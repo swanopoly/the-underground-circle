@@ -114,11 +114,15 @@ assert(
 );
 
 assert(
-  // Honest STOP (wave 6): a user-cancelled run finalizes as 'cancelled'; the
-  // original max_tokens/error → 'failed' vs end_turn → 'completed' logic is
-  // preserved as the non-cancelled tail of the same expression.
-  edgeSource.includes('const terminalStatus = cancelled ? "cancelled" : finalStopReason === "end_turn" ? "completed" : "failed"'),
-  'edge marks max_tokens/error terminal runs as failed (and cancelled runs as cancelled), not completed',
+  // Honest STOP + terminal integrity: cancellation wins, an unverified
+  // dispatched client mutation cannot be converted to success by model
+  // end_turn, and only an otherwise-clean end_turn is completed.
+  edgeSource.includes('function classifySwanBotTerminalStatus(')
+    && edgeSource.includes('if (args.cancelled) return "cancelled";')
+    && edgeSource.includes('if (args.clientMutationIntegrity.status === "outcome_unknown") return "failed";')
+    && edgeSource.includes('return args.finalStopReason === "end_turn" ? "completed" : "failed";')
+    && edgeSource.includes('let terminalStatus = classifySwanBotTerminalStatus({'),
+  'edge classifier marks cancellations as cancelled, unverified mutations/max_tokens/errors as failed, and only clean end_turn as completed',
 );
 
 if (failures > 0) {

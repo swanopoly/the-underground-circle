@@ -67,8 +67,15 @@ import {
   photoshopPlaceAsset as bridgePhotoshopPlaceAsset,
   photoshopExportProof as bridgePhotoshopExportProof,
   waitForApp as bridgeWaitForApp,
+  observeApp as bridgeObserveApp,
+  observeNativeSemanticActionTarget as bridgeObserveNativeSemanticActionTarget,
+  performNativeSemanticAction as bridgePerformNativeSemanticAction,
   ensureDesktopBridgePaired,
   type A11yNode,
+  type DesktopFileStat,
+  type ObserveAppData,
+  type NativeSemanticActionExecution,
+  type NativeSemanticActionTarget,
 } from './desktopBridge';
 import {
   detectBlockingAppModalPlan,
@@ -111,6 +118,7 @@ import {
   type SurfaceCapabilityStatus,
   type SurfaceEscalationDecision,
 } from './appAutomationControlSurfaces';
+import { hasTerminalDesktopSequenceCompletionProof } from './computerTaskOutcome';
 
 export interface ComputerAppAdapterResult {
   ok: boolean;
@@ -125,6 +133,1551 @@ export interface ComputerAppAdapterResult {
 
 function normalizeText(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase();
+}
+
+export type NativeAppActivationKind = 'launch_app' | 'focus_app';
+
+export type NativeAppActivationObservation = {
+  app: string;
+  requestedAppName?: string | null;
+  resolvedAppName?: string;
+  pid?: number;
+  processIdentityVersion?: number;
+  indexGeneration?: number;
+  appRunning: boolean;
+  frontmost: boolean;
+  windowCount: number;
+};
+
+export type NativeAppActivationBridgeResult<T> = {
+  ok: boolean;
+  error?: string;
+  errorCode?: string;
+  data?: T;
+};
+
+function normalizeNativeBridgeErrorCode(
+  value: unknown,
+  fallback = 'unknown',
+): string {
+  const normalized = String(value || '').trim().toLowerCase();
+  return /^[a-z][a-z0-9_]{0,63}$/.test(normalized)
+    ? normalized
+    : fallback;
+}
+
+function renderNativeBridgeFailure(errorCode: unknown): string {
+  return `local bridge error (${normalizeNativeBridgeErrorCode(errorCode)})`;
+}
+
+export type NativeAppActivationDispatch = {
+  appName: string;
+  requestedAppName?: string;
+  resolvedAppName?: string;
+};
+
+export type NativeAppActivationDeps = {
+  observeApp: (args: {
+    appName?: string;
+    maxDepth?: number;
+    maxNodes?: number;
+  }) => Promise<NativeAppActivationBridgeResult<NativeAppActivationObservation>>;
+  launchApp: (appName: string) => Promise<NativeAppActivationBridgeResult<NativeAppActivationDispatch>>;
+  focusApp: (appName: string) => Promise<NativeAppActivationBridgeResult<NativeAppActivationDispatch>>;
+  waitForApp?: (
+    appName: string,
+    timeoutMs?: number,
+  ) => Promise<NativeAppActivationBridgeResult<{ appName: string; elapsedMs: number }>>;
+  now?: () => string;
+};
+
+export type NativeOpenPathApprovalProposal = {
+  schemaVersion: 1;
+  operation: 'native_open_path';
+  targetFingerprint: string;
+  targetKind: 'file' | 'directory';
+  evidenceId: string;
+  observedAt: string;
+  targetSummary: 'one exact local file or folder';
+  approvalRequired: true;
+  risk: 'medium';
+};
+
+export type NativeOpenPathApprovalDecision = {
+  approved: boolean;
+  /** Runtime-issued approval receipt; never a model assertion. */
+  approvalId?: string;
+  reason?: string;
+};
+
+export type NativeOpenPathDispatchRequest = {
+  /** Transient exact path. Callers must never persist or render this value. */
+  path: string;
+  targetFingerprint: string;
+  approvalId: string;
+};
+
+export type NativeOpenPathDispatchResult = NativeAppActivationBridgeResult<{
+  /** Exact bridge echo used only inside the sealed adapter. */
+  path: string;
+  /** Resolved explicit app when the bridge has one; null for the default app. */
+  appName: string | null;
+}> & {
+  /** True only after the durable dispatch boundary was entered. */
+  mutationAttempted: boolean;
+  /** Conservative runtime verdict for a missing or ambiguous dispatch receipt. */
+  outcomeUnknown: boolean;
+};
+
+export type NativeOpenPathDeps = {
+  statFile: (path: string) => Promise<NativeAppActivationBridgeResult<DesktopFileStat>>;
+  observeApp: (args: {
+    appName?: string;
+    maxDepth?: number;
+    maxNodes?: number;
+    target?: string;
+  }) => Promise<NativeAppActivationBridgeResult<ObserveAppData>>;
+  fingerprint: (value: unknown) => Promise<string | null>;
+  approvalGate: (
+    proposal: NativeOpenPathApprovalProposal,
+  ) => Promise<NativeOpenPathApprovalDecision>;
+  /**
+   * The OpenSwan runtime implementation claims the durable action first and
+   * advances it to dispatched immediately before its sole openPath call.
+   */
+  dispatchOpenPath: (
+    request: NativeOpenPathDispatchRequest,
+  ) => Promise<NativeOpenPathDispatchResult>;
+  now?: () => string;
+};
+
+export type BoundedNativeOpenPathObservation = {
+  observedAt: string;
+  appFingerprint: string;
+  pid: number;
+  appRunning: boolean;
+  frontmost: boolean;
+  windowCount: number;
+  targetEvidenceMatched: boolean;
+  evidenceFingerprint: string;
+};
+
+export type NativeSemanticActionRequest = {
+  action: 'press';
+  appName: string;
+  /** Positive PID bound by the caller's preceding model-visible observation. */
+  expectedPid: number;
+  /** Exact dotted AX path from the same fresh observation. */
+  targetPath: string;
+  expectedRole: string;
+  expectedLabel: string;
+};
+
+export type NativeSemanticActionApprovalProposal = {
+  schemaVersion: 1;
+  operation: 'native_semantic_press';
+  action: 'press';
+  app: string;
+  pid: number;
+  targetRole: string;
+  targetFingerprint: string;
+  evidenceId: string;
+  /** Privacy-safe epoch from the sealed accessibility observation. */
+  observedAt: string;
+  /** Positive tree generation bound to the exact sealed observation. */
+  indexGeneration: number;
+  targetSummary: string;
+  approvalRequired: true;
+  risk: 'medium';
+  expiresAt: string;
+};
+
+export type NativeSemanticActionApprovalDecision = {
+  approved: boolean;
+  /** Runtime-issued approval receipt; never the model's own assertion. */
+  approvalId?: string;
+  reason?: string;
+};
+
+export type NativeSemanticActionDeps = {
+  observeApp: (args: {
+    appName?: string;
+    maxDepth?: number;
+    maxNodes?: number;
+    target?: string;
+  }) => Promise<NativeAppActivationBridgeResult<ObserveAppData>>;
+  observeSemanticActionTarget: (args: {
+    action: 'press';
+    appName: string;
+    pid: number;
+    indexGeneration: number;
+    targetPath: string;
+    expectedRole: string;
+    expectedLabel: string;
+  }) => Promise<NativeAppActivationBridgeResult<NativeSemanticActionTarget>>;
+  performSemanticAction: (args: {
+    targetId: string;
+    targetFingerprint: string;
+    approvalId: string;
+  }) => Promise<NativeAppActivationBridgeResult<NativeSemanticActionExecution>>;
+  approvalGate: (
+    proposal: NativeSemanticActionApprovalProposal,
+  ) => Promise<NativeSemanticActionApprovalDecision>;
+};
+
+export type BoundedNativeAppObservation = {
+  observedAt: string;
+  app: string;
+  resolvedAppName: string;
+  pid: number;
+  indexGeneration?: number;
+  appRunning: boolean;
+  frontmost: boolean;
+  windowCount: number;
+  targetMatched: boolean;
+};
+
+function normalizedAppIdentity(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .replace(/\.app$/i, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function versionStrippedNativeAppIdentity(value: unknown): string {
+  return normalizedAppIdentity(value)
+    .replace(/\b(20\d{2}|19\d{2}|v?\d+(?:\.\d+){0,3})\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const NATIVE_APP_EXPLICIT_ALIAS_GROUPS: readonly (readonly string[])[] = [
+  ['chrome', 'google chrome'],
+  ['edge', 'microsoft edge'],
+  ['zoom', 'zoom us'],
+  ['vscode', 'visual studio code'],
+  ['photoshop', 'adobe photoshop'],
+  ['indesign', 'adobe indesign'],
+  ['illustrator', 'adobe illustrator'],
+  ['premiere', 'premiere pro', 'adobe premiere pro'],
+  ['after effects', 'adobe after effects'],
+  ['acrobat', 'adobe acrobat'],
+  ['word', 'microsoft word'],
+  ['excel', 'microsoft excel'],
+  ['powerpoint', 'microsoft powerpoint'],
+  ['outlook', 'microsoft outlook'],
+  ['teams', 'microsoft teams'],
+  ['onenote', 'microsoft onenote'],
+];
+
+function exactOrExplicitNativeAppAliasMatches(
+  observedValue: unknown,
+  expectedValue: unknown,
+): boolean {
+  const observed = normalizedAppIdentity(observedValue);
+  const expected = normalizedAppIdentity(expectedValue);
+  if (!observed || !expected) return false;
+  if (observed === expected) return true;
+  const observedNoVersion = versionStrippedNativeAppIdentity(observedValue);
+  const expectedNoVersion = versionStrippedNativeAppIdentity(expectedValue);
+  if (observedNoVersion && observedNoVersion === expectedNoVersion) return true;
+  return NATIVE_APP_EXPLICIT_ALIAS_GROUPS.some(
+    (group) => group.includes(observedNoVersion) && group.includes(expectedNoVersion),
+  );
+}
+
+function resolveInitialNativeAppIdentity(
+  value: NativeAppActivationObservation,
+  requestedName: string,
+): string | null {
+  const app = String(value.app || '').trim().slice(0, 120);
+  const requestedEcho = String(value.requestedAppName || '').trim().slice(0, 120);
+  const resolved = String(value.resolvedAppName || '').trim().slice(0, 120);
+  if (requestedEcho && normalizedAppIdentity(requestedEcho) !== normalizedAppIdentity(requestedName)) {
+    return null;
+  }
+  if (resolved) {
+    if (!app || normalizedAppIdentity(app) !== normalizedAppIdentity(resolved)) return null;
+    if (!exactOrExplicitNativeAppAliasMatches(resolved, requestedName)) return null;
+    return resolved;
+  }
+  return exactOrExplicitNativeAppAliasMatches(app, requestedName) ? app : null;
+}
+
+function boundedNativeAppObservation(
+  value: NativeAppActivationObservation,
+  expectedResolvedApp: string,
+  observedAt: string,
+  expectedPid?: number,
+  expectedRequestedApp: string = expectedResolvedApp,
+): BoundedNativeAppObservation {
+  const app = String(value.app || '').trim().slice(0, 120);
+  const resolvedAppName = String(value.resolvedAppName || app).trim().slice(0, 120);
+  const requestedEcho = String(value.requestedAppName || '').trim().slice(0, 120);
+  const pid = Math.max(0, Math.trunc(Number(value.pid || 0)));
+  const indexGeneration = Math.max(0, Math.trunc(Number(value.indexGeneration || 0))) || undefined;
+  const identityMatches = (
+    normalizedAppIdentity(app) === normalizedAppIdentity(expectedResolvedApp)
+    && normalizedAppIdentity(resolvedAppName) === normalizedAppIdentity(expectedResolvedApp)
+    && (!requestedEcho || normalizedAppIdentity(requestedEcho) === normalizedAppIdentity(expectedRequestedApp))
+    && (value.appRunning !== true || pid > 0)
+    && (!(Number(expectedPid) > 0) || pid === expectedPid)
+  );
+  return {
+    observedAt,
+    app,
+    resolvedAppName,
+    pid,
+    ...(indexGeneration ? { indexGeneration } : {}),
+    appRunning: value.appRunning === true,
+    frontmost: value.frontmost === true,
+    windowCount: Number.isFinite(Number(value.windowCount))
+      ? Math.max(0, Math.min(10_000, Math.floor(Number(value.windowCount))))
+      : 0,
+    targetMatched: identityMatches,
+  };
+}
+
+function nativeAppPostconditionSatisfied(
+  kind: NativeAppActivationKind,
+  observation: BoundedNativeAppObservation,
+): boolean {
+  return observation.targetMatched
+    && observation.appRunning
+    && (kind === 'launch_app' || observation.frontmost);
+}
+
+function normalizeNativeOpenPathEvidence(value: unknown): string {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase();
+}
+
+function nativeOpenPathBasename(value: unknown): string | null {
+  const clean = String(value || '').trim().replace(/[\\/]+$/, '');
+  if (!clean) return null;
+  const basename = clean.split(/[\\/]/).filter(Boolean).pop() || '';
+  if (
+    !basename
+    || basename === '.'
+    || basename === '..'
+    || basename.length > 240
+    || /[\u0000-\u001f\u007f]/.test(basename)
+  ) {
+    return null;
+  }
+  return basename;
+}
+
+function nativeOpenPathErrorCode(value: unknown, fallback = 'unknown'): string {
+  const code = String(value || '').trim().toLowerCase();
+  return [
+    'invalid_input',
+    'path_not_found',
+    'file_access_not_granted',
+    'uncertain_ui_target',
+    'stale_bridge',
+    'bridge_offline',
+    'approval_required',
+    'native_open_path_verification_failed',
+  ].includes(code)
+    ? code
+    : fallback;
+}
+
+async function safeNativeOpenPathFingerprint(
+  fingerprint: NativeOpenPathDeps['fingerprint'],
+  value: unknown,
+): Promise<string | null> {
+  try {
+    const result = await fingerprint(value);
+    return result && /^[a-f0-9]{64}$/.test(result) ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function nativeOpenPathEvidenceMatchesTarget(
+  candidateInput: unknown,
+  targetNameInput: string,
+): boolean {
+  const candidate = normalizeNativeOpenPathEvidence(candidateInput);
+  const targetName = normalizeNativeOpenPathEvidence(targetNameInput);
+  if (!candidate || !targetName) return false;
+  if (candidate === targetName) return true;
+  if (!candidate.startsWith(targetName)) return false;
+  const after = candidate[targetName.length] || '';
+  // Exact basename occurrence only: reject look-alike prefixes/suffixes such
+  // as report.pdf.exe or my-report.pdf. Only standard app-title delimiters
+  // remain acceptable after the exact name (for example
+  // "report.pdf — Preview").
+  return !after || /[\s—–\-|•·(\[]/u.test(after);
+}
+
+function findNativeOpenPathEvidence(
+  observation: ObserveAppData,
+  targetName: string,
+): string | null {
+  for (const title of (observation.windowTitles || []).slice(0, 8)) {
+    if (nativeOpenPathEvidenceMatchesTarget(title, targetName)) return title;
+  }
+  const stack: A11yNode[] = observation.tree ? [observation.tree] : [];
+  let visited = 0;
+  while (stack.length > 0 && visited < 400) {
+    const node = stack.shift()!;
+    visited += 1;
+    for (const candidate of [node.label, node.value]) {
+      if (nativeOpenPathEvidenceMatchesTarget(candidate, targetName)) {
+        return String(candidate || '');
+      }
+    }
+    for (const child of (node.children || []).slice(0, 80)) stack.push(child);
+  }
+  return null;
+}
+
+async function boundedNativeOpenPathObservation(
+  value: ObserveAppData,
+  observedAt: string,
+  targetName: string,
+  fingerprint: NativeOpenPathDeps['fingerprint'],
+): Promise<BoundedNativeOpenPathObservation | null> {
+  const app = String(value.resolvedAppName || value.app || '').trim().slice(0, 120);
+  const pid = Math.max(0, Math.trunc(Number(value.pid || 0)));
+  const frontmostApp = String(value.frontmostApp || '').trim().slice(0, 120);
+  if (
+    !app
+    || value.appRunning !== true
+    || value.frontmost !== true
+    || !(pid > 0)
+    || (frontmostApp && !exactOrExplicitNativeAppAliasMatches(frontmostApp, app))
+    || !Number.isFinite(Date.parse(observedAt))
+  ) {
+    return null;
+  }
+  const targetEvidence = findNativeOpenPathEvidence(value, targetName);
+  const appFingerprint = await safeNativeOpenPathFingerprint(fingerprint, {
+    schemaVersion: 1,
+    kind: 'native_app_process',
+    app,
+    pid,
+  });
+  const evidenceFingerprint = targetEvidence
+    ? await safeNativeOpenPathFingerprint(fingerprint, {
+        schemaVersion: 1,
+        kind: 'native_open_path_evidence',
+        app,
+        pid,
+        targetEvidence,
+      })
+    : null;
+  if (
+    !appFingerprint
+    || !evidenceFingerprint
+  ) {
+    return null;
+  }
+  return {
+    observedAt,
+    appFingerprint,
+    pid,
+    appRunning: true,
+    frontmost: true,
+    windowCount: Number.isFinite(Number(value.windowCount))
+      ? Math.max(0, Math.min(10_000, Math.floor(Number(value.windowCount))))
+      : 0,
+    targetEvidenceMatched: true,
+    evidenceFingerprint,
+  };
+}
+
+function nativeOpenPathFailureData(
+  phase: string,
+  errorCode: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    kind: 'desktop_open_path',
+    operation: 'native_open_path',
+    phase,
+    errorCode,
+    completionVerified: false,
+    outcomeUnknown: false,
+    outcomeUnknownPolicy: 'never_retry',
+    replayAllowed: false,
+    ...extra,
+  };
+}
+
+/**
+ * Fresh stat + frontmost observation → exact-call approval → one durable
+ * dispatch callback → fresh frontmost observation with exact basename proof.
+ *
+ * Raw paths, app names, window titles, accessibility text, and bridge errors
+ * remain transient. The returned proof contains only bounded booleans, counts,
+ * process ids, and cryptographic fingerprints.
+ */
+export async function executeObservedNativeOpenPath(
+  pathInput: string,
+  deps: NativeOpenPathDeps,
+): Promise<ComputerAppAdapterResult> {
+  const requestedPath = String(pathInput || '').trim();
+  const now = deps.now || (() => new Date().toISOString());
+  if (
+    !requestedPath
+    || requestedPath.length > 2_048
+    || /[\u0000-\u001f\u007f]/.test(requestedPath)
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before observing the local target because the exact path identity was invalid.',
+      warnings: ['native open path blocked before observation: invalid target identity'],
+      data: nativeOpenPathFailureData('input', 'invalid_input'),
+    };
+  }
+
+  let statResult: NativeAppActivationBridgeResult<DesktopFileStat>;
+  try {
+    statResult = await deps.statFile(requestedPath);
+  } catch {
+    statResult = { ok: false, errorCode: 'unknown' };
+  }
+  const stat = statResult.data;
+  const resolvedPath = String(stat?.path || '').trim();
+  const targetName = nativeOpenPathBasename(resolvedPath);
+  if (
+    !statResult.ok
+    || !stat
+    || stat.exists !== true
+    || (stat.kind !== 'file' && stat.kind !== 'directory')
+    || !resolvedPath
+    || !targetName
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before approval because a fresh exact file/folder stat was unavailable.',
+      warnings: ['native open path blocked before mutation: exact target stat unavailable'],
+      data: nativeOpenPathFailureData(
+        'file_observation',
+        nativeOpenPathErrorCode(
+          statResult.errorCode,
+          stat?.exists === false ? 'path_not_found' : 'uncertain_ui_target',
+        ),
+      ),
+    };
+  }
+
+  let beforeResult: NativeAppActivationBridgeResult<ObserveAppData>;
+  try {
+    beforeResult = await deps.observeApp({ maxDepth: 1, maxNodes: 1 });
+  } catch {
+    beforeResult = { ok: false, errorCode: 'unknown' };
+  }
+  const before = beforeResult.data;
+  const beforeApp = String(before?.resolvedAppName || before?.app || '').trim().slice(0, 120);
+  const beforePid = Math.max(0, Math.trunc(Number(before?.pid || 0)));
+  if (
+    !beforeResult.ok
+    || !before
+    || before.appRunning !== true
+    || before.frontmost !== true
+    || !beforeApp
+    || !(beforePid > 0)
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before approval because a fresh frontmost-app observation was unavailable.',
+      warnings: ['native open path blocked before mutation: frontmost observation unavailable'],
+      data: nativeOpenPathFailureData(
+        'before_observation',
+        nativeOpenPathErrorCode(beforeResult.errorCode, 'uncertain_ui_target'),
+      ),
+    };
+  }
+
+  const observedAt = now();
+  const targetFingerprint = await safeNativeOpenPathFingerprint(deps.fingerprint, {
+    schemaVersion: 1,
+    operation: 'native_open_path',
+    requestedPath,
+    resolvedPath,
+    kind: stat.kind,
+    size: stat.size,
+    modifiedAt: stat.modifiedAt,
+  });
+  const beforeAppFingerprint = await safeNativeOpenPathFingerprint(deps.fingerprint, {
+    schemaVersion: 1,
+    kind: 'native_app_process',
+    app: beforeApp,
+    pid: beforePid,
+  });
+  const evidenceId = targetFingerprint && beforeAppFingerprint
+    ? await safeNativeOpenPathFingerprint(deps.fingerprint, {
+        schemaVersion: 1,
+        operation: 'native_open_path_observation',
+        targetFingerprint,
+        beforeAppFingerprint,
+        observedAt,
+      })
+    : null;
+  if (
+    !targetFingerprint
+    || !beforeAppFingerprint
+    || !evidenceId
+    || !Number.isFinite(Date.parse(observedAt))
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before approval because cryptographic target binding was unavailable.',
+      warnings: ['native open path blocked before mutation: target binding unavailable'],
+      data: nativeOpenPathFailureData('target_binding', 'invalid_input'),
+    };
+  }
+
+  const proposal: NativeOpenPathApprovalProposal = {
+    schemaVersion: 1,
+    operation: 'native_open_path',
+    targetFingerprint,
+    targetKind: stat.kind,
+    evidenceId,
+    observedAt,
+    targetSummary: 'one exact local file or folder',
+    approvalRequired: true,
+    risk: 'medium',
+  };
+  let approval: NativeOpenPathApprovalDecision;
+  try {
+    approval = await deps.approvalGate(proposal);
+  } catch {
+    approval = { approved: false, reason: 'approval gate unavailable' };
+  }
+  const approvalId = String(approval.approvalId || '').trim();
+  if (
+    !approval.approved
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(approvalId)
+  ) {
+    return {
+      ok: false,
+      message: approval.approved
+        ? 'I did not open the local target because the approval gate returned no valid runtime receipt.'
+        : 'The exact local open action is awaiting live runtime approval. Nothing was opened.',
+      warnings: ['native open path not dispatched: approval required'],
+      data: nativeOpenPathFailureData('approval', 'approval_required', {
+        approvalRequired: true,
+        approvalGranted: false,
+        mutationAttempted: false,
+      }),
+    };
+  }
+
+  let dispatched: NativeOpenPathDispatchResult;
+  try {
+    // Exactly one dispatch callback. The runtime implementation advances the
+    // durable row immediately before its one and only bridge openPath call.
+    dispatched = await deps.dispatchOpenPath({
+      path: resolvedPath,
+      targetFingerprint,
+      approvalId,
+    });
+  } catch {
+    dispatched = {
+      ok: false,
+      mutationAttempted: true,
+      outcomeUnknown: true,
+      errorCode: 'unknown',
+    };
+  }
+  if ((!dispatched.ok || !dispatched.data) && !dispatched.mutationAttempted) {
+    const outcomeUnknown = dispatched.outcomeUnknown || dispatched.mutationAttempted;
+    return {
+      ok: false,
+      message: outcomeUnknown
+        ? 'The approved local open call crossed the dispatch boundary without exact completion proof. Its outcome is unknown and it will not be replayed.'
+        : 'The approved local open call stopped before dispatch. Nothing was opened.',
+      warnings: [
+        outcomeUnknown
+          ? 'native open path outcome unknown; never replay automatically'
+          : 'native open path blocked before bridge dispatch',
+      ],
+      data: nativeOpenPathFailureData(
+        outcomeUnknown ? 'dispatch' : 'before_dispatch',
+        nativeOpenPathErrorCode(dispatched.errorCode),
+        {
+          mutationAttempted: dispatched.mutationAttempted,
+          outcomeUnknown,
+        },
+      ),
+    };
+  }
+
+  const dispatchAcknowledged = dispatched.ok === true && Boolean(dispatched.data);
+  const dispatchPathMatched = dispatchAcknowledged
+    && String(dispatched.data?.path || '') === resolvedPath;
+  // `open` acknowledges before a cold default app necessarily publishes its
+  // first window. This is one bounded settle barrier, not a mutation or
+  // observation retry; the following observeApp call remains the sole
+  // post-action proof attempt.
+  await sleep(900);
+  let afterResult: NativeAppActivationBridgeResult<ObserveAppData>;
+  try {
+    afterResult = await deps.observeApp({
+      maxDepth: 10,
+      maxNodes: 400,
+      target: targetName,
+    });
+  } catch {
+    afterResult = { ok: false, errorCode: 'unknown' };
+  }
+  const afterRaw = afterResult.data;
+  const afterObservedAt = now();
+  const after = afterResult.ok && afterRaw
+    ? await boundedNativeOpenPathObservation(
+        afterRaw,
+        afterObservedAt,
+        targetName,
+        deps.fingerprint,
+      )
+    : null;
+  const explicitDispatchApp = String(dispatched.data?.appName || '').trim();
+  const explicitAppMatched = !explicitDispatchApp || (
+    !!afterRaw
+    && exactOrExplicitNativeAppAliasMatches(
+      afterRaw.resolvedAppName || afterRaw.app,
+      explicitDispatchApp,
+    )
+  );
+  const completionVerified = Boolean(
+    dispatchPathMatched
+    && dispatchAcknowledged
+    && explicitAppMatched
+    && after
+    && after.targetEvidenceMatched
+  );
+  const proof = {
+    schemaVersion: 1,
+    operation: 'native_open_path',
+    targetFingerprint,
+    evidenceId,
+    requestedPostcondition: 'frontmost_app_contains_exact_target_evidence',
+    mutationAttempted: true,
+    mutationPerformed: completionVerified,
+    dispatchAcknowledged,
+    dispatchTargetMatched: dispatchPathMatched,
+    explicitAppMatched,
+    completionVerified,
+    outcomeUnknown: !completionVerified,
+    outcomeUnknownPolicy: 'never_retry',
+    replayAllowed: false,
+    before: {
+      observedAt,
+      appFingerprint: beforeAppFingerprint,
+      pid: beforePid,
+      appRunning: true,
+      frontmost: true,
+      windowCount: Math.max(0, Math.min(10_000, Math.floor(Number(before.windowCount || 0)))),
+    },
+    after,
+  };
+
+  if (!completionVerified) {
+    return {
+      ok: false,
+      message: 'The bridge accepted the exact local open call, but a fresh frontmost-app observation did not prove the exact file/folder target. The outcome is unknown and the call will not be replayed.',
+      warnings: ['native open path failed closed: exact post-open target proof missing'],
+      data: nativeOpenPathFailureData('after_observation', 'native_open_path_verification_failed', {
+        mutationAttempted: true,
+        outcomeUnknown: true,
+        proof,
+      }),
+    };
+  }
+
+  return {
+    ok: true,
+    message: 'Opened and verified the exact approved local target in the frontmost app.',
+    warnings: [],
+    data: {
+      kind: 'desktop_open_path',
+      operation: 'native_open_path',
+      phase: 'completed',
+      approvalRequired: true,
+      approvalGranted: true,
+      mutationAttempted: true,
+      completionVerified: true,
+      outcomeUnknown: false,
+      outcomeUnknownPolicy: 'never_retry',
+      replayAllowed: false,
+      proof,
+    },
+  };
+}
+
+/**
+ * Observe-first, proof-bearing launch/focus lane.
+ *
+ * This deliberately projects observations onto a bounded shape. Window
+ * titles and accessibility content never leave desktopBridge through this
+ * result. A dispatch acknowledgement is progress only; completion requires a
+ * second fresh observation of the requested running/frontmost postcondition.
+ */
+export async function executeObservedNativeAppActivation(
+  kind: NativeAppActivationKind,
+  requestedNameInput: string,
+  deps: NativeAppActivationDeps,
+): Promise<ComputerAppAdapterResult> {
+  const requestedName = String(requestedNameInput || '').trim().slice(0, 120);
+  const resultKind = kind === 'focus_app' ? 'desktop_bridge_focus' : 'desktop_bridge_launch';
+  const actionVerb = kind === 'focus_app' ? 'focus' : 'launch';
+  const completedVerb = kind === 'focus_app' ? 'Focused' : 'Launched';
+  const requestedPostcondition = kind === 'focus_app' ? 'running_and_frontmost' : 'running';
+  const now = deps.now || (() => new Date().toISOString());
+  if (
+    !requestedName
+    || !/^[A-Za-z0-9 .\-_()]+$/.test(requestedName)
+  ) {
+    return {
+      ok: false,
+      message: `I stopped before trying to ${actionVerb} the app because its exact name was missing or invalid.`,
+      warnings: ['desktop app activation blocked before observation: invalid app identity'],
+      data: {
+        kind: 'desktop_bridge_error',
+        operation: kind,
+        phase: 'input',
+        errorCode: 'invalid_input',
+        requestedName,
+        capability: 'desktop_action',
+        completionVerified: false,
+      },
+    };
+  }
+
+  let beforeResult: NativeAppActivationBridgeResult<NativeAppActivationObservation>;
+  try {
+    beforeResult = await deps.observeApp({
+      appName: requestedName,
+      maxDepth: 1,
+      maxNodes: 1,
+    });
+  } catch {
+    beforeResult = {
+      ok: false,
+      errorCode: 'bridge_exception',
+    };
+  }
+  if (!beforeResult.ok || !beforeResult.data) {
+    const beforeErrorCode = normalizeNativeBridgeErrorCode(beforeResult.errorCode);
+    return {
+      ok: false,
+      message: `I stopped before trying to ${actionVerb} **${requestedName}** because a fresh pre-action app observation was unavailable: ${renderNativeBridgeFailure(beforeErrorCode)}.`,
+      warnings: ['desktop app activation blocked before mutation: fresh observation unavailable'],
+      data: {
+        kind: 'desktop_bridge_error',
+        operation: kind,
+        phase: 'before_observation',
+        errorCode: beforeErrorCode,
+        requestedName,
+        capability: 'desktop_action',
+        completionVerified: false,
+      },
+    };
+  }
+
+  const resolvedName = resolveInitialNativeAppIdentity(beforeResult.data, requestedName);
+  const before = boundedNativeAppObservation(
+    beforeResult.data,
+    resolvedName || requestedName,
+    now(),
+    undefined,
+    requestedName,
+  );
+  if (!resolvedName || !before.targetMatched) {
+    return {
+      ok: false,
+      message: `I stopped before trying to ${actionVerb} **${requestedName}** because the fresh observation resolved to a different app target.`,
+      warnings: ['desktop app activation blocked before mutation: observed target mismatch'],
+      data: {
+        kind: 'desktop_bridge_error',
+        operation: kind,
+        phase: 'before_observation',
+        errorCode: 'uncertain_ui_target',
+        requestedName,
+        capability: 'desktop_action',
+        completionVerified: false,
+        proof: {
+          schemaVersion: 1,
+          operation: kind,
+          requestedName,
+          resolvedAppName: resolvedName,
+          requestedPostcondition,
+          mutationNeeded: null,
+          mutationAttempted: false,
+          mutationPerformed: false,
+          dispatchAcknowledged: false,
+          completionVerified: false,
+          outcomeUnknown: false,
+          outcomeUnknownPolicy: 'verify_before_retry',
+          replayAllowed: false,
+          before,
+          after: null,
+        },
+      },
+    };
+  }
+
+  if (kind === 'focus_app' && !before.appRunning) {
+    return {
+      ok: false,
+      message: `I did not try to focus **${resolvedName}** because a fresh observation confirmed it is not running. Launch it first.`,
+      warnings: ['desktop focus blocked before mutation: app is not running'],
+      data: {
+        kind: 'desktop_bridge_error',
+        operation: kind,
+        phase: 'before_observation',
+        errorCode: 'app_not_running',
+        displayName: resolvedName,
+        requestedName,
+        capability: 'desktop_action',
+        completionVerified: false,
+        outcomeUnknown: false,
+        proof: {
+          schemaVersion: 1,
+          operation: kind,
+          requestedName,
+          resolvedAppName: resolvedName,
+          requestedPostcondition,
+          mutationNeeded: false,
+          mutationAttempted: false,
+          mutationPerformed: false,
+          dispatchAcknowledged: false,
+          dispatchTargetMatched: false,
+          completionVerified: false,
+          outcomeUnknown: false,
+          outcomeUnknownPolicy: 'verify_before_retry',
+          replayAllowed: false,
+          before,
+          after: null,
+        },
+      },
+    };
+  }
+
+  const mutationNeeded = !nativeAppPostconditionSatisfied(kind, before);
+  let dispatchResult: NativeAppActivationBridgeResult<NativeAppActivationDispatch> | null = null;
+  if (mutationNeeded) {
+    try {
+      dispatchResult = kind === 'focus_app'
+        ? await deps.focusApp(resolvedName)
+        : await deps.launchApp(resolvedName);
+    } catch {
+      dispatchResult = {
+        ok: false,
+        errorCode: 'bridge_exception',
+      };
+    }
+  }
+
+  const dispatchName = String(dispatchResult?.data?.appName || '').trim().slice(0, 120);
+  const dispatchResolvedName = String(dispatchResult?.data?.resolvedAppName || '').trim().slice(0, 120);
+  const dispatchRequestedName = String(dispatchResult?.data?.requestedAppName || '').trim().slice(0, 120);
+  const dispatchTargetMatched = !mutationNeeded || (
+    !!dispatchName
+    && !!dispatchResolvedName
+    && !!dispatchRequestedName
+    && normalizedAppIdentity(dispatchName) === normalizedAppIdentity(resolvedName)
+    && normalizedAppIdentity(dispatchResolvedName) === normalizedAppIdentity(resolvedName)
+    && normalizedAppIdentity(dispatchRequestedName) === normalizedAppIdentity(resolvedName)
+  );
+  const displayName = resolvedName;
+  if (
+    kind === 'launch_app'
+    && dispatchResult?.ok
+    && dispatchTargetMatched
+    && deps.waitForApp
+  ) {
+    // `open -a` acknowledges before slower apps publish a process/window.
+    // This is only a bounded readiness barrier; the following observeApp
+    // call remains the source of completion proof.
+    await deps.waitForApp(resolvedName, 8_000).catch(() => null);
+  }
+  let afterResult: NativeAppActivationBridgeResult<NativeAppActivationObservation>;
+  try {
+    afterResult = await deps.observeApp({
+      appName: resolvedName,
+      maxDepth: 1,
+      maxNodes: 1,
+    });
+  } catch {
+    afterResult = {
+      ok: false,
+      errorCode: 'bridge_exception',
+    };
+  }
+
+  const after = afterResult.ok && afterResult.data
+    ? boundedNativeAppObservation(
+        afterResult.data,
+        resolvedName,
+        now(),
+        before.appRunning ? before.pid : undefined,
+      )
+    : null;
+  const dispatchAcknowledged = mutationNeeded ? dispatchResult?.ok === true : false;
+  const afterPostconditionVerified = after !== null && nativeAppPostconditionSatisfied(kind, after);
+  const completionVerified = afterPostconditionVerified && (
+    !mutationNeeded || (dispatchAcknowledged && dispatchTargetMatched)
+  );
+  const outcomeUnknown = mutationNeeded && !completionVerified;
+  const proof = {
+    schemaVersion: 1,
+    operation: kind,
+    requestedName,
+    resolvedAppName: resolvedName,
+    requestedPostcondition,
+    mutationNeeded,
+    mutationAttempted: mutationNeeded,
+    mutationPerformed: mutationNeeded && dispatchAcknowledged && dispatchTargetMatched && completionVerified,
+    dispatchAcknowledged,
+    dispatchTargetMatched,
+    completionVerified,
+    outcomeUnknown,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    before,
+    after,
+  };
+
+  if (mutationNeeded && !dispatchAcknowledged) {
+    const dispatchErrorCode = normalizeNativeBridgeErrorCode(dispatchResult?.errorCode);
+    return {
+      ok: false,
+      message: `I could not ${actionVerb} **${requestedName}** through the local bridge: ${renderNativeBridgeFailure(dispatchErrorCode)}.`,
+      warnings: [`desktop_action failed with ${dispatchErrorCode}`],
+      data: {
+        kind: 'desktop_bridge_error',
+        operation: kind,
+        phase: 'dispatch',
+        errorCode: dispatchErrorCode,
+        displayName,
+        requestedName,
+        capability: 'desktop_action',
+        completionVerified: false,
+        outcomeUnknown,
+        proof,
+      },
+    };
+  }
+
+  if (mutationNeeded && dispatchAcknowledged && !dispatchTargetMatched) {
+    return {
+      ok: false,
+      message: `The bridge accepted the ${actionVerb} request but returned a different resolved app identity. I stopped without replaying it and could not accept completion for **${resolvedName}**.`,
+      warnings: ['desktop app activation failed closed: dispatch target identity changed'],
+      data: {
+        kind: resultKind,
+        operation: kind,
+        phase: 'dispatch',
+        errorCode: 'uncertain_ui_target',
+        displayName,
+        requestedName,
+        capability: 'desktop_action',
+        completionVerified: false,
+        outcomeUnknown: true,
+        proof,
+      },
+    };
+  }
+
+  if (!completionVerified) {
+    const missingState = kind === 'focus_app'
+      ? 'the requested app running in the frontmost state'
+      : 'the requested app running';
+    return {
+      ok: false,
+      message: `${mutationNeeded ? `The bridge accepted the ${actionVerb} request` : `**${requestedName}** initially appeared to satisfy the request`}, but a fresh post-action observation did not confirm ${missingState}.`,
+      warnings: ['desktop app activation failed closed: requested postcondition was not verified'],
+      data: {
+        kind: resultKind,
+        operation: kind,
+        phase: 'after_observation',
+        errorCode: normalizeNativeBridgeErrorCode(
+          afterResult.errorCode,
+          !after?.targetMatched ? 'uncertain_ui_target' : 'unknown',
+        ),
+        displayName,
+        requestedName,
+        capability: 'desktop_action',
+        completionVerified: false,
+        outcomeUnknown,
+        proof,
+      },
+    };
+  }
+
+  const noOpMessage = kind === 'focus_app'
+    ? `**${displayName}** was already frontmost; a fresh observation confirmed no focus action was needed.`
+    : `**${displayName}** was already running; a fresh observation confirmed no launch action was needed.`;
+  return {
+    ok: true,
+    message: mutationNeeded
+      ? `${completedVerb} and verified **${displayName}** via fresh local app observation.`
+      : noOpMessage,
+    warnings: [],
+    data: {
+      kind: resultKind,
+      operation: kind,
+      displayName,
+      requestedName,
+      capability: 'desktop_action',
+      completionVerified: true,
+      proof,
+    },
+  };
+}
+
+type ExactNativeSemanticNode = {
+  node: A11yNode;
+  ancestors: A11yNode[];
+  container: A11yNode | null;
+};
+
+function normalizeNativeSemanticText(value: unknown): string {
+  return String(value || '')
+    .replace(/[\u2026]/g, '...')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function findExactNativeSemanticNode(
+  root: A11yNode,
+  targetPath: string,
+): ExactNativeSemanticNode | null {
+  let match: ExactNativeSemanticNode | null = null;
+  const walk = (node: A11yNode, ancestors: A11yNode[], container: A11yNode | null): void => {
+    if (match) return;
+    const roleKey = normalizeNativeSemanticText(node.role).replace(/[\s_-]+/g, '');
+    const nextContainer = /ax(alert|dialog|sheet)/.test(roleKey) ? node : container;
+    if (node.id === targetPath) {
+      match = { node, ancestors, container: nextContainer };
+      return;
+    }
+    for (const child of node.children || []) walk(child, [...ancestors, node], nextContainer);
+  };
+  walk(root, [], null);
+  return match;
+}
+
+function nativeSemanticContext(match: ExactNativeSemanticNode): string {
+  const contextNodes = match.container
+    ? flattenA11yNodes(match.container).slice(0, 120)
+    : [...match.ancestors.slice(-12), match.node];
+  return contextNodes
+    .map((node) => `${node.label || ''} ${node.value || ''}`)
+    .join(' ')
+    .slice(0, 2000);
+}
+
+function classifyNativeSemanticNode(
+  match: ExactNativeSemanticNode,
+): { ok: true } | { ok: false; reason: string } {
+  const role = normalizeNativeSemanticText(match.node.role).replace(/[\s_-]+/g, '');
+  const containerRole = normalizeNativeSemanticText(match.container?.role).replace(/[\s_-]+/g, '');
+  const label = normalizeNativeSemanticText(match.node.label);
+  const value = normalizeNativeSemanticText(match.node.value);
+  const context = normalizeNativeSemanticText(`${label} ${nativeSemanticContext(match)}`).slice(0, 2000);
+  const blockedRole = /textfield|textarea|textentry|searchfield|combobox|popupbutton|checkbox|switch|radiobutton|slider|incrementor|disclosuretriangle|securetextfield|link|cell|row|table|outline|webarea/;
+  if (blockedRole.test(role)) return { ok: false, reason: 'state_or_text_control' };
+  if (!['axbutton', 'axmenuitem', 'axmenubaritem'].includes(role)) {
+    return { ok: false, reason: 'unsupported_role' };
+  }
+  if (/^ax(alert|dialog|sheet)$/.test(containerRole)) {
+    return { ok: false, reason: 'modal_context' };
+  }
+  if (value) return { ok: false, reason: 'value_bearing_target' };
+  if (!label) return { ok: false, reason: 'missing_label' };
+  const consequential = /\b(delete|remove|erase|trash|discard|reset|replace|overwrite|close without saving|quit|terminate|kill|pay|payment|purchase|buy|checkout|order|subscribe|subscription|billing|credit card|bank|wire|transfer|refund|sign in|signin|log in|login|log out|logout|password|passcode|authenticate|authentication|verify identity|account|credential|token|api key|allow|permission|authorize|authorization|access|privacy|camera|microphone|location|contacts|screen recording|accessibility|send|submit|publish|post|upload|install|update|accept|agree|consent|terms|license|confirm|approve)\b/;
+  if (consequential.test(context)) return { ok: false, reason: 'consequential_context' };
+  const allowed = (
+    /^(show|hide) (details|sidebar|toolbar|inspector|preview|info|information|status bar|tab bar)$/.test(label)
+    || /^(zoom in|zoom out|actual size|fit to (window|screen|page)|enter full screen|exit full screen)$/.test(label)
+    || /^(help|settings|preferences)$/.test(label)
+    || /^about(?: [a-z0-9][a-z0-9 ._'()&+-]{0,80})?$/.test(label)
+  );
+  return allowed ? { ok: true } : { ok: false, reason: 'unknown_semantics' };
+}
+
+function nativeSemanticFailureData(
+  phase: string,
+  errorCode: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    kind: 'desktop_semantic_action',
+    operation: 'native_semantic_press',
+    phase,
+    errorCode,
+    completionVerified: false,
+    outcomeUnknown: false,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    ...extra,
+  };
+}
+
+/**
+ * Production dependency bundle. The caller must supply a real runtime/user
+ * approval gate; there is deliberately no auto-approve default.
+ */
+export function createNativeSemanticActionBridgeDeps(
+  approvalGate: NativeSemanticActionDeps['approvalGate'],
+): NativeSemanticActionDeps {
+  return {
+    observeApp: bridgeObserveApp,
+    observeSemanticActionTarget: bridgeObserveNativeSemanticActionTarget,
+    performSemanticAction: bridgePerformNativeSemanticAction,
+    approvalGate,
+  };
+}
+
+/**
+ * Observe → exact-node classify → prepare one-shot target → approval →
+ * dispatch once → accept only exact-target after proof.
+ *
+ * Raw AX paths, labels, and the target capability are not returned in the
+ * execution receipt. A transport failure after perform starts is
+ * conservatively outcome-unknown and never replayable.
+ */
+export async function executeObservedNativeSemanticAction(
+  requestInput: NativeSemanticActionRequest,
+  deps: NativeSemanticActionDeps,
+): Promise<ComputerAppAdapterResult> {
+  const request: NativeSemanticActionRequest = {
+    action: requestInput?.action,
+    appName: String(requestInput?.appName || '').trim().slice(0, 120),
+    expectedPid: Math.trunc(Number(requestInput?.expectedPid || 0)),
+    targetPath: String(requestInput?.targetPath || '').trim(),
+    expectedRole: String(requestInput?.expectedRole || '').trim().slice(0, 80),
+    expectedLabel: String(requestInput?.expectedLabel || '').trim().slice(0, 120),
+  };
+  if (
+    request.action !== 'press'
+    || !request.appName
+    || !/^[A-Za-z0-9 .\-_()]+$/.test(request.appName)
+    || !(request.expectedPid > 0)
+    || !/^[0-9]+(\.[0-9]+)*$/.test(request.targetPath)
+    || !request.expectedRole
+    || !request.expectedLabel
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before observing the native app because the exact semantic-action identity was invalid.',
+      warnings: ['native semantic action blocked before observation: invalid exact target identity'],
+      data: nativeSemanticFailureData('input', 'invalid_input'),
+    };
+  }
+
+  let observation: NativeAppActivationBridgeResult<ObserveAppData>;
+  try {
+    observation = await deps.observeApp({
+      appName: request.appName,
+      maxDepth: 10,
+      maxNodes: 400,
+    });
+  } catch {
+    observation = {
+      ok: false,
+      errorCode: 'bridge_exception',
+    };
+  }
+  if (!observation.ok || !observation.data) {
+    const observationErrorCode = normalizeNativeBridgeErrorCode(observation.errorCode);
+    return {
+      ok: false,
+      message: `I stopped before preparing the native action because a fresh app observation was unavailable: ${renderNativeBridgeFailure(observationErrorCode)}.`,
+      warnings: ['native semantic action blocked before mutation: fresh app observation unavailable'],
+      data: nativeSemanticFailureData('before_observation', observationErrorCode),
+    };
+  }
+
+  const observed = observation.data;
+  const resolvedApp = resolveInitialNativeAppIdentity(observed, request.appName);
+  const pid = Math.max(0, Math.trunc(Number(observed.pid || 0)));
+  const indexGeneration = Math.max(0, Math.trunc(Number(observed.indexGeneration || 0)));
+  if (
+    !resolvedApp
+    || !observed.appRunning
+    || observed.frontmost !== true
+    || !(pid > 0)
+    || pid !== request.expectedPid
+    || !(indexGeneration > 0)
+    || !observed.tree
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before preparing the native action because the exact running app, PID, or fresh accessibility tree was unavailable.',
+      warnings: ['native semantic action blocked before mutation: incomplete exact observation'],
+      data: nativeSemanticFailureData('before_observation', 'uncertain_ui_target'),
+    };
+  }
+
+  const exactNode = findExactNativeSemanticNode(observed.tree, request.targetPath);
+  if (
+    !exactNode
+    || String(exactNode.node.role || '') !== request.expectedRole
+    || normalizeNativeSemanticText(exactNode.node.label) !== normalizeNativeSemanticText(request.expectedLabel)
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before preparing the native action because the exact AX path, role, and label did not all match the fresh observation.',
+      warnings: ['native semantic action blocked before mutation: exact target mismatch'],
+      data: nativeSemanticFailureData('target_validation', 'uncertain_ui_target'),
+    };
+  }
+  const localClassification = classifyNativeSemanticNode(exactNode);
+  if (!localClassification.ok) {
+    return {
+      ok: false,
+      message: 'I stopped before preparing the native action because that control is outside the narrow low-consequence semantic-action canary.',
+      warnings: [`native semantic action blocked before mutation: ${localClassification.reason}`],
+      data: nativeSemanticFailureData('target_validation', 'native_semantic_target_blocked'),
+    };
+  }
+
+  let prepared: NativeAppActivationBridgeResult<NativeSemanticActionTarget>;
+  try {
+    prepared = await deps.observeSemanticActionTarget({
+      action: 'press',
+      appName: resolvedApp,
+      pid,
+      indexGeneration,
+      targetPath: request.targetPath,
+      expectedRole: request.expectedRole,
+      expectedLabel: request.expectedLabel,
+    });
+  } catch {
+    prepared = {
+      ok: false,
+      errorCode: 'bridge_exception',
+    };
+  }
+  if (!prepared.ok || !prepared.data) {
+    const preparationErrorCode = normalizeNativeBridgeErrorCode(prepared.errorCode);
+    return {
+      ok: false,
+      message: `I stopped before approval because the bridge could not seal the exact fresh native target: ${renderNativeBridgeFailure(preparationErrorCode)}.`,
+      warnings: ['native semantic action blocked before mutation: one-shot target unavailable'],
+      data: nativeSemanticFailureData('target_preparation', preparationErrorCode),
+    };
+  }
+  const target = prepared.data;
+  const preparedIdentityMatched = (
+    target.schemaVersion === 1
+    && target.action === 'press'
+    && exactOrExplicitNativeAppAliasMatches(target.app, resolvedApp)
+    && target.pid === pid
+    && target.indexGeneration === indexGeneration
+    && target.targetPath === request.targetPath
+    && target.targetRole === request.expectedRole
+    && normalizeNativeSemanticText(target.targetLabel) === normalizeNativeSemanticText(request.expectedLabel)
+    && /^[a-f0-9]{48}$/.test(target.targetId)
+    && /^[a-f0-9]{64}$/.test(target.targetFingerprint)
+    && Number.isFinite(Date.parse(target.observedAt))
+    && target.indexGeneration > 0
+    && target.approvalRequired === true
+    && target.risk === 'medium'
+  );
+  if (!preparedIdentityMatched) {
+    return {
+      ok: false,
+      message: 'I stopped before approval because the prepared target did not preserve the exact observed app, PID, node, and semantics.',
+      warnings: ['native semantic action blocked before mutation: prepared target mismatch'],
+      data: nativeSemanticFailureData('target_preparation', 'uncertain_ui_target'),
+    };
+  }
+
+  const approvalProposal: NativeSemanticActionApprovalProposal = {
+    schemaVersion: 1,
+    operation: 'native_semantic_press',
+    action: 'press',
+    app: resolvedApp,
+    pid,
+    targetRole: target.targetRole,
+    targetFingerprint: target.targetFingerprint,
+    evidenceId: target.evidenceId,
+    observedAt: target.observedAt,
+    indexGeneration: target.indexGeneration,
+    targetSummary: target.targetSummary,
+    approvalRequired: true,
+    risk: 'medium',
+    expiresAt: target.expiresAt,
+  };
+  let approval: NativeSemanticActionApprovalDecision;
+  try {
+    approval = await deps.approvalGate(approvalProposal);
+  } catch {
+    approval = {
+      approved: false,
+      reason: 'approval_gate_unavailable',
+    };
+  }
+  const approvalId = String(approval.approvalId || '').trim();
+  if (!approval.approved || !/^[A-Za-z0-9._:-]{8,160}$/.test(approvalId)) {
+    return {
+      ok: false,
+      message: approval.approved
+        ? 'I did not dispatch the native action because the approval gate did not return a valid runtime receipt.'
+        : 'The native action was not approved. Review or retry the approval request.',
+      warnings: ['native semantic action not dispatched: approval required'],
+      data: nativeSemanticFailureData('approval', 'approval_required', {
+        approvalRequired: true,
+        approvalGranted: false,
+        approvalSummary: target.targetSummary,
+        evidenceId: target.evidenceId,
+        mutationAttempted: false,
+      }),
+    };
+  }
+
+  let execution: NativeAppActivationBridgeResult<NativeSemanticActionExecution>;
+  try {
+    // Exactly one perform call. The one-shot target is consumed server-side
+    // before freshness checks or helper dispatch.
+    execution = await deps.performSemanticAction({
+      targetId: target.targetId,
+      targetFingerprint: target.targetFingerprint,
+      approvalId,
+    });
+  } catch (error: any) {
+    return {
+      ok: false,
+      message: 'The approved native action call ended without a receipt. Its outcome is unknown, so I will not replay it.',
+      warnings: ['native semantic action outcome unknown after dispatch call; verify before any retry'],
+      data: nativeSemanticFailureData('dispatch', 'bridge_offline', {
+        evidenceId: target.evidenceId,
+        mutationAttempted: true,
+        outcomeUnknown: true,
+      }),
+    };
+  }
+
+  if (!execution.ok || !execution.data) {
+    const proof = execution.data?.proof;
+    const outcomeUnknown = proof
+      ? proof.outcomeUnknown === true
+      : true;
+    const mutationAttempted = proof
+      ? proof.mutationAttempted === true
+      : true;
+    return {
+      ok: false,
+      message: outcomeUnknown
+        ? 'The approved native action was not verified against the exact target. Its outcome is unknown, so I will not replay it.'
+        : `The bridge stopped before dispatching the approved native action: ${renderNativeBridgeFailure(execution.errorCode)}.`,
+      warnings: [
+        outcomeUnknown
+          ? 'native semantic action outcome unknown; verify before any retry'
+          : 'native semantic action consumed without dispatch after fresh target validation failed',
+      ],
+      data: nativeSemanticFailureData(
+        proof?.mutationAttempted ? 'after_observation' : 'before_dispatch',
+        normalizeNativeBridgeErrorCode(execution.errorCode),
+        {
+          evidenceId: target.evidenceId,
+          mutationAttempted,
+          outcomeUnknown,
+          ...(proof ? { proof } : {}),
+        },
+      ),
+    };
+  }
+
+  const completed = execution.data;
+  const beforeProof = completed.proof.before;
+  const afterProof = completed.proof.after;
+  const exactTargetPostcondition = !!beforeProof
+    && !!afterProof
+    && beforeProof.app === resolvedApp
+    && afterProof.app === resolvedApp
+    && beforeProof.pid === pid
+    && afterProof.pid === pid
+    && beforeProof.targetPresent === true
+    && beforeProof.targetFingerprint === target.targetFingerprint
+    && (
+      (
+        completed.proof.diff.kind === 'target_disappeared'
+        && afterProof.targetPresent === false
+        && afterProof.targetFingerprint === null
+      )
+      || (
+        completed.proof.diff.kind === 'target_semantics_changed'
+        && afterProof.targetPresent === true
+        && !!afterProof.targetFingerprint
+        && afterProof.targetFingerprint !== beforeProof.targetFingerprint
+      )
+    );
+  const exactCompletion = (
+    completed.app === resolvedApp
+    && completed.pid === pid
+    && completed.targetFingerprint === target.targetFingerprint
+    && completed.evidenceId === target.evidenceId
+    && completed.completionVerified === true
+    && completed.outcomeUnknown === false
+    && completed.replayAllowed === false
+    && completed.proof.completionVerified === true
+    && completed.proof.outcomeUnknown === false
+    && completed.proof.replayAllowed === false
+    && completed.proof.noOp === false
+    && completed.proof.mutationAttempted === true
+    && completed.proof.mutationPerformed === true
+    && completed.proof.dispatchAcknowledged === true
+    && (
+      completed.proof.dispatchMethod === 'ax_press'
+      || completed.proof.dispatchMethod === 'cg_event'
+    )
+    && exactTargetPostcondition
+  );
+  if (!exactCompletion) {
+    return {
+      ok: false,
+      message: 'The bridge returned a receipt, but it did not prove a local postcondition on the exact approved target. I will not replay the action.',
+      warnings: ['native semantic action failed closed: exact-target completion proof missing'],
+      data: nativeSemanticFailureData('after_observation', 'native_semantic_verification_failed', {
+        evidenceId: target.evidenceId,
+        mutationAttempted: true,
+        outcomeUnknown: true,
+        proof: completed.proof,
+      }),
+    };
+  }
+
+  return {
+    ok: true,
+    message: `Pressed and verified the approved native control in **${resolvedApp}**.`,
+    warnings: [],
+    data: {
+      kind: 'desktop_semantic_action',
+      operation: 'native_semantic_press',
+      phase: 'completed',
+      app: resolvedApp,
+      pid,
+      evidenceId: target.evidenceId,
+      approvalRequired: true,
+      approvalGranted: true,
+      mutationAttempted: true,
+      completionVerified: true,
+      outcomeUnknown: false,
+      outcomeUnknownPolicy: 'verify_before_retry',
+      replayAllowed: false,
+      proof: completed.proof,
+    },
+  };
 }
 
 function toolMatches(tool: Pick<McpTool, 'name' | 'description'>, needles: string[]): boolean {
@@ -1068,6 +2621,7 @@ async function runPhotoshopSaveForWebExportFallback(outputPath: string, appQuery
       filenameEntry: namedFile.data || null,
       postSave: postSave?.data || null,
       outputVerification: outputVerification?.data || null,
+      completionVerified: outputVerification?.ok === true,
     },
   };
 }
@@ -1215,6 +2769,8 @@ export const __computerAppAdapterTestables = {
   buildAppleNotesCreateNoteRecipe,
   buildAppleNotesCreateNoteSequence,
   detectComputerAppAdapterSequence,
+  executeObservedNativeAppActivation,
+  executeObservedNativeSemanticAction,
 };
 
 // E3 — region-zoom coordinate re-click. When an a11y element click fails
@@ -2124,6 +3680,7 @@ async function executeLocalDesktopSequenceStep(
         kind: 'desktop_photoshop_export_proof',
         ...exported.data,
         modalHandling: modalResult?.data || null,
+        completionVerified: exported.data.fileExists && !exported.data.error,
       },
     };
   }
@@ -2173,6 +3730,7 @@ async function executeLocalDesktopSequenceStep(
         kind: 'desktop_indesign_export_proof',
         ...exported.data,
         modalHandling: modalResult?.data || null,
+        completionVerified: exported.data.fileExists && !exported.data.error,
       },
     };
   }
@@ -2226,6 +3784,9 @@ async function executeLocalDesktopSequenceStep(
         kind: 'desktop_indesign_package_document',
         ...packaged.data,
         modalHandling: modalResult?.data || null,
+        completionVerified: packaged.data.packageOk
+          && packaged.data.fileCount > 0
+          && !packaged.data.error,
       },
     };
   }
@@ -2277,6 +3838,9 @@ async function executeLocalDesktopSequenceStep(
         kind: 'desktop_indesign_relink_asset',
         ...relinked.data,
         modalHandling: modalResult?.data || null,
+        completionVerified: relinked.data.relinkedLinks > 0
+          && relinked.data.missingAfter === 0
+          && !relinked.data.error,
       },
     };
   }
@@ -2653,6 +4217,7 @@ async function executeLocalDesktopSequenceStep(
         docSaved: changed.data?.docSaved === true,
         fallbackReason: changed.data?.fallbackReason || null,
         inventory: diagnosticInventory?.ok ? diagnosticInventory.data : null,
+        completionVerified: remaining === 0 && (count > 0 || alreadyApplied),
       },
     };
   }
@@ -2717,6 +4282,7 @@ async function executeLocalDesktopSequenceStep(
         kind: 'desktop_indesign_batch_find_change',
         ...changed.data,
         modalHandling: modalResult?.data || null,
+        completionVerified: failures.length === 0 && changed.data.remaining === 0,
       },
     };
   }
@@ -3051,7 +4617,12 @@ async function executeLocalDesktopIntent(
       ok: true,
       message: `Completed ${steps.length} desktop app steps:\n${steps.map((step) => `${step.index}. ${step.message}`).join('\n')}`,
       warnings: [],
-      data: { kind: 'desktop_action_sequence', steps, recipe: serializeAppAutomationRecipe(recipe) },
+      data: {
+        kind: 'desktop_action_sequence',
+        steps,
+        recipe: serializeAppAutomationRecipe(recipe),
+        completionVerified: hasTerminalDesktopSequenceCompletionProof(steps),
+      },
     };
   }
 
@@ -3136,29 +4707,12 @@ async function executeLocalDesktopIntent(
     }
 
     if ((intent.kind === 'launch_app' || intent.kind === 'focus_app') && intent.appQuery) {
-      const r = intent.kind === 'focus_app'
-        ? await bridgeFocusApp(intent.appQuery)
-        : await bridgeLaunchApp(intent.appQuery);
-      if (!r.ok) {
-        return {
-          ok: false,
-          message: `I could not ${intent.kind === 'focus_app' ? 'focus' : 'launch'} **${intent.appQuery}** through the local bridge: ${r.error || r.errorCode || 'unknown bridge error'}.`,
-          warnings: [`desktop_action failed with ${r.errorCode || 'unknown_error'}`],
-          data: { kind: 'desktop_bridge_error', errorCode: r.errorCode, displayName: intent.appQuery },
-        };
-      }
-      const displayName = r.data?.appName || intent.appQuery;
-      return {
-        ok: true,
-        message: `${intent.kind === 'focus_app' ? 'Focused' : 'Launched'} **${displayName}** via the local bridge.`,
-        warnings: [],
-        data: {
-          kind: intent.kind === 'focus_app' ? 'desktop_bridge_focus' : 'desktop_bridge_launch',
-          displayName,
-          requestedName: intent.appQuery,
-          capability: 'desktop_action',
-        },
-      };
+      return executeObservedNativeAppActivation(intent.kind, intent.appQuery, {
+        observeApp: bridgeObserveApp,
+        launchApp: bridgeLaunchApp,
+        focusApp: bridgeFocusApp,
+        waitForApp: bridgeWaitForApp,
+      });
     }
 
     if (intent.kind === 'wait_for_app' && intent.appQuery) {
@@ -3841,8 +5395,21 @@ async function executeComputerAppTaskInner(args: {
         // Auto-pair if needed — ensureDesktopBridgePaired is idempotent
         // and silent when already paired.
         await ensureDesktopBridgePaired().catch(() => null);
-        const r = await bridgeLaunchApp(resolveMacLaunchName(bridgeCandidate));
-        if (r.ok) {
+        const detectedKnownIntent = detectLocalComputerAwarenessIntent(task);
+        const activationKind: NativeAppActivationKind = detectedKnownIntent.kind === 'focus_app'
+          ? 'focus_app'
+          : 'launch_app';
+        const activationResult = await executeObservedNativeAppActivation(
+          activationKind,
+          resolveMacLaunchName(bridgeCandidate),
+          {
+            observeApp: bridgeObserveApp,
+            launchApp: bridgeLaunchApp,
+            focusApp: bridgeFocusApp,
+            waitForApp: bridgeWaitForApp,
+          },
+        );
+        if (activationResult.ok) {
           // For utterances with a built-in follow-up pattern we know
           // from the alias match (e.g. "open Claude Code" → launch
           // Terminal + type `claude` + Return), auto-chain the
@@ -3850,13 +5417,17 @@ async function executeComputerAppTaskInner(args: {
           // desktop.* tools. Client-side only — same trust boundary
           // as the launch itself, and avoids needing the hardcoded
           // swanbot-ai edge fn to know about desktop tools.
-          const autoChainSteps = await runAutoChain(bridgeCandidate.id);
+          const autoChainSteps = activationKind === 'launch_app'
+            ? await runAutoChain(bridgeCandidate.id)
+            : { ok: true, steps: ['no auto-chain for focus'], elapsedMs: 0 };
+          const hasUnverifiedAutoChain = activationKind === 'launch_app'
+            && (bridgeCandidate.id === 'terminal-claude' || bridgeCandidate.id === 'zoom');
 
           const followupMessages: Record<string, string> = {
             'terminal-claude': 'Ran `claude` in Terminal.',
             zoom: 'Sent Cmd+N to start a new meeting.',
           };
-          const chainMsg = autoChainSteps.ok && followupMessages[bridgeCandidate.id]
+          const chainMsg = activationKind === 'launch_app' && autoChainSteps.ok && followupMessages[bridgeCandidate.id]
             ? ` ${followupMessages[bridgeCandidate.id]}`
             : autoChainSteps.error
               ? ` Auto-chain hit an issue: ${autoChainSteps.error}.`
@@ -3865,38 +5436,44 @@ async function executeComputerAppTaskInner(args: {
           return {
             ok: true,
             message:
-              `Launched **${bridgeCandidate.displayName}** via the local bridge.${chainMsg}` +
+              `${activationResult.message}${chainMsg}` +
               (autoChainSteps.ok
                 ? ''
                 : ' Follow up with `desktop.type_text` / `desktop.press_keys` for further actions.'),
-            warnings: [],
+            warnings: [
+              ...activationResult.warnings,
+              ...(hasUnverifiedAutoChain ? ['desktop auto-chain actions have no fresh after-state proof'] : []),
+            ],
             data: {
-              kind: 'desktop_bridge_launch',
+              kind: activationResult.data?.kind || (activationKind === 'focus_app' ? 'desktop_bridge_focus' : 'desktop_bridge_launch'),
               appId: bridgeCandidate.id,
               displayName: bridgeCandidate.displayName,
               capability: 'desktop_action',
               autoChain: autoChainSteps,
+              completionVerified: activationResult.data?.completionVerified === true && !hasUnverifiedAutoChain,
+              proof: activationResult.data?.proof || null,
             },
           };
         }
+        const launchErrorCode = String(activationResult.data?.errorCode || 'unknown');
         // Bridge reachable but launch failed — surface the specific
         // error state inline rather than silently returning the URL
         // shortcut. The user wants to know WHY the real path didn't
         // work so they can fix it.
-        if (r.errorCode === 'permission_denied') {
+        if (launchErrorCode === 'permission_denied') {
           return {
             ok: false,
             message:
               `**macOS Accessibility permission required.**\n\n` +
-              `The bridge tried to launch **${bridgeCandidate.displayName}** but was blocked. ` +
+              `The bridge tried to ${activationKind === 'focus_app' ? 'focus' : 'launch'} **${bridgeCandidate.displayName}** but was blocked. ` +
               `Open **System Settings → Privacy & Security → Accessibility** and enable it for ` +
               `whichever Terminal / iTerm is running \`node scripts/claude-bridge.js\`. ` +
               `Retry the same command afterwards — no re-pairing needed.`,
             warnings: ['desktop_action failed with permission_denied'],
-            data: { kind: 'desktop_bridge_error', errorCode: r.errorCode, displayName: bridgeCandidate.displayName },
+            data: { ...activationResult.data, kind: 'desktop_bridge_error', errorCode: launchErrorCode, displayName: bridgeCandidate.displayName },
           };
         }
-        if (r.errorCode === 'app_not_found') {
+        if (launchErrorCode === 'app_not_found') {
           return {
             ok: false,
             message:
@@ -3904,20 +5481,20 @@ async function executeComputerAppTaskInner(args: {
               `The bridge tried \`open -a "${bridgeCandidate.displayName}"\` and got "not found." ` +
               `Install the app or ask me for a browser fallback (${bridgeCandidate.webUrl}).`,
             warnings: ['desktop_action failed with app_not_found'],
-            data: { kind: 'desktop_bridge_error', errorCode: r.errorCode, displayName: bridgeCandidate.displayName, webFallback: bridgeCandidate.webUrl },
+            data: { ...activationResult.data, kind: 'desktop_bridge_error', errorCode: launchErrorCode, displayName: bridgeCandidate.displayName, webFallback: bridgeCandidate.webUrl },
           };
         }
-        if (r.errorCode === 'not_paired') {
+        if (launchErrorCode === 'not_paired') {
           return {
             ok: false,
             message:
               `**Bridge running but not paired.** Tap **⎇ Pair Desktop Bridge** ` +
               `in the Chat Actions menu once, then retry.`,
             warnings: ['desktop_action failed with not_paired'],
-            data: { kind: 'desktop_bridge_error', errorCode: r.errorCode },
+            data: { ...activationResult.data, kind: 'desktop_bridge_error', errorCode: launchErrorCode },
           };
         }
-        if (r.errorCode === 'origin_blocked') {
+        if (launchErrorCode === 'origin_blocked') {
           // CORS preflight failed. Before 2026-04-23 the bridge didn't
           // include `X-UC-Desktop-Token` in Access-Control-Allow-Headers,
           // so every authed call died here even with a paired token.
@@ -3931,11 +5508,20 @@ async function executeComputerAppTaskInner(args: {
               `after running \`git pull\` — the CORS allow-list was widened to accept ` +
               `the desktop-token header. Then run \`/desktop diag\` to confirm.`,
             warnings: ['desktop_action failed with origin_blocked'],
-            data: { kind: 'desktop_bridge_error', errorCode: r.errorCode },
+            data: { ...activationResult.data, kind: 'desktop_bridge_error', errorCode: launchErrorCode },
           };
         }
-        // Unknown error state — note it but fall through to URL-scheme
-        // shortcut so the user still has SOME path.
+        // The lane has either blocked before mutation, observed an
+        // unverified after-state, or recorded an ambiguous dispatch. Do not
+        // fall through to a second launch surface and risk a blind retry.
+        return {
+          ...activationResult,
+          data: {
+            ...activationResult.data,
+            displayName: bridgeCandidate.displayName,
+            webFallback: bridgeCandidate.webUrl,
+          },
+        };
       }
     } catch {
       // Bridge probe threw — continue with the non-bridge paths.

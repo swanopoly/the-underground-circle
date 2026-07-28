@@ -53,6 +53,12 @@ export interface ComputerTaskEvidenceRecoveryInput {
    * generic "use a code agent" hint. Optional and additive.
    */
   appAdapterGap?: AppAdapterGapContract | null;
+  /**
+   * Original user intent, retained for surrounding recovery UX only. Never use
+   * task wording as evidence of why a run failed: stop conditions such as
+   * "stop if CAPTCHA" and requested actions such as "export" are not observed
+   * failure causes.
+   */
   task?: string | null;
   failureMessage?: string | null;
   outcomeStatus?: string | null;
@@ -255,25 +261,28 @@ function resolveFailureArea(args: {
   return routeArea;
 }
 
-function textFromInput(input: ComputerTaskEvidenceRecoveryInput): string {
+/**
+ * Build the only prose channel allowed to influence failure classification.
+ *
+ * Deliberately excludes `input.task`, plan summaries, and grounding summaries:
+ * those describe intended work and expected control surfaces, not what the
+ * failed run actually observed. Structured route blockers/status, preflight
+ * results, tool outcome text, and captured observation summaries are evidence.
+ */
+function failureEvidenceTextFromInput(input: ComputerTaskEvidenceRecoveryInput): string {
   const routeDecision = summarizeAppRouteDecision(input.appRouteDecision);
   return [
-    input.task,
     input.failureMessage,
     input.outcomeStatus,
     input.source,
-    input.planSummary,
-    input.groundingSummary,
     input.preflightSummary,
+    ...(input.observations || []).map((observation) => observation?.summary),
     routeDecision
       ? [
           `app route status ${routeDecision.status}`,
-          routeDecision.targetName,
-          routeDecision.taskFamily,
-          routeDecision.chosenSurfaceLabel,
           ...routeDecision.missingConfirmations,
+          ...routeDecision.missingApprovals,
           ...routeDecision.userActionBlockers,
-          ...routeDecision.nextSteps,
         ].join('\n')
       : null,
   ].map((value) => clean(value, 1_200).toLowerCase()).join('\n');
@@ -313,7 +322,8 @@ function classifyFailureArea(text: string, contract: ComputerTaskEvidenceContrac
     return 'actionability';
   }
   if (matches(text, [
-    /\b(approval|not approved|approval required|side effect|submit|publish|send|pay|purchase|delete|overwrite|destructive|save|export|package|render)\b/i,
+    /\b(approval required|requires? approval|not approved|approval (?:was )?not granted|approval denied|awaiting approval|blocked (?:by|for|on) approval|stopped (?:at|before) (?:the )?approval|approval boundary)\b/i,
+    /\b(?:side effect|submit|publish|send|pay|purchase|delete|overwrite|destructive|save|export|package|render)\b[\s\S]{0,100}\b(?:requires? approval|not approved|approval (?:was )?not granted|approval denied|awaiting approval)\b/i,
   ])) {
     return 'approval_boundary';
   }
@@ -596,7 +606,7 @@ export function diagnoseComputerTaskEvidenceFailure(
   const contract = input.contract || null;
   if (!contract) return null;
   const appRouteDecision = summarizeAppRouteDecision(input.appRouteDecision);
-  const text = textFromInput(input);
+  const text = failureEvidenceTextFromInput(input);
   const area = resolveFailureArea({
     rawArea: classifyFailureArea(text, contract),
     routeDecision: appRouteDecision,

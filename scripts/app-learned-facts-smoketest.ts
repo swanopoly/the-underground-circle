@@ -329,14 +329,14 @@ function main() {
   assert(!('app-00' in store.apps), 'store: oldest updatedAtIso evicted first');
   assert('app-30' in store.apps, 'store: newest upsert always kept');
 
-  // ─── Wiring source assertions (never-auto-execute + audit-wins merge) ──
+  // ─── Wiring source assertions (never-auto-execute + live-audit authority) ──
   const repoRoot = path.resolve(__dirname, '..');
   const runtimeSrc = fs.readFileSync(path.join(repoRoot, 'src/lib/computerTaskRuntime.ts'), 'utf8');
   assert(
-    runtimeSrc.includes('mergeCapabilityStatusWithLearnedHints(')
-      && runtimeSrc.includes('deriveSurfaceCapabilityStatusFromAudit(args.audit)')
-      && runtimeSrc.includes('deriveCapabilityHintsFromFacts(learnedFacts)'),
-    'wiring: learned hints merged into the audit-derived capabilityStatusById before execution',
+    runtimeSrc.includes('Learned per-app facts still gate read-only trace/example context')
+      && runtimeSrc.includes('shouldInjectDesktopExample(learnedFacts)')
+      && !runtimeSrc.includes('mergeCapabilityStatusWithLearnedHints('),
+    'wiring: learned facts inform read-only context/proposals without overriding the live capability audit',
   );
   assert(runtimeSrc.includes('shouldProposeCapabilityBuildout(input.updatedFacts)'), 'wiring: propose trigger consulted on the freshly-recorded facts');
   assert(runtimeSrc.includes('learnedProposalReason: decision.reason'), 'wiring: propose routes through the EXISTING requestConnectedAppCapabilityBuildout path');
@@ -355,8 +355,8 @@ function main() {
   assert((runtimeSrc.match(/desktopExampleInjected \?\? undefined/g) || []).length >= 3, 'wiring: exampleInjected threaded into every agent-seam outcome recording');
   assert(runtimeSrc.includes('desktop example injection suppressed by learned evidence:'), 'wiring: suppression decision + reason surfaced on the runtime warnings channel');
   assert(
-    (runtimeSrc.match(/recordLearnedAppOutcome\(Boolean\(retryAttempt\.response\), surfaceEscalations\)/g) || []).length === 2,
-    'wiring: post-buildout-retry outcomes folded at BOTH retry call sites (success resets failure counters)',
+    (runtimeSrc.match(/recordLearnedAppOutcome\(isComputerTaskOutcomeComplete\(retryAttempt\.status\), surfaceEscalations\)/g) || []).length === 2,
+    'wiring: post-buildout-retry outcomes use the authoritative typed status at BOTH retry call sites',
   );
 
   if (failures > 0) {

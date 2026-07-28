@@ -653,20 +653,18 @@ async function main() {
   })!;
   assert(staleReadiness.ready === false && staleReadiness.status === 'stale', 'J5 aged observations degrade to stale (fail closed)', staleReadiness.status);
 
-  // DOCUMENTED DRIFT LOCK (reported, not fixed here): classifyFailureArea
-  // folds the raw TASK text into classification, so the same actionability
-  // failure on MSG1 — whose task text mentions "captcha" in a user STOP
-  // CONDITION — classifies as user_unblock and forbids the retry. Locked so
-  // a future classifier fix surfaces here.
+  // Regression: user task stop conditions are intent, not observed failure
+  // evidence. "Stop if CAPTCHA" must not override the actual locator
+  // actionability failure or disable its one fresh-evidence retry.
   const poisonedRec5 = diagnoseComputerTaskEvidenceFailure({
     contract: contract1,
     task: MSG1,
     failureMessage: failure5,
     outcomeStatus: 'failed',
   })!;
-  assert(poisonedRec5.failureArea === 'user_unblock' && poisonedRec5.retryAllowed === false,
-    'J5 documents task-text classification poisoning: "stop if … captcha" in the TASK flips an actionability failure to user_unblock (update this lock when fixed)',
-    poisonedRec5.failureArea);
+  assert(poisonedRec5.failureArea === 'actionability' && poisonedRec5.retryAllowed === true,
+    'J5 task stop-condition "captcha" cannot poison observed actionability recovery',
+    { area: poisonedRec5.failureArea, retry: poisonedRec5.retryAllowed });
 
   // Approval-boundary failure on the floor route → blocked readiness.
   const blockedRec5 = diagnoseComputerTaskEvidenceFailure({
@@ -681,9 +679,6 @@ async function main() {
   collectTools('J5 approval recovery', blockedRec5.requiredEvidence);
 
   // Capability-gap failure on the Photoshop contract → connected-agent path.
-  // task omitted: MSG2 contains "export", which classifyFailureArea reads
-  // from the TASK text and would misclassify as approval_boundary — second
-  // face of the same documented classification-poisoning drift.
   const gapFailure5 = 'missing bridge tool: desktop.photoshop_set_layer_state is not implemented on this bridge';
   const gapRec5 = diagnoseComputerTaskEvidenceFailure({
     contract: contract2,
@@ -695,18 +690,18 @@ async function main() {
   assert(gapRec5.recommendedOptionId === 'let_connected_agent_repair', 'J5 capability gap recommends agent repair', gapRec5.recommendedOptionId);
   collectTools('J5 capability-gap recovery', gapRec5.requiredEvidence);
 
-  // DOCUMENTED DRIFT LOCK (same classifier issue, mutation-verb face):
-  // including the original task text ("… export a PNG") flips the identical
-  // missing-adapter failure to approval_boundary, losing the agent-repair path.
+  // Regression: the requested "export" action is intent, not evidence that an
+  // approval boundary caused the failure. The observed missing tool keeps the
+  // connected-agent repair route.
   const gapPoisoned5 = diagnoseComputerTaskEvidenceFailure({
     contract: contract2,
     task: MSG2,
     failureMessage: gapFailure5,
     outcomeStatus: 'failed',
   })!;
-  assert(gapPoisoned5.failureArea === 'approval_boundary' && gapPoisoned5.connectedAgentAllowed === false,
-    'J5 documents task-text classification poisoning: "export" in the TASK flips a capability gap to approval_boundary (update this lock when fixed)',
-    gapPoisoned5.failureArea);
+  assert(gapPoisoned5.failureArea === 'capability_gap' && gapPoisoned5.connectedAgentAllowed === true,
+    'J5 requested "export" cannot poison observed missing-adapter recovery',
+    { area: gapPoisoned5.failureArea, agent: gapPoisoned5.connectedAgentAllowed });
 
   // Photoshop fresh-evidence failure → app-specific desktop evidence tools.
   const psRec5 = diagnoseComputerTaskEvidenceFailure({
@@ -743,7 +738,7 @@ async function main() {
   // Recovery contracts promise these catalog tools — they must exist for the
   // loop to ever satisfy a required observation with a real dispatch.
   const MUST_EXIST = [
-    'browser.dom_snapshot', 'browser.verification_state', 'browser.screenshot',
+    'browser.dom_snapshot', 'browser.verification_state', 'browser.locator_actionability', 'browser.screenshot',
     'desktop.read_a11y_tree', 'desktop.window_state', 'desktop.screenshot',
     'desktop.file_search', 'desktop.file_stat',
     'desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory',
@@ -757,10 +752,7 @@ async function main() {
   // Names recovery emits that are deliberately NOT dispatchable catalog tools
   // (markers for user steps / runtime-internal evidence). If one of these
   // ever ships as a real catalog tool, remove it here — the disjointness
-  // assert below keeps this list honest. NOTE: `browser.locator_actionability`
-  // is required-evidence for actionability retries but has no catalog tool
-  // that can produce the observation — reported as cross-module drift (see
-  // smoke header / report); locked here so NEW drift still fails.
+  // assert below keeps this list honest.
   const KNOWN_VIRTUAL = new Set([
     'user.confirm_unblocked',            // user-step marker, resolved by chat UX not a tool
     'agent.build_app_capability.result', // result artifact of catalog tool agent.build_app_capability
@@ -770,7 +762,6 @@ async function main() {
     'computer.result_summary',           // runtime-internal summary marker
     'computer.failure_fingerprint',      // runtime-internal recovery marker
     'computer.grounding_trace',          // runtime-internal recovery marker
-    'browser.locator_actionability',     // DRIFT: no catalog tool emits this observation
   ]);
   for (const virtual of KNOWN_VIRTUAL) {
     assert(!catalog.has(virtual), `J5 virtual name stays out of the catalog: ${virtual}`);

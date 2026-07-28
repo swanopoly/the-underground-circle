@@ -23,6 +23,8 @@
  *            '0'/'false'/'off' opt-out still turns it OFF), and the mass-deploy
  *            tool stays enabled AND approval-gated (mandatory 'ask' policy,
  *            50-agent ceiling, $10 per-deploy cost cap).
+ *   OST-G6 — exact per-call tool identity and hidden runtime receipts survive
+ *            the typed bridge without generated IDs or model-visible metadata.
  *
  * Run: npm run smoke:openswan-typed-runtime-invariants
  */
@@ -117,6 +119,8 @@ assert(
 const sessionSrc = readFileSync(join(repoRoot, 'src/lib/openswanSessionRuntime.ts'), 'utf8');
 const persistenceSrc = readFileSync(join(repoRoot, 'src/lib/agentRunPersistence.ts'), 'utf8');
 const subagentSrc = readFileSync(join(repoRoot, 'src/lib/subagentRegistry.ts'), 'utf8');
+const executionCoreSrc = readFileSync(join(repoRoot, 'src/lib/agentExecutionCore.ts'), 'utf8');
+const bridgeSrc = readFileSync(join(repoRoot, 'src/lib/openswanBridge.ts'), 'utf8');
 assert(/parallelToolConcurrency:\s*4\b/.test(sessionSrc), 'session runtime pins parallelToolConcurrency: 4 (R1 flip, 2026-07-20)');
 // The other two typed-core call sites stay fully sequential — the R1 flip is
 // scoped to the OpenSwan session runtime only.
@@ -152,6 +156,42 @@ assert(
 assert(
   hasLiveMention(sessionSrc, 'toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider('),
   'toolParallelPolicyProvider is passed LIVE into the typed-core run (replay safety + partitioning, 2026-07-20)',
+);
+
+// ── OST-G6: exact call identity + hidden receipt side channel ──────────────
+assert(
+  executionCoreSrc.includes('toolName: use.name,')
+    && executionCoreSrc.includes('toolUseId: use.id,')
+    && executionCoreSrc.includes('result = await def.handler(use.input, handlerCtx);'),
+  'agentExecutionCore constructs handler context from the exact model tool name/id',
+);
+assert(
+  bridgeSrc.includes('toolName: handlerCtx.toolName,')
+    && bridgeSrc.includes('toolUseId: handlerCtx.toolUseId,')
+    && bridgeSrc.includes('iteration: handlerCtx.iteration,')
+    && bridgeSrc.includes('input as any,')
+    && bridgeSrc.includes('callContext,'),
+  'OpenSwan bridge forwards the per-call handler identity into a fresh runtime context',
+);
+const callContextStart = bridgeSrc.indexOf('const callContext: OpenSwanRuntimeCallContext');
+const callContextEnd = callContextStart >= 0
+  ? bridgeSrc.indexOf('const result = await executeOpenSwanRuntimeTool', callContextStart)
+  : -1;
+const callContextSlice = callContextStart >= 0 && callContextEnd > callContextStart
+  ? bridgeSrc.slice(callContextStart, callContextEnd)
+  : '';
+assert(
+  callContextSlice.length > 0
+    && !/(randomUUID|Date\.now|Math\.random|tool[_-]?use[_-]?id\s*[:=]\s*['"`])/i.test(callContextSlice),
+  'OpenSwan bridge does not fabricate a tool-use identity',
+);
+assert(
+  bridgeSrc.includes('splitOpenSwanRuntimeToolResultMetadata,')
+    && bridgeSrc.includes('const { raw: visibleResult, metadata } = splitOpenSwanRuntimeToolResultMetadata(result);')
+    && bridgeSrc.includes('raw: visibleResult')
+    && bridgeSrc.includes('visibleResult as any')
+    && bridgeSrc.includes('...(metadata ? { metadata } : {})'),
+  'OpenSwan bridge lifts hidden metadata while raw and formatted model data use the stripped result',
 );
 
 // ── OST-G4: typed run-ledger token rollups stay complete ───────────────────

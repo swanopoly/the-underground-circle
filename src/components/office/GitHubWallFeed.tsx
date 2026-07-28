@@ -10,6 +10,7 @@ import {
   View, Text, ScrollView, Pressable, StyleSheet, Platform, Animated,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { subscribeWithReconnect } from '../../lib/subscribeWithReconnect';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -130,41 +131,50 @@ export default function GitHubWallFeed({ circleId, accentColor, maxEvents = 15 }
   const scrollRef = useRef<ScrollView>(null);
   const fadeAnims = useRef<Map<string, Animated.Value>>(new Map());
 
-  // ─── Load initial events ──────────────────────────────────────────────────
+  // ─── Load events (initial + realtime catch-up) ────────────────────────────
+  // Extracted so the resilient subscription can replay it after a reconnect:
+  // inserts that landed while the socket was down never arrive as events, so
+  // without this the wall silently misses whatever shipped during the gap.
+  const mountedRef = useRef(true);
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const { data } = await supabase
-          .from('circle_github_events')
-          .select('id, event_type, payload, created_at')
-          .eq('circle_id', circleId)
-          .order('created_at', { ascending: false })
-          .limit(maxEvents);
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
-        if (mounted && data) {
-          const parsed = data.map(parseEvent).reverse();
-          setEvents(parsed);
-          // Initialize fade anims
-          parsed.forEach(e => {
-            if (!fadeAnims.current.has(e.id)) {
-              fadeAnims.current.set(e.id, new Animated.Value(1));
-            }
-          });
-        }
-      } catch {
-        // Table may not exist
-      } finally {
-        if (mounted) setLoading(false);
+  const loadEvents = useCallback(async () => {
+    try {
+      const { data } = await supabase
+        .from('circle_github_events')
+        .select('id, event_type, payload, created_at')
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false })
+        .limit(maxEvents);
+
+      if (mountedRef.current && data) {
+        const parsed = data.map(parseEvent).reverse();
+        setEvents(parsed);
+        // Initialize fade anims
+        parsed.forEach(e => {
+          if (!fadeAnims.current.has(e.id)) {
+            fadeAnims.current.set(e.id, new Animated.Value(1));
+          }
+        });
       }
-    })();
-    return () => { mounted = false; };
+    } catch {
+      // Table may not exist
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
   }, [circleId, maxEvents]);
+
+  useEffect(() => { void loadEvents(); }, [loadEvents]);
 
   // ─── Subscribe to realtime inserts ────────────────────────────────────────
   useEffect(() => {
-    const channel = supabase
-      .channel(`github-events-${circleId}`)
+    const handle = subscribeWithReconnect({
+      channelName: `github-events-${circleId}`,
+      onCatchUp: () => { void loadEvents(); },
+      setup: (channel) => channel
       .on(
         'postgres_changes',
         {
@@ -201,13 +211,13 @@ export default function GitHubWallFeed({ circleId, accentColor, maxEvents = 15 }
             scrollRef.current?.scrollToEnd({ animated: true });
           }, 100);
         }
-      )
-      .subscribe();
+      ),
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      handle.unsubscribe();
     };
-  }, [circleId, maxEvents]);
+  }, [circleId, maxEvents, loadEvents]);
 
   // ─── Time ticker — update relative times every 30s ────────────────────────
   const [, setTick] = useState(0);

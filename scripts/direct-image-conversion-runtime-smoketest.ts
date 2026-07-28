@@ -1,294 +1,135 @@
 import assert from 'node:assert/strict';
-import { executeDirectImageConversionRequest } from '../src/lib/directImageConversionRuntime';
+import { readFileSync } from 'node:fs';
+import {
+  buildDirectImageConversionRuntimeHandoff,
+  DIRECT_IMAGE_CONVERSION_REQUIRED_CONTEXT,
+  executeDirectImageConversionRequest,
+} from '../src/lib/directImageConversionRuntime';
 
 async function main() {
-  const success = await executeDirectImageConversionRequest(
-    'on the desktop open pearsoncdjr-img in photoshop and save it as a png',
-    async (request) => {
-      assert.equal(request.source, 'pearsoncdjr-img');
-      assert.equal(request.format, 'png');
-      return {
-        ok: true,
-        data: {
-          sourcePath: '/Users/cswanson/Desktop/pearsoncdjr-img.jpg',
-          outputPath: '/Users/cswanson/Desktop/pearsoncdjr-img.png',
-          format: 'png',
-          bytes: 12345,
-        },
-      };
-    },
-  );
+  let convertCalls = 0;
+  let statCalls = 0;
+  let searchCalls = 0;
+  const privateSource = 'UC_PRIVATE_IMAGE_9217.png';
+  const privatePath = `/Users/private/Desktop/${privateSource}`;
 
-  assert.equal(success.handled, true, 'direct image conversion request is handled');
-  assert.equal(success.status, 'completed', 'direct image conversion completes with proof');
-  assert.match(success.message, /Saved \/Users\/cswanson\/Desktop\/pearsoncdjr-img\.png \(png, 12345 bytes\)\./, 'success message carries output proof');
-  assert(success.data?.proofSignals?.some((signal) => signal.includes('desktop.convert_image')), 'success data carries convert_image proof signal');
-
-  const desktopPronounJpg = await executeDirectImageConversionRequest(
-    'open Gemini_Generated_Image_lppqo8lppqo8lppq.png from the desktop and make it a jpg',
-    async (request) => {
-      assert.equal(request.source, 'Gemini_Generated_Image_lppqo8lppqo8lppq.png');
-      assert.equal(request.format, 'jpg');
-      return {
-        ok: true,
-        data: {
-          sourcePath: '/Users/cswanson/Desktop/Gemini_Generated_Image_lppqo8lppqo8lppq.png',
-          outputPath: '/Users/cswanson/Desktop/Gemini_Generated_Image_lppqo8lppqo8lppq.jpg',
-          format: 'jpg',
-          bytes: 67890,
-        },
-      };
-    },
-  );
-
-  assert.equal(desktopPronounJpg.handled, true, 'desktop filename pronoun conversion is handled');
-  assert.equal(desktopPronounJpg.status, 'completed', 'desktop filename pronoun conversion completes');
-  assert.match(desktopPronounJpg.message, /Gemini_Generated_Image_lppqo8lppqo8lppq\.jpg/, 'desktop filename pronoun conversion reports JPG output');
-
-  const resolvedByPreflight = await executeDirectImageConversionRequest(
-    'open logo.png from the desktop and make it a jpg',
+  const outcome = await executeDirectImageConversionRequest(
+    `open "${privatePath}" and convert it to jpeg`,
     {
-      async statFile(path) {
-        if (path === 'logo.png') {
-          return { ok: false, error: 'path must be scoped', errorCode: 'invalid_input' };
-        }
-        assert.equal(path, '/Users/cswanson/Desktop/logo.png', 'preflight stats the matched file before conversion');
-        return {
-          ok: true,
-          data: {
-            path: '/Users/cswanson/Desktop/logo.png',
-            exists: true,
-            kind: 'file',
-            size: 111,
-            modifiedAt: '2026-06-30T12:00:00.000Z',
-            createdAt: '2026-06-30T11:00:00.000Z',
-          },
-        };
-      },
-      async searchFiles(rootPath, query, options) {
-        assert.equal(rootPath, '~/Desktop', 'desktop task searches Desktop first');
-        assert.equal(query, 'logo.png', 'preflight searches by basename');
-        assert.deepEqual(options?.extensions, ['png'], 'preflight scopes search by extension');
-        return {
-          ok: true,
-          data: {
-            rootPath,
-            query,
-            visited: 12,
-            truncated: false,
-            matches: [{
-              path: '/Users/cswanson/Desktop/logo.png',
-              name: 'logo.png',
-              reason: 'name',
-              size: 111,
-              modifiedAt: '2026-06-30T12:00:00.000Z',
-            }],
-          },
-        };
-      },
-      async convertImage(request) {
-        assert.equal(request.source, '/Users/cswanson/Desktop/logo.png', 'conversion receives the verified source path');
-        assert.equal(request.format, 'jpg');
-        return {
-          ok: true,
-          data: {
-            sourcePath: '/Users/cswanson/Desktop/logo.png',
-            outputPath: '/Users/cswanson/Desktop/logo.jpg',
-            format: 'jpg',
-            bytes: 34567,
-          },
-        };
-      },
-    },
-  );
-
-  assert.equal(resolvedByPreflight.status, 'completed', 'preflight-resolved conversion completes');
-  assert(resolvedByPreflight.data?.preflightSignals?.includes('desktop.file_stat:matched_source_exists'), 'preflight signals include matched file stat proof');
-  assert(resolvedByPreflight.data?.proofSignals?.includes('desktop.file_search:~/Desktop:ok'), 'proof signals include the bounded file search');
-
-  const quotedJpeg = await executeDirectImageConversionRequest(
-    'convert "~/Desktop/logo mark.png" to jpeg',
-    async (request) => {
-      assert.equal(request.source, '~/Desktop/logo mark.png');
-      assert.equal(request.format, 'jpeg');
-      return {
-        ok: true,
-        data: {
-          sourcePath: '/Users/cswanson/Desktop/logo mark.png',
-          outputPath: '/Users/cswanson/Desktop/logo mark.jpeg',
-          format: 'jpeg',
-          bytes: 23456,
-        },
-      };
-    },
-  );
-
-  assert.equal(quotedJpeg.handled, true, 'quoted JPEG conversion is handled');
-  assert.equal(quotedJpeg.status, 'completed', 'quoted JPEG conversion completes');
-  assert.match(quotedJpeg.message, /logo mark\.jpeg \(jpeg, 23456 bytes\)/, 'quoted JPEG conversion reports proof');
-
-  const unsupportedRenameExport = await executeDirectImageConversionRequest(
-    'open the file Screenshot 2026-05-21 at 4.44.42 PM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png',
-    async () => {
-      throw new Error('format-only converter should not run for renamed export requests');
-    },
-  );
-
-  assert.equal(unsupportedRenameExport.handled, false, 'renamed Photoshop export is not handled by format-only converter');
-
-  const missingProof = await executeDirectImageConversionRequest(
-    'on the desktop open pearsoncdjr-img in photoshop and save it as a png',
-    async () => ({
-      ok: true,
-      data: {
-        sourcePath: '/Users/cswanson/Desktop/pearsoncdjr-img.jpg',
-        outputPath: '/Users/cswanson/Desktop/pearsoncdjr-img.png',
-        format: 'png',
-        bytes: 0,
-      },
-    }),
-  );
-
-  assert.equal(missingProof.handled, true, 'missing-proof direct conversion still consumes the task');
-  assert.equal(missingProof.status, 'failed', 'missing output proof fails closed');
-  assert.match(missingProof.message, /output proof/i, 'missing proof message is customer-readable');
-  assert.doesNotMatch(missingProof.message, /desktop\.convert_image|byte-size/i, 'missing proof message hides tool contract detail');
-
-  const notFound = await executeDirectImageConversionRequest(
-    'open Gemini_Generated_Image_lppqo8lppqo8lppq.png from the desktop and make it a jpg',
-    async () => ({
-      ok: false,
-      error: 'File or folder does not exist at that path.',
-      errorCode: 'file_not_found',
-    }),
-  );
-
-  assert.equal(notFound.handled, true, 'not-found direct conversion still consumes the task');
-  assert.equal(notFound.status, 'failed', 'not-found direct conversion fails closed');
-  assert.match(notFound.message, /could not find that image/i, 'not-found message tells the user the simple blocker');
-  assert.doesNotMatch(notFound.message, /desktop\.convert_image|File or folder does not exist/i, 'not-found message hides bridge internals');
-  assert(notFound.warnings.some((warning) => /desktop\.convert_image failed \(file_not_found\)/i.test(warning)), 'not-found warning keeps technical support detail');
-
-  const preflightNoMatches = await executeDirectImageConversionRequest(
-    'open missing-logo.png from the desktop and make it a jpg',
-    {
-      async statFile() {
-        return { ok: false, error: 'path must be scoped', errorCode: 'invalid_input' };
-      },
-      async searchFiles(rootPath, query) {
-        assert.equal(rootPath, '~/Desktop');
-        assert.equal(query, 'missing-logo.png');
-        return {
-          ok: true,
-          data: { rootPath, query, visited: 4, truncated: false, matches: [] },
-        };
-      },
       async convertImage() {
-        throw new Error('conversion should not run without a source match');
+        convertCalls += 1;
+        throw new Error('direct conversion must never execute');
       },
-    },
-  );
-
-  assert.equal(preflightNoMatches.status, 'failed', 'preflight no-match fails closed');
-  assert.match(preflightNoMatches.message, /could not find that image/i, 'preflight no-match gets not-found copy');
-  assert.doesNotMatch(preflightNoMatches.message, /desktop\.file_search|desktop\.convert_image|No matching source/i, 'preflight no-match hides tool details');
-  assert(preflightNoMatches.warnings.some((warning) => /preflight failed \(file_not_found\)/i.test(warning)), 'preflight no-match keeps diagnostic warning');
-
-  const preflightAmbiguous = await executeDirectImageConversionRequest(
-    'open logo.png from the desktop and make it a jpg',
-    {
       async statFile() {
-        return { ok: false, error: 'path must be scoped', errorCode: 'invalid_input' };
+        statCalls += 1;
+        throw new Error('direct preflight stat must never execute');
       },
-      async searchFiles(rootPath, query) {
-        return {
-          ok: true,
-          data: {
-            rootPath,
-            query,
-            visited: 4,
-            truncated: false,
-            matches: [
-              { path: '/Users/cswanson/Desktop/logo.png', name: 'logo.png', reason: 'name', size: 1, modifiedAt: '2026-06-30T12:00:00.000Z' },
-              { path: '/Users/cswanson/Desktop/archive/logo.png', name: 'logo.png', reason: 'name', size: 2, modifiedAt: '2026-06-30T12:00:00.000Z' },
-            ],
-          },
-        };
-      },
-      async convertImage() {
-        throw new Error('conversion should not run for ambiguous source matches');
+      async searchFiles() {
+        searchCalls += 1;
+        throw new Error('direct preflight search must never execute');
       },
     },
   );
 
-  assert.equal(preflightAmbiguous.status, 'failed', 'preflight ambiguous match fails closed');
-  assert.match(preflightAmbiguous.message, /more than one matching image|exact file path/i, 'preflight ambiguous match gets exact-path copy');
-  assert.doesNotMatch(preflightAmbiguous.message, /desktop\.file_search|ambiguous_file_match/i, 'preflight ambiguous message hides tool details');
-  assert(preflightAmbiguous.warnings.some((warning) => /preflight failed \(ambiguous_file_match\)/i.test(warning)), 'preflight ambiguous keeps diagnostic warning');
+  assert.equal(outcome.handled, true, 'bounded conversion is consumed by the handoff');
+  assert.equal(outcome.status, 'handoff', 'conversion never claims completion');
+  assert.match(outcome.message, /not executed directly|authenticated OpenSwan typed runtime/i);
+  assert.equal(convertCalls, 0, 'convertImage is never called');
+  assert.equal(statCalls, 0, 'stat preflight is never called');
+  assert.equal(searchCalls, 0, 'search preflight is never called');
+  assert.equal('request' in (outcome.data || {}), false, 'parsed source and format are not returned');
+  assert.equal('proof' in (outcome.data || {}), false, 'no conversion proof is fabricated');
+  assert.equal('proofSignals' in (outcome.data || {}), false, 'no proof signal is fabricated');
+  assert.equal('preflightSignals' in (outcome.data || {}), false, 'no direct preflight telemetry is fabricated');
 
-  for (const failureCase of [
-    {
-      label: 'ambiguous file match',
-      errorCode: 'ambiguous_file_match' as const,
-      error: 'multiple images matched "logo.png"; provide the full path before converting.',
-      userPattern: /more than one matching image|exact file path/i,
-      rawPattern: /multiple images matched|errorCode|File or folder does not exist|ECONNREFUSED|EACCES/i,
-    },
-    {
-      label: 'output conflict',
-      errorCode: 'output_conflict' as const,
-      error: 'could not choose a non-conflicting output path for "logo.png".',
-      userPattern: /already exists|overwriting/i,
-      rawPattern: /non-conflicting|errorCode|File or folder does not exist|ECONNREFUSED|EACCES/i,
-    },
-    {
-      label: 'permission denied',
-      errorCode: 'permission_denied' as const,
-      error: 'EACCES: permission denied, open /Users/cswanson/Desktop/logo.jpg',
-      userPattern: /desktop bridge|approve the requested folder|try again/i,
-      rawPattern: /EACCES|permission denied|desktop\.convert_image|errorCode/i,
-    },
-    {
-      label: 'bridge unavailable',
-      errorCode: 'bridge_offline' as const,
-      error: 'ECONNREFUSED 127.0.0.1:7778',
-      userPattern: /desktop bridge|approve the requested folder|try again/i,
-      rawPattern: /ECONNREFUSED|127\.0\.0\.1|desktop\.convert_image|errorCode/i,
-    },
-  ]) {
-    const failed = await executeDirectImageConversionRequest(
-      'open logo.png from the desktop and make it a jpg',
-      async () => ({
-        ok: false,
-        error: failureCase.error,
-        errorCode: failureCase.errorCode,
-      }),
-    );
-    assert.equal(failed.handled, true, `${failureCase.label}: task is handled`);
-    assert.equal(failed.status, 'failed', `${failureCase.label}: task fails closed`);
-    assert.match(failed.message, failureCase.userPattern, `${failureCase.label}: message is actionable`);
-    assert.doesNotMatch(failed.message, failureCase.rawPattern, `${failureCase.label}: message hides raw diagnostics`);
-    assert(failed.warnings.some((warning) => warning.includes(`desktop.convert_image failed (${failureCase.errorCode})`)), `${failureCase.label}: warning keeps diagnostic code`);
+  const handoff = outcome.data?.runtimeHandoff;
+  assert(handoff, 'conversion returns a structured typed-runtime handoff');
+  assert.deepEqual(handoff, buildDirectImageConversionRuntimeHandoff());
+  assert.equal(handoff.kind, 'openswan_typed_tool');
+  assert.equal(handoff.tool, 'desktop.convert_image');
+  assert.equal(handoff.executable, false);
+  assert.equal(handoff.bridgeCalled, false);
+  assert.equal(handoff.mutationDispatched, false);
+  assert.equal(handoff.completionClaimed, false);
+  for (const falseField of [
+    'carriesRawPath',
+    'carriesRawApp',
+    'carriesRawValue',
+    'carriesSecret',
+    'carriesIdentity',
+    'carriesApproval',
+    'carriesReceipt',
+    'carriesProof',
+  ] as const) {
+    assert.equal(handoff[falseField], false, `${falseField} remains false`);
   }
-
-  const thrownBridge = await executeDirectImageConversionRequest(
-    'open logo.png from the desktop and make it a jpg',
-    async () => {
-      throw new TypeError('fetch failed ECONNREFUSED 127.0.0.1:7778');
-    },
+  assert.deepEqual(
+    handoff.requiredContext,
+    [...DIRECT_IMAGE_CONVERSION_REQUIRED_CONTEXT],
+    'handoff lists the authenticated execution requirements',
   );
 
-  assert.equal(thrownBridge.handled, true, 'thrown bridge conversion is handled');
-  assert.equal(thrownBridge.status, 'failed', 'thrown bridge conversion fails closed');
-  assert.match(thrownBridge.message, /desktop bridge|approve the requested folder|try again/i, 'thrown bridge conversion uses safe user copy');
-  assert.doesNotMatch(thrownBridge.message, /fetch failed|ECONNREFUSED|127\.0\.0\.1|desktop\.convert_image/i, 'thrown bridge conversion hides raw thrown detail');
-  assert(thrownBridge.warnings.some((warning) => /desktop\.convert_image failed \(bridge_offline\): fetch failed ECONNREFUSED/i.test(warning)), 'thrown bridge conversion keeps diagnostic warning');
+  const serialized = JSON.stringify(outcome);
+  assert.equal(serialized.includes(privateSource), false, 'returned metadata omits the source basename');
+  assert.equal(serialized.includes(privatePath), false, 'returned metadata omits the source path');
+  assert.equal(serialized.includes('/Users/private'), false, 'returned metadata omits the local home path');
 
-  const notDirect = await executeDirectImageConversionRequest('open Notes and create a note', async () => {
-    throw new Error('converter should not be called');
-  });
+  let functionBridgeCalls = 0;
+  const functionBridgeOutcome = await executeDirectImageConversionRequest(
+    `convert ${privateSource} on my desktop to png`,
+    async () => {
+      functionBridgeCalls += 1;
+      throw new Error('legacy function bridge must never execute');
+    },
+  );
+  assert.equal(functionBridgeOutcome.status, 'handoff');
+  assert.equal(functionBridgeCalls, 0, 'legacy function bridge is also inert');
 
-  assert.equal(notDirect.handled, false, 'non-image task is not handled by direct conversion runtime');
+  const unsupportedRenamedExport = await executeDirectImageConversionRequest(
+    'open logo.png in Photoshop and rename it private-new-name.png and save it as a jpg',
+    async () => {
+      convertCalls += 1;
+      throw new Error('unsupported renamed export must never execute');
+    },
+  );
+  assert.equal(unsupportedRenamedExport.handled, false, 'unsupported renamed export falls through to the authenticated general agent route');
+  assert.equal(unsupportedRenamedExport.data, undefined, 'unsupported task metadata contains no raw values');
+
+  const notConversion = await executeDirectImageConversionRequest(
+    'open Notes and create a note',
+    async () => {
+      convertCalls += 1;
+      throw new Error('non-conversion must never execute');
+    },
+  );
+  assert.equal(notConversion.handled, false);
+  assert.equal(notConversion.status, 'failed');
+  assert.equal(notConversion.data, undefined);
+  assert.equal(convertCalls, 0);
+
+  const runtimeSource = readFileSync(
+    new URL('../src/lib/directImageConversionRuntime.ts', import.meta.url),
+    'utf8',
+  );
+  for (const forbiddenSource of [
+    'await bridge.convertImage',
+    'await bridge.statFile',
+    'await bridge.searchFiles',
+    "status: 'completed'",
+    'proofSignals:',
+    'preflightSignals:',
+  ]) {
+    assert.equal(
+      runtimeSource.includes(forbiddenSource),
+      false,
+      `runtime source omits direct-execution primitive ${forbiddenSource}`,
+    );
+  }
+  assert.match(
+    runtimeSource,
+    /void bridge;[\s\S]*status: 'handoff'/,
+    'legacy bridge injection seam is inert before the handoff returns',
+  );
 
   console.log('All direct image conversion runtime smoke cases passed.');
 }

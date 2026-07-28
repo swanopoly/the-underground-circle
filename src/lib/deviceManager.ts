@@ -7,6 +7,8 @@
  */
 
 import { getBridgeUrl } from './bridgeEnvironment';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
+import { requestLocalFileSessionGrant } from './desktopBridge';
 
 const BRIDGE_PORT = 7778;
 
@@ -65,7 +67,7 @@ async function bridgeGet<T>(path: string): Promise<{ ok: boolean; data: T | null
   const bridgeUrl = getDeviceBridgeUrl();
   if (!bridgeUrl) return { ok: false, data: null, error: 'Bridge unavailable in this environment' };
   try {
-    const res = await fetch(`${bridgeUrl}${path}`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}${path}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -77,13 +79,17 @@ async function bridgeGet<T>(path: string): Promise<{ ok: boolean; data: T | null
   }
 }
 
-async function bridgePost<T>(path: string, body: Record<string, any>): Promise<{ ok: boolean; data: T | null; error?: string }> {
+async function bridgePost<T>(
+  path: string,
+  body: Record<string, any>,
+  extraHeaders: Record<string, string> = {},
+): Promise<{ ok: boolean; data: T | null; error?: string }> {
   const bridgeUrl = getDeviceBridgeUrl();
   if (!bridgeUrl) return { ok: false, data: null, error: 'Bridge unavailable in this environment' };
   try {
-    const res = await fetch(`${bridgeUrl}${path}`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...extraHeaders },
       body: JSON.stringify(body),
     });
     if (!res.ok) return { ok: false, data: null, error: `HTTP ${res.status}` };
@@ -146,11 +152,19 @@ export async function printText(text: string, options?: { printer?: string; copi
 
 /** Print a file by path */
 export async function printFile(filePath: string, options?: { printer?: string; copies?: number }): Promise<{ ok: boolean; jobId?: string; error?: string }> {
+  const grant = await requestLocalFileSessionGrant({
+    roots: [filePath],
+    scope: 'read',
+    reason: `Print local file ${filePath}`,
+  });
+  if (!grant.ok || !grant.data?.token) {
+    return { ok: false, error: grant.error || 'Local file access grant was not created.' };
+  }
   const result = await bridgePost<{ ok: boolean; jobId?: string; error?: string }>('/devices/print', {
     file: filePath,
     printer: options?.printer,
     copies: options?.copies || 1,
-  });
+  }, { 'X-UC-File-Session-Token': grant.data.token });
   return { ok: result.ok, jobId: result.data?.jobId, error: result.error };
 }
 

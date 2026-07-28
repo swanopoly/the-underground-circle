@@ -13,6 +13,7 @@ import {
   type SwanBotStructuredToolAction,
 } from './swanbot';
 import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
+import { wrapUntrusted } from './untrustedContent';
 import { assembleDelegationBrief } from './delegationBriefCore';
 import {
   buildSubagentChildRunOptions,
@@ -23,7 +24,11 @@ import {
   runSubagentTypedCoreLoop,
   type SubagentParentSummary,
 } from './delegationGate';
-import { createPersistedRun, type PersistedRunHandle } from './agentRunPersistence';
+import {
+  createPersistedRun,
+  sanitizeToolActionMetadataForPersistence,
+  type PersistedRunHandle,
+} from './agentRunPersistence';
 import type { AgentEvent, AgentProvider, AgentToolDefinition } from './agentExecutionCore';
 import { getOpenSwanToolsForSurface } from './openswanBridge';
 import { getOpenSwanToolPolicy, type OpenSwanRuntimeToolContext, type OpenSwanRuntimeToolName } from './openswanToolRuntime';
@@ -49,7 +54,6 @@ import { supabase } from './supabase';
 import { logActivity } from '../services/agentActivityLogger';
 import type { PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
-import { stripDesignAppRuntimeCaptureMetadata } from './designAppRuntimeManifest';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import { buildOpenSwanMemoryStores } from './openswanMemoryStores';
@@ -66,6 +70,11 @@ import {
 import { getPluginSubagentRoles } from './pluginRegistry';
 import { sizeDelegationSpecs } from './delegationSizingCore';
 import { selectSignaledSpecialists, rankSpecialistsByPriority } from './specialistSelectionCore';
+import {
+  PERSISTED_TOOL_FAILURE_TEXT,
+  summarizeToolInputForPersistence,
+  summarizeToolResultForPersistence,
+} from './eventBoundCore';
 
 // ── Subagent Definitions ────────────────────────────────────────────────────
 
@@ -880,7 +889,9 @@ export async function delegateToSubagent(opts: {
       chatHistory: [
         opts.subagent.systemPrompt,
         opts.chatHistory ? `\n## Recent Conversation\n${opts.chatHistory}` : '',
-        memoryBundle.combined ? `\n## Memory Context\n${memoryBundle.combined}` : '',
+        // Retrieved memory is untrusted content (CLAUDE.md) — fence it before it
+        // reaches a delegated subagent's prompt, same as the parent lanes do.
+        memoryBundle.combined ? `\n## Memory Context\n${wrapUntrusted(memoryBundle.combined)}` : '',
       ].filter(Boolean).join('\n\n'),
     });
 
@@ -933,9 +944,18 @@ export async function delegateToSubagent(opts: {
         tool_name: evt.tool,
         title: evt.tool.replace(/_/g, ' ').replace(/\./g, ' > '),
         status,
-        input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
-        output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
-        metadata: stripDesignAppRuntimeCaptureMetadata(evt.metadata || {}),
+        input_preview: JSON.stringify(
+          summarizeToolInputForPersistence(evt.tool, evt.input),
+        ).slice(0, 500),
+        output_preview: status === 'failed'
+          ? PERSISTED_TOOL_FAILURE_TEXT
+          : JSON.stringify(
+              summarizeToolResultForPersistence(evt.tool, evt.result, status),
+            ).slice(0, 1200),
+        metadata: {
+          source: 'subagent_runtime',
+          ...(sanitizeToolActionMetadataForPersistence(evt.metadata) || {}),
+        },
       };
     });
 
@@ -1150,7 +1170,14 @@ export async function delegateToSubagent(opts: {
   } catch (err: any) {
     if (runId) {
       try {
-        await addStep({ runId, circleId: opts.circleId, stepIndex: 0, stepKind: 'error', title: 'Delegation failed', body: err.message });
+        await addStep({
+          runId,
+          circleId: opts.circleId,
+          stepIndex: 0,
+          stepKind: 'error',
+          title: 'Delegation failed',
+          body: PERSISTED_TOOL_FAILURE_TEXT,
+        });
         await updateRunStatus(runId, 'failed');
       } catch {}
     }

@@ -6,7 +6,7 @@
  * parallel while keeping strict serial order for everything else.
  *
  * Load-bearing assertions:
- *   ALLOWLIST: READONLY_CLIENT_TOOLS contains exactly the 20 side-effect-
+ *   ALLOWLIST: READONLY_CLIENT_TOOLS contains exactly the 21 side-effect-
  *   free client tools (desktop/browser/codebase/coordination reads) and
  *   NONE of the mutating tools (edit_file, run_shell, git.run,
  *   clipboard_write/clear, launch_app, browser.click/fill, tasks.create).
@@ -77,6 +77,7 @@ function main(): void {
     'desktop.wait_for_app',
     'desktop.app_reachability',
     'browser.dom_snapshot',
+    'browser.locator_actionability',
     'browser.verification_state',
     'browser.screenshot',
     'codebase.search',
@@ -85,7 +86,7 @@ function main(): void {
   for (const name of expectedReads) {
     assert(READONLY_CLIENT_TOOLS.has(name), `(1) allowlist contains ${name}`);
   }
-  assertEq(READONLY_CLIENT_TOOLS.size, expectedReads.length, '(1) allowlist has exactly the expected 20 tools');
+  assertEq(READONLY_CLIENT_TOOLS.size, expectedReads.length, '(1) allowlist has exactly the expected 21 tools');
 
   const mutators = [
     'desktop.edit_file',
@@ -105,6 +106,7 @@ function main(): void {
   // ─── (2) isReadOnlyClientTool — strict, fail-closed ──────────────────────
   assertEq(isReadOnlyClientTool('desktop.read_a11y_tree'), true, '(2) a11y tree read is read-only');
   assertEq(isReadOnlyClientTool('browser.dom_snapshot'), true, '(2) dom snapshot is read-only');
+  assertEq(isReadOnlyClientTool('browser.locator_actionability'), true, '(2) locator actionability advisory is read-only');
   assertEq(isReadOnlyClientTool('coordination.file_status'), true, '(2) coordination file_status is read-only');
   assertEq(isReadOnlyClientTool('desktop.edit_file'), false, '(2) edit_file is NOT read-only');
   assertEq(isReadOnlyClientTool('local.run_shell'), false, '(2) run_shell is NOT read-only');

@@ -39,6 +39,7 @@ import type { BridgeProbeResult } from './bridgeHealthDiag';
 import type { PreflightBlockerItem } from '../screens/circles/tabs/chat/PreflightBlockersCard';
 import type { SearchResultRow } from '../screens/circles/tabs/chat/SearchResultsCard';
 import type { AssignPickerAgent } from '../screens/circles/tabs/chat/AssignPickerCard';
+import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
 
 // ─── Types (moved verbatim from ChatTab.tsx) ─────────────────────────────────
 
@@ -81,6 +82,7 @@ export type ChatMessage = {
   browserSessions?: BrowserSessionRecord[];
   recoveryOptions?: ChatFailureRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
+  computerTaskStatus?: ComputerTaskOutcomeStatus | null;
   computerHandoff?: ChatComputerHandoffMetadata;
   chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
@@ -147,6 +149,7 @@ export type ChatBotMessageExtra = {
   browserSessions?: BrowserSessionRecord[];
   recoveryOptions?: ChatFailureRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
+  computerTaskStatus?: ComputerTaskOutcomeStatus | null;
   computerHandoff?: ChatComputerHandoffMetadata;
   chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };

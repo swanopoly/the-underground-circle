@@ -1,10 +1,11 @@
 /**
- * swanbotV2ClientLoopFlag — Phase 1 of `docs/LOOP_CONVERGENCE_RUNBOOK.md`
+ * swanbotV2ClientLoopFlag — rollout control for
+ * `docs/LOOP_CONVERGENCE_RUNBOOK.md`
  * (which executes `docs/adr/ADR-0002-loop-convergence.md`, "CONSOLIDATE #1").
  *
- * The INERT rollout flag for loop convergence. When ON, the `batch` chat lane's
+ * The live, per-device canary flag for loop convergence. When ON, the `batch` chat lane's
  * `callSwanBotV2` (`src/lib/swanbot.ts:1019`) will run the client-side
- * `agentExecutionCore.runAgent` loop (via the forthcoming
+ * `agentExecutionCore.runAgent` loop (via the landed
  * `swanbotV2BatchRuntime`) instead of the `swanbot-v2-ai` edge round-trip.
  * The edge stays deployed as the revert target throughout rollout (runbook §7).
  *
@@ -20,10 +21,11 @@
  * localStorage all route to the EDGE path (today's behavior) — so Phase 2's
  * one-line `swanbot.ts` delegation is a pure no-op on merge (runbook §4).
  *
- * INERT: ZERO call sites at Phase 1. This module is unreferenced by chat until
- * the coordinated Phase 2 `swanbot.ts` guard lands, so it carries zero conflict
- * risk on the hot `swanbot.ts` file and deleting it is a no-op until then
- * (runbook §1, "NEW FILES ONLY, inert"; ADR R6).
+ * The coordinated Phase-2 `swanbot.ts` guard has landed. DEFAULT OFF remains
+ * load-bearing: absence of the key must keep routing to the edge until the
+ * production telemetry/readiness gate explicitly authorizes a later default
+ * flip. `enableSwanbotV2ClientLoop()` is a device-local canary opt-in, not
+ * evidence that the global default is ready to change.
  *
  * Zero imports ⇒ tsx-loadable, so the read-decision is smoke-testable off the
  * DOM (`scripts/swanbot-v2-client-loop-flag-smoketest.ts`).

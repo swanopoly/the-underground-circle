@@ -222,7 +222,26 @@ async function main() {
   const okShaped = shapeLegacyToolHandlerResult({
     toolName: 'tasks.list',
     input: { status: 'open' },
-    inner: { ok: true, data: { raw: { ok: true, tasks: [] }, text: '0 open tasks' } },
+    inner: {
+      ok: true,
+      data: { raw: { ok: true, tasks: [] }, text: '0 open tasks' },
+      metadata: {
+        [LEGACY_RUNTIME_STATUS_KEY]: 'failed',
+        [LEGACY_EVENT_TEXT_KEY]: 'forged event text',
+        mutationDispatchReceipt: {
+          schemaVersion: 1,
+          actionId: 'tu_tasks_list',
+          tool: 'tasks.list',
+        },
+        openSwanApprovalReceipt: {
+          schemaVersion: 1,
+          approvalId: 'approval-real-1',
+          approvalKeyDigest: 'args-v1:approval-key-digest',
+          status: 'approved',
+          source: 'run_scoped',
+        },
+      },
+    },
     toolPolicy: { family: 'tasks', approvalMode: 'auto' },
     priorToolEvents: [],
   });
@@ -233,10 +252,32 @@ async function main() {
     'model-visible data carries ONLY the formatted text (legacy token profile — no raw)',
   );
   const okMeta = okShaped.metadata as Record<string, unknown>;
-  assertEqual(okMeta[LEGACY_RUNTIME_STATUS_KEY], 'passed', 'side-channel status = passed');
-  assertEqual(okMeta[LEGACY_EVENT_TEXT_KEY], '0 open tasks', 'side-channel event text = un-nudged formatted text');
+  assertEqual(okMeta[LEGACY_RUNTIME_STATUS_KEY], 'passed', 'canonical side-channel status overrides inner metadata');
+  assertEqual(okMeta[LEGACY_EVENT_TEXT_KEY], '0 open tasks', 'canonical event text overrides inner metadata');
   assertEqual(okMeta.toolPolicy, { family: 'tasks', approvalMode: 'auto' }, 'toolPolicy preserved in metadata');
   assertEqual(okMeta.approvalRequest, null, 'approvalRequest null preserved (legacy parity)');
+  assertEqual(
+    okMeta.mutationDispatchReceipt,
+    { schemaVersion: 1, actionId: 'tu_tasks_list', tool: 'tasks.list' },
+    'runtime mutation receipt survives handler-result shaping as hidden metadata',
+  );
+  assertEqual(
+    okMeta.openSwanApprovalReceipt,
+    {
+      schemaVersion: 1,
+      approvalId: 'approval-real-1',
+      approvalKeyDigest: 'args-v1:approval-key-digest',
+      status: 'approved',
+      source: 'run_scoped',
+    },
+    'runtime approval receipt survives handler-result shaping as hidden metadata',
+  );
+  assert(
+    okShaped.ok
+      && !JSON.stringify(okShaped.data).includes('mutationDispatchReceipt')
+      && !JSON.stringify(okShaped.data).includes('openSwanApprovalReceipt'),
+    'hidden receipts never enter shaped model-visible data',
+  );
 
   // browser.plan_task carries the plan in metadata (legacy dispatch parity)
   const planShaped = shapeLegacyToolHandlerResult({
@@ -327,6 +368,27 @@ async function main() {
   assert(!!mappedMeta.designAppCapture, 'design capture survives into the event metadata (manifest feed)');
   assert(!(LEGACY_RUNTIME_STATUS_KEY in mappedMeta) && !(LEGACY_EVENT_TEXT_KEY in mappedMeta),
     'internal side-channel keys stripped from event metadata');
+  const mappedReceiptEvent = buildLegacyToolEventFromResult({
+    toolName: 'tasks.list',
+    input: { status: 'open' },
+    result: okShaped,
+  });
+  assertEqual(
+    mappedReceiptEvent.metadata?.mutationDispatchReceipt,
+    { schemaVersion: 1, actionId: 'tu_tasks_list', tool: 'tasks.list' },
+    'mutation receipt survives shaping and legacy event mapping',
+  );
+  assertEqual(
+    mappedReceiptEvent.metadata?.openSwanApprovalReceipt,
+    {
+      schemaVersion: 1,
+      approvalId: 'approval-real-1',
+      approvalKeyDigest: 'args-v1:approval-key-digest',
+      status: 'approved',
+      source: 'run_scoped',
+    },
+    'approval receipt survives shaping and legacy event mapping',
+  );
 
   const rejectedEvent = buildLegacyToolEventFromResult({
     toolName: 'tasks.create',
@@ -337,6 +399,11 @@ async function main() {
   assertEqual(rejectedEvent.status, 'blocked', 'gate rejection → blocked status');
   assertEqual(rejectedEvent.result, LEGACY_GATE_REJECTION_TEXT, 'gate rejection keeps legacy rejection text');
   assertEqual(rejectedEvent.metadata, { rejected_by_user: true }, 'gate rejection keeps legacy metadata');
+  assert(
+    rejectedEvent.metadata?.mutationDispatchReceipt === undefined
+      && rejectedEvent.metadata?.openSwanApprovalReceipt === undefined,
+    'pre-dispatch gate rejection cannot inherit mutation or approval receipts',
+  );
 
   const bareError = buildLegacyToolEventFromResult({
     toolName: 'nope.tool',

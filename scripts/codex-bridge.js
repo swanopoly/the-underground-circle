@@ -28,8 +28,14 @@ const {
   buildCodexSessionRecentActions,
   summarizeCodexJsonl,
 } = require('./codex-session-summary');
+const {
+  createPairingChallengeStore,
+  isBridgeRequestSourceAllowed,
+  isPairingRequestSourceAllowed,
+} = require('./desktop-bridge-security');
 
-const PORT = 7779;
+const PORT = Math.max(1024, Math.min(65535, Number(process.env.UC_CODEX_BRIDGE_PORT) || 7779));
+const BRIDGE_BIND_HOST = '127.0.0.1';
 const SCAN_INTERVAL = 5000;
 const ACTIVE_THRESHOLD = 120_000;   // 2min → active
 const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequently than Claude)
@@ -51,6 +57,7 @@ const LAUNCHED_SESSION_TTL = 12 * 60 * 60_000;
 
 let cachedSessions = [];
 let lastScanTime = '';
+const pairingChallenges = createPairingChallengeStore({ ttlMs: 30_000, maxEntries: 64 });
 
 // ── Shared desktop bridge token ─────────────────────────────────────────────
 // The browser app pairs once and then sends this token to all local bridges.
@@ -645,11 +652,57 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/pair' && req.method === 'POST') {
-    if (!isAllowedPairOrigin(req)) {
-      writeJson(res, 403, { ok: false, error: 'Pairing origin not allowlisted.' });
+    const sourceCheck = isPairingRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+    if (!sourceCheck.ok) {
+      writeJson(res, 403, {
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Pairing is available only through an allowed loopback bridge request.',
+      });
+      return;
+    }
+    let pairInput;
+    try {
+      pairInput = await readJsonBody(req, 2048);
+    } catch (err) {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'pairing_body_invalid',
+        error: String(err?.message || err || 'Invalid pairing request body.').slice(0, 300),
+      });
+      return;
+    }
+    const pairingChallenge = String(pairInput?.pairingChallenge || '').trim();
+    if (!pairingChallenge) {
+      const issued = pairingChallenges.issue(req.socket.remoteAddress);
+      writeJson(res, 428, {
+        ok: false,
+        code: 'pairing_challenge_required',
+        challenge: issued.challenge,
+        expiresAt: new Date(issued.expiresAt).toISOString(),
+        error: 'Retry pairing once with the short-lived challenge.',
+      });
+      return;
+    }
+    if (!pairingChallenges.consume(pairingChallenge, req.socket.remoteAddress)) {
+      writeJson(res, 403, {
+        ok: false,
+        code: 'pairing_challenge_invalid',
+        error: 'Pairing challenge is invalid, expired, already used, or belongs to another source.',
+      });
       return;
     }
     writeJson(res, 200, { ok: true, token: getOrCreateBridgeToken(), bridge: 'codex' });
+    return;
+  }
+
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  if (!sourceCheck.ok) {
+    writeJson(res, 403, {
+      ok: false,
+      code: sourceCheck.code,
+      error: 'Bridge access is available only through an allowed loopback or explicitly configured tunnel request.',
+    });
     return;
   }
 
@@ -726,8 +779,8 @@ const server = http.createServer(async (req, res) => {
 scan();
 setInterval(scan, SCAN_INTERVAL);
 
-server.listen(PORT, () => {
-  console.log(`\n🧠 Codex Bridge running on http://localhost:${PORT}`);
+server.listen(PORT, BRIDGE_BIND_HOST, () => {
+  console.log(`\n🧠 Codex Bridge running on http://${BRIDGE_BIND_HOST}:${PORT} (loopback only)`);
   console.log(`   Health:   http://localhost:${PORT}/health`);
   console.log(`   Pair:     POST http://localhost:${PORT}/pair`);
   console.log(`   Sessions: http://localhost:${PORT}/sessions`);

@@ -17,6 +17,10 @@ import type { ResearchDocumentReference } from './researchControl';
 import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
 import type { WikiArticleReference } from './wikiData';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+import {
+  normalizeComputerTaskOutcomeStatus,
+  type ComputerTaskOutcomeStatus,
+} from './computerTaskOutcome';
 
 const LEGACY_CROWN_PREFIX = /^👑 \*\*OpenSwan:\*\* /u;
 const BOT_PREFIX = /^(🦢|🤖) \*\*[^*]{1,80}:\*\* /u;
@@ -144,6 +148,7 @@ export type PersistedChatBotMetadata = {
   browserSessions?: BrowserSessionRecord[];
   recoveryOptions?: PersistedChatRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
+  computerTaskStatus?: ComputerTaskOutcomeStatus | null;
   computerHandoff?: ChatComputerHandoffMetadata | null;
   chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   modeOutcomeSummary?: {
@@ -754,6 +759,7 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
     (metadata.browserSessions?.length || 0) > 0 ||
     (metadata.recoveryOptions?.length || 0) > 0 ||
     !!metadata.recoveryReliability ||
+    !!normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus) ||
     !!metadata.computerHandoff ||
     !!metadata.chatAutomationPlanPreview ||
     !!metadata.modeOutcomeSummary?.headline ||
@@ -851,6 +857,7 @@ function compactComputerHandoff(
       browserPlanId: null,
       browserActionCount: handoff.browserActionCount ?? null,
       runId: null,
+      outcomeStatus: normalizeComputerTaskOutcomeStatus(handoff.outcomeStatus),
       preflightStatus: handoff.preflightStatus || null,
       preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), 120) : null,
       groundingStatus: handoff.groundingStatus || null,
@@ -1023,6 +1030,7 @@ function compactComputerHandoff(
     browserPlanId: mode === 'minimal' ? null : handoff.browserPlanId || null,
     browserActionCount: handoff.browserActionCount ?? null,
     runId: mode === 'minimal' ? null : handoff.runId || null,
+    outcomeStatus: normalizeComputerTaskOutcomeStatus(handoff.outcomeStatus),
     preflightStatus: handoff.preflightStatus || null,
     preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), mode === 'minimal' ? 160 : 360) : null,
     groundingStatus: handoff.groundingStatus || null,
@@ -1352,6 +1360,7 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     })) as any,
     recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),
     recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
+    computerTaskStatus: normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus),
     computerHandoff: compactComputerHandoff(metadata.computerHandoff),
     chatAutomationPlanPreview: compactChatAutomationPlanPreview(metadata.chatAutomationPlanPreview),
     modeOutcomeSummary: metadata.modeOutcomeSummary,
@@ -1453,6 +1462,7 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     })) as any,
     recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 3),
     recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability, 'minimal'),
+    computerTaskStatus: normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus),
     computerHandoff: compactComputerHandoff(metadata.computerHandoff, 'minimal'),
     chatAutomationPlanPreview: compactChatAutomationPlanPreview(metadata.chatAutomationPlanPreview, 'minimal'),
     modeOutcomeSummary: metadata.modeOutcomeSummary,
@@ -1502,9 +1512,14 @@ export function readPersistedChatBotMetadata(content: string | null | undefined)
     const parsed = JSON.parse(raw) as PersistedChatBotMetadata;
     if (!parsed || typeof parsed !== 'object') return null;
     const agentSubjectMetadata = compactAgentSubjectMetadata(parsed.agentSubjectMetadata);
-    return agentSubjectMetadata
-      ? { ...parsed, agentSubjectMetadata }
-      : { ...parsed, agentSubjectMetadata: undefined };
+    return {
+      ...parsed,
+      agentSubjectMetadata: agentSubjectMetadata || undefined,
+      computerTaskStatus: normalizeComputerTaskOutcomeStatus(parsed.computerTaskStatus),
+      computerHandoff: parsed.computerHandoff
+        ? compactComputerHandoff(parsed.computerHandoff)
+        : undefined,
+    };
   } catch {
     return null;
   }
@@ -1524,6 +1539,7 @@ export function formatPersistedChatBotMessage(
         agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
         recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),
         recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
+        computerTaskStatus: normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus),
         computerHandoff: compactComputerHandoff(metadata.computerHandoff),
         chatAutomationPlanPreview: compactChatAutomationPlanPreview(metadata.chatAutomationPlanPreview),
         computerFindings: compactComputerFindings(metadata.computerFindings),

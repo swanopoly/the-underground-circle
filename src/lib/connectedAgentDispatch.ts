@@ -60,20 +60,33 @@ export async function dispatchConnectedAgentTask(opts: {
   sessionId?: string | null;
   preferredProvider?: ConnectedAgentProvider | null;
   providerOrder?: ConnectedAgentProvider[];
+  /**
+   * Hard provider allowlist for workflows that require provider-specific
+   * result contracts. Unlike providerOrder, this also constrains an explicit
+   * sessionId so a stale/user-supplied id cannot silently escape the lane.
+   */
+  allowedProviders?: ConnectedAgentProvider[];
   launchIfMissing?: boolean;
   circleId?: string;
   userId?: string;
 }): Promise<ConnectedAgentDispatchResult> {
+  const allowed = new Set<ConnectedAgentProvider>(
+    opts.allowedProviders?.length ? opts.allowedProviders : DEFAULT_PROVIDER_ORDER,
+  );
   const order = Array.from(new Set<ConnectedAgentProvider>([
     ...(opts.preferredProvider ? [opts.preferredProvider] : []),
     ...((opts.providerOrder && opts.providerOrder.length ? opts.providerOrder : DEFAULT_PROVIDER_ORDER)),
-  ]));
+  ])).filter((provider) => allowed.has(provider));
 
   // 1. Reuse a manageable session — explicit id first, else preference order.
   const sessions = await listTerminalAgentControlSessions().catch(
     () => [] as Awaited<ReturnType<typeof listTerminalAgentControlSessions>>,
   );
-  const manageable = sessions.filter((session) => session.manageable && isConnectedAgentProvider(session.provider));
+  const manageable = sessions.filter((session) =>
+    session.manageable
+    && isConnectedAgentProvider(session.provider)
+    && allowed.has(session.provider)
+  );
   let target = opts.sessionId
     ? manageable.find((session) => session.sessionId === opts.sessionId) || null
     : null;

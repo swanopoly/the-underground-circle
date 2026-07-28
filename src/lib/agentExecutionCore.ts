@@ -94,7 +94,18 @@ export type AgentToolDefinition = {
 export type AgentToolContext = {
   /** Opaque, caller-supplied. Persist circleId, userId, auth, etc. here. */
   session: Record<string, unknown>;
-  /** Monotonic iteration counter (0-indexed). */
+  /**
+   * Exact model-requested tool name for this handler entry. `runAgent`
+   * guarantees it; optional only for compatibility with direct handler tests
+   * and legacy callers that execute a definition outside the model loop.
+   */
+  toolName?: string;
+  /**
+   * Exact model-issued tool-use id for this handler entry. `runAgent`
+   * guarantees it and never synthesizes one; direct legacy calls may omit it.
+   */
+  toolUseId?: string;
+  /** Monotonic provider-turn counter (1-indexed). */
   iteration: number;
 };
 
@@ -156,6 +167,45 @@ export type AgentToolConstraintGuard = (req: {
   iteration: number;
 }) => AgentToolConstraintVerdict | Promise<AgentToolConstraintVerdict>;
 
+export type AgentRoundToolResult = {
+  toolName: string;
+  toolUseId: string;
+  ok: boolean;
+  resultText?: string;
+  /**
+   * Metadata-stripped, base64-scrubbed result envelope before deterministic
+   * context summarization. Safety predicates may inspect this so a condition
+   * buried in the omitted middle of a large result cannot be bypassed.
+   */
+  enforcementText?: string;
+  input?: unknown;
+};
+
+export type AgentToolResultStopDecision =
+  | { stop?: false }
+  | { stop: true; reason: string; responseText?: string }
+  | void
+  | undefined;
+
+/**
+ * Generic post-result safety interlock. The presence of this guard forces tool
+ * calls within a provider turn to dispatch sequentially. It runs after each
+ * requested call has produced a result but BEFORE the next handler can enter.
+ *
+ * A `{ stop: true }` verdict prevents all remaining handlers in that turn from
+ * entering. The core synthesizes explicit `dispatched:false` error results for
+ * those skipped requests, closes every tool_use/tool_result pair, emits the
+ * resumable `iteration_complete` checkpoint, and only then ends the run. A
+ * thrown guard fails CLOSED with generic stop copy. Omit the hook for
+ * byte-compatible legacy dispatch behavior.
+ */
+export type AgentToolResultStopGuard = (ctx: {
+  iteration: number;
+  maxIterations: number;
+  latestToolResult: AgentRoundToolResult;
+  completedToolResults: readonly AgentRoundToolResult[];
+}) => AgentToolResultStopDecision | Promise<AgentToolResultStopDecision>;
+
 /**
  * Round-boundary hook (O1 nudge parity). Fired after a tool round's results
  * are appended (and `iteration_complete` is emitted) but BEFORE the next
@@ -175,10 +225,11 @@ export type AgentRoundCompleteHook = (ctx: {
   /** 1-indexed provider-turn counter for the round that just completed. */
   iteration: number;
   maxIterations: number;
-  /** This round's dispatched tools, in original tool_use order. `input` is
-   *  the raw tool input — the run-and-fix gate uses it to classify
-   *  local.run_shell / git.run calls as verification vs mutation. */
-  toolResults: Array<{ toolName: string; ok: boolean; resultText?: string; input?: unknown }>;
+  /** This round's requested tools/results, in original tool_use order
+   *  (including pre-dispatch policy blocks). `input` is the raw tool input —
+   *  the run-and-fix gate uses it to classify local.run_shell / git.run calls
+   *  as verification vs mutation. */
+  toolResults: AgentRoundToolResult[];
   messages: readonly AgentMessage[];
 }) => { appendUserNote?: string } | void | Promise<{ appendUserNote?: string } | void>;
 
@@ -215,7 +266,20 @@ export type AgentEvent =
   | { kind: 'context_compressed'; iteration: number; droppedCount: number; tokensBefore: number; tokensAfter: number }
   | { kind: 'model_delta'; iteration: number; text: string }
   | { kind: 'tool_call_start'; iteration: number; toolName: string; toolUseId: string; input: unknown }
-  | { kind: 'tool_call_result'; iteration: number; toolName: string; toolUseId: string; result: AgentToolResult; durationMs: number }
+  | {
+      kind: 'tool_call_result';
+      iteration: number;
+      toolName: string;
+      toolUseId: string;
+      result: AgentToolResult;
+      durationMs: number;
+      /**
+       * True only after the registered handler was actually entered. Optional
+       * solely for compatibility with events persisted before this field
+       * existed; current `runAgent` emissions always carry a boolean.
+       */
+      dispatched?: boolean;
+    }
   | { kind: 'turn_end'; iteration: number; stop_reason: ProviderTurnResult['stop_reason']; usage?: ProviderTurnResult['usage'] }
   | { kind: 'final_response'; iteration: number; text: string }
   | { kind: 'max_iterations_exceeded'; iteration: number }
@@ -227,6 +291,12 @@ export type AgentEvent =
    * `reason` is the human-readable "repeated identical failing call — <tool> x3".
    */
   | { kind: 'loop_stopped_no_progress'; iteration: number; reason: string }
+  /**
+   * A runtime-owned post-tool boundary guard stopped the loop after all
+   * tool_use/tool_result pairs were closed. `reason` is bounded for telemetry;
+   * the user-facing text is emitted separately via `final_response`.
+   */
+  | { kind: 'round_boundary_stopped'; iteration: number; reason: string }
   /**
    * P56: the stuck point injected ONE fresh-eyes solver consultation instead
    * of stopping — the model must produce a root-cause hypothesis + two
@@ -309,6 +379,14 @@ export type AgentRunOptions = {
    * behavior (whole round dispatched via `parallelToolConcurrency`).
    */
   toolParallelPolicyProvider?: (toolName: string) => ToolParallelPolicy | null;
+  /**
+   * Optional fail-closed per-result safety interlock (see
+   * `AgentToolResultStopGuard`). Forces sequential handler entry within a
+   * provider turn and can skip all remaining calls after any result. The core
+   * still closes the complete requested round before returning. Omit to
+   * preserve legacy parallel dispatch behavior.
+   */
+  toolResultStopGuard?: AgentToolResultStopGuard;
   /**
    * Optional round-boundary guidance hook (O1 nudge parity — see
    * `AgentRoundCompleteHook`). The legacy `executeToolUseLoop` injected
@@ -819,6 +897,14 @@ function extractToolUses(blocks: AgentMessageContentBlock[]): Array<Extract<Agen
   return out;
 }
 
+function isValidToolUseId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length >= 1
+    && value.length <= 180
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 async function runWithConcurrency<T, R>(
   items: T[],
   worker: (item: T, index: number) => Promise<R>,
@@ -863,6 +949,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     toolConstraintGuard,
     resolveAdditionalTools,
     toolParallelPolicyProvider,
+    toolResultStopGuard,
     onRoundComplete,
     steering,
     toolResultSummarization,
@@ -885,6 +972,18 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   for (const t of advertisedTools) toolsByName.set(t.name, t);
 
   const messages: AgentMessage[] = [...initialMessages];
+  // Tool-use ids are provider-issued call capabilities. They must remain
+  // unique for the complete run because mutation action/idempotency keys and
+  // tool_result transcript pairing bind to them. Seed from resumed history so
+  // a later provider turn cannot reuse a prior call id.
+  const usedToolUseIds = new Set<string>();
+  for (const message of initialMessages) {
+    for (const block of ensureBlocks(message.content)) {
+      if (block.type === 'tool_use' && isValidToolUseId(block.id)) {
+        usedToolUseIds.add(block.id);
+      }
+    }
+  }
   let lastStopReason: ProviderTurnResult['stop_reason'] = 'end_turn';
   let lastText = '';
   let iteration = 0;
@@ -1072,12 +1171,8 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
 
     emit({ kind: 'turn_end', iteration, stop_reason: turn.stop_reason, usage: turn.usage });
 
-    // Always record the assistant turn in the message history, whether it
-    // ended in text or tool_use. The provider is expected to include tool_use
-    // blocks so we can dispatch them and reference their ids in tool_result.
-    messages.push({ role: 'assistant', content: turn.content });
-
     if (turn.stop_reason !== 'tool_use') {
+      messages.push({ role: 'assistant', content: turn.content });
       lastText = extractText(turn.content);
       emit({ kind: 'final_response', iteration, text: lastText });
       return { text: lastText, messages, iterations: iteration, stopReason: turn.stop_reason, hitMaxIterations: false };
@@ -1092,6 +1187,41 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       emit({ kind: 'final_response', iteration, text: lastText });
       return { text: lastText, messages, iterations: iteration, stopReason: 'end_turn', hitMaxIterations: false };
     }
+
+    // Validate the whole requested round before recording it or entering any
+    // handler. Empty, oversized, control-character, same-round duplicate, or
+    // run-wide reused ids make tool_result pairing and mutation idempotency
+    // ambiguous. Never fabricate a replacement id; fail closed without adding
+    // the malformed assistant turn to the resumable transcript.
+    const roundToolUseIds = new Set<string>();
+    let hasInvalidToolUseId = false;
+    for (const use of toolUses) {
+      if (
+        !isValidToolUseId(use.id)
+        || roundToolUseIds.has(use.id)
+        || usedToolUseIds.has(use.id)
+      ) {
+        hasInvalidToolUseId = true;
+        break;
+      }
+      roundToolUseIds.add(use.id);
+    }
+    if (hasInvalidToolUseId) {
+      lastText = 'Stopped before tool dispatch because the model returned a missing, invalid, or reused tool-call identity. No requested tool was run; start a fresh model turn before retrying.';
+      emit({ kind: 'final_response', iteration, text: lastText });
+      return {
+        text: lastText,
+        messages,
+        iterations: iteration,
+        stopReason: 'end_turn',
+        hitMaxIterations: false,
+      };
+    }
+    for (const id of roundToolUseIds) usedToolUseIds.add(id);
+
+    // Record only a structurally valid assistant tool-use turn. Every id is
+    // now bounded and reserved run-wide before the first handler can enter.
+    messages.push({ role: 'assistant', content: turn.content });
 
     // Progress-based stuck-loop exit (BEFORE dispatching this round). If the
     // model is asking to re-run the SAME single tool with the SAME input that
@@ -1178,8 +1308,6 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       }
     }
 
-    const ctx: AgentToolContext = { session, iteration };
-
     // Partition interactive tools — those must run sequentially and in the
     // order the model requested, matching Hermes' behaviour for `clarify`.
     const hasInteractive = toolUses.some(u => toolsByName.get(u.name)?.interactive);
@@ -1200,6 +1328,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         })
       : false;
 
+    const enforcementTextByToolUseId = new Map<string, string>();
     const dispatchOne = async (use: typeof toolUses[number]): Promise<AgentMessageContentBlock> => {
       emit({ kind: 'tool_call_start', iteration, toolName: use.name, toolUseId: use.id, input: use.input });
       const started = Date.now();
@@ -1271,8 +1400,18 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
             };
           } else {
             try {
+              // Construct the tool context only at handler entry from the
+              // exact provider-requested call. A shared round context cannot
+              // honestly identify same-round calls and would make mutation
+              // receipts/idempotency keys collide or rely on fabricated IDs.
+              const handlerCtx: AgentToolContext = {
+                session,
+                toolName: use.name,
+                toolUseId: use.id,
+                iteration,
+              };
               dispatched = true;
-              result = await def.handler(use.input, ctx);
+              result = await def.handler(use.input, handlerCtx);
             } catch (e) {
               // Tools SHOULD NOT throw — we still catch to preserve the loop.
               const message = e instanceof Error ? e.message : String(e);
@@ -1282,7 +1421,15 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         }
       }
       const durationMs = Date.now() - started;
-      emit({ kind: 'tool_call_result', iteration, toolName: use.name, toolUseId: use.id, result, durationMs });
+      emit({
+        kind: 'tool_call_result',
+        iteration,
+        toolName: use.name,
+        toolUseId: use.id,
+        result,
+        durationMs,
+        dispatched,
+      });
       // Metadata (R14) is a side channel for runtime consumers (design-app
       // manifest capture, audit ledgers) — it flows through the event above
       // but is STRIPPED from the model-visible tool_result content so hidden
@@ -1290,6 +1437,17 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       const modelVisible: AgentToolResult = result.ok
         ? { ok: true, data: result.data }
         : { ok: false, error: result.error };
+      try {
+        enforcementTextByToolUseId.set(
+          use.id,
+          JSON.stringify(stripBase64Payloads(modelVisible)),
+        );
+      } catch {
+        // Tool data is expected to be JSON-safe, but enforcement must remain
+        // total if a custom handler returns a pathological value. The visible
+        // result path below retains its existing behavior.
+        enforcementTextByToolUseId.set(use.id, '');
+      }
       // P21 image side channel (CONSUMER seam): a tool result carrying
       // `data.image` becomes a REAL Anthropic image block so the model can
       // see captures, while the text envelope is deep-scrubbed so the
@@ -1371,6 +1529,58 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       };
     };
 
+    const toRoundToolResult = (
+      use: typeof toolUses[number],
+      block: AgentMessageContentBlock | undefined,
+    ): AgentRoundToolResult => {
+      const tr = block?.type === 'tool_result' ? block : null;
+      const resultText = typeof tr?.content === 'string'
+        ? tr.content
+        : Array.isArray(tr?.content)
+          ? tr.content
+              .filter((part): part is Extract<AgentToolResultContentPart, { type: 'text' }> => part.type === 'text')
+              .map((part) => part.text)
+              .join('\n')
+          : '';
+      const enforcementText = enforcementTextByToolUseId.get(use.id);
+      return {
+        toolName: use.name,
+        toolUseId: use.id,
+        ok: tr?.is_error !== true,
+        input: use.input,
+        ...(resultText ? { resultText } : {}),
+        ...(enforcementText ? { enforcementText } : {}),
+      };
+    };
+
+    const skipAfterToolResultStop = (
+      use: typeof toolUses[number],
+      reason: string,
+    ): AgentMessageContentBlock => {
+      const result: AgentToolResult = {
+        ok: false,
+        error: `Tool "${use.name}" was not run because an earlier tool result triggered a safety stop. ${reason} Do not retry until the user clears the stop condition.`,
+      };
+      // There is deliberately no tool_call_start: the requested handler never
+      // started. The result event closes telemetry with authoritative
+      // dispatched:false semantics, matching the synthetic transcript block.
+      emit({
+        kind: 'tool_call_result',
+        iteration,
+        toolName: use.name,
+        toolUseId: use.id,
+        result,
+        durationMs: 0,
+        dispatched: false,
+      });
+      return {
+        type: 'tool_result',
+        tool_use_id: use.id,
+        content: JSON.stringify(result),
+        is_error: true,
+      };
+    };
+
     // Dependency-aware dispatch (T8/O6): when the caller supplied a policy
     // provider and the round has no interactive tool, partition the round
     // into ordered groups — parallel within a group, sequential between.
@@ -1378,7 +1588,45 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // barriers. Result blocks are reassembled in original tool_use order so
     // the follow-up user message is byte-identical to the sequential shape.
     let toolResultBlocks: AgentMessageContentBlock[];
-    if (toolParallelPolicyProvider && !hasInteractive) {
+    let toolResultStopDecision: AgentToolResultStopDecision = undefined;
+    if (toolResultStopGuard) {
+      // A post-result stop policy cannot coexist safely with same-round
+      // parallel handler entry: result #1 must be checked before handler #2
+      // starts. Force strict original-order dispatch whenever this hook exists.
+      toolResultBlocks = [];
+      const completedToolResults: AgentRoundToolResult[] = [];
+      for (const use of toolUses) {
+        if (toolResultStopDecision && toolResultStopDecision.stop === true) {
+          const reason = String(toolResultStopDecision.reason || 'a safety stop condition matched')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 240);
+          const skipped = skipAfterToolResultStop(use, reason);
+          toolResultBlocks.push(skipped);
+          completedToolResults.push(toRoundToolResult(use, skipped));
+          continue;
+        }
+
+        const block = await dispatchOne(use);
+        toolResultBlocks.push(block);
+        const latestToolResult = toRoundToolResult(use, block);
+        completedToolResults.push(latestToolResult);
+        try {
+          toolResultStopDecision = await toolResultStopGuard({
+            iteration,
+            maxIterations,
+            latestToolResult,
+            completedToolResults: [...completedToolResults],
+          });
+        } catch {
+          toolResultStopDecision = {
+            stop: true,
+            reason: 'tool-result safety guard failed',
+            responseText: 'Stopped at a completed tool boundary because the safety check could not verify that it was safe to continue.',
+          };
+        }
+      }
+    } else if (toolParallelPolicyProvider && !hasInteractive) {
       const policies: Array<ToolParallelPolicy | null> = toolUses.map((use) => {
         try { return toolParallelPolicyProvider(use.name); } catch { return null; }
       });
@@ -1429,6 +1677,38 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // tool_result block, in the same order the tools were requested — this
     // is how Anthropic's Messages API expects the follow-up to be shaped.
     messages.push({ role: 'user', content: toolResultBlocks });
+
+    const roundToolResults: AgentRoundToolResult[] = toolUses.map(
+      (use, i) => toRoundToolResult(use, toolResultBlocks[i]),
+    );
+
+    // Resumable-checkpoint boundary (R12): every tool_use in this provider
+    // turn now has a matching tool_result. A per-result stop decision is held
+    // until after this emit so it always leaves a durable, well-formed
+    // checkpoint, including on the final iteration.
+    emit({ kind: 'iteration_complete', iteration, messages: [...messages] });
+
+    // A per-result stop decision was already made BEFORE any later handler
+    // could enter. We waited to return until now so every remaining tool_use
+    // has an explicit skipped result and this checkpoint is fully resumable.
+    if (toolResultStopDecision && toolResultStopDecision.stop === true) {
+      const reason = String(toolResultStopDecision.reason || 'tool-result safety condition matched')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 240);
+      lastText = typeof toolResultStopDecision.responseText === 'string' && toolResultStopDecision.responseText.trim()
+        ? toolResultStopDecision.responseText.trim().slice(0, 1_200)
+        : `Stopped at a completed tool boundary: ${reason}.`;
+      emit({ kind: 'round_boundary_stopped', iteration, reason });
+      emit({ kind: 'final_response', iteration, text: lastText });
+      return {
+        text: lastText,
+        messages,
+        iterations: iteration,
+        stopReason: 'end_turn',
+        hitMaxIterations: false,
+      };
+    }
 
     // Oscillation stop (audit): the pre-dispatch guard above only catches the
     // SAME single call repeating. This catches cross-round A-B-A-B failure
@@ -1488,11 +1768,6 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       }
     }
 
-    // Resumable-checkpoint boundary (R12): the round is complete and the
-    // history is consistent (tool_use/tool_result pairs closed). Snapshot
-    // so later mutation of `messages` doesn't alias into the handler.
-    emit({ kind: 'iteration_complete', iteration, messages: [...messages] });
-
     // Mid-run steering (P7b): drain queued user guidance and inject each note
     // VERBATIM as a user message — the same shape as onRoundComplete's
     // appendUserNote below (the bus owns normalization + framing). Skipped on
@@ -1515,16 +1790,6 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // hook must never break the loop.
     if (onRoundComplete && iteration < maxIterations) {
       try {
-        const roundToolResults = toolUses.map((use, i) => {
-          const block = toolResultBlocks[i];
-          const tr = block?.type === 'tool_result' ? block : null;
-          return {
-            toolName: use.name,
-            ok: !tr?.is_error,
-            input: use.input,
-            ...(typeof tr?.content === 'string' ? { resultText: tr.content } : {}),
-          };
-        });
         const outcome = await onRoundComplete({
           iteration,
           maxIterations,

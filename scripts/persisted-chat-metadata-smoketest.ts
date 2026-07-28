@@ -163,8 +163,10 @@ const handoffMessage = formatPersistedChatBotMessage(
   'OpenSwan',
   'InDesign task is ready for review.',
   {
+    computerTaskStatus: 'partial',
     computerHandoff: {
       surface: 'desktop',
+      outcomeStatus: 'partial',
       adapterId: 'hybrid_adapter',
       taskKind: 'hybrid_task',
       taskLabel: 'Uploaded desktop file task',
@@ -311,6 +313,8 @@ const handoffMessage = formatPersistedChatBotMessage(
   },
 );
 const handoffMetadata = readPersistedChatBotMetadata(handoffMessage);
+assert(handoffMetadata?.computerTaskStatus === 'partial', 'rich computer outcome status is persisted at message level');
+assert(handoffMetadata?.computerHandoff?.outcomeStatus === 'partial', 'rich computer outcome status is persisted in the handoff');
 assert(handoffMetadata?.computerHandoff?.designAppTask?.appName === 'Adobe InDesign', 'computer handoff design app metadata is persisted');
 assert((handoffMetadata?.computerHandoff?.desktopAttachmentPackage?.files?.[0]?.sha256 || '').length <= 16, 'computer handoff file hashes are compacted');
 assert(handoffMetadata?.computerHandoff?.designObjectManifestArtifact?.auditOk === true, 'design object manifest artifact summary is persisted');

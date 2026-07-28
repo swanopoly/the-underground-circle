@@ -928,3 +928,159 @@ export function applySyntheticAgentStatusUpgrade(
     : currentStatus; // building/active keep their tier on building-grade evidence
   return { status, activity: live.activity, changed: true };
 }
+
+// ─── Desk accountability plaque (desktop floor sprite) ───────────────────────
+// The mobile agent card renders the full accountability line
+// (OfficeAgentAccountabilityLine: last outcome + 24h counts + cost + the O2
+// bridge note). The desktop isometric floor — the Office's flagship view —
+// carried NO outcome signal at all: a sprite could read "Active", bob happily,
+// and stack XP while its last three runs failed and its bridge was dead. This
+// builds the compact plaque that sits under the sprite's name tag.
+//
+// Deliberately narrower than the mobile line: a 16-desk floor has no room for
+// titles or cost, so the plaque carries only what changes a decision — did the
+// recent work pass, and is the status itself untrustworthy. The full line stays
+// one tap away in the agent detail rail.
+
+export type OfficeDeskPlaqueTone = 'good' | 'danger' | 'warn' | 'neutral';
+
+/** Bound for the fail-visible note on a ~90px-wide desk plaque. */
+export const OFFICE_DESK_PLAQUE_NOTE_MAX = 22;
+
+export interface OfficeDeskAccountabilityPlaque {
+  /** False = nothing worth showing; caller renders nothing at all. */
+  visible: boolean;
+  /** "✓3 ✗1" — empty when no run finished inside the 24h window. */
+  counts: string;
+  /** Plaque colour. Severity order: danger > warn > good > neutral. */
+  tone: OfficeDeskPlaqueTone;
+  /** Bounded O2 status note ("bridge offline — status stale"), '' when none. */
+  note: string;
+  /** Unbounded one-liner for tooltip/a11y: note + last-outcome line. */
+  detail: string;
+}
+
+const EMPTY_DESK_PLAQUE: OfficeDeskAccountabilityPlaque = {
+  visible: false,
+  counts: '',
+  tone: 'neutral',
+  note: '',
+  detail: '',
+};
+
+/**
+ * Build the desk plaque from the accountability entry (may be absent — most
+ * agents have no finished run in the window) plus the roster's fail-visible
+ * status note. Pure, clock-free, never throws on partial input.
+ *
+ * Tone precedence is severity-ordered, NOT source-ordered: a failed last run
+ * outranks a stale-bridge note, because a real failure is a harder fact than
+ * "we cannot currently trust this status". A note still renders in both cases —
+ * it is never hidden, only out-ranked for colour.
+ */
+export function buildOfficeDeskAccountabilityPlaque(
+  entry: OfficeAgentAccountability | null | undefined,
+  statusNote: string | null | undefined,
+): OfficeDeskAccountabilityPlaque {
+  const rawNote = typeof statusNote === 'string' ? statusNote.trim() : '';
+  const note = rawNote ? truncateText(rawNote, OFFICE_DESK_PLAQUE_NOTE_MAX) : '';
+  const counts = formatAccountabilityCounts(entry);
+  if (!note && !counts) return EMPTY_DESK_PLAQUE;
+
+  const tone: OfficeDeskPlaqueTone =
+    entry?.tone === 'danger' ? 'danger'
+    : note ? 'warn'
+    : counts ? 'good'
+    : 'neutral';
+
+  const lastLine = typeof entry?.lastLine === 'string' ? entry.lastLine.trim() : '';
+  const detail = [rawNote ? `⚠️ ${rawNote}` : '', lastLine].filter(Boolean).join(' · ');
+
+  return { visible: true, counts, tone, note, detail };
+}
+
+// ─── Per-agent build XP (desk sprite progress bar) ───────────────────────────
+// The floor used to pass the CIRCLE USER's lifetime points to every sprite, so
+// all 16 desks rendered an identical bar under a per-agent name tag — while
+// each sprite floated its own "+126 BUILD XP" numbers that filled nothing. Two
+// different currencies stacked on top of each other.
+//
+// This makes the bar the same currency as the floats: XP an agent earned from
+// its OWN work. The per-event formula lives in PixelAgent (`getBuildXpGain`);
+// this is its cumulative form, and the two MUST stay in lockstep — a float that
+// says "+126" has to move the bar by 126.
+
+/** Lockstep with PixelAgent.getBuildXpGain: `turns * 18`. */
+export const OFFICE_XP_PER_TURN = 18;
+/** Lockstep with PixelAgent.getBuildXpGain: `round(tokens / 160)`. */
+export const OFFICE_XP_TOKENS_PER_POINT = 160;
+/** Level 1 spans this much XP; each level after costs OFFICE_XP_LEVEL_STEP more. */
+export const OFFICE_XP_BASE_LEVEL_SPAN = 100;
+export const OFFICE_XP_LEVEL_STEP = 80;
+/** Hard ceiling — bounds the level walk and keeps the badge one character wide. */
+export const OFFICE_XP_MAX_LEVEL = 99;
+
+export interface OfficeAgentXp {
+  /** Lifetime build XP from this agent's own turns + tokens. */
+  total: number;
+  /** 1-based level. Clamped to OFFICE_XP_MAX_LEVEL. */
+  level: number;
+  /** XP earned inside the current level — the bar's numerator. */
+  intoLevel: number;
+  /** XP the current level costs — the bar's denominator. Never 0. */
+  levelSpan: number;
+  /** Absolute `total` at which the next level starts (drives the LEVEL UP float). */
+  nextTotal: number;
+  /** True at the ceiling: bar reads full and stops promising another level. */
+  maxed: boolean;
+}
+
+/** XP the given 1-based level costs to complete. */
+export function officeXpLevelSpan(level: number): number {
+  const n = Number.isFinite(level) && level > 1 ? Math.floor(level) : 1;
+  return OFFICE_XP_BASE_LEVEL_SPAN + (Math.min(n, OFFICE_XP_MAX_LEVEL) - 1) * OFFICE_XP_LEVEL_STEP;
+}
+
+function toCountable(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
+}
+
+/**
+ * Cumulative build XP for one agent, plus its level breakdown.
+ *
+ * Pure and clock-free: XP is a function of the agent's own lifetime counters,
+ * so it is stable across reloads without any stored progress. Partial, negative,
+ * NaN, and absurd inputs all degrade to a valid level-1 result rather than
+ * throwing or producing a NaN-width progress bar.
+ */
+export function buildOfficeAgentXp(
+  turns: number | null | undefined,
+  tokens: number | null | undefined,
+): OfficeAgentXp {
+  const total =
+    toCountable(turns) * OFFICE_XP_PER_TURN +
+    Math.round(toCountable(tokens) / OFFICE_XP_TOKENS_PER_POINT);
+
+  let level = 1;
+  let consumed = 0;
+  while (level < OFFICE_XP_MAX_LEVEL) {
+    const span = officeXpLevelSpan(level);
+    if (total < consumed + span) break;
+    consumed += span;
+    level += 1;
+  }
+
+  const levelSpan = officeXpLevelSpan(level);
+  const intoLevel = Math.max(0, total - consumed);
+  const maxed = level >= OFFICE_XP_MAX_LEVEL && intoLevel >= levelSpan;
+
+  return {
+    total,
+    level,
+    intoLevel: maxed ? levelSpan : intoLevel,
+    levelSpan,
+    nextTotal: consumed + levelSpan,
+    maxed,
+  };
+}

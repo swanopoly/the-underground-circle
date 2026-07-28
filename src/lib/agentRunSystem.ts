@@ -13,6 +13,35 @@ import { devLog } from './devLog';
 import { mapLegacyToolEventToLedgerStatus, persistAgentRunToolEvent } from './agentRunLedgerPersistence';
 import { subscribeWithReconnect } from './subscribeWithReconnect';
 import { runMatchesAgent } from './agentRunSubjectSummary';
+import {
+  summarizeToolInputForPersistence,
+  summarizeToolResultForPersistence,
+} from './eventBoundCore';
+import { detectCredentialMemoryContent, describeCredentialMemoryBlock } from './userMemoryCaps';
+import {
+  DEFAULT_AGENT_SCOPE_MEMORY_LIMIT,
+  describeAgentScopeLookupWarning,
+  isAgentScopeMissingLookupId,
+  resolveMemoryLookupIds,
+  resolveMemoryScopeQueryLimit,
+  scopesRequestAgentMemory,
+} from './memoryLookupKeyCore';
+
+/**
+ * Fire-and-forget embed-on-write.
+ *
+ * DYNAMIC import on purpose: `memoryEmbeddings` → `privacyMode` → `react-native`,
+ * and this module is transitively imported by tsx-loaded smoke tests, which
+ * cannot load react-native. A static top-level import here would break every one
+ * of them; `memoryService` already used a dynamic import of this module for
+ * exactly that reason.
+ */
+function queueMemoryEmbeddingSafe(memoryId: string, title?: string | null, content?: string | null): void {
+  if (!memoryId) return;
+  void import('./memoryEmbeddings')
+    .then(({ queueMemoryEmbedding }) => queueMemoryEmbedding({ memoryId, title, content }))
+    .catch(() => { /* embedding must never affect the write */ });
+}
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -124,6 +153,101 @@ export interface RunStep {
   metadata: Record<string, unknown>;
 }
 
+const PERSISTED_TOOL_OUTPUT_STATUSES = new Set([
+  'planned',
+  'running',
+  'passed',
+  'completed',
+  'success',
+  'verified',
+  'manual_required',
+  'blocked',
+  'failed',
+  'error',
+  'skipped',
+  'cancelled',
+  'inconclusive',
+  'outcome_unknown',
+  'unknown',
+]);
+const PERSISTED_TOOL_OUTPUT_KINDS = new Set([
+  'empty',
+  'array',
+  'object',
+  'string',
+  'number',
+  'non_finite_number',
+  'boolean',
+  'bigint',
+  'undefined',
+  'unsupported',
+  'unavailable',
+]);
+
+/**
+ * Render durable tool-output telemetry without ever echoing a historical raw
+ * command/result back into the UI. New rows contain a value-free structural
+ * envelope; pre-boundary legacy rows are acknowledged but deliberately hidden.
+ */
+export function describePersistedToolOutput(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.redacted !== true) {
+      return 'Tool result recorded · legacy value hidden';
+    }
+    const status = typeof parsed.status === 'string' && PERSISTED_TOOL_OUTPUT_STATUSES.has(parsed.status)
+      ? parsed.status.replace(/_/g, ' ')
+      : 'unknown';
+    const kind = typeof parsed.resultKind === 'string' && PERSISTED_TOOL_OUTPUT_KINDS.has(parsed.resultKind)
+      ? parsed.resultKind.replace(/_/g, ' ')
+      : 'unavailable';
+    return `Tool result: ${status} · ${kind} · values hidden`;
+  } catch {
+    return 'Tool result recorded · legacy value hidden';
+  }
+}
+
+/**
+ * Project a durable or legacy tool name through the same strict canonical
+ * allowlist used at the write boundary. Historical path-, URL-, command-, or
+ * secret-shaped values become `unknown` before reaching the UI.
+ */
+export function describePersistedToolName(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  return String(summarizeToolInputForPersistence(value, undefined).tool || 'unknown');
+}
+
+export function projectPersistedRunStepForDisplay(step: Pick<
+  RunStep,
+  'step_kind' | 'title' | 'body' | 'tool_name' | 'tool_output'
+>): {
+  title: string;
+  body: string | null;
+  toolName: string | null;
+  toolOutput: string | null;
+} {
+  const toolName = describePersistedToolName(step.tool_name);
+  const toolBound = toolName !== null
+    || step.step_kind === 'tool_call'
+    || step.step_kind === 'tool_result';
+  if (!toolBound) {
+    return {
+      title: `${step.step_kind.toUpperCase()} · ${step.title}`,
+      body: step.body || null,
+      toolName: null,
+      toolOutput: null,
+    };
+  }
+  const safeName = toolName || 'unknown';
+  return {
+    title: `${step.step_kind.toUpperCase()} · ${step.step_kind === 'tool_result' ? 'Tool result' : 'Tool call'}: ${safeName}`,
+    body: null,
+    toolName: safeName,
+    toolOutput: describePersistedToolOutput(step.tool_output),
+  };
+}
+
 export interface RunArtifact {
   id: string;
   run_id: string;
@@ -171,6 +295,9 @@ export interface MemoryEntry {
   importance?: number;
   retrieval_mode?: 'startup' | 'on_demand' | 'manual_only';
   status?: string;
+  /** memory_entries.pinned — written by pinMemory/unpinMemory (memoryActions.ts).
+   *  Must be projected in mapMemory or every pin-state UI reads `undefined`. */
+  pinned?: boolean;
   access_count?: number;
   last_accessed_at?: string;
   updated_at?: string;
@@ -194,6 +321,60 @@ export async function getCircleSessionMemoryMode(circleId: string): Promise<Sess
 
 // ── 1. Create Run ───────────────────────────────────────────────────────────
 
+/**
+ * Read the canonical agent subject key back OUT of a run-metadata blob — the
+ * inverse of `buildAgentRuntimeSubjectPayload`'s `runMetadata` stamp.
+ *
+ * Office plan O6: every run writer already puts subject identity into
+ * `metadata`, so `createRun` derives the durable `agent_runs.agent_id` here, at
+ * one chokepoint, instead of threading a new argument through all six call
+ * sites. Key precedence mirrors `deriveRunSubjectIdentity` (officeOpsBoard) so
+ * the column and the metadata fallback can never disagree about who ran a run.
+ *
+ * Private on purpose: `agentRuntimeSubject.ts` is the canonical owner of subject
+ * identity and this belongs there, but that file is currently root-owned and
+ * unwritable. Promote it (and drop this) once the permissions are fixed.
+ *
+ * Returns null for anything it can't confidently resolve — a wrong id is worse
+ * than none, because it attributes work to the wrong agent.
+ */
+function readAgentSubjectKeyFromRunMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const clean = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const text = value.trim();
+    return text ? text : null;
+  };
+  const nested = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const agentSubject = nested(metadata.agentSubject);
+  const targetSubject = nested(metadata.targetAgentSubject);
+  // EXACTLY the four subject-key sources deriveRunSubjectIdentity reads from
+  // metadata — no more. `metadata.agentId` is deliberately NOT consulted: the
+  // subject payload does set it to the subject key, but other writers use that
+  // field for connection/session ids, and persisting one of those would make
+  // the column itself a false attribution that deriveRunSubjectIdentity would
+  // then trust. Unresolvable → null → unchanged name-matching fallback.
+  return clean(metadata.agentSubjectKey)
+    || clean(metadata.targetAgentSubjectKey)
+    || clean(agentSubject.agentSubjectKey)
+    || clean(targetSubject.agentSubjectKey);
+}
+
+/** True for the PostgREST/Postgres shapes of "that column isn't there".
+ *  Lets `createRun` write `agent_id` before the O6 migration has been applied to
+ *  a given database without ever failing the run itself. */
+function isMissingAgentIdColumnError(error: unknown): boolean {
+  const e = error as { code?: string; message?: string } | null;
+  if (!e) return false;
+  // 42703 = undefined_column (Postgres); PGRST204 = unknown column (PostgREST cache)
+  if (e.code === '42703' || e.code === 'PGRST204') return true;
+  const msg = String(e.message || '').toLowerCase();
+  return msg.includes('agent_id') && (msg.includes('column') || msg.includes('schema cache'));
+}
+
 export async function createRun(opts: {
   circleId: string;
   userId: string;
@@ -208,29 +389,50 @@ export async function createRun(opts: {
   chatSessionId?: string;
   parentRunId?: string;
   delegatedTo?: string;
+  /** Canonical agent runtime subject key (or the published agent's uuid) —
+   *  Office plan O6. Persisting this is what lets the Office stop attributing
+   *  runs to agents by matching display names. */
+  agentId?: string;
   metadata?: Record<string, unknown>;
 }): Promise<AgentRun | null> {
-  const { data, error } = await supabase
-    .from('agent_runs')
-    .insert({
-      circle_id: opts.circleId,
-      user_id: opts.userId,
-      surface: opts.surface,
-      title: opts.title,
-      goal: opts.goal,
-      mode: opts.mode || 'talk',
-      model: opts.model,
-      provider: opts.provider,
-      room_id: opts.roomId,
-      task_id: opts.taskId,
-      chat_session_id: opts.chatSessionId,
-      parent_run_id: opts.parentRunId,
-      delegated_to: opts.delegatedTo,
-      status: 'queued',
-      metadata: opts.metadata || {},
-    })
-    .select()
-    .single();
+  const base = {
+    circle_id: opts.circleId,
+    user_id: opts.userId,
+    surface: opts.surface,
+    title: opts.title,
+    goal: opts.goal,
+    mode: opts.mode || 'talk',
+    model: opts.model,
+    provider: opts.provider,
+    room_id: opts.roomId,
+    task_id: opts.taskId,
+    chat_session_id: opts.chatSessionId,
+    parent_run_id: opts.parentRunId,
+    delegated_to: opts.delegatedTo,
+    status: 'queued',
+    metadata: opts.metadata || {},
+  };
+  // O6 chokepoint: prefer an explicit agentId, else recover the canonical
+  // subject key the writer already stamped into metadata. Doing it here means
+  // every existing createRun caller starts persisting durable attribution
+  // without a single call-site change.
+  const agentId = (typeof opts.agentId === 'string' && opts.agentId.trim())
+    ? opts.agentId.trim()
+    : readAgentSubjectKeyFromRunMetadata(base.metadata);
+
+  const insert = (payload: Record<string, unknown>) =>
+    supabase.from('agent_runs').insert(payload).select().single();
+
+  let { data, error } = await insert(agentId ? { ...base, agent_id: agentId } : base);
+
+  // Fail-soft: a database that hasn't run RUN_THIS_SQL.sql §25 yet must still be
+  // able to create runs. Retry without the column rather than losing the run —
+  // attribution degrades to the name-matching fallback, which is exactly the
+  // pre-O6 behaviour.
+  if (error && agentId && isMissingAgentIdColumnError(error)) {
+    console.warn('[AgentRunSystem] agent_runs.agent_id missing — run RUN_THIS_SQL.sql §25; falling back to name attribution');
+    ({ data, error } = await insert(base));
+  }
 
   if (error) { console.error('[AgentRunSystem] createRun error:', error); return null; }
   return mapRun(data);
@@ -537,6 +739,48 @@ export async function addStep(opts: {
   tokensUsed?: number;
   metadata?: Record<string, unknown>;
 }): Promise<RunStep | null> {
+  // `addStep` is the final client-side persistence boundary for
+  // agent_run_steps. Callers still need the exact arguments in memory for
+  // approval, dispatch, verification, and recovery, but no caller-owned tool
+  // argument/result/metadata value may cross through those durable columns.
+  // Always derive a fresh canonical, key-free structural summary here—even
+  // when a caller already appears to provide a summary—so a malformed or
+  // mislabeled object cannot bypass the boundary. Preserve `undefined` for
+  // steps that never carried tool input or output. `tool_output` is a text
+  // column, so its structural envelope is serialized after sanitization; raw
+  // commands, URLs, session identifiers, provider bodies, and observations
+  // stay transient.
+  const persistedStatus = opts.status || 'completed';
+  const persistedToolName = opts.toolName === undefined
+    ? undefined
+    : String(summarizeToolInputForPersistence(opts.toolName, undefined).tool || 'unknown');
+  const persistedToolInput = opts.toolInput === undefined
+    ? undefined
+    : summarizeToolInputForPersistence(persistedToolName, opts.toolInput);
+  const persistedToolOutput = opts.toolOutput === undefined
+    ? undefined
+    : JSON.stringify(summarizeToolResultForPersistence(
+      persistedToolName,
+      opts.toolOutput,
+      persistedStatus,
+    ));
+  const isToolBoundStep = persistedToolName !== undefined
+    || opts.stepKind === 'tool_call'
+    || opts.stepKind === 'tool_result';
+  const safeToolLabel = persistedToolName || 'unknown';
+  const persistedTitle = isToolBoundStep
+    ? `${opts.stepKind === 'tool_result' ? 'Tool result' : 'Tool call'}: ${safeToolLabel}`
+    : opts.title;
+  const persistedBody = isToolBoundStep
+    ? opts.body === undefined
+      ? undefined
+      : 'Tool details hidden'
+    : opts.body;
+  const persistedMetadata = opts.metadata === undefined
+    ? {}
+    : isToolBoundStep
+      ? summarizeToolInputForPersistence(persistedToolName, opts.metadata)
+      : opts.metadata;
   const { data, error } = await supabase
     .from('agent_run_steps')
     .insert({
@@ -544,17 +788,17 @@ export async function addStep(opts: {
       circle_id: opts.circleId,
       step_index: opts.stepIndex,
       step_kind: opts.stepKind,
-      title: opts.title,
-      body: opts.body,
-      tool_name: opts.toolName,
-      tool_input: opts.toolInput,
-      tool_output: opts.toolOutput,
+      title: persistedTitle,
+      body: persistedBody,
+      tool_name: persistedToolName,
+      tool_input: persistedToolInput,
+      tool_output: persistedToolOutput,
       delegated_to: opts.delegatedTo,
       child_run_id: opts.childRunId,
-      status: opts.status || 'completed',
+      status: persistedStatus,
       duration_ms: opts.durationMs,
       tokens_used: opts.tokensUsed || 0,
-      metadata: opts.metadata || {},
+      metadata: persistedMetadata,
     })
     .select()
     .single();
@@ -870,10 +1114,56 @@ export async function findRecentDesktopActionTrace(
   }
 }
 
-// Event kinds that carry full tool inputs in `agent_run_events.payload`:
-// `tool_call_start` (server-dispatched + typed-core persisted runs) and
-// `client_tool_call_pending` (swanbot-v2 client-delegated desktop tools).
+// Event kinds that historically carried tool inputs in
+// `agent_run_events.payload`: `tool_call_start` (server-dispatched +
+// typed-core persisted runs) and `client_tool_call_pending` (swanbot-v2
+// client-delegated desktop tools). Current writers may store only the
+// value-free summary recognized below.
 const DESKTOP_TRACEABLE_RUN_EVENT_KINDS = ['tool_call_start', 'client_tool_call_pending'];
+
+const DESKTOP_TOOL_INPUT_SUMMARY_STRUCTURAL_KEYS = [
+  'inputKind',
+  'fieldKinds',
+  'fields',
+] as const;
+const DESKTOP_TOOL_INPUT_SUMMARY_AUXILIARY_KEYS = [
+  'tool',
+  'fieldCount',
+  'itemCount',
+  'omittedFieldCount',
+] as const;
+
+/**
+ * Durable tool events now replace exact arguments with a value-free structural
+ * summary (`eventBoundCore.summarizeToolInputForPersistence`). Those summaries
+ * are safe telemetry, but they are NOT executable arguments and must never be
+ * learned as a desktop replay step.
+ *
+ * Versions 1 and 2 used `fields` / `fieldKinds` respectively. The broader
+ * signature deliberately fails closed for malformed or partially migrated
+ * summaries: once an object combines a summary envelope marker
+ * (`redacted`/`schemaVersion`) with structural summary fields, discard the
+ * action rather than risk replaying telemetry metadata as tool input.
+ */
+export function isPersistedToolInputSummaryLike(input: unknown): boolean {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const record = input as Record<string, unknown>;
+  const hasOwn = (key: string): boolean => Object.prototype.hasOwnProperty.call(record, key);
+  const hasRedactionMarker = hasOwn('redacted');
+  const hasSchemaMarker = hasOwn('schemaVersion');
+  const hasStructuralMarker = DESKTOP_TOOL_INPUT_SUMMARY_STRUCTURAL_KEYS.some(hasOwn);
+  const hasAuxiliaryMarker = DESKTOP_TOOL_INPUT_SUMMARY_AUXILIARY_KEYS.some(hasOwn);
+  const supportedSummaryVersion = record.schemaVersion === 1 || record.schemaVersion === 2;
+
+  // Canonical v1/v2 summary, including a truncated/malformed instance that
+  // lost its structural fields after the durable payload bound was applied.
+  if (record.redacted === true && supportedSummaryVersion) return true;
+
+  // Fail closed for partially migrated or malformed summary-shaped objects.
+  if (hasStructuralMarker && (hasRedactionMarker || hasSchemaMarker)) return true;
+  if (record.redacted === true && hasAuxiliaryMarker) return true;
+  return false;
+}
 
 async function listRunActionEntriesForTrace(runId: string): Promise<Array<{ tool: string; input: unknown }>> {
   const { data, error } = await supabase
@@ -885,11 +1175,12 @@ async function listRunActionEntriesForTrace(runId: string): Promise<Array<{ tool
     .limit(80);
   if (error || !data) return [];
   return data
-    .map((row: any) => ({
-      tool: String(row?.payload?.tool || '').trim(),
-      input: row?.payload?.input,
-    }))
-    .filter((entry) => entry.tool.length > 0);
+    .flatMap((row: any) => {
+      const tool = String(row?.payload?.tool || '').trim();
+      const input = row?.payload?.input;
+      if (!tool || isPersistedToolInputSummaryLike(input)) return [];
+      return [{ tool, input }];
+    });
 }
 
 /**
@@ -906,8 +1197,10 @@ async function listRunActionEntriesForTrace(runId: string): Promise<Array<{ tool
  *      `executeAgentRun`. Find the newest sibling created inside the task
  *      window for the same circle/user and harvest its events.
  *
- * Returns RAW inputs — callers must redact before persisting or injecting.
- * Tolerant of errors → [].
+ * Returns only genuine historical inputs — callers must still apply the
+ * existing tool-aware exclusions and redact before persisting or injecting.
+ * Value-free durable summaries are omitted because their structural metadata
+ * cannot reconstruct an executable call. Tolerant of errors → [].
  */
 export async function harvestDesktopRunActionEntries(args: {
   runId?: string | null;
@@ -979,6 +1272,29 @@ export async function saveMemory(opts: {
   retrievalMode?: 'startup' | 'on_demand' | 'manual_only';
   metadata?: Record<string, unknown>;
 }): Promise<MemoryEntry | null> {
+  // ── Secret hygiene gate (CLAUDE.md Critical Guarantees) ───────────────────
+  // `saveMemory` is the single `memory_entries` chokepoint for the client —
+  // `memoryService.saveMemoryWithContext` and every `saveSharedTaskMemory`-style
+  // helper route through it. A memory row is permanent, embedded into pgvector
+  // and re-injected into every later prompt, so a pasted key or a tool response
+  // echoing a token would become a standing leak. We REFUSE rather than redact:
+  // partial redaction of a multi-line secret still persists it, and the residue
+  // is worth ~nothing. Never silent — always a console.warn naming the rule
+  // (never the value) plus a null return the callers already treat as failure.
+  // Guard source (LOCKSTEP with `supabase/functions/_shared/memory-credential-guard.ts`):
+  // `src/lib/userMemoryCaps.ts`.
+  const credentialFinding =
+    detectCredentialMemoryContent(opts.content) || detectCredentialMemoryContent(opts.title);
+  if (credentialFinding) {
+    console.warn(
+      '[AgentRunSystem] saveMemory REFUSED —',
+      describeCredentialMemoryBlock(credentialFinding),
+      `| rule=${credentialFinding.rule} scope=${opts.scope} kind=${opts.memoryKind}`,
+      `surface=${opts.sourceSurface || 'unknown'} runId=${opts.sourceRunId || 'none'}`,
+    );
+    return null;
+  }
+
   const basePayload = {
     scope: opts.scope,
     circle_id: opts.circleId,
@@ -1049,6 +1365,8 @@ export async function saveMemory(opts: {
       return fallback ? mapMemory(fallback) : null;
     }
     devLog.trace('[AgentRunSystem] saveMemory session dedup updated:', opts.title?.slice(0, 50));
+    // Re-embed: the row's stored vector now describes the PREVIOUS content.
+    queueMemoryEmbeddingSafe(updated.id, opts.title, opts.content);
     return mapMemory(updated);
   };
 
@@ -1077,6 +1395,15 @@ export async function saveMemory(opts: {
     return null;
   }
   devLog.trace('[AgentRunSystem] saveMemory OK:', opts.title?.slice(0, 50));
+  // Embed-on-write. This is the single client-side `memory_entries` insert
+  // chokepoint, so one line here covers the save_memory tool, MemoryViewer
+  // quick-save, saveMemoryWithContext, saveAgentMemory and saveSharedTaskMemory.
+  // Before this, `embedAndStoreMemory` had only two call sites — both inside a
+  // code path that was itself dead in the shipped config — so almost no row was
+  // ever embedded, and `match_memories` filters `embedding IS NOT NULL`.
+  // Synchronous, returns void, never throws: it structurally cannot become part
+  // of the write's success condition.
+  queueMemoryEmbeddingSafe(data.id, opts.title, opts.content);
   return mapMemory(data);
 }
 
@@ -1161,8 +1488,15 @@ export async function loadMemories(opts: {
     if (data) results.push(...data.map(mapMemory));
   }
 
-  const agentLookupIds = uniqueStrings([opts.agentId, ...(opts.agentAliases || [])]);
-  const wantsAgent = agentLookupIds.length > 0 && (!!opts.scopes && opts.scopes.includes('agent'));
+  const agentLookupIds = resolveMemoryLookupIds(opts.agentId, opts.agentAliases);
+  // FAIL LOUD (2026-07-24): `scopes:['agent']` with no agent id can never match
+  // a row — the agent branch below is gated on a lookup id and the shared
+  // branch above filters 'agent' out. Returning [] silently is what let two
+  // SOUL-memory readers stay permanently empty without anyone noticing.
+  if (isAgentScopeMissingLookupId({ scopes: opts.scopes, lookupIds: agentLookupIds })) {
+    console.warn(describeAgentScopeLookupWarning({ scopes: opts.scopes, caller: 'loadMemories' }));
+  }
+  const wantsAgent = agentLookupIds.length > 0 && scopesRequestAgentMemory(opts.scopes);
   if (wantsAgent) {
     let agentQuery = supabase
       .from('memory_entries')
@@ -1172,7 +1506,10 @@ export async function loadMemories(opts: {
       .eq('visibility', 'private')
       .eq('is_active', true)
       .order('updated_at', { ascending: false })
-      .limit(20);
+      // Bug 3 (2026-07-24): this was pinned at 20 regardless of opts.limit, so
+      // AgentMemoryPanel's request for 200 and the prompt context both
+      // truncated silently at 20 rows.
+      .limit(resolveMemoryScopeQueryLimit(opts.limit, DEFAULT_AGENT_SCOPE_MEMORY_LIMIT));
     agentQuery = agentLookupIds.length === 1
       ? agentQuery.eq('agent_id', agentLookupIds[0])
       : agentQuery.in('agent_id', agentLookupIds);
@@ -1219,13 +1556,31 @@ export async function promoteMemory(
  * Budget: capped at ~3000 chars to prevent context bloat.
  * Priority: instructions > preferences > decisions > facts > findings > context
  */
-export async function buildMemoryContext(circleId: string, roomId?: string, userId?: string, agentId?: string, agentName?: string): Promise<string> {
+export async function buildMemoryContext(
+  circleId: string,
+  roomId?: string,
+  userId?: string,
+  agentId?: string,
+  agentName?: string,
+  /**
+   * Alias write-keys this agent has ever used — pass
+   * `agentRuntimeSubject.memoryAgentAliases` (or the subject payload's
+   * `legacyAgentIds` + db id + session key). Without them the MODEL reads
+   * alias-blind while the Office UI (`AgentMemoryPanel`) reads alias-aware, so
+   * after any subject-key rotation (session agent published to
+   * `circle_office_agents`, or a bridge reconnect) the agent's own memory stays
+   * on screen and disappears from its prompt.
+   */
+  agentAliases?: string[],
+): Promise<string> {
+  const agentLookupIds = resolveMemoryLookupIds(agentId, agentAliases);
   const memories = (await loadMemories({
     circleId,
     roomId,
     agentId,
+    agentAliases: agentLookupIds.slice(1),
     userId, // REQUIRED for safe user-scope loading
-    scopes: agentId ? ['circle', 'room', 'user', 'agent'] : ['circle', 'room', 'user'],
+    scopes: agentLookupIds.length > 0 ? ['circle', 'room', 'user', 'agent'] : ['circle', 'room', 'user'],
     limit: 25,
   }))
     .filter(m => m.retrieval_mode !== 'manual_only');
@@ -1291,7 +1646,9 @@ export async function buildMemoryContext(circleId: string, roomId?: string, user
   } catch {}
 
   // Render in priority order: agent > room > user > circle
-  const scopeOrder: MemoryScope[] = agentId ? ['agent', 'room', 'user', 'circle'] : ['room', 'user', 'circle'];
+  const scopeOrder: MemoryScope[] = agentLookupIds.length > 0
+    ? ['agent', 'room', 'user', 'circle']
+    : ['room', 'user', 'circle'];
   for (const scope of scopeOrder) {
     const entries = grouped[scope];
     if (!entries || entries.length === 0) continue;
@@ -1469,6 +1826,10 @@ function mapMemory(d: any): MemoryEntry {
     user_id: d.user_id, memory_kind: d.memory_kind, title: d.title,
     content: d.content, source_run_id: d.source_run_id, source_surface: d.source_surface,
     is_active: d.is_active, visibility: d.visibility, importance: d.importance,
+    // `pinned` was never projected, so AgentMemoryPanel's Pin button read
+    // undefined forever: the label was permanently "Pin", clicking an already
+    // pinned memory re-pinned it, and unpinning from Office was impossible.
+    pinned: d.pinned ?? false,
     retrieval_mode: d.retrieval_mode, status: d.status, access_count: d.access_count,
     last_accessed_at: d.last_accessed_at, updated_at: d.updated_at, created_at: d.created_at,
     metadata: d.metadata || {},

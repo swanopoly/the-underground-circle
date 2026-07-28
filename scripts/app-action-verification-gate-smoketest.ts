@@ -29,6 +29,7 @@ for (const tool of [
   'desktop.launch_app',
   'desktop.open_url',
   'browser.click_role',
+  'browser.set_toggle',
   'browser.fill_field',
   'browser.fill_credential_field',
   'browser.press_key',

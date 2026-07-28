@@ -1,5 +1,5 @@
 /**
- * swanbotV2BatchRuntime — the INERT, flag-gated loop-convergence runtime.
+ * swanbotV2BatchRuntime — the flag-gated loop-convergence runtime.
  *
  * CONSOLIDATE #1 (`docs/adr/ADR-0002-loop-convergence.md`,
  * `docs/LOOP_CONVERGENCE_RUNBOOK.md` §2). This is the thin runtime that repoints
@@ -10,11 +10,10 @@
  * existing exports (no new engine), mirroring the proven `runTypedCoreToolLoop`
  * reference impl (`openswanSessionRuntime.ts:542`) without editing it.
  *
- * INERT (Phase 1): ZERO call sites. Nothing here consults the rollout flag
- * (`swanbotV2ClientLoopFlag`); the flag guard is the SEPARATE, coordinated
- * Phase-2 one-line delegation inside `swanbot.ts`. So this module carries zero
- * conflict risk on the hot `swanbot.ts` file and deleting it is a no-op until
- * that guard lands (runbook §1, ADR R6).
+ * LIVE BUT FLAG-DARK: `callSwanBotV2` delegates here only when
+ * `uc_swanbot_v2_client_loop === 'true'`. The flag remains DEFAULT OFF until
+ * production telemetry satisfies the M4 readiness gate; the deployed edge loop
+ * remains the rollback target.
  *
  * DROP-IN CONTRACT: `runSwanbotV2Batch` matches `callSwanBotV2`'s positional
  * params + `V2CallResult` return shape EXACTLY, plus ONE trailing options bag
@@ -55,6 +54,16 @@ import {
 import { buildSnapshotAwareInitialMessages } from './circleSnapshotContextInjection';
 import { getOpenSwanToolsForSurface, createOpenSwanToolParallelPolicyProvider } from './openswanBridge';
 import type { OpenSwanRuntimeToolContext } from './openswanToolRuntime';
+import {
+  resolveChatComputerConstraintInputs,
+  type ChatComputerConstraintCategory,
+} from './chatComputerRequestRouter';
+import {
+  createSwanbotV2BatchToolResultStopGuard,
+  createSwanbotV2BatchToolConstraintGuard,
+  didSwanbotV2BatchEnterToolHandler,
+  mergeSwanbotV2BatchUserConstraints,
+} from './swanbotV2BatchPolicy';
 import {
   buildSwanbotToolTurnBody,
   toAnthropicToolShapes,
@@ -109,7 +118,7 @@ export type SwanbotV2BatchContext = {
   snapshotContextMessage?: string | null;
   /** STOP-button cancellation the edge never had — aborts at a loop boundary. */
   signal?: AbortSignal;
-  /** Batch iteration budget. Default `V2_BATCH_MAX_ITERATIONS` (edge cap = 5). */
+  /** Batch iteration budget, clamped to `V2_BATCH_MAX_ITERATIONS` (edge cap = 5). */
   maxIterations?: number;
   /** Persisted target-agent name. Default `BlackSwan` (edge parity). */
   targetAgentName?: string;
@@ -127,6 +136,12 @@ export type SwanbotV2BatchContext = {
   activePluginIds?: string[];
   /** Optional parsed "never do X" constraints for the dispatch backstop (QW1). */
   userConstraints?: OpenSwanRuntimeToolContext['userConstraints'];
+  /**
+   * Always-confirm categories detected in the original turn. The step-level
+   * matcher still independently checks every tool name + args so a caller
+   * cannot erase the policy by omitting this context.
+   */
+  alwaysConfirmFloor?: ChatComputerConstraintCategory[];
 };
 
 /**
@@ -163,7 +178,26 @@ export async function runSwanbotV2Batch(
   const targetAgentName = extra.targetAgentName || V2_BATCH_DEFAULT_TARGET_AGENT;
   const targetAgentSubject = extra.targetAgentSubject || null;
   const targetAgentMetadata = buildV2BatchTargetAgentMetadata(targetAgentName, targetAgentSubject);
-  const maxIterations = Math.max(1, Math.floor(extra.maxIterations || V2_BATCH_MAX_ITERATIONS));
+  const requestedMaxIterations = typeof extra.maxIterations === 'number'
+    && Number.isFinite(extra.maxIterations)
+    ? Math.floor(extra.maxIterations)
+    : V2_BATCH_MAX_ITERATIONS;
+  const maxIterations = Math.min(
+    V2_BATCH_MAX_ITERATIONS,
+    Math.max(1, requestedMaxIterations),
+  );
+  // Parse the original turn inside the runtime as a non-bypassable floor, then
+  // union any richer upstream route context. An explicit `null` from a caller
+  // cannot erase a constraint that is visible in the user's own message.
+  const parsedConstraintInputs = resolveChatComputerConstraintInputs(message);
+  const userConstraints = mergeSwanbotV2BatchUserConstraints(
+    parsedConstraintInputs.userConstraints,
+    extra.userConstraints,
+  );
+  const alwaysConfirmFloor = Array.from(new Set([
+    ...parsedConstraintInputs.alwaysConfirmFloor,
+    ...(extra.alwaysConfirmFloor || []),
+  ]));
 
   // The frozen system prompt is caller-built (§2.2). Fold in the per-turn
   // `systemDirective` (a drop-in positional param) so it is never silently lost.
@@ -207,7 +241,8 @@ export async function runSwanbotV2Batch(
   // agent_run_events parity) and, optionally, into the live-narration sink.
   const turnEndEvents: AgentEvent[] = [];
   // ── DE-RISK #5 (HIGH — relay-failure double-execution, runbook §0.5.5). ──
-  // Once ANY tool has started this run, a later relay/loop failure must NOT
+  // Once ANY registered tool handler has actually been entered, a later
+  // relay/loop failure must NOT
   // return `{ text: null }`: the orchestrator would classify it as a transport
   // failure and re-run the WHOLE prompt via v1, re-executing already-committed
   // side effects (duplicate email/commit). Mirrors the sibling suppression in
@@ -217,7 +252,12 @@ export async function runSwanbotV2Batch(
   let anyToolExecuted = false;
   const onEvent = (event: AgentEvent) => {
     if (event.kind === 'turn_end') turnEndEvents.push(event);
-    if (event.kind === 'tool_call_start') anyToolExecuted = true;
+    // tool_call_start is emitted before registration, constraint, and approval
+    // checks. Only the result's runtime-owned dispatched bit proves a handler
+    // was entered and a retry could duplicate an outcome-unknown side effect.
+    if (didSwanbotV2BatchEnterToolHandler(event)) {
+      anyToolExecuted = true;
+    }
     // Durable trajectory rows (turn_start/turn_end/tool_call_*/final_response),
     // fire-and-forget inside the handle — matches the edge's event writes.
     if (handle) {
@@ -263,7 +303,7 @@ export async function runSwanbotV2Batch(
       runId: handle?.run.id,
       threadId: extra.threadId,
       activePluginIds: extra.activePluginIds,
-      userConstraints: extra.userConstraints ?? null,
+      userConstraints,
     };
     const catalog = getOpenSwanToolsForSurface(V2_BATCH_RUN_SURFACE, toolCtx, { mode });
     const handlerByName = new Map<string, AgentToolDefinition['handler']>(
@@ -320,6 +360,20 @@ export async function runSwanbotV2Batch(
     };
 
     // 2.6 runAgent — nine reliability layers + STOP-button cancellation.
+    // Approval and constraint seams are materialized before entering the core:
+    // a missing approval gate leaves ordinary catalog policy unchanged, while
+    // ask-before and always-confirm matches fail closed in the universal guard.
+    const toolApprovalGate = extra.toolApprovalGate
+      ? createLegacyApprovalGateAdapter(extra.toolApprovalGate)
+      : undefined;
+    const toolConstraintGuard = createSwanbotV2BatchToolConstraintGuard({
+      userConstraints,
+      alwaysConfirmFloor,
+      hasApprovalGate: toolApprovalGate !== undefined,
+    });
+    const toolResultStopGuard = createSwanbotV2BatchToolResultStopGuard(
+      userConstraints?.stopConditions,
+    );
     const runResult = await runAgent({
       initialMessages,
       tools,
@@ -327,6 +381,22 @@ export async function runSwanbotV2Batch(
       maxIterations,
       signal: extra.signal,
       onEvent,
+      session: {
+        circleId,
+        userId,
+        runId: handle?.run.id,
+        threadId: extra.threadId,
+        surface: V2_BATCH_RUN_SURFACE,
+        mode,
+      },
+      // These two pre-dispatch seams apply to the complete canonical catalog.
+      // The core executes the constraint guard first and both gates fail closed.
+      toolConstraintGuard,
+      toolApprovalGate,
+      // User "stop if ..." constraints are checked after each result and
+      // BEFORE the next same-turn handler enters. The core then closes any
+      // remaining requests as skipped results before returning.
+      toolResultStopGuard,
       // Sequential dispatch (safe superset of legacy ordering, incl. approval
       // prompts) — same posture the session path holds until T8 is flipped on.
       parallelToolConcurrency: 1,
@@ -340,9 +410,6 @@ export async function runSwanbotV2Batch(
       toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({
         activePluginIds: extra.activePluginIds,
       }),
-      ...(extra.toolApprovalGate
-        ? { toolApprovalGate: createLegacyApprovalGateAdapter(extra.toolApprovalGate) }
-        : {}),
     });
 
     // A swanbot-ai relay transport failure must NOT read as a clean completion —

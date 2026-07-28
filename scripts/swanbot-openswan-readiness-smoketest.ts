@@ -26,6 +26,171 @@ assert(
   SWANBOT_OPENSWAN_REQUIRED_SMOKES.some(smoke => smoke.id === 'swanbot-v2-stop-reason'),
   'required readiness smokes should include the v2 stop-reason/token persistence guard',
 );
+for (const requiredRuntimeSmoke of [
+  'openswan-runtime-approval',
+  'openswan-generic-native-ui-runtime',
+  'browser-dom-snapshot-privacy',
+  'swanbot-v2-terminal-integrity',
+  'chat-approval-single-use',
+  'event-bound-core',
+  'swanbot-v2-continuation-crypto',
+  'desktop-action-summary-replay',
+  'computer-task-runtime-context',
+  'computer-app-open-path-runtime',
+  'automation-executor-mutation-guard',
+  'scheduled-action-mutation-guard',
+  'office-terminal-broadcast-authority',
+  'database-authority-guards',
+  'direct-local-file-runtime',
+  'direct-image-conversion-runtime',
+  'computer-app-action-contract',
+  'browser-locator-actionability',
+  'browser-fill-mutation-gateway',
+  'browser-toggle-mutation-gateway',
+  'browser-toggle-runtime-gateway',
+  'browser-select-mutation-gateway',
+  'browser-select-runtime-gateway',
+  'computer-use-select-handoff',
+  'computer-use-mutation-handoff',
+  'computer-use-cloud-policy',
+  'computer-app-launch-focus-proof',
+  'swanbot-v2-client-result-persistence',
+  'swanbot-v2-batch-policy',
+  'swanbot-v2-edge-fill-schema',
+  'agent-action-calls',
+  'agent-action-runtime-wiring',
+  'computer-app-semantic-action-proof',
+  'computer-app-semantic-action-runtime',
+]) {
+  const readinessEntries = SWANBOT_OPENSWAN_REQUIRED_SMOKES.filter(
+    smoke => smoke.id === requiredRuntimeSmoke,
+  );
+  assert(
+    readinessEntries.length === 1,
+    `required readiness smokes should include ${requiredRuntimeSmoke} exactly once (found ${readinessEntries.length})`,
+  );
+}
+
+type PackageScripts = Record<string, string>;
+
+const packageJson = JSON.parse(
+  readFileSync(join(process.cwd(), 'package.json'), 'utf8'),
+) as { scripts?: PackageScripts };
+const packageScripts = packageJson.scripts ?? {};
+
+function commandSegments(scriptName: string): string[] {
+  const command = packageScripts[scriptName];
+  assert(typeof command === 'string' && command.length > 0, `package.json should define ${scriptName}`);
+  return command.split(/\s*&&\s*/u).map(segment => segment.trim());
+}
+
+function assertExecutesOnce(scriptName: string, smokeName: string): void {
+  const expected = `npm run ${smokeName}`;
+  const count = commandSegments(scriptName).filter(segment => segment === expected).length;
+  assert(
+    count === 1,
+    `${scriptName} should execute ${smokeName} exactly once (found ${count})`,
+  );
+}
+
+const crossChainSafetySmokes = [
+  'smoke:openswan-generic-native-ui-runtime',
+  'smoke:browser-dom-snapshot-privacy',
+  'smoke:swanbot-v2-terminal-integrity',
+];
+for (const chainName of [
+  'check:swanbot-v2:daily',
+  'check:swanbot-v2:release',
+  'check:swanbot-chat:daily',
+  'check:swanbot-chat:release',
+  'smoke:all',
+]) {
+  for (const smokeName of crossChainSafetySmokes) assertExecutesOnce(chainName, smokeName);
+}
+
+for (const smoke of SWANBOT_OPENSWAN_REQUIRED_SMOKES) {
+  const smokeName = smoke.command.replace(/^npm run /u, '');
+  assert(
+    smokeName !== smoke.command && typeof packageScripts[smokeName] === 'string',
+    `required readiness smoke ${smoke.id} should resolve to a package.json script`,
+  );
+}
+
+const dailyGuardSmokes = [
+  'smoke:swanbot-v2-batch-policy',
+  'smoke:swanbot-v2-client-result-persistence',
+  'smoke:swanbot-v2-edge-fill-schema',
+  'smoke:browser-locator-actionability',
+  'smoke:browser-fill-mutation-gateway',
+  'smoke:browser-toggle-runtime-gateway',
+  'smoke:browser-select-runtime-gateway',
+  'smoke:computer-app-launch-focus-proof',
+  'smoke:agent-action-runtime-wiring',
+  'smoke:computer-app-semantic-action-runtime',
+];
+const releaseGuardSmokes = [
+  'smoke:event-bound-core',
+  'smoke:swanbot-v2-continuation-crypto',
+  'smoke:desktop-action-summary-replay',
+  'smoke:swanbot-v2-batch-policy',
+  'smoke:swanbot-v2-client-result-persistence',
+  'smoke:swanbot-v2-edge-fill-schema',
+  'smoke:browser-locator-actionability',
+  'smoke:browser-fill-mutation-gateway',
+  'smoke:browser-toggle-mutation-gateway',
+  'smoke:browser-toggle-runtime-gateway',
+  'smoke:browser-select-mutation-gateway',
+  'smoke:browser-select-runtime-gateway',
+  'smoke:computer-app-action-contract',
+  'smoke:computer-app-launch-focus-proof',
+  'smoke:agent-action-calls',
+  'smoke:agent-action-runtime-wiring',
+  'smoke:computer-app-semantic-action-proof',
+  'smoke:computer-app-semantic-action-runtime',
+];
+
+for (const chainName of ['check:swanbot-v2:daily', 'check:swanbot-chat:daily']) {
+  for (const smokeName of dailyGuardSmokes) assertExecutesOnce(chainName, smokeName);
+}
+for (const chainName of ['check:swanbot-v2:release', 'check:swanbot-chat:release']) {
+  for (const smokeName of releaseGuardSmokes) assertExecutesOnce(chainName, smokeName);
+}
+const authoritySafetySmokes = [
+  'smoke:chat-approval-single-use',
+  'smoke:openswan-runtime-approval',
+  'smoke:computer-app-open-path-runtime',
+  'smoke:automation-executor-mutation-guard',
+  'smoke:scheduled-action-mutation-guard',
+  'smoke:office-terminal-broadcast-authority',
+  'smoke:database-authority-guards',
+  'smoke:direct-local-file-runtime',
+  'smoke:direct-image-conversion-runtime',
+  'smoke:computer-task-runtime-context',
+];
+for (const chainName of [
+  'check:swanbot-v2:daily',
+  'check:swanbot-v2:release',
+  'check:swanbot-chat:daily',
+  'check:swanbot-chat:release',
+]) {
+  for (const smokeName of authoritySafetySmokes) assertExecutesOnce(chainName, smokeName);
+}
+const chatComputerPolicySmokes = [
+  'smoke:computer-task-runtime-context',
+  'smoke:computer-use-select-handoff',
+  'smoke:computer-use-mutation-handoff',
+  'smoke:computer-use-cloud-policy',
+];
+for (const chainName of ['check:swanbot-chat:daily', 'check:swanbot-chat:release']) {
+  for (const smokeName of chatComputerPolicySmokes) assertExecutesOnce(chainName, smokeName);
+}
+for (const smokeName of new Set([
+  ...releaseGuardSmokes,
+  ...chatComputerPolicySmokes,
+  ...authoritySafetySmokes,
+])) {
+  assertExecutesOnce('smoke:all', smokeName);
+}
 
 // ── R16: live tool parity, derived from the actual edge-function source ──
 // The expected constants must match the REAL swanbot-v2-ai TOOLS array
@@ -329,6 +494,20 @@ const pendingTelemetry = buildSwanBotOpenSwanTelemetryInputFromAgentRunRows([
     metadata: { version: 'swanbot-v2-ai' },
   },
   {
+    id: 'v2-active-dispatching',
+    status: 'running',
+    surface: 'main_chat',
+    final_stop_reason: 'client_dispatching',
+    metadata: { version: 'swanbot-v2-ai' },
+  },
+  {
+    id: 'v2-active-resuming',
+    status: 'running',
+    surface: 'main_chat',
+    final_stop_reason: 'client_resuming',
+    metadata: { version: 'swanbot-v2-ai' },
+  },
+  {
     id: 'v2-terminal',
     status: 'completed',
     surface: 'main_chat',
@@ -342,13 +521,23 @@ const pendingTelemetry = buildSwanBotOpenSwanTelemetryInputFromAgentRunRows([
   },
 ], { minRuns: 1 });
 const pendingV2StopReasons = pendingTelemetry.telemetry.v2StopReasons as Record<string, number>;
-assert(pendingTelemetry.rowsScanned === 2, 'pending telemetry should still report scanned rows');
-assert(pendingTelemetry.ignoredRows === 1, 'pending telemetry should ignore active client-pending rows');
+assert(pendingTelemetry.rowsScanned === 4, 'pending telemetry should still report scanned rows');
+assert(pendingTelemetry.ignoredRows === 3, 'pending telemetry should ignore active pending, dispatch, and claimed-resume rows');
 assert(pendingV2StopReasons.end_turn === 1, 'pending telemetry should count only terminal v2 rows');
 assert(!pendingV2StopReasons.client_pending, 'pending telemetry should not count active client_pending as terminal readiness evidence');
+assert(!pendingV2StopReasons.client_dispatching, 'pending telemetry should not count an active pre-dispatch claim as terminal readiness evidence');
+assert(!pendingV2StopReasons.client_resuming, 'pending telemetry should not count an active single-consumer resume claim as terminal evidence');
 assert(
   pendingTelemetry.warnings.some(warning => warning.includes('active client_pending')),
   'pending telemetry should warn that active client-pending rows were ignored',
+);
+assert(
+  pendingTelemetry.warnings.some(warning => warning.includes('active client_dispatching')),
+  'pending telemetry should warn that active pre-dispatch claims were ignored',
+);
+assert(
+  pendingTelemetry.warnings.some(warning => warning.includes('active client_resuming')),
+  'pending telemetry should warn that active continuation claims were ignored',
 );
 
 const zeroTokenTelemetry = buildSwanBotOpenSwanTelemetryInputFromAgentRunRows([

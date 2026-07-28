@@ -116,11 +116,12 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
         // non-null updated_at (DEFAULT now() + updateRunStatus), so a dead
         // heartbeat only proves death for runs that OPTED IN to heartbeating —
         // metadata.heartbeat, set by agentRunPersistence.createPersistedRun.
-        // Everything else (edge v2 loops, legacy runtimes, 'client_pending'
-        // user-paced waits) gets at most the soft "STALLED?" badge below,
-        // NEVER the local 'failed' flip or the DB reap.
+        // Everything else (edge v2 loops, legacy runtimes, or any active
+        // client-continuation phase) gets at most the soft "STALLED?" badge
+        // below, NEVER the local 'failed' flip or the DB reap.
         const reapEligibleIds = new Set(rawData
-          .filter((r) => r.metadata?.heartbeat === true && r.final_stop_reason !== 'client_pending')
+          .filter((r) => r.metadata?.heartbeat === true
+            && !['client_pending', 'client_dispatching', 'client_resuming'].includes(String(r.final_stop_reason || '')))
           .map((r) => r.id));
         const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
         const data = reapIds.size > 0

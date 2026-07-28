@@ -35,11 +35,21 @@ export interface ResilientSubscriptionHandle {
   /** Idempotent teardown: clears timers + removes the channel; safe to call in a
    *  `useEffect` cleanup or an unmount path. */
   unsubscribe: () => void;
+  /** The CURRENT underlying channel, for call sites that also `.send()` on it
+   *  (broadcast). Must be read per-send, never cached: reconnect replaces the
+   *  channel object, so a captured reference would send into a dead channel.
+   *  Null before the first connect and after `unsubscribe()`. */
+  getChannel: () => RealtimeChannel | null;
 }
 
 export interface SubscribeWithReconnectOptions {
   /** Stable channel name for `supabase.channel(name)`. */
   channelName: string;
+  /** Optional `supabase.channel(name, opts)` config, re-applied on every
+   *  reconnect. Required for broadcast channels that rely on `{ self: true }`
+   *  or presence keys — dropping it on reconnect would silently change the
+   *  channel's semantics after the first drop. */
+  channelConfig?: Parameters<typeof supabase.channel>[1];
   /** Attach listeners and return the channel; do NOT call `.subscribe()` here. */
   setup: (channel: RealtimeChannel) => RealtimeChannel;
   /** Catch-up refetch on re-subscribe + on silent-staleness. Omit to only reconnect. */
@@ -134,7 +144,9 @@ export function subscribeWithReconnect(
     } catch { /* non-fatal — subscribe with whatever the client holds */ }
     if (cancelled) return;
 
-    const raw = supabase.channel(channelName);
+    const raw = opts.channelConfig
+      ? supabase.channel(channelName, opts.channelConfig)
+      : supabase.channel(channelName);
     // Wrap `.on` so every listener the caller attaches also bumps the freshness
     // clock — keeps a HEALTHY channel from ever being judged stale.
     try {
@@ -202,5 +214,6 @@ export function subscribeWithReconnect(
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (channel) { try { supabase.removeChannel(channel); } catch { /* ignore */ } channel = null; }
     },
+    getChannel: () => (cancelled ? null : channel),
   };
 }

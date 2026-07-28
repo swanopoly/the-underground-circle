@@ -22,6 +22,7 @@
 
 import { supabase } from './supabase';
 import type { MemoryDocKind } from './memoryBankKinds';
+import { updateMemoryDoc } from '../services/sharedMemory';
 
 const DEFAULT_MAX_CHARS = 4000;
 const COMPACTION_TRIGGER_MULTIPLIER = 1.1; // 10% overage before we propose
@@ -240,33 +241,38 @@ export async function applyApprovedMemoryCompaction(
     return { ok: false, error: 'invalid payload' };
   }
 
-  // Upsert the new content for this (circle, doc_kind). The row may already
-  // exist, so prefer update-first, fall back to insert.
-  const { data: existing } = await supabase
-    .from('circle_memory')
-    .select('id')
-    .eq('circle_id', circleId)
-    .eq('doc_kind', docKind)
-    .maybeSingle();
-  if (existing) {
-    const { error } = await supabase
-      .from('circle_memory')
-      .update({
-        content: proposedSummary,
-        last_edited_at: new Date().toISOString(),
-        last_edited_by: approval.resolved_by ?? null,
-      })
-      .eq('id', existing.id);
-    if (error) return { ok: false, error: `update failed: ${error.message}` };
-  } else {
-    const { error } = await supabase.from('circle_memory').insert({
-      circle_id: circleId,
-      doc_kind: docKind,
-      content: proposedSummary,
-      last_edited_at: new Date().toISOString(),
-      last_edited_by: approval.resolved_by ?? null,
-    });
-    if (error) return { ok: false, error: `insert failed: ${error.message}` };
+  // Route through the shared, audited write path rather than UPDATEing
+  // `circle_memory.content` directly.
+  //
+  // Compaction REPLACES the circle's shared operating doc with a summary — it is
+  // the most destructive memory operation in the app, and it was the ONLY write
+  // path that recorded no `circle_memory_history` row and never bumped
+  // `version`. So the one operation users would most want to undo was the one
+  // with no undo and no audit trail, and it silently desynced `version` from
+  // history for every write that followed.
+  //
+  // `guardBaseContent` pins the write to the exact document the approved summary
+  // was generated from (captured as `originalContent` in the proposal payload).
+  // Without it, an edit made between proposal and approval would be summarised
+  // away — destroyed by a change the approver never saw and with a perfectly
+  // well-formed audit trail claiming it was intended.
+  const guardBaseContent = typeof payload.originalContent === 'string'
+    ? payload.originalContent
+    : null;
+  const writeResult = await updateMemoryDoc(
+    circleId,
+    proposedSummary,
+    approval.resolved_by ?? '',
+    docKind,
+    { guardBaseContent },
+  );
+  if (!writeResult.ok) {
+    return {
+      ok: false,
+      error: writeResult.status === 'conflict'
+        ? `compaction not applied — the shared doc changed after this was proposed (${writeResult.message}). Re-run the proposal against the current content.`
+        : `${writeResult.status}: ${writeResult.message}`,
+    };
   }
 
   try {

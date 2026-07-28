@@ -4,7 +4,7 @@
  * are unreachable.
  */
 
-import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 import type { TerminalLaunchMode } from './agentIdentity';
 import { applyAgentDevelopmentStandardsToPrompt } from './agentDevelopmentStandards';
@@ -79,7 +79,7 @@ async function probeBridge(port: number): Promise<boolean> {
 }
 
 /**
- * Dispatch to Claude Code bridge via /exec — pipes prompt to claude CLI
+ * Dispatch to Claude Code through the structured, server-owned spawn route.
  */
 async function dispatchToClaudeCode(prompt: string, fileName?: string | null): Promise<BridgeTaskResult> {
   if (!isClaudeCodeBillingAllowed()) {
@@ -89,35 +89,33 @@ async function dispatchToClaudeCode(prompt: string, fileName?: string | null): P
   const online = await probeBridge(port);
   if (!online) return { ok: false, error: 'Claude Code bridge not reachable', dispatchedVia: 'none', provider: 'claude-code' };
   try {
-    // Use a safe temp file approach to avoid shell injection — write prompt to stdin via process substitution
     const fileCtx = fileName ? `\n\nFile context: ${fileName}` : '';
     const fullPrompt = prompt + fileCtx;
-    // Pass prompt as JSON body field — the bridge exec endpoint handles it as stdin pipe
-    // Escape for shell: use base64 encoding to avoid any injection
-    const b64 = typeof btoa === 'function' ? btoa(unescape(encodeURIComponent(fullPrompt))) : Buffer.from(fullPrompt).toString('base64');
-    const command = `echo '${b64}' | base64 -d | claude --dangerously-skip-permissions -p 2>&1 | tail -200`;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`http://localhost:${port}/exec`, {
+    const baseUrl = getBridgeUrl(port) || `http://localhost:${port}`;
+    const res = await fetchBridgeAuthenticated(`${baseUrl}/spawn`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
-      body: JSON.stringify({ command }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: fullPrompt, useWorktree: false }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
 
     const data = await res.json();
     if (data.ok) {
+      const spawned = Array.isArray(data.results) ? data.results.find((item: any) => item?.ok) : null;
       return {
         ok: true,
-        response: data.stdout || data.stderr || 'Task completed (no output)',
+        response: spawned?.spawnId
+          ? `Claude Code task started (handle ${spawned.spawnId}).`
+          : (data.message || 'Claude Code task started.'),
         dispatchedVia: 'bridge',
         provider: 'claude-code',
       };
     }
-    return { ok: false, error: data.error || 'Exec failed', dispatchedVia: 'bridge', provider: 'claude-code' };
+    return { ok: false, error: data.error || data.message || 'Spawn failed', dispatchedVia: 'bridge', provider: 'claude-code' };
   } catch (e: any) {
     return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'claude-code' };
   }
@@ -132,10 +130,10 @@ async function dispatchToGemini(prompt: string, fileName?: string | null): Promi
     const fileCtx = fileName ? `\n\nContext file: ${fileName}` : '';
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 120000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`http://localhost:${port}/send`, {
+    const baseUrl = getBridgeUrl(port) || `http://localhost:${port}`;
+    const res = await fetchBridgeAuthenticated(`${baseUrl}/send`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: prompt + fileCtx }),
       signal: controller.signal,
     });
@@ -189,10 +187,9 @@ export async function sendTerminalAgentSessionMessage(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/terminal/send`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/terminal/send`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId, message: profiledMessage }),
       signal: controller.signal,
     });
@@ -300,13 +297,12 @@ export async function spawnNewClaudeSession(
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
-    const token = await ensureBridgeToken();
     const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
       label: 'The launched terminal agent must follow these repo standards for this delegated task.',
     });
-    const res = await fetch(`${bridgeUrl}/launch`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         count: 1,
         prompts: [profiledTask],
@@ -348,10 +344,9 @@ export async function spawnNewCodexSession(
     const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
       label: 'The launched terminal agent must follow these repo standards for this delegated task.',
     });
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/launch`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         count: 1,
         prompts: [profiledTask],
@@ -395,10 +390,9 @@ export async function spawnNewGeminiCliSession(
     const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
       label: 'The launched terminal agent must follow these repo standards for this delegated task.',
     });
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/launch`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         count: 1,
         prompts: [profiledTask],
@@ -436,10 +430,9 @@ export async function spawnNewCursorComposerSession(
     const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
       label: 'The launched terminal agent must follow these repo standards for this delegated task.',
     });
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/launch`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         count: 1,
         prompts: [profiledTask],
@@ -483,10 +476,9 @@ export async function pruneTerminalAgentWorktrees(
   try {
     const online = await probeBridge(port);
     if (!online) return { ok: false, error: 'Claude Code bridge not reachable for worktree prune' };
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/worktree/prune`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/worktree/prune`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workdir: options?.workdir, force: options?.force }),
     });
     const data = await res.json().catch(() => null);

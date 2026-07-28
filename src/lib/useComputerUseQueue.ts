@@ -24,13 +24,18 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentHandle } from './computerUseAgent';
+import type {
+  AgentHandle,
+  ComputerUseAlwaysConfirmCategory,
+  ComputerUsePreRunBrowserPermission,
+} from './computerUseAgent';
 import type {
   ComputerUseTaskState,
   LiveUsage,
   PendingConfirmation,
 } from './useComputerUseTask';
 import type { LiveAction, LiveScreenshot } from '../components/ComputerUseLiveCard';
+import { buildChatComputerUsePolicyInputs } from './chatComputerRequestRouter';
 
 const EMPTY_TASK: ComputerUseTaskState = {
   status: 'idle',
@@ -129,8 +134,12 @@ export function useComputerUseQueue(circleId: string, userId?: string) {
   // session starts with parallel automation off.
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const handlesRef = useRef<Map<string, AgentHandle>>(new Map());
-  // Serializes auto-starts: `start` awaits creds before claiming a slot, so
-  // two concurrent dequeues could both pass the concurrency check.
+  // Each start claims a synchronous token before its first await. Counting
+  // these tokens alongside rendered slots closes the stale-state race where
+  // concurrent calls could all resolve credentials and overfill the queue.
+  const pendingStartsRef = useRef<Set<object>>(new Set());
+  // Serializes automatic dequeues so one effect pass cannot remove two
+  // waiting tasks; pendingStartsRef separately guards all manual/auto starts.
   const autoStartInFlightRef = useRef(false);
 
   const mutate = useCallback((id: string, patch: Partial<ComputerUseTaskState> | ((s: ComputerUseTaskState) => ComputerUseTaskState)) => {
@@ -144,54 +153,129 @@ export function useComputerUseQueue(circleId: string, userId?: string) {
   /** Kick off a new task. Returns the slot id (or null if we refused). */
   const start = useCallback(async (
     task: string,
-    options?: { sessionId?: string; model?: string | null },
+    options?: {
+      sessionId?: string;
+      model?: string | null;
+      userConstraints?: string[];
+      alwaysConfirmCategories?: ComputerUseAlwaysConfirmCategory[];
+      preRunBrowserPermission?: ComputerUsePreRunBrowserPermission;
+    },
   ): Promise<{ id: string | null; reason?: string }> => {
     const trimmed = task.trim();
     if (!trimmed) return { id: null, reason: 'Empty task.' };
-    if (countActiveComputerUseSlots(slots) >= MAX_CONCURRENT_TASKS) {
+    const ownedActiveCount = Math.max(
+      countActiveComputerUseSlots(slots),
+      handlesRef.current.size,
+    );
+    if (ownedActiveCount + pendingStartsRef.current.size >= MAX_CONCURRENT_TASKS) {
       return { id: null, reason: `Queue full (max ${MAX_CONCURRENT_TASKS} concurrent tasks). Wait for one to finish.` };
     }
+    const startReservation = {};
+    pendingStartsRef.current.add(startReservation);
+    const releaseStartReservation = () => {
+      pendingStartsRef.current.delete(startReservation);
+    };
 
-    const [{ startComputerUseAgent }, { resolveComputerUseCreds }] = await Promise.all([
-      import('./computerUseAgent'),
-      import('./computerUseCreds'),
-    ]);
-    const creds = await resolveComputerUseCreds(circleId);
-    if (!creds.ok) return { id: null, reason: creds.reason };
+    let startComputerUseAgent: typeof import('./computerUseAgent').startComputerUseAgent;
+    let buildComputerUsePolicyEnvelope: typeof import('./computerUseAgent').buildComputerUsePolicyEnvelope;
+    let resolveComputerUseCreds: typeof import('./computerUseCreds').resolveComputerUseCreds;
+    try {
+      const [agentModule, credsModule] = await Promise.all([
+        import('./computerUseAgent'),
+        import('./computerUseCreds'),
+      ]);
+      startComputerUseAgent = agentModule.startComputerUseAgent;
+      buildComputerUsePolicyEnvelope = agentModule.buildComputerUsePolicyEnvelope;
+      resolveComputerUseCreds = credsModule.resolveComputerUseCreds;
+    } catch {
+      const wasCancelled = !pendingStartsRef.current.has(startReservation);
+      releaseStartReservation();
+      return {
+        id: null,
+        reason: wasCancelled ? 'Task start was cancelled.' : 'Could not load the Computer Use runtime.',
+      };
+    }
+    if (!pendingStartsRef.current.has(startReservation)) {
+      return { id: null, reason: 'Task start was cancelled.' };
+    }
+    let creds: Awaited<ReturnType<typeof resolveComputerUseCreds>>;
+    try {
+      creds = await resolveComputerUseCreds(circleId);
+    } catch {
+      const wasCancelled = !pendingStartsRef.current.has(startReservation);
+      releaseStartReservation();
+      return {
+        id: null,
+        reason: wasCancelled ? 'Task start was cancelled.' : 'Could not load Computer Use credentials.',
+      };
+    }
+    if (!pendingStartsRef.current.has(startReservation)) {
+      return { id: null, reason: 'Task start was cancelled.' };
+    }
+    if (!creds.ok) {
+      releaseStartReservation();
+      return {
+        id: null,
+        reason: 'reason' in creds ? creds.reason : 'Computer Use credentials are unavailable.',
+      };
+    }
 
+    const derivedPolicy = buildChatComputerUsePolicyInputs(trimmed);
     const id = `cu-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setSlots((prev) => [...prev, { id, state: { ...EMPTY_TASK, status: 'starting', task: trimmed } }]);
 
-    const handle = startComputerUseAgent({
-      task: trimmed,
-      circleId,
-      userId,
-      model: options?.model || undefined,
-      sessionId: options?.sessionId,
-      browserbase: creds.creds.browserbase,
-      onRunStarted: ({ runId }) => mutate(id, { runId }),
-      onSessionStarted: (info) => mutate(id, { status: 'running', sessionId: info.sessionId, liveUrl: info.liveUrl }),
-      onAction: (info) => mutate(id, (s) => ({ ...s, actions: [...s.actions, { ...info, at: Date.now() } as LiveAction] })),
-      onScreenshot: ({ b64, url }) => mutate(id, (s) => ({ ...s, screenshots: [...s.screenshots, { b64, url, at: Date.now() } as LiveScreenshot] })),
-      onReasoning: (text) => { if (text.trim()) mutate(id, (s) => ({ ...s, reasoning: [...s.reasoning, text] })); },
-      onUsage: (u: LiveUsage) => mutate(id, { usage: u }),
-      onConfirmationRequired: (info) => mutate(id, { pendingConfirmation: { ...info, askedAt: Date.now() } as PendingConfirmation }),
-      onConfirmationResolved: () => mutate(id, { pendingConfirmation: null }),
-      onResult: ({ summary, iterations, tokens, findings, runId }) => {
-        mutate(id, (s) => ({
-          ...s,
-          status: 'done',
-          runId: runId || s.runId,
-          result: { summary, iterations, tokens, findings: findings ?? null },
-        }));
-        handlesRef.current.delete(id);
-      },
-      onError: (msg) => {
-        mutate(id, { status: 'error', errorMessage: msg });
-        handlesRef.current.delete(id);
-      },
-    });
+    let handle: AgentHandle;
+    try {
+      handle = startComputerUseAgent({
+        task: trimmed,
+        circleId,
+        userId,
+        model: options?.model || undefined,
+        sessionId: options?.sessionId,
+        policy: buildComputerUsePolicyEnvelope({
+          executionMode: 'interactive',
+          source: 'queue',
+          userConstraints: options?.userConstraints ?? derivedPolicy.userConstraints,
+          alwaysConfirmCategories:
+            options?.alwaysConfirmCategories ?? derivedPolicy.alwaysConfirmCategories,
+          preRunBrowserPermission: options?.preRunBrowserPermission,
+        }),
+        browserbase: creds.creds.browserbase,
+        onRunStarted: ({ runId }) => mutate(id, { runId }),
+        onSessionStarted: (info) => mutate(id, { status: 'running', sessionId: info.sessionId, liveUrl: info.liveUrl }),
+        onAction: (info) => mutate(id, (s) => ({ ...s, actions: [...s.actions, { ...info, at: Date.now() } as LiveAction] })),
+        onScreenshot: ({ b64, url }) => mutate(id, (s) => ({ ...s, screenshots: [...s.screenshots, { b64, url, at: Date.now() } as LiveScreenshot] })),
+        onReasoning: (text) => { if (text.trim()) mutate(id, (s) => ({ ...s, reasoning: [...s.reasoning, text] })); },
+        onUsage: (u: LiveUsage) => mutate(id, { usage: u }),
+        onConfirmationRequired: (info) => mutate(id, { pendingConfirmation: { ...info, askedAt: Date.now() } as PendingConfirmation }),
+        onConfirmationResolved: () => mutate(id, { pendingConfirmation: null }),
+        onResult: ({ summary, iterations, tokens, findings, runId }) => {
+          mutate(id, (s) => ({
+            ...s,
+            status: 'done',
+            runId: runId || s.runId,
+            result: { summary, iterations, tokens, findings: findings ?? null },
+          }));
+          handlesRef.current.delete(id);
+        },
+        onError: (msg) => {
+          mutate(id, { status: 'error', errorMessage: msg });
+          handlesRef.current.delete(id);
+        },
+      });
+    } catch {
+      const wasCancelled = !pendingStartsRef.current.has(startReservation);
+      releaseStartReservation();
+      if (wasCancelled) return { id: null, reason: 'Task start was cancelled.' };
+      mutate(id, { status: 'error', errorMessage: 'Could not start the Computer Use task.' });
+      return { id: null, reason: 'Could not start the Computer Use task.' };
+    }
+    if (!pendingStartsRef.current.has(startReservation)) {
+      try { handle.cancel(); } catch {}
+      return { id: null, reason: 'Task start was cancelled.' };
+    }
     handlesRef.current.set(id, handle);
+    releaseStartReservation();
     return { id };
   }, [circleId, userId, slots, mutate]);
 
@@ -240,7 +324,7 @@ export function useComputerUseQueue(circleId: string, userId?: string) {
     setPending((prev) => prev.filter((item) => item.id !== nextTask.id));
     void start(nextTask.task)
       .then((result) => {
-        if (!result.id) {
+        if (!result.id && result.reason !== 'Task start was cancelled.') {
           // Make the refusal visible as its own error card; never retry the
           // same task in a loop.
           setSlots((prev) => [...prev, {
@@ -269,6 +353,8 @@ export function useComputerUseQueue(circleId: string, userId?: string) {
   }, []);
 
   const clear = useCallback(() => {
+    // Invalidate every start still awaiting module/credential resolution.
+    pendingStartsRef.current.clear();
     for (const h of handlesRef.current.values()) { try { h.cancel(); } catch {} }
     handlesRef.current.clear();
     setSlots([]);

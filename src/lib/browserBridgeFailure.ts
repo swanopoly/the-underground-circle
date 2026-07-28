@@ -26,6 +26,19 @@ function normalizeExplicitCode(value: unknown): DesktopBridgeError | null {
     case 'human_verification_required':
     case 'browser_bridge_offline':
     case 'browser_dialog_blocked':
+    case 'browser_identity_required':
+    case 'browser_identity_mismatch':
+    case 'browser_target_required':
+    case 'browser_target_mismatch':
+    case 'browser_target_expired':
+    case 'browser_target_replayed':
+    case 'browser_target_revoked':
+    case 'browser_target_unknown':
+    case 'browser_target_capacity':
+    case 'browser_fill_canary_blocked':
+    case 'browser_fill_verification_failed':
+    case 'browser_toggle_canary_blocked':
+    case 'browser_toggle_verification_failed':
     case 'bridge_offline':
     case 'not_paired':
     case 'token_rejected':
@@ -117,6 +130,26 @@ export function browserBridgeRecoveryHint(errorCode: DesktopBridgeError): string
       return 'Read the browser popup text/buttons, use the guarded modal advisor, and retry only if it selects a safe acknowledgement or requested-output overwrite.';
     case 'selector_not_found':
       return 'Collect a fresh DOM snapshot, prefer role/name locators, and retry the failed action once.';
+    case 'browser_identity_required':
+    case 'browser_identity_mismatch':
+      return 'Collect a fresh browser DOM snapshot before retrying with its exact context, page, and URL identity.';
+    case 'browser_target_required':
+    case 'browser_target_mismatch':
+    case 'browser_target_expired':
+    case 'browser_target_replayed':
+    case 'browser_target_revoked':
+    case 'browser_target_unknown':
+      return 'Observe the exact field or state control again and retry only with the new single-use browser target capability.';
+    case 'browser_target_capacity':
+      return 'Wait for stale target observations to expire, then observe the exact field once and retry.';
+    case 'browser_fill_canary_blocked':
+      return 'Use the dedicated approval-gated submit or credential path; this canary only fills non-secret fields without submission.';
+    case 'browser_fill_verification_failed':
+      return 'Collect a fresh DOM snapshot and inspect the field before deciding whether one bounded retry is safe.';
+    case 'browser_toggle_canary_blocked':
+      return 'Do not use the toggle canary for this control. Use a dedicated reviewed action, or pause for the user when authentication or human verification is involved.';
+    case 'browser_toggle_verification_failed':
+      return 'Collect a fresh DOM snapshot and inspect the exact state control before deciding whether one bounded retry is safe.';
     case 'ambiguous_locator':
       return 'Pick a candidate by nth (0-based) or a more specific role+name/selector; do not click the first match.';
     case 'uncertain_ui_target':
@@ -177,6 +210,23 @@ export function browserBridgeRequiredEvidence(errorCode: DesktopBridgeError): st
       return ['browser.dialog_observation', 'browser.dom_snapshot', 'browser.screenshot'];
     case 'selector_not_found':
       return ['browser.dom_snapshot', 'browser.screenshot'];
+    case 'browser_identity_required':
+    case 'browser_identity_mismatch':
+    case 'browser_fill_verification_failed':
+    case 'browser_toggle_verification_failed':
+      return ['browser.dom_snapshot'];
+    case 'browser_target_required':
+    case 'browser_target_mismatch':
+    case 'browser_target_expired':
+    case 'browser_target_replayed':
+    case 'browser_target_revoked':
+    case 'browser_target_unknown':
+    case 'browser_target_capacity':
+      return ['browser.dom_snapshot', 'browser.fill_target'];
+    case 'browser_fill_canary_blocked':
+      return ['browser.dom_snapshot', 'user.approve_dedicated_browser_action'];
+    case 'browser_toggle_canary_blocked':
+      return ['browser.dom_snapshot', 'user.approve_dedicated_browser_action'];
     case 'ambiguous_locator':
       return ['browser.dom_snapshot', 'browser.candidate_list'];
     case 'uncertain_ui_target':
@@ -237,6 +287,17 @@ export function browserBridgeRetryability(errorCode: DesktopBridgeError): Browse
     case 'selector_not_found':
     case 'ambiguous_locator':
     case 'uncertain_ui_target':
+    case 'browser_identity_required':
+    case 'browser_identity_mismatch':
+    case 'browser_target_required':
+    case 'browser_target_mismatch':
+    case 'browser_target_expired':
+    case 'browser_target_replayed':
+    case 'browser_target_revoked':
+    case 'browser_target_unknown':
+    case 'browser_target_capacity':
+    case 'browser_fill_verification_failed':
+    case 'browser_toggle_verification_failed':
     case 'a11y_tree_empty':
     case 'a11y_path_stale':
     case 'stale_bridge':
@@ -250,6 +311,8 @@ export function browserBridgeRetryability(errorCode: DesktopBridgeError): Browse
       return 'retry_once';
     // Nothing to gain from retrying as-is.
     case 'invalid_input':
+    case 'browser_fill_canary_blocked':
+    case 'browser_toggle_canary_blocked':
     case 'platform_unsupported':
     case 'helper_missing':
     case 'app_not_found':

@@ -141,27 +141,60 @@ export interface SwanBotOpenSwanReadinessSnapshot {
 // Expected counts are pinned against the live `swanbot-v2-ai` TOOLS array by
 // the readiness smoke via deriveSwanbotV2ToolParityFromSource — if the edge
 // catalog grows or shrinks, the smoke fails until these are re-pinned here.
-// (Re-pinned 2026-07-14: +6 coding-agent client tools — edit_file, run_shell,
-// git.run, codebase.search, todo.write, coordination.file_status — v2 now
-// exposes 79 tools, 54 of them client-delegated.)
-export const SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL = 79;
-export const SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS = 54;
+// (Re-pinned 2026-07-27: +1 read-only advisory locator-actionability tool —
+// browser.locator_actionability — v2 now exposes 82 tools, 57 of them
+// client-delegated. Its evidence never authorizes or binds a later mutation.)
+export const SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL = 82;
+export const SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS = 57;
 export const SWANBOT_OPENSWAN_DEFAULT_MIN_TELEMETRY_RUNS = 50;
 
 export const SWANBOT_OPENSWAN_REQUIRED_SMOKES: SwanBotOpenSwanSmokeCheck[] = [
   { id: 'swanbot-routing', command: 'npm run smoke:swanbot-routing', status: 'unknown' },
   { id: 'swanbot-v2-delegation', command: 'npm run smoke:swanbot-v2-delegation', status: 'unknown' },
   { id: 'swanbot-v2-continuation', command: 'npm run smoke:swanbot-v2-continuation', status: 'unknown' },
+  { id: 'swanbot-v2-continuation-crypto', command: 'npm run smoke:swanbot-v2-continuation-crypto', status: 'unknown' },
+  { id: 'swanbot-v2-batch-policy', command: 'npm run smoke:swanbot-v2-batch-policy', status: 'unknown' },
   { id: 'swanbot-v2-writers', command: 'npm run smoke:swanbot-v2-writers', status: 'unknown' },
   { id: 'swanbot-v2-workspace', command: 'npm run smoke:swanbot-v2-workspace', status: 'unknown' },
   { id: 'swanbot-v2-approvals', command: 'npm run smoke:swanbot-v2-approvals', status: 'unknown' },
   { id: 'swanbot-v2-wp', command: 'npm run smoke:swanbot-v2-wp', status: 'unknown' },
   { id: 'swanbot-v2-dispatcher-parity', command: 'npm run smoke:swanbot-v2-dispatcher-parity', status: 'unknown' },
   { id: 'swanbot-v2-stop-reason', command: 'npm run smoke:swanbot-v2-stop-reason', status: 'unknown' },
+  { id: 'swanbot-v2-terminal-integrity', command: 'npm run smoke:swanbot-v2-terminal-integrity', status: 'unknown' },
   { id: 'wordpress-admin-source-intelligence', command: 'npm run smoke:wordpress-admin-source-intelligence', status: 'unknown' },
+  { id: 'browser-locator-actionability', command: 'npm run smoke:browser-locator-actionability', status: 'unknown' },
+  { id: 'browser-dom-snapshot-privacy', command: 'npm run smoke:browser-dom-snapshot-privacy', status: 'unknown' },
   { id: 'openswan-runtime-approval', command: 'npm run smoke:openswan-runtime-approval', status: 'unknown' },
+  { id: 'openswan-generic-native-ui-runtime', command: 'npm run smoke:openswan-generic-native-ui-runtime', status: 'unknown' },
+  { id: 'chat-approval-single-use', command: 'npm run smoke:chat-approval-single-use', status: 'unknown' },
   { id: 'openswan-task-planner', command: 'npm run smoke:openswan-task-planner', status: 'unknown' },
   { id: 'agent-failure-recovery', command: 'npm run smoke:agent-failure-recovery', status: 'unknown' },
+  { id: 'event-bound-core', command: 'npm run smoke:event-bound-core', status: 'unknown' },
+  { id: 'desktop-action-summary-replay', command: 'npm run smoke:desktop-action-summary-replay', status: 'unknown' },
+  { id: 'computer-task-runtime-context', command: 'npm run smoke:computer-task-runtime-context', status: 'unknown' },
+  { id: 'computer-app-open-path-runtime', command: 'npm run smoke:computer-app-open-path-runtime', status: 'unknown' },
+  { id: 'automation-executor-mutation-guard', command: 'npm run smoke:automation-executor-mutation-guard', status: 'unknown' },
+  { id: 'scheduled-action-mutation-guard', command: 'npm run smoke:scheduled-action-mutation-guard', status: 'unknown' },
+  { id: 'office-terminal-broadcast-authority', command: 'npm run smoke:office-terminal-broadcast-authority', status: 'unknown' },
+  { id: 'database-authority-guards', command: 'npm run smoke:database-authority-guards', status: 'unknown' },
+  { id: 'direct-local-file-runtime', command: 'npm run smoke:direct-local-file-runtime', status: 'unknown' },
+  { id: 'direct-image-conversion-runtime', command: 'npm run smoke:direct-image-conversion-runtime', status: 'unknown' },
+  { id: 'computer-app-action-contract', command: 'npm run smoke:computer-app-action-contract', status: 'unknown' },
+  { id: 'browser-fill-mutation-gateway', command: 'npm run smoke:browser-fill-mutation-gateway', status: 'unknown' },
+  { id: 'browser-toggle-mutation-gateway', command: 'npm run smoke:browser-toggle-mutation-gateway', status: 'unknown' },
+  { id: 'browser-toggle-runtime-gateway', command: 'npm run smoke:browser-toggle-runtime-gateway', status: 'unknown' },
+  { id: 'browser-select-mutation-gateway', command: 'npm run smoke:browser-select-mutation-gateway', status: 'unknown' },
+  { id: 'browser-select-runtime-gateway', command: 'npm run smoke:browser-select-runtime-gateway', status: 'unknown' },
+  { id: 'computer-use-select-handoff', command: 'npm run smoke:computer-use-select-handoff', status: 'unknown' },
+  { id: 'computer-use-mutation-handoff', command: 'npm run smoke:computer-use-mutation-handoff', status: 'unknown' },
+  { id: 'computer-use-cloud-policy', command: 'npm run smoke:computer-use-cloud-policy', status: 'unknown' },
+  { id: 'computer-app-launch-focus-proof', command: 'npm run smoke:computer-app-launch-focus-proof', status: 'unknown' },
+  { id: 'swanbot-v2-client-result-persistence', command: 'npm run smoke:swanbot-v2-client-result-persistence', status: 'unknown' },
+  { id: 'swanbot-v2-edge-fill-schema', command: 'npm run smoke:swanbot-v2-edge-fill-schema', status: 'unknown' },
+  { id: 'agent-action-calls', command: 'npm run smoke:agent-action-calls', status: 'unknown' },
+  { id: 'agent-action-runtime-wiring', command: 'npm run smoke:agent-action-runtime-wiring', status: 'unknown' },
+  { id: 'computer-app-semantic-action-proof', command: 'npm run smoke:computer-app-semantic-action-proof', status: 'unknown' },
+  { id: 'computer-app-semantic-action-runtime', command: 'npm run smoke:computer-app-semantic-action-runtime', status: 'unknown' },
 ];
 
 export interface SwanbotV2DerivedToolParity {
@@ -277,6 +310,8 @@ export function buildSwanBotOpenSwanTelemetryInputFromAgentRunRows(
   const warnings: string[] = [];
   let ignoredRows = 0;
   let activePendingRows = 0;
+  let activeDispatchingRows = 0;
+  let activeResumingRows = 0;
 
   for (const row of rows || []) {
     if (row.surface && row.surface !== 'main_chat') {
@@ -296,9 +331,18 @@ export function buildSwanBotOpenSwanTelemetryInputFromAgentRunRows(
 
     const rawReason = row.final_stop_reason;
     const reason = normalizeStopReason(rawReason);
-    if (row.status === 'running' && reason === 'client_pending') {
+    if (
+      row.status === 'running'
+      && (
+        reason === 'client_pending'
+        || reason === 'client_dispatching'
+        || reason === 'client_resuming'
+      )
+    ) {
       ignoredRows += 1;
-      activePendingRows += 1;
+      if (reason === 'client_pending') activePendingRows += 1;
+      else if (reason === 'client_dispatching') activeDispatchingRows += 1;
+      else activeResumingRows += 1;
       continue;
     }
     const sideCompleteness = completeness[side];
@@ -326,7 +370,16 @@ export function buildSwanBotOpenSwanTelemetryInputFromAgentRunRows(
   if (activePendingRows > 0) {
     warnings.push(`Ignored ${activePendingRows} active client_pending SwanBot run${activePendingRows === 1 ? '' : 's'}; readiness counts terminal rows only.`);
   }
-  const ignoredNonPendingRows = ignoredRows - activePendingRows;
+  if (activeDispatchingRows > 0) {
+    warnings.push(`Ignored ${activeDispatchingRows} active client_dispatching SwanBot run${activeDispatchingRows === 1 ? '' : 's'}; the durable pre-dispatch claim is non-terminal.`);
+  }
+  if (activeResumingRows > 0) {
+    warnings.push(`Ignored ${activeResumingRows} active client_resuming SwanBot run${activeResumingRows === 1 ? '' : 's'}; the single-consumer continuation claim is non-terminal.`);
+  }
+  const ignoredNonPendingRows = ignoredRows
+    - activePendingRows
+    - activeDispatchingRows
+    - activeResumingRows;
   if (ignoredNonPendingRows > 0) {
     warnings.push(`Ignored ${ignoredNonPendingRows} non-SwanBot agent_run row${ignoredNonPendingRows === 1 ? '' : 's'}.`);
   }

@@ -55,6 +55,26 @@ live-run freshness / failover visibility.**
 
 ### 1 — Realtime subscriptions don't reconnect; live surfaces go silently stale · CORE BUILT (generalize) · mostly SAFE
 
+> **Status update 2026-07-24.** The core landed since this doc was written:
+> `resilientSubscriptionCore.ts` (pure decisions) + `subscribeWithReconnect.ts`
+> (non-React wrapper) + `useResilientSubscription.ts` (hook) + `connectionStatusCore.ts`.
+> The remaining work is **adoption**, and the whole **Office surface is now
+> migrated**: `circleOffice.subscribeToCircleOffice` (the roster — the highest-value
+> one), `OfficeTab` agent plans, all three `officeTerminal` channels, `OfficeTerminal`
+> responses, `AgentMemoryPanel`, `OfficeAnalyticsPanel`, `GitHubWallFeed`, and
+> `Whiteboard` rewards. Two supporting changes were needed in the shared wrapper:
+> `channelConfig` passthrough (re-applied on every reconnect — the terminal command
+> channel relies on `broadcast: { self: true }`, and dropping it after the first
+> drop would silently stop the sender seeing its own commands) and `getChannel()`
+> (the terminal's send path shared that channel, and a cached reference would send
+> into a channel that reconnect had already replaced). Where a caller had a real
+> refetch it is wired as `onCatchUp`, so rows written while the socket was down are
+> backfilled rather than lost; `OfficeAnalyticsPanel` is reconnect-only because its
+> handler applies incremental patches over a parent-owned snapshot with nothing
+> local to refetch. **Still on raw `.subscribe()`:** Chat, Feed, Rooms, WarRoom,
+> GitHub tabs, `useKanbanData`, `useGoals`, `useOrg`, `useBackpackData`, and the
+> `services/*` layer (~30 files).
+
 **The single highest-leverage reliability gap.** The app opens **76 realtime
 `.subscribe()` channels** across Chat/Office/Feed, but exactly **one file**
 handles channel drop. After any network blip, laptop sleep/wake, or Supabase

@@ -34,14 +34,18 @@ import {
   executeOpenSwanRuntimeTool,
   formatOpenSwanRuntimeToolResult,
   getOpenSwanToolParallelPolicy,
+  splitOpenSwanRuntimeToolResultMetadata,
   type OpenSwanRuntimeToolContext,
   type OpenSwanRuntimeToolName,
   type OpenSwanToolCatalogMatch,
   type OpenSwanToolSurface,
 } from './openswanToolRuntime';
-import type { AgentToolDefinition } from './agentExecutionCore';
+import type { AgentToolContext, AgentToolDefinition } from './agentExecutionCore';
 import { extractToolResultImageSideChannel } from './agentExecutionCore';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
+
+type OpenSwanRuntimeCallContext = OpenSwanRuntimeToolContext
+  & Pick<AgentToolContext, 'toolName' | 'toolUseId' | 'iteration'>;
 
 /**
  * Returns OpenSwan tools (for the given surface) as AgentToolDefinition[],
@@ -79,30 +83,48 @@ export function getOpenSwanToolsForSurface(
     input_schema: tool.input_schema as Record<string, unknown>,
     // X4 (P47): carry curated input_examples through to the provider.
     ...(tool.input_examples ? { input_examples: tool.input_examples } : {}),
-    handler: async (input) => {
+    handler: async (input, handlerCtx) => {
       try {
+        // Per-call identity must come from the model loop's handler context.
+        // Never derive/fabricate a tool-use id from the catalog name, args, or
+        // run id. Direct legacy handler calls may omit these optional fields;
+        // mutation chokepoints can then fail closed.
+        const callContext: OpenSwanRuntimeCallContext = {
+          ...ctx,
+          toolName: handlerCtx.toolName,
+          toolUseId: handlerCtx.toolUseId,
+          iteration: handlerCtx.iteration,
+        };
         const result = await executeOpenSwanRuntimeTool(
           tool.name as OpenSwanRuntimeToolName,
           input as any,
-          ctx,
+          callContext,
         );
+        // The runtime splitter removes its reserved metadata namespace before
+        // anything becomes raw/formatted model data and only returns metadata
+        // backed by a runtime-issued (unforgeable in-process) receipt object.
+        const { raw: visibleResult, metadata } = splitOpenSwanRuntimeToolResultMetadata(result);
         // P21 image side channel (PRODUCER seam — LOCKSTEP with
         // agentExecutionCore's extraction/consumption): a large base64 field
         // becomes `data.image` and the raw copy carries an omission marker,
         // so screenshots reach the model as REAL image blocks instead of
         // flooding the tool_result text as stringified base64.
-        const sideChannel = extractToolResultImageSideChannel(result);
+        const sideChannel = extractToolResultImageSideChannel(visibleResult);
         const data: Record<string, unknown> = sideChannel
           ? { raw: sideChannel.sanitizedRaw, image: sideChannel.image }
-          : { raw: result };
+          : { raw: visibleResult };
         if (includeFormatted) {
           try {
-            data.text = formatOpenSwanRuntimeToolResult(tool.name as OpenSwanRuntimeToolName, result as any);
+            data.text = formatOpenSwanRuntimeToolResult(tool.name as OpenSwanRuntimeToolName, visibleResult as any);
           } catch {
             // Formatter failures are non-fatal — raw is enough to recover.
           }
         }
-        return { ok: true, data };
+        return {
+          ok: true,
+          data,
+          ...(metadata ? { metadata } : {}),
+        };
       } catch (err) {
         return {
           ok: false,

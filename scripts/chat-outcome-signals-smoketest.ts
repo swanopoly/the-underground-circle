@@ -16,12 +16,16 @@ import {
   CHAT_OUTCOME_VERDICTS,
   CHAT_USER_SIGNALS,
   buildOutcomeSignalPayload,
+  deriveBrowserPlanChatOutcomeSignal,
+  deriveComputerTaskChatOutcomeSignal,
   deriveOutcomeVerdict,
+  deriveStopMessageChatOutcomeSignal,
   mapReactionToSignal,
   readOutcomeSignalPayload,
   summarizeOutcomeForFlywheel,
   type ChatOutcomeSignalInput,
 } from '../src/lib/chatOutcomeSignals';
+import { resolveChatStopMessage } from '../src/lib/chatStopMessageCore';
 import {
   formatPersistedChatBotMessage,
   readPersistedChatBotMetadata,
@@ -98,6 +102,68 @@ assert(
 assert(
   deriveOutcomeVerdict({ hadError: 1, hadRecoveryOptions: 'x' } as any) === 'unknown',
   'non-boolean fields ignored -> unknown',
+);
+
+const computerOutcomeExpectations = [
+  ['completed', 'completed', false, false],
+  ['partial', 'partial', false, true],
+  ['failed', 'failed', false, true],
+  ['waiting_approval', 'blocked', true, false],
+  ['blocked', 'blocked', false, false],
+  ['needs_input', 'blocked', false, false],
+  ['cancelled', 'blocked', false, true],
+] as const;
+for (const [status, verdict, approvalPending, canRetry] of computerOutcomeExpectations) {
+  const signal = deriveComputerTaskChatOutcomeSignal(status);
+  assert(
+    signal?.verdict === verdict
+      && signal.approvalPending === approvalPending
+      && signal.canRetry === canRetry,
+    `authoritative computer ${status} maps to truthful flywheel/follow-up state`,
+  );
+}
+assert(
+  deriveComputerTaskChatOutcomeSignal(null) === null,
+  'missing computer status leaves generic outcome inference in control',
+);
+
+assert(
+  deriveBrowserPlanChatOutcomeSignal([{ status: 'launched' }])?.verdict === 'unknown',
+  'a launched browser plan is nonterminal, not a completed artifact',
+);
+assert(
+  deriveBrowserPlanChatOutcomeSignal([{ status: 'planned' }, { status: 'approval_requested' }])?.approvalPending === true,
+  'latest browser approval request maps to a blocked approval state',
+);
+assert(
+  deriveBrowserPlanChatOutcomeSignal([{ status: 'launched' }, { status: 'completed' }])?.verdict === 'completed',
+  'only a terminal completed browser plan maps to completed',
+);
+assert(
+  deriveBrowserPlanChatOutcomeSignal([{ status: 'failed' }])?.verdict === 'failed',
+  'terminal failed browser plan maps to failed',
+);
+assert(
+  deriveBrowserPlanChatOutcomeSignal([{ status: 'launched' }, { nope: true }])?.verdict === 'unknown',
+  'browser lifecycle mapper safely ignores malformed trailing entries',
+);
+assert(
+  deriveStopMessageChatOutcomeSignal(
+    'Stopped because the latest browser.observe result matched your "captcha" stop condition. I did not continue. Clear the blocker or tell me how you want to proceed.',
+  )?.verdict === 'blocked',
+  'a typed user stop condition is blocked rather than completed prose',
+);
+assert(
+  deriveStopMessageChatOutcomeSignal(resolveChatStopMessage('v2_continuation_cap').message)?.verdict === 'partial',
+  'a continuation cap preserves partial progress instead of becoming completed',
+);
+assert(
+  deriveStopMessageChatOutcomeSignal(resolveChatStopMessage('tool_use_failed').message)?.verdict === 'failed',
+  'recognized tool-failure stop copy maps to failed',
+);
+assert(
+  deriveStopMessageChatOutcomeSignal('Here is the finished answer.') === null,
+  'ordinary text is not treated as an authoritative stop',
 );
 
 // exhaustive: every boolean combination returns a defined verdict

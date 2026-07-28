@@ -4,10 +4,11 @@
  * D7c guided replay in supabase/functions/computer-use-agent/index.ts).
  *
  * Covered:
- *   1. Redaction parity with the edge `redactForTrace`/`recordTrace`:
- *      credential-shaped keys masked (incl. NESTED — deliberate
- *      strengthening), 200-char string truncation, ≤40-action sliding
- *      window (newest kept).
+ *   1. Both current redaction contracts: the desktop runtime recursively
+ *      masks credential-shaped keys and bounds heterogeneous harvested
+ *      traces, while the edge uses stronger tool-aware allowlisting and
+ *      omits typed/key/credential/ask-user actions from replay traces.
+ *      Both keep a ≤40-action sliding window (newest kept).
  *   2. Normalization parity with the edge `normalizeTaskForReplay`:
  *      schedule prefix stripped, lowercased, whitespace collapsed.
  *   3. Example-block format: numbered tool(input) steps, HYPOTHESIS +
@@ -24,9 +25,9 @@
  * The pure helpers are MIRRORED from src/lib/computerTaskRuntime.ts —
  * that module cannot be imported here (agentRuntime drags in
  * react-native, see scripts/computer-task-runtime-smoketest.ts for the
- * same pattern). Source-parity assertions below read both the runtime
- * file and the edge function to keep the mirror + the edge semantics in
- * lockstep.
+ * same pattern). Source-contract assertions below read both the runtime
+ * file and the edge function to pin their intentionally different,
+ * defense-in-depth redaction responsibilities.
  *
  * Run: npm run smoke:desktop-action-trace
  */
@@ -185,23 +186,58 @@ const edgeNormalizeTaskForReplay = (value: string) => String(value || '')
 
 // ─── Test runner ─────────────────────────────────────────────────────────────
 
+let assertions = 0;
 let failures = 0;
 function fail(m: string) { failures += 1; console.error('FAIL:', m); }
 function pass(m: string) { console.log('pass:', m); }
 function assert(cond: unknown, name: string, detail?: string) {
+  assertions += 1;
   if (cond) pass(name); else fail(`${name}${detail ? ' — ' + detail : ''}`);
 }
 
 function main() {
-  // ─── Source parity: the mirror + the edge stay in lockstep ────────────────
+  // ─── Source contracts: runtime defense + tool-aware edge telemetry ────────
   const repoRoot = path.resolve(__dirname, '..');
   const runtimeSrc = fs.readFileSync(path.join(repoRoot, 'src/lib/computerTaskRuntime.ts'), 'utf8');
   const edgeSrc = fs.readFileSync(path.join(repoRoot, 'supabase/functions/computer-use-agent/index.ts'), 'utf8');
   const runSystemSrc = fs.readFileSync(path.join(repoRoot, 'src/lib/agentRunSystem.ts'), 'utf8');
 
   const sensitiveKeyLiteral = '/password|secret|token|otp|credential|passcode|pin|cvv|card/i';
-  assert(runtimeSrc.includes(sensitiveKeyLiteral), 'parity: runtime carries the edge SENSITIVE_KEY_RE literal');
-  assert(edgeSrc.includes(sensitiveKeyLiteral), 'parity: edge still carries the same SENSITIVE_KEY_RE literal');
+  assert(runtimeSrc.includes(sensitiveKeyLiteral), 'runtime redaction: credential-shaped key regex remains pinned');
+  assert(
+    edgeSrc.includes('function redactToolInputForTelemetry(tool: string, input: unknown): unknown'),
+    'edge redaction: tool-aware telemetry redactor remains the single entry point',
+  );
+  assert(
+    edgeSrc.includes('if (action === "type" || action === "key")')
+      && edgeSrc.includes('text: "[redacted]"'),
+    'edge redaction: native type/key telemetry replaces text with a marker',
+  );
+  assert(
+    edgeSrc.includes('if (tool === "fill_saved_login")')
+      && edgeSrc.includes('return { credential: "[redacted]", purpose: "[redacted]", submit: input.submit === true };'),
+    'edge redaction: saved-login telemetry exposes only redaction markers and submit boolean',
+  );
+  assert(
+    edgeSrc.includes('if (tool === "ask_user")')
+      && edgeSrc.includes('question: "[confirmation text omitted from telemetry]"'),
+    'edge redaction: ask-user telemetry omits confirmation text',
+  );
+  assert(
+    edgeSrc.includes('if (tool === "fill_saved_login" || tool === "ask_user") return;')
+      && edgeSrc.includes('if (action === "type" || action === "key") return;'),
+    'edge trace: credential, ask-user, type, and key calls are omitted from replay capture',
+  );
+  assert(
+    edgeSrc.includes('actionTrace.push({ tool, input: redactToolInputForTelemetry(tool, input) });'),
+    'edge trace: every retained action passes through tool-aware allowlisting',
+  );
+  assert(
+    edgeSrc.includes('if (a.tool === "fill_saved_login") return false;')
+      && edgeSrc.includes('classified.action !== "type"')
+      && edgeSrc.includes('classified.action !== "key"'),
+    'edge replay: historical credential/type/key traces are filtered before prompt injection',
+  );
   const prefixLiteral = '/^run this computer task exactly as written:\\s*/i';
   assert(runtimeSrc.includes(prefixLiteral), 'parity: runtime carries the edge schedule-prefix matcher');
   assert(edgeSrc.includes(prefixLiteral), 'parity: edge still carries the schedule-prefix matcher');
@@ -223,7 +259,7 @@ function main() {
   assert(runtimeSrc.includes('${desktopTraceExampleBlock}USER COMPUTER TASK'), 'wiring: example block injected into prompt assembly');
   assert((runtimeSrc.match(/persistDesktopActionTraceForRun\(/g) || []).length === 2, 'wiring: exactly one persistence call site (+definition)');
 
-  // ─── 1. Redaction parity ─────────────────────────────────────────────────
+  // ─── 1. Runtime recursive redaction defense ──────────────────────────────
   {
     const redacted = redactDesktopTraceInput({
       password: 'hunter2',
@@ -448,7 +484,7 @@ function main() {
     console.error(`\n${failures} desktop-action-trace smoke-test failure(s)`);
     process.exit(1);
   }
-  console.log('\nAll desktop-action-trace smoke cases passed.');
+  console.log(`\nAll desktop-action-trace smoke cases passed (${assertions} assertions).`);
 }
 
 main();

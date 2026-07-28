@@ -53,6 +53,9 @@ const LADDER: Record<string, SurfaceLadderStep[]> = {
     { tool: 'browser.press_key', why: 'keyboard-navigate — Tab to the control, then Enter/Space' },
     { tool: 'browser.dom_snapshot', why: 're-read the DOM and retry click_role with the corrected role/name' },
   ],
+  'browser.set_toggle': [
+    { tool: 'browser.dom_snapshot', why: 're-read the DOM and resolve one exact checkbox, switch, or radio again' },
+  ],
   'browser.fill_field': [
     { tool: 'browser.click_role', why: 'focus the field by role/label first' },
     { tool: 'browser.press_key', why: 'then type into the focused field via keyboard' },

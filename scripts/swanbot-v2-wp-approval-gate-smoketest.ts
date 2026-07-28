@@ -1,9 +1,9 @@
 /**
  * swanbot-v2-wp-approval-gate-smoketest
  *
- * Offline guard for SwanBot v2 client-only WordPress mutation safety. This
- * intentionally checks the real source wiring so a future refactor cannot
- * accidentally let wp.* writes bypass the exact tool+args approval row.
+ * Offline guard for SwanBot client-side WordPress and always-confirm
+ * approval safety. It pins the canonical v2 digest/audit shape plus the real
+ * source wiring around authenticated persisted identity and single-use CAS.
  *
  * Run: npm run smoke:swanbot-v2-wp-approval-gate
  */
@@ -11,8 +11,11 @@
 import { readFileSync } from 'node:fs';
 
 import {
-  buildOpenSwanToolApprovalKey,
+  buildOpenSwanApprovalAuditPayload,
+  buildOpenSwanApprovalAuthorityBindingDigest,
+  buildOpenSwanToolApprovalDigest,
   resolveOpenSwanRuntimeApprovalDecision,
+  type OpenSwanRuntimeApprovalRow,
 } from '../src/lib/openswanToolApprovals';
 
 let failures = 0;
@@ -40,6 +43,12 @@ function extractSwitchCase(source: string, tool: string): string {
   return nextCase >= 0 ? afterStart.slice(0, nextCase) : afterStart;
 }
 
+function extractFunction(source: string, name: string, nextName: string): string {
+  const start = source.indexOf(`async function ${name}`);
+  const end = source.indexOf(`async function ${nextName}`, start + 1);
+  return start >= 0 && end > start ? source.slice(start, end) : '';
+}
+
 const swanbotSource = readFileSync('src/lib/swanbot.ts', 'utf8');
 const openswanRuntimeSource = readFileSync('src/lib/openswanToolRuntime.ts', 'utf8');
 const edgeSource = readFileSync('supabase/functions/swanbot-v2-ai/index.ts', 'utf8');
@@ -58,16 +67,22 @@ const READ_ONLY_WP_TOOLS = [
 
 function assertSwanBotContinuationContext(): void {
   assert(
-    /executeClientToolCalls\(pendingCalls,\s*\{\s*circleId,\s*userId,\s*runId:\s*response\.continuationRunId,\s*\}\)/s.test(swanbotSource),
-    'continuation passes run-scoped approval context into client tools',
+    swanbotSource.includes('runId: response.continuationRunId')
+      && swanbotSource.includes('iteration: i + 1'),
+    'continuation passes persisted run and loop iteration into client tools',
   );
   assert(
     /dispatchOneClientTool\(bridge,\s*call,\s*context\)/.test(swanbotSource),
     'client tool loop forwards approval context into dispatcher',
   );
   assert(
-    /context\?:\s*\{\s*circleId:\s*string;\s*userId:\s*string;\s*runId:\s*string\s*\}/s.test(swanbotSource),
-    'dispatcher context includes circleId userId and runId',
+    /type SwanBotClientToolApprovalContext = \{[\s\S]*toolUseId: string;[\s\S]*iteration: number;/m.test(swanbotSource),
+    'approval context binds exact provider tool-use identity and iteration',
+  );
+  assert(
+    swanbotSource.includes('toolUseId: block.id')
+      && swanbotSource.includes('iteration: round + 1'),
+    'legacy SwanBot loop passes exact block identity into always-confirm floor',
   );
 }
 
@@ -76,8 +91,9 @@ function assertSwanBotWpGateWiring(): void {
   for (const tool of MUTATING_WP_TOOLS) {
     assert(swanbotSource.includes(`'${tool}'`), `${tool} is in source`);
     assert(
-      swanbotSource.includes(`case '${tool}':`) && swanbotSource.includes(`withSwanBotClientWordPressApproval(call.name, input, context`),
-      `${tool} is routed through the approval wrapper`,
+      swanbotSource.includes(`case '${tool}':`)
+        && swanbotSource.includes('withSwanBotClientWordPressApproval(call.name, input, context, call.id'),
+      `${tool} is routed through the exact-call approval wrapper`,
     );
   }
   for (const tool of READ_ONLY_WP_TOOLS) {
@@ -89,15 +105,123 @@ function assertSwanBotWpGateWiring(): void {
       `${tool} remains direct/read-only`,
     );
   }
-  assert(swanbotSource.includes("key === 'approvalId'"), 'approval key ignores caller-supplied approvalId');
-  assert(swanbotSource.includes("key === 'toolApprovalKey'"), 'approval key ignores caller-supplied toolApprovalKey');
-  assert(swanbotSource.includes(".from('agent_run_approvals')"), 'approval resolver queries agent_run_approvals');
-  assert(swanbotSource.includes(".eq('run_id', context.runId)"), 'approval lookup is scoped to continuation run id');
-  assert(swanbotSource.includes(".eq('circle_id', context.circleId)"), 'approval lookup is scoped to circle id');
-  assert(swanbotSource.includes('buildOpenSwanToolApprovalKey(input.tool, args)'), 'missing approvals create exact tool+args key');
-  assert(swanbotSource.includes('resolveOpenSwanRuntimeApprovalDecision'), 'approval decisions reuse OpenSwan exact matcher');
-  assert(swanbotSource.includes('requestRunApproval'), 'missing approvals create a pending run approval');
-  assert(swanbotSource.includes('I did not touch WordPress'), 'blocked messages are customer-safe and explicit');
+
+  assert(
+    swanbotSource.includes('SWANBOT_APPROVAL_METADATA_ARG_KEYS')
+      && swanbotSource.includes("'dispatchBindingDigest'")
+      && swanbotSource.includes("'toolApprovalDigest'"),
+    'caller-supplied approval metadata is stripped from exact args',
+  );
+  assert(
+    swanbotSource.includes('buildOpenSwanToolApprovalDigest')
+      && swanbotSource.includes('buildOpenSwanApprovalAuditPayload')
+      && swanbotSource.includes('resolveOpenSwanRuntimeApprovalDecision'),
+    'SwanBot reuses canonical v2 digest, payload, and resolution helpers',
+  );
+  assert(
+    !swanbotSource.includes('toolApprovalKeyVersion: 1'),
+    'SwanBot no longer creates legacy v1 approval payloads',
+  );
+  const requestFunction = extractFunction(
+    swanbotSource,
+    'requestOrConsumeSwanBotApproval',
+    'resolveSwanBotClientToolApproval',
+  );
+  assert(
+    requestFunction.includes('payload,')
+      && !/payload:\s*\{[\s\S]*?\bargs\b/.test(requestFunction),
+    'approval request persists the canonical safe payload, never raw args',
+  );
+
+  const wrapperFunction = extractFunction(
+    swanbotSource,
+    'withSwanBotClientWordPressApproval',
+    'resolveSwanBotFloorApproval',
+  );
+  assert(
+    wrapperFunction.indexOf('resolveSwanBotClientToolApproval') >= 0
+      && wrapperFunction.indexOf('resolveSwanBotClientToolApproval') < wrapperFunction.indexOf('await dispatch()'),
+    'WordPress approval is atomically resolved before mutation dispatch',
+  );
+  assert(
+    swanbotSource.includes('I did not touch WordPress'),
+    'blocked WordPress messages remain customer-safe and explicit',
+  );
+}
+
+function assertAuthenticatedSingleUseWiring(): void {
+  const authFunction = extractFunction(
+    swanbotSource,
+    'hasAuthenticatedPersistedSwanBotApprovalCall',
+    'consumeSwanBotApprovalAuthority',
+  );
+  assert(
+    authFunction.includes('supabase.auth.getUser()')
+      && authFunction.includes("from('agent_runs')")
+      && authFunction.includes(".eq('user_id', context.userId)")
+      && authFunction.includes(".eq('circle_id', context.circleId)"),
+    'approval authority requires current auth and persisted user/circle run',
+  );
+
+  const consumeFunction = extractFunction(
+    swanbotSource,
+    'consumeSwanBotApprovalAuthority',
+    'findCrossRunApprovedToolPass',
+  );
+  assert(
+    consumeFunction.includes('buildOpenSwanApprovalAuthorityBindingDigest')
+      && consumeFunction.includes("source: input.source"),
+    'consume receipt cryptographically binds run/call/source authority',
+  );
+  assert(
+    consumeFunction.includes(".eq('requested_by', input.context.userId)")
+      && consumeFunction.includes(".eq('payload->>toolApprovalDigest', exactDigest)")
+      && consumeFunction.includes(".is('payload->>dispatchBindingDigest', null)")
+      && consumeFunction.includes(".gt('requested_at', expiryCutoff)")
+      && consumeFunction.includes("select('id')"),
+    'approved row is consumed with exact single-use, live-row CAS predicates',
+  );
+  assert(
+    consumeFunction.includes('data.length !== 1'),
+    'zero-row and competing multi-row CAS outcomes fail closed',
+  );
+  assert(
+    !consumeFunction.includes('update({ payload: input.args')
+      && !consumeFunction.includes('args: input.args'),
+    'atomic consume persists no raw tool arguments',
+  );
+
+  const crossRunFunction = extractFunction(
+    swanbotSource,
+    'findCrossRunApprovedToolPass',
+    'requestOrConsumeSwanBotApproval',
+  );
+  assert(
+    crossRunFunction.includes(".eq('requested_by', input.context.userId)")
+      && crossRunFunction.includes("source: 'cross_run'")
+      && crossRunFunction.includes('consumeSwanBotApprovalAuthority'),
+    'cross-run retry is current-user scoped and consumes its source grant once',
+  );
+}
+
+function assertAlwaysConfirmFloorWiring(): void {
+  const floorFunction = extractFunction(
+    swanbotSource,
+    'resolveSwanBotFloorApproval',
+    'dispatchWpDiscoverTypes',
+  );
+  assert(
+    floorFunction.includes('requestOrConsumeSwanBotApproval')
+      && floorFunction.includes("policyFamily: 'always_confirm_floor'")
+      && floorFunction.includes('floorCategory: input.category'),
+    'always-confirm floor uses the same v2 exact approval contract',
+  );
+  assert(
+    floorFunction.includes('outcome.kind ===')
+      && floorFunction.includes('already used')
+      && floorFunction.includes('request a fresh confirmation'),
+    'floor blocks replay/malformed authority and asks for fresh state',
+  );
 }
 
 function assertEdgeToolContracts(): void {
@@ -137,81 +261,181 @@ function assertSharedValidationWiring(): void {
   }
 }
 
-function assertApprovalDecisionMatrix(): void {
+async function assertApprovalDecisionMatrix(): Promise<void> {
   const args = {
     siteUrl: 'https://dealer.example',
     onePasswordItem: 'Dealer Inspire WP',
     postId: 14030,
     postType: 'di_slide',
     title: 'Promaster June Offer',
+    nested: { unchanged: ['a', 'b'], tail: 'exact' },
   };
-  const exactKey = buildOpenSwanToolApprovalKey('wp.update_post', args);
-  const wrongArgsKey = buildOpenSwanToolApprovalKey('wp.update_post', { ...args, postId: 14031 });
-  const callerInjectedKey = buildOpenSwanToolApprovalKey('wp.update_post', { ...args, toolApprovalKey: exactKey });
+  const exactDigest = await buildOpenSwanToolApprovalDigest('wp.update_post', args);
+  const wrongArgsDigest = await buildOpenSwanToolApprovalDigest(
+    'wp.update_post',
+    { ...args, nested: { ...args.nested, tail: 'changed' } },
+  );
+  const basePayload = buildOpenSwanApprovalAuditPayload({
+    toolName: 'wp.update_post',
+    approvalDigest: exactDigest,
+    policyFamily: 'wordpress',
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+  });
+  const wrongPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: 'wp.update_post',
+    approvalDigest: wrongArgsDigest,
+    policyFamily: 'wordpress',
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+  });
+  const nowMs = Date.now();
+  const baseRow = {
+    run_id: '33333333-3333-4333-8333-333333333333',
+    circle_id: '22222222-2222-4222-8222-222222222222',
+    requested_by: '11111111-1111-4111-8111-111111111111',
+    requested_at: new Date(nowMs - 1_000).toISOString(),
+    timeout_seconds: 300,
+  } satisfies OpenSwanRuntimeApprovalRow;
+  const row = (
+    id: string,
+    status: string,
+    payload: Record<string, unknown> | null,
+  ): OpenSwanRuntimeApprovalRow => ({ ...baseRow, id, status, payload });
 
   assert(
-    resolveOpenSwanRuntimeApprovalDecision({
-      tool: 'wp.update_post',
-      args,
-      rows: [{ id: 'approved_exact', status: 'approved', payload: { toolApprovalKey: exactKey } }],
-    }).kind === 'pass',
-    'exact approved approval key passes',
+    Boolean(exactDigest) && exactDigest !== wrongArgsDigest,
+    'SHA-256 approval digest covers long-tail nested argument changes',
+  );
+  assert(
+    Boolean(basePayload)
+      && basePayload?.toolApprovalKey === exactDigest
+      && !Object.hasOwn(basePayload || {}, 'args')
+      && !JSON.stringify(basePayload).includes('Dealer Inspire WP'),
+    'v2 audit payload contains only digest-safe structural metadata',
   );
   assert(
     resolveOpenSwanRuntimeApprovalDecision({
       tool: 'wp.update_post',
-      args,
-      rows: [{ id: 'auto_exact', status: 'auto_approved', payload: { toolApprovalKey: exactKey } }],
+      approvalDigest: exactDigest,
+      rows: [row('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'approved', basePayload)],
+      nowMs,
     }).kind === 'pass',
-    'exact auto-approved approval key passes',
+    'exact live approved v2 row passes intent resolution',
   );
   assert(
     resolveOpenSwanRuntimeApprovalDecision({
       tool: 'wp.update_post',
-      args,
-      rows: [{ id: 'pending_exact', status: 'pending', payload: { toolApprovalKey: exactKey } }],
+      approvalDigest: exactDigest,
+      rows: [row('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'auto_approved', basePayload)],
+      nowMs,
+    }).kind === 'pass',
+    'exact live auto-approved v2 row passes intent resolution',
+  );
+  assert(
+    resolveOpenSwanRuntimeApprovalDecision({
+      tool: 'wp.update_post',
+      approvalDigest: exactDigest,
+      rows: [row('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'pending', basePayload)],
+      nowMs,
     }).kind === 'defer',
-    'exact pending approval key defers',
+    'exact pending v2 row defers',
   );
   assert(
     resolveOpenSwanRuntimeApprovalDecision({
       tool: 'wp.update_post',
-      args,
-      rows: [{ id: 'rejected_exact', status: 'rejected', payload: { toolApprovalKey: exactKey } }],
+      approvalDigest: exactDigest,
+      rows: [row('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'rejected', basePayload)],
+      nowMs,
     }).kind === 'block',
-    'exact rejected approval key blocks',
+    'exact rejected v2 row blocks',
   );
   assert(
     resolveOpenSwanRuntimeApprovalDecision({
       tool: 'wp.update_post',
-      args,
-      rows: [{ id: 'wrong_args', status: 'approved', payload: { toolApprovalKey: wrongArgsKey } }],
+      approvalDigest: exactDigest,
+      rows: [row('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'approved', wrongPayload)],
+      nowMs,
     }).kind === 'new',
-    'approved key for different post id does not pass',
+    'approved v2 digest for different nested args does not pass',
   );
   assert(
     resolveOpenSwanRuntimeApprovalDecision({
       tool: 'wp.update_post',
-      args,
-      rows: [{ id: 'generic', status: 'approved', payload: { tool: 'wp.update_post', label: 'Approve WordPress update' } }],
-    }).kind === 'new',
-    'generic approval payload does not pass',
+      approvalDigest: exactDigest,
+      rows: [row(
+        'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        'approved',
+        { toolApprovalKeyVersion: 1, toolApprovalKey: JSON.stringify(args), args },
+      )],
+      nowMs,
+    }).kind === 'block',
+    'legacy raw-args v1 approval fails closed',
   );
   assert(
-    callerInjectedKey !== exactKey,
-    'caller-supplied toolApprovalKey would alter the approval digest unless stripped by SwanBot',
+    resolveOpenSwanRuntimeApprovalDecision({
+      tool: 'wp.update_post',
+      approvalDigest: exactDigest,
+      rows: [{
+        ...row('12121212-1212-4212-8212-121212121212', 'approved', basePayload),
+        requested_at: new Date(nowMs - 301_000).toISOString(),
+      }],
+      nowMs,
+    }).kind === 'block',
+    'expired approved v2 row fails closed',
+  );
+
+  const binding = await buildOpenSwanApprovalAuthorityBindingDigest({
+    approvalId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    approvalDigest: exactDigest,
+    status: 'approved',
+    source: 'run_scoped',
+    identity: {
+      userId: baseRow.requested_by,
+      circleId: baseRow.circle_id,
+      runId: baseRow.run_id,
+      toolName: 'wp.update_post',
+      toolUseId: 'toolu_wp_exact_1',
+      iteration: 1,
+    },
+  });
+  const consumedPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: 'wp.update_post',
+    approvalDigest: exactDigest,
+    policyFamily: 'wordpress',
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+    dispatchBindingDigest: binding,
+    dispatchConsumedAt: new Date(nowMs - 100).toISOString(),
+  });
+  assert(
+    resolveOpenSwanRuntimeApprovalDecision({
+      tool: 'wp.update_post',
+      approvalDigest: exactDigest,
+      rows: [row('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'approved', consumedPayload)],
+      nowMs,
+    }).kind === 'block',
+    'already-consumed approval cannot replay',
   );
 }
 
-assertSwanBotContinuationContext();
-assertSwanBotWpGateWiring();
-assertEdgeToolContracts();
-assertSharedValidationWiring();
-assertApprovalDecisionMatrix();
+async function main(): Promise<void> {
+  assertSwanBotContinuationContext();
+  assertSwanBotWpGateWiring();
+  assertAuthenticatedSingleUseWiring();
+  assertAlwaysConfirmFloorWiring();
+  assertEdgeToolContracts();
+  assertSharedValidationWiring();
+  await assertApprovalDecisionMatrix();
 
-if (failures > 0) {
-  console.error(`\n${failures} SwanBot WordPress approval-gate smoke failure(s)`);
-  process.exit(1);
+  if (failures > 0) {
+    console.error(`\n${failures} SwanBot WordPress approval-gate smoke failure(s)`);
+    process.exit(1);
+  }
+  console.log('\nSwanBot WordPress approval-gate smoke OK');
 }
 
-console.log('\nSwanBot WordPress approval-gate smoke OK');
+void main();

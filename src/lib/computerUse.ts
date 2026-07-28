@@ -1,10 +1,10 @@
 /**
  * computerUse.ts — Computer-Use Engine
  *
- * Plans browser actions, checks permissions, and executes them through
- * a bridge-backed browser runtime. The local Playwright MCP bridge remains
- * the default backend, and Browserbase Stagehand is used when a connected
- * Browserbase integration is available for the active circle.
+ * Plans browser work, executes only read-only observations through a
+ * bridge-backed runtime, and hands every mutation to the typed OpenSwan loop.
+ * The local Playwright bridge remains the default observation backend, while
+ * Browserbase Stagehand is restricted to observe/extract/screenshot.
  */
 
 import { getCircleIntegration, getCircleIntegrationSecretValues } from './circleIntegrations';
@@ -14,6 +14,7 @@ import { buildBrowserbaseWorkflowPromptBlock } from './browserbaseWorkflowIntent
 import { buildFallbackBrowserActions as buildPureFallbackBrowserActions } from './browserActionFallback';
 import { chooseBrowserAutomationBackendPreference, type BrowserAutomationBackendPreference } from './browserAutomationBackend';
 import { getBridgeUrl } from './bridgeEnvironment';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { ensureDesktopBridgePaired } from './desktopBridge';
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import type { ComputerAppPreflight } from './computerAppPreflight';
@@ -23,23 +24,63 @@ import {
   type ComputerAppGroundingTrace,
 } from './computerAppGrounding';
 import {
-  clickRole as localBrowserClickRole,
   describeDomSnapshotTruncation,
   domSnapshot as localBrowserDomSnapshot,
-  fillField as localBrowserFillField,
-  openUrl as localBrowserOpenUrl,
-  pressKey as localBrowserPressKey,
   renderBrowserTree,
   screenshot as localBrowserScreenshot,
-  selectOption as localBrowserSelectOption,
 } from './browserBridge';
 
 export type ComputerUsePermission = 'none' | 'ask_every_time' | 'ask_for_new_sites' | 'trusted';
 export type ComputerUseBackend = 'playwright_bridge' | 'browserbase_stagehand';
 
+export type BrowserMutationActionType =
+  | 'navigate'
+  | 'click'
+  | 'fill'
+  | 'select'
+  | 'press_key'
+  | 'scroll';
+
+export type BrowserReadOnlyActionType =
+  | 'observe'
+  | 'extract'
+  | 'screenshot'
+  | 'wait';
+
+export type BrowserMutationRuntimeTool =
+  | 'browser.open_url'
+  | 'browser.click_role'
+  | 'browser.fill_field'
+  | 'browser.select_option'
+  | 'browser.press_key';
+
+export type BrowserMutationRuntimeRequirement =
+  | 'authenticated_user_id'
+  | 'circle_id'
+  | 'persisted_agent_run_id'
+  | 'provider_tool_use_id'
+  | 'tool_iteration'
+  | 'exact_openswan_runtime_approval';
+
+/** Compatibility alias for callers that adopted the first select-only handoff. */
+export type BrowserSelectRuntimeRequirement = BrowserMutationRuntimeRequirement;
+
+export interface BrowserActionRuntimeHandoff {
+  kind: 'openswan_typed_tool';
+  tool: BrowserMutationRuntimeTool;
+  legacyActionType: BrowserMutationActionType;
+  credentialTool?: 'browser.fill_credential_field';
+  sourceLane: 'legacy_computer_use';
+  reasonCode: 'sealed_runtime_identity_required';
+  executable: false;
+  carriesRawInput: false;
+  requiredContext: BrowserMutationRuntimeRequirement[];
+  message: string;
+}
+
 export interface BrowserAction {
   id: string;
-  type: 'navigate' | 'observe' | 'extract' | 'click' | 'fill' | 'screenshot' | 'select' | 'press_key' | 'wait' | 'scroll';
+  type: BrowserMutationActionType | BrowserReadOnlyActionType;
   target?: string;
   value?: string;
   description: string;
@@ -52,6 +93,7 @@ export interface BrowserAction {
   output?: string;
   error?: string;
   executedAt?: string;
+  runtimeHandoff?: BrowserActionRuntimeHandoff;
 }
 
 export interface ComputerUseSession {
@@ -127,7 +169,7 @@ export interface BrowserPlanCardData {
   completedAt?: string;
   backendSessionId?: string;
   backendLiveUrl?: string;
-  actions: Array<Pick<BrowserAction, 'id' | 'type' | 'target' | 'value' | 'description' | 'requiresApproval' | 'approvalReason' | 'blockedReason'>>;
+  actions: Array<Pick<BrowserAction, 'id' | 'type' | 'target' | 'value' | 'description' | 'requiresApproval' | 'approvalReason' | 'blockedReason' | 'runtimeHandoff'>>;
   computerAppPreflight?: ComputerAppPreflight | null;
   computerAppGroundingTrace?: ComputerAppGroundingTrace | null;
 }
@@ -189,7 +231,9 @@ interface StagehandRunnerPayload {
   projectId: string;
   region?: string;
   sessionId?: string;
-  action?: Pick<BrowserAction, 'type' | 'target' | 'value' | 'description'>;
+  action?: Pick<BrowserAction, 'target' | 'value' | 'description'> & {
+    type: Extract<BrowserReadOnlyActionType, 'observe' | 'extract'>;
+  };
 }
 
 interface StagehandRunnerResponse {
@@ -210,7 +254,85 @@ type BrowserActionSafetyAssessment = {
 const BRIDGE_PORT = 7778;
 const BRIDGE_TIMEOUT = 15000;
 const STAGEHAND_TIMEOUT = 120000;
-const STAGEHAND_RUNNER = 'node scripts/stagehand-runner.mjs';
+const LEGACY_SELECT_BLOCKED_REASON =
+  'Dropdown selection is unavailable in the legacy Computer Use lane. Continue through the typed OpenSwan browser.select_option tool so it can freshly observe one native select, obtain exact approval, claim the durable action call, dispatch once, and verify the selected option.';
+const LEGACY_MUTATION_ACTION_TYPES = new Set<BrowserMutationActionType>([
+  'navigate',
+  'click',
+  'fill',
+  'select',
+  'press_key',
+  'scroll',
+]);
+const LEGACY_MUTATION_TOOL_BY_ACTION: Readonly<Record<
+  BrowserMutationActionType,
+  BrowserMutationRuntimeTool
+>> = Object.freeze({
+  navigate: 'browser.open_url',
+  click: 'browser.click_role',
+  fill: 'browser.fill_field',
+  select: 'browser.select_option',
+  press_key: 'browser.press_key',
+  scroll: 'browser.press_key',
+});
+const LEGACY_MUTATION_MESSAGE_BY_ACTION: Readonly<Record<
+  BrowserMutationActionType,
+  string
+>> = Object.freeze({
+  navigate:
+    'Navigation is unavailable in the legacy Computer Use lane. Continue through the typed OpenSwan browser.open_url tool with current authenticated run and approval context.',
+  click:
+    'Browser clicking is unavailable in the legacy Computer Use lane. Continue through the typed OpenSwan browser.click_role tool after a fresh DOM observation and exact approval.',
+  fill:
+    'Browser field input is unavailable in the legacy Computer Use lane. Continue through typed OpenSwan browser.fill_field after a fresh DOM observation and exact approval. Credential input must be recollected through the sealed vault-backed browser.fill_credential_field path; this handoff carries no raw value.',
+  select: LEGACY_SELECT_BLOCKED_REASON,
+  press_key:
+    'Browser key input is unavailable in the legacy Computer Use lane. Continue through the typed OpenSwan browser.press_key tool with current authenticated run, provider-call, and approval context.',
+  scroll:
+    'Browser scrolling is unavailable in the legacy Computer Use lane. Re-plan the exact direction as a typed OpenSwan browser.press_key PageUp/PageDown call with current authenticated run and approval context.',
+});
+const LEGACY_MUTATION_REQUIRED_CONTEXT: BrowserMutationRuntimeRequirement[] = [
+  'authenticated_user_id',
+  'circle_id',
+  'persisted_agent_run_id',
+  'provider_tool_use_id',
+  'tool_iteration',
+  'exact_openswan_runtime_approval',
+];
+
+export function isComputerUseMutationActionType(
+  value: unknown,
+): value is BrowserMutationActionType {
+  return typeof value === 'string'
+    && LEGACY_MUTATION_ACTION_TYPES.has(value as BrowserMutationActionType);
+}
+
+export function buildComputerUseMutationRuntimeHandoff(
+  actionType: BrowserMutationActionType,
+): BrowserActionRuntimeHandoff {
+  if (!isComputerUseMutationActionType(actionType)) {
+    throw new Error('Unsupported legacy Computer Use mutation handoff type.');
+  }
+  return {
+    kind: 'openswan_typed_tool',
+    tool: LEGACY_MUTATION_TOOL_BY_ACTION[actionType],
+    legacyActionType: actionType,
+    ...(actionType === 'fill'
+      ? { credentialTool: 'browser.fill_credential_field' as const }
+      : {}),
+    sourceLane: 'legacy_computer_use',
+    reasonCode: 'sealed_runtime_identity_required',
+    executable: false,
+    carriesRawInput: false,
+    requiredContext: [...LEGACY_MUTATION_REQUIRED_CONTEXT],
+    message: LEGACY_MUTATION_MESSAGE_BY_ACTION[actionType],
+  };
+}
+
+/** Compatibility wrapper for the original select-only handoff API. */
+export function buildComputerUseSelectRuntimeHandoff(): BrowserActionRuntimeHandoff {
+  return buildComputerUseMutationRuntimeHandoff('select');
+}
 
 function generateId(): string {
   return `cu_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -224,15 +346,18 @@ function extractDomain(url: string): string {
   }
 }
 
-function isSubmissionLikeAction(action: Pick<BrowserAction, 'type' | 'description' | 'target' | 'value'>): boolean {
-  const haystack = `${action.description || ''} ${action.target || ''} ${action.value || ''}`.toLowerCase();
-  return /\b(submit|confirm|place order|checkout|purchase|pay|send|publish|post|delete|remove|save changes|book|reserve|transfer|wire|invite|create account)\b/.test(haystack);
-}
-
 function assessBrowserActionSafety(
   intent: BrowserTaskIntent | undefined,
   action: Pick<BrowserAction, 'type' | 'description' | 'target' | 'value'>,
 ): BrowserActionSafetyAssessment {
+  if (isComputerUseMutationActionType(action.type)) {
+    const runtimeHandoff = buildComputerUseMutationRuntimeHandoff(action.type);
+    return {
+      requiresApproval: false,
+      blockedReason: runtimeHandoff.message,
+    };
+  }
+
   const verificationGate = detectAutomationVerificationGate([
     action.description,
     action.target,
@@ -253,61 +378,18 @@ function assessBrowserActionSafety(
     };
   }
 
-  const explicitApproval = action.type === 'navigate' || action.type === 'fill';
   if (!intent) {
-    return { requiresApproval: explicitApproval };
+    return { requiresApproval: false };
   }
 
-  if (intent.requiresLogin && (action.type === 'fill' || action.type === 'press_key' || action.type === 'observe' || action.type === 'extract')) {
+  if (intent.requiresLogin && (action.type === 'observe' || action.type === 'extract')) {
     return {
       requiresApproval: true,
       approvalReason: 'This step may enter credentials, read account data, or interact with an authenticated session.',
     };
   }
 
-  if (intent.hasSideEffects && isSubmissionLikeAction(action)) {
-    return {
-      requiresApproval: true,
-      approvalReason: 'This step appears to submit or change external state.',
-    };
-  }
-
-  if (intent.risk === 'high' && (action.type === 'click' || action.type === 'select')) {
-    return {
-      requiresApproval: true,
-      approvalReason: 'High-risk workflow step requires explicit approval.',
-    };
-  }
-
-  return { requiresApproval: explicitApproval };
-}
-
-function encodeBase64(value: string): string {
-  try {
-    return btoa(unescape(encodeURIComponent(value)));
-  } catch {
-    const bufferCtor = (globalThis as any).Buffer;
-    if (bufferCtor) return bufferCtor.from(value, 'utf8').toString('base64');
-    throw new Error('Base64 encoding unavailable in this environment');
-  }
-}
-
-function parseJsonFromExecOutput(raw: string): any {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const lines = trimmed.split('\n').map((line) => line.trim()).filter(Boolean);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      try {
-        return JSON.parse(lines[index]);
-      } catch {
-        continue;
-      }
-    }
-  }
-  return null;
+  return { requiresApproval: false };
 }
 
 async function probeBridge(): Promise<boolean> {
@@ -322,30 +404,6 @@ async function probeBridge(): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function callBridgeExec(command: string, timeoutMs: number = BRIDGE_TIMEOUT): Promise<any> {
-  const bridgeUrl = getBridgeUrl(BRIDGE_PORT);
-  if (!bridgeUrl) {
-    throw new Error('Bridge unavailable in this environment');
-  }
-  const online = await probeBridge();
-  if (!online) {
-    throw new Error(`Bridge not reachable at ${bridgeUrl}`);
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const res = await fetch(`${bridgeUrl}/exec`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command }),
-    signal: controller.signal,
-  });
-  clearTimeout(timeout);
-  if (!res.ok) {
-    throw new Error(`Bridge /exec failed: ${res.status}`);
-  }
-  return res.json();
 }
 
 async function resolveComputerUseBackend(circleId?: string, intent?: BrowserTaskIntent): Promise<ComputerUseBackendContext> {
@@ -416,6 +474,81 @@ export async function createSession(
   };
 }
 
+const COMPUTER_USE_ACTION_TYPES = new Set<BrowserAction['type']>([
+  'navigate',
+  'observe',
+  'extract',
+  'click',
+  'fill',
+  'screenshot',
+  'select',
+  'press_key',
+  'wait',
+  'scroll',
+]);
+
+type BrowserActionPlanInput = Partial<
+  Pick<
+    BrowserAction,
+    'id' | 'type' | 'target' | 'value' | 'description' | 'approvalReason' | 'blockedReason'
+  >
+> & {
+  type?: unknown;
+  target?: unknown;
+  value?: unknown;
+  description?: unknown;
+};
+
+function optionalPlanText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function withoutPersistedMutationInput(action: BrowserAction): BrowserAction {
+  if (!isComputerUseMutationActionType(action.type)) return action;
+  return {
+    ...action,
+    // A legacy value can be a password, token, typed draft, option, or key
+    // sequence. The typed runtime must re-derive it from the current user turn
+    // or vault; a plan card/session must never become a secret-bearing relay.
+    value: undefined,
+    runtimeHandoff: buildComputerUseMutationRuntimeHandoff(action.type),
+  };
+}
+
+function normalizeComputerUsePlannedAction(
+  rawAction: BrowserActionPlanInput,
+  index: number,
+  intent?: BrowserTaskIntent,
+): BrowserAction {
+  const actionType = COMPUTER_USE_ACTION_TYPES.has(rawAction.type as BrowserAction['type'])
+    ? rawAction.type as BrowserAction['type']
+    : 'navigate';
+  const target = optionalPlanText(rawAction.target);
+  const value = isComputerUseMutationActionType(actionType)
+    ? undefined
+    : optionalPlanText(rawAction.value);
+  const base: Pick<BrowserAction, 'type' | 'target' | 'value' | 'description'> = {
+    type: actionType,
+    target,
+    value,
+    description: optionalPlanText(rawAction.description) || `Step ${index + 1}`,
+  };
+  const safety = assessBrowserActionSafety(intent, base);
+  const blockedReason = safety.blockedReason || optionalPlanText(rawAction.blockedReason);
+  const normalized: BrowserAction = {
+    id: optionalPlanText(rawAction.id) || `action_${Date.now()}_${index}`,
+    ...base,
+    requiresApproval: safety.requiresApproval,
+    approvalReason: safety.approvalReason || optionalPlanText(rawAction.approvalReason),
+    blockedReason,
+    status: blockedReason ? 'rejected' : 'pending',
+    runtimeHandoff: isComputerUseMutationActionType(actionType)
+      ? buildComputerUseMutationRuntimeHandoff(actionType)
+      : undefined,
+  };
+  return withoutPersistedMutationInput(normalized);
+}
+
 export async function createSessionFromBrowserPlan(
   agentName: string,
   permission: ComputerUsePermission,
@@ -431,23 +564,18 @@ export async function createSessionFromBrowserPlan(
   session.backendLabel = plan.backendLabel;
   session.backendDetails = plan.backendDetails;
   session.backendPreference = plan.backendPreference;
-  session.actions = plan.actions.map((action) => {
-    const safety = assessBrowserActionSafety(plan.intent, action);
+  session.actions = plan.actions.map((action, index) => {
+    // Rebuild safety and handoff metadata from the action type. Persisted
+    // runtimeHandoff/value fields are never trusted or replayed.
+    const normalized = normalizeComputerUsePlannedAction(action, index, plan.intent);
     const status =
-      safety.blockedReason
+      normalized.blockedReason
         ? 'rejected'
-        : permission === 'trusted' && !safety.requiresApproval
+        : permission === 'trusted' && !normalized.requiresApproval
           ? 'approved'
           : 'pending';
     return {
-      id: action.id,
-      type: action.type,
-      target: action.target,
-      value: action.value,
-      description: action.description,
-      requiresApproval: safety.requiresApproval,
-      approvalReason: safety.approvalReason || action.approvalReason,
-      blockedReason: safety.blockedReason || action.blockedReason,
+      ...normalized,
       status,
     };
   });
@@ -497,17 +625,20 @@ ${buildBrowserbaseWorkflowPromptBlock(analyzedIntent.browserbaseWorkflow)}
 Break this into specific browser actions. Return ONLY a JSON array (no markdown, no explanation).
 Each action has: type, target, value (optional), description.
 
-Valid types: navigate, observe, extract, click, fill, screenshot, select, press_key, wait, scroll
+Valid executable read-only types: observe, extract, screenshot, wait
+Valid NON-EXECUTABLE mutation handoff markers: navigate, click, fill, select, press_key, scroll
 
 Rules:
-- Follow any Computer/App Grounding section in CONTEXT before choosing click/fill/submit actions.
+- Follow any Computer/App Grounding section in CONTEXT before proposing mutation handoffs.
 - If CONTEXT says the next safe action is an observation, start with observe/extract/screenshot instead of mutation.
+- This planner cannot execute navigate, click, fill, select, press_key, or scroll because it does not carry authenticated typed-loop user/circle/run/provider-call identity, a fresh exact observation, or exact OpenSwan approval. Represent each as a NON-EXECUTABLE marker. Execution stops visibly at the first marker and must continue through browser.open_url, browser.click_role, browser.fill_field (or vault-backed browser.fill_credential_field), browser.select_option, or browser.press_key.
+- Never include passwords, tokens, credentials, or text-to-enter in a mutation marker. Omit value for fill/select/key/scroll markers; the typed runtime must re-derive exact arguments from the current user request or approved vault entry.
 - Never plan to solve CAPTCHA, MFA, OTP, Cloudflare, Turnstile, or "I am not a robot"; plan a pause/blocked step instead.
 - Prefer the explicit start URL when one is present.
 - Keep actions inside the allowed domains unless the task clearly requires otherwise.
-- For web data retrieval, keep the action plan narrow: navigate, wait for rendered content when needed, extract the requested fields, and add a screenshot only when visual proof matters.
-- For Stagehand-style tasks, use observe before ambiguous UI choices, act-sized click/fill steps for changes, and extract for requested data.
-- For form submission, include field-filling steps, a review screenshot before submit, and a post-submit verification step.
+- For web data retrieval, keep the plan narrow: navigation handoff, wait for rendered content when needed, extract the requested fields, and add a screenshot only when visual proof matters.
+- Stagehand is read-only in this lane: use it only for observe/extract/screenshot. Represent every action-sized change as a typed-tool handoff.
+- For form submission, include field-input handoff markers, a review screenshot before the final submit handoff, and a post-submit observation step for the typed runtime to perform.
 - If the task appears transactional or login-related, stop before final submission and add a screenshot step near the end.
 - If the task is read-only or extract-focused, end with a screenshot after reaching the requested result.
 
@@ -516,63 +647,48 @@ Example:
   {"type":"navigate","target":"https://example.com","description":"Open example.com"},
   {"type":"observe","description":"Observe the visible navigation and form controls"},
   {"type":"click","target":"#login-button","description":"Click the login button"},
-  {"type":"fill","target":"#email","value":"user@test.com","description":"Enter email address"},
+  {"type":"fill","target":"#email","description":"Continue the requested email field input in typed OpenSwan; value omitted"},
   {"type":"extract","description":"Extract the requested records as structured JSON"},
   {"type":"screenshot","description":"Capture the result"}
 ]
 
 Return ONLY the JSON array:`;
 
-  const aiResponse = await getAIResponse(planPrompt, {
-    userId: opts?.userId || '00000000-0000-0000-0000-000000000000',
-    circleId: opts?.circleId,
-    userName: 'ComputerUse',
-    model: opts?.model || undefined,
-  });
-
   let parsed: any[] = [];
-  try {
-    parsed = JSON.parse(aiResponse);
-  } catch {
-    const jsonMatch = aiResponse.match(/\[[\s\S]*?\]/);
-    if (jsonMatch) {
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch {
+  const planningUserId = optionalPlanText(opts?.userId);
+  if (planningUserId) {
+    const aiResponse = await getAIResponse(planPrompt, {
+      userId: planningUserId,
+      circleId: opts?.circleId,
+      userName: 'ComputerUse',
+      model: opts?.model || undefined,
+    });
+    try {
+      parsed = JSON.parse(aiResponse);
+    } catch {
+      const jsonMatch = aiResponse.match(/\[[\s\S]*?\]/);
+      if (jsonMatch) {
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch {
+          parsed = [];
+        }
+      } else {
         parsed = [];
       }
-    } else {
-      parsed = [];
     }
   }
 
   const normalized = parsed
     .filter(Boolean)
-    .map((item: any, index: number) => {
-      const allowedTypes = new Set<BrowserAction['type']>([
-        'navigate', 'observe', 'extract', 'click', 'fill', 'screenshot', 'select', 'press_key', 'wait', 'scroll',
-      ]);
-      const itemType = allowedTypes.has(item.type) ? item.type : 'navigate';
-      const base = {
-        id: `action_${Date.now()}_${index}`,
-        type: itemType,
-        target: item.target || undefined,
-        value: item.value || undefined,
-        description: item.description || `Step ${index + 1}`,
-      };
-      const safety = assessBrowserActionSafety(analyzedIntent, base);
-      return {
-        ...base,
-        requiresApproval: safety.requiresApproval,
-        approvalReason: safety.approvalReason,
-        blockedReason: safety.blockedReason,
-        status: safety.blockedReason ? 'rejected' as const : 'pending' as const,
-      };
-    });
+    .map((item: any, index: number) =>
+      normalizeComputerUsePlannedAction(item, index, analyzedIntent));
 
   if (normalized.length > 0) return normalized;
 
-  return buildPureFallbackBrowserActions(task, analyzedIntent) as BrowserAction[];
+  return buildPureFallbackBrowserActions(task, analyzedIntent)
+    .map((action, index) =>
+      normalizeComputerUsePlannedAction(action, index, analyzedIntent));
 }
 
 export async function callPlaywrightMCP(
@@ -626,20 +742,7 @@ export async function callPlaywrightMCP(
     throw new Error(text || `Bridge /mcp failed: ${res.status}`);
   } catch (err) {
     mcpError = err;
-    // Fall through to /exec fallback
-  }
-
-  // The exec fallback can only meaningfully emulate screenshot via
-  // `screencapture`. For navigate/click/fill/select/press_key there is no
-  // real shell equivalent — `npx playwright open` just opens codegen, it
-  // doesn't drive our session. Previously these commands returned a resolved
-  // promise with empty stdout, which the caller treated as success and the
-  // UI showed "COMPLETED" for actions that never ran.
-  if (toolName === 'mcp__playwright__browser_take_screenshot') {
-    const ts = Date.now();
-    const path = `/tmp/cu_screenshot_${ts}.png`;
-    const command = `screencapture -x ${path} && base64 ${path} && rm ${path}`;
-    return callBridgeExec(command);
+    // Fall through to the structured-backend error below.
   }
 
   throw new Error(
@@ -648,15 +751,23 @@ export async function callPlaywrightMCP(
 }
 
 async function callStagehandRunner(payload: StagehandRunnerPayload): Promise<StagehandRunnerResponse> {
-  const encoded = encodeBase64(JSON.stringify(payload));
-  const result = await callBridgeExec(`${STAGEHAND_RUNNER} '${encoded}'`, STAGEHAND_TIMEOUT);
-  const raw = `${result?.stdout || result?.output || result?.stderr || ''}`;
-  const parsed = parseJsonFromExecOutput(raw) as StagehandRunnerResponse | null;
-  if (parsed?.ok) return parsed;
-  if (parsed && !parsed.ok) {
-    throw new Error(parsed.error || 'Stagehand runner failed');
+  const bridgeUrl = getBridgeUrl(BRIDGE_PORT);
+  if (!bridgeUrl) throw new Error('Bridge unavailable in this environment');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), STAGEHAND_TIMEOUT);
+  try {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/stagehand/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload }),
+      signal: controller.signal,
+    });
+    const parsed = await res.json().catch(() => null) as StagehandRunnerResponse | null;
+    if (res.ok && parsed?.ok) return parsed;
+    throw new Error(parsed?.error || `Stagehand bridge failed: HTTP ${res.status}`);
+  } finally {
+    clearTimeout(timeout);
   }
-  throw new Error(raw.trim() || 'Stagehand runner returned no structured output');
 }
 
 async function ensureStagehandSession(session: ComputerUseSession): Promise<void> {
@@ -682,8 +793,19 @@ async function ensureStagehandSession(session: ComputerUseSession): Promise<void
 async function runStagehandSessionCommand(
   session: ComputerUseSession,
   mode: 'action' | 'screenshot',
-  action?: Pick<BrowserAction, 'type' | 'target' | 'value' | 'description'>,
+  action?: NonNullable<StagehandRunnerPayload['action']>,
 ): Promise<StagehandRunnerResponse> {
+  if (
+    mode === 'action'
+    && (!action || (action.type !== 'observe' && action.type !== 'extract'))
+  ) {
+    throw new Error(
+      'Stagehand mutation refused: legacy Computer Use permits only observe/extract action mode.',
+    );
+  }
+  if (mode === 'screenshot' && action) {
+    throw new Error('Stagehand screenshot mode does not accept an action payload.');
+  }
   const backend = await resolveComputerUseBackend(session.circleId, session.intent);
   if (backend.backend !== 'browserbase_stagehand' || !backend.browserbase) {
     throw new Error('Browserbase Stagehand is not configured for this circle');
@@ -724,50 +846,6 @@ async function runPlaywrightReadAction(action: BrowserAction): Promise<string> {
   throw lastError instanceof Error
     ? lastError
     : new Error('No browser read/snapshot tool is available for observe/extract.');
-}
-
-function looksLikeBrowserSelector(value?: string): boolean {
-  const text = String(value || '').trim();
-  return !!text && (
-    /^[#.]/.test(text)
-    || /\[[\w-]+\s*([~|^$*]?=|\])/.test(text)
-    || /:nth-(?:child|of-type|last-child)/.test(text)
-    || /^[a-z][\w-]*\s*[>+~]/i.test(text)
-    || /^[a-z][\w-]*\s*\[/i.test(text)
-    || /^[a-z][\w-]*\s*\.[\w-]/i.test(text)
-  );
-}
-
-function extractQuotedLabel(value?: string): string | undefined {
-  const match = String(value || '').match(/["'“”‘’]([^"'“”‘’]{1,120})["'“”‘’]/);
-  return match?.[1]?.trim() || undefined;
-}
-
-function inferBrowserRole(action: BrowserAction, fallback: string): string {
-  const text = `${action.target || ''} ${action.description || ''}`.toLowerCase();
-  if (/\blink\b|href|anchor/.test(text)) return 'link';
-  if (/\btab\b/.test(text)) return 'tab';
-  if (/\bcheckbox\b|check box/.test(text)) return 'checkbox';
-  if (/\bradio\b/.test(text)) return 'radio';
-  if (/\bcombo|dropdown|drop down|select\b/.test(text)) return 'combobox';
-  if (/\btextbox|text box|input|field|email|password|search\b/.test(text)) return 'textbox';
-  return fallback;
-}
-
-function buildLocalBrowserLocatorArgs(
-  action: BrowserAction,
-  fallbackRole: string,
-): { role: string; name?: string; selector?: string; exact?: boolean; timeoutMs?: number } {
-  const target = String(action.target || '').trim();
-  const role = inferBrowserRole(action, fallbackRole);
-  if (looksLikeBrowserSelector(target)) {
-    return { role, selector: target, timeoutMs: 10000 };
-  }
-  const name = target || extractQuotedLabel(action.description);
-  if (!name) {
-    throw new Error(`${action.type} action needs a target selector or accessible name.`);
-  }
-  return { role, name, timeoutMs: 10000 };
 }
 
 async function runLocalBrowserReadAction(action: BrowserAction): Promise<string> {
@@ -820,19 +898,7 @@ export async function takeScreenshot(session?: ComputerUseSession): Promise<stri
       return result;
     }
   } catch {
-    // Try shell fallback
-  }
-
-  try {
-    const ts = Date.now();
-    const path = `/tmp/cu_screenshot_${ts}.png`;
-    const res = await callBridgeExec(`screencapture -x ${path} && base64 ${path} && rm ${path}`);
-    const output = res.output || res.stdout || '';
-    if (output && output.length > 100) {
-      return output.trim();
-    }
-  } catch {
-    // Ignore
+    // No shell fallback: structured browser/desktop capture must succeed.
   }
 
   return null;
@@ -842,12 +908,26 @@ export async function executeAction(
   action: BrowserAction,
   session?: ComputerUseSession,
 ): Promise<BrowserAction> {
-  const updated: BrowserAction = { ...action, status: 'executing', executedAt: new Date().toISOString() };
-  const browserTaskContext = [
-    session?.task,
-    action.description,
-    action.target,
-  ].filter(Boolean).join('\n');
+  const safeAction = withoutPersistedMutationInput(action);
+  const updated: BrowserAction = {
+    ...safeAction,
+    status: 'executing',
+    executedAt: new Date().toISOString(),
+  };
+  if (isComputerUseMutationActionType(action.type)) {
+    // This is the first executable boundary. Rebuild the handoff from the
+    // action type and return before screenshots, Stagehand session creation,
+    // Playwright MCP, or any local bridge call.
+    const runtimeHandoff = buildComputerUseMutationRuntimeHandoff(action.type);
+    return {
+      ...updated,
+      status: 'failed',
+      requiresApproval: false,
+      blockedReason: runtimeHandoff.message,
+      error: runtimeHandoff.message,
+      runtimeHandoff,
+    };
+  }
 
   try {
     const beforeShot = await takeScreenshot(session);
@@ -857,7 +937,12 @@ export async function executeAction(
       switch (action.type) {
         case 'observe':
         case 'extract': {
-          const result = await runStagehandSessionCommand(session, 'action', action);
+          const result = await runStagehandSessionCommand(session, 'action', {
+            type: action.type === 'observe' ? 'observe' : 'extract',
+            target: action.target,
+            value: action.value,
+            description: action.description,
+          });
           updated.output = result.output || undefined;
           updated.status = 'completed';
           return updated;
@@ -881,19 +966,11 @@ export async function executeAction(
           await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
           break;
         }
-        default: {
-          await runStagehandSessionCommand(session, 'action', action);
-          break;
-        }
+        default:
+          throw new Error(`Stagehand legacy action type is not read-only: ${action.type}`);
       }
     } else {
       switch (action.type) {
-        case 'navigate': {
-          const result = await localBrowserOpenUrl(action.target || '', { waitUntil: 'domcontentloaded', taskContext: browserTaskContext });
-          if (!result.ok) throw new Error(result.error || 'Local browser navigation failed.');
-          if (session) session.currentUrl = result.data?.url || action.target;
-          break;
-        }
         case 'observe':
         case 'extract': {
           try {
@@ -903,20 +980,6 @@ export async function executeAction(
           }
           updated.status = 'completed';
           return updated;
-        }
-        case 'click': {
-          const result = await localBrowserClickRole({ ...buildLocalBrowserLocatorArgs(action, 'button'), taskContext: browserTaskContext });
-          if (!result.ok) throw new Error(result.error || 'Local browser click failed.');
-          break;
-        }
-        case 'fill': {
-          const result = await localBrowserFillField({
-            ...buildLocalBrowserLocatorArgs(action, 'textbox'),
-            text: action.value || '',
-            taskContext: browserTaskContext,
-          });
-          if (!result.ok) throw new Error(result.error || 'Local browser fill failed.');
-          break;
         }
         case 'screenshot': {
           const shot = await takeScreenshot(session);
@@ -931,32 +994,13 @@ export async function executeAction(
           updated.status = 'completed';
           return updated;
         }
-        case 'select': {
-          const result = await localBrowserSelectOption({
-            ...buildLocalBrowserLocatorArgs(action, 'combobox'),
-            value: action.value || '',
-            taskContext: browserTaskContext,
-          });
-          if (!result.ok) throw new Error(result.error || 'Local browser select failed.');
-          break;
-        }
-        case 'press_key': {
-          const result = await localBrowserPressKey(action.value || action.target || '', { taskContext: browserTaskContext });
-          if (!result.ok) throw new Error(result.error || 'Local browser key press failed.');
-          break;
-        }
         case 'wait': {
           const ms = parseInt(action.value || '1000', 10);
           await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
           break;
         }
-        case 'scroll': {
-          const result = await localBrowserPressKey(action.value === 'up' ? 'PageUp' : 'PageDown');
-          if (!result.ok) throw new Error(result.error || 'Local browser scroll failed.');
-          break;
-        }
         default:
-          throw new Error(`Unknown action type: ${action.type}`);
+          throw new Error(`Legacy browser action type is not read-only: ${action.type}`);
       }
     }
 
@@ -975,6 +1019,7 @@ export function checkPermission(
   session: ComputerUseSession,
   action: BrowserAction
 ): boolean {
+  if (isComputerUseMutationActionType(action.type)) return false;
   if (action.blockedReason) return false;
   if (action.requiresApproval) return action.status === 'approved';
   switch (session.permission) {
@@ -984,11 +1029,8 @@ export function checkPermission(
       return true;
     case 'ask_every_time':
       return false;
-    case 'ask_for_new_sites': {
-      if (action.type !== 'navigate') return true;
-      const domain = extractDomain(action.target || '');
-      return session.approvedDomains.includes(domain);
-    }
+    case 'ask_for_new_sites':
+      return true;
     default:
       return false;
   }
@@ -1000,9 +1042,34 @@ export async function executePlan(
 ): Promise<ComputerUseResult> {
   const results: BrowserAction[] = [];
   let lastScreenshot: string | undefined;
+  // Direct/legacy callers can bypass planner hydration. Redact every mutation
+  // value and rebuild every handoff before any result, pause, or persistence
+  // path can expose the session.
+  session.actions = session.actions.map(withoutPersistedMutationInput);
 
   for (let i = 0; i < session.actions.length; i += 1) {
     const action = session.actions[i];
+
+    if (isComputerUseMutationActionType(action.type)) {
+      // Halt on the first mutation marker even if a legacy/saved caller marked
+      // it approved or completed. executeAction rebuilds a fresh, non-secret
+      // handoff and returns before all observation/backend I/O.
+      const halted = await executeAction(action, session);
+      results.push(halted);
+      results.push(
+        ...session.actions.slice(i + 1).map(withoutPersistedMutationInput),
+      );
+      onActionComplete(halted, i);
+      return {
+        success: false,
+        message: `Stopped at step ${i + 1}: ${halted.error || halted.blockedReason || 'Typed OpenSwan mutation handoff required.'}`,
+        screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
+        actions: results,
+        currentUrl: session.currentUrl,
+        backendSessionId: session.backendSessionId,
+        backendLiveUrl: session.backendLiveUrl,
+      };
+    }
 
     if (action.status === 'rejected' || action.status === 'completed') {
       results.push(action);
@@ -1062,13 +1129,6 @@ export async function executePlan(
         backendSessionId: session.backendSessionId,
         backendLiveUrl: session.backendLiveUrl,
       };
-    }
-
-    if (action.type === 'navigate' && action.target) {
-      const domain = extractDomain(action.target);
-      if (!session.approvedDomains.includes(domain)) {
-        session.approvedDomains.push(domain);
-      }
     }
 
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -1149,6 +1209,11 @@ export async function describeComputerUsePlan(opts: {
   });
   session.actions = actions;
   const backendPreference = session.backendPreference || chooseBrowserAutomationBackendPreference(intent);
+  const runtimeHandoffTools = Array.from(new Set(
+    actions
+      .map((action) => action.runtimeHandoff?.tool)
+      .filter((tool): tool is BrowserMutationRuntimeTool => Boolean(tool)),
+  ));
 
   const summaryText = [
     `Browser backend: ${session.backendLabel}${session.backendDetails ? ` (${session.backendDetails})` : ''}`,
@@ -1170,6 +1235,12 @@ export async function describeComputerUsePlan(opts: {
     ...actions.slice(0, 8).map((action, index) =>
       `${index + 1}. ${action.type.toUpperCase()}${action.target ? ` ${action.target}` : ''} — ${action.description}`),
     actions.length > 8 ? `...and ${actions.length - 8} more action(s)` : '',
+    runtimeHandoffTools.length > 0
+      ? `Legacy Computer Use will stop at its first mutation marker. Continue in Chat/OpenSwan through: ${runtimeHandoffTools.join(', ')}. No raw mutation value or sealed runtime identity is carried by this plan.`
+      : '',
+    runtimeHandoffTools.includes('browser.select_option')
+      ? 'Dropdown selection is blocked in this legacy plan. Continue that exact step in Chat/OpenSwan through browser.select_option; do not retry it through Computer Use or a raw bridge.'
+      : '',
     `Completion: ${intent.completionCriteria.join(' | ')}`,
     requiresApproval
       ? 'This plan requires user approval before live browser execution.'
@@ -1216,7 +1287,7 @@ export function toBrowserSessionRecord(
     backendSessionId: session.backendSessionId,
     backendLiveUrl: session.backendLiveUrl,
     recommendedPermission: session.recommendedPermission,
-    actions: session.actions,
+    actions: session.actions.map(withoutPersistedMutationInput),
   };
 }
 
@@ -1234,15 +1305,19 @@ export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlan
     status: 'planned',
     computerAppPreflight: plan.computerAppPreflight || null,
     computerAppGroundingTrace: plan.computerAppGroundingTrace || null,
-    actions: plan.actions.map((action) => ({
-      id: action.id,
-      type: action.type,
-      target: action.target,
-      value: action.value,
-      description: action.description,
-      requiresApproval: action.requiresApproval,
-      approvalReason: action.approvalReason,
-      blockedReason: action.blockedReason,
-    })),
+    actions: plan.actions.map((action) => {
+      const safeAction = withoutPersistedMutationInput(action);
+      return {
+        id: safeAction.id,
+        type: safeAction.type,
+        target: safeAction.target,
+        value: safeAction.value,
+        description: safeAction.description,
+        requiresApproval: safeAction.requiresApproval,
+        approvalReason: safeAction.approvalReason,
+        blockedReason: safeAction.blockedReason,
+        runtimeHandoff: safeAction.runtimeHandoff,
+      };
+    }),
   };
 }

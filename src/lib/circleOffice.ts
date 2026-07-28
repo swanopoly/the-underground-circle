@@ -11,6 +11,7 @@
  */
 
 import { supabase } from './supabase';
+import { subscribeWithReconnect } from './subscribeWithReconnect';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -439,17 +440,23 @@ export function subscribeToCircleOffice(
   circleId: string,
   onUpdate: () => void
 ): () => void {
-  const channel = supabase
-    .channel(`circle-office-${circleId}`)
-    .on('postgres_changes', {
+  // Resilient path (next-gaps FINDING 1): a bare `.subscribe()` here meant that
+  // after any network blip or laptop sleep/wake the Office roster stopped
+  // updating FOREVER — no error, no retry, just a dashboard quietly frozen on
+  // whatever it last saw. `onUpdate` is already the caller's full refetch, so it
+  // doubles as the catch-up that backfills whatever changed while we were down.
+  const handle = subscribeWithReconnect({
+    channelName: `circle-office-${circleId}`,
+    setup: (channel) => channel.on('postgres_changes', {
       event: '*',
       schema: 'public',
       table: 'circle_office_agents',
       filter: `circle_id=eq.${circleId}`,
-    }, onUpdate)
-    .subscribe();
+    }, onUpdate),
+    onCatchUp: onUpdate,
+  });
 
-  return () => { supabase.removeChannel(channel); };
+  return () => handle.unsubscribe();
 }
 
 // ─── Update agent spirit ──────────────────────────────────────────────────────

@@ -13,6 +13,10 @@
  *   7. Determinism: identical output for identical inputs + nowMs
  *   8. O8 synthetic pinned-agent live status: evidence → upgrade, no evidence
  *      → untouched, finished/stale runs → no upgrade, bounds, determinism
+ *   9. Desk accountability plaque: visibility, severity-ordered tone, note
+ *      bounding, detail line, degenerate inputs
+ *  10. Per-agent build XP: lockstep with PixelAgent.getBuildXpGain, monotonic
+ *      level walk, bar invariants, ceiling, degenerate inputs
  *
  * Usage:
  *   npm run smoke:office-ops-board
@@ -23,6 +27,9 @@ import {
   buildOfficeTokenTracker,
   buildAgentLiveOps,
   buildOfficeAgentAccountabilityIndex,
+  buildOfficeDeskAccountabilityPlaque,
+  buildOfficeAgentXp,
+  officeXpLevelSpan,
   applySyntheticAgentStatusUpgrade,
   deriveSyntheticAgentStatusFromRuns,
   formatAccountabilityCounts,
@@ -31,6 +38,10 @@ import {
   HUGGINGSWAN_RUN_NAME_KEYS,
   OPENSWAN_RUN_NAME_KEYS,
   OFFICE_ACCOUNTABILITY_WINDOW_MS,
+  OFFICE_DESK_PLAQUE_NOTE_MAX,
+  OFFICE_XP_PER_TURN,
+  OFFICE_XP_TOKENS_PER_POINT,
+  OFFICE_XP_MAX_LEVEL,
   OFFICE_BOARD_MAX_ROOTS,
   OFFICE_BOARD_MAX_CHILDREN_PER_ROOT,
   OFFICE_BOARD_MAX_RECENTLY_FINISHED,
@@ -569,6 +580,141 @@ console.log('\n[O8] synthetic live status — evidence, mapping, staleness');
   const up8 = applySyntheticAgentStatusUpgrade('idle', null);
   check('no evidence → untouched', !up8.changed && up8.status === 'idle' && up8.activity === undefined);
 }
+
+// ─── 9. Desk accountability plaque (floor sprite) ────────────────────────────
+
+{
+  const good = {
+    lastLine: '✅ Fixed login flow · 2h ago',
+    tone: 'good' as const,
+    completed24h: 3,
+    failed24h: 1,
+    costUsd24h: 0.42,
+  };
+  const bad = { ...good, lastLine: '❌ Deploy failed · 20m ago', tone: 'danger' as const };
+
+  const none = buildOfficeDeskAccountabilityPlaque(undefined, undefined);
+  check('plaque: no entry + no note → invisible', !none.visible && none.counts === '' && none.note === '' && none.detail === '' && none.tone === 'neutral');
+
+  const countsOnly = buildOfficeDeskAccountabilityPlaque(good, undefined);
+  check('plaque: entry only → visible, good tone, counts', countsOnly.visible && countsOnly.tone === 'good' && countsOnly.counts === '✓3 ✗1' && countsOnly.note === '');
+  check('plaque: detail carries the last outcome line', countsOnly.detail === good.lastLine);
+
+  const noteOnly = buildOfficeDeskAccountabilityPlaque(null, 'bridge disconnected');
+  check('plaque: note only → visible, warn tone, empty counts', noteOnly.visible && noteOnly.tone === 'warn' && noteOnly.counts === '' && noteOnly.note === 'bridge disconnected');
+  check('plaque: detail prefixes the note', noteOnly.detail === '⚠️ bridge disconnected');
+
+  // Severity order: a failed last run outranks a stale-bridge note for colour,
+  // but the note must still render (fail-visible, never hidden).
+  const both = buildOfficeDeskAccountabilityPlaque(bad, 'bridge offline — status stale');
+  check('plaque: danger outranks warn for tone', both.tone === 'danger');
+  check('plaque: note still rendered under danger tone', both.note.length > 0);
+  check('plaque: detail joins note + last outcome', both.detail === '⚠️ bridge offline — status stale · ❌ Deploy failed · 20m ago');
+
+  const warnOverGood = buildOfficeDeskAccountabilityPlaque(good, 'bridge disconnected');
+  check('plaque: warn outranks good', warnOverGood.tone === 'warn' && warnOverGood.counts === '✓3 ✗1');
+
+  // Bounding + degenerates.
+  const longNote = buildOfficeDeskAccountabilityPlaque(null, 'x'.repeat(200));
+  check('plaque: note bounded to OFFICE_DESK_PLAQUE_NOTE_MAX', longNote.note.length <= OFFICE_DESK_PLAQUE_NOTE_MAX);
+  check('plaque: detail keeps the UNBOUNDED note for tooltip', longNote.detail.length > OFFICE_DESK_PLAQUE_NOTE_MAX);
+
+  const blankNote = buildOfficeDeskAccountabilityPlaque(null, '   ');
+  check('plaque: whitespace-only note → invisible', !blankNote.visible);
+
+  const zeroCounts = buildOfficeDeskAccountabilityPlaque(
+    { lastLine: '', tone: 'good', completed24h: 0, failed24h: 0, costUsd24h: 0 },
+    undefined,
+  );
+  check('plaque: zero counts + no note → invisible', !zeroCounts.visible);
+
+  const failedOnly = buildOfficeDeskAccountabilityPlaque({ ...bad, completed24h: 0, failed24h: 2 }, undefined);
+  check('plaque: failures only → ✗ counts + danger', failedOnly.counts === '✗2' && failedOnly.tone === 'danger');
+
+  check('plaque: never throws on junk input', (() => {
+    try {
+      buildOfficeDeskAccountabilityPlaque({} as any, 123 as any);
+      buildOfficeDeskAccountabilityPlaque(null as any, null);
+      return true;
+    } catch { return false; }
+  })());
+
+  check('plaque: deterministic', JSON.stringify(buildOfficeDeskAccountabilityPlaque(bad, 'bridge disconnected'))
+    === JSON.stringify(buildOfficeDeskAccountabilityPlaque(bad, 'bridge disconnected')));
+}
+
+
+// ─── 10. Per-agent build XP ─────────────────────────────────────────────────
+
+{
+  const zero = buildOfficeAgentXp(0, 0);
+  check('xp: zero work → level 1, empty bar', zero.total === 0 && zero.level === 1 && zero.intoLevel === 0 && !zero.maxed);
+  check('xp: level 1 span is non-zero (bar never divides by 0)', zero.levelSpan > 0);
+
+  // Lockstep with PixelAgent.getBuildXpGain: turns*18 + round(tokens/160).
+  check('xp: turn contribution matches getBuildXpGain', buildOfficeAgentXp(10, 0).total === 10 * OFFICE_XP_PER_TURN);
+  check('xp: token contribution matches getBuildXpGain', buildOfficeAgentXp(0, 1600).total === Math.round(1600 / OFFICE_XP_TOKENS_PER_POINT));
+  check('xp: contributions are additive', buildOfficeAgentXp(10, 1600).total === 10 * OFFICE_XP_PER_TURN + 10);
+
+  // Bar invariants must hold at every level, or a desk renders a broken bar.
+  let lastTotal = -1;
+  let lastLevel = 0;
+  let invariantsHold = true;
+  let monotonic = true;
+  for (let turns = 0; turns <= 4000; turns += 7) {
+    const xp = buildOfficeAgentXp(turns, turns * 90);
+    if (xp.total < lastTotal) monotonic = false;
+    if (xp.level < lastLevel) monotonic = false;
+    lastTotal = xp.total;
+    lastLevel = xp.level;
+    if (
+      !(xp.levelSpan > 0) ||
+      !(xp.intoLevel >= 0 && xp.intoLevel <= xp.levelSpan) ||
+      !(xp.level >= 1 && xp.level <= OFFICE_XP_MAX_LEVEL) ||
+      !(xp.nextTotal > 0) ||
+      !Number.isFinite(xp.total)
+    ) invariantsHold = false;
+  }
+  check('xp: bar invariants hold across the whole curve', invariantsHold);
+  check('xp: total and level are monotonic in work done', monotonic);
+
+  // Level boundaries: nextTotal is exactly where the next level begins.
+  const midLevel = buildOfficeAgentXp(20, 0);
+  const atBoundary = buildOfficeAgentXp(0, 0);
+  check('xp: nextTotal == total - intoLevel + levelSpan', midLevel.nextTotal === midLevel.total - midLevel.intoLevel + midLevel.levelSpan);
+  check('xp: level 1 nextTotal is its own span', atBoundary.nextTotal === officeXpLevelSpan(1));
+  const justUnder = buildOfficeAgentXp(0, (officeXpLevelSpan(1) - 1) * OFFICE_XP_TOKENS_PER_POINT);
+  const justOver = buildOfficeAgentXp(0, officeXpLevelSpan(1) * OFFICE_XP_TOKENS_PER_POINT);
+  check('xp: crossing a span boundary advances exactly one level', justUnder.level === 1 && justOver.level === 2);
+  check('xp: intoLevel resets at the boundary', justOver.intoLevel === 0);
+
+  // Levels get more expensive.
+  check('xp: level spans grow', officeXpLevelSpan(2) > officeXpLevelSpan(1) && officeXpLevelSpan(9) > officeXpLevelSpan(8));
+
+  // Ceiling: absurd work clamps instead of looping forever or overflowing.
+  const huge = buildOfficeAgentXp(1e9, 1e12);
+  check('xp: level clamped at OFFICE_XP_MAX_LEVEL', huge.level === OFFICE_XP_MAX_LEVEL);
+  check('xp: ceiling reports maxed with a full bar', huge.maxed && huge.intoLevel === huge.levelSpan);
+  check('xp: below the ceiling is never maxed', !buildOfficeAgentXp(5, 0).maxed);
+
+  // Degenerates must not produce NaN widths.
+  const junk = [
+    buildOfficeAgentXp(-5, -5),
+    buildOfficeAgentXp(NaN, NaN),
+    buildOfficeAgentXp(undefined, null),
+    buildOfficeAgentXp(Infinity, -Infinity),
+    buildOfficeAgentXp(2.7, 3.9),
+  ];
+  check('xp: degenerate inputs → finite, valid, non-negative', junk.every(x =>
+    Number.isFinite(x.total) && x.total >= 0 &&
+    Number.isFinite(x.intoLevel) && Number.isFinite(x.levelSpan) && x.levelSpan > 0 &&
+    x.level >= 1));
+  check('xp: negative/NaN work → zero total', junk[0].total === 0 && junk[1].total === 0 && junk[2].total === 0);
+  check('xp: fractional counters floor rather than fractionalise', junk[4].total === 2 * OFFICE_XP_PER_TURN + 0);
+
+  check('xp: deterministic', JSON.stringify(buildOfficeAgentXp(37, 41000)) === JSON.stringify(buildOfficeAgentXp(37, 41000)));
+}
+
 
 // ─── Summary ────────────────────────────────────────────────────────────────
 

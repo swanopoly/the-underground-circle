@@ -15,6 +15,8 @@ export type SwanBotClientToolDispatchResult = {
 // so we never build a payload the edge would just re-truncate.
 export const SWANBOT_CLIENT_TOOL_RESULT_MAX_CHARS = 16_000;
 export const SWANBOT_CLIENT_TOOL_RESULT_STRING_MAX_CHARS = 2_000;
+/** Exact browser identity URLs may legally be up to 4,096 characters. */
+export const SWANBOT_CLIENT_TOOL_RESULT_IDENTITY_URL_MAX_CHARS = 4_096;
 // Grounding fields (a11y tree, DOM/HTML snapshot, screen/page text) ARE the
 // model's eyes on the screen — clipping them to 2k blinded computer-use turns
 // (discarded ~75% of a real a11y tree). Give those specific keys a much larger
@@ -25,7 +27,11 @@ const GROUNDING_TEXT_KEYS: ReadonlySet<string> = new Set([
   'dom', 'domsnapshot', 'snapshot', 'html', 'markdown', 'rendered',
   'pagetext', 'screentext', 'outerhtml',
 ]);
+const IDENTITY_URL_KEYS: ReadonlySet<string> = new Set(['url', 'expectedurl']);
 function stringBudgetForKey(key: string | null): number {
+  if (key && IDENTITY_URL_KEYS.has(key.toLowerCase())) {
+    return SWANBOT_CLIENT_TOOL_RESULT_IDENTITY_URL_MAX_CHARS;
+  }
   if (key && GROUNDING_TEXT_KEYS.has(key.toLowerCase())) {
     return SWANBOT_CLIENT_TOOL_RESULT_GROUNDING_STRING_MAX_CHARS;
   }
@@ -199,10 +205,32 @@ export async function dispatchSwanBotDesktopClientTool(
 ): Promise<SwanBotClientToolDispatchResult | null> {
   const input = (call.input || {}) as Record<string, any>;
   switch (call.name) {
+    case 'browser.locator_actionability': {
+      const { locatorActionability } = await import('./browserBridge');
+      const result = await locatorActionability(input as any);
+      return result.ok
+        ? { ok: true, data: result.data }
+        : {
+          ok: false,
+          error: [
+            result.error || 'Browser actionability evidence failed.',
+            result.recoveryHint ? `Next: ${result.recoveryHint}` : '',
+            result.requiredEvidence?.length
+              ? `Evidence: ${result.requiredEvidence.join(', ')}.`
+              : '',
+          ].filter(Boolean).join(' '),
+        };
+    }
     case 'desktop.launch_app':
-      return bridge.launchApp(String(input.appName || ''));
+      return {
+        ok: false,
+        error: 'desktop.launch_app must run through the approval and fresh native-app proof runtime gateway.',
+      };
     case 'desktop.focus_app':
-      return bridge.focusApp(String(input.appName || ''));
+      return {
+        ok: false,
+        error: 'desktop.focus_app must run through the approval and fresh native-app proof runtime gateway.',
+      };
     case 'desktop.type_text':
       return bridge.typeText(String(input.text || ''));
     case 'desktop.paste_text':
@@ -361,10 +389,10 @@ export async function dispatchSwanBotDesktopClientTool(
       };
     }
     case 'desktop.click_element':
-      return bridge.clickElement({
-        pid: Number(input.pid),
-        path: String(input.path || ''),
-      });
+      return {
+        ok: false,
+        error: 'desktop.click_element requires the sealed OpenSwan native semantic-action runtime and cannot use the raw client bridge dispatcher.',
+      };
     case 'desktop.set_element_value':
       return bridge.setElementValue({
         pid: Number(input.pid),

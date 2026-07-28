@@ -43,6 +43,7 @@ import {
 } from './computerGrantGate';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
 import { getModelCapabilityFlags, normalizeModelId } from './modelCapabilities';
+import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
 
 export type ChatComputerSurfaceKind = 'browser' | 'desktop' | 'local_files' | 'computer';
 
@@ -59,6 +60,7 @@ export interface ChatComputerHandoffContextInput {
   browserPlanId?: string | null;
   browserActionCount?: number | null;
   runId?: string | null;
+  outcomeStatus?: ComputerTaskOutcomeStatus | null;
   preflightStatus?: string | null;
   preflightSummary?: string | null;
   groundingStatus?: string | null;
@@ -103,6 +105,7 @@ export interface ChatComputerHandoffMetadata {
   browserPlanId?: string | null;
   browserActionCount?: number | null;
   runId?: string | null;
+  outcomeStatus?: ComputerTaskOutcomeStatus | null;
   preflightStatus?: string | null;
   preflightSummary?: string | null;
   groundingStatus?: string | null;
@@ -428,6 +431,7 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
     preflightStatusText ? `- Preflight: ${preflightStatusText}` : null,
     appRouteDecision ? `- App route decision: ${appRouteDecision.status} via ${appRouteDecision.chosenSurfaceLabel} for ${appRouteDecision.taskFamily}` : null,
     groundingStatusText ? `- Grounding: ${groundingStatusText}` : null,
+    input.outcomeStatus ? `- Outcome: ${input.outcomeStatus.replace(/_/g, ' ')}` : null,
     approvalSummaryText ? `- Approval: ${approvalSummaryText}` : null,
     standingGrant ? `- Standing grant: ${standingGrant.scopeKey}` : null,
     warnings.length ? `- Warnings: ${warnings.join('; ')}` : null,
@@ -459,6 +463,7 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
       browserPlanId: input.browserPlanId || null,
       browserActionCount: input.browserActionCount ?? null,
       runId: input.runId || null,
+      outcomeStatus: input.outcomeStatus || null,
       preflightStatus: preflightStatusText,
       preflightSummary: preflightSummaryText,
       groundingStatus: groundingStatusText,

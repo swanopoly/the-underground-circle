@@ -154,8 +154,8 @@ export const APP_CAPABILITIES: readonly AppCapability[] = [
     family: 'browser',
     title: 'Browser automation',
     whenToUse:
-      'Operate a real website that needs logged-in state, form submission, or DOM-level action — plan first with browser.plan_task, then act.',
-    exampleTools: ['browser.plan_task', 'browser.open_url', 'browser.dom_snapshot', 'browser.click_role'],
+      'Operate a real website that needs logged-in state, form submission, or DOM-level action. Before a target mutation, read the DOM and use locator actionability as read-only advisory evidence; the later mutation still needs its own gate.',
+    exampleTools: ['browser.dom_snapshot', 'browser.locator_actionability', 'browser.set_toggle', 'browser.plan_task'],
     approval: 'ask',
   },
   {

@@ -91,7 +91,18 @@ function main() {
 
   assert(customApiProxy.includes('Custom API baseUrl must use HTTPS'), 'Custom API proxy enforces HTTPS base URLs');
   assert(customApiProxy.includes('isBlockedHostname'), 'Custom API proxy blocks private/local destinations');
-  assert(customApiProxy.includes('requireApprovedToolCall'), 'Custom API proxy verifies approval before write-like requests');
+  assert(
+    customApiProxy.includes('requireConsumedToolReceipt')
+      && customApiProxy.includes('claim_agent_action_call')
+      && customApiProxy.includes('dispatchBindingDigest === receipt.authorityBindingDigest'),
+    'Custom API proxy verifies and durably claims a consumed v2 approval before write-like requests',
+  );
+  assert(
+    customApiProxy.includes('const approvalReceipt = !readOnly')
+      && customApiProxy.includes(': null;')
+      && customApiProxy.includes('const dispatchLease = approvalReceipt'),
+    'Custom API GET/HEAD stays read-only without consuming or claiming mutation authority',
+  );
   assert(customApiProxy.includes('bodyPreview') && customApiProxy.includes('maxBytes'), 'Custom API proxy caps response previews');
   assert(customApiProxy.includes('authorization') && customApiProxy.includes('secret not returned') === false, 'Custom API proxy injects auth server-side without returning secret values');
 

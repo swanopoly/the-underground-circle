@@ -17,6 +17,7 @@
  * tsx/esbuild without pulling react-native.
  */
 
+import { readFileSync } from 'node:fs';
 import {
   buildMessagingPayload,
   describeMessagingNotify,
@@ -243,12 +244,10 @@ function json(value: unknown): string {
   assert('unknown provider falls back to slack shape', Array.isArray(unknown.blocks));
 }
 
-// ── 9. Approval-key parity contract (edge ⇄ client) ──────────────────────────
-// The messaging-notify + custom-api-proxy edges verify a stored approval by
-// recomputing buildApprovalKey(tool, args) and string-comparing it to the
-// client's persisted toolApprovalKey. If the serializations diverge, the match
-// ALWAYS fails and every approved post/write is rejected server-side. This pins
-// the exact string the edge must produce against the canonical client builder.
+// ── 9. Approval v2 digest/receipt contract (edge ⇄ client) ───────────────────
+// The edges recompute the v2 digest from ephemeral args, verify a redacted
+// runtime-consumed receipt + durable row, and use the action ledger to prevent
+// a second external dispatch. Raw canonical args are never persisted.
 {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const {
@@ -261,16 +260,94 @@ function json(value: unknown): string {
   const args = { provider: 'slack', title: 'Deploy', body: 'shipped', fields: [{ value: 'v', label: 'k' }] };
 
   const clientKey = buildOpenSwanToolApprovalKey(tool, args);
+  const edgeCanonical = stableApprovalJson({ version: 2, tool, args });
+  assert('edge v2 canonical input === client canonical input', edgeCanonical === clientKey);
 
-  // FIXED edge formula (what buildApprovalKey now does): stableValue the whole
-  // { version, tool, args } wrapper → top-level keys sorted too.
-  const fixedEdgeKey = stableApprovalJson({ version: 1, tool, args });
-  assert('edge fixed key === client canonical key', fixedEdgeKey === clientKey);
-
-  // OLD buggy edge formula: sort only args, leave the literal wrapper in
-  // insertion order. This MUST differ — the pin fails if anyone reverts.
-  const buggyEdgeKey = JSON.stringify({ version: 1, tool, args: JSON.parse(stableApprovalJson(args)) });
-  assert('old buggy edge key differed from client (regression guard)', buggyEdgeKey !== clientKey);
+  const messagingEdge = readFileSync('supabase/functions/messaging-notify/index.ts', 'utf8');
+  const customApiEdge = readFileSync('supabase/functions/custom-api-proxy/index.ts', 'utf8');
+  const runtimeSource = readFileSync('src/lib/openswanToolRuntime.ts', 'utf8');
+  for (const [label, source] of [
+    ['messaging edge', messagingEdge],
+    ['custom API edge', customApiEdge],
+  ] as const) {
+    assert(`${label} requires v2 digest`, source.includes('approval-v2:sha256:'));
+    assert(`${label} verifies consumed authority binding`, source.includes('dispatchBindingDigest === receipt.authorityBindingDigest'));
+    assert(`${label} checks persisted run/user/circle`, source.includes('.from("agent_runs")') && source.includes('.eq("user_id", input.userId)') && source.includes('.eq("circle_id", input.circleId)'));
+    assert(
+      `${label} binds approve-then-retry across two persisted runs`,
+      source.includes('record.source === "cross_run"')
+        && source.includes('row.run_id !== receipt.approvalRunId')
+        && source.includes('.eq("id", receipt.approvalRunId)')
+        && source.includes('receipt.source === "cross_run" && receipt.approvalRunId === runId'),
+    );
+    assert(
+      `${label} rejects legacy/malformed receipt fields`,
+      source.includes('Object.keys(record).some((key) => !RECEIPT_KEYS.has(key))')
+        && source.includes('"approvalRunId"')
+        && !source.includes('"approvalKey",'),
+    );
+    assert(`${label} rejects expired/future receipts`, source.includes('Date.now() >= expiresAtMs') && source.includes('consumedAtMs > Date.now() + 5_000'));
+    assert(`${label} claims durable one-use dispatch`, source.includes('claim_agent_action_call') && source.includes('data.disposition !== "claimed"'));
+    assert(
+      `${label} treats a lost durable-start response as outcome unknown`,
+      source.includes('dispatchStartAttempted = true;')
+        && source.includes('dispatchStartAttempted) {')
+        && source.includes('finishEdgeDispatch(userSupabase, dispatchLease, "outcome_unknown")'),
+    );
+    assert(`${label} never reopens approval authority`, !source.includes('.update({ payload:') && !source.includes("dispatchBindingDigest', null"));
+    assert(`${label} does not compare raw v1 approval keys`, !source.includes('row?.payload?.toolApprovalKey === approvalKey') && !source.includes('version: 1, tool, args'));
+    const consumeAt = source.lastIndexOf('requireConsumedToolReceipt({');
+    const claimAt = source.lastIndexOf('claimEdgeDispatch({');
+    const startAt = source.lastIndexOf('startEdgeDispatch(');
+    const fetchAt = source.lastIndexOf('await fetch(');
+    assert(
+      `${label} re-verifies consumed authority, durably claims, and starts before one external dispatch`,
+      consumeAt > 0
+        && consumeAt < claimAt
+        && claimAt < startAt
+        && startAt < fetchAt,
+    );
+    assert(
+      `${label} never returns raw DB/provider/URL exception text`,
+      !source.includes('integrationError.message')
+        && !source.includes('e instanceof Error ? e.message')
+        && !source.includes('providerText')
+        && !source.includes('res.statusText'),
+    );
+  }
+  assert(
+    'messaging edge requires exact authenticated circle membership',
+    messagingEdge.includes('.from("circle_members")')
+      && messagingEdge.includes('.eq("circle_id", circleId)')
+      && messagingEdge.includes('.eq("user_id", user.id)')
+      && !messagingEdge.includes('userOwnsConnection('),
+  );
+  assert(
+    'edges complete read-only connector preparation before accepting consumed authority',
+    messagingEdge.lastIndexOf('const target = assertSafeWebhookUrl(webhookUrl)')
+        < messagingEdge.lastIndexOf('requireConsumedToolReceipt({')
+      && customApiEdge.lastIndexOf('const secrets = await loadSecrets(')
+        < customApiEdge.lastIndexOf('requireConsumedToolReceipt({'),
+  );
+  assert(
+    'messaging edge derives provider and message only from digest-bound args',
+    messagingEdge.includes('const provider = String(exactToolArgs.provider')
+      && messagingEdge.includes('const outboundPayload = buildMessagingPayload(provider, {')
+      && messagingEdge.includes('body: typeof exactToolArgs.body'),
+  );
+  assert(
+    'Custom API edge derives write target and body only from digest-bound args',
+    customApiEdge.includes('const requestInput = exactMutationArgs || body')
+      && customApiEdge.includes('requestInput.path')
+      && customApiEdge.includes('requestInput.body'),
+  );
+  assert(
+    'OpenSwan edge callers keep invocation exceptions redacted',
+    runtimeSource.includes('Custom API proxy was unavailable or returned a redacted failure')
+      && runtimeSource.includes('Messaging notify was unavailable or returned a redacted failure')
+      && !runtimeSource.includes('Custom API proxy failed: ${error.message}')
+      && !runtimeSource.includes('Messaging notify failed: ${error.message}'),
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

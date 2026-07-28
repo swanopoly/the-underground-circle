@@ -3,16 +3,24 @@
 // This function is intentionally narrow. It only calls the base URL saved on a
 // connected `custom_api` circle integration, only uses methods allowed by that
 // integration metadata, blocks private/local destinations, hides secret values,
-// caps response bytes, and requires a matching approved OpenSwan approval row
-// for non-read methods.
+// caps response bytes, and requires an exact runtime-consumed OpenSwan v2
+// approval receipt plus one durable action-ledger claim for non-read methods.
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import {
   corsHeaders,
   createServiceRoleClient,
   errResponse,
   getAuthenticatedUser,
+  getRequiredEnv,
   jsonResponse,
 } from "../_shared/edge.ts";
+import {
+  buildOpenSwanApprovalAuthorityBindingDigest,
+  buildOpenSwanToolApprovalDigest,
+  isOpenSwanApprovalAuditPayload,
+  stableApprovalJson,
+} from "../../../src/lib/openswanToolApprovals.ts";
 
 type HttpMethod = "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -21,6 +29,7 @@ interface RequestBody {
   runId?: string | null;
   toolName?: "custom_api.read" | "custom_api.request";
   toolArgs?: Record<string, unknown>;
+  approvalReceipt?: Record<string, unknown> | null;
   integrationId?: string;
   apiName?: string;
   toolNamespace?: string;
@@ -35,6 +44,55 @@ const READ_METHODS = new Set<HttpMethod>(["GET", "HEAD"]);
 const WRITE_METHODS = new Set<HttpMethod>(["POST", "PUT", "PATCH", "DELETE"]);
 const ALL_METHODS = new Set<HttpMethod>(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
 const SECRETISH_KEY_RE = /(secret|token|password|private|credential|api[_-]?key|access[_-]?key|refresh|client[_-]?secret|authorization|cookie)/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CALL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
+const APPROVAL_DIGEST_RE = /^approval-v2:sha256:[0-9a-f]{64}$/;
+const AUTHORITY_DIGEST_RE = /^authority-v2:sha256:[0-9a-f]{64}$/;
+const ARGS_DIGEST_RE = /^args-v2:sha256:[0-9a-f]{64}$/;
+const RECEIPT_KEYS = new Set([
+  "schemaVersion",
+  "approvalId",
+  "approvalDigest",
+  "approvalKeyDigest",
+  "authorityBindingDigest",
+  "status",
+  "source",
+  "consumedAt",
+  "userId",
+  "circleId",
+  "approvalRunId",
+  "runId",
+  "toolName",
+  "toolUseId",
+  "iteration",
+]);
+
+type V2ApprovalReceipt = {
+  schemaVersion: 2;
+  approvalId: string;
+  approvalDigest: string;
+  approvalKeyDigest: string;
+  authorityBindingDigest: string;
+  status: "approved" | "auto_approved";
+  source: "run_scoped" | "cross_run" | "category_auto";
+  consumedAt: string;
+  userId: string;
+  circleId: string;
+  approvalRunId: string;
+  runId: string;
+  toolName: string;
+  toolUseId: string;
+  iteration: number;
+};
+
+type EdgeDispatchLease = {
+  receipt: V2ApprovalReceipt;
+  toolArgsFingerprint: string;
+  contractFingerprint: string;
+  actionId: string;
+  idempotencyKey: string;
+  claimToken: string;
+};
 
 function decodeSecret(value: string): string {
   try {
@@ -163,22 +221,98 @@ function buildTargetUrl(baseUrl: unknown, pathValue: unknown, query: Record<stri
   return target;
 }
 
-function stableValue(value: unknown): unknown {
-  if (value === undefined) return null;
-  if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      out[key] = stableValue((value as Record<string, unknown>)[key]);
-    }
-    return out;
+async function sha256Hex(value: string): Promise<string> {
+  if (typeof value !== "string" || value.length > 1_000_000) return "";
+  try {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    const hex = Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    return hex.length === 64 ? hex : "";
+  } catch {
+    return "";
   }
-  return String(value);
 }
 
-function buildApprovalKey(tool: string, args: Record<string, unknown>): string {
-  return JSON.stringify({ version: 1, tool, args: stableValue(args || {}) });
+function parseV2ApprovalReceipt(
+  value: unknown,
+  expected: { userId: string; circleId: string; runId: string; toolName: string },
+): V2ApprovalReceipt | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !RECEIPT_KEYS.has(key))) return null;
+  const status = record.status === "approved" || record.status === "auto_approved"
+    ? record.status
+    : null;
+  const source = record.source === "run_scoped"
+    || record.source === "cross_run"
+    || record.source === "category_auto"
+    ? record.source
+    : null;
+  if (!status || !source) return null;
+  const receipt: V2ApprovalReceipt = {
+    schemaVersion: 2,
+    approvalId: typeof record.approvalId === "string" ? record.approvalId : "",
+    approvalDigest: typeof record.approvalDigest === "string" ? record.approvalDigest : "",
+    approvalKeyDigest: typeof record.approvalKeyDigest === "string" ? record.approvalKeyDigest : "",
+    authorityBindingDigest: typeof record.authorityBindingDigest === "string" ? record.authorityBindingDigest : "",
+    status,
+    source,
+    consumedAt: typeof record.consumedAt === "string" ? record.consumedAt : "",
+    userId: typeof record.userId === "string" ? record.userId : "",
+    circleId: typeof record.circleId === "string" ? record.circleId : "",
+    approvalRunId: typeof record.approvalRunId === "string" ? record.approvalRunId : "",
+    runId: typeof record.runId === "string" ? record.runId : "",
+    toolName: typeof record.toolName === "string" ? record.toolName : "",
+    toolUseId: typeof record.toolUseId === "string" ? record.toolUseId : "",
+    iteration: Number(record.iteration),
+  };
+  if (
+    record.schemaVersion !== 2
+    || !UUID_RE.test(receipt.approvalId)
+    || !APPROVAL_DIGEST_RE.test(receipt.approvalDigest)
+    || receipt.approvalKeyDigest !== receipt.approvalDigest
+    || !AUTHORITY_DIGEST_RE.test(receipt.authorityBindingDigest)
+    || !Number.isFinite(Date.parse(receipt.consumedAt))
+    || !UUID_RE.test(receipt.approvalRunId)
+    || receipt.userId !== expected.userId
+    || receipt.circleId !== expected.circleId
+    || receipt.runId !== expected.runId
+    || receipt.toolName !== expected.toolName
+    || !CALL_ID_RE.test(receipt.toolUseId)
+    || !Number.isInteger(receipt.iteration)
+    || receipt.iteration < 1
+    || receipt.iteration > 1_000
+  ) {
+    return null;
+  }
+  return receipt;
+}
+
+function isExactConsumedApprovalPayload(
+  payload: unknown,
+  receipt: V2ApprovalReceipt,
+): payload is Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const record = payload as Record<string, unknown>;
+  if (!isOpenSwanApprovalAuditPayload(record)) return false;
+  const policyFamily = typeof record.policyFamily === "string" ? record.policyFamily : "";
+  const autoApproveCategory = typeof record.autoApproveCategory === "string" ? record.autoApproveCategory : "";
+  const floorCategory = typeof record.floorCategory === "string" ? record.floorCategory : "";
+  return record.approvalSchemaVersion === 2
+    && record.toolName === receipt.toolName
+    && record.toolApprovalDigest === receipt.approvalDigest
+    && record.toolApprovalKey === receipt.approvalDigest
+    && record.toolApprovalKeyVersion === 2
+    && CALL_ID_RE.test(policyFamily)
+    && record.approvalMode === "ask"
+    && record.mutatesState === true
+    && record.externalSideEffect === true
+    && (!autoApproveCategory || CALL_ID_RE.test(autoApproveCategory))
+    && (!floorCategory || CALL_ID_RE.test(floorCategory))
+    && record.dispatchReceiptSchemaVersion === 2
+    && record.dispatchBindingDigest === receipt.authorityBindingDigest
+    && record.dispatchConsumedAt === new Date(Date.parse(receipt.consumedAt)).toISOString();
 }
 
 async function readResponsePreview(res: Response, maxBytes: number): Promise<{ text: string; bytesRead: number; truncated: boolean }> {
@@ -230,7 +364,7 @@ async function loadSecrets(supabase: any, integrationId: string): Promise<Record
     .from("circle_integration_secrets")
     .select("key, value_encrypted")
     .eq("integration_id", integrationId);
-  if (error) throw new Error(`Secret lookup failed: ${error.message}`);
+  if (error) throw new Error("Custom API credential lookup failed.");
   const out: Record<string, string> = {};
   for (const row of data || []) {
     out[row.key] = decodeSecret(row.value_encrypted);
@@ -272,21 +406,223 @@ function applyAuth(headers: Headers, metadata: Record<string, unknown>, secrets:
   throw new Error("Unsupported authScheme. Use bearer, x-api-key, basic, or none.");
 }
 
-async function requireApprovedToolCall(supabase: any, runId: string | null | undefined, toolName: string, toolArgs: Record<string, unknown> | undefined) {
-  if (!runId) throw new Error("Approval runId is required for write-like Custom API requests.");
-  if (!toolArgs || typeof toolArgs !== "object") throw new Error("Original tool args are required for approval verification.");
-  const approvalKey = buildApprovalKey(toolName, toolArgs);
-  const { data, error } = await supabase
+function createAuthenticatedRpcClient(req: Request) {
+  const authorization = req.headers.get("Authorization") || req.headers.get("authorization") || "";
+  if (!authorization) return null;
+  return createClient(
+    getRequiredEnv("SUPABASE_URL"),
+    getRequiredEnv("SUPABASE_ANON_KEY"),
+    { global: { headers: { Authorization: authorization } } },
+  );
+}
+
+async function requireConsumedToolReceipt(input: {
+  serviceSupabase: any;
+  userId: string;
+  circleId: string;
+  runId: string | null | undefined;
+  toolName: string;
+  toolArgs: Record<string, unknown> | undefined;
+  receiptValue: unknown;
+}): Promise<V2ApprovalReceipt> {
+  if (!UUID_RE.test(String(input.runId || ""))) {
+    throw new Error("A persisted approval run is required before this outbound request.");
+  }
+  if (!input.toolArgs || typeof input.toolArgs !== "object" || Array.isArray(input.toolArgs)) {
+    throw new Error("Exact tool arguments are required for approval verification.");
+  }
+  const runId = String(input.runId);
+  const receipt = parseV2ApprovalReceipt(input.receiptValue, {
+    userId: input.userId,
+    circleId: input.circleId,
+    runId,
+    toolName: input.toolName,
+  });
+  if (!receipt) {
+    throw new Error("A valid consumed OpenSwan v2 approval receipt is required. Nothing was sent.");
+  }
+  const exactDigest = await buildOpenSwanToolApprovalDigest(input.toolName, input.toolArgs);
+  if (!exactDigest || exactDigest !== receipt.approvalDigest) {
+    throw new Error("The consumed approval does not match these exact tool arguments. Nothing was sent.");
+  }
+  const expectedBinding = await buildOpenSwanApprovalAuthorityBindingDigest({
+    approvalId: receipt.approvalId,
+    approvalRunId: receipt.approvalRunId,
+    approvalDigest: receipt.approvalDigest,
+    status: receipt.status,
+    source: receipt.source,
+    identity: {
+      userId: receipt.userId,
+      circleId: receipt.circleId,
+      runId: receipt.runId,
+      toolName: receipt.toolName,
+      toolUseId: receipt.toolUseId,
+      iteration: receipt.iteration,
+    },
+  });
+  if (!expectedBinding || expectedBinding !== receipt.authorityBindingDigest) {
+    throw new Error("The approval dispatch binding is invalid. Nothing was sent.");
+  }
+  const { data: run, error: runError } = await input.serviceSupabase
+    .from("agent_runs")
+    .select("id")
+    .eq("id", runId)
+    .eq("user_id", input.userId)
+    .eq("circle_id", input.circleId)
+    .maybeSingle();
+  if (runError || !run) {
+    throw new Error("The approval receipt is not bound to the authenticated persisted run. Nothing was sent.");
+  }
+  if (receipt.approvalRunId !== runId) {
+    const { data: approvalRun, error: approvalRunError } = await input.serviceSupabase
+      .from("agent_runs")
+      .select("id")
+      .eq("id", receipt.approvalRunId)
+      .eq("user_id", input.userId)
+      .eq("circle_id", input.circleId)
+      .maybeSingle();
+    if (approvalRunError || !approvalRun) {
+      throw new Error("The approval authority run does not match the authenticated user and circle. Nothing was sent.");
+    }
+  }
+  const { data: row, error } = await input.serviceSupabase
     .from("agent_run_approvals")
-    .select("id,status,payload")
-    .eq("run_id", runId)
-    .eq("title", `OpenSwan approval required: ${toolName}`)
-    .in("status", ["approved", "auto_approved"])
-    .order("requested_at", { ascending: false })
-    .limit(8);
-  if (error) throw new Error(`Approval lookup failed: ${error.message}`);
-  const approved = (data || []).some((row: any) => row?.payload?.toolApprovalKey === approvalKey);
-  if (!approved) throw new Error("A matching approved OpenSwan approval is required before this Custom API request can run.");
+    .select("id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,title,payload")
+    .eq("id", receipt.approvalId)
+    .maybeSingle();
+  if (error || !row) throw new Error("Approval receipt lookup failed. Nothing was sent.");
+
+  const requestedAtMs = Date.parse(String(row.requested_at || ""));
+  const timeoutSeconds = Number(row.timeout_seconds);
+  const consumedAtMs = Date.parse(receipt.consumedAt);
+  const expiresAtMs = requestedAtMs + timeoutSeconds * 1_000;
+  if (
+    row.run_id !== receipt.approvalRunId
+    || row.circle_id !== input.circleId
+    || row.requested_by !== input.userId
+    || row.status !== receipt.status
+    || row.title !== `OpenSwan approval required: ${input.toolName}`
+    || (receipt.source === "cross_run" && receipt.approvalRunId === runId)
+    || (receipt.source !== "cross_run" && receipt.approvalRunId !== runId)
+    || !Number.isFinite(requestedAtMs)
+    || !Number.isFinite(timeoutSeconds)
+    || timeoutSeconds < 1
+    || timeoutSeconds > 86_400
+    || !Number.isFinite(consumedAtMs)
+    || consumedAtMs < requestedAtMs
+    || consumedAtMs > expiresAtMs
+    || consumedAtMs > Date.now() + 5_000
+    || Date.now() >= expiresAtMs
+    || !isExactConsumedApprovalPayload(row.payload, receipt)
+  ) {
+    throw new Error("The approval is malformed, expired, cross-run, or already invalid. Nothing was sent.");
+  }
+  return receipt;
+}
+
+async function claimEdgeDispatch(input: {
+  userSupabase: any;
+  receipt: V2ApprovalReceipt;
+  integrationId: string;
+  method: string;
+  targetUrl: string;
+}): Promise<EdgeDispatchLease> {
+  const bindingHex = input.receipt.authorityBindingDigest.slice("authority-v2:sha256:".length);
+  const toolArgsFingerprint = `args-v2:sha256:${input.receipt.approvalDigest.slice("approval-v2:sha256:".length)}`;
+  const contractHex = await sha256Hex(stableApprovalJson({
+    schemaVersion: 1,
+    edge: "custom_api",
+    approvalId: input.receipt.approvalId,
+    approvalDigest: input.receipt.approvalDigest,
+    authorityBindingDigest: input.receipt.authorityBindingDigest,
+    integrationId: input.integrationId,
+    method: input.method,
+    targetUrl: input.targetUrl,
+  }));
+  const contractFingerprint = `args-v2:sha256:${contractHex}`;
+  const actionId = `edge:${bindingHex}`;
+  const idempotencyKey = `edge-v2:${bindingHex}`;
+  if (!ARGS_DIGEST_RE.test(toolArgsFingerprint) || !ARGS_DIGEST_RE.test(contractFingerprint)) {
+    throw new Error("The durable dispatch fingerprint could not be created. Nothing was sent.");
+  }
+  const { data, error } = await input.userSupabase.rpc("claim_agent_action_call", {
+    p_user_id: input.receipt.userId,
+    p_circle_id: input.receipt.circleId,
+    p_run_id: input.receipt.runId,
+    p_tool_name: input.receipt.toolName,
+    p_tool_use_id: input.receipt.toolUseId,
+    p_action_id: actionId,
+    p_tool_args_fingerprint: toolArgsFingerprint,
+    p_contract_fingerprint: contractFingerprint,
+    p_idempotency_key: idempotencyKey,
+    p_metadata: {
+      surface: "system",
+      risk: "high",
+      approvalId: input.receipt.approvalId,
+      source: "openswan_tool_runtime",
+      actor: "user_authorized_agent",
+      redacted: true,
+    },
+    p_ttl_seconds: 120,
+  });
+  if (
+    error
+    || !data
+    || data.ok !== true
+    || data.disposition !== "claimed"
+    || data.state !== "claimed"
+    || data.attemptCount !== 1
+    || !UUID_RE.test(String(data.claimToken || ""))
+  ) {
+    throw new Error("This approval receipt was already claimed or the durable dispatch ledger is unavailable. Nothing was sent.");
+  }
+  return {
+    receipt: input.receipt,
+    toolArgsFingerprint,
+    contractFingerprint,
+    actionId,
+    idempotencyKey,
+    claimToken: String(data.claimToken),
+  };
+}
+
+function edgeDispatchRpcArgs(lease: EdgeDispatchLease) {
+  return {
+    p_user_id: lease.receipt.userId,
+    p_circle_id: lease.receipt.circleId,
+    p_run_id: lease.receipt.runId,
+    p_tool_name: lease.receipt.toolName,
+    p_tool_use_id: lease.receipt.toolUseId,
+    p_action_id: lease.actionId,
+    p_tool_args_fingerprint: lease.toolArgsFingerprint,
+    p_contract_fingerprint: lease.contractFingerprint,
+    p_idempotency_key: lease.idempotencyKey,
+    p_claim_token: lease.claimToken,
+  };
+}
+
+async function startEdgeDispatch(userSupabase: any, lease: EdgeDispatchLease): Promise<void> {
+  const { data, error } = await userSupabase.rpc("start_agent_action_call", edgeDispatchRpcArgs(lease));
+  if (error || !data || data.ok !== true || data.disposition !== "started" || data.state !== "dispatched") {
+    throw new Error("Durable dispatch start was refused. Nothing was sent.");
+  }
+}
+
+async function finishEdgeDispatch(
+  userSupabase: any,
+  lease: EdgeDispatchLease,
+  finalState: "verified" | "outcome_unknown",
+): Promise<boolean> {
+  const { data, error } = await userSupabase.rpc("finish_agent_action_call", {
+    ...edgeDispatchRpcArgs(lease),
+    p_final_state: finalState,
+    p_metadata: {
+      completionVerified: finalState === "verified",
+      outcomeUnknown: finalState === "outcome_unknown",
+      redacted: true,
+    },
+  });
+  return !error && data?.ok === true && data?.state === finalState;
 }
 
 Deno.serve(async (req) => {
@@ -305,8 +641,21 @@ Deno.serve(async (req) => {
 
   const circleId = String(body.circleId || "").trim();
   if (!circleId) return errResponse(400, "missing_circle", "circleId is required.");
+  const exactMutationArgs = (
+    body.toolName === "custom_api.request"
+    && body.toolArgs
+    && typeof body.toolArgs === "object"
+    && !Array.isArray(body.toolArgs)
+  )
+    ? body.toolArgs
+    : null;
+  // For writes the digest-bound tool args are the sole source of action
+  // parameters. Duplicate top-level fields cannot alter the approved target.
+  const requestInput = exactMutationArgs || body;
 
   const supabase = createServiceRoleClient();
+  const userSupabase = createAuthenticatedRpcClient(req);
+  if (!userSupabase) return errResponse(401, "unauthorized", "A user-scoped authorization token is required.");
   const { data: membership, error: membershipError } = await supabase
     .from("circle_members")
     .select("user_id")
@@ -321,11 +670,13 @@ Deno.serve(async (req) => {
     .eq("circle_id", circleId)
     .eq("provider", "custom_api")
     .eq("is_active", true);
-  if (integrationError) return errResponse(500, "integration_lookup_failed", integrationError.message);
+  if (integrationError) {
+    return errResponse(500, "integration_lookup_failed", "Custom API connection lookup failed. Retry after the integration service is healthy.");
+  }
 
-  const needleId = clip(body.integrationId, 120);
-  const needleName = clip(body.apiName, 120).toLowerCase();
-  const needleNamespace = clip(body.toolNamespace, 120).toLowerCase();
+  const needleId = clip(requestInput.integrationId, 120);
+  const needleName = clip(requestInput.apiName, 120).toLowerCase();
+  const needleNamespace = clip(requestInput.toolNamespace, 120).toLowerCase();
   const candidates = (integrations || []) as any[];
   const integration = candidates.find((row) => {
     const metadata = row.metadata || {};
@@ -340,12 +691,16 @@ Deno.serve(async (req) => {
   if (integration.status === "disabled") return errResponse(409, "integration_disabled", "Custom API integration is disabled.");
 
   const metadata = (integration.metadata || {}) as Record<string, unknown>;
-  const method = normalizeMethod(body.method || metadata.defaultMethod, "GET");
+  const method = normalizeMethod(requestInput.method || metadata.defaultMethod, "GET");
   if (!method) return errResponse(400, "bad_method", "Unsupported HTTP method.");
   const readOnly = READ_METHODS.has(method);
-  const toolName = body.toolName || (readOnly ? "custom_api.read" : "custom_api.request");
-  if (toolName === "custom_api.read" && !readOnly) return errResponse(400, "read_tool_method", "custom_api.read only allows GET or HEAD.");
-  if (toolName === "custom_api.request" && !WRITE_METHODS.has(method)) return errResponse(400, "request_tool_method", "custom_api.request only allows POST, PUT, PATCH, or DELETE.");
+  const toolName = readOnly ? "custom_api.read" : "custom_api.request";
+  if ((!readOnly && body.toolName !== toolName) || (readOnly && body.toolName && body.toolName !== toolName)) {
+    return errResponse(400, "tool_identity_mismatch", `${toolName} is required for this HTTP method.`);
+  }
+  if (!readOnly && !exactMutationArgs) {
+    return errResponse(400, "missing_exact_args", "Digest-bound toolArgs are required for write-like Custom API requests.");
+  }
 
   const allowedMethods = parseAllowedMethods(metadata.allowedMethods);
   if (!allowedMethods.has(method)) {
@@ -353,51 +708,115 @@ Deno.serve(async (req) => {
   }
 
   try {
-    if (!readOnly) await requireApprovedToolCall(supabase, body.runId, toolName, body.toolArgs);
-
-    const target = buildTargetUrl(metadata.baseUrl, body.path, body.query, metadata.defaultEndpoint);
+    const target = buildTargetUrl(
+      metadata.baseUrl,
+      requestInput.path,
+      requestInput.query as Record<string, unknown> | undefined,
+      metadata.defaultEndpoint,
+    );
     const secrets = await loadSecrets(supabase, integration.id);
     const headers = new Headers();
     headers.set("accept", "application/json, text/plain;q=0.9, */*;q=0.1");
     const authUsed = applyAuth(headers, metadata, secrets);
 
     let requestBody: BodyInit | undefined;
-    if (!readOnly && body.body !== undefined && body.body !== null) {
-      requestBody = typeof body.body === "string" ? body.body : JSON.stringify(body.body);
-      headers.set("content-type", typeof body.body === "string" ? "text/plain" : "application/json");
+    if (!readOnly && requestInput.body !== undefined && requestInput.body !== null) {
+      requestBody = typeof requestInput.body === "string" ? requestInput.body : JSON.stringify(requestInput.body);
+      headers.set("content-type", typeof requestInput.body === "string" ? "text/plain" : "application/json");
     }
 
+    // Finish read-only preparation before re-verifying the upstream-consumed
+    // receipt, then durably claim immediately before dispatch. Invalid target
+    // or credential state must never create an edge action-ledger claim.
+    const approvalReceipt = !readOnly
+      ? await requireConsumedToolReceipt({
+          serviceSupabase: supabase,
+          userId: user.id,
+          circleId,
+          runId: body.runId,
+          toolName,
+          toolArgs: body.toolArgs,
+          receiptValue: body.approvalReceipt,
+        })
+      : null;
+
+    const dispatchLease = approvalReceipt
+      ? await claimEdgeDispatch({
+          userSupabase,
+          receipt: approvalReceipt,
+          integrationId: String(integration.id),
+          method,
+          targetUrl: target.toString(),
+        })
+      : null;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);
-    const res = await fetch(target.toString(), {
-      method,
-      headers,
-      body: method === "GET" || method === "HEAD" ? undefined : requestBody,
-      signal: controller.signal,
-      // SSRF guard: the host allow-list is enforced pre-flight on the configured
-      // hostname, so following a 3xx to an internal/metadata host would escape
-      // it. Do not follow redirects — any redirect is treated as blocked below.
-      redirect: "manual",
-    });
-    clearTimeout(timeout);
+    let res: Response;
+    let dispatchStartAttempted = false;
+    try {
+      if (dispatchLease) {
+        // Set before awaiting the RPC: a lost start response is ambiguous and
+        // must be sealed outcome_unknown if the server did enter dispatched.
+        dispatchStartAttempted = true;
+        await startEdgeDispatch(userSupabase, dispatchLease);
+      }
+      res = await fetch(target.toString(), {
+        method,
+        headers,
+        body: method === "GET" || method === "HEAD" ? undefined : requestBody,
+        signal: controller.signal,
+        // SSRF guard: the host allow-list is enforced pre-flight on the configured
+        // hostname, so following a 3xx to an internal/metadata host would escape
+        // it. Do not follow redirects — any redirect is treated as blocked below.
+        redirect: "manual",
+      });
+    } catch (error) {
+      if (dispatchLease && dispatchStartAttempted) {
+        await finishEdgeDispatch(userSupabase, dispatchLease, "outcome_unknown");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     // A redirect points somewhere the host guard never vetted. Refuse without
     // reading or forwarding the body (mirrors the isBlockedHostname block).
     if ((res.status >= 300 && res.status < 400) || res.type === "opaqueredirect") {
+      if (dispatchLease) {
+        await finishEdgeDispatch(userSupabase, dispatchLease, "outcome_unknown");
+      }
       throw new Error("Custom API upstream attempted a redirect, which is blocked.");
     }
 
-    const maxBytes = Math.max(256, Math.min(20_000, Number(body.maxBytes) || 8_000));
-    const preview = method === "HEAD"
-      ? { text: "", bytesRead: 0, truncated: false }
-      : await readResponsePreview(res, maxBytes);
+    let preview: { text: string; bytesRead: number; truncated: boolean };
+    try {
+      const maxBytes = Math.max(256, Math.min(20_000, Number(requestInput.maxBytes) || 8_000));
+      preview = method === "HEAD"
+        ? { text: "", bytesRead: 0, truncated: false }
+        : await readResponsePreview(res, maxBytes);
+    } catch (error) {
+      if (dispatchLease) {
+        await finishEdgeDispatch(userSupabase, dispatchLease, "outcome_unknown");
+      }
+      throw error;
+    }
+    if (dispatchLease) {
+      const sealed = await finishEdgeDispatch(
+        userSupabase,
+        dispatchLease,
+        res.ok ? "verified" : "outcome_unknown",
+      );
+      if (!sealed) {
+        throw new Error("The outbound request completed but its durable outcome could not be sealed. It must not be replayed.");
+      }
+    }
     const contentType = res.headers.get("content-type") || "unknown";
     const visibleUrl = `${target.origin}${target.pathname}${target.search ? "?..." : ""}`;
 
     return jsonResponse({
       ok: res.ok,
       status: res.status,
-      statusText: res.statusText,
+      statusText: res.ok ? "success" : "non_success",
       method,
       url: visibleUrl,
       integration: {
@@ -409,11 +828,15 @@ Deno.serve(async (req) => {
       authUsed,
       bytesRead: preview.bytesRead,
       truncated: preview.truncated,
-      bodyPreview: preview.text,
-      approvalVerified: !readOnly,
+      bodyPreview: res.ok || readOnly ? preview.text : "",
+      approvalVerified: Boolean(approvalReceipt),
     }, res.ok ? 200 : 502);
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    return errResponse(400, "custom_api_request_blocked", message);
+    void e;
+    return errResponse(
+      400,
+      "custom_api_request_blocked",
+      "Custom API dispatch was blocked or could not be verified. Review the approval/run receipt before retrying; no automatic replay occurred.",
+    );
   }
 });

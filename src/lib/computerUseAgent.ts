@@ -23,6 +23,113 @@ import { shouldBlockExternalAiProvider, getStrictLocalAiModeMessage } from './pr
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 
+export const COMPUTER_USE_POLICY_SCHEMA_VERSION = 1 as const;
+
+export type ComputerUseExecutionMode = 'interactive' | 'scheduled_observation';
+export type ComputerUsePolicySource = 'chat' | 'queue' | 'watch';
+export type ComputerUseAlwaysConfirmCategory =
+  | 'browser_mutation'
+  | 'opaque_target'
+  | 'credentials'
+  | 'external_side_effect';
+
+/**
+ * A short-lived signal from an explicit pre-run browser permission surface.
+ *
+ * The native Anthropic computer tool currently addresses click/type targets
+ * by coordinates or focus, so the edge still treats those targets as opaque
+ * and asks live. This signal is intentionally narrow: it may only support
+ * future low-consequence actions with a server-verifiable semantic target.
+ */
+export interface ComputerUsePreRunBrowserPermission {
+  kind: 'explicit_user_grant';
+  grantId: string;
+  scope: 'low_consequence_browser';
+  issuedAt: string;
+  expiresAt: string;
+}
+
+/**
+ * Bounded policy context carried with every cloud Computer Use run.
+ * It is authorization context, not prose for the model to reinterpret.
+ */
+export interface ComputerUsePolicyEnvelope {
+  schemaVersion: typeof COMPUTER_USE_POLICY_SCHEMA_VERSION;
+  executionMode: ComputerUseExecutionMode;
+  source: ComputerUsePolicySource;
+  userConstraints: string[];
+  alwaysConfirmCategories: ComputerUseAlwaysConfirmCategory[];
+  preRunBrowserPermission?: ComputerUsePreRunBrowserPermission;
+}
+
+const MAX_POLICY_CONSTRAINTS = 8;
+const MAX_POLICY_CONSTRAINT_CHARS = 160;
+const MAX_PRE_RUN_GRANT_MS = 30 * 60 * 1000;
+
+function boundPolicyConstraints(values?: readonly string[]): string[] {
+  const bounded: string[] = [];
+  for (const value of values || []) {
+    const trimmed = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!trimmed || bounded.includes(trimmed)) continue;
+    bounded.push(trimmed.slice(0, MAX_POLICY_CONSTRAINT_CHARS));
+    if (bounded.length >= MAX_POLICY_CONSTRAINTS) break;
+  }
+  return bounded;
+}
+
+function isCurrentBoundedPermission(
+  value: ComputerUsePreRunBrowserPermission | null | undefined,
+  nowMs: number,
+): value is ComputerUsePreRunBrowserPermission {
+  if (!value || value.kind !== 'explicit_user_grant' || value.scope !== 'low_consequence_browser') {
+    return false;
+  }
+  const grantId = String(value.grantId || '').trim();
+  const issuedAt = Date.parse(value.issuedAt);
+  const expiresAt = Date.parse(value.expiresAt);
+  return grantId.length >= 8
+    && grantId.length <= 128
+    && Number.isFinite(issuedAt)
+    && Number.isFinite(expiresAt)
+    && issuedAt <= nowMs + 60_000
+    && expiresAt > nowMs
+    && expiresAt - issuedAt > 0
+    && expiresAt - issuedAt <= MAX_PRE_RUN_GRANT_MS;
+}
+
+export function buildComputerUsePolicyEnvelope(args: {
+  executionMode: ComputerUseExecutionMode;
+  source: ComputerUsePolicySource;
+  userConstraints?: readonly string[];
+  alwaysConfirmCategories?: readonly ComputerUseAlwaysConfirmCategory[];
+  preRunBrowserPermission?: ComputerUsePreRunBrowserPermission | null;
+  nowMs?: number;
+}): ComputerUsePolicyEnvelope {
+  const allowedCategories = new Set<ComputerUseAlwaysConfirmCategory>([
+    'browser_mutation',
+    'opaque_target',
+    'credentials',
+    'external_side_effect',
+  ]);
+  const alwaysConfirmCategories = Array.from(new Set(args.alwaysConfirmCategories || []))
+    .filter((category): category is ComputerUseAlwaysConfirmCategory => allowedCategories.has(category))
+    .slice(0, 4);
+  const envelope: ComputerUsePolicyEnvelope = {
+    schemaVersion: COMPUTER_USE_POLICY_SCHEMA_VERSION,
+    executionMode: args.executionMode,
+    source: args.source,
+    userConstraints: boundPolicyConstraints(args.userConstraints),
+    alwaysConfirmCategories,
+  };
+  if (isCurrentBoundedPermission(args.preRunBrowserPermission, args.nowMs ?? Date.now())) {
+    envelope.preRunBrowserPermission = {
+      ...args.preRunBrowserPermission,
+      grantId: args.preRunBrowserPermission.grantId.trim(),
+    };
+  }
+  return envelope;
+}
+
 export interface ComputerUseAgentOpts {
   task: string;
   circleId: string;
@@ -39,6 +146,8 @@ export interface ComputerUseAgentOpts {
    *  (iterations/tokens/cost/wall-clock) so a multi-leg checkout can finish.
    *  Non-booking runs are unchanged. */
   booking?: boolean;
+  /** Required fail-closed execution context for the cloud action gateway. */
+  policy: ComputerUsePolicyEnvelope;
   onRunStarted?: (info: { runId: string }) => void;
   onSessionStarted?: (info: { sessionId: string; liveUrl: string }) => void;
   /** Fired when the agent pauses for user approval via the `ask_user`
@@ -131,6 +240,10 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
   let cancelled = false;
 
   (async () => {
+    // Let the caller store the returned handle before any terminal callback
+    // can fire (strict-local mode can reject synchronously otherwise).
+    await Promise.resolve();
+    if (cancelled) return;
     if (shouldBlockExternalAiProvider('anthropic')) {
       opts.onError(getStrictLocalAiModeMessage('anthropic'));
       return;
@@ -158,6 +271,7 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
           maxTokensBudget: opts.maxTokensBudget,
           maxCostUsd: opts.maxCostUsd,
           booking: opts.booking,
+          policy: opts.policy,
         }),
         signal: controller.signal,
       });

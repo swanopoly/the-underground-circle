@@ -3,11 +3,12 @@
  *
  * Locks two approval hard-stops:
  *
- *   1. `computerUse.executePlan` HALTS at the first unapproved step instead
- *      of skipping past it — skipping could mutate external state on partial
- *      inputs (e.g. click a submit button whose credential fills were
- *      skipped). The halt returns a resumable terminal-pending result
- *      (`success: false` + `pendingApproval`) with later steps untouched.
+ *   1. `computerUse.executePlan` HALTS every legacy mutation at a sealed,
+ *      non-executable typed OpenSwan handoff before generic permission or
+ *      `pendingApproval` handling. Raw mutation values are stripped, saved
+ *      statuses cannot bypass the boundary, and later steps stay untouched.
+ *      Read-only permission waits still return the resumable
+ *      `pendingApproval` contract.
  *
  *   2. `chatApprovalGate`'s per-category `'auto'` waiver cannot waive the
  *      destructive floor (pay / delete / login / grant — the same category
@@ -45,10 +46,12 @@ registerHooks({
 import type { BrowserAction, ComputerUseSession } from '../src/lib/computerUse';
 import type { ChatAutomationPlan } from '../src/lib/chatAutomationPlanner';
 
+let assertions = 0;
 let failures = 0;
 function fail(message: string) { failures += 1; console.error('FAIL:', message); }
 function pass(message: string) { console.log('pass:', message); }
 function assert(condition: unknown, message: string, detail?: string) {
+  assertions += 1;
   if (condition) pass(message);
   else fail(`${message}${detail ? ` — ${detail}` : ''}`);
 }
@@ -103,7 +106,7 @@ async function main() {
   const computerUse = await import('../src/lib/computerUse');
   const gate = await import('../src/lib/chatApprovalGate');
 
-  // ── executePlan: halt at the first unapproved step ─────────────────────────
+  // ── executePlan: sealed handoff before approval/status handling ────────────
   const fill = makeAction({
     id: 'a-fill',
     type: 'fill',
@@ -125,23 +128,61 @@ async function main() {
     makeSession([fill, submit], 'trusted'),
     (action) => { completions.push(action.id); },
   );
-  assert(halted.success === false, 'unapproved fill halts the plan (success=false)');
-  assert(completions.length === 0, 'no action executed after the halt (submit never ran)');
+  const fillHandoff = halted.actions[0]?.runtimeHandoff;
+  assert(halted.success === false, 'legacy fill halts the plan (success=false)');
   assert(
-    halted.pendingApproval?.index === 0 && halted.pendingApproval?.actionId === 'a-fill',
-    'halt result points at the unapproved step for resume',
+    completions.length === 1 && completions[0] === 'a-fill',
+    'completion callback reports only the halted fill handoff (no mutation executed)',
+  );
+  assert(
+    halted.actions[0]?.status === 'failed',
+    'legacy fill is returned as a failed/non-executable handoff marker',
+  );
+  assert(
+    fillHandoff?.kind === 'openswan_typed_tool'
+      && fillHandoff.tool === 'browser.fill_field'
+      && fillHandoff.credentialTool === 'browser.fill_credential_field',
+    'fill handoff identifies the typed field tool and sealed credential tool',
+  );
+  assert(
+    fillHandoff?.sourceLane === 'legacy_computer_use'
+      && fillHandoff.reasonCode === 'sealed_runtime_identity_required'
+      && fillHandoff.executable === false
+      && fillHandoff.carriesRawInput === false,
+    'fill handoff is explicitly non-executable and carries no raw input',
+  );
+  assert(
+    fillHandoff?.requiredContext.includes('authenticated_user_id')
+      && fillHandoff.requiredContext.includes('circle_id')
+      && fillHandoff.requiredContext.includes('persisted_agent_run_id')
+      && fillHandoff.requiredContext.includes('provider_tool_use_id')
+      && fillHandoff.requiredContext.includes('tool_iteration')
+      && fillHandoff.requiredContext.includes('exact_openswan_runtime_approval'),
+    'fill handoff requires authenticated run, provider-call, and exact-approval context',
+  );
+  assert(
+    halted.actions[0]?.value === undefined && !JSON.stringify(halted).includes('secret'),
+    'raw credential value is stripped from the entire halt result',
+  );
+  assert(
+    halted.pendingApproval === undefined,
+    'legacy mutation handoff occurs before generic pendingApproval handling',
   );
   assert(halted.actions.length === 2, 'halt result carries every plan step (resumable session state)');
   assert(
     halted.actions[1]?.id === 'a-submit'
       && halted.actions[1]?.status === 'pending'
-      && !halted.actions[1]?.executedAt,
+      && !halted.actions[1]?.executedAt
+      && halted.actions[1]?.runtimeHandoff?.tool === 'browser.click_role',
     'later steps are returned untouched — not skipped, not executed',
   );
-  assert(/Paused at step 1/.test(halted.message), 'halt message names the paused step');
+  assert(
+    /Stopped at step 1/.test(halted.message) && /typed OpenSwan/.test(halted.message),
+    'halt message names the stopped step and typed OpenSwan continuation',
+  );
 
-  // Resume mechanics: completed steps are skipped, the halt lands on the
-  // NEXT unapproved step — a re-run after approval continues, not restarts.
+  // A persisted legacy status is untrusted: even "completed" cannot skip the
+  // sealed mutation boundary or expose a later mutation.
   const completedFill = { ...fill, status: 'completed' as const };
   const unapprovedPay = makeAction({
     id: 'a-pay',
@@ -156,21 +197,62 @@ async function main() {
     (action) => { completions.push(action.id); },
   );
   assert(
-    resumed.success === false && resumed.pendingApproval?.index === 1 && resumed.pendingApproval?.actionId === 'a-pay',
-    're-run skips completed steps and halts on the next unapproved step',
+    resumed.success === false
+      && resumed.pendingApproval === undefined
+      && resumed.actions[0]?.status === 'failed'
+      && resumed.actions[0]?.runtimeHandoff?.tool === 'browser.fill_field',
+    'saved completed status cannot bypass the first legacy mutation handoff',
+  );
+  assert(
+    resumed.actions[1]?.id === 'a-pay'
+      && resumed.actions[1]?.status === 'pending'
+      && !resumed.actions[1]?.executedAt,
+    'saved-status bypass attempt leaves the later payment step untouched',
   );
 
-  // ask_every_time: even a no-approval-flag step halts (permission denies it).
+  // Mutation sealing precedes permission handling, including ask_every_time.
   const plainClick = makeAction({ id: 'a-click', type: 'click', target: '#next', description: 'Click Next' });
   const askEveryTime = await computerUse.executePlan(
     makeSession([plainClick], 'ask_every_time'),
     (action) => { completions.push(action.id); },
   );
   assert(
-    askEveryTime.success === false && askEveryTime.pendingApproval?.actionId === 'a-click',
-    'ask_every_time permission halts pending steps instead of skipping them',
+    askEveryTime.success === false
+      && askEveryTime.pendingApproval === undefined
+      && askEveryTime.actions[0]?.runtimeHandoff?.tool === 'browser.click_role',
+    'ask_every_time mutation still returns the typed handoff before pendingApproval',
   );
-  assert(completions.length === 0, 'no halt case ever executed an action');
+
+  // Read-only permission waits retain the resumable pendingApproval contract
+  // and stop before observation/backend I/O.
+  const observe = makeAction({
+    id: 'a-observe',
+    type: 'observe',
+    description: 'Observe the current page',
+  });
+  const readOnlyPause = await computerUse.executePlan(
+    makeSession([observe], 'ask_every_time'),
+    (action) => { completions.push(action.id); },
+  );
+  assert(
+    readOnlyPause.success === false
+      && readOnlyPause.pendingApproval?.index === 0
+      && readOnlyPause.pendingApproval?.actionId === 'a-observe',
+    'ask_every_time read-only step returns a resumable pendingApproval',
+  );
+  assert(
+    readOnlyPause.actions[0]?.status === 'pending'
+      && readOnlyPause.actions[0]?.runtimeHandoff === undefined,
+    'read-only permission pause stays pending and carries no mutation handoff',
+  );
+  assert(
+    /Paused at step 1/.test(readOnlyPause.message),
+    'read-only pendingApproval message names the paused step',
+  );
+  assert(
+    completions.join(',') === 'a-fill,a-fill,a-click',
+    'callbacks report exactly three mutation handoffs; no read-only action or backend ran',
+  );
 
   // ── chatApprovalGate: 'auto' cannot waive the destructive floor ────────────
   const payPlan = makePlan({
@@ -207,7 +289,7 @@ async function main() {
     console.error(`\n${failures} computer plan approval floor smoke-test failure(s)`);
     process.exit(1);
   }
-  console.log('\nAll computer plan approval floor smoke cases passed.');
+  console.log(`\nAll computer plan approval floor smoke cases passed (${assertions} assertions).`);
 }
 
 main().catch((error) => {

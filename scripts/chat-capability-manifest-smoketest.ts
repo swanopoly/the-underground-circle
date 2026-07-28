@@ -61,6 +61,23 @@ for (const required of ['browser', 'desktop', 'wp', 'vault', 'team.deploy_agents
 check('menu has at least one auto family', APP_CAPABILITIES.some((c) => c.approval === 'auto'));
 check('menu has at least one ask family', APP_CAPABILITIES.some((c) => c.approval === 'ask'));
 
+const browserCapability = APP_CAPABILITIES.find((cap) => cap.family === 'browser');
+const browserDomIndex = browserCapability?.exampleTools.indexOf('browser.dom_snapshot') ?? -1;
+const browserActionabilityIndex = browserCapability?.exampleTools.indexOf('browser.locator_actionability') ?? -1;
+const browserMutationIndex = browserCapability?.exampleTools.indexOf('browser.set_toggle') ?? -1;
+check(
+  'browser examples order DOM -> locator actionability -> mutation',
+  browserDomIndex >= 0
+    && browserActionabilityIndex > browserDomIndex
+    && browserMutationIndex > browserActionabilityIndex,
+);
+check(
+  'browser capability explains advisory read-only evidence and the later mutation gate',
+  !!browserCapability
+    && /read-only advisory/i.test(browserCapability.whenToUse)
+    && /later mutation still needs its own gate/i.test(browserCapability.whenToUse),
+);
+
 // Closed loop: every family that is ON the menu must be recognized by
 // isKnownCapabilityFamily, so the menu and the known-family token set can never
 // silently drift apart (a new capability without a token, or vice versa).
@@ -73,6 +90,7 @@ const prompt = buildCapabilityManifestPrompt();
 check('prompt is a non-empty string', typeof prompt === 'string' && prompt.length > 0);
 check('prompt mentions tools.search', prompt.includes('tools.search'));
 check('prompt mentions browser', /browser/i.test(prompt));
+check('prompt advertises browser.locator_actionability', prompt.includes('browser.locator_actionability'));
 check('prompt mentions desktop', /desktop/i.test(prompt));
 check('prompt mentions deploy_agents', prompt.includes('deploy_agents'));
 check('prompt says stream a plain reply by default', /stream/i.test(prompt) && /plain/i.test(prompt));

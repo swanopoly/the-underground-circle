@@ -1,6 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { getRunArtifacts, getRunSteps, listChatSessionRuns, listChildRuns, listRuns, subscribeToRun, subscribeToRunSteps, type AgentRun, type RunArtifact, type RunStep } from '../../lib/agentRunSystem';
+import {
+  getRunArtifacts,
+  getRunSteps,
+  listChatSessionRuns,
+  listChildRuns,
+  listRuns,
+  projectPersistedRunStepForDisplay,
+  subscribeToRun,
+  subscribeToRunSteps,
+  type AgentRun,
+  type RunArtifact,
+  type RunStep,
+} from '../../lib/agentRunSystem';
 import type { BrowserPlanCardData, BrowserPlanEvent } from '../../lib/computerUse';
 import { applyOpenSwanMemoryRecommendation, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from '../../lib/memoryService';
 import { getOpenSwanExecutionStatusColor, getOpenSwanExecutionStatusLabel, type OpenSwanExecutionContract } from '../../lib/openswanExecution';
@@ -579,14 +591,19 @@ export default function RunHistoryDrawer({
                   <Text style={styles.sectionTitle}>STEPS</Text>
                   {steps.length === 0 ? (
                     <Text style={styles.empty}>No recorded steps.</Text>
-                  ) : steps.map((step) => (
-                    <View key={step.id} style={styles.stepCard}>
-                      <Text style={styles.stepTitle}>{step.step_kind.toUpperCase()} · {step.title}</Text>
-                      {step.body ? <Text style={styles.stepBody}>{step.body}</Text> : null}
-                      {step.tool_name ? <Text style={styles.stepMeta}>Tool: {step.tool_name}</Text> : null}
-                      {step.tool_output ? <Text style={styles.stepMeta}>Command: {step.tool_output}</Text> : null}
-                    </View>
-                  ))}
+                  ) : steps.map((step) => {
+                    const display = projectPersistedRunStepForDisplay(step);
+                    return (
+                      <View key={step.id} style={styles.stepCard}>
+                        <Text style={styles.stepTitle}>{display.title}</Text>
+                        {display.body ? <Text style={styles.stepBody}>{display.body}</Text> : null}
+                        {display.toolName ? <Text style={styles.stepMeta}>Tool: {display.toolName}</Text> : null}
+                        {display.toolOutput ? (
+                          <Text style={styles.stepMeta}>{display.toolOutput}</Text>
+                        ) : null}
+                      </View>
+                    );
+                  })}
 
                   <Text style={styles.sectionTitle}>ARTIFACTS</Text>
                   {artifacts.length === 0 ? (

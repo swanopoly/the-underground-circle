@@ -48,6 +48,25 @@ assert(browserRecovery?.requiredEvidence.some((item) => item.tool === 'browser.d
 assert(browserRecovery?.requiredEvidence.some((item) => item.tool === 'browser.locator_actionability'), 'browser recovery requires actionability evidence');
 assert.equal(browserRecovery?.evidenceReadiness?.status, 'missing', 'browser recovery starts with missing evidence readiness');
 assert.equal(browserRecovery?.recommendedOptionId, 'retry_with_fresh_evidence', 'browser recovery recommends fresh-evidence retry');
+
+const taskStopConditionDoesNotPoisonActionability = diagnoseComputerTaskEvidenceFailure({
+  contract: browserRoute.evidenceContract,
+  task: 'Buy the basic plan, but stop and ask me if a CAPTCHA appears.',
+  failureMessage: 'Locator timed out because the target button was obscured and failed actionability checks.',
+  outcomeStatus: 'failed',
+  source: 'browser_bridge_action',
+});
+assert.equal(
+  taskStopConditionDoesNotPoisonActionability?.failureArea,
+  'actionability',
+  'CAPTCHA in the user task stop condition is not treated as an observed CAPTCHA failure',
+);
+assert.equal(
+  taskStopConditionDoesNotPoisonActionability?.retryAllowed,
+  true,
+  'task stop-condition wording cannot disable an evidence-backed actionability retry',
+);
+
 const readinessNow = Date.parse('2026-05-28T12:00:00.000Z');
 const readyBrowserEvidence = evaluateComputerTaskEvidenceRecoveryReadiness({
   recovery: browserRecovery,
@@ -98,6 +117,23 @@ assert.equal(userBlockedRecovery?.retryAllowed, false, 'human verification does 
 assert.equal(userBlockedRecovery?.evidenceReadiness?.status, 'blocked', 'user-blocked recovery readiness is blocked');
 assert.equal(userBlockedRecovery?.recommendedOptionId, 'resolve_contract_blocker', 'human verification recommends user unblock');
 
+const observedCaptchaRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: browserRoute.evidenceContract,
+  task: 'Continue checkout',
+  failureMessage: 'The run stopped after refreshing the page state.',
+  outcomeStatus: 'blocked',
+  observations: [{
+    tool: 'browser.verification_state',
+    ok: true,
+    summary: 'A CAPTCHA human-verification challenge is visible in the observed page state.',
+  }],
+});
+assert.equal(
+  observedCaptchaRecovery?.failureArea,
+  'user_unblock',
+  'captured observation evidence can still classify a genuine CAPTCHA blocker',
+);
+
 const photoshopRoute = buildChatComputerRequestRoute('Open Photoshop and update the text layer then export a proof png');
 assert(photoshopRoute?.evidenceContract, 'Photoshop route carries evidence contract');
 assert(photoshopRoute?.appAutomationRouteDecision, 'Photoshop route carries app automation route decision');
@@ -134,6 +170,24 @@ assert.equal(indesignRecovery?.connectedAgentAllowed, true, 'missing adapter all
 assert(indesignRecovery?.requiredEvidence.some((item) => item.tool === 'agent.build_app_capability.result'), 'missing adapter requires buildout result evidence');
 assert(indesignRecovery?.requiredEvidence.some((item) => item.tool === 'computer.focused_smoke'), 'missing adapter requires focused smoke evidence');
 assert.equal(indesignRecovery?.recommendedOptionId, 'let_connected_agent_repair', 'missing adapter recommends connected-agent repair');
+
+const exportTaskDoesNotPoisonCapabilityGap = diagnoseComputerTaskEvidenceFailure({
+  contract: indesignRoute.evidenceContract,
+  task: 'Resize the InDesign banner and export a PDF proof.',
+  failureMessage: 'Missing adapter: no InDesign export bridge tool is implemented for this command.',
+  outcomeStatus: 'failed',
+  source: 'computer_task_outcome',
+});
+assert.equal(
+  exportTaskDoesNotPoisonCapabilityGap?.failureArea,
+  'capability_gap',
+  'requested export action is not mistaken for an observed approval boundary',
+);
+assert.equal(
+  exportTaskDoesNotPoisonCapabilityGap?.recommendedOptionId,
+  'let_connected_agent_repair',
+  'missing export adapter retains the connected-agent repair path',
+);
 
 const genericAppRoute = buildChatComputerRequestRoute('Open the AcmeDesigner desktop app and create the requested marketing layout');
 assert(genericAppRoute?.evidenceContract, 'generic native app route carries evidence contract');

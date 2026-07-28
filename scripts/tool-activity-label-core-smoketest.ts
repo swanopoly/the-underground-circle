@@ -4,7 +4,7 @@
  * generic rotating "is typing…" verb during stream-escalated tool loops and
  * SwanBot v2 client-tool continuations. Load-bearing assertions:
  *
- *   MAP: the 16 spec'd tool labels are exact ("rooms.create" → "Creating the
+ *   MAP: the 17 spec'd tool labels are exact ("rooms.create" → "Creating the
  *   room…", "verification.tests" → "Running tests…", …); the map is frozen,
  *   has 25+ entries, and every key is canonical lowercase with a bounded
  *   non-empty label ending in "…".
@@ -62,7 +62,7 @@ function isBoundedLabel(s: unknown): boolean {
 }
 
 function main(): void {
-  // ─── (1) TOOL_ACTIVITY_LABELS map shape + the 16 spec'd entries ───────────
+  // ─── (1) TOOL_ACTIVITY_LABELS map shape + the 17 spec'd entries ───────────
   assertEq(TOOL_ACTIVITY_LABELS['rooms.create'], 'Creating the room…', '(1) rooms.create label');
   assertEq(TOOL_ACTIVITY_LABELS['tasks.create'], 'Adding the task…', '(1) tasks.create label');
   assertEq(TOOL_ACTIVITY_LABELS['local.run_shell'], 'Running the command…', '(1) local.run_shell label');
@@ -73,6 +73,7 @@ function main(): void {
   assertEq(TOOL_ACTIVITY_LABELS['desktop.screenshot'], 'Taking a screenshot…', '(1) desktop.screenshot label');
   assertEq(TOOL_ACTIVITY_LABELS['browser.open_url'], 'Opening the page…', '(1) browser.open_url label');
   assertEq(TOOL_ACTIVITY_LABELS['browser.dom_snapshot'], 'Reading the page…', '(1) browser.dom_snapshot label');
+  assertEq(TOOL_ACTIVITY_LABELS['browser.locator_actionability'], 'Checking the page target…', '(1) browser.locator_actionability label');
   assertEq(TOOL_ACTIVITY_LABELS['codebase.search'], 'Searching the codebase…', '(1) codebase.search label');
   assertEq(TOOL_ACTIVITY_LABELS['desktop.edit_file'], 'Editing the file…', '(1) desktop.edit_file label');
   assertEq(TOOL_ACTIVITY_LABELS['save_memory'], 'Saving to memory…', '(1) save_memory label');
@@ -97,6 +98,7 @@ function main(): void {
   assertEq(toolActivityLabel('verification.typecheck'), 'Type-checking…', '(2) verification.typecheck lookup');
   assertEq(toolActivityLabel('desktop.read_a11y_tree'), 'Reading the screen…', '(2) desktop.read_a11y_tree lookup');
   assertEq(toolActivityLabel('browser.dom_snapshot'), 'Reading the page…', '(2) browser.dom_snapshot lookup');
+  assertEq(toolActivityLabel('browser.locator_actionability'), 'Checking the page target…', '(2) browser.locator_actionability lookup');
   assertEq(toolActivityLabel('save_memory'), 'Saving to memory…', '(2) save_memory lookup');
   assertEq(toolActivityLabel('gmail.write'), 'Sending the email…', '(2) gmail.write lookup');
   assertEq(toolActivityLabel('ROOMS.CREATE'), 'Creating the room…', '(2) lookup is case-insensitive');
@@ -166,6 +168,7 @@ function main(): void {
   assertEq(toolFamilyVerb('fetch_url'), 'read', '(6) fetch_url → read');
   assertEq(toolFamilyVerb('save_memory'), 'save', '(6) save_memory → save');
   assertEq(toolFamilyVerb('browser.dom_snapshot'), 'read', '(6) browser.dom_snapshot → read');
+  assertEq(toolFamilyVerb('browser.locator_actionability'), 'check', '(6) browser.locator_actionability → check');
   assertEq(toolFamilyVerb('TASKS.LIST'), 'list', '(6) verb lookup is case-insensitive');
   assertEq(toolFamilyVerb('messaging.notify'), 'send', '(6) messaging.notify → send');
   assertEq(toolFamilyVerb('desktop.click_element'), 'click', '(6) desktop.click_element → click');

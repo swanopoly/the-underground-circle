@@ -2,7 +2,8 @@
  * swanbot-v2-dispatcher-parity-smoketest — guard (G1) that every v2
  * client-delegated tool has a handler. Reads three real files, parses the
  * clientOnly tool-name set from the v2 edge TOOLS array, and the handled-tool
- * set from the desktop dispatcher (desktop.*) + swanbot.ts inline
+ * set from the shared client dispatcher (desktop.* plus bounded browser
+ * evidence handlers) + swanbot.ts inline
  * (browser/workspace/verification/credentials/wp), then asserts set-equality.
  * Edits NONE of them (the dispatcher and swanbot.ts handler are root-owned).
  *
@@ -37,11 +38,11 @@ const dispatcherSource = readFileSync(join(root, 'src/lib/swanbotClientToolDispa
 const swanbotSource = readFileSync(join(root, 'src/lib/swanbot.ts'), 'utf8');
 
 const v2ClientOnly = new Set(parseV2ClientOnlyToolNames(v2Source));
-const desktop = parseDesktopDispatcherToolNames(dispatcherSource);
+const dispatcher = parseDesktopDispatcherToolNames(dispatcherSource);
 const inline = parseInlineClientToolNames(swanbotSource);
-const handled = new Set([...desktop, ...inline]);
+const handled = new Set([...dispatcher, ...inline]);
 
-console.log(`info: desktop dispatcher cases = ${desktop.length}, inline swanbot cases = ${inline.length}, v2 clientOnly = ${v2ClientOnly.size}`);
+console.log(`info: shared dispatcher cases = ${dispatcher.length}, inline swanbot cases = ${inline.length}, v2 clientOnly = ${v2ClientOnly.size}`);
 
 // (a) set-equality, with a symmetric diff naming any orphan
 const missingHandler = [...v2ClientOnly].filter((n) => !handled.has(n));
@@ -51,6 +52,7 @@ for (const requiredTool of [
   'desktop.file_stat',
   'desktop.open_path',
   'desktop.convert_image',
+  'browser.locator_actionability',
 ]) {
   assert(v2ClientOnly.has(requiredTool), `${requiredTool}: exposed as v2 clientOnly tool`);
   assert(handled.has(requiredTool), `${requiredTool}: handled by client dispatcher`);
@@ -76,8 +78,8 @@ assert(
   `handled tool union (${handled.size}) === pinned constant (${SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS})`,
 );
 assert(
-  desktop.length + inline.length === handled.size,
-  'desktop + inline handler sets are disjoint (no double-count)',
+  dispatcher.length + inline.length === handled.size,
+  'shared dispatcher + inline handler sets are disjoint (no double-count)',
 );
 
 if (failures > 0) {

@@ -90,8 +90,10 @@ export const TOOL_ACTIVITY_LABELS: Readonly<Record<string, string>> = Object.fre
   // ── Browser computer use ──────────────────────────────────────────────────
   'browser.open_url': 'Opening the page…',
   'browser.dom_snapshot': 'Reading the page…',
+  'browser.locator_actionability': 'Checking the page target…',
   'browser.screenshot': 'Taking a screenshot…',
   'browser.click_role': 'Clicking on the page…',
+  'browser.set_toggle': 'Setting the browser control…',
   'browser.fill_field': 'Filling in the form…',
   'browser.plan_task': 'Planning the browser task…',
 
@@ -157,7 +159,7 @@ const VERB_SYNONYMS: Readonly<Record<string, string>> = Object.freeze({
   open: 'open', launch: 'open', focus: 'open',
   close: 'close', quit: 'close',
   click: 'click', press: 'click', tap: 'click',
-  check: 'check', verify: 'check', test: 'check',
+  check: 'check', verify: 'check', test: 'check', actionability: 'check',
   save: 'save',
 });
 

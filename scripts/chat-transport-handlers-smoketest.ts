@@ -224,7 +224,9 @@ async function main() {
   // ─── dep that throws → failed (never throws across boundary) ───────────
   {
     const handlers = createChatTransportHandlers({
-      run_openswan: async () => { throw new Error('boom'); },
+      run_openswan: async () => {
+        throw new Error('boom /Users/private/secret.txt sk-live-secret');
+      },
     });
     let threw = false;
     let outcome;
@@ -233,7 +235,12 @@ async function main() {
     assert(!threw, 'throw: handler did not rethrow');
     assertEqual(outcome?.status, 'failed', 'throw: failed status');
     assert(!!outcome && outcome.message.includes('internal error'), 'throw: safe error message surfaced');
-    assert(!!outcome?.warnings?.some((warning) => warning.includes('boom')), 'throw: raw error preserved in warnings');
+    const serializedOutcome = JSON.stringify(outcome);
+    assertEqual((outcome?.data as any)?.errorCode, 'transport_handler_error', 'throw: stable error code surfaced');
+    assertEqual((outcome?.data as any)?.redacted, true, 'throw: outcome is marked redacted');
+    assert(!serializedOutcome.includes('boom'), 'throw: raw error omitted');
+    assert(!serializedOutcome.includes('/Users/private/secret.txt'), 'throw: path omitted');
+    assert(!serializedOutcome.includes('sk-live-secret'), 'throw: secret omitted');
   }
 
   // ─── custom status + data/warnings passthrough ─────────────────────────

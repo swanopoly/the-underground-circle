@@ -212,16 +212,19 @@ async function checkRealCatalogPolicies() {
     'real-catalog round partitions: disjoint writers group, conflicting write + dependent read barrier',
   );
 
-  // verification.* run real shell commands via bridge /exec — external side
-  // effect (auto-approved, non-mutating), so each call is a sequential
-  // singleton barrier: three npm processes must never contend in one
-  // working tree inside a single parallel group.
+  // verification.* are plan-only requirements at the local bridge boundary.
+  // Package scripts must be delegated to a connected coding agent with its
+  // normal approval flow, so these calls have no local process side effect
+  // and may be grouped like other pure planning reads.
   for (const name of ['verification.typecheck', 'verification.tests', 'verification.lint']) {
     const p = runtime.getOpenSwanToolParallelPolicy(name);
     assert.equal(p.approvalMode, 'auto', `${name} stays auto-approved (no new HITL prompt)`);
     assert.equal(p.mutatesState, false, `${name} is non-mutating`);
-    assert.equal(p.externalSideEffect, true, `${name} spawns a bridge /exec process (external side effect)`);
-    assert.equal(isParallelEligibleToolPolicy(p), false, `${name} is never parallel-eligible`);
+    assert.equal(p.externalSideEffect, false, `${name} does not spawn a local bridge process`);
+    assert.equal(isParallelEligibleToolPolicy(p), true, `${name} plan is parallel-eligible`);
+    const result = await runtime.executeOpenSwanTool(name, {});
+    assert.equal(result.executed, false, `${name} records the requirement without executing it`);
+    assert.match(result.error || '', /connected coding agent/i, `${name} requires a connected-agent handoff`);
   }
   assert.deepEqual(
     partitionParallelSafeBatch([
@@ -229,8 +232,8 @@ async function checkRealCatalogPolicies() {
       runtime.getOpenSwanToolParallelPolicy('verification.tests'),
       runtime.getOpenSwanToolParallelPolicy('verification.lint'),
     ]),
-    [[0], [1], [2]],
-    'a verification round runs strictly serially (no concurrent npm processes)',
+    [[0, 1, 2]],
+    'plan-only verification requirements can share one parallel planning group',
   );
 
   // desktop.wait_for_app is a temporal synchronization primitive: base policy

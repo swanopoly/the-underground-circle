@@ -218,6 +218,14 @@ export default function ChatThreadHeader({
       </View>
 
       <View style={styles.actions}>
+        <Pressable
+          onPress={() => setShowServiceMenu(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Open OpenSwan service controls"
+          style={styles.serviceActionBtn}
+        >
+          <Text style={styles.serviceActionText}>OPENSWAN</Text>
+        </Pressable>
         {!isCircleThread && (
           <Pressable onPress={onOpenRunHistory} style={styles.actionBtnGhost}>
             <Text style={styles.actionBtnGhostText}>RUNS</Text>
@@ -473,7 +481,16 @@ const styles = StyleSheet.create({
   },
   metaModel: { color: '#64748b', fontSize: 10, fontWeight: '700' },
   metaModelMuted: { color: '#475569', fontSize: 10, fontWeight: '700' },
-  actions: { flexDirection: 'row', gap: 6 },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
+  serviceActionBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    backgroundColor: '#17110a',
+  },
+  serviceActionText: { color: '#f59e0b', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   actionBtn: {
     paddingHorizontal: 10, paddingVertical: 6,
     borderRadius: 6, borderWidth: 1, borderColor: '#22d3ee',

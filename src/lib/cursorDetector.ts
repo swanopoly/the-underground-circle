@@ -14,7 +14,7 @@ import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
-import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 
 const BRIDGE_PORT = 7781;
@@ -58,8 +58,7 @@ export async function detectCursorBridge(): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -76,8 +75,7 @@ export async function fetchCursorSessions(): Promise<CursorSession[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -269,10 +267,9 @@ export async function launchCursorComposerSessions(input: CursorComposerLaunchRe
   }
 
   try {
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/launch`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         count: input.count,
         prompts: input.prompts,

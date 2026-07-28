@@ -1,28 +1,92 @@
 /**
- * memoryEmbeddings — Phase 1 of AGENT_MEMORY_GOD_PLAN.
+ * memoryEmbeddings — Phase 1 of AGENT_MEMORY_GOD_PLAN, and the COMPLETE OWNER
+ * of semantic-memory embedding coverage.
  *
  * Thin client for embedding memory text via the `llm-proxy` edge fn
- * (provider: 'openai-embed'), plus a fire-and-forget helper that stores
- * the resulting vector on `memory_entries`.
+ * (provider: 'openai-embed'), plus the three things that make coverage real:
  *
- * Design notes:
+ *   1. EMBED ON WRITE — `queueMemoryEmbedding()`. A one-line, synchronous,
+ *      never-throwing, never-awaited call for the `memory_entries` write paths
+ *      (owned by other modules). Writes are coalesced for 250ms and batched, so
+ *      a burst of saves costs one proxy request instead of N.
+ *   2. REPAIR — `repairMemoryEmbeddings()` / `ensureMemoryEmbeddingCoverage()`.
+ *      A bounded, resumable, idempotent sweep over `embedding IS NULL`. Safe to
+ *      run as often as you like: the SQL predicate plus
+ *      `evaluateEmbeddingEligibility` mean an already-embedded row is never
+ *      re-billed.
+ *   3. ORPHAN RECOVERY — every path that gives up on a row (breaker open, proxy
+ *      error, queue overflow, privacy block) records it on the orphan ledger.
+ *      The ledger arms the repair sweep, which is refused while the breaker is
+ *      open and fires as soon as it closes. Rows written during an outage are
+ *      therefore repaired instead of being orphaned forever.
+ *
+ * WHY THIS MATTERS: `match_memories` filters `AND m.embedding IS NOT NULL`, so
+ * an un-embedded row is invisible to every semantic retrieval path in the app.
+ * Before this file owned coverage, `embedAndStoreMemory` had two call sites
+ * (both inside one dead extraction path), `backfillMemoryEmbeddings` had zero
+ * callers, and a five-minute proxy outage permanently deleted everything saved
+ * during it from semantic search.
+ *
+ * THE ONE RULE: EMBEDDING MUST NEVER BE ABLE TO FAIL A MEMORY WRITE. A memory
+ * saved without an embedding is degraded and repairable; a memory that fails to
+ * save is data loss. Nothing here is awaited by a write path, nothing here
+ * throws into one, and nothing here returns a value a write path can mistake
+ * for its own success.
+ *
+ * Design notes (unchanged):
  *   * All calls are fire-and-forget from the user's perspective — we never
- *     block the UI on embedding latency. On failure we log and move on;
- *     the row simply stays un-embedded and can be picked up by the
- *     backfill sweep later.
+ *     block the UI on embedding latency.
  *   * The model name and dimensions are recorded on the row so we can
  *     safely migrate providers (re-embed only rows whose model differs).
  *   * Batch size ceiling = 50 per request. OpenAI accepts larger batches
  *     but bigger batches → larger responses → slower user-visible calls
  *     during interactive backfill.
+ *
+ * Decisions live in the pure core (`memoryEmbeddingPolicyCore.ts`, smoke:
+ * `npx tsx scripts/memory-embedding-policy-core-smoketest.ts`); this file only
+ * does I/O.
  */
 
 import { supabase } from './supabase';
 import { shouldBlockExternalAiProvider } from './privacyMode';
+import {
+  EMBEDDING_BATCH_MAX,
+  EMBEDDING_COALESCE_MS,
+  EMBEDDING_QUEUE_MAX,
+  REPAIR_MIN_INTERVAL_MS,
+  advanceRepairCursor,
+  buildEmbeddingInput,
+  createEmbeddingBreakerState,
+  createEmbeddingRepairSchedule,
+  createRepairCursor,
+  describeEmbeddingBreaker,
+  describeEmbeddingCoverage,
+  enqueueEmbeddingJobs,
+  formatEmbeddingCoverage,
+  isEmbeddingBreakerOpen,
+  markEmbeddingOrphans,
+  noteEmbeddingRepairRun,
+  parseRepairCursor,
+  planEmbeddingBatches,
+  recordEmbeddingFailure,
+  recordEmbeddingSuccess,
+  resolveRepairMaxPages,
+  resolveRepairPageSize,
+  selectEmbeddingBatch,
+  serializeRepairCursor,
+  shouldContinueRepair,
+  shouldRunEmbeddingRepair,
+  summarizeRepairCursor,
+  takeEmbeddingBatch,
+  type EmbeddingBreakerState,
+  type EmbeddingQueueItem,
+  type EmbeddingRepairSchedule,
+  type MemoryEmbeddingRepairCursor,
+} from './memoryEmbeddingPolicyCore';
 
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
 export const EMBEDDING_DIMS = 1536;
-const BATCH_SIZE = 50;
+const BATCH_SIZE = EMBEDDING_BATCH_MAX;
 
 interface EmbedResponse {
   embeddings: number[][];
@@ -31,18 +95,32 @@ interface EmbedResponse {
   input_tokens: number;
 }
 
-// Track consecutive failures to avoid hammering a broken endpoint
-let consecutiveFailures = 0;
-const MAX_CONSECUTIVE_FAILURES = 5;
-const BACKOFF_RESET_MS = 5 * 60 * 1000; // 5 min
-let lastFailureAt = 0;
+// ─── Circuit breaker + orphan ledger ─────────────────────────────────────────
+// Breaker semantics are UNCHANGED from the legacy implementation: 5 consecutive
+// failures opens it, any success closes it, cooldown is 5 minutes. The only
+// deviation is that a BACKWARDS clock jump can no longer wedge it open (see
+// describeEmbeddingBreaker) — the safer direction, since a stuck-open breaker
+// is exactly what used to orphan rows permanently.
+let breakerState: EmbeddingBreakerState = createEmbeddingBreakerState();
+let repairSchedule: EmbeddingRepairSchedule = createEmbeddingRepairSchedule();
+
+/**
+ * Record rows we could not embed. This is the ONLY thing standing between a
+ * proxy outage and a permanently unsearchable memory: it arms the repair sweep,
+ * which finds the rows again through `embedding IS NULL`.
+ */
+function noteOrphans(count: number, why: string): void {
+  if (!count || count <= 0) return;
+  repairSchedule = markEmbeddingOrphans(repairSchedule, count, Date.now());
+  console.warn(`[memoryEmbeddings] ${count} memory row(s) left un-embedded (${why}) — queued for repair sweep`);
+}
 
 async function callEmbedProxy(inputs: string[]): Promise<EmbedResponse | null> {
   if (inputs.length === 0) return { embeddings: [], model: EMBEDDING_MODEL, dimensions: EMBEDDING_DIMS, input_tokens: 0 };
   if (shouldBlockExternalAiProvider('openai')) return null;
 
   // Circuit breaker — if we've failed N times in a row, stop trying for 5 min
-  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && Date.now() - lastFailureAt < BACKOFF_RESET_MS) {
+  if (isEmbeddingBreakerOpen(breakerState, Date.now())) {
     return null;
   }
 
@@ -56,25 +134,58 @@ async function callEmbedProxy(inputs: string[]): Promise<EmbedResponse | null> {
       },
     });
     if (error) {
-      consecutiveFailures++;
-      lastFailureAt = Date.now();
+      breakerState = recordEmbeddingFailure(breakerState, Date.now());
       console.warn('[memoryEmbeddings] proxy error:', error.message, '| status:', (error as any).status, '| context:', JSON.stringify(error).slice(0, 200));
       return null;
     }
     if (!data?.embeddings || !Array.isArray(data.embeddings) || data.embeddings.length === 0) {
-      consecutiveFailures++;
-      lastFailureAt = Date.now();
+      breakerState = recordEmbeddingFailure(breakerState, Date.now());
       console.warn('[memoryEmbeddings] proxy returned unexpected data:', JSON.stringify(data).slice(0, 300));
       return null;
     }
     // Success — reset circuit breaker
-    consecutiveFailures = 0;
+    breakerState = recordEmbeddingSuccess(breakerState);
     return data as EmbedResponse;
   } catch (err) {
-    consecutiveFailures++;
-    lastFailureAt = Date.now();
+    breakerState = recordEmbeddingFailure(breakerState, Date.now());
     console.warn('[memoryEmbeddings] proxy call failed:', err);
     return null;
+  }
+}
+
+/** pgvector wants the literal text form `"[0.1,0.2,...]"`, not a JSON array. */
+function toPgVector(vector: number[]): string | null {
+  if (!Array.isArray(vector) || vector.length !== EMBEDDING_DIMS) return null;
+  for (let i = 0; i < vector.length; i += 1) {
+    if (typeof vector[i] !== 'number' || !Number.isFinite(vector[i])) return null;
+  }
+  return `[${vector.join(',')}]`;
+}
+
+/** Persist one vector. Returns false (never throws) on any failure. */
+async function storeEmbedding(memoryId: string, vector: number[], model: string): Promise<boolean> {
+  const vectorStr = toPgVector(vector);
+  if (!vectorStr) return false;
+  try {
+    const { error } = await supabase
+      .from('memory_entries')
+      .update({
+        embedding: vectorStr as any,
+        embedding_model: model || EMBEDDING_MODEL,
+        embedded_at: new Date().toISOString(),
+      })
+      .eq('id', memoryId);
+    if (error) {
+      // PGRST204 = column not in schema cache yet (migration not run).
+      if ((error as any).code !== 'PGRST204' && (error as any).code !== '42703') {
+        console.warn('[memoryEmbeddings] store failed:', error.message);
+      }
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('[memoryEmbeddings] store threw:', err);
+    return false;
   }
 }
 
@@ -116,106 +227,537 @@ export async function embedText(text: string): Promise<number[] | null> {
 /**
  * Embed a memory's content and persist the vector on memory_entries.
  * Fire-and-forget — callers should not await except in tests/backfill.
+ *
+ * Prefer `queueMemoryEmbedding` from write paths: it coalesces and batches, so
+ * N saves in a burst cost one proxy call instead of N. This single-row form
+ * stays for callers that genuinely need the awaited boolean.
  */
 export async function embedAndStoreMemory(opts: {
   memoryId: string;
   title: string;
   content: string;
 }): Promise<boolean> {
-  const combined = `${opts.title}\n${opts.content}`.trim();
-  if (!combined) return false;
+  const memoryId = String(opts?.memoryId || '').trim();
+  const combined = buildEmbeddingInput(opts);
+  if (!memoryId || !combined) return false;
   const vector = await embedText(combined);
   if (!vector) {
-    console.warn(`[memoryEmbeddings] embedText returned null for memory ${opts.memoryId.slice(0, 8)} — embedding skipped`);
+    console.warn(`[memoryEmbeddings] embedText returned null for memory ${memoryId.slice(0, 8)} — embedding skipped`);
+    noteOrphans(1, 'embed proxy returned nothing');
     return false;
   }
   if (!Array.isArray(vector) || vector.length !== EMBEDDING_DIMS) {
     console.warn(`[memoryEmbeddings] unexpected vector shape: length=${vector?.length}, expected=${EMBEDDING_DIMS}`);
+    noteOrphans(1, 'unexpected vector shape');
     return false;
   }
-  // pgvector expects the vector as a JSON array string "[0.1, 0.2, ...]"
-  const vectorStr = `[${vector.join(',')}]`;
-  const { error } = await supabase
-    .from('memory_entries')
-    .update({
-      embedding: vectorStr as any,
-      embedding_model: EMBEDDING_MODEL,
-      embedded_at: new Date().toISOString(),
-    })
-    .eq('id', opts.memoryId);
-  if (error) {
-    // PGRST204 = column not in schema cache yet (migration not run).
-    if ((error as any).code !== 'PGRST204' && (error as any).code !== '42703') {
-      console.warn('[memoryEmbeddings] store failed:', error.message);
-    }
-    return false;
+  const stored = await storeEmbedding(memoryId, vector, EMBEDDING_MODEL);
+  if (!stored) noteOrphans(1, 'vector write failed');
+  return stored;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EMBED ON WRITE
+// ═══════════════════════════════════════════════════════════════════════════
+
+let embedQueue: EmbeddingQueueItem[] = [];
+let drainTimer: any = null;
+let draining: Promise<void> | null = null;
+
+function armTimer(delayMs: number, fn: () => void): void {
+  try {
+    if (drainTimer) return;
+    drainTimer = setTimeout(() => {
+      drainTimer = null;
+      try { fn(); } catch { /* a drain must never surface into a caller */ }
+    }, Math.max(0, delayMs));
+    // Do not hold a Node process (scripts/tests) open for a background drain.
+    if (drainTimer && typeof drainTimer.unref === 'function') drainTimer.unref();
+  } catch {
+    drainTimer = null;
   }
-  return true;
 }
 
 /**
- * Backfill embeddings for memories that don't have one yet.
- * Processes in batches of BATCH_SIZE; returns a summary.
+ * THE EMBED-ON-WRITE ENTRY POINT.
  *
- * Intended to be called from an admin screen or on-demand; once we wire a
- * Supabase cron it can be invoked from there too.
+ * Designed for a single fire-and-forget line at the bottom of a `memory_entries`
+ * write path, in a module this file does not own:
+ *
+ *     queueMemoryEmbedding({ memoryId: saved.id, title: saved.title, content: saved.content });
+ *
+ * Contract, so a write path can adopt it without reading this file:
+ *   * SYNCHRONOUS and returns void — there is nothing to await and nothing to
+ *     branch on, so it cannot become part of the write's success condition.
+ *   * NEVER THROWS. Every failure mode inside is caught and turned into an
+ *     orphan-ledger entry that the repair sweep will pick up.
+ *   * IDEMPOTENT per row within the coalesce window: saving then immediately
+ *     editing the same row embeds once, from the newer text.
+ *   * SAFE ON UPDATE PATHS. Content that just changed makes any stored vector
+ *     stale, so the queue always re-embeds what it is handed.
+ */
+export function queueMemoryEmbedding(opts: {
+  memoryId: string;
+  title?: string | null;
+  content?: string | null;
+}): void {
+  try {
+    const memoryId = String(opts?.memoryId || '').trim();
+    const text = buildEmbeddingInput({ title: opts?.title, content: opts?.content });
+    if (!memoryId || !text) return;
+
+    const result = enqueueEmbeddingJobs(embedQueue, [{ id: memoryId, text }], {
+      maxSize: EMBEDDING_QUEUE_MAX,
+      nowMs: Date.now(),
+    });
+    embedQueue = result.queue;
+    // Evicted rows are still `embedding IS NULL` in the database, so the sweep
+    // will find them. Losing them from memory is not losing them.
+    if (result.dropped.length > 0) noteOrphans(result.dropped.length, 'write queue overflow');
+
+    armTimer(EMBEDDING_COALESCE_MS, () => { void drainEmbedQueue(); });
+  } catch (err) {
+    // Absolute last resort: a write path must never see an exception from here.
+    try { console.warn('[memoryEmbeddings] queueMemoryEmbedding ignored an error:', err); } catch { /* noop */ }
+  }
+}
+
+async function drainEmbedQueue(): Promise<void> {
+  if (draining) { await draining; return; }
+
+  // The in-flight marker is cleared by the CALLER, not inside the worker. If a
+  // `finally` inside the worker cleared it, a fully synchronous path (empty
+  // queue, open breaker, empty batch) would clear it BEFORE the assignment
+  // below and wedge `draining` on a resolved promise forever — after which the
+  // queue would never drain again.
+  const run = (async () => {
+    try {
+      if (embedQueue.length > 0 && shouldBlockExternalAiProvider('openai')) {
+        // Strict local AI mode. Record the debt and let go of the rows — the
+        // sweep re-finds them from the database once the mode is turned off.
+        noteOrphans(embedQueue.length, 'strict local AI mode blocks external embedding');
+        embedQueue = [];
+        return;
+      }
+      while (embedQueue.length > 0) {
+        const now = Date.now();
+        const breaker = describeEmbeddingBreaker(breakerState, now);
+        if (breaker.open) {
+          // Do NOT burn the queue against an open breaker. Mark the debt so the
+          // durable sweep is armed either way, and retry once it heals.
+          noteOrphans(embedQueue.length, 'embed breaker open');
+          armTimer(breaker.remainingMs + EMBEDDING_COALESCE_MS, () => { void drainEmbedQueue(); });
+          return;
+        }
+
+        const { batch, queue } = takeEmbeddingBatch(embedQueue, EMBEDDING_BATCH_MAX);
+        embedQueue = queue;
+        if (batch.length === 0) return;
+
+        const res = await callEmbedProxy(batch.map((item) => item.text));
+        if (!res) {
+          // Failed batches are NOT requeued — that risks an infinite retry loop
+          // against a broken proxy. They become orphans, and the sweep (which
+          // reads `embedding IS NULL` from the database) is the retry.
+          noteOrphans(batch.length, 'embed proxy failure');
+          continue;
+        }
+
+        let failed = 0;
+        await Promise.all(batch.map(async (item, i) => {
+          const vector = res.embeddings?.[i];
+          const ok = Array.isArray(vector) ? await storeEmbedding(item.id, vector, res.model || EMBEDDING_MODEL) : false;
+          if (!ok) failed += 1;
+        }));
+        if (failed > 0) noteOrphans(failed, 'vector write failure');
+      }
+    } catch (err) {
+      console.warn('[memoryEmbeddings] drain failed:', err);
+      noteOrphans(embedQueue.length, 'drain error');
+    }
+  })();
+
+  draining = run;
+  try {
+    await run;
+  } finally {
+    if (draining === run) draining = null;
+  }
+
+  // Any debt recorded above (this drain or an earlier one) becomes a sweep.
+  void ensureMemoryEmbeddingCoverage().catch(() => {});
+}
+
+/**
+ * Await the write-path queue. For scripts, tests, and "before I search, make
+ * sure what I just saved is findable" call sites. Never throws.
+ */
+export async function flushMemoryEmbeddingQueue(): Promise<{ pending: number }> {
+  try {
+    await drainEmbedQueue();
+  } catch { /* drain already logs */ }
+  return { pending: embedQueue.length };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REPAIR / BACKFILL
+// ═══════════════════════════════════════════════════════════════════════════
+
+const REPAIR_CURSOR_STORAGE_KEY = 'uc_memory_embedding_repair_cursor';
+let repairCursor: MemoryEmbeddingRepairCursor | null = null;
+let repairInFlight: Promise<MemoryEmbeddingRepairResult> | null = null;
+
+function readPersistedCursor(): MemoryEmbeddingRepairCursor | null {
+  if (repairCursor) return repairCursor;
+  try {
+    const store = (globalThis as any)?.localStorage;
+    const raw = store?.getItem?.(REPAIR_CURSOR_STORAGE_KEY);
+    const parsed = parseRepairCursor(raw);
+    if (parsed) repairCursor = parsed;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function persistCursor(cursor: MemoryEmbeddingRepairCursor): void {
+  repairCursor = cursor;
+  try {
+    (globalThis as any)?.localStorage?.setItem?.(REPAIR_CURSOR_STORAGE_KEY, serializeRepairCursor(cursor));
+  } catch { /* memory-only resume is still a resume */ }
+}
+
+export interface MemoryEmbeddingRepairResult {
+  ran: boolean;
+  /** Why the pass stopped: done | max_pages | max_rows | deadline | breaker_open | fetch_failed | privacy_blocked | cooling_down | idle */
+  reason: string;
+  cursor: MemoryEmbeddingRepairCursor;
+  scanned: number;
+  eligible: number;
+  embedded: number;
+  failed: number;
+  skipped: number;
+  pages: number;
+  done: boolean;
+  dryRun: boolean;
+  summary: string;
+}
+
+function repairResult(
+  cursor: MemoryEmbeddingRepairCursor,
+  reason: string,
+  ran: boolean,
+  eligible: number,
+  dryRun: boolean,
+): MemoryEmbeddingRepairResult {
+  return {
+    ran,
+    reason,
+    cursor,
+    scanned: cursor.scanned,
+    eligible,
+    embedded: cursor.embedded,
+    failed: cursor.failed,
+    skipped: cursor.skipped,
+    pages: cursor.pagesDone,
+    done: cursor.done,
+    dryRun,
+    summary: summarizeRepairCursor(cursor),
+  };
+}
+
+/**
+ * One page of un-embedded rows, keyset-paged on `id`.
+ *
+ * NOTE: `embedding` is deliberately NOT selected — 1536 floats per row would
+ * dwarf the payload, and the `IS NULL` predicate already proves it is empty.
+ * `evaluateEmbeddingEligibility` then sees `embedding: undefined`, which reads
+ * as "not covered", which is exactly right for this query.
+ */
+async function fetchRepairPage(
+  lastId: string | null,
+  pageSize: number,
+  circleId?: string,
+): Promise<Array<{ id: string; title: string; content: string; embedding_model?: string }> | null> {
+  try {
+    let query = supabase
+      .from('memory_entries')
+      .select('id, title, content, embedding_model')
+      .eq('is_active', true)
+      .is('embedding', null)
+      .order('id', { ascending: true })
+      .limit(pageSize);
+    if (lastId) query = query.gt('id', lastId);
+    if (circleId) query = query.eq('circle_id', circleId);
+
+    const { data, error } = await query;
+    if (error) {
+      // PGRST204 / 42703 = embedding column not migrated yet — not an error.
+      if ((error as any).code !== 'PGRST204' && (error as any).code !== '42703') {
+        console.warn('[memoryEmbeddings] repair fetch failed:', error.message);
+      }
+      return null;
+    }
+    return (data || []) as any;
+  } catch (err) {
+    console.warn('[memoryEmbeddings] repair fetch threw:', err);
+    return null;
+  }
+}
+
+/**
+ * THE REPAIR SWEEP. Finds `memory_entries` rows with no embedding and embeds
+ * them.
+ *
+ * Properties that make it safe to run repeatedly, from anywhere:
+ *   * BOUNDED — `pageSize` rows per query, `maxPages` queries per invocation,
+ *     optional `maxRows` and wall-clock `deadlineMs`. One automatic pass can
+ *     never walk an unbounded table.
+ *   * RESUMABLE — keyset on `id` (the only unique, totally ordered column), so
+ *     the cursor only moves forward. Rows that FAIL to embed stay null, and a
+ *     naive re-fetch would hand back the same poisoned rows forever; the cursor
+ *     steps past them and a later pass (starting fresh) retries them.
+ *   * IDEMPOTENT — the SQL `IS NULL` filter plus `evaluateEmbeddingEligibility`
+ *     mean an already-embedded row is never re-sent to the proxy. Running this
+ *     every minute forever costs nothing once coverage is complete.
+ *   * FAIL-SOFT — a fetch error, a proxy error, or an open breaker stops the
+ *     pass and leaves the debt on the ledger. It never throws.
+ */
+export async function repairMemoryEmbeddings(opts?: {
+  circleId?: string;
+  pageSize?: number;
+  maxPages?: number;
+  maxRows?: number;
+  deadlineMs?: number;
+  /** Continue from the persisted cursor (default true). */
+  resume?: boolean;
+  /** Report what would be embedded without calling the proxy. */
+  dryRun?: boolean;
+  onProgress?: (cursor: MemoryEmbeddingRepairCursor) => void;
+}): Promise<MemoryEmbeddingRepairResult> {
+  const pageSize = resolveRepairPageSize(opts?.pageSize);
+  const maxPages = resolveRepairMaxPages(opts?.maxPages);
+  const dryRun = opts?.dryRun === true;
+
+  if (shouldBlockExternalAiProvider('openai')) {
+    // Privacy mode: leave the debt on the ledger so coverage is repaired once
+    // strict local mode is turned off.
+    return repairResult(createRepairCursor(Date.now()), 'privacy_blocked', false, 0, dryRun);
+  }
+
+  const persisted = opts?.resume === false ? null : readPersistedCursor();
+  // A completed sweep starts over next time: new null rows can appear anywhere
+  // in the id space, so "done" means "done with this pass", not "done forever".
+  let cursor = persisted && !persisted.done ? persisted : createRepairCursor(Date.now());
+
+  let eligibleTotal = 0;
+  let stopReason = 'done';
+
+  for (;;) {
+    const now = Date.now();
+    const gate = shouldContinueRepair(cursor, {
+      maxPages,
+      maxRows: opts?.maxRows,
+      deadlineMs: opts?.deadlineMs,
+      nowMs: now,
+      breakerOpen: isEmbeddingBreakerOpen(breakerState, now),
+    });
+    if (!gate.continue) { stopReason = gate.reason; break; }
+
+    const rows = await fetchRepairPage(cursor.lastId, pageSize, opts?.circleId);
+    if (rows === null) { stopReason = 'fetch_failed'; break; }
+
+    // Belt-and-braces: the SQL filter already excludes covered rows, but the
+    // eligibility core is the thing that PROVES we never re-bill one.
+    const jobs: Array<{ id: string; text: string }> = [];
+    const claimed: string[] = [];
+    let pending: any[] = rows;
+    let pageSkipped = 0;
+    while (pending.length > 0) {
+      const sel = selectEmbeddingBatch(pending, { maxBatchSize: EMBEDDING_BATCH_MAX, seenIds: claimed });
+      jobs.push(...sel.batch);
+      for (const job of sel.batch) claimed.push(job.id);
+      pageSkipped += sel.skipped.length;
+      if (!sel.truncated || sel.remaining.length === 0) break;
+      pending = sel.remaining as any[];
+    }
+    eligibleTotal += jobs.length;
+
+    let pageEmbedded = 0;
+    let pageFailed = 0;
+    if (!dryRun) {
+      for (const chunk of planEmbeddingBatches(jobs, EMBEDDING_BATCH_MAX)) {
+        const res = await callEmbedProxy(chunk.map((job) => job.text));
+        if (!res) { pageFailed += chunk.length; continue; }
+        await Promise.all(chunk.map(async (job, i) => {
+          const vector = res.embeddings?.[i];
+          const ok = Array.isArray(vector) ? await storeEmbedding(job.id, vector, res.model || EMBEDDING_MODEL) : false;
+          if (ok) pageEmbedded += 1; else pageFailed += 1;
+        }));
+      }
+    }
+
+    cursor = advanceRepairCursor(
+      cursor,
+      {
+        rowIds: rows.map((row) => row?.id),
+        requestedPageSize: pageSize,
+        embedded: pageEmbedded,
+        failed: pageFailed,
+        skipped: pageSkipped,
+      },
+      Date.now(),
+    );
+    if (!dryRun) persistCursor(cursor);
+    try { opts?.onProgress?.(cursor); } catch { /* progress must not break the sweep */ }
+  }
+
+  return repairResult(cursor, stopReason, true, eligibleTotal, dryRun);
+}
+
+/**
+ * THE TRIGGER. Throttled, self-arming, safe to call on any hot path.
+ *
+ * Why this and not a cron: this app has no installed scheduler, and a Supabase
+ * cron would need the service role plus a deployed function to embed on the
+ * user's behalf — it cannot see RLS-scoped rows the way the signed-in client
+ * can. So the repair rides the write path instead: every `queueMemoryEmbedding`
+ * drain calls this, it costs one `shouldRunEmbeddingRepair` comparison when
+ * nothing is owed, and it becomes a real bounded sweep only when
+ *   (a) orphans are on the ledger and the breaker has closed,
+ *   (b) it is the first call of the session (which catches every historical
+ *       orphan, including everything written before this file existed), or
+ *   (c) the idle re-sweep interval has elapsed.
+ * `scripts/backfill-memory-embeddings.ts` is the loud, ops-side companion for
+ * a large one-time catch-up.
+ */
+export async function ensureMemoryEmbeddingCoverage(opts?: {
+  force?: boolean;
+  circleId?: string;
+  pageSize?: number;
+  maxPages?: number;
+  maxRows?: number;
+}): Promise<MemoryEmbeddingRepairResult> {
+  const now = Date.now();
+  const idle = repairResult(readPersistedCursor() || createRepairCursor(now), 'idle', false, 0, false);
+
+  if (shouldBlockExternalAiProvider('openai')) return { ...idle, reason: 'privacy_blocked' };
+  if (repairInFlight) return repairInFlight;
+
+  const decision = shouldRunEmbeddingRepair({
+    schedule: repairSchedule,
+    breaker: breakerState,
+    nowMs: now,
+    minIntervalMs: REPAIR_MIN_INTERVAL_MS,
+    force: opts?.force === true,
+  });
+  if (!decision.run) return { ...idle, reason: decision.reason };
+
+  // Same rule as the drain: the in-flight marker is cleared by the caller, so a
+  // synchronous failure path cannot wedge it before the assignment below.
+  const run = (async (): Promise<MemoryEmbeddingRepairResult> => {
+    try {
+      const result = await repairMemoryEmbeddings({
+        circleId: opts?.circleId,
+        pageSize: opts?.pageSize,
+        maxPages: opts?.maxPages,
+        maxRows: opts?.maxRows,
+      });
+      // The debt clears only on a CLEAN, COMPLETE pass. A partial or partly
+      // failed sweep keeps the ledger armed so the next one retries.
+      repairSchedule = noteEmbeddingRepairRun(repairSchedule, Date.now(), {
+        clearedOrphans: result.done && result.failed === 0,
+      });
+      if (result.embedded > 0 || result.failed > 0) {
+        console.info(`[memoryEmbeddings] repair (${decision.reason}): ${result.summary}`);
+      }
+      return result;
+    } catch (err) {
+      console.warn('[memoryEmbeddings] repair sweep failed:', err);
+      return { ...idle, reason: 'error' };
+    }
+  })();
+
+  repairInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (repairInFlight === run) repairInFlight = null;
+  }
+}
+
+/** Row counts behind the semantic-retrieval gap. Never throws. */
+export async function getMemoryEmbeddingCoverage(circleId?: string): Promise<{
+  total: number;
+  embedded: number;
+  missing: number;
+  pct: number;
+  healthy: boolean;
+  summary: string;
+}> {
+  const count = async (missingOnly: boolean): Promise<number> => {
+    try {
+      let query = supabase
+        .from('memory_entries')
+        .select('id', { count: 'exact', head: true })
+        .eq('is_active', true);
+      if (missingOnly) query = query.is('embedding', null);
+      if (circleId) query = query.eq('circle_id', circleId);
+      const { count: n, error } = await query;
+      if (error) return 0;
+      return n || 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  const total = await count(false);
+  const missing = await count(true);
+  const coverage = describeEmbeddingCoverage({ total, embedded: Math.max(0, total - missing) });
+  return { ...coverage, summary: formatEmbeddingCoverage(coverage) };
+}
+
+/** Breaker + orphan-ledger + cursor snapshot for diagnostics and scripts. */
+export function getMemoryEmbeddingRuntimeStatus(): {
+  breaker: ReturnType<typeof describeEmbeddingBreaker>;
+  orphanCount: number;
+  repairOwed: boolean;
+  lastRepairAtMs: number;
+  queued: number;
+  cursor: MemoryEmbeddingRepairCursor | null;
+} {
+  return {
+    breaker: describeEmbeddingBreaker(breakerState, Date.now()),
+    orphanCount: repairSchedule.orphanCount,
+    repairOwed: repairSchedule.repairOwed,
+    lastRepairAtMs: repairSchedule.lastRepairAtMs,
+    queued: embedQueue.length,
+    cursor: readPersistedCursor(),
+  };
+}
+
+/**
+ * Legacy entry point (kept for compatibility — it had zero callers). Runs a
+ * fresh, forced, bounded sweep from the start of the table.
  */
 export async function backfillMemoryEmbeddings(opts: {
   circleId?: string;
   limit?: number;              // cap this pass; default 500
   onProgress?: (done: number, total: number) => void;
 }): Promise<{ processed: number; succeeded: number; failed: number }> {
-  const limit = opts.limit ?? 500;
-  let query = supabase
-    .from('memory_entries')
-    .select('id, title, content')
-    .eq('is_active', true)
-    .is('embedding', null)
-    .order('importance', { ascending: false })
-    .order('updated_at', { ascending: false })
-    .limit(limit);
-  if (opts.circleId) query = query.eq('circle_id', opts.circleId);
-
-  const { data: rows, error } = await query;
-  if (error || !rows) {
-    console.warn('[memoryEmbeddings] backfill fetch failed:', error?.message);
-    return { processed: 0, succeeded: 0, failed: 0 };
-  }
-
-  let succeeded = 0;
-  let failed = 0;
-  const total = rows.length;
-
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
-    const inputs = batch.map(r => `${r.title}\n${r.content}`.slice(0, 30000));
-    const res = await callEmbedProxy(inputs);
-    if (!res) {
-      failed += batch.length;
-      opts.onProgress?.(Math.min(i + BATCH_SIZE, total), total);
-      continue;
-    }
-
-    // Write back — sequential updates because Supabase JS doesn't expose a
-    // bulk upsert that preserves the IDs we need per row.
-    await Promise.all(batch.map(async (row, j) => {
-      const vector = res.embeddings[j];
-      if (!vector) { failed++; return; }
-      const { error: upErr } = await supabase
-        .from('memory_entries')
-        .update({
-          embedding: vector,
-          embedding_model: res.model,
-          embedded_at: new Date().toISOString(),
-        })
-        .eq('id', row.id);
-      if (upErr) { failed++; } else { succeeded++; }
-    }));
-
-    opts.onProgress?.(Math.min(i + BATCH_SIZE, total), total);
-  }
-
-  return { processed: total, succeeded, failed };
+  const limit = Math.max(1, Math.min(opts?.limit ?? 500, 100000));
+  const pageSize = resolveRepairPageSize(Math.min(limit, BATCH_SIZE));
+  const result = await repairMemoryEmbeddings({
+    circleId: opts?.circleId,
+    pageSize,
+    maxPages: Math.min(Math.ceil(limit / pageSize), 200),
+    maxRows: limit,
+    resume: false,
+    onProgress: (cursor) => {
+      try { opts?.onProgress?.(cursor.scanned, limit); } catch { /* noop */ }
+    },
+  });
+  return { processed: result.scanned, succeeded: result.embedded, failed: result.failed };
 }
 
 /**
@@ -245,7 +787,7 @@ export async function diagnoseEmbeddingPipeline(): Promise<Record<string, unknow
     results.embeddedRows = error ? `QUERY ERROR: ${error.message}` : `${data?.length || 0} rows with embeddings`;
   } catch (e: any) { results.embeddedRows = `ERROR — ${e.message}`; }
 
-  // 3. Check total memories
+  // 3. Check total memories + the actual coverage gap
   try {
     const { count } = await supabase
       .from('memory_entries')
@@ -253,6 +795,10 @@ export async function diagnoseEmbeddingPipeline(): Promise<Record<string, unknow
       .eq('is_active', true);
     results.totalMemories = count;
   } catch (e: any) { results.totalMemories = `ERROR — ${e.message}`; }
+
+  try {
+    results.coverage = (await getMemoryEmbeddingCoverage()).summary;
+  } catch (e: any) { results.coverage = `ERROR — ${e.message}`; }
 
   // 4. Check match_memories RPC exists
   try {
@@ -271,8 +817,21 @@ export async function diagnoseEmbeddingPipeline(): Promise<Record<string, unknow
     results.soulWisdom = data?.length ? `${data.length} entries` : 'EMPTY';
   } catch (e: any) { results.soulWisdom = `ERROR — ${e.message}`; }
 
-  // 6. Circuit breaker status
-  results.circuitBreaker = { consecutiveFailures, lastFailureAt: lastFailureAt ? new Date(lastFailureAt).toISOString() : 'never' };
+  // 6. Circuit breaker + orphan ledger + resume cursor
+  const status = getMemoryEmbeddingRuntimeStatus();
+  results.circuitBreaker = {
+    consecutiveFailures: status.breaker.consecutiveFailures,
+    open: status.breaker.open,
+    lastFailureAt: status.breaker.lastFailureAtMs ? new Date(status.breaker.lastFailureAtMs).toISOString() : 'never',
+    retryAt: status.breaker.retryAtMs ? new Date(status.breaker.retryAtMs).toISOString() : 'n/a',
+  };
+  results.orphanLedger = {
+    orphanCount: status.orphanCount,
+    repairOwed: status.repairOwed,
+    queuedForEmbedding: status.queued,
+    lastRepairAt: status.lastRepairAtMs ? new Date(status.lastRepairAtMs).toISOString() : 'never',
+  };
+  results.repairCursor = status.cursor ? summarizeRepairCursor(status.cursor) : 'none';
 
   console.log('[memoryEmbeddings] DIAGNOSTIC:', JSON.stringify(results, null, 2));
   return results;

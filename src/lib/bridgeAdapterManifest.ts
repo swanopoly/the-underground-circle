@@ -195,6 +195,17 @@ export const DEFAULT_BRIDGE_ADAPTERS: readonly BridgeAdapter[] = [
     proofAfter: [PROOF_DOM_STATE],
     floorCategories: [],
   },
+  {
+    id: 'browser.toggle_target',
+    endpoint: '/browser/toggle_target',
+    surface: 'browser',
+    capabilityFamily: 'browser',
+    riskTier: 'read',
+    requiresApproval: false,
+    evidenceBefore: [OBSERVE_DOM],
+    proofAfter: [],
+    floorCategories: [],
+  },
   // ── Browser: mutations ───────────────────────────────────────────────────────
   {
     id: 'browser.open_url',
@@ -217,6 +228,17 @@ export const DEFAULT_BRIDGE_ADAPTERS: readonly BridgeAdapter[] = [
     evidenceBefore: [OBSERVE_DOM, 'locator resolves to exactly one visible, enabled target'],
     proofAfter: [PROOF_DOM_STATE],
     floorCategories: ['submit'],
+  },
+  {
+    id: 'browser.set_toggle',
+    endpoint: '/browser/set_toggle',
+    surface: 'browser',
+    capabilityFamily: 'browser',
+    riskTier: 'gated',
+    requiresApproval: true,
+    evidenceBefore: [OBSERVE_DOM, 'one exact non-consequential state control capability'],
+    proofAfter: ['same-target previous/current/desired boolean state proof', PROOF_DOM_STATE],
+    floorCategories: [],
   },
   {
     id: 'browser.fill',

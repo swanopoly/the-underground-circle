@@ -15,6 +15,9 @@
  * chat surface; this file must stay smoke-testable (no react-native imports).
  */
 
+import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import { matchStopResolution } from './chatStopMessageCore';
+
 /**
  * How the user reacted to a finalized bot reply.
  * - accept       — thumbs up / explicit acceptance
@@ -65,6 +68,110 @@ export const CHAT_OUTCOME_VERDICTS: readonly ChatOutcomeVerdict[] = [
   'failed',
   'unknown',
 ] as const;
+
+export type AuthoritativeChatOutcomeSignal = {
+  verdict: ChatOutcomeVerdict;
+  approvalPending: boolean;
+  canRetry: boolean;
+};
+
+/**
+ * Preserve the richer computer-task terminal state when adapting it to the
+ * deliberately smaller flywheel/cross-surface vocabulary. Text in the bot
+ * reply must never override this runtime-owned status.
+ */
+export function deriveComputerTaskChatOutcomeSignal(
+  status: ComputerTaskOutcomeStatus | null | undefined,
+): AuthoritativeChatOutcomeSignal | null {
+  switch (status) {
+    case 'completed':
+      return { verdict: 'completed', approvalPending: false, canRetry: false };
+    case 'partial':
+      return { verdict: 'partial', approvalPending: false, canRetry: true };
+    case 'failed':
+      return { verdict: 'failed', approvalPending: false, canRetry: true };
+    case 'waiting_approval':
+      return { verdict: 'blocked', approvalPending: true, canRetry: false };
+    case 'blocked':
+    case 'needs_input':
+      return { verdict: 'blocked', approvalPending: false, canRetry: false };
+    case 'cancelled':
+      return { verdict: 'blocked', approvalPending: false, canRetry: true };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Browser plan cards are lifecycle records, not proof merely because they
+ * exist. Only the latest terminal status can override the generic text-based
+ * verdict; planned/launched rows remain `unknown`.
+ */
+export function deriveBrowserPlanChatOutcomeSignal(
+  plans: unknown,
+): AuthoritativeChatOutcomeSignal | null {
+  if (!Array.isArray(plans) || plans.length === 0) return null;
+  const latest = [...plans].reverse().find(
+    (item) => !!item && typeof item === 'object' && !Array.isArray(item) && typeof (item as Record<string, unknown>).status === 'string',
+  ) as Record<string, unknown> | undefined;
+  switch (latest?.status) {
+    case 'completed':
+      return { verdict: 'completed', approvalPending: false, canRetry: false };
+    case 'failed':
+      return { verdict: 'failed', approvalPending: false, canRetry: true };
+    case 'approval_requested':
+      return { verdict: 'blocked', approvalPending: true, canRetry: false };
+    case 'planned':
+    case 'launched':
+      return { verdict: 'unknown', approvalPending: false, canRetry: false };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Stop copy is a terminal runtime signal, not ordinary successful prose.
+ *
+ * The typed batch loop's user-authored stop condition is intentionally kept
+ * separate from the generic stop-message resolver because it names the exact
+ * condition that halted execution. Other recognized stop messages are mapped
+ * by consequence: failed tools/transports are failures, while continuation
+ * and iteration boundaries preserve useful progress as partial.
+ */
+export function deriveStopMessageChatOutcomeSignal(
+  content: unknown,
+): AuthoritativeChatOutcomeSignal | null {
+  if (typeof content !== 'string') return null;
+  const normalized = content.slice(0, 800).replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+  const lower = normalized.toLowerCase();
+
+  if (
+    lower.startsWith('stopped because the latest ')
+    && lower.includes(' stop condition')
+    && lower.includes('i did not continue')
+  ) {
+    return { verdict: 'blocked', approvalPending: false, canRetry: false };
+  }
+
+  const matched = matchStopResolution(normalized);
+  if (!matched) return null;
+
+  if (
+    lower.includes('tool step failed')
+    || lower.includes('step failed, so i stopped this turn early')
+    || lower.includes("couldn't reach the server to finish")
+    || lower.includes("last few attempts weren't making progress")
+  ) {
+    return { verdict: 'failed', approvalPending: false, canRetry: true };
+  }
+
+  return {
+    verdict: 'partial',
+    approvalPending: false,
+    canRetry: matched.canContinue || matched.quickReplies.length > 0,
+  };
+}
 
 // Keep persisted ids tiny: they are model/lane identifiers, never prose. A
 // hard clamp (no "[truncated]" suffix) keeps the byte cost of the signal

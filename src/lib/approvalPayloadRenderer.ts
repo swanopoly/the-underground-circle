@@ -77,6 +77,7 @@ function toolAction(tool: string): { verb: string; target: 'app' | 'browser' | '
     case 'desktop.open_path':  return { verb: 'Open', target: 'file' };
     case 'browser.open_url':   return { verb: 'Navigate to', target: 'browser' };
     case 'browser.click_role': return { verb: 'Click', target: 'browser' };
+    case 'browser.set_toggle': return { verb: 'Set toggle in', target: 'browser' };
     case 'browser.fill_field': return { verb: 'Fill', target: 'browser' };
     case 'browser.press_key':  return { verb: 'Press', target: 'browser' };
     case 'custom_api.request': return { verb: 'Call', target: 'generic' };

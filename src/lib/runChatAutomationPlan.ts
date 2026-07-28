@@ -26,6 +26,10 @@ import type {
 } from './chatAutomationPlanner';
 import { isPlanSafeForPlanMode, describePlanModeRefusal } from './chatAutomationPlanner';
 import { buildChatAutomationPlanPreview } from './chatAutomationPlanPreview';
+import {
+  buildChatAgentContextPack,
+  type ChatAgentContextPack,
+} from './chatAgentContextPack';
 
 /**
  * Outcome each transport reports back. Normalised so the caller can log
@@ -115,6 +119,12 @@ export type ChatTransportContext = {
   chatMode?: ChatMode;
   /** R9 — thread-scoped clarification park/resume store (see type docs). */
   clarificationResume?: ChatClarificationResumeStore;
+  /**
+   * Portable, redacted plan/guardrail/proof handoff. The dispatcher builds
+   * this before any approval or transport callback, so connected-agent
+   * handlers can consume the same bounded context later attached to outcome.
+   */
+  agentContextPack?: ChatAgentContextPack;
   /** Caller supplies app-specific extras (nav functions, state setters). */
   extras?: Record<string, unknown>;
 };
@@ -222,12 +232,20 @@ export type DispatchOptions = {
 function attachPlanPreview(
   plan: ChatAutomationPlan,
   outcome: ChatAutomationOutcome,
+  ctx: ChatTransportContext,
 ): ChatAutomationOutcome {
   return {
     ...outcome,
     data: {
       ...(outcome.data || {}),
       chatAutomationPlanPreview: buildChatAutomationPlanPreview(plan),
+      chatAgentContextPack: ctx.agentContextPack || buildChatAgentContextPack(plan, {
+          circleId: ctx.circleId,
+          userId: ctx.userId,
+          threadId: ctx.threadId,
+          model: ctx.model,
+          chatMode: ctx.chatMode,
+        }),
     },
   };
 }
@@ -239,7 +257,16 @@ export async function dispatchChatAutomationPlan(
   opts: DispatchOptions,
 ): Promise<ChatAutomationOutcome> {
   const started = Date.now();
-  const ctx = opts.ctx;
+  const ctx: ChatTransportContext = {
+    ...opts.ctx,
+    agentContextPack: buildChatAgentContextPack(plan, {
+      circleId: opts.ctx.circleId,
+      userId: opts.ctx.userId,
+      threadId: opts.ctx.threadId,
+      model: opts.ctx.model,
+      chatMode: opts.ctx.chatMode,
+    }),
+  };
 
   // Plan vs Act mode gate — refuses destructive dispatches up-front,
   // BEFORE the HITL approval gate so plan-mode never even files a
@@ -252,7 +279,7 @@ export async function dispatchChatAutomationPlan(
       data: { planModeRefusal: true, executionKind: plan.execution.kind, risk: plan.risk },
       durationMs: Date.now() - started,
     };
-    const finalOutcome = attachPlanPreview(plan, outcome);
+    const finalOutcome = attachPlanPreview(plan, outcome, ctx);
     try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
     return finalOutcome;
   }
@@ -286,7 +313,7 @@ export async function dispatchChatAutomationPlan(
         durationMs: Date.now() - started,
         ...(Object.keys(data).length > 0 ? { data } : {}),
       };
-      const finalOutcome = attachPlanPreview(plan, outcome);
+      const finalOutcome = attachPlanPreview(plan, outcome, ctx);
       try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
       return finalOutcome;
     }
@@ -316,7 +343,7 @@ export async function dispatchChatAutomationPlan(
       message: `No handler registered for execution kind "${plan.execution.kind}". Falling back to caller's legacy path.`,
       durationMs: Date.now() - started,
     };
-    const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome));
+    const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome), ctx);
     try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
     return finalOutcome;
   }
@@ -331,18 +358,20 @@ export async function dispatchChatAutomationPlan(
     outcome = {
       executionKind: plan.execution.kind,
       status: 'failed',
-      // Policy (desktop-runtime-wiring E-gate): visible copy hides thrown
-      // transport internals; diagnostics stay in warnings + data.rawError.
-      message: 'That automation step hit an internal error. Technical details were saved for recovery.',
-      warnings: [`Transport threw: ${err instanceof Error ? err.message : String(err)}`],
+      // Treat arbitrary transport exceptions as untrusted: provider errors
+      // can contain credentials, paths, request bodies, or typed values.
+      // Persist only a bounded classification, never the raw exception.
+      message: 'That automation step hit an internal error. No uncertain action was replayed.',
+      warnings: ['Transport failed with a redacted internal error.'],
       data: {
-        rawError: err instanceof Error ? err.message : String(err),
+        errorCode: 'transport_error',
+        redacted: true,
       },
       durationMs: Date.now() - started,
     };
   }
 
-  const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome));
+  const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome), ctx);
   try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
   return finalOutcome;
 }

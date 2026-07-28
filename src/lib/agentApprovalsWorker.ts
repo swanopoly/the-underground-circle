@@ -73,6 +73,18 @@ export async function applyApprovedAction(approvalId: string): Promise<ApprovalA
     return { ok: true, actionType, applied: false, reason: `status is "${status}"` };
   }
 
+  // Runtime-owned approvals are consumed by the exact runner immediately
+  // before its transport dispatch. The generic UI worker must leave both the
+  // one-shot applied_at field and the fingerprinted payload untouched.
+  if (actionType.startsWith('scheduled_action.') || actionType.startsWith('chat.')) {
+    return {
+      ok: true,
+      actionType,
+      applied: false,
+      reason: 'deferred to the exact runtime-owned dispatch gate',
+    };
+  }
+
   // ── Idempotency guard (atomic claim = applied_at) ─────────────────────────
   // APIs with side effects aren't safe to retry unless they provide
   // idempotency. The approval `id` is the logical-operation key; `applied_at`

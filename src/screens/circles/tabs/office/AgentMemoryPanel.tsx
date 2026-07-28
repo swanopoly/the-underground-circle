@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 import { getAgentSoulInfo, getMemorySoulKey } from './agentSoulMemory';
 import { MONO, formatMsgTime } from './AgentPanelShared';
 
@@ -129,21 +130,23 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
   }, [load]);
 
   useEffect(() => {
-    const channel = supabase
-      .channel(`agent-memory-panel:${circleId}:${agentId}`)
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'memory_entries',
-        filter: `circle_id=eq.${circleId}`,
-      }, () => { void load(); })
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'circle_office_agents',
-        filter: `circle_id=eq.${circleId}`,
-      }, () => { void load(); })
-      .subscribe();
+    const handle = subscribeWithReconnect({
+      channelName: `agent-memory-panel:${circleId}:${agentId}`,
+      setup: (channel) => channel
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'memory_entries',
+          filter: `circle_id=eq.${circleId}`,
+        }, () => { void load(); })
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'circle_office_agents',
+          filter: `circle_id=eq.${circleId}`,
+        }, () => { void load(); }),
+      onCatchUp: () => { void load(); },
+    });
 
     // Realtime subscriptions above already fire `load` on INSERT/UPDATE. This
     // polling is a belt-and-suspenders refresh for missed realtime events;
@@ -151,7 +154,7 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
     const intervalId = setInterval(() => { void load(); }, 30000);
     return () => {
       clearInterval(intervalId);
-      void supabase.removeChannel(channel);
+      handle.unsubscribe();
     };
   }, [agentId, circleId, load]);
 

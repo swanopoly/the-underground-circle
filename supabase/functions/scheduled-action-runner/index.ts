@@ -6,14 +6,13 @@
 // supabase/migrations/20260414_scheduled_actions_cron.sql) and can also be
 // invoked ad-hoc by the client to run a specific action "now".
 //
-// Design goals:
-//   * One atomic claim step so two cron ticks don't fight over the same row
-//   * Per-kind adapter functions — add a kind by adding an entry to EXECUTORS
-//   * Retries with exponential backoff (15s × 2^n, capped at 30 min)
-//   * Honors `requires_approval`: if true, creates an agent_approvals row and
-//     parks the action until the approval is resolved
-//   * Every execution produces structured `result` JSON so the Outbox can
-//     render "posted to bsky.app/x/abc123" or "200 OK · {json preview}"
+// Safety contract:
+//   * Every kind is a durable/external mutation and always needs a fresh,
+//     exact, single-use approval (legacy requires_approval=false is ignored).
+//   * One runner atomically claims an occurrence before consuming approval.
+//   * dispatched_at is stamped immediately before the only executor attempt.
+//   * A failure/timeout after that boundary is outcome_unknown and is sealed.
+//   * Results and errors persist only fixed status codes and opaque receipt IDs.
 //
 // Deploy: npx supabase functions deploy scheduled-action-runner
 // Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (both injected by Supabase)
@@ -28,7 +27,9 @@ const corsHeaders = {
 };
 
 const MAX_ACTIONS_PER_RUN = 20;       // cap per tick to keep the fn bounded
-const PER_ACTION_TIMEOUT_MS = 20_000; // any executor that stalls → failure
+const PER_ACTION_TIMEOUT_MS = 20_000;
+const APPROVAL_TTL_SECONDS = 600;
+const APPROVAL_SCHEMA_VERSION = 2;
 
 interface ScheduledAction {
   id: string;
@@ -42,6 +43,13 @@ interface ScheduledAction {
   max_retries: number;
   requires_approval: boolean;
   approval_id: string | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  dispatched_at: string | null;
+  outcome_unknown_at: string | null;
+  recurrence?: string | null;
+  recurrence_label?: string | null;
+  parent_action_id?: string | null;
 }
 
 interface ExecResult {
@@ -554,11 +562,55 @@ function base64UrlEncode(input: string): string {
 
 // ─── Core loop ──────────────────────────────────────────────────────────────
 
-async function runOnce(supabase: SupabaseEdgeClient): Promise<{ claimed: number; succeeded: number; failed: number; skipped: number }> {
-  // 1. Fetch IDs of due actions. We do a lookup + individual claim rather
-  //    than a SKIP-LOCKED CTE because the Supabase SDK doesn't expose that
-  //    syntax ergonomically. The race window is small and each claim is
-  //    atomic via the eq('status','pending') guard.
+interface ApprovalBindingPayload {
+  approvalSchemaVersion: number;
+  actionId: string;
+  userId: string;
+  circleId: string | null;
+  actionKind: string;
+  payloadFingerprint: string;
+  occurrenceFingerprint: string;
+}
+
+interface ApprovalBinding {
+  sessionKey: string;
+  actionType: string;
+  description: string;
+  payload: ApprovalBindingPayload;
+}
+
+interface ApprovalRow {
+  id: string;
+  circle_id: string | null;
+  session_key: string;
+  action_type: string;
+  description: string;
+  payload: Record<string, unknown>;
+  status: string;
+  requested_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  timeout_seconds: number;
+  applied_at: string | null;
+}
+
+type ApprovalGate =
+  | { state: 'waiting' }
+  | { state: 'rejected'; code: 'approval_rejected' | 'approval_expired' }
+  | { state: 'invalid'; code: 'approval_scope_mismatch' | 'approval_consumed' }
+  | { state: 'approved'; approval: ApprovalRow; binding: ApprovalBinding; expiresAt: number };
+
+interface RunSummary {
+  claimed: number;
+  succeeded: number;
+  failed: number;
+  outcomeUnknown: number;
+  skipped: number;
+}
+
+async function runOnce(supabase: SupabaseEdgeClient): Promise<RunSummary> {
+  // Lookup plus a guarded pending -> running write is an atomic queue claim.
+  // Every later state write is also bound to the winner's opaque claim token.
   const { data: dueActions, error: fetchErr } = await supabase
     .from('scheduled_actions')
     .select('*')
@@ -568,137 +620,636 @@ async function runOnce(supabase: SupabaseEdgeClient): Promise<{ claimed: number;
     .limit(MAX_ACTIONS_PER_RUN);
 
   if (fetchErr) {
-    console.error('[runner] fetch failed:', fetchErr);
-    return { claimed: 0, succeeded: 0, failed: 0, skipped: 0 };
+    console.error('[scheduled-action-runner] due_action_lookup_failed');
+    return { claimed: 0, succeeded: 0, failed: 0, outcomeUnknown: 0, skipped: 0 };
   }
   if (!dueActions || dueActions.length === 0) {
-    return { claimed: 0, succeeded: 0, failed: 0, skipped: 0 };
+    return { claimed: 0, succeeded: 0, failed: 0, outcomeUnknown: 0, skipped: 0 };
   }
 
   let succeeded = 0;
   let failed = 0;
+  let outcomeUnknown = 0;
   let skipped = 0;
   let claimed = 0;
 
   for (const raw of dueActions) {
     const action = raw as ScheduledAction;
 
-    // 1a. HITL gate — park actions that need approval until their
-    // agent_approvals row flips to 'approved'. We create the approval row
-    // on first sight if one doesn't exist.
-    if (action.requires_approval) {
-      const gate = await handleApprovalGate(supabase, action);
-      if (gate === 'waiting') { skipped++; continue; }
-      if (gate === 'rejected') {
-        await markFailed(supabase, action, 'Approval rejected', false);
-        failed++;
-        continue;
-      }
-      // 'approved' falls through to execution
+    const validationCode = validateBeforeDispatch(action);
+    if (validationCode) {
+      await markPendingAsPredispatchFailed(supabase, action.id, validationCode);
+      failed++;
+      continue;
     }
 
-    // 1b. Atomic claim — only proceeds if still pending. If another runner
-    // got here first, eq('status','pending') filters us out and we skip.
-    const { data: claimRows, error: claimErr } = await supabase
+    // All current kinds mutate durable/external state. This gate is
+    // unconditional; legacy rows with requires_approval=false cannot bypass it.
+    const gate = await handleApprovalGate(supabase, action);
+    if (gate.state === 'waiting') {
+      skipped++;
+      continue;
+    }
+    if (gate.state === 'rejected' || gate.state === 'invalid') {
+      await markPendingAsPredispatchFailed(supabase, action.id, gate.code);
+      failed++;
+      continue;
+    }
+
+    const claimToken = crypto.randomUUID();
+    const claimTime = new Date().toISOString();
+    const { data: claimedAction, error: claimErr } = await supabase
       .from('scheduled_actions')
-      .update({ status: 'running', started_at: new Date().toISOString() })
+      .update({
+        status: 'running',
+        started_at: claimTime,
+        claimed_at: claimTime,
+        claim_token: claimToken,
+        // Normalize legacy caller policy while the exact row is claimed.
+        requires_approval: true,
+        max_retries: 0,
+      })
       .eq('id', action.id)
       .eq('status', 'pending')
-      .select('id');
-    if (claimErr || !claimRows || claimRows.length === 0) { skipped++; continue; }
+      .eq('approval_id', gate.approval.id)
+      .is('dispatched_at', null)
+      .select('*')
+      .maybeSingle();
+    if (claimErr || !claimedAction) {
+      skipped++;
+      continue;
+    }
     claimed++;
 
-    // 2. Execute with a per-action timeout so one slow provider can't
-    // starve the rest of the tick's actions.
-    const executor = EXECUTORS[action.kind] || execNotImplemented;
-    const result = await runWithTimeout(() => executor(action, supabase), PER_ACTION_TIMEOUT_MS);
+    const sealedAction = claimedAction as ScheduledAction;
+    const claimedBinding = await buildApprovalBinding(sealedAction);
+    if (
+      !approvalMatchesBinding(gate.approval, claimedBinding)
+      || gate.expiresAt <= Date.now()
+    ) {
+      await markClaimedAsPredispatchFailed(
+        supabase,
+        sealedAction,
+        claimToken,
+        'approval_scope_mismatch',
+      );
+      failed++;
+      continue;
+    }
+
+    const consumed = await consumeApproval(
+      supabase,
+      sealedAction,
+      gate.approval,
+      claimedBinding,
+      gate.expiresAt,
+    );
+    if (!consumed) {
+      await markClaimedAsPredispatchFailed(
+        supabase,
+        sealedAction,
+        claimToken,
+        'approval_not_consumed',
+      );
+      failed++;
+      continue;
+    }
+
+    // This is the irreversible boundary. There is exactly one executor call
+    // after it and no code path ever moves this row back to pending.
+    const dispatchTime = new Date().toISOString();
+    const { data: dispatched, error: dispatchErr } = await supabase
+      .from('scheduled_actions')
+      .update({ dispatched_at: dispatchTime })
+      .eq('id', sealedAction.id)
+      .eq('status', 'running')
+      .eq('claim_token', claimToken)
+      .eq('approval_id', gate.approval.id)
+      .is('dispatched_at', null)
+      .select('id')
+      .maybeSingle();
+    if (dispatchErr || !dispatched) {
+      await markClaimedAsPredispatchFailed(
+        supabase,
+        sealedAction,
+        claimToken,
+        'dispatch_boundary_not_persisted',
+      );
+      failed++;
+      continue;
+    }
+
+    const executor = EXECUTORS[sealedAction.kind] || execNotImplemented;
+    const result = await runWithTimeout(
+      () => executor(sealedAction, supabase),
+      PER_ACTION_TIMEOUT_MS,
+    );
 
     if (result.ok) {
-      await markSucceeded(supabase, action, result.data || {});
-      succeeded++;
-    } else {
-      const shouldRetry = (result.retryable !== false) && (action.retry_count + 1 <= action.max_retries);
-      if (shouldRetry) {
-        await scheduleRetry(supabase, action, result.error || 'unknown');
-      } else {
-        await markFailed(supabase, action, result.error || 'unknown', false);
+      const finalized = await markSucceeded(
+        supabase,
+        sealedAction,
+        claimToken,
+        sanitizeExecutionReceipt(result.data),
+      );
+      if (!finalized) {
+        // The row remains running + dispatched. It is deliberately ineligible
+        // for queue lookup and manual retry.
+        outcomeUnknown++;
+        continue;
       }
-      failed++;
+      succeeded++;
+      await createNextOccurrence(supabase, sealedAction);
+    } else {
+      await markOutcomeUnknown(supabase, sealedAction, claimToken);
+      outcomeUnknown++;
     }
   }
 
-  return { claimed, succeeded, failed, skipped };
+  return { claimed, succeeded, failed, outcomeUnknown, skipped };
 }
 
 async function handleApprovalGate(
   supabase: SupabaseEdgeClient,
   action: ScheduledAction,
-): Promise<'approved' | 'waiting' | 'rejected'> {
-  if (action.approval_id) {
-    const { data } = await supabase
-      .from('agent_approvals')
-      .select('status')
-      .eq('id', action.approval_id)
-      .maybeSingle();
-    if (!data) return 'waiting';
-    if (data.status === 'approved') return 'approved';
-    if (data.status === 'rejected') return 'rejected';
-    return 'waiting';
+): Promise<ApprovalGate> {
+  const binding = await buildApprovalBinding(action);
+  if (!action.approval_id) {
+    await createAndLinkApproval(supabase, action, binding);
+    return { state: 'waiting' };
   }
-  // Create an approval row on first sight and park
-  const { data: approval, error } = await supabase
+
+  const { data, error } = await supabase
     .from('agent_approvals')
-    .insert({
-      circle_id: action.circle_id,
-      agent_name: 'Scheduler',
-      session_key: null,
-      action_type: action.kind,
-      action_detail: JSON.stringify(action.payload).slice(0, 500),
-      status: 'pending',
-    })
-    .select('id')
-    .single();
-  if (error || !approval) return 'waiting';
-  await supabase.from('scheduled_actions').update({ approval_id: approval.id }).eq('id', action.id);
-  return 'waiting';
+    .select(
+      'id, circle_id, session_key, action_type, description, payload, status, '
+        + 'requested_at, resolved_at, resolved_by, timeout_seconds, applied_at',
+    )
+    .eq('id', action.approval_id)
+    .maybeSingle();
+  if (error || !data) return { state: 'waiting' };
+
+  const approval = data as ApprovalRow;
+  if (!approvalMatchesBinding(approval, binding)) {
+    return { state: 'invalid', code: 'approval_scope_mismatch' };
+  }
+  if (approval.applied_at) {
+    return { state: 'invalid', code: 'approval_consumed' };
+  }
+  if (approval.status === 'rejected') {
+    return { state: 'rejected', code: 'approval_rejected' };
+  }
+
+  const expiresAt = approvalExpiresAt(approval);
+  if (expiresAt === null || expiresAt <= Date.now()) {
+    await expireApproval(supabase, approval.id);
+    return { state: 'rejected', code: 'approval_expired' };
+  }
+  if (approval.status === 'pending') return { state: 'waiting' };
+  if (
+    approval.status !== 'approved'
+    || approval.resolved_by !== action.user_id
+    || !approval.resolved_at
+  ) {
+    return { state: 'invalid', code: 'approval_scope_mismatch' };
+  }
+
+  const requestedAt = Date.parse(approval.requested_at);
+  const resolvedAt = Date.parse(approval.resolved_at);
+  if (
+    !Number.isFinite(requestedAt)
+    || !Number.isFinite(resolvedAt)
+    || resolvedAt < requestedAt
+    || resolvedAt > Date.now() + 5_000
+    || resolvedAt >= expiresAt
+  ) {
+    return { state: 'invalid', code: 'approval_scope_mismatch' };
+  }
+  return { state: 'approved', approval, binding, expiresAt };
 }
 
-async function markSucceeded(supabase: SupabaseEdgeClient, action: ScheduledAction, result: Record<string, unknown>) {
-  await supabase.from('scheduled_actions').update({
+async function createAndLinkApproval(
+  supabase: SupabaseEdgeClient,
+  action: ScheduledAction,
+  binding: ApprovalBinding,
+): Promise<void> {
+  let approvalId: string | null = null;
+  const { data: existing } = await supabase
+    .from('agent_approvals')
+    .select('id')
+    .eq('session_key', binding.sessionKey)
+    .limit(1)
+    .maybeSingle();
+  if (existing?.id) {
+    approvalId = String(existing.id);
+  } else {
+    const { data: inserted } = await supabase
+      .from('agent_approvals')
+      .insert({
+        circle_id: action.circle_id,
+        session_key: binding.sessionKey,
+        agent_name: 'Scheduler',
+        action_type: binding.actionType,
+        description: binding.description,
+        payload: binding.payload,
+        status: 'pending',
+        timeout_seconds: APPROVAL_TTL_SECONDS,
+      })
+      .select('id')
+      .maybeSingle();
+    approvalId = inserted?.id ? String(inserted.id) : null;
+
+    // A concurrent runner can win the partial unique index.
+    if (!approvalId) {
+      const { data: raced } = await supabase
+        .from('agent_approvals')
+        .select('id')
+        .eq('session_key', binding.sessionKey)
+        .limit(1)
+        .maybeSingle();
+      approvalId = raced?.id ? String(raced.id) : null;
+    }
+  }
+
+  if (!approvalId) return;
+  await supabase
+    .from('scheduled_actions')
+    .update({
+      approval_id: approvalId,
+      requires_approval: true,
+      max_retries: 0,
+    })
+    .eq('id', action.id)
+    .eq('status', 'pending')
+    .is('approval_id', null);
+}
+
+async function consumeApproval(
+  supabase: SupabaseEdgeClient,
+  action: ScheduledAction,
+  approval: ApprovalRow,
+  binding: ApprovalBinding,
+  expiresAt: number,
+): Promise<boolean> {
+  if (Date.now() >= expiresAt) return false;
+  let update = supabase
+    .from('agent_approvals')
+    .update({ applied_at: new Date().toISOString() })
+    .eq('id', approval.id)
+    .eq('session_key', binding.sessionKey)
+    .eq('action_type', binding.actionType)
+    .eq('description', binding.description)
+    .eq('status', 'approved')
+    .eq('resolved_by', action.user_id)
+    .eq('requested_at', approval.requested_at)
+    .eq('resolved_at', approval.resolved_at)
+    .eq('timeout_seconds', APPROVAL_TTL_SECONDS)
+    .is('applied_at', null);
+  update = action.circle_id === null
+    ? update.is('circle_id', null)
+    : update.eq('circle_id', action.circle_id);
+  const { data, error } = await update.select(
+    'id, circle_id, session_key, action_type, description, payload, status, '
+      + 'requested_at, resolved_at, resolved_by, timeout_seconds, applied_at',
+  ).maybeSingle();
+  if (error || !data || Date.now() >= expiresAt) return false;
+  return approvalMatchesBinding(data as ApprovalRow, binding);
+}
+
+async function expireApproval(supabase: SupabaseEdgeClient, approvalId: string): Promise<void> {
+  await supabase
+    .from('agent_approvals')
+    .update({ status: 'expired', resolved_at: new Date().toISOString() })
+    .eq('id', approvalId)
+    .in('status', ['pending', 'approved'])
+    .is('applied_at', null);
+}
+
+async function markSucceeded(
+  supabase: SupabaseEdgeClient,
+  action: ScheduledAction,
+  claimToken: string,
+  result: Record<string, unknown>,
+): Promise<boolean> {
+  const { data, error } = await supabase.from('scheduled_actions').update({
     status: 'succeeded',
     completed_at: new Date().toISOString(),
     result,
     error: null,
-  }).eq('id', action.id);
+  })
+    .eq('id', action.id)
+    .eq('status', 'running')
+    .eq('claim_token', claimToken)
+    .not('dispatched_at', 'is', null)
+    .select('id')
+    .maybeSingle();
+  return !error && Boolean(data?.id);
 }
 
-async function markFailed(supabase: SupabaseEdgeClient, action: ScheduledAction, error: string, retryable: boolean) {
+async function markPendingAsPredispatchFailed(
+  supabase: SupabaseEdgeClient,
+  actionId: string,
+  code: string,
+): Promise<void> {
   await supabase.from('scheduled_actions').update({
     status: 'failed',
     completed_at: new Date().toISOString(),
-    error,
-    retry_count: retryable ? action.retry_count + 1 : action.retry_count,
-  }).eq('id', action.id);
+    result: { status: 'not_dispatched' },
+    error: boundedFailureCode(code),
+    max_retries: 0,
+  })
+    .eq('id', actionId)
+    .eq('status', 'pending')
+    .is('dispatched_at', null);
 }
 
-async function scheduleRetry(supabase: SupabaseEdgeClient, action: ScheduledAction, error: string) {
-  const nextAttempt = action.retry_count + 1;
-  // Exponential backoff: 15s × 2^n, capped at 30 min
-  const delayMs = Math.min(15_000 * Math.pow(2, nextAttempt - 1), 30 * 60_000);
-  const scheduledFor = new Date(Date.now() + delayMs).toISOString();
+async function markClaimedAsPredispatchFailed(
+  supabase: SupabaseEdgeClient,
+  action: ScheduledAction,
+  claimToken: string,
+  code: string,
+): Promise<void> {
   await supabase.from('scheduled_actions').update({
-    status: 'pending',
-    scheduled_for: scheduledFor,
-    error,
-    retry_count: nextAttempt,
-    started_at: null,
-  }).eq('id', action.id);
+    status: 'failed',
+    completed_at: new Date().toISOString(),
+    result: { status: 'not_dispatched' },
+    error: boundedFailureCode(code),
+    max_retries: 0,
+  })
+    .eq('id', action.id)
+    .eq('status', 'running')
+    .eq('claim_token', claimToken)
+    .is('dispatched_at', null);
 }
 
-function runWithTimeout<T>(fn: () => Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('timeout')), ms);
-    fn().then(v => { clearTimeout(t); resolve(v); }).catch(err => { clearTimeout(t); reject(err); });
+async function markOutcomeUnknown(
+  supabase: SupabaseEdgeClient,
+  action: ScheduledAction,
+  claimToken: string,
+): Promise<void> {
+  const at = new Date().toISOString();
+  await supabase.from('scheduled_actions').update({
+    status: 'outcome_unknown',
+    completed_at: at,
+    outcome_unknown_at: at,
+    result: { status: 'outcome_unknown', replay_allowed: false },
+    error: 'dispatch_outcome_unknown',
+    max_retries: 0,
+  })
+    .eq('id', action.id)
+    .eq('status', 'running')
+    .eq('claim_token', claimToken)
+    .not('dispatched_at', 'is', null);
+}
+
+function runWithTimeout(fn: () => Promise<ExecResult>, ms: number): Promise<ExecResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: ExecResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(
+      () => finish({ ok: false, error: 'dispatch_timeout', retryable: false }),
+      ms,
+    );
+    try {
+      fn()
+        .then(finish)
+        .catch(() => finish({ ok: false, error: 'dispatch_error', retryable: false }));
+    } catch {
+      finish({ ok: false, error: 'dispatch_error', retryable: false });
+    }
+  });
+}
+
+function validateBeforeDispatch(action: ScheduledAction): string | null {
+  const p = action.payload || {};
+  const nonEmpty = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+  const stringList = (value: unknown) =>
+    Array.isArray(value) && value.length > 0 && value.every(nonEmpty);
+  if (!Object.prototype.hasOwnProperty.call(EXECUTORS, action.kind)) return 'unsupported_kind';
+  switch (action.kind) {
+    case 'webhook':
+      return nonEmpty(p.url) ? null : 'invalid_payload';
+    case 'bluesky_post':
+    case 'tweet':
+    case 'linkedin_post':
+      return nonEmpty(p.text) ? null : 'invalid_payload';
+    case 'reminder':
+      return nonEmpty(p.title) ? null : 'invalid_payload';
+    case 'gmail_send':
+    case 'gmail_draft':
+    case 'outlook_send':
+      return stringList(p.to) && nonEmpty(p.subject) && nonEmpty(p.body_markdown)
+        ? null
+        : 'invalid_payload';
+    case 'wp_post':
+      return nonEmpty(p.title) && nonEmpty(p.content) ? null : 'invalid_payload';
+    case 'slack_post':
+      return nonEmpty(p.channel) && nonEmpty(p.text) ? null : 'invalid_payload';
+    default:
+      return 'unsupported_kind';
+  }
+}
+
+const SAFE_FAILURE_CODES = new Set([
+  'unsupported_kind',
+  'invalid_payload',
+  'approval_rejected',
+  'approval_expired',
+  'approval_scope_mismatch',
+  'approval_consumed',
+  'approval_not_consumed',
+  'dispatch_boundary_not_persisted',
+]);
+
+function boundedFailureCode(value: string): string {
+  return SAFE_FAILURE_CODES.has(value) ? value : 'predispatch_guard_failed';
+}
+
+function sanitizeExecutionReceipt(data?: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { status: 'completed' };
+  if (!data || typeof data !== 'object') return result;
+
+  const providerStatus = data.status;
+  if (
+    typeof providerStatus === 'number'
+    && Number.isInteger(providerStatus)
+    && providerStatus >= 100
+    && providerStatus <= 599
+  ) {
+    result.provider_status = providerStatus;
+  } else if (
+    typeof providerStatus === 'string'
+    && ['ok', 'accepted', 'draft', 'publish', 'published', 'private', 'pending'].includes(providerStatus)
+  ) {
+    result.provider_status = providerStatus;
+  }
+
+  const ids: Record<string, string> = {};
+  for (const key of [
+    'id',
+    'message_id',
+    'thread_id',
+    'draft_id',
+    'post_id',
+    'tweet_id',
+    'cid',
+    'ts',
+  ]) {
+    const raw = data[key];
+    const value = typeof raw === 'number' ? String(raw) : raw;
+    if (
+      typeof value === 'string'
+      && value.length > 0
+      && value.length <= 160
+      && /^[A-Za-z0-9:_.-]+$/.test(value)
+    ) {
+      ids[key] = value;
+    }
+  }
+  if (Object.keys(ids).length > 0) result.receipt_ids = ids;
+  return result;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      out[key] = canonicalize(record[key]);
+    }
+    return out;
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (value === undefined) return null;
+  return value;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function buildApprovalBinding(action: ScheduledAction): Promise<ApprovalBinding> {
+  const payloadFingerprint = await sha256Hex(
+    JSON.stringify(canonicalize(action.payload || {})),
+  );
+  const occurrenceFingerprint = await sha256Hex(JSON.stringify(canonicalize({
+    actionId: action.id,
+    scheduledFor: action.scheduled_for,
+    parentActionId: action.parent_action_id || null,
+  })));
+  const payload: ApprovalBindingPayload = {
+    approvalSchemaVersion: APPROVAL_SCHEMA_VERSION,
+    actionId: action.id,
+    userId: action.user_id,
+    circleId: action.circle_id,
+    actionKind: action.kind,
+    payloadFingerprint,
+    occurrenceFingerprint,
+  };
+  return {
+    sessionKey:
+      `scheduled-action:v2:${action.id}:${occurrenceFingerprint.slice(0, 24)}:${payloadFingerprint.slice(0, 24)}`,
+    actionType: `scheduled_action.${action.kind}`,
+    description:
+      `Approve one scheduled ${action.kind} mutation. Contents are hidden and authority expires in 10 minutes.`,
+    payload,
+  };
+}
+
+function approvalMatchesBinding(row: ApprovalRow, binding: ApprovalBinding): boolean {
+  if (
+    row.circle_id !== binding.payload.circleId
+    ||
+    row.session_key !== binding.sessionKey
+    || row.action_type !== binding.actionType
+    || row.description !== binding.description
+    || row.timeout_seconds !== APPROVAL_TTL_SECONDS
+  ) {
+    return false;
+  }
+  return JSON.stringify(canonicalize(row.payload || {}))
+    === JSON.stringify(canonicalize(binding.payload));
+}
+
+function approvalExpiresAt(row: ApprovalRow): number | null {
+  const requestedAt = Date.parse(row.requested_at);
+  if (
+    !Number.isFinite(requestedAt)
+    || row.timeout_seconds !== APPROVAL_TTL_SECONDS
+  ) {
+    return null;
+  }
+  return requestedAt + APPROVAL_TTL_SECONDS * 1_000;
+}
+
+function nextCronOccurrence(cronExpr: string, after: Date): Date {
+  const parts = cronExpr.trim().split(/\s+/);
+  if (parts.length !== 5) return new Date(after.getTime() + 24 * 60 * 60 * 1_000);
+  const [minF, hourF, domF, _monF, dowF] = parts;
+  const minute = minF === '*' ? 0 : Number.parseInt(minF, 10);
+  const hour = hourF === '*' ? after.getUTCHours() : Number.parseInt(hourF, 10);
+  if (!Number.isInteger(minute) || !Number.isInteger(hour)) {
+    return new Date(after.getTime() + 24 * 60 * 60 * 1_000);
+  }
+  const next = new Date(after);
+  next.setUTCMinutes(minute, 0, 0);
+  next.setUTCHours(hour);
+  if (dowF !== '*') {
+    const day = Number.parseInt(dowF, 10);
+    if (!Number.isInteger(day) || day < 0 || day > 6) {
+      return new Date(after.getTime() + 24 * 60 * 60 * 1_000);
+    }
+    let ahead = (day - next.getUTCDay() + 7) % 7;
+    if (ahead === 0 && next <= after) ahead = 7;
+    next.setUTCDate(next.getUTCDate() + ahead);
+    return next;
+  }
+  if (domF !== '*') {
+    const day = Number.parseInt(domF, 10);
+    if (!Number.isInteger(day) || day < 1 || day > 31) {
+      return new Date(after.getTime() + 24 * 60 * 60 * 1_000);
+    }
+    next.setUTCDate(day);
+    if (next <= after) next.setUTCMonth(next.getUTCMonth() + 1);
+    return next;
+  }
+  if (next <= after) {
+    if (hourF === '*') next.setUTCHours(next.getUTCHours() + 1);
+    else next.setUTCDate(next.getUTCDate() + 1);
+  }
+  return next;
+}
+
+async function createNextOccurrence(
+  supabase: SupabaseEdgeClient,
+  action: ScheduledAction,
+): Promise<void> {
+  if (!action.recurrence) return;
+  const next = nextCronOccurrence(action.recurrence, new Date());
+  await supabase.from('scheduled_actions').insert({
+    user_id: action.user_id,
+    circle_id: action.circle_id,
+    kind: action.kind,
+    payload: action.payload,
+    scheduled_for: next.toISOString(),
+    requires_approval: true,
+    approval_id: null,
+    max_retries: 0,
+    recurrence: action.recurrence,
+    recurrence_label: action.recurrence_label || null,
+    parent_action_id: action.id,
   });
 }
 
@@ -720,8 +1271,8 @@ Deno.serve(async (req) => {
   try {
     const summary = await runOnce(supabase);
     return jsonResponse({ ok: true, ...summary, at: new Date().toISOString() });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return jsonResponse({ ok: false, error: message }, 500);
+  } catch {
+    console.error('[scheduled-action-runner] unhandled_internal_error');
+    return jsonResponse({ ok: false, error: 'runner_internal_error' }, 500);
   }
 });

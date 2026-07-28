@@ -10,7 +10,13 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
-import { startComputerUseAgent, type AgentHandle } from './computerUseAgent';
+import {
+  buildComputerUsePolicyEnvelope,
+  startComputerUseAgent,
+  type AgentHandle,
+  type ComputerUseAlwaysConfirmCategory,
+  type ComputerUsePreRunBrowserPermission,
+} from './computerUseAgent';
 import { resolveComputerUseCreds } from './computerUseCreds';
 import {
   fireComputerTaskWebNotification,
@@ -24,6 +30,7 @@ import {
   type ComputerTaskModelResolution,
 } from './chatComputerHandoffContext';
 import { translateComputerUseErrorMessage } from './chatUserFacingOutcomes';
+import { buildChatComputerUsePolicyInputs } from './chatComputerRequestRouter';
 
 export type TaskStatus = 'idle' | 'starting' | 'running' | 'done' | 'error';
 
@@ -120,6 +127,9 @@ const sanitizeComputerUseErrorMessage = translateComputerUseErrorMessage;
 export function useComputerUseTask(circleId: string, userId?: string, threadId?: string | null) {
   const [state, setState] = useState<ComputerUseTaskState>(EMPTY_STATE);
   const handleRef = useRef<AgentHandle | null>(null);
+  // Synchronous reservation closes the await-creds race: two run() calls in
+  // the same render can no longer both pass the empty handle check.
+  const startReservationRef = useRef<object | null>(null);
   // Mirrors the live pendingConfirmation id so terminal callbacks can
   // expire the persisted copy without reading React state.
   const pendingQuestionIdRef = useRef<string | null>(null);
@@ -166,15 +176,43 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       maxCostUsd?: number;
       maxIterations?: number;
       maxTokensBudget?: number;
+      /** User-authored limits copied into the bounded edge policy envelope. */
+      userConstraints?: string[];
+      /** Categories the user wants confirmed even when another grant exists. */
+      alwaysConfirmCategories?: ComputerUseAlwaysConfirmCategory[];
+      /** Optional short-lived signal from an explicit browser permission UI. */
+      preRunBrowserPermission?: ComputerUsePreRunBrowserPermission;
     },
   ): Promise<{ started: boolean; reason?: string }> => {
     if (!task.trim()) return { started: false, reason: 'Empty task.' };
-    if (handleRef.current) return { started: false, reason: 'Another task is already running.' };
+    if (handleRef.current || startReservationRef.current) {
+      return { started: false, reason: 'Another task is already running.' };
+    }
+    const startReservation = {};
+    startReservationRef.current = startReservation;
+    const releaseStartReservation = () => {
+      if (startReservationRef.current === startReservation) startReservationRef.current = null;
+    };
 
-    const credsResult = await resolveComputerUseCreds(circleId);
+    let credsResult: Awaited<ReturnType<typeof resolveComputerUseCreds>>;
+    try {
+      credsResult = await resolveComputerUseCreds(circleId);
+    } catch {
+      const wasCancelled = startReservationRef.current !== startReservation;
+      releaseStartReservation();
+      if (wasCancelled) return { started: false, reason: 'Task start was cancelled.' };
+      const reason = 'Could not load Computer Use credentials.';
+      setState({ ...EMPTY_STATE, status: 'error', task, errorMessage: reason });
+      return { started: false, reason };
+    }
+    if (startReservationRef.current !== startReservation) {
+      return { started: false, reason: 'Task start was cancelled.' };
+    }
     if (!credsResult.ok) {
-      setState({ ...EMPTY_STATE, status: 'error', task, errorMessage: credsResult.reason });
-      return { started: false, reason: credsResult.reason };
+      releaseStartReservation();
+      const reason = 'reason' in credsResult ? credsResult.reason : 'Computer Use credentials are unavailable.';
+      setState({ ...EMPTY_STATE, status: 'error', task, errorMessage: reason });
+      return { started: false, reason };
     }
 
     // 2.5 substitution visibility: consume the edge loop's model coercion
@@ -183,118 +221,147 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
     // event locally — same inputs, same shape. Null when the requested model
     // already drives the native loop (no substitution → no notice).
     const modelResolution = resolveComputerTaskLoopModel(options?.model);
+    const derivedPolicy = buildChatComputerUsePolicyInputs(task, {
+      booking: options?.booking === true,
+    });
     setState({
       ...EMPTY_STATE,
       status: 'starting',
       task,
       modelResolution: modelResolution.substituted ? modelResolution : null,
     });
-    handleRef.current = startComputerUseAgent({
-      task,
-      circleId,
-      userId,
-      model: options?.model || undefined,
-      sessionId: options?.sessionId,
-      booking: options?.booking,
-      maxCostUsd: options?.maxCostUsd,
-      maxIterations: options?.maxIterations,
-      maxTokensBudget: options?.maxTokensBudget,
-      browserbase: credsResult.creds.browserbase,
-      onRunStarted: ({ runId }) => {
-        runIdRef.current = runId;
-        setState((prev) => ({ ...prev, runId }));
-      },
-      onSessionStarted: ({ sessionId, liveUrl }) => {
-        sessionIdRef.current = sessionId;
-        setState((prev) => ({ ...prev, status: 'running', sessionId, liveUrl }));
-      },
-      onAction: (info) => {
-        setState((prev) => ({ ...prev, actions: [...prev.actions, { ...info, at: Date.now() }] }));
-      },
-      onScreenshot: ({ b64, url }) => {
-        setState((prev) => ({ ...prev, screenshots: [...prev.screenshots, { b64, url, at: Date.now() }] }));
-      },
-      onReasoning: (text) => {
-        if (!text.trim()) return;
-        setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
-      },
-      onSteeringApplied: ({ note }) => {
-        // Steering confirmation rides the reasoning stream the live card
-        // already renders — the user sees exactly when their note landed.
-        const text = `🧭 Steering applied: ${String(note || '').slice(0, 200)}`;
-        setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
-      },
-      onConfirmationRequired: (info) => {
-        const pending: PendingConfirmation = { ...info, askedAt: Date.now() };
-        persistQuestionAsked(pending, { sessionId: sessionIdRef.current, runId: runIdRef.current });
-        setState((prev) => ({ ...prev, pendingConfirmation: pending }));
-      },
-      onConfirmationResolved: () => {
-        persistQuestionResolved('resolved in session');
-        setState((prev) => ({ ...prev, pendingConfirmation: null }));
-      },
-      onUsage: (info) => {
-        setState((prev) => ({ ...prev, usage: info }));
-      },
-      onPartialResult: ({ summary, iterations, runId }) => {
-        // D8: a bounded stop (timeout/budget/stall) hands back the progress
-        // made so far. Populate `result` with the partial summary so the
-        // card shows what WAS done; the matching onError that follows sets
-        // the error status + message.
-        // D6: persist the partial-result notification on the durable record
-        // so a walked-away user learns about the bounded stop on return.
-        void recordComputerTaskPartialResultNotification(circleId, threadId, {
-          summary,
-          runId: runId || runIdRef.current,
-        });
-        setState((prev) => ({
-          ...prev,
-          runId: runId || prev.runId,
-          result: prev.result || {
+    let startedHandle: AgentHandle;
+    try {
+      startedHandle = startComputerUseAgent({
+        task,
+        circleId,
+        userId,
+        model: options?.model || undefined,
+        sessionId: options?.sessionId,
+        booking: options?.booking,
+        maxCostUsd: options?.maxCostUsd,
+        maxIterations: options?.maxIterations,
+        maxTokensBudget: options?.maxTokensBudget,
+        policy: buildComputerUsePolicyEnvelope({
+          executionMode: 'interactive',
+          source: 'chat',
+          userConstraints: options?.userConstraints ?? derivedPolicy.userConstraints,
+          // Native computer targets are coordinate/focus based today. Mark the
+          // opacity explicitly so no broad or stale grant can skip the live gate.
+          alwaysConfirmCategories:
+            options?.alwaysConfirmCategories ?? derivedPolicy.alwaysConfirmCategories,
+          preRunBrowserPermission: options?.preRunBrowserPermission,
+        }),
+        browserbase: credsResult.creds.browserbase,
+        onRunStarted: ({ runId }) => {
+          runIdRef.current = runId;
+          setState((prev) => ({ ...prev, runId }));
+        },
+        onSessionStarted: ({ sessionId, liveUrl }) => {
+          sessionIdRef.current = sessionId;
+          setState((prev) => ({ ...prev, status: 'running', sessionId, liveUrl }));
+        },
+        onAction: (info) => {
+          setState((prev) => ({ ...prev, actions: [...prev.actions, { ...info, at: Date.now() }] }));
+        },
+        onScreenshot: ({ b64, url }) => {
+          setState((prev) => ({ ...prev, screenshots: [...prev.screenshots, { b64, url, at: Date.now() }] }));
+        },
+        onReasoning: (text) => {
+          if (!text.trim()) return;
+          setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
+        },
+        onSteeringApplied: ({ note }) => {
+          // Steering confirmation rides the reasoning stream the live card
+          // already renders — the user sees exactly when their note landed.
+          const text = `🧭 Steering applied: ${String(note || '').slice(0, 200)}`;
+          setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
+        },
+        onConfirmationRequired: (info) => {
+          const pending: PendingConfirmation = { ...info, askedAt: Date.now() };
+          persistQuestionAsked(pending, { sessionId: sessionIdRef.current, runId: runIdRef.current });
+          setState((prev) => ({ ...prev, pendingConfirmation: pending }));
+        },
+        onConfirmationResolved: () => {
+          persistQuestionResolved('resolved in session');
+          setState((prev) => ({ ...prev, pendingConfirmation: null }));
+        },
+        onUsage: (info) => {
+          setState((prev) => ({ ...prev, usage: info }));
+        },
+        onPartialResult: ({ summary, iterations, runId }) => {
+          // D8: a bounded stop (timeout/budget/stall) hands back the progress
+          // made so far. Populate `result` with the partial summary so the
+          // card shows what WAS done; the matching onError that follows sets
+          // the error status + message.
+          // D6: persist the partial-result notification on the durable record
+          // so a walked-away user learns about the bounded stop on return.
+          void recordComputerTaskPartialResultNotification(circleId, threadId, {
             summary,
-            iterations,
-            tokens: {
-              input: prev.usage?.inputTokens || 0,
-              output: prev.usage?.outputTokens || 0,
+            runId: runId || runIdRef.current,
+          });
+          setState((prev) => ({
+            ...prev,
+            runId: runId || prev.runId,
+            result: prev.result || {
+              summary,
+              iterations,
+              tokens: {
+                input: prev.usage?.inputTokens || 0,
+                output: prev.usage?.outputTokens || 0,
+              },
+              findings: null,
+              extractedData: null,
             },
-            findings: null,
-            extractedData: null,
-          },
-        }));
-      },
-      onResult: ({ summary, iterations, tokens, findings, extractedData, runId }) => {
-        persistQuestionResolved(null); // task finished — expire any open question
-        // D6 progressive enhancement: page hidden + permission already
-        // granted → native web notification. Silent no-op otherwise.
-        fireComputerTaskWebNotification({
-          kind: 'completed',
-          title: 'Computer task finished',
-          body: summary || task,
-        });
-        setState((prev) => ({
-          ...prev,
-          status: 'done',
-          runId: runId || prev.runId,
-          result: { summary, iterations, tokens, findings: findings ?? null, extractedData: extractedData ?? null },
-        }));
-        handleRef.current = null;
-      },
-      onError: (msg) => {
-        persistQuestionResolved(null); // task errored — expire any open question
-        const visibleError = sanitizeComputerUseErrorMessage(msg);
-        fireComputerTaskWebNotification({
-          kind: 'failed',
-          title: 'Computer task failed',
-          body: visibleError || task,
-        });
-        setState((prev) => ({ ...prev, status: 'error', errorMessage: visibleError, rawErrorMessage: msg }));
-        handleRef.current = null;
-      },
-    });
+          }));
+        },
+        onResult: ({ summary, iterations, tokens, findings, extractedData, runId }) => {
+          persistQuestionResolved(null); // task finished — expire any open question
+          // D6 progressive enhancement: page hidden + permission already
+          // granted → native web notification. Silent no-op otherwise.
+          fireComputerTaskWebNotification({
+            kind: 'completed',
+            title: 'Computer task finished',
+            body: summary || task,
+          });
+          setState((prev) => ({
+            ...prev,
+            status: 'done',
+            runId: runId || prev.runId,
+            result: { summary, iterations, tokens, findings: findings ?? null, extractedData: extractedData ?? null },
+          }));
+          handleRef.current = null;
+        },
+        onError: (msg) => {
+          persistQuestionResolved(null); // task errored — expire any open question
+          const visibleError = sanitizeComputerUseErrorMessage(msg);
+          fireComputerTaskWebNotification({
+            kind: 'failed',
+            title: 'Computer task failed',
+            body: visibleError || task,
+          });
+          setState((prev) => ({ ...prev, status: 'error', errorMessage: visibleError, rawErrorMessage: msg }));
+          handleRef.current = null;
+        },
+      });
+    } catch {
+      releaseStartReservation();
+      const reason = 'Could not start the Computer Use task.';
+      setState({ ...EMPTY_STATE, status: 'error', task, errorMessage: reason });
+      return { started: false, reason };
+    }
+    if (startReservationRef.current !== startReservation) {
+      try { startedHandle.cancel(); } catch {}
+      return { started: false, reason: 'Task start was cancelled.' };
+    }
+    handleRef.current = startedHandle;
+    releaseStartReservation();
     return { started: true };
-  }, [circleId, userId]);
+  }, [circleId, userId, persistQuestionAsked, persistQuestionResolved]);
 
   const cancel = useCallback(() => {
+    // Invalidate an in-flight credential lookup before it can create a run.
+    startReservationRef.current = null;
     if (handleRef.current) {
       try { handleRef.current.cancel(); } catch {}
       handleRef.current = null;

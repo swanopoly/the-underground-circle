@@ -1,4 +1,6 @@
 import type { ComputerTaskCheckpointSurface, ComputerTaskComplexityPlan } from './computerTaskComplexityPlan';
+import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import type { ConnectedAgentProvider } from './connectedAgentDispatch';
 
 export type ComputerTaskPhase =
   | 'planning'
@@ -39,6 +41,8 @@ export interface ComputerTaskStateGrounding {
 export interface ComputerTaskCapabilityBuildout {
   status: ComputerTaskCapabilityBuildoutStatus;
   message: string;
+  /** Connected coding-agent bridge that owns the delegated buildout session. */
+  provider?: ConnectedAgentProvider | null;
   appName?: string | null;
   buildoutKind?: string | null;
   risk?: string | null;
@@ -58,6 +62,97 @@ export interface ComputerTaskCapabilityBuildout {
   autoRetryCompletedAt?: string | null;
   autoRetryRunId?: string | null;
   updatedAt: string;
+}
+
+const COMPUTER_TASK_CAPABILITY_BUILDOUT_STATUSES = new Set<ComputerTaskCapabilityBuildoutStatus>([
+  'approval_required',
+  'requested',
+  'ready_to_retry',
+  'incomplete',
+  'blocked',
+  'failed',
+]);
+const COMPUTER_TASK_CAPABILITY_BUILDOUT_AUTO_RETRY_STATUSES = new Set<
+  NonNullable<ComputerTaskCapabilityBuildout['autoRetryStatus']>
+>(['running', 'completed', 'failed']);
+const COMPUTER_TASK_CONNECTED_AGENT_PROVIDERS = new Set<ConnectedAgentProvider>([
+  'codex',
+  'claude-code',
+  'gemini',
+  'cursor',
+]);
+
+function boundedBuildoutString(value: unknown, limit: number): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, limit) : null;
+}
+
+function boundedBuildoutStringList(value: unknown, limit: number, itemLimit: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => boundedBuildoutString(item, itemLimit))
+    .filter((item): item is string => !!item)
+    .slice(0, limit);
+}
+
+/**
+ * Normalize the durable connected-agent identity without importing the
+ * dispatch runtime. The type-only dependency keeps this state model usable in
+ * pure smoke tests while the explicit allowlist rejects persisted junk.
+ */
+export function normalizeComputerTaskCapabilityProvider(value: unknown): ConnectedAgentProvider | null {
+  if (typeof value !== 'string' || value.length > 32) return null;
+  const normalized = value.trim().toLowerCase();
+  return COMPUTER_TASK_CONNECTED_AGENT_PROVIDERS.has(normalized as ConnectedAgentProvider)
+    ? normalized as ConnectedAgentProvider
+    : null;
+}
+
+/**
+ * Canonical persistence boundary for capability-buildout state. Explicitly
+ * picks and bounds every field so untrusted/stale storage cannot smuggle
+ * arbitrary properties back into a live computer-task record.
+ */
+export function compactComputerTaskCapabilityBuildout(value: unknown): ComputerTaskCapabilityBuildout | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const buildout = value as Record<string, unknown>;
+  const rawStatus = boundedBuildoutString(buildout.status, 40);
+  const status = rawStatus && COMPUTER_TASK_CAPABILITY_BUILDOUT_STATUSES.has(rawStatus as ComputerTaskCapabilityBuildoutStatus)
+    ? rawStatus as ComputerTaskCapabilityBuildoutStatus
+    : 'requested';
+  const rawAutoRetryStatus = boundedBuildoutString(buildout.autoRetryStatus, 20);
+  const autoRetryStatus = rawAutoRetryStatus
+    && COMPUTER_TASK_CAPABILITY_BUILDOUT_AUTO_RETRY_STATUSES.has(
+      rawAutoRetryStatus as NonNullable<ComputerTaskCapabilityBuildout['autoRetryStatus']>,
+    )
+    ? rawAutoRetryStatus as NonNullable<ComputerTaskCapabilityBuildout['autoRetryStatus']>
+    : null;
+
+  return {
+    status,
+    message: boundedBuildoutString(buildout.message, 1_000) || '',
+    provider: normalizeComputerTaskCapabilityProvider(buildout.provider),
+    appName: boundedBuildoutString(buildout.appName, 160),
+    buildoutKind: boundedBuildoutString(buildout.buildoutKind, 120),
+    risk: boundedBuildoutString(buildout.risk, 40),
+    sessionId: boundedBuildoutString(buildout.sessionId, 200),
+    launched: typeof buildout.launched === 'boolean' ? buildout.launched : null,
+    approvalId: boundedBuildoutString(buildout.approvalId, 200),
+    retryPlan: boundedBuildoutString(buildout.retryPlan, 1_000),
+    summary: boundedBuildoutString(buildout.summary, 1_000),
+    controlSurface: boundedBuildoutString(buildout.controlSurface, 160),
+    sourceRefs: boundedBuildoutStringList(buildout.sourceRefs, 12, 500),
+    filesChanged: boundedBuildoutStringList(buildout.filesChanged, 40, 500),
+    verification: boundedBuildoutString(buildout.verification, 1_000),
+    userActionNeeded: boundedBuildoutString(buildout.userActionNeeded, 1_000),
+    missingEvidence: boundedBuildoutStringList(buildout.missingEvidence, 8, 300),
+    autoRetryStatus,
+    autoRetryAttemptedAt: boundedBuildoutString(buildout.autoRetryAttemptedAt, 80),
+    autoRetryCompletedAt: boundedBuildoutString(buildout.autoRetryCompletedAt, 80),
+    autoRetryRunId: boundedBuildoutString(buildout.autoRetryRunId, 200),
+    updatedAt: boundedBuildoutString(buildout.updatedAt, 80) || new Date().toISOString(),
+  };
 }
 
 export interface ComputerTaskStateCheckpoint {
@@ -228,6 +323,8 @@ export interface ComputerTaskStateRecord {
   runId?: string | null;
   sessionId?: string | null;
   liveUrl?: string | null;
+  /** Authoritative rich terminal outcome; phase remains the coarse UI state. */
+  outcomeStatus?: ComputerTaskOutcomeStatus | null;
   grounding?: ComputerTaskStateGrounding | null;
   capabilityBuildout?: ComputerTaskCapabilityBuildout | null;
   complexity?: ComputerTaskStateComplexity | null;

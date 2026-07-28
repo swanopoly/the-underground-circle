@@ -5,6 +5,11 @@
 > Synthesized 2026-07-13 from a read-only sweep of the codebase (571 `src/lib`
 > modules, 47 edge functions, ~30 planning docs) plus a frontier scan of the
 > mid-2026 agent field.
+> Runtime reconciliation updated 2026-07-27 for guarded browser fill/toggle/
+> native-select, read-only locator-actionability evidence, native activation and narrow semantic-press proof, SwanBot
+> continuation receipts, the durable action-call ledger, Chat computer context
+> packs, provider-aware app-capability recovery, and bounded dispatch/proof
+> persistence.
 >
 > **Reading rules.** Every capability is tagged **SHIPPED** (live in code, cite
 > file/commit), **IN-FLIGHT** (built + smoke-tested but flag-gated / awaiting a
@@ -78,6 +83,17 @@ is commoditizing. We build the harness; we let the model vendors race on IQ.
 - **Computer/app request routing** — `chatComputerRequestRouter.ts` +
   `chatComputerRequestUx.ts`: the hidden best-path (preview, pipeline, approvals,
   fallbacks, proof) stays quiet; user sees only approval/proof/blockers.
+- **Portable computer-task context** — `chatAgentContextPack.ts` builds one
+  bounded immutable goal/guardrail/proof contract. The real app/file/hybrid
+  handler and both capability-retry paths pass it into `AgentRunRequest`, where
+  `agentRuntime` injects the compact prompt and saves a bounded run projection.
+- **Provider-aware unfamiliar-app recovery** — durable buildout state retains
+  its provider and delayed polling consumes strict dedicated result receipts
+  from Codex or Claude Code. Gemini/Cursor remain general delegation targets
+  but fail explicitly in this auto-retry lane until their bridges expose the
+  equivalent bounded receipt instead of leaving work indefinitely pending.
+  Claude's distinct transcript id attaches to its managed id only through one
+  anchored, unambiguous UC launcher marker.
 - **UX** — streaming bubbles, model picker (Auto tier), 8 artifact kinds
   (text/link/file/diff/image/code/webpage/table), thread lineage
   (`↳ CONTINUES`), checkpoints + restore (`chatCheckpoints.ts`), attention queue
@@ -92,7 +108,11 @@ is commoditizing. We build the harness; we let the model vendors race on IQ.
   approval idempotency, messaging.notify.
 - **Reliability** — lane terminal telemetry (`/lanes`), unified lane error
   boundary, SSE mid-stream recovery, 50-prompt route golden canaries, provider
-  health pre-selection, session-state persistence.
+  health pre-selection, session-state persistence. Typed run persistence keeps
+  dispatched/skipped/legacy-unknown truth and only bounded receipt allowlists.
+  Guarded browser fill, safe-preference toggle/native-select, and narrow native
+  semantic-press lanes emit mutation-dispatch and app-verification receipts.
+  Other mutation families still need the same producer contract.
 
 **IN-FLIGHT** (built, flag-dark, awaiting a live signal)
 
@@ -120,14 +140,69 @@ governance (scope × rate × require-review).
   `runLoop()` over `ToolDef[]`, prompt caching, `agent_runs`/`agent_run_events`
   telemetry, normalized `final_stop_reason` vocabulary.
 - **Client-delegated tool protocol** (M2) — edge emits
-  `{ pending, clientToolCalls, continuationRunId }`; client executes against the
-  bridge; POSTs results; edge resumes from persisted continuation state (stale
-  after 10 min, ≤6 rounds/turn, validated for missing/dup/oversized results).
-  Mixed batches run server tools first, merge client results in tool-use order.
-- **73-tool executable subset** — 25 server-side (memory/tasks/missions/rooms/
-  messages/approvals/rewards/github/fetch) + 48 client-delegated (desktop 26,
-  browser 8, workspace 6, WordPress 6, credentials/approvals 2). Source-derived
-  parity guarded by the `swanbot-v2-dispatcher-parity` smoke (G1).
+  `{ pending, clientToolCalls, continuationRunId, continuationIdentity,
+  continuationVersion, continuationNonce }`. Before any local handler enters,
+  the client-generated dispatch claim compare-and-sets `pending` /
+  `client_pending` to `dispatch_claimed` / `client_dispatching`; only the exact
+  echoed claim may execute. Submitting its complete validated results then
+  persists them and compare-and-sets to `results_claimed` /
+  `client_resuming` before model resume. Only an exact same-claim dispatch retry
+  carrying the winning claim is idempotently acknowledged. Competing, mixed-version/state,
+  ambiguous, expired, or lost claim-bound paths seal `outcome_unknown` and
+  never replay local actions or model resume. Mixed batches run server tools
+  first and merge client results in tool-use order. Readiness ignores all three
+  active stop-reason rows: `client_pending`, `client_dispatching`, and
+  `client_resuming`.
+- **Continuation checkpoint privacy (source-shipped 2026-07-26)** — the exact
+  resumable transcript/system/tool snapshot is AES-256-GCM sealed under the
+  dedicated `SWANBOT_CONTINUATION_ENCRYPTION_SECRET`, with the authenticated
+  rotation label supplied by
+  `SWANBOT_CONTINUATION_ENCRYPTION_KEY_VERSION`. Circle-visible
+  `agent_runs.metadata.continuation` contains only a bounded
+  identity/state/claim envelope, pending `{id,name}` pairs, ten-minute expiry,
+  and the versioned IV/ciphertext envelope; raw messages, arguments, results,
+  system blocks, and model state are not beside the ciphertext. Public run
+  events keep value-free structural argument summaries and fixed redacted
+  errors. If the key is unavailable, fresh turns withhold every `clientOnly`
+  tool and cannot create dispatchable local work.
+- **Edge-side write replay barrier (source-shipped 2026-07-26)** — the v2 edge
+  inserts one client-generated per-turn UUID as `agent_runs.id` and transport
+  retries reuse it, so a duplicate attempt collides before model/tool work.
+  Legacy/no-identity starts have server writers withheld. The edge then latches
+  before server-side memory/task/mission/message/room/approval handler entry.
+  If a subsequent provider/runtime failure makes completion ambiguous, it
+  persists a value-free `server_mutation_outcome_unknown` marker with
+  `replayAllowed: false` and requires fresh verification. The client recovers
+  that structured non-2xx body and stops before v1 fallback, rather than
+  repeating the user turn under a new run/tool-use identity.
+- **Default-edge authorization parity** — the ordinary edge-continuation path,
+  not only the flag-dark typed client loop, unions constraints parsed from the
+  raw user turn with richer upstream constraints and the always-confirm floor.
+  It runs that hard policy before the client handler, then invokes the live
+  exact-call approval callback when supplied. Policy exceptions and approval
+  rejection fail closed; an active approval surface forces sequential
+  per-call dispatch so prompts cannot race or be reviewed out of order.
+- **82-tool executable subset** — 25 server-side (memory/tasks/missions/rooms/
+  messages/approvals/rewards/github/fetch) + 57 client-delegated across desktop,
+  browser, workspace, WordPress, credentials, and coding-agent families.
+  `browser.select_option`, read-only `browser.locator_actionability`, and the
+  exact `desktop.click_element` semantic-press schema are included in that same
+  82/57 catalog, with edge/OpenSwan schema and dispatcher parity guarded by
+  focused smokes. Locator actionability is bounded advisory evidence for one
+  fresh exact target; it does not authorize or bind a later mutation. The edge-facing
+  `browser.fill_field` schema is narrowed to the sealed draft contract:
+  textbox/searchbox only, bounded text/context/locator fields, name XOR
+  selector at the edge schema, app normalizer/runtime, client request, and
+  bridge target/perform layers, bounded timeout, no submit, and no additional
+  properties. Both-present and neither-present locator inputs fail before
+  observation or dispatch. Every
+  currently client-delegated browser/desktop mutation—navigation, fill/
+  protected fill, toggle/select, click/key, app activation, text/key/menu/
+  script/path, coordinate/pointer, and semantic/value actions—enters the
+  canonical OpenSwan runtime before any generic bridge fallback. The raw
+  dispatchers still fail closed for the sealed semantic press, so that exact
+  lane cannot bypass fresh observation, approval, grounding, durable identity,
+  or proof.
 - **Reliability** — mid-stream interruption handling (never auto-retry
   mid-stream), transient continuation retry with full-jitter backoff, turn
   dedup (15 s TTL), session circuit breaker (2 consecutive transport failures →
@@ -163,6 +238,16 @@ subagent circuit + a prompt-builder debt).
   (3) parallel read-only rounds, (4) transient edge retry, (5) fail-safe
   finalization, (6) stuck-loop guard + surface ladder, (7) step-budget nudge,
   (8) deterministic auto re-observe, (9) completion proof-check.
+- **Exact per-call identity** — provider tool-use ids are bounded and unique for
+  the complete typed run, including resumed history. One malformed or reused id
+  blocks the whole requested round before transcript append/dispatch; every
+  entered handler receives the exact tool name, id, and iteration with no
+  fabricated fallback.
+- **Evidence-bearing runtime approval** — run-scoped, consumed cross-run, and
+  category-auto passes return a genuine receipt backed by a real
+  `agent_run_approvals` row. Category auto records an exact `auto_approved` row
+  first. Hidden telemetry replaces the canonical key/args with a digest and
+  never places the receipt envelope in model-visible raw or formatted output.
 - **180+ typed tool catalog** — the `OpenSwanRuntimeToolName` union in
   `openswanToolRuntime.ts`, spanning ~30 families: desktop automation (largest —
   file ops, mouse/keyboard, a11y tree, screenshot, Adobe/CAD adapters),
@@ -171,8 +256,10 @@ subagent circuit + a prompt-builder debt).
   coordination, codebase, todo, delegation. Per-tool policy: family, approval
   mode (auto/ask), mutation flag, surface list, and progressive disclosure
   (pinned vs deferred-via-`tools.search`).
-- **Always-confirm floor** — pay/delete/login/grant hit the floor structurally;
-  no auto-approve waiver overrides it.
+- **Always-confirm floor** — every non-read browser/desktop mutation crosses
+  the structural floor, not only calls whose names/arguments say
+  pay/delete/login/grant. Bland or opaque keypresses and unknown/future
+  mutations are gated too; no auto-approve waiver overrides it.
 - **Delegation** — `delegationGate.ts` (depth ≤2, ≤3 concurrent/circle, optional
   daily spend cap, summary-only parent view); `multiAgentDispatch.ts`
   (parallel/roundtable/sequential/debate); mass deploy (`agentDeployPolicy.ts`:
@@ -181,29 +268,33 @@ subagent circuit + a prompt-builder debt).
 
 **Futures:** self-healing code agent (todo + codebase search + result
 summarization + context compression already exist as pieces); offline
-self-evolution once ≥50 skills + ≥1k runs accumulate; universal computer
-automation via a11y/DOM semantic targeting instead of pixels.
+self-evolution once ≥50 skills + ≥1k runs accumulate; expand the sealed browser
+fill/toggle/native-select lanes and narrow native semantic press into a
+generalized computer gateway through stable a11y/DOM/app target identity and
+machine-checked proof instead of pixels.
 
 ---
 
 ## 5. Coding agent (Claude-Code / Cursor-Composer class)
 
-Plan: `docs/CODING_AGENT_UPGRADE_PLAN.md`. **4 of 6 phases live; 2 pure-core-ready
-awaiting bridge plumbing; 1 SQL migration pending.**
+Plan: `docs/CODING_AGENT_UPGRADE_PLAN.md`. **Four phases are live, P2/P3 have
+read-only diagnostic compatibility surfaces plus connected-agent delegation,
+and one SQL migration remains pending.**
 
 | Phase | What | Status |
 |---|---|---|
 | **P1** precise editor | `fileEditCore.ts` → `desktop.edit_file`, now lease+CAS-guarded | **SHIPPED + WIRED** |
-| **P2** shell | `shellCommandPolicy.ts` (read/mutate/blocked, 99-case smoke) | **PURE CORE DONE** — awaits bridge `execFile` endpoint + `local.run_shell` tool |
-| **P3** git | `gitCommandPolicy.ts` (argv-safe, 185-case smoke) | **PURE CORE DONE** — awaits bridge `execFile("git",argv)` + `git.run` tool |
+| **P2** shell/diagnostics | `shellCommandPolicy.ts`; compatibility tool `local.run_shell` | **SECURITY-CONSTRAINED 2026-07-24** — local route is fixed read-only diagnostics only; full shell/build/test delegates to a connected coding agent |
+| **P3** git | `gitCommandPolicy.ts`; compatibility tool `git.run` | **SECURITY-CONSTRAINED 2026-07-24** — local route is fixed read-only git diagnostics only; mutations delegate to a connected coding agent |
 | **P4** codebase index / search / @mentions / conventions | `codebaseIndex*`, `codebaseSymbol*`, `codebaseMentions*`, `projectConventions.ts`; tools `codebase.index`/`codebase.search`; prompt sections wired | **SHIPPED + WIRED** — but `codebase_files` table (RUN_THIS_SQL §24) **PENDING PROD APPLY** |
 | **P5** plan/execute model split | `codingModelSplitPolicy.ts` (strong planner → fast executor, fail-closed), `modelCapabilities.ts` coding tiers; auto best-of-N | **SHIPPED + WIRED** (`uc_coding_plan_split` default-ON) |
 | **P6** loop upgrades | `agentTodoCore.ts` + `todo.write`; `toolResultSummaryCore.ts` (>20k head+tail+error); `runAndFixGateCore.ts` (≤2 nudges/run) | **SHIPPED + WIRED** |
 
-**Critical path to full parity:** (1) apply P4 SQL §24; (2) bridge `execFile`
-endpoint → wire `local.run_shell`; (3) same for `git.run`. Every mutating tool
-stays approval-gated with a visible diff; shell/git run as argv vectors (never a
-shell string); secrets never enter prompts/logs.
+**Critical path to full parity:** (1) apply P4 SQL §24; (2) keep the local
+diagnostic endpoint narrow; (3) route build/test and repository mutation through
+structured connected-agent runs with approvals, exact workspace scope, and
+file coordination. The browser-facing bridge must never regain arbitrary shell
+authority.
 
 ---
 
@@ -212,7 +303,7 @@ shell string); secrets never enter prompts/logs.
 Plans: `docs/AGENT_APP_AUTOMATION_IMPLEMENTATION_PLAN.md`,
 `docs/UC_APP_TASK_RELIABILITY_ARCHITECTURE.md`.
 
-**SHIPPED & LIVE (executable):**
+**SHIPPED CAPABILITY SURFACES (source/live status called out per bullet):**
 
 - **Photoshop + InDesign ExtendScript adapters** — real shipping tools via
   AppleScript `do javascript`, approval-gated, never auto-save, screenshot-verified.
@@ -223,8 +314,187 @@ Plans: `docs/AGENT_APP_AUTOMATION_IMPLEMENTATION_PLAN.md`,
 - **Desktop bridge substrate** — file ops, app launch/focus/reachability, a11y
   tree, screenshot, clipboard, AppleScript (`scripts/claude-bridge.js` +
   `desktopBridge.ts`).
-- **Browser computer-use** — `computerUse.ts` + `computer-use-agent` edge
-  (Browserbase/Stagehand; native Sonnet screenshot loop).
+- **Browser computer-use (source-hardened 2026-07-26; updated edge not yet
+  re-deployed)** — the hosted `computer-use-agent` Browserbase/native Sonnet
+  lane now validates a bounded schema-v1 execution policy before
+  provider/session work. Authenticated Chat/queue starts require an interactive
+  envelope; scheduled watch/service starts are forced observation-only, while
+  authenticated legacy callers without a policy receive HTTP 400. All three
+  root Chat starts—automatic browser launch, booking-session continuation, and
+  manual approved launch—preserve router-derived user constraints plus
+  opaque-target, credential, and external-side-effect confirmation floors.
+  Single-task and queue hooks acquire synchronous start reservations before
+  module/credential awaits and invalidate pending reservations on cancel/clear.
+  Every left/right/double click, type, key, and saved-login call requires
+  durable exact-call live confirmation because its coordinate/focus target is
+  opaque, including when a pre-run grant exists. Approved calls require a
+  fresh pre/post screenshots around one-attempt dispatch. Unknown native
+  actions fail closed; an ambiguous attempted
+  mutation returns `mutation_outcome_unknown` and is never auto-replayed.
+  Secret-bearing actions are redacted or suppressed across SSE,
+  progress/action traces, model history, replay, stuck-solver inputs, usage
+  metadata, and errors.
+  The separate legacy `computerUse.ts` planner/recording lane remains
+  observation-only for local replay and hands every mutation to typed OpenSwan.
+- **Root Chat app/attachment boundary (source-hardened 2026-07-26)** —
+  `computerTaskRuntime` no longer calls `executeComputerAppTask`,
+  `bridgeOpenPath`, or `bridgeWaitForApp` before authenticated
+  `executeAgentRun`; only read-only live observation may run first. App/hybrid
+  work reaches the typed agent loop. This removes the pre-agent app-adapter and
+  attachment-open bypasses. Uploaded desktop files remain staged and produce a
+  value-free, non-executable `desktop.open_path` handoff without raw path,
+  identity, approval, receipt, or proof. Exact staged context stays in the
+  authenticated task prompt and is redacted from result, capability-buildout,
+  and action-trace telemetry.
+- **Exact approval + unattended-dispatch authority (source-hardened
+  2026-07-26)** — Chat binds the complete normalized plan plus
+  user/circle/thread/room with SHA-256 and atomically consumes
+  `agent_approvals.applied_at` before one transport dispatch. OpenSwan binds
+  exact canonical arguments plus authenticated persisted-run/provider-call
+  identity and atomically consumes one schema-v2 dispatch binding. SwanBot
+  WordPress writes and the generic risk floor share the same digest-safe,
+  one-use authority. Approval audit/model payloads retain only bounded labels
+  and safe digests. Durable OpenSwan/subagent tool-call telemetry retains only
+  bounded field/type/shape summaries; exact arguments remain in-memory for
+  approval, dispatch, and proof. `event-bound-core` is required by readiness
+  and both release gates.
+
+  Legacy direct local-file, image-conversion, and diagnostic launch helpers
+  return value-free, non-executable handoffs. Executable
+  `desktop.open_path` requires a fresh exact stat plus path digests, exact
+  identity/approval, a §26 claim/start, one bridge attempt, and fresh exact
+  frontmost-app proof. Service/scheduled automation invocation stays
+  read-only; manual automation writes and outbound custom API/messaging writes
+  use exact approval plus the action ledger. Every scheduled external action
+  gets fresh per-occurrence approval, one claim/dispatch, and no retry;
+  post-dispatch ambiguity persists `outcome_unknown`, and Pending Actions shows
+  a redacted verify-first roadblock without retry.
+
+  Office Realtime messages are advisory wakeups. After client auth/shape
+  checks, §28 `invoke_agent` locks the exact durable
+  message/circle/expected-command row, verifies membership plus target
+  ownership/scope, and returns canonical executable fields. Its
+  message/agent-subject claim is idempotent (including synthetic `blackswan`);
+  stream/completion writes are claimant-bound, membership/live-state checked,
+  bounded, CAS-protected, and require multi-target coverage. Section 28 also
+  validates and freezes protected schema-v2 Chat/OpenSwan approval payloads,
+  server-stamps pending resolution, and restricts expiry/one-use consume to the
+  requester without touching unrelated legacy/scheduled rows. These contracts and their
+  ten focused guards are source/focused-smoke evidence only: §26/§27/§28,
+  updated edges, live DB/cron/Realtime races, external provider execution, and
+  GUI behavior remain unverified.
+- **Sealed browser/native mutation canaries (source-verified)** — typed
+  OpenSwan `browser.fill_field` normalizes one exact non-secret draft, observes
+  opaque bridge-process/context/live-document/URL identity, and asks read-only
+  `POST /browser/fill_target` to resolve exactly one field before approval. The
+  edge schema, app normalizer/sealed runtime, browser client request builders,
+  and bridge target/perform endpoints each require `name` XOR `selector`; both
+  or neither fail before observation/dispatch. The
+  bridge issues a short-lived single-use `targetId` backed by that ElementHandle
+  plus an HMAC privacy-safe v2 `targetFingerprint` over inspected semantics and
+  keyed document/node/frame structure. The id is dispatch-only. Durable
+  approval stores SHA-256 bindings for exact normalized intent and exact URL
+  plus bounded safe origin/length and opaque identity metadata; raw draft text,
+  URL path/query/fragment, locator, and task context remain transient. App and
+  bridge classifiers reject obvious secret-bearing values without reflecting
+  them. The sealed dispatcher recomputes SHA-256 over deep-frozen exact handler
+  args and revokes the observation epoch before entry. The handler consumes the
+  id once and rechecks direct
+  attributes, associated labels, `aria-labelledby`/`aria-describedby`, and
+  containing-form context for credential/recovery/seed/private-key/payment/CVV
+  signals plus target-fingerprint drift. It reads the same handle first and
+  skips `fill()` when the approved draft is already present, avoiding duplicate
+  input/change handlers after an outcome-unknown attempt. Completion uses one
+  renderer capture of value, semantics, document, node, and frame state
+  bracketed by stable browser identity checks, and returns only
+  fingerprint/equality/length plus mutation/no-op proof without echoing the id
+  or value. It does not submit.
+  `browser.set_toggle` applies the same one-shot capability and verification
+  pattern to one exact checkbox/switch/radio with an explicit desired boolean,
+  and only for a positive allowlist of clearly local presentation or
+  accessibility preferences. Consequential and unknown settings fail closed.
+  Generic click inspects its exact resolved ElementHandle and refuses native or
+  ARIA checkbox/switch/radio semantics—including labels and descendants—so
+  selector or role spoofing cannot bypass that boundary.
+  `browser.select_option` extends the same sealed, one-shot pattern to one exact
+  option on one native single-value HTML `<select>`. It binds the inspected
+  document/control/option fingerprint, permits only bounded local presentation
+  or accessibility preferences, and verifies the same control without
+  submitting or navigating. Custom ARIA comboboxes, multi-selects, unknown
+  settings, and account/security/privacy/payment/publishing controls fail
+  closed.
+  The older Computer Use planner/executor cannot supply authenticated typed-loop
+  identity, a persisted run, provider tool-use id/iteration, durable dispatch
+  ownership, or the exact OpenSwan approval required by that lane. All six
+  legacy Computer Use mutation kinds—`navigate`, `click`, `fill`, `select`,
+  `press_key`, and `scroll`—therefore become visible, value-stripped,
+  structured non-executable typed OpenSwan handoffs during planning,
+  saved-plan hydration, direct
+  execution, and plan-card serialization. The lane returns before screenshot,
+  Stagehand, MCP, or bridge mutation I/O and must resume as a fresh typed call,
+  never a legacy/raw retry. `/replay` preflights the entire saved plan, runs
+  zero steps when any browser/desktop mutation is present, and permits only the
+  reviewed observation-only allowlist.
+  Native `desktop.launch_app` and `desktop.focus_app` now share an
+  observe-before/after activation helper across OpenSwan and SwanBot. It binds
+  an exact resolved name or explicit alias plus positive process id, proves
+  running/frontmost postconditions, accepts verified no-ops, and never
+  auto-replays an unknown outcome. This is activation proof, not sealed general
+  native UI control.
+  `/desktop diag` is an authenticated read-only health/pairing/running-app
+  probe. `/desktop diag <app>` still performs no launch, focus, open, click, or
+  type mutation; it returns a value-free non-executable `desktop.launch_app`
+  typed-runtime handoff requiring fresh run/provider-call identity, exact
+  approval, dispatch receipt, and post-launch focus proof.
+  The narrow `desktop.click_element` semantic-press canary accepts only
+  `{ action?: 'press', appName, pid, path, expectedRole, expectedLabel }` from a
+  fresh accessibility-tree observation. The adapter re-observes the exact
+  frontmost app, caller PID, path, role, label, and accessibility generation;
+  seals a one-shot target; and asks for approval with bounded fingerprints
+  instead of the raw path/label/capability. Only button/menu-item-like,
+  low-consequence presentation/help/settings targets are eligible. Text/state/
+  value controls, modals, unknown semantics, and destructive, payment, auth,
+  permission, send, or publish targets fail closed. Completion requires the
+  exact target to disappear or change semantic fingerprint; unrelated tree
+  churn is outcome-unknown and is never auto-replayed.
+  OpenSwan authorizes that exact observation through `computerAppGrounding`,
+  then `dispatchDurableComputerAppMutation` claims and marks the
+  `agent_action_calls` identity started before the bridge can perform once. It
+  finishes verified or outcome-unknown, and duplicate identities do not
+  execute. SwanBot routes `desktop.click_element` through this same sealed
+  OpenSwan gateway before its generic client dispatcher. The raw OpenSwan
+  dispatcher and raw SwanBot bridge dispatcher explicitly refuse the tool, so
+  callers cannot bypass observation, approval, grounding, or the durable
+  wrapper.
+  The same gateway-first rule now covers every browser/desktop mutation in the
+  current SwanBot client-delegated catalog. Reads such as snapshots and
+  accessibility trees may use their bounded read dispatchers; mutations do not
+  fall through to raw bridge handlers.
+  SwanBot v2 continuation transports only bounded, allowlisted dispatch and
+  verification receipts beside tool content, re-sanitizes and correlates them
+  to the saved tool call, persists value-free result events/run summaries with
+  fixed failure copy, and removes the hidden receipt metadata before model
+  replay. The exact resume transcript/system/tool state is not raw
+  circle-visible JSON: it is held only in the authenticated AES-256-GCM
+  ciphertext snapshot inside the bounded public continuation envelope. Resume persistence
+  is two-phase: exact identity/version/nonce plus `dispatchClaimId` first moves
+  `client_pending` to `client_dispatching` before local execution; only the
+  exact edge acknowledgement releases handlers. Exact results then move
+  `client_dispatching` to `client_resuming` before the model loop. Only an
+  exact same-claim dispatch retry is idempotent, and only the internal result
+  claim may publish the next pending round or terminal result. Competing/mixed
+  claims, unconfirmed writes, lease expiry, loop failure, or final-transition
+  ambiguity close `outcome_unknown` with `replayAllowed:false`; neither local
+  execution nor model resume is reopened. Once applied, §29 additionally
+  strips active malformed/expired/state-mismatched snapshots on a three-minute
+  sweep and scrubs legacy plaintext plus terminal checkpoints.
+  Source/unit/action/gateway smokes and typecheck pass. The latest edge,
+  dedicated continuation env, §29 scrub/cron behavior,
+  `agent_action_calls` migration/RPCs, and native behavior still require
+  production deployment/live-database verification. A live GUI browser/native
+  run and live-database concurrency races—two workers resuming one
+  continuation, the sweeper racing an active claim, and two workers claiming
+  one action identity—remain pending.
 
 **IN-FLIGHT (pure generators, doc-verified, gated on a live install run):**
 
@@ -298,10 +568,20 @@ model planning. The moat is **RL-on-your-harness + verifiable checks**, not weig
   metadata-table injection (cache-hot), approval-gated writes, health tracking,
   body-fencing for untrusted content.
 - **Approvals/HITL** — `chatApprovalGate.ts` + `computerGrantGate.ts`: sticky
-  pay/delete/login/grant floor, dedup/idempotency, fail-closed on missing rows;
-  `runApprovalsService.ts` per-run approvals with realtime banner.
+  structural floor for every non-read browser/desktop mutation (with
+  pay/delete/login/grant as known examples), dedup/idempotency, fail-closed on
+  missing rows;
+  `runApprovalsService.ts` per-run approvals with realtime banner. OpenSwan's
+  ask gate now preserves genuine run/cross-run/category-auto approval row
+  receipts and exposes only issued digest-safe hidden telemetry.
 - **Run persistence** — `agent_runs` + `agent_run_events` + token/cost rollups;
-  surfaces, status flow, step kinds, ~20 artifact kinds.
+  surfaces, status flow, step kinds, ~20 artifact kinds. Tool events distinguish
+  dispatched/skipped/legacy-unknown and persist only bounded primitive receipt
+  allowlists; guarded browser fill, safe-preference toggle/native-select, and
+  narrow native semantic press emit mutation-dispatch/app-verification receipts
+  into that seam. The semantic-press route additionally uses the source-built
+  `agent_action_calls` claim/start/finish ledger to bind one exact authorized
+  action across workers and prevent duplicate execution.
 - **Cross-dashboard discovery** — `connectedResourcesDigest.ts`/`…Runtime.ts`:
   the agent starts each turn aware of connected integrations, vault creds (names
   only), Google Workspace, and BYOK providers, with a secret-value guard.
@@ -379,8 +659,9 @@ with our sticky floor as the enforcement point.
 
 **Near (this quarter, mostly unblocking already-built work):**
 
-- Full Claude-Code-class coding in chat: apply P4 SQL §24 + wire the shell/git
-  `execFile` bridge endpoints → run-and-fix loops on the real repo.
+- Full Claude-Code-class coding in chat: apply P4 SQL §24 and complete the
+  structured connected-agent delegation path for build/test/mutating git while
+  keeping the browser-facing `execFile` endpoint diagnostic-only.
 - Live app automation for the first headless engines (MATLAB/AutoCAD/GIMP) +
   Adobe cloud imaging → "generate a hero image and drop it into an InDesign
   template and export," with proof + approvals.
@@ -419,26 +700,124 @@ with our sticky floor as the enforcement point.
   paper; none is LIVE until a real binary run flips its gate.
 - **SQL not yet applied** — `codebase_files` (§24) blocks codebase indexing until
   run in prod. A local migration file is not proof prod has it.
-- **Bridge plumbing pending** — shell/git are policy-complete but need the
-  `execFile` endpoint; app automation needs per-engine runners.
+- **Connected coding convergence pending** — the local `execFile` endpoint is
+  intentionally diagnostic-only; full shell/build/test/git mutation must run
+  through structured paired coding agents. App automation still needs
+  additional per-engine runners.
+- **Cloud Computer Use is source-proven, not live-integration-proven** — the
+  required v1 policy, forced scheduled observation-only floor, exact live
+  mutation confirmation, fresh screenshot brackets, one-attempt dispatch,
+  redaction, outcome-unknown/no-replay, and start reservations are pinned by
+  `computer-use-cloud-policy`. Root Chat constraint propagation and removal of
+  the app/attachment pre-agent bypasses are pinned by
+  `chat-computer-request-router` and `computer-task-runtime-context`. The
+  cloud-policy and runtime-context guards run exactly once in all Chat/SwanBot
+  daily and release gates, `smoke:all`, and canonical readiness. Exact
+  approval, direct-handoff, open-path, automation, scheduled-action, Office
+  broadcast, and database-authority guards share that exactly-once contract.
+  The updated edge has not been
+  deployed/re-verified, and no live Browserbase plus Supabase confirmation-row
+  integration or native-app GUI run was performed. Authenticated legacy cloud
+  callers without the policy now receive HTTP 400.
+- **Computer mutation gateway remains narrow** — non-secret, non-submit
+  `browser.fill_field`, positive-allowlist `browser.set_toggle`, native
+  single-select `browser.select_option`, and low-consequence native
+  `desktop.click_element` semantic press are sealed in the source runtime.
+  All current SwanBot client-delegated browser/desktop mutations enter the
+  OpenSwan runtime first, but that routing parity does not make every local
+  typed mutation a sealed canary: submit, general clicks/keys/upload/
+  navigation/close, text or state-bearing native controls, modal/destructive/
+  payment/auth/permission actions, and generalized desktop/native-app mutation
+  still need the same target/ledger/proof contract. The hosted cloud edge now
+  exact-confirms opaque native clicks/typing/keys, but its one-call screenshot
+  boundary is separate from the local semantic target/ledger contract.
+  Semantic press is intercepted before SwanBot's
+  generic desktop dispatcher; both raw OpenSwan and raw SwanBot bridge paths
+  fail closed. Its exact observation is grounded and wrapped by the durable
+  `agent_action_calls` claim/start/finish contract before a one-time bridge
+  perform. The separately vault/origin-gated credential lane remains
+  compatible. Native launch/focus has exact-name/alias plus PID before/after
+  proof but is not the general native mutation gateway. Target expiry/replay,
+  detachment, fingerprint drift, and ambiguous after-state fail closed or return
+  outcome-unknown and require a fresh observation; they are not auto-replayed.
+  Current proof is focused source/unit/typecheck verification, not live browser
+  or native GUI execution.
+- **Durable action ledger is not production-proven yet** — the
+  `agent_action_calls` source, SQL migration/RPCs, runtime wrapper, and focused
+  smokes are built. Applying and exercising that migration against the live
+  database, verifying authenticated run ownership/RLS and claim/start/finish
+  RPCs, and racing two workers against one idempotency identity remain release
+  checks.
+- **Authority consolidation is source-proven, not deployment-proven** — the
+  exact Chat/OpenSwan/SwanBot approval claims, value-free direct handoffs,
+  `desktop.open_path` ledger, automation/scheduled no-replay guards,
+  `outcome_unknown` UI, Office durable-row wakeup, and external edge ledger
+  bindings are pinned by focused smokes and readiness. Sections 26, 27, and 28 are
+  not applied; changed edges are not deployed/re-verified; and live RLS,
+  Realtime, cron, provider, concurrent-worker, and GUI behavior was not tested.
+  Local Docker/Supabase was unavailable for §28 execution.
+- **Continuation protocol/privacy is source-proven, not
+  deployment/live-race-proven** — source and focused smokes pin the
+  AES-256-GCM exact-state snapshot, dedicated secret plus authenticated
+  rotation version, bounded circle-visible envelope, missing-key
+  `clientOnly` withholding, value-free event inputs/fixed errors,
+  `client_pending → client_dispatching` before any local execution,
+  `client_dispatching → client_resuming` before model resume, exact same-claim
+  dispatch retry, exact result-claim next/terminal updates, all-three-active-
+  state readiness exclusion, and closed outcome-unknown handling. The latest
+  `swanbot-v2-ai` still must be deployed with the dedicated env configured and
+  rotation-tested. §29 is not applied, so historical legacy plaintext rows can
+  still remain; its one-time legacy/terminal scrub, malformed/expired/state-
+  mismatch sweep, and three-minute pg_cron job (or manual fallback) have no
+  live proof. Live dispatch/result/sweeper races plus post-commit/network and
+  lease-expiry failure injection must prove one consumer, no resurrection,
+  and no automatic replay.
 - **Telemetry maturity** — M4 sign-off and BlackSwan v6/v7 both wait on
   accumulating production data (trace telemetry was only recently wired).
 - **Live-builder memory gap** — build completions don't write memory yet.
 - **Office run→agent link is name-matched** — needs a durable `agent_id`.
-- **Security invariants that never relax:** the pay/delete/login/grant floor;
-  no raw secrets in prompts/logs/metadata; untrusted retrieved content stays
-  fenced; no silent provider/model switching; Rule-of-Two for unattended sessions.
+- **Security invariants that never relax:** the always-confirm floor for every
+  non-read browser/desktop mutation, including bland/unknown calls; no raw
+  secrets in prompts/logs/metadata; untrusted retrieved content stays fenced;
+  no silent provider/model switching; Rule-of-Two for unattended sessions.
 
 ---
 
 ## 12. Verification posture
 
-Everything in §§2–8 is grounded in this repo (files, commits, smoke tests) as of
-commit `b26b7f3` on `wip/full-working-tree`, 2026-07-13. Tool-catalog size is
-stated as "180+" because the `OpenSwanRuntimeToolName` union is a composed
-multi-type union (counting method yields 170–191); the 73-tool figure is the
-concrete `swanbot-v2-ai` executable subset. §9 frontier claims are primary-sourced
-for the pre-cutoff backbone (launch dates, benchmark methodology, protocol
-history, RLVR science, the trifecta/Rule-of-Two spine) and **[UNVERIFIED]** for
-anything after Jan 2026 (2026 leaderboard numbers, Composer 2 internals,
-next-gen model names). Treat post-cutoff items as directional.
+The original §§2–8 sweep is grounded in repo files, commits, and smoke tests as
+of commit `b26b7f3` on `wip/full-working-tree`, 2026-07-13. Runtime
+reconciliation through 2026-07-26 is source- and focused-smoke-verified for the
+sealed native-select, semantic-press schema/routing, raw-bypass closure,
+grounding, durable action wrapper, default-edge constraint/approval enforcement,
+gateway-first browser/desktop mutation routing, sealed fill schema, structured
+all-mutation Computer Use handoffs, read-only locator-actionability advisory
+evidence, whole-plan replay preflight, two-phase
+continuation ownership, AES-256-GCM continuation state, bounded public
+envelopes/value-free events, missing-key local-tool withholding, read-only
+diagnostic launch handoff, cloud v1 policy
+and exact-confirmation ordering, all-three root Chat policy propagation,
+start reservations, staged attachment handoff, pre-agent app/attachment bypass
+closure, and edge/OpenSwan parity. `computer-use-mutation-handoff` is the
+focused legacy-lane guard; `computer-use-cloud-policy` and
+`computer-task-runtime-context` guard the second-wave boundary; and the
+guarded-action ledger smoke contains 103 assertions. The exact approval,
+direct-handoff, open-path, automation, schedule, Office broadcast, and
+database-authority focused guards are mandatory once in all Chat/SwanBot
+daily/release gates, `smoke:all`, and readiness. The locator-actionability guard
+is mandatory in those same gates but never authorizes or binds a later
+mutation. This is not evidence of
+the latest edge deployments, production continuation-key configuration or
+rotation, live Browserbase/Supabase confirmation integration, live
+`agent_action_calls` or scheduled-action migrations/RPCs, applied §29 legacy
+scrubbing/sweeping, live GUI execution, live Realtime/RLS/cron behavior, live database
+concurrency/failure-injection behavior, or production telemetry. Tool-catalog
+size is stated as "180+"
+because the `OpenSwanRuntimeToolName` union is a composed multi-type union
+  (counting method yields 170–191); **82 total = 25 server-side + 57
+client-delegated** is the concrete source-derived `swanbot-v2-ai` executable
+subset. §9 frontier claims are primary-sourced for the pre-cutoff backbone
+(launch dates, benchmark methodology, protocol history, RLVR science, the
+trifecta/Rule-of-Two spine) and **[UNVERIFIED]** for anything after Jan 2026
+(2026 leaderboard numbers, Composer 2 internals, next-gen model names). Treat
+post-cutoff items as directional.

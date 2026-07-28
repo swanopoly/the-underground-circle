@@ -199,18 +199,21 @@ function toHandler(kind: ChatAutomationExecutionKind, dep: ChatTransportDep): Ch
         ...(res?.approvalId !== undefined ? { approvalId: res.approvalId } : {}),
         ...(res?.stateRequests ? { stateRequests: res.stateRequests } : {}),
       };
-    } catch (err) {
+    } catch {
       // Transports MUST NOT throw across the dispatcher boundary. NOTE: a
       // throw deliberately carries NO stateRequests — the caller's finally
       // falls back to its fail-safe defaults (typing off, workbench stopped)
-      // so a mid-handler crash cannot leave the UI stuck.
+      // so a mid-handler crash cannot leave the UI stuck. Keep the envelope
+      // value-free: handler errors can contain paths, prompts, or secrets and
+      // Chat outcomes may be rendered or persisted by downstream callers.
       return {
         executionKind: kind,
         status: 'failed',
-        message: 'That automation step hit an internal error. Technical details were saved for recovery.',
-        warnings: [`Transport "${kind}" threw: ${err instanceof Error ? err.message : String(err)}`],
+        message: 'That automation step hit an internal error. No uncertain action was replayed.',
+        warnings: ['The transport failed with redacted internal details.'],
         data: {
-          rawError: err instanceof Error ? err.message : String(err),
+          errorCode: 'transport_handler_error',
+          redacted: true,
         },
       };
     }

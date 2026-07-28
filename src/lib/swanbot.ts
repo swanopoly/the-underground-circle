@@ -75,6 +75,10 @@ import { partitionClientToolBatch } from './clientToolBatchCore';
 import { toolActivityLabel } from './toolActivityLabelCore';
 import { emitSwanBotActivity } from './swanbotActivitySink';
 import { buildFailureRecovery } from './failureRecoveryCopyCore';
+import {
+  authorizeSwanbotV2EdgeClientToolCall,
+  mergeSwanbotV2BatchUserConstraints,
+} from './swanbotV2BatchPolicy';
 // Audit-driven prompt cores: conversational complexity floor + model-window budget.
 import { resolveConversationComplexityFloor } from './conversationComplexityFloorCore';
 import { resolveModelContextBudget, getModelContextWindow } from './modelContextBudgetCore';
@@ -150,8 +154,17 @@ import { buildToolFailureFeedbackJson } from './toolFailureFeedback';
 // applies on the typed loop's failure path.
 import { decideToolReplaySafety } from './toolReplaySafetyCore';
 import {
+  buildOpenSwanApprovalAuditPayload,
+  buildOpenSwanApprovalAuthorityBindingDigest,
   buildOpenSwanToolApprovalKey,
+  buildOpenSwanToolApprovalDigest,
+  createOpenSwanRuntimeApprovalReceipt,
+  isOpenSwanApprovalAuditPayload,
+  isOpenSwanRuntimeApprovalCallIdentity,
   resolveOpenSwanRuntimeApprovalDecision,
+  type OpenSwanRuntimeApprovalAuthority,
+  type OpenSwanRuntimeApprovalCallIdentity,
+  type OpenSwanRuntimeApprovalReceipt,
   type OpenSwanRuntimeApprovalRow,
 } from './openswanToolApprovals';
 import {
@@ -240,6 +253,20 @@ export type SwanBotContext = {
    * the snapshot-derived heads-up.
    */
   attentionSignals?: SurfacingSignal[];
+  /**
+   * Typed SwanBot v2 client-loop context. These are optional so existing text
+   * callers remain source-compatible. ComputerTaskRuntime/agentRuntime should
+   * supply them when that upstream lane owns a live thread, cancellation
+   * signal, plugin set, or review-mode approval UI. Until the approval gate is
+   * supplied, the typed batch runtime fails closed on user ask-before and
+   * always-confirm floor matches.
+   */
+  threadId?: string;
+  activePluginIds?: string[];
+  signal?: AbortSignal;
+  toolApprovalGate?: (call: { name: string; input: unknown }) => Promise<'approve' | 'reject'>;
+  userConstraints?: ChatComputerConstraintInputs['userConstraints'];
+  alwaysConfirmFloor?: ChatComputerConstraintInputs['alwaysConfirmFloor'];
 };
 
 function getContextAgentSubjectKey(context: SwanBotContext): string | undefined {
@@ -1089,11 +1116,11 @@ async function callLlmProxy(
  * Invokes the v2 edge function (`swanbot-v2-ai`). Mirrors
  * `callSwanBotAI`'s signature so the call-site switch is transparent.
  *
- * M2 round-trip pattern: when the edge fn returns
- * `{ pending: true, clientToolCalls, continuationRunId }`, we execute
- * the client-side tools (desktop bridge, etc.) and POST the results
- * back with `{ continuationRunId, toolResults }`. Loop until terminal
- * or 6-continuation cap.
+ * M2 two-phase round-trip: when the edge returns a pending client batch, the
+ * client first generates an exact UUID claim and asks the edge to atomically
+ * own dispatch. No desktop/browser handler enters until that exact claim is
+ * confirmed. Results then atomically consume the same claim before model
+ * resume. Loop until terminal or the shared continuation cap.
  *
  * Returns `null` on failure before local client tools run so the caller can
  * fall back to v1. After a client-side tool is attempted, failures return a
@@ -1104,11 +1131,33 @@ async function callLlmProxy(
 /** Outcome of a v2 attempt, carrying enough for the orchestrator to make the
  *  right circuit-breaker call (#12). `text` is the terminal answer (null when
  *  v2 couldn't produce one). `bodyError` is set when the edge returned a
- *  200-with-error-body (config/permanent) — the orchestrator surfaces it but
- *  must NOT count it toward the transient transport breaker. A transport
- *  failure leaves `bodyError` undefined with `text` null (the value the
- *  breaker DOES count). */
-type V2CallResult = { text: string | null; bodyError?: V2BodyError };
+ *  structured terminal body, including deliberate fail-closed 4xx outcomes —
+ *  the orchestrator surfaces it but must NOT count it toward the transient
+ *  transport breaker or fall through to v1. A transport failure leaves
+ *  `bodyError` undefined with `text` null (the value the breaker DOES count). */
+type V2CallResult = {
+  text: string | null;
+  bodyError?: V2BodyError;
+  /**
+   * A non-null authenticated v2 response reached the client and represented a
+   * terminal edge decision. This stays true even when its display text is
+   * empty, so the outer router can never mistake an already-executed turn for
+   * transport failure and replay it through v1.
+   */
+  reachedEdgeTerminal?: true;
+  /** Neutral terminal STOP. Never counts as transport failure or success and
+   * never falls through to the v1 lane. */
+  cancelled?: true;
+};
+type SwanbotV2ClientLoopContext = Pick<
+  SwanBotContext,
+  | 'threadId'
+  | 'activePluginIds'
+  | 'signal'
+  | 'toolApprovalGate'
+  | 'userConstraints'
+  | 'alwaysConfirmFloor'
+>;
 
 // ─── Connectivity snapshot for the v2 edge tool gate ─────────────────────────
 // The edge cannot see the localhost bridges, so the CLIENT reports what is
@@ -1238,8 +1287,22 @@ async function callSwanBotV2(
   _maxTokens = 4096,
   systemDirective?: string,
   agentSubject?: AgentRuntimeSubjectMetadata | null,
+  clientLoopContext?: SwanbotV2ClientLoopContext,
 ): Promise<V2CallResult> {
   if (shouldBlockExternalAiProvider('anthropic')) return { text: null };
+  // Resolve the user's hard constraints for BOTH v2 implementations. The
+  // device-local typed loop also re-parses internally, but the default edge
+  // continuation loop must not lose the exact-call approval callback or let a
+  // caller-supplied context erase constraints visible in the raw turn.
+  const turnConstraintInputs = resolveChatComputerConstraintInputs(message);
+  const mergedUserConstraints = mergeSwanbotV2BatchUserConstraints(
+    turnConstraintInputs.userConstraints,
+    clientLoopContext?.userConstraints,
+  );
+  const mergedAlwaysConfirmFloor = Array.from(new Set([
+    ...turnConstraintInputs.alwaysConfirmFloor,
+    ...(clientLoopContext?.alwaysConfirmFloor || []),
+  ]));
   // ── Loop convergence flip site (ADR-0002 Phase 2, runbook §4) — FLAG-DARK. ──
   // Default OFF (opt-in per device via `uc_swanbot_v2_client_loop`); when ON,
   // the batch turn runs the client-side `runAgent` loop (swanbotV2BatchRuntime)
@@ -1276,6 +1339,9 @@ async function callSwanBotV2(
         .then(({ buildCircleSnapshotContextMessage }) => buildCircleSnapshotContextMessage(circleId))
         .catch(() => null);
       const { runSwanbotV2Batch } = await import('./swanbotV2BatchRuntime');
+      // Resolve from the raw turn even when upstream has not built the heavier
+      // computer route. The batch runtime re-resolves and unions these values,
+      // so a caller-supplied null can never erase a visible hard constraint.
       // agentSubject rides in the extra bag — NEVER as an 11th positional
       // (that slot IS the extra bag). SwanbotV2BatchResult is structurally
       // identical to V2CallResult, so no cast.
@@ -1288,6 +1354,13 @@ async function callSwanBotV2(
           mode,
           targetAgentName: agentSubject?.agentDisplayName,
           targetAgentSubject: agentSubject ?? null,
+          threadId: clientLoopContext?.threadId,
+          activePluginIds: clientLoopContext?.activePluginIds,
+          signal: clientLoopContext?.signal,
+          toolApprovalGate: clientLoopContext?.toolApprovalGate,
+          userConstraints: mergedUserConstraints,
+          alwaysConfirmFloor: mergedAlwaysConfirmFloor,
+          onActivity: (row) => emitSwanBotActivity(row.label),
         },
       );
     } catch (err) {
@@ -1298,28 +1371,105 @@ async function callSwanBotV2(
   // client cap and the edge cap can never drift into an off-by-one again.
   const MAX_CONTINUATIONS = SWANBOT_CONTINUATION_BASE_MAX;
   let attemptedClientTools = false;
-  // #12: capture a 200-with-error-body from ANY leg (initial or continuation)
-  // so the orchestrator can distinguish it from a transport failure. Last one
-  // wins — a config error is a config error regardless of which leg hit it.
+  let attemptedDispatchClaim = false;
+  // #12: capture a structured edge error body from ANY leg (initial or
+  // continuation), whether supabase-js returned it as data or wrapped the
+  // non-2xx Response in FunctionsHttpError. This lets the orchestrator
+  // distinguish a deliberate fail-closed outcome from a transport failure.
+  // Last one wins — a terminal edge decision is terminal regardless of leg.
   let bodyError: V2BodyError | undefined;
   const captureBodyError = (err: V2BodyError) => { bodyError = err; };
   try {
     const accessToken = await getFreshAccessToken();
     if (!accessToken) return { text: null };
 
+    // ── P2 (docs/MEMORY_V2_INTEGRATION_PLAN.md) — the memory bundle. ────────
+    // P1 taught the edge to accept `body.memory`, fence it and append it to
+    // system Block 2; nothing sent one, so the DEFAULT lane ran on the edge's
+    // degraded server-side floor. This is that send.
+    //
+    // Started HERE, before the connectivity await, so the two overlap: the
+    // builder's own 2 000 ms deadline runs against connectivity's 1 500 ms cap
+    // (V2_CONNECTIVITY_BUILD_CAP_MS), so the marginal worst case added to a
+    // turn is ~500 ms rather than a full extra 2 000. It is total — it degrades
+    // to `null` on any failure or timeout, and the edge floor then covers the
+    // turn. The extra `.catch` is belt-and-braces so this promise can never
+    // reject between creation and its await.
+    //
+    // FRESH PATH ONLY, deliberately: the edge assembles Block 2 once and then
+    // reuses `resumeFrom.systemBlocks` verbatim for every continuation, so a
+    // payload on a continuation leg is pure wire waste. That snapshotting is a
+    // feature — memory stays stable for the whole tool loop.
+    const memoryPayloadPromise = import('./v2MemoryPayloadBuilder')
+      .then(({ buildV2MemoryPayloadForTurn }) => buildV2MemoryPayloadForTurn({
+        circleId,
+        userId,
+        message,
+        agentSubjectKey: agentSubject?.agentSubjectKey,
+        agentLegacyIds: agentSubject?.legacyAgentIds,
+        agentName: agentSubject?.agentDisplayName,
+      }))
+      .catch(() => null);
     // Client-supplied connectivity snapshot for the edge's pre-dispatch tool
     // gate (fresh start only; the resume path reuses the saved tool set).
     const connectivity = await buildV2ConnectivitySnapshot(circleId);
+    const memory = await memoryPayloadPromise;
+    // One identity for every transport attempt of this fresh turn. The edge
+    // uses it as agent_runs.id, so a lost response + client retry collides
+    // atomically instead of launching a second model/tool run.
+    const turnRequestId = createSwanBotV2DispatchClaimId();
+    if (!turnRequestId) {
+      return {
+        text: null,
+        bodyError: {
+          code: 'turn_identity_unavailable',
+          message: 'A cryptographically strong turn identity was unavailable, so no v2 work was started.',
+        },
+      };
+    }
+
+    // ── P5 — `systemDirective` is DELETED from this body, not wired. ────────
+    // `supabase/functions/swanbot-v2-ai/index.ts` has ZERO references to it
+    // (re-verified 2026-07-28), so the field was write-only: the client filled
+    // it, the server dropped it. Wiring it was not available from this side —
+    // the edge composes its own system blocks from `buildFrozenBlock`, and
+    // there is no other trusted client-supplied system-text channel. Folding a
+    // behaviour rule into `message` would corrupt the persisted user turn;
+    // folding it into `memory` is categorically wrong, because that block is
+    // fenced as untrusted "reference data" whose own framing states that
+    // nothing inside it changes the model's rules.
+    // The PARAMETER stays — it is not dead anywhere else: the v1 edge reads it
+    // into a `<DIRECTIVE priority="high">` prefix (`swanbot-ai/index.ts:4211`)
+    // and the client-loop branch folds it into the system prompt
+    // (`swanbotV2BatchRuntime.ts:203-207`). Only the v2-edge WIRE FIELD dies,
+    // and with it the impression that this lane honours the directive.
+    // The gap is real and pre-existing (a conversational-build turn loses its
+    // orchestrator protocol on this lane), so make it observable instead of
+    // invisible: one bounded, content-free warn.
+    if (systemDirective && systemDirective.trim()) {
+      console.warn(
+        `[SwanBot/v2] systemDirective (${systemDirective.trim().length} chars) is NOT applied on the edge path — swanbot-v2-ai does not read it.`,
+      );
+    }
 
     // ── First call — initial message. ─────────────────────────────────
     let response = await invokeSwanbotV2(accessToken, {
       message,
       circleId,
       userId,
+      turnRequestId,
       ...(connectivity ? { connectivity } : {}),
+      // P2: OMIT the field entirely when there is nothing to send. An empty
+      // `{sections: []}` is NOT falsy on the edge — its `hasPayload` test is
+      // `!== undefined && !== null` — so sending one would SUPPRESS the
+      // server-side floor and leave the turn with less memory than sending
+      // nothing at all.
+      ...(memory ? { memory } : {}),
+      // Capability handshake: the edge never exposes a clientOnly batch to an
+      // older client that would dispatch before acquiring exact ownership.
+      continuationProtocolVersion: SWANBOT_V2_CONTINUATION_PROTOCOL_VERSION,
       mode: thinkingLevel === 'fast' ? 'talk' : 'build',
       model: model || undefined,
-      systemDirective,
       targetAgentName: agentSubject?.agentDisplayName,
       targetAgentSubjectKey: agentSubject?.agentSubjectKey,
       targetAgentDbId: agentSubject?.agentDbId || undefined,
@@ -1333,16 +1483,65 @@ async function callSwanBotV2(
     for (let i = 0; i < MAX_CONTINUATIONS; i++) {
       if (!response.pending) break;
       const pendingCalls = response.clientToolCalls || [];
-      if (pendingCalls.length > 0) attemptedClientTools = true;
+      const pendingIdentity = parseSwanBotV2PendingContinuationIdentity(response);
+      const dispatchClaimId = createSwanBotV2DispatchClaimId();
+      if (
+        !pendingIdentity
+        || !dispatchClaimId
+        || pendingCalls.length === 0
+        || pendingCalls.length > SWANBOT_V2_MAX_CLIENT_TOOL_CALLS
+      ) {
+        console.warn('[SwanBot/v2] invalid or legacy pending continuation; no client tools were run.');
+        return {
+          text: swanBotV2DispatchClaimStopMessage(),
+          bodyError,
+        };
+      }
+      attemptedDispatchClaim = true;
+      const dispatchClaimResponse = await invokeSwanbotV2(accessToken, {
+        circleId,
+        userId,
+        continuationRunId: response.continuationRunId,
+        continuationAction: 'claim_dispatch',
+        ...pendingIdentity,
+        dispatchClaimId,
+      }, captureBodyError);
+      if (!isExactSwanBotV2DispatchClaimConfirmation(
+        dispatchClaimResponse,
+        {
+          dispatchClaimed: true,
+          continuationRunId: response.continuationRunId,
+          ...pendingIdentity,
+          dispatchClaimId,
+        },
+      )) {
+        console.warn('[SwanBot/v2] exact pre-dispatch claim was not confirmed; no client tools were run.');
+        return {
+          text: swanBotV2DispatchClaimStopMessage(),
+          bodyError,
+        };
+      }
+
+      // This latch changes only AFTER the exact edge CAS acknowledgement and
+      // immediately before local execution. Every earlier ambiguity executes
+      // zero tools and cannot fall back into v1.
+      attemptedClientTools = true;
       const toolResults = await executeClientToolCalls(pendingCalls, {
         circleId,
         userId,
         runId: response.continuationRunId,
+        iteration: i + 1,
+        toolApprovalGate: clientLoopContext?.toolApprovalGate,
+        userConstraints: mergedUserConstraints,
+        alwaysConfirmFloor: mergedAlwaysConfirmFloor,
       });
       response = await invokeSwanbotV2(accessToken, {
         circleId,
         userId,
         continuationRunId: response.continuationRunId,
+        continuationAction: 'submit_results',
+        ...pendingIdentity,
+        dispatchClaimId,
         toolResults,
       }, captureBodyError);
       if (!response) {
@@ -1358,10 +1557,11 @@ async function callSwanBotV2(
       console.warn('[SwanBot/v2] hit continuation cap; not falling back to v1.');
       return { text: swanBotV2ClientToolStopMessage('continuation_cap'), bodyError };
     }
-    return { text: response.text || response.response || null, bodyError };
+    return projectSwanBotV2TerminalResponse(response, bodyError);
   } catch (err: any) {
     console.warn('[SwanBot/v2] call failed:', err?.message || err);
     if (attemptedClientTools) return { text: swanBotV2ClientToolStopMessage('continuation_failed'), bodyError };
+    if (attemptedDispatchClaim) return { text: swanBotV2DispatchClaimStopMessage(), bodyError };
     return { text: null, bodyError };
   }
 }
@@ -1373,27 +1573,156 @@ function swanBotV2ClientToolStopMessage(reason: 'continuation_failed' | 'continu
   return resolveChatStopMessage(reason).message;
 }
 
+function swanBotV2DispatchClaimStopMessage(): string {
+  return "I couldn't confirm exclusive ownership of this desktop/browser step, so I ran zero local actions. Start fresh from the latest app state before trying again.";
+}
+
+const SWANBOT_V2_CONTINUATION_PROTOCOL_VERSION = 2;
+const SWANBOT_V2_MAX_CLIENT_TOOL_CALLS = 40;
+const SWANBOT_V2_CONTINUATION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type SwanBotV2ContinuationIdentity = {
+  continuationIdentity: string;
+  continuationVersion: number;
+  continuationNonce: string;
+};
+
+type SwanBotV2DispatchClaimConfirmation = SwanBotV2ContinuationIdentity & {
+  pending?: false;
+  dispatchClaimed: true;
+  continuationRunId: string;
+  dispatchClaimId: string;
+  idempotent?: boolean;
+  text?: undefined;
+  response?: undefined;
+};
+
+function exactSwanBotV2ContinuationUuid(value: unknown): string | null {
+  return typeof value === 'string'
+    && value.length === 36
+    && SWANBOT_V2_CONTINUATION_UUID_RE.test(value)
+    ? value.toLowerCase()
+    : null;
+}
+
+function parseSwanBotV2PendingContinuationIdentity(
+  response: V2Response,
+): SwanBotV2ContinuationIdentity | null {
+  if (!response.pending) return null;
+  const continuationIdentity = exactSwanBotV2ContinuationUuid(response.continuationIdentity);
+  const continuationNonce = exactSwanBotV2ContinuationUuid(response.continuationNonce);
+  if (
+    !continuationIdentity
+    || response.continuationVersion !== SWANBOT_V2_CONTINUATION_PROTOCOL_VERSION
+    || !continuationNonce
+  ) {
+    return null;
+  }
+  return {
+    continuationIdentity,
+    continuationVersion: SWANBOT_V2_CONTINUATION_PROTOCOL_VERSION,
+    continuationNonce,
+  };
+}
+
+function createSwanBotV2DispatchClaimId(): string | null {
+  try {
+    const cryptoApi = (globalThis as {
+      crypto?: { randomUUID?: () => string };
+    }).crypto;
+    return exactSwanBotV2ContinuationUuid(cryptoApi?.randomUUID?.());
+  } catch {
+    return null;
+  }
+}
+
+function isExactSwanBotV2DispatchClaimConfirmation(
+  response: V2Response | null,
+  expected: SwanBotV2DispatchClaimConfirmation,
+): boolean {
+  if (!response || response.pending === true || response.dispatchClaimed !== true) return false;
+  return response.continuationRunId === expected.continuationRunId
+    && exactSwanBotV2ContinuationUuid(response.continuationIdentity) === expected.continuationIdentity
+    && response.continuationVersion === expected.continuationVersion
+    && exactSwanBotV2ContinuationUuid(response.continuationNonce) === expected.continuationNonce
+    && exactSwanBotV2ContinuationUuid(response.dispatchClaimId) === expected.dispatchClaimId;
+}
+
 type V2Response =
   | {
       pending: true;
+      dispatchClaimed?: false;
       clientToolCalls: Array<{ id: string; name: string; input: unknown }>;
       continuationRunId: string;
+      continuationIdentity: string;
+      continuationVersion: number;
+      continuationNonce: string;
       text?: string;
       response?: string;
     }
+  | SwanBotV2DispatchClaimConfirmation
   | {
       pending?: false;
+      dispatchClaimed?: false;
       text?: string;
       response?: string;
+      cancelled?: boolean;
     };
 
-/** A 200-with-error-body from the v2 edge (e.g. `model_unsupported_on_v2`,
- *  `key_missing`). Distinct from a transport failure: the function RAN and
- *  chose to error — usually a permanent config problem, not a transient
- *  blip. #12: this must NOT count toward the session circuit breaker (which
- *  counts transport failures only), or one config error trips it and
- *  disables v2 for the whole session. Threaded out so the orchestrator can
- *  surface it (fail-visible) without incrementing the breaker. */
+// SWANBOT_V2_CLIENT_TERMINAL_CORE_START
+const SWANBOT_V2_CANCELLED_MESSAGE =
+  'Run cancelled by the user. No further actions were started. Any already-dispatched local action remains recorded and will not be replayed automatically.';
+
+function projectSwanBotV2TerminalResponse(
+  response: { cancelled?: unknown; text?: unknown; response?: unknown },
+  bodyError?: V2BodyError,
+): V2CallResult {
+  if (response.cancelled === true) {
+    // Never trust or surface a partial model tail as the cancellation result.
+    // A deterministic non-empty terminal copy also prevents the outer router
+    // from mistaking STOP for a transport failure and replaying through v1.
+    return {
+      text: SWANBOT_V2_CANCELLED_MESSAGE,
+      reachedEdgeTerminal: true,
+      cancelled: true,
+      ...(bodyError ? { bodyError } : {}),
+    };
+  }
+  const text = typeof response.text === 'string' && response.text
+    ? response.text
+    : typeof response.response === 'string' && response.response
+      ? response.response
+      : null;
+  return {
+    text,
+    reachedEdgeTerminal: true,
+    ...(bodyError ? { bodyError } : {}),
+  };
+}
+
+function classifySwanBotV2CallDisposition(
+  result: V2CallResult,
+): 'cancelled' | 'success' | 'body_error' | 'terminal_without_payload' | 'transport_failure' {
+  if (result.cancelled === true) return 'cancelled';
+  if (result.bodyError) return 'body_error';
+  if (result.text) return 'success';
+  if (result.reachedEdgeTerminal === true) return 'terminal_without_payload';
+  return 'transport_failure';
+}
+
+function shouldFallbackSwanBotV2ToV1(result: V2CallResult): boolean {
+  return classifySwanBotV2CallDisposition(result) === 'transport_failure';
+}
+// SWANBOT_V2_CLIENT_TERMINAL_CORE_END
+
+/** A structured error body from the v2 edge (e.g.
+ *  `model_unsupported_on_v2`, `key_missing`, or a non-replayable ambiguous
+ *  mutation). Distinct from a transport failure: the function RAN and chose
+ *  to stop. #12: this must NOT count toward the session circuit breaker
+ *  (which counts transport failures only), or one fail-closed edge decision
+ *  trips it and disables v2 for the whole session. Threaded out so the
+ *  orchestrator can surface it without falling through to v1. */
 type V2BodyError = { code?: string; message: string };
 
 function extractV2BodyError(data: any): V2BodyError | null {
@@ -1407,9 +1736,9 @@ function extractV2BodyError(data: any): V2BodyError | null {
 // outcome so `invokeSwanbotV2` can retry transient failures (S4): a 429 /
 // 5xx / network blip on a CONTINUATION call would otherwise discard the
 // whole in-flight turn (server work + already-executed client tools).
-// `onBodyError` (#12): a 200-with-error-body is reported to this sink so the
-// caller can distinguish it from a transport failure (both still resolve to
-// the same terminal `null` for the retry wrapper).
+// `onBodyError` (#12): a structured data or non-2xx response body is reported
+// to this sink so the caller can distinguish a deliberate edge stop from a
+// transport failure (both still resolve to terminal `null` for the wrapper).
 async function invokeSwanbotV2Once(
   accessToken: string,
   body: Record<string, unknown>,
@@ -1421,6 +1750,14 @@ async function invokeSwanbotV2Once(
   });
   if (error) {
     const retryable = isRetryableInvokeError(error);
+    if (!retryable) {
+      // supabase-js returns non-2xx edge responses as FunctionsHttpError with
+      // `data: null`; recover the stable public `{ error, code }` body so a
+      // fail-closed 4xx (especially post-mutation outcome-unknown) cannot be
+      // mistaken for transport failure and replayed through v1.
+      const httpBodyError = await readSwanBotInvokeErrorBody(error);
+      if (httpBodyError) onBodyError?.(httpBodyError);
+    }
     console.warn(
       `[SwanBot/v2] invoke error${retryable ? ' (retryable)' : ''}:`,
       (error as any)?.message || String(error),
@@ -1430,8 +1767,8 @@ async function invokeSwanbotV2Once(
   const bodyError = extractV2BodyError(data);
   if (bodyError) {
     // The function ran and chose to error — retrying won't change the result.
-    // Report it distinctly (config error, not transport) then resolve
-    // terminally: the retry wrapper still sees a non-retryable failure.
+    // Report it distinctly (edge stop, not transport), then resolve
+    // terminally: the retry wrapper sees a non-retryable failure.
     console.warn('[SwanBot/v2] edge returned error:', data.error);
     onBodyError?.(bodyError);
     return { ok: false, retryable: false };
@@ -1456,10 +1793,25 @@ async function invokeSwanbotV2(
 // Dispatch client-delegated tool calls against the local bridge. Every
 // returned `{ tool_use_id, content, is_error? }` gets forwarded to the
 // edge fn as the next `tool_result` content block.
+type SwanBotV2EdgeClientToolContext = {
+  circleId: string;
+  userId: string;
+  runId: string;
+  iteration?: number;
+  toolApprovalGate?: SwanbotV2ClientLoopContext['toolApprovalGate'];
+  userConstraints?: SwanbotV2ClientLoopContext['userConstraints'];
+  alwaysConfirmFloor?: SwanbotV2ClientLoopContext['alwaysConfirmFloor'];
+};
+
 async function executeClientToolCalls(
   calls: Array<{ id: string; name: string; input: unknown }>,
-  context?: { circleId: string; userId: string; runId: string },
-): Promise<Array<{ tool_use_id: string; content: string; is_error?: boolean }>> {
+  context?: SwanBotV2EdgeClientToolContext,
+): Promise<Array<{
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+  receipt_metadata?: SwanBotClientToolReceiptMetadata;
+}>> {
   if (calls.length === 0) return [];
   const bridge = await import('./desktopBridge');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
@@ -1506,13 +1858,91 @@ async function executeClientToolCalls(
     return buildToolFailureFeedbackJson(toolName, serializedEnvelope, replayNote);
   };
 
+  const buildPreDispatchBlockResult = (
+    call: { id: string; name: string },
+    reason: string,
+  ): {
+    tool_use_id: string;
+    content: string;
+    is_error: true;
+  } => ({
+    tool_use_id: call.id,
+    content: appendAppActionVerificationGate(
+      serializeSwanBotClientToolResult({ ok: false, error: reason }),
+      call.name,
+      'error',
+    ),
+    is_error: true,
+  });
+
   // One call's full dispatch (bridge call + a11y cache + recording observer +
   // verification-gate framing), unchanged from the legacy loop body.
   const runOne = async (
     call: { id: string; name: string; input: unknown },
-  ): Promise<{ tool_use_id: string; content: string; is_error?: boolean }> => {
+  ): Promise<{
+    tool_use_id: string;
+    content: string;
+    is_error?: boolean;
+    receipt_metadata?: SwanBotClientToolReceiptMetadata;
+  }> => {
     try {
-      const result = await dispatchOneClientTool(bridge, call, context);
+      const authorization = await authorizeSwanbotV2EdgeClientToolCall(
+        {
+          userConstraints: context?.userConstraints || null,
+          alwaysConfirmFloor: context?.alwaysConfirmFloor || [],
+          toolApprovalGate: context?.toolApprovalGate,
+        },
+        {
+          toolName: call.name,
+          toolUseId: call.id,
+          input: call.input,
+          iteration: context?.iteration || 1,
+        },
+      );
+      if (!authorization.allowed) {
+        return buildPreDispatchBlockResult(
+          call,
+          authorization.reason,
+        );
+      }
+
+      const directMutationReceipt =
+        createDirectClientMutationReceiptTracker(call.name);
+      if (
+        DIRECT_CLIENT_MUTATION_TOOL_NAMES.has(call.name)
+        && !directMutationReceipt
+      ) {
+        return buildPreDispatchBlockResult(
+          call,
+          'A cryptographically strong mutation receipt was unavailable, so the client mutation was not dispatched.',
+        );
+      }
+      const result = await dispatchOneClientTool(
+        bridge,
+        call,
+        context,
+        directMutationReceipt?.markDispatched,
+      );
+      if (
+        result.ok
+        && directMutationReceipt
+        && hasAcceptedDirectClientMutationProof(
+          call.name,
+          call.input,
+          result.data,
+        )
+      ) {
+        directMutationReceipt.markVerified();
+      }
+      const runtimeReceiptProjection = result.receipt_metadata
+        ? { receipt_metadata: result.receipt_metadata }
+        : {};
+      const directReceiptMetadata = directMutationReceipt?.getMetadata();
+      const durableReceiptProjection = result.receipt_metadata
+        ? runtimeReceiptProjection
+        : directReceiptMetadata
+          ? { receipt_metadata: directReceiptMetadata }
+          : {};
       // UC-4: cache the last-read a11y tree so an immediately-following
       // semantic AX write/click can be tagged with the element's role +
       // label at record time. Scoped to globalThis so the standalone
@@ -1554,6 +1984,10 @@ async function executeClientToolCalls(
           result.ok ? 'success' : 'error',
         ),
         is_error: !result.ok,
+        // Durable-only side channel. The edge re-sanitizes and correlates this
+        // to the exact pending tool call; it is deliberately never serialized
+        // into model-visible `content`.
+        ...durableReceiptProjection,
       };
     } catch (err: any) {
       return {
@@ -1573,8 +2007,18 @@ async function executeClientToolCalls(
   // any write/unknown call stays a serial singleton, and group order is the
   // original call order — so write ordering is byte-for-byte preserved.
   // The partitioner is pure + smoke-pinned (clientToolBatchCore).
-  const { groups } = partitionClientToolBatch(calls);
-  const byId = new Map<string, { tool_use_id: string; content: string; is_error?: boolean }>();
+  const partition = partitionClientToolBatch(calls);
+  // A live approval surface is inherently sequential: concurrent prompts can
+  // reorder decisions and make it unclear which exact call the user reviewed.
+  const groups = context?.toolApprovalGate
+    ? partition.groups.flat().map((call) => [call])
+    : partition.groups;
+  const byId = new Map<string, {
+    tool_use_id: string;
+    content: string;
+    is_error?: boolean;
+    receipt_metadata?: SwanBotClientToolReceiptMetadata;
+  }>();
   for (const group of groups) {
     // Live progress label so the user sees "Reading the screen…" / "Running
     // tests…" instead of a static spinner during a multi-tool loop.
@@ -1592,16 +2036,196 @@ async function executeClientToolCalls(
   }
   // Return in the ORIGINAL call order (edge fn matches tool_result by id, but
   // stable order keeps transcripts/telemetry faithful).
-  return calls.map((c) => byId.get(c.id)).filter(Boolean) as Array<{ tool_use_id: string; content: string; is_error?: boolean }>;
+  return calls.map((c) => byId.get(c.id)).filter(Boolean) as Array<{
+    tool_use_id: string;
+    content: string;
+    is_error?: boolean;
+    receipt_metadata?: SwanBotClientToolReceiptMetadata;
+  }>;
 }
+
+// SWANBOT_DIRECT_CLIENT_MUTATION_RECEIPT_CORE_START
+type SwanBotClientToolReceiptPrimitive = string | number | boolean | null;
+type SwanBotClientToolReceiptMetadata = {
+  mutationDispatchReceipt?: Record<string, SwanBotClientToolReceiptPrimitive>;
+  computerAppVerificationReceipt?: Record<string, SwanBotClientToolReceiptPrimitive>;
+};
+
+type SwanBotClientRuntimeDispatchResult = {
+  ok: boolean;
+  data?: unknown;
+  error?: string;
+  receipt_metadata?: SwanBotClientToolReceiptMetadata;
+};
+
+/**
+ * Client-delegated mutations that do not already pass through the canonical
+ * OpenSwan runtime receipt path. Their exact local/provider dispatcher calls
+ * `markDispatched` immediately before the first mutating operation. Validation
+ * and approval failures return before that boundary and therefore remain
+ * truthful no-dispatch failures.
+ */
+const DIRECT_CLIENT_MUTATION_TOOL_NAMES = new Set([
+  'workspace.create_room',
+  'workspace.apply_artifacts',
+  'workspace.open_preview',
+  'wp.upload_media',
+  'wp.create_slide',
+  'wp.update_post',
+  'wp.trash_post',
+]);
+
+type DirectClientMutationReceiptTracker = {
+  markDispatched: () => boolean;
+  markVerified: () => void;
+  getMetadata: () => SwanBotClientToolReceiptMetadata | undefined;
+};
+
+function createDirectClientMutationReceiptTracker(
+  toolName: string,
+  testClock?: {
+    createId: () => string | null;
+    nowIso: () => string;
+  },
+): DirectClientMutationReceiptTracker | null {
+  if (!DIRECT_CLIENT_MUTATION_TOOL_NAMES.has(toolName)) return null;
+  const createId = testClock?.createId || createSwanBotV2DispatchClaimId;
+  const nowIso = testClock?.nowIso || (() => new Date().toISOString());
+  const actionId = createId();
+  const epochId = createId();
+  if (!actionId || !epochId) return null;
+  const authorizedAt = nowIso();
+  let dispatchedAt: string | null = null;
+  let verification: Record<string, SwanBotClientToolReceiptPrimitive> | undefined;
+  return {
+    markDispatched: () => {
+      if (!dispatchedAt) dispatchedAt = nowIso();
+      return true;
+    },
+    markVerified: () => {
+      if (!dispatchedAt) return;
+      const afterEpochId = createId();
+      if (!afterEpochId) return;
+      verification = {
+        schemaVersion: 1,
+        actionId,
+        beforeEpochId: epochId,
+        afterEpochId,
+        status: 'verified',
+        checkedAt: nowIso(),
+        canComplete: true,
+        evidenceCount: 1,
+        blockerCount: 0,
+      };
+    },
+    getMetadata: () => {
+      if (!dispatchedAt) return undefined;
+      return {
+        mutationDispatchReceipt: {
+          schemaVersion: 1,
+          actionId,
+          tool: toolName,
+          epochId,
+          authorizedAt,
+          dispatchedAt,
+        },
+        ...(verification
+          ? { computerAppVerificationReceipt: verification }
+          : {}),
+      };
+    },
+  };
+}
+
+/**
+ * A direct provider/database acknowledgement is accepted only when it carries
+ * a concrete identity/state produced by that exact operation. A generic
+ * `ok:true`, zero-change acknowledgement, or identity from another target is
+ * never promoted to verified completion.
+ */
+function hasAcceptedDirectClientMutationProof(
+  toolName: string,
+  input: unknown,
+  data: unknown,
+): boolean {
+  const exactInput = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, any>
+    : {};
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const row = data as Record<string, any>;
+  if (toolName === 'workspace.create_room') {
+    return typeof row.roomId === 'string'
+      && row.roomId.length > 0
+      && Number.isInteger(row.fileCount)
+      && row.fileCount > 0
+      && typeof row.primaryFileId === 'string'
+      && row.primaryFileId.length > 0;
+  }
+  if (toolName === 'workspace.apply_artifacts') {
+    const requestedRoomId = String(exactInput.roomId || '').trim();
+    return requestedRoomId.length > 0
+      && row.roomId === requestedRoomId
+      && Number.isInteger(row.fileCount)
+      && row.fileCount > 0
+      && typeof row.primaryFileId === 'string'
+      && row.primaryFileId.length > 0;
+  }
+  if (toolName === 'wp.upload_media') {
+    const requestedFileName = String(exactInput.fileName || '').trim();
+    return requestedFileName.length > 0
+      && row.fileName === requestedFileName
+      && Number.isInteger(row.id)
+      && row.id > 0
+      && typeof row.source_url === 'string'
+      && /^https?:\/\//i.test(row.source_url);
+  }
+  if (toolName === 'wp.create_slide') {
+    const requestedStatus = exactInput.status === 'publish' ? 'publish' : 'draft';
+    return Number.isInteger(row.media?.id)
+      && row.media.id > 0
+      && typeof row.media?.source_url === 'string'
+      && /^https?:\/\//i.test(row.media.source_url)
+      && Number.isInteger(row.slide?.id)
+      && row.slide.id > 0
+      && row.slide.status === requestedStatus;
+  }
+  if (toolName === 'wp.update_post') {
+    const requestedPostId = Number(exactInput.postId);
+    const requestedStatus = typeof exactInput.status === 'string'
+      ? exactInput.status
+      : null;
+    return Number.isFinite(requestedPostId)
+      && requestedPostId > 0
+      && Number.isInteger(row.post?.id)
+      && row.post.id === requestedPostId
+      && typeof row.post?.status === 'string'
+      && row.post.status.length > 0
+      && (!requestedStatus || row.post.status === requestedStatus);
+  }
+  if (toolName === 'wp.trash_post') {
+    const requestedPostId = Number(exactInput.postId);
+    return Number.isFinite(requestedPostId)
+      && requestedPostId > 0
+      && Number.isInteger(row.post?.id)
+      && row.post.id === requestedPostId
+      // normalizeWordPressTrashPostMutation rejects force-delete. The only
+      // accepted after-state is therefore a restorable WordPress trash state.
+      && row.post.status === 'trash';
+  }
+  // workspace.open_preview has no independent after-observation yet.
+  return false;
+}
+// SWANBOT_DIRECT_CLIENT_MUTATION_RECEIPT_CORE_END
 
 async function dispatchOneClientTool(
   bridge: typeof import('./desktopBridge'),
   call: { id: string; name: string; input: unknown },
-  context?: { circleId: string; userId: string; runId: string },
-): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  context?: SwanBotV2EdgeClientToolContext,
+  markDirectMutationDispatched?: () => boolean,
+): Promise<SwanBotClientRuntimeDispatchResult> {
   const input = (call.input || {}) as Record<string, any>;
-  // Coding-agent tools (P1–P6 v2 parity): routed through the SAME runtime
+  // Runtime-gateway tools (coding-agent parity plus every client-delegated
+  // browser/desktop mutation): routed through the SAME runtime
   // chokepoint the typed loop uses (executeOpenSwanRuntimeTool → constraint
   // floor + args-aware approval + coordination leases) instead of duplicating
   // gates here. Intercepted BEFORE the desktop dispatcher so desktop.edit_file
@@ -1615,6 +2239,32 @@ async function dispatchOneClientTool(
     case 'codebase.search':
     case 'todo.write':
     case 'coordination.file_status':
+    case 'browser.open_url':
+    case 'browser.fill_field':
+    case 'browser.fill_credential_field':
+    case 'browser.set_toggle':
+    case 'browser.select_option':
+    case 'browser.click_role':
+    case 'browser.press_key':
+    case 'desktop.launch_app':
+    case 'desktop.focus_app':
+    case 'desktop.type_text':
+    case 'desktop.paste_text':
+    case 'desktop.press_keys':
+    case 'desktop.menu_click':
+    case 'desktop.run_applescript':
+    case 'desktop.convert_image':
+    case 'desktop.open_url':
+    case 'desktop.open_path':
+    case 'desktop.click_at':
+    case 'desktop.mouse_move':
+    case 'desktop.mouse_click':
+    case 'desktop.mouse_down':
+    case 'desktop.mouse_up':
+    case 'desktop.mouse_drag':
+    case 'desktop.mouse_scroll':
+    case 'desktop.click_element':
+    case 'desktop.set_element_value':
       return dispatchCodingClientTool(call, context);
   }
   const desktopResult = await dispatchSwanBotDesktopClientTool(bridge, call);
@@ -1643,11 +2293,11 @@ async function dispatchOneClientTool(
 
     // ── M3c: workspace + verification ─────────────────────────────────
     case 'workspace.create_room':
-      return dispatchWorkspaceCreateRoom(input);
+      return dispatchWorkspaceCreateRoom(input, markDirectMutationDispatched);
     case 'workspace.apply_artifacts':
-      return dispatchWorkspaceApplyArtifacts(input);
+      return dispatchWorkspaceApplyArtifacts(input, markDirectMutationDispatched);
     case 'workspace.open_preview':
-      return dispatchWorkspaceOpenPreview(input);
+      return dispatchWorkspaceOpenPreview(input, markDirectMutationDispatched);
     case 'verification.typecheck':
     case 'verification.tests':
     case 'verification.lint':
@@ -1663,13 +2313,13 @@ async function dispatchOneClientTool(
     case 'wp.list_posts':
       return dispatchWpListPosts(input);
     case 'wp.upload_media':
-      return withSwanBotClientWordPressApproval(call.name, input, context, () => dispatchWpUploadMedia(input));
+      return withSwanBotClientWordPressApproval(call.name, input, context, call.id, () => dispatchWpUploadMedia(input, markDirectMutationDispatched));
     case 'wp.create_slide':
-      return withSwanBotClientWordPressApproval(call.name, input, context, () => dispatchWpCreateSlide(input));
+      return withSwanBotClientWordPressApproval(call.name, input, context, call.id, () => dispatchWpCreateSlide(input, markDirectMutationDispatched));
     case 'wp.update_post':
-      return withSwanBotClientWordPressApproval(call.name, input, context, () => dispatchWpUpdatePost(input));
+      return withSwanBotClientWordPressApproval(call.name, input, context, call.id, () => dispatchWpUpdatePost(input, markDirectMutationDispatched));
     case 'wp.trash_post':
-      return withSwanBotClientWordPressApproval(call.name, input, context, () => dispatchWpTrashPost(input));
+      return withSwanBotClientWordPressApproval(call.name, input, context, call.id, () => dispatchWpTrashPost(input, markDirectMutationDispatched));
 
     default:
       return { ok: false, error: `Unknown client tool "${call.name}"` };
@@ -1677,7 +2327,8 @@ async function dispatchOneClientTool(
 }
 
 /**
- * Coding-agent client tools (v2 parity) run through the runtime chokepoint,
+ * Selected client tools (coding-agent parity and sealed browser mutations)
+ * run through the runtime chokepoint,
  * so read-classified shell/git commands auto-pass, mutations file an
  * `agent_run_approvals` row against the continuation run (same table the WP
  * gate uses), blocked commands are refused, and desktop.edit_file gets the
@@ -1686,8 +2337,8 @@ async function dispatchOneClientTool(
  */
 async function dispatchCodingClientTool(
   call: { id: string; name: string; input: unknown },
-  context?: { circleId: string; userId: string; runId: string },
-): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  context?: SwanBotV2EdgeClientToolContext,
+): Promise<SwanBotClientRuntimeDispatchResult> {
   try {
     const runtime = await import('./openswanToolRuntime');
     const result = await runtime.executeOpenSwanRuntimeTool(
@@ -1698,12 +2349,65 @@ async function dispatchCodingClientTool(
         userId: context?.userId || '',
         runId: context?.runId || undefined,
         surface: 'main_chat',
+        toolName: call.name,
+        toolUseId: call.id,
+        iteration: context?.iteration,
+        // Keep both non-erasable turn policy inputs attached at the final
+        // runtime chokepoint. `userConstraints` is enforced there today;
+        // `alwaysConfirmFloor` also remains available to the runtime context
+        // instead of being discarded between exact review and dispatch.
+        userConstraints: context?.userConstraints || null,
+        alwaysConfirmFloor: context?.alwaysConfirmFloor || [],
       } as never,
     );
-    const r = result as { ok?: boolean; resultsText?: string };
+    const split = runtime.splitOpenSwanRuntimeToolResultMetadata(result);
+    const r = split.raw as {
+      ok?: boolean;
+      resultsText?: string;
+      completionVerified?: boolean;
+      outcomeUnknown?: boolean;
+      proof?: unknown;
+    };
+    const { sanitizeToolResultMetadataForPersistence } = await import('./agentRunPersistence');
+    const persistedMetadata = sanitizeToolResultMetadataForPersistence(split.metadata);
+    const receiptMetadata: SwanBotClientToolReceiptMetadata | undefined = persistedMetadata
+      ? {
+          ...(persistedMetadata.mutationDispatchReceipt
+            ? { mutationDispatchReceipt: persistedMetadata.mutationDispatchReceipt }
+            : {}),
+          ...(persistedMetadata.computerAppVerificationReceipt
+            ? { computerAppVerificationReceipt: persistedMetadata.computerAppVerificationReceipt }
+            : {}),
+        }
+      : undefined;
     const text = typeof r.resultsText === 'string' ? r.resultsText : '';
-    if (r.ok === false) return { ok: false, error: text || `${call.name} failed` };
-    return { ok: true, data: { parts: chunkSwanBotClientToolText(text || `${call.name} ok`) } };
+    if (r.ok === false) {
+      return {
+        ok: false,
+        error: text || `${call.name} failed`,
+        ...(receiptMetadata && Object.keys(receiptMetadata).length > 0
+          ? { receipt_metadata: receiptMetadata }
+          : {}),
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        parts: chunkSwanBotClientToolText(text || `${call.name} ok`),
+        ...(typeof r.completionVerified === 'boolean'
+          ? { completionVerified: r.completionVerified }
+          : {}),
+        ...(typeof r.outcomeUnknown === 'boolean'
+          ? { outcomeUnknown: r.outcomeUnknown }
+          : {}),
+        ...(r.proof && typeof r.proof === 'object' && !Array.isArray(r.proof)
+          ? { proof: r.proof }
+          : {}),
+      },
+      ...(receiptMetadata && Object.keys(receiptMetadata).length > 0
+        ? { receipt_metadata: receiptMetadata }
+        : {}),
+    };
   } catch (err: any) {
     return { ok: false, error: err?.message || String(err) };
   }
@@ -1735,6 +2439,8 @@ type SwanBotClientToolApprovalContext = {
   circleId: string;
   userId: string;
   runId: string;
+  toolUseId: string;
+  iteration: number;
 };
 
 const SWANBOT_CLIENT_WP_MUTATION_TOOLS = new Set([
@@ -1748,57 +2454,383 @@ function isSwanBotClientWpMutationTool(tool: string): boolean {
   return SWANBOT_CLIENT_WP_MUTATION_TOOLS.has(tool);
 }
 
+const SWANBOT_APPROVAL_METADATA_ARG_KEYS = new Set([
+  'approvalId',
+  'approval_id',
+  'approvalKey',
+  'approvalRunId',
+  'approvalReceipt',
+  'approvalSchemaVersion',
+  'authorityBindingDigest',
+  'dispatchBindingDigest',
+  'dispatchConsumedAt',
+  'toolApprovalDigest',
+  'toolApprovalKey',
+  'toolApprovalKeyVersion',
+]);
+
 function buildSwanBotClientToolApprovalArgs(input: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input || {})) {
-    if (key === 'approvalId' || key === 'approval_id' || key === 'toolApprovalKey' || key === 'approvalKey') continue;
+    if (SWANBOT_APPROVAL_METADATA_ARG_KEYS.has(key)) continue;
     out[key] = value;
   }
   return out;
 }
+
+function buildSwanBotApprovalCallIdentity(
+  tool: string,
+  context: SwanBotClientToolApprovalContext,
+): OpenSwanRuntimeApprovalCallIdentity | null {
+  const identity: OpenSwanRuntimeApprovalCallIdentity = {
+    userId: context.userId,
+    circleId: context.circleId,
+    runId: context.runId,
+    toolName: tool,
+    toolUseId: context.toolUseId,
+    iteration: context.iteration,
+  };
+  return isOpenSwanRuntimeApprovalCallIdentity(identity) ? identity : null;
+}
+
+async function hasAuthenticatedPersistedSwanBotApprovalCall(
+  tool: string,
+  context: SwanBotClientToolApprovalContext,
+): Promise<boolean> {
+  if (!buildSwanBotApprovalCallIdentity(tool, context)) return false;
+  return hasAuthenticatedPersistedSwanBotRun(context.runId, context);
+}
+
+async function hasAuthenticatedPersistedSwanBotRun(
+  runId: string,
+  context: SwanBotClientToolApprovalContext,
+): Promise<boolean> {
+  if (!runId) return false;
+  try {
+    const auth = await supabase.auth.getUser();
+    if (auth.error || !auth.data.user || auth.data.user.id !== context.userId) {
+      return false;
+    }
+    const { data, error } = await supabase
+      .from('agent_runs')
+      .select('id,user_id,circle_id')
+      .eq('id', runId)
+      .eq('user_id', context.userId)
+      .eq('circle_id', context.circleId)
+      .maybeSingle();
+    if (error || !data) return false;
+    const row = data as {
+      id?: string | null;
+      user_id?: string | null;
+      circle_id?: string | null;
+    };
+    return (
+      row.id === runId
+      && row.user_id === context.userId
+      && row.circle_id === context.circleId
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exchange one approved SwanBot intent for one exact provider-call receipt.
+ * The payload update is the single-use CAS: only the first current-user,
+ * current-circle, exact-digest consumer can stamp `dispatchBindingDigest`.
+ * Raw tool arguments stay ephemeral and are never persisted.
+ */
+async function consumeSwanBotApprovalAuthority(input: {
+  authority: OpenSwanRuntimeApprovalAuthority;
+  source: OpenSwanRuntimeApprovalReceipt['source'];
+  tool: string;
+  args: Record<string, unknown>;
+  context: SwanBotClientToolApprovalContext;
+}): Promise<OpenSwanRuntimeApprovalReceipt | null> {
+  const identity = buildSwanBotApprovalCallIdentity(input.tool, input.context);
+  const row = input.authority.row;
+  const payload = row.payload;
+  const approvalRunId = typeof row.run_id === 'string' ? row.run_id : '';
+  const approvalRunAuthorized = approvalRunId
+    ? input.source !== 'cross_run'
+      || await hasAuthenticatedPersistedSwanBotRun(approvalRunId, input.context)
+    : false;
+  if (
+    !identity
+    || !(await hasAuthenticatedPersistedSwanBotApprovalCall(input.tool, input.context))
+    || !approvalRunAuthorized
+    || !isOpenSwanApprovalAuditPayload(payload)
+    || row.circle_id !== input.context.circleId
+    || row.requested_by !== input.context.userId
+    || !row.run_id
+    || (
+      input.source === 'cross_run'
+        ? row.run_id === input.context.runId
+        : row.run_id !== input.context.runId
+    )
+  ) {
+    return null;
+  }
+
+  const exactDigest = await buildOpenSwanToolApprovalDigest(input.tool, input.args);
+  if (!exactDigest || exactDigest !== input.authority.approvalDigest) return null;
+  const approvalKey = buildOpenSwanToolApprovalKey(input.tool, input.args);
+  const authorityBindingDigest = await buildOpenSwanApprovalAuthorityBindingDigest({
+    approvalId: input.authority.approvalId,
+    approvalRunId,
+    approvalDigest: exactDigest,
+    status: input.authority.status,
+    source: input.source,
+    identity,
+  });
+  if (!authorityBindingDigest) return null;
+
+  const safePayload = payload as Record<string, unknown>;
+  const consumedAt = new Date().toISOString();
+  const consumedPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: input.tool,
+    approvalDigest: exactDigest,
+    policyFamily: String(safePayload.policyFamily || ''),
+    approvalMode: safePayload.approvalMode === 'auto' ? 'auto' : 'ask',
+    mutatesState: safePayload.mutatesState === true,
+    externalSideEffect: safePayload.externalSideEffect === true,
+    autoApproveCategory: typeof safePayload.autoApproveCategory === 'string'
+      ? safePayload.autoApproveCategory
+      : null,
+    floorCategory: typeof safePayload.floorCategory === 'string'
+      ? safePayload.floorCategory
+      : null,
+    dispatchBindingDigest: authorityBindingDigest,
+    dispatchConsumedAt: consumedAt,
+  });
+  const requestedAtMs = Date.parse(String(row.requested_at || ''));
+  const timeoutSeconds = Number(row.timeout_seconds);
+  if (
+    !consumedPayload
+    || !Number.isFinite(requestedAtMs)
+    || !Number.isFinite(timeoutSeconds)
+    || timeoutSeconds < 1
+    || timeoutSeconds > 86_400
+  ) {
+    return null;
+  }
+
+  const expiryCutoff = new Date(Date.now() - timeoutSeconds * 1_000).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from('agent_run_approvals')
+      .update({ payload: consumedPayload })
+      .eq('id', input.authority.approvalId)
+      .eq('run_id', row.run_id)
+      .eq('circle_id', input.context.circleId)
+      .eq('requested_by', input.context.userId)
+      .eq('status', input.authority.status)
+      .eq('payload->>approvalSchemaVersion', '2')
+      .eq('payload->>toolName', input.tool)
+      .eq('payload->>toolApprovalDigest', exactDigest)
+      .is('payload->>dispatchBindingDigest', null)
+      .gt('requested_at', expiryCutoff)
+      .select('id');
+    if (error || !Array.isArray(data) || data.length !== 1) return null;
+    return createOpenSwanRuntimeApprovalReceipt({
+      approvalId: input.authority.approvalId,
+      approvalRunId,
+      approvalKey,
+      approvalDigest: exactDigest,
+      authorityBindingDigest,
+      status: input.authority.status,
+      source: input.source,
+      consumedAt,
+      identity,
+    });
+  } catch {
+    return null;
+  }
+}
+
+type SwanBotApprovalGateOutcome =
+  | { kind: 'allowed'; receipt: OpenSwanRuntimeApprovalReceipt }
+  | { kind: 'pending'; approvalId: string; created: boolean }
+  | { kind: 'blocked'; approvalId?: string; reason: string };
 
 /**
  * approval-resume: cross-run approval honor. Each chat turn creates a NEW
  * agent run, so an approval the user grants AFTER a turn ends (e.g. via
  * RunApprovalBanner) lives on the previous run's row — the run-scoped
  * lookups in the two resolvers below can never see it, and the retry turn
- * would ask again. Deliberately narrow: same circle, same title, already
- * approved/auto_approved, requested within the last 15 minutes, honored
- * ONLY on an exact toolApprovalKey match. Pending/rejected rows from other
- * runs are never honored. Fail-closed: errors fall back to the ask flow.
+ * would ask again. Deliberately narrow: same authenticated user + circle,
+ * exact v2 digest, a genuinely different persisted run, and a still-live
+ * approved/auto-approved row from the last 15 minutes. The source row is
+ * consumed atomically before dispatch; lookup errors and malformed/legacy
+ * rows fail closed.
  */
 async function findCrossRunApprovedToolPass(
-  circleId: string,
-  title: string,
-  tool: string,
-  args: Record<string, unknown>,
-): Promise<string | null> {
+  input: {
+    title: string;
+    tool: string;
+    args: Record<string, unknown>;
+    approvalDigest: string;
+    context: SwanBotClientToolApprovalContext;
+  },
+): Promise<SwanBotApprovalGateOutcome | { kind: 'none' }> {
   try {
     const { data, error } = await supabase
       .from('agent_run_approvals')
-      .select('id,status,payload')
-      .eq('circle_id', circleId)
-      .eq('title', title)
-      .in('status', ['approved', 'auto_approved'])
+      .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
+      .eq('circle_id', input.context.circleId)
+      .eq('requested_by', input.context.userId)
+      .eq('title', input.title)
+      .in('status', ['approved', 'auto_approved', 'expired'])
       .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString())
       .order('requested_at', { ascending: false })
       .limit(8);
-    if (error || !Array.isArray(data)) return null;
-    const key = buildOpenSwanToolApprovalKey(tool, args);
-    for (const row of data as OpenSwanRuntimeApprovalRow[]) {
-      const status = String(row.status || '').toLowerCase();
-      if (status !== 'approved' && status !== 'auto_approved') continue;
-      const payloadKey = row.payload && typeof row.payload === 'object'
-        ? (row.payload as Record<string, unknown>).toolApprovalKey
-        : null;
-      if (typeof payloadKey === 'string' && payloadKey === key) {
-        return String(row.id || '') || null;
-      }
+    if (error || !Array.isArray(data)) {
+      return { kind: 'blocked', reason: 'Cross-run approval lookup failed closed.' };
     }
-    return null;
+    const decision = resolveOpenSwanRuntimeApprovalDecision({
+      tool: input.tool,
+      approvalDigest: input.approvalDigest,
+      rows: data as OpenSwanRuntimeApprovalRow[],
+    });
+    if (decision.kind === 'new') return { kind: 'none' };
+    if (decision.kind !== 'pass') {
+      return {
+        kind: 'blocked',
+        approvalId: decision.approvalId,
+        reason: decision.message,
+      };
+    }
+    if (decision.authority.row.run_id === input.context.runId) {
+      return {
+        kind: 'blocked',
+        approvalId: decision.authority.approvalId,
+        reason: 'Approval was not valid cross-run authority.',
+      };
+    }
+    const receipt = await consumeSwanBotApprovalAuthority({
+      authority: decision.authority,
+      source: 'cross_run',
+      tool: input.tool,
+      args: input.args,
+      context: input.context,
+    });
+    return receipt
+      ? { kind: 'allowed', receipt }
+      : {
+          kind: 'blocked',
+          approvalId: decision.authority.approvalId,
+          reason: 'Approval authority could not be atomically consumed.',
+        };
   } catch {
-    return null;
+    return { kind: 'blocked', reason: 'Cross-run approval lookup failed closed.' };
   }
+}
+
+async function requestOrConsumeSwanBotApproval(input: {
+  tool: string;
+  args: Record<string, unknown>;
+  context: SwanBotClientToolApprovalContext;
+  title: string;
+  approvalKind: 'publish' | 'privileged_action';
+  description: string;
+  policyFamily: 'wordpress' | 'always_confirm_floor';
+  floorCategory?: string;
+}): Promise<SwanBotApprovalGateOutcome> {
+  if (!(await hasAuthenticatedPersistedSwanBotApprovalCall(input.tool, input.context))) {
+    return {
+      kind: 'blocked',
+      reason: 'Authenticated persisted run and exact provider-call identity were unavailable.',
+    };
+  }
+  const approvalDigest = await buildOpenSwanToolApprovalDigest(input.tool, input.args);
+  if (!approvalDigest) {
+    return { kind: 'blocked', reason: 'Exact SHA-256 approval binding failed.' };
+  }
+
+  const { data, error } = await supabase
+    .from('agent_run_approvals')
+    .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
+    .eq('run_id', input.context.runId)
+    .eq('circle_id', input.context.circleId)
+    .eq('requested_by', input.context.userId)
+    .eq('title', input.title)
+    .order('requested_at', { ascending: false })
+    .limit(8);
+  if (error || !Array.isArray(data)) {
+    return { kind: 'blocked', reason: 'Run-scoped approval lookup failed closed.' };
+  }
+
+  const decision = resolveOpenSwanRuntimeApprovalDecision({
+    tool: input.tool,
+    approvalDigest,
+    rows: data as OpenSwanRuntimeApprovalRow[],
+  });
+  if (decision.kind === 'pass') {
+    const receipt = await consumeSwanBotApprovalAuthority({
+      authority: decision.authority,
+      source: 'run_scoped',
+      tool: input.tool,
+      args: input.args,
+      context: input.context,
+    });
+    return receipt
+      ? { kind: 'allowed', receipt }
+      : {
+          kind: 'blocked',
+          approvalId: decision.authority.approvalId,
+          reason: 'Approval was already consumed or lost an atomic consume race.',
+        };
+  }
+  if (decision.kind === 'defer') {
+    return { kind: 'pending', approvalId: decision.approvalId, created: false };
+  }
+  if (decision.kind === 'block') {
+    return {
+      kind: 'blocked',
+      approvalId: decision.approvalId,
+      reason: decision.message,
+    };
+  }
+
+  const crossRun = await findCrossRunApprovedToolPass({
+    title: input.title,
+    tool: input.tool,
+    args: input.args,
+    approvalDigest,
+    context: input.context,
+  });
+  if (crossRun.kind !== 'none') return crossRun;
+
+  const payload = buildOpenSwanApprovalAuditPayload({
+    toolName: input.tool,
+    approvalDigest,
+    policyFamily: input.policyFamily,
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+    floorCategory: input.floorCategory || null,
+  });
+  if (!payload) {
+    return {
+      kind: 'blocked',
+      reason: 'Approval metadata could not be reduced to the safe v2 allowlist.',
+    };
+  }
+  const { requestRunApproval } = await import('./agentRunSystem');
+  const approval = await requestRunApproval({
+    runId: input.context.runId,
+    circleId: input.context.circleId,
+    approvalKind: input.approvalKind,
+    title: input.title,
+    description: input.description,
+    requestedBy: input.context.userId,
+    payload,
+  });
+  const approvalId = String(approval?.id || '');
+  if (!approvalId) {
+    return { kind: 'blocked', reason: 'Approval request could not be created.' };
+  }
+  return { kind: 'pending', approvalId, created: true };
 }
 
 async function resolveSwanBotClientToolApproval(input: {
@@ -1808,7 +2840,7 @@ async function resolveSwanBotClientToolApproval(input: {
 }): Promise<{ ok: true; approvalId: string } | { ok: false; error: string; approvalRequest?: { id: string; status: 'pending' } }> {
   if (!isSwanBotClientWpMutationTool(input.tool)) return { ok: true, approvalId: '' };
   const context = input.context;
-  if (!context?.circleId || !context.userId || !context.runId) {
+  if (!context) {
     return {
       ok: false,
       error: 'Approval required before WordPress changes can run. I could not verify the approval context, so I did not touch WordPress.',
@@ -1817,88 +2849,54 @@ async function resolveSwanBotClientToolApproval(input: {
 
   const args = buildSwanBotClientToolApprovalArgs(input.args);
   const title = `SwanBot approval required: ${input.tool}`;
-  const { data, error } = await supabase
-    .from('agent_run_approvals')
-    .select('id,status,payload')
-    .eq('run_id', context.runId)
-    .eq('circle_id', context.circleId)
-    .order('requested_at', { ascending: false })
-    .limit(20);
-
-  if (error) {
-    return {
-      ok: false,
-      error: 'Approval check failed before running the WordPress action. I did not touch WordPress.',
-    };
-  }
-
-  const decision = resolveOpenSwanRuntimeApprovalDecision({
+  const outcome = await requestOrConsumeSwanBotApproval({
     tool: input.tool,
     args,
-    rows: (data || []) as OpenSwanRuntimeApprovalRow[],
-  });
-  if (decision.kind === 'pass') return { ok: true, approvalId: decision.approvalId };
-  if (decision.kind === 'defer') {
-    return {
-      ok: false,
-      error: 'Approval is still pending for this WordPress action. I did not touch WordPress.',
-      approvalRequest: { id: decision.approvalId, status: 'pending' },
-    };
-  }
-  if (decision.kind === 'block') {
-    return {
-      ok: false,
-      error: 'This WordPress action was rejected. I did not touch WordPress.',
-    };
-  }
-
-  // decision.kind === 'new': before creating a fresh approval row, honor an
-  // exact-match approval the user granted on a PREVIOUS run in the last 15
-  // minutes (approve → retry turn actually resumes instead of re-asking).
-  const crossRunPassId = await findCrossRunApprovedToolPass(context.circleId, title, input.tool, args);
-  if (crossRunPassId) return { ok: true, approvalId: crossRunPassId };
-
-  const toolApprovalKey = buildOpenSwanToolApprovalKey(input.tool, args);
-  const { requestRunApproval } = await import('./agentRunSystem');
-  const approval = await requestRunApproval({
-    runId: context.runId,
-    circleId: context.circleId,
-    approvalKind: 'publish',
+    context,
     title,
+    approvalKind: 'publish',
     description: 'Review and approve this exact WordPress action before SwanBot runs it.',
-    requestedBy: context.userId,
-    payload: {
-      tool: input.tool,
-      args,
-      toolApprovalKey,
-      toolApprovalKeyVersion: 1,
-      policyFamily: 'wordpress',
-      approvalMode: 'ask',
-      mutatesState: true,
-      externalSideEffect: true,
-    },
+    policyFamily: 'wordpress',
   });
-
-  if (!approval) {
+  if (outcome.kind === 'allowed') {
+    return { ok: true, approvalId: outcome.receipt.approvalId };
+  }
+  if (outcome.kind === 'pending') {
     return {
       ok: false,
-      error: 'Approval is required, but I could not create the approval request. I did not touch WordPress.',
+      error: outcome.created
+        ? 'Approval requested for this WordPress action. I did not touch WordPress yet.'
+        : 'Approval is still pending for this WordPress action. I did not touch WordPress.',
+      approvalRequest: { id: outcome.approvalId, status: 'pending' },
     };
   }
   return {
     ok: false,
-    error: 'Approval requested for this WordPress action. I did not touch WordPress yet.',
-    approvalRequest: { id: approval.id, status: 'pending' },
+    error: 'This WordPress approval was rejected, expired, malformed, already used, or could not be atomically claimed. I did not touch WordPress. Request a fresh approval from the latest state.',
   };
 }
 
 async function withSwanBotClientWordPressApproval(
   tool: string,
   input: Record<string, any>,
-  context: SwanBotClientToolApprovalContext | undefined,
+  context: SwanBotV2EdgeClientToolContext | undefined,
+  toolUseId: string,
   dispatch: () => Promise<{ ok: boolean; data?: unknown; error?: string }>,
 ): Promise<{ ok: boolean; data?: unknown; error?: string }> {
-  const approval = await resolveSwanBotClientToolApproval({ tool, args: input, context });
+  const approvalContext = context && Number.isInteger(context.iteration)
+    ? {
+        circleId: context.circleId,
+        userId: context.userId,
+        runId: context.runId,
+        toolUseId,
+        iteration: Number(context.iteration),
+      }
+    : undefined;
+  const approval = await resolveSwanBotClientToolApproval({
+    tool,
+    args: input,
+    context: approvalContext,
+  });
   if (!approval.ok) {
     return {
       ok: false,
@@ -1927,13 +2925,15 @@ async function withSwanBotClientWordPressApproval(
 // approval for this exact (tool,args), and if none exists yet, create a pending
 // one. The loop then feeds a "not performed, approval pending" tool_result and
 // skips dispatch, so a later round (after the user approves) can proceed. Keyed
-// on the same `agent_run_approvals` machinery so an approval granted once is
-// honored on the retry via `resolveOpenSwanRuntimeApprovalDecision`.
+// on the same `agent_run_approvals` machinery; a grant is SHA-bound to exact
+// arguments and atomically consumed for exactly one provider tool-use identity.
 
 type SwanBotFloorApprovalContext = {
   circleId?: string;
   userId?: string;
   runId?: string;
+  toolUseId?: string;
+  iteration?: number;
 };
 
 async function resolveSwanBotFloorApproval(input: {
@@ -1943,85 +2943,52 @@ async function resolveSwanBotFloorApproval(input: {
   context: SwanBotFloorApprovalContext;
 }): Promise<{ passed: true } | { passed: false; message: string; approvalId?: string }> {
   const { context } = input;
-  // Fail closed: without a run context we cannot record/track an approval, so
-  // the floored action must NOT run.
-  if (!context.circleId || !context.userId || !context.runId) {
+  // Fail closed: a floor grant needs the authenticated persisted run plus the
+  // exact provider tool-use identity that will consume it.
+  if (
+    !context.circleId
+    || !context.userId
+    || !context.runId
+    || !context.toolUseId
+    || !Number.isInteger(context.iteration)
+  ) {
     return {
       passed: false,
-      message: `Always-confirm floor: "${input.category}" actions require explicit user confirmation, but no approval context was available — the action was not performed. Ask the user to confirm before retrying.`,
+      message: `Always-confirm floor: "${input.category}" actions require explicit user confirmation, but authenticated persisted run and exact provider-call identity were unavailable — the action was not performed. Ask the user to confirm before retrying.`,
     };
   }
   const args = buildSwanBotClientToolApprovalArgs(input.args);
   const title = `SwanBot approval required: ${input.tool}`;
-  const { data, error } = await supabase
-    .from('agent_run_approvals')
-    .select('id,status,payload')
-    .eq('run_id', context.runId)
-    .eq('circle_id', context.circleId)
-    .order('requested_at', { ascending: false })
-    .limit(20);
-  if (error) {
-    return {
-      passed: false,
-      message: `Always-confirm floor: approval lookup failed for "${input.tool}" — the ${input.category} action was not performed.`,
-    };
-  }
-  const decision = resolveOpenSwanRuntimeApprovalDecision({
+  const outcome = await requestOrConsumeSwanBotApproval({
     tool: input.tool,
     args,
-    rows: (data || []) as OpenSwanRuntimeApprovalRow[],
-  });
-  if (decision.kind === 'pass') return { passed: true };
-  if (decision.kind === 'defer') {
-    return {
-      passed: false,
-      message: `Always-confirm floor: approval is still pending for this ${input.category} action ("${input.tool}"). It was not performed. Wait for the user's decision.`,
-      approvalId: decision.approvalId,
-    };
-  }
-  if (decision.kind === 'block') {
-    return {
-      passed: false,
-      message: `The user rejected this ${input.category} action ("${input.tool}"). Do not retry it — choose a different approach or ask the user.`,
-      approvalId: decision.approvalId,
-    };
-  }
-  // decision.kind === 'new': before creating a fresh floor approval row, honor
-  // an exact-match approval the user granted on a PREVIOUS run in the last 15
-  // minutes (approve → retry turn actually resumes instead of re-asking).
-  const crossRunPassId = await findCrossRunApprovedToolPass(context.circleId, title, input.tool, args);
-  if (crossRunPassId) return { passed: true };
-  const toolApprovalKey = buildOpenSwanToolApprovalKey(input.tool, args);
-  const { requestRunApproval } = await import('./agentRunSystem');
-  const approval = await requestRunApproval({
-    runId: context.runId,
-    circleId: context.circleId,
-    approvalKind: input.category === 'pay' ? 'publish' : 'privileged_action',
-    title,
-    description: `Always-confirm floor (${input.category}): review and approve this exact action before SwanBot runs it. This confirmation is required in every autonomy mode.`,
-    requestedBy: context.userId,
-    payload: {
-      tool: input.tool,
-      args,
-      toolApprovalKey,
-      toolApprovalKeyVersion: 1,
-      policyFamily: 'always_confirm_floor',
-      floorCategory: input.category,
-      approvalMode: 'ask',
-      mutatesState: true,
-      externalSideEffect: true,
+    context: {
+      circleId: context.circleId,
+      userId: context.userId,
+      runId: context.runId,
+      toolUseId: context.toolUseId,
+      iteration: Number(context.iteration),
     },
+    title,
+    approvalKind: input.category === 'pay' ? 'publish' : 'privileged_action',
+    description: `Always-confirm floor (${input.category}): review and approve this exact action before SwanBot runs it. This confirmation is required in every autonomy mode.`,
+    policyFamily: 'always_confirm_floor',
+    floorCategory: input.category,
   });
-  if (!approval) {
+  if (outcome.kind === 'allowed') return { passed: true };
+  if (outcome.kind === 'pending') {
     return {
       passed: false,
-      message: `Always-confirm floor: "${input.category}" confirmation is required, but the approval request could not be created — the action was not performed.`,
+      message: outcome.created
+        ? `Always-confirm floor: requested user confirmation for this ${input.category} action ("${input.tool}", id: ${outcome.approvalId.slice(0, 8)}). It was NOT performed yet — wait for the user's approval before continuing.`
+        : `Always-confirm floor: approval is still pending for this ${input.category} action ("${input.tool}"). It was not performed. Wait for the user's decision.`,
+      approvalId: outcome.approvalId,
     };
   }
   return {
     passed: false,
-    message: `Always-confirm floor: requested user confirmation for this ${input.category} action ("${input.tool}", id: ${approval.id.slice(0, 8)}). It was NOT performed yet — wait for the user's approval before continuing.`,
-    approvalId: approval.id,
+    message: `Always-confirm floor: approval for this ${input.category} action ("${input.tool}") was rejected, expired, malformed, already used, or could not be atomically claimed. It was not performed; request a fresh confirmation from the latest state.`,
+    approvalId: outcome.approvalId,
   };
 }
 
@@ -2112,13 +3079,29 @@ function normalizeArtifact(raw: unknown): SwanBotStructuredArtifact | null {
   });
 }
 
-async function dispatchWorkspaceCreateRoom(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+function claimDirectClientMutationDispatch(
+  markDispatched?: () => boolean,
+): { ok: true } | { ok: false; error: string } {
+  return markDispatched?.() === true
+    ? { ok: true }
+    : {
+        ok: false,
+        error: 'Mutation dispatch receipt could not be established, so no change was attempted.',
+      };
+}
+
+async function dispatchWorkspaceCreateRoom(
+  input: Record<string, any>,
+  markDispatched?: () => boolean,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const artifact = normalizeArtifact(input.artifact);
   if (!artifact) return { ok: false, error: 'artifact required with valid { kind, title }' };
   const circleId = String(input.circleId || '').trim();
   if (!circleId) return { ok: false, error: 'circleId required' };
   try {
     const { createWorkspaceFromArtifact } = await import('./chatWorkspace');
+    const dispatchClaim = claimDirectClientMutationDispatch(markDispatched);
+    if (!dispatchClaim.ok) return dispatchClaim;
     const result = await createWorkspaceFromArtifact(circleId, artifact);
     if (!result.roomId) return { ok: false, error: 'workspace creation returned no roomId' };
     return { ok: true, data: result };
@@ -2127,13 +3110,18 @@ async function dispatchWorkspaceCreateRoom(input: Record<string, any>): Promise<
   }
 }
 
-async function dispatchWorkspaceApplyArtifacts(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+async function dispatchWorkspaceApplyArtifacts(
+  input: Record<string, any>,
+  markDispatched?: () => boolean,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const roomId = String(input.roomId || '').trim();
   if (!roomId) return { ok: false, error: 'roomId required' };
   const artifact = normalizeArtifact(input.artifact);
   if (!artifact) return { ok: false, error: 'artifact required with valid { kind, title }' };
   try {
     const { createFilesInRoomFromArtifact } = await import('./chatWorkspace');
+    const dispatchClaim = claimDirectClientMutationDispatch(markDispatched);
+    if (!dispatchClaim.ok) return dispatchClaim;
     const result = await createFilesInRoomFromArtifact(roomId, artifact);
     return { ok: true, data: result };
   } catch (e: any) {
@@ -2141,12 +3129,17 @@ async function dispatchWorkspaceApplyArtifacts(input: Record<string, any>): Prom
   }
 }
 
-async function dispatchWorkspaceOpenPreview(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+async function dispatchWorkspaceOpenPreview(
+  input: Record<string, any>,
+  markDispatched?: () => boolean,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const roomId = String(input.roomId || '').trim();
   if (!roomId) return { ok: false, error: 'roomId required' };
   const preferredPanel: 'chat' | 'playground' = input.preferredPanel === 'chat' ? 'chat' : 'playground';
   try {
     const { primeRoomWorkspaceLaunch, focusRoomWorkspaceFile } = await import('./roomWorkspaceLauncher');
+    const dispatchClaim = claimDirectClientMutationDispatch(markDispatched);
+    if (!dispatchClaim.ok) return dispatchClaim;
     if (input.circleId) {
       primeRoomWorkspaceLaunch({
         circleId: String(input.circleId),
@@ -2187,6 +3180,29 @@ function validateWpSite(input: Record<string, any>): { ok: true; site: { siteUrl
   return { ok: true, site: normalized.value };
 }
 
+type WpDispatchOperation =
+  | 'discover_types'
+  | 'list_posts'
+  | 'upload_media'
+  | 'create_slide'
+  | 'update_post'
+  | 'trash_post';
+
+function redactedWpDispatchFailure(operation: WpDispatchOperation): {
+  ok: false;
+  error: string;
+  data: { errorCode: string; redacted: true };
+} {
+  return {
+    ok: false,
+    error: 'WordPress request failed. Provider details were redacted.',
+    data: {
+      errorCode: `wordpress_${operation}_failed`,
+      redacted: true,
+    },
+  };
+}
+
 async function dispatchWpDiscoverTypes(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const v = validateWpSite(input);
   if (!v.ok) return v;
@@ -2199,8 +3215,8 @@ async function dispatchWpDiscoverTypes(input: Record<string, any>): Promise<{ ok
       rest_base: t?.rest_base || slug,
     }));
     return { ok: true, data: { siteUrl: v.site.siteUrl, count: slim.length, types: slim } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('discover_types');
   }
 }
 
@@ -2220,12 +3236,15 @@ async function dispatchWpListPosts(input: Record<string, any>): Promise<{ ok: bo
       link: p.link,
     }));
     return { ok: true, data: { count: slim.length, posts: slim } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('list_posts');
   }
 }
 
-async function dispatchWpUploadMedia(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+async function dispatchWpUploadMedia(
+  input: Record<string, any>,
+  markDispatched?: () => boolean,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const v = validateWpSite(input);
   if (!v.ok) return v;
   const storagePath = String(input?.storagePath || '').trim();
@@ -2234,14 +3253,19 @@ async function dispatchWpUploadMedia(input: Record<string, any>): Promise<{ ok: 
   const mimeType = typeof input?.mimeType === 'string' && input.mimeType.trim() ? input.mimeType.trim() : 'application/octet-stream';
   try {
     const { uploadMediaFromStorage } = await import('./wpAdmin');
+    const dispatchClaim = claimDirectClientMutationDispatch(markDispatched);
+    if (!dispatchClaim.ok) return dispatchClaim;
     const media = await uploadMediaFromStorage(v.site, storagePath, fileName, mimeType);
     return { ok: true, data: { id: media.id, source_url: media.source_url, fileName } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('upload_media');
   }
 }
 
-async function dispatchWpCreateSlide(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+async function dispatchWpCreateSlide(
+  input: Record<string, any>,
+  markDispatched?: () => boolean,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const v = validateWpSite(input);
   if (!v.ok) return v;
   const storagePath = String(input?.storagePath || '').trim();
@@ -2253,6 +3277,8 @@ async function dispatchWpCreateSlide(input: Record<string, any>): Promise<{ ok: 
   const slideType = typeof input?.slideType === 'string' && input.slideType.trim() ? input.slideType.trim() : undefined;
   try {
     const { uploadImageAndCreateSlide } = await import('./wpAdmin');
+    const dispatchClaim = claimDirectClientMutationDispatch(markDispatched);
+    if (!dispatchClaim.ok) return dispatchClaim;
     const result = await uploadImageAndCreateSlide(
       v.site,
       { storagePath, fileName, mimeType },
@@ -2270,16 +3296,21 @@ async function dispatchWpCreateSlide(input: Record<string, any>): Promise<{ ok: 
         },
       },
     };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('create_slide');
   }
 }
 
-async function dispatchWpUpdatePost(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+async function dispatchWpUpdatePost(
+  input: Record<string, any>,
+  markDispatched?: () => boolean,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const normalized = normalizeWordPressUpdatePostMutation(input);
   if (!normalized.ok) return { ok: false, error: normalized.error };
   try {
     const { updatePost } = await import('./wpAdmin');
+    const dispatchClaim = claimDirectClientMutationDispatch(markDispatched);
+    if (!dispatchClaim.ok) return dispatchClaim;
     const post = await updatePost(normalized.value.site, normalized.value.update);
     return {
       ok: true,
@@ -2292,12 +3323,15 @@ async function dispatchWpUpdatePost(input: Record<string, any>): Promise<{ ok: b
         },
       },
     };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('update_post');
   }
 }
 
-async function dispatchWpTrashPost(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+async function dispatchWpTrashPost(
+  input: Record<string, any>,
+  markDispatched?: () => boolean,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const normalized = normalizeWordPressTrashPostMutation(input);
   if (!normalized.ok) return { ok: false, error: normalized.error };
   const { site, trash } = normalized.value;
@@ -2305,6 +3339,8 @@ async function dispatchWpTrashPost(input: Record<string, any>): Promise<{ ok: bo
 
   try {
     const { trashPost } = await import('./wpAdmin');
+    const dispatchClaim = claimDirectClientMutationDispatch(markDispatched);
+    if (!dispatchClaim.ok) return dispatchClaim;
     const result = await trashPost(site, trash);
     const previous = result?.previous && typeof result.previous === 'object' ? result.previous : undefined;
     const source = previous || result || {};
@@ -2327,8 +3363,8 @@ async function dispatchWpTrashPost(input: Record<string, any>): Promise<{ ok: bo
         },
       },
     };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('trash_post');
   }
 }
 
@@ -2349,6 +3385,186 @@ async function dispatchBrowserOpenUrl(input: Record<string, any>): Promise<{ ok:
   return { ok: true, data: r.data };
 }
 
+export const SWANBOT_BROWSER_DOM_SNAPSHOT_TEXT_MAX_CHARS = 8_192;
+export const SWANBOT_BROWSER_DOM_SNAPSHOT_TITLE_MAX_CHARS = 2_000;
+export const SWANBOT_BROWSER_DOM_ID_MIN_CHARS = 20;
+export const SWANBOT_BROWSER_DOM_ID_MAX_CHARS = 180;
+export const SWANBOT_BROWSER_DOM_URL_MAX_CHARS = 4_096;
+export const SWANBOT_BROWSER_DOM_OBSERVATION_MAX_AGE_MS = 30_000;
+export const SWANBOT_BROWSER_DOM_OBSERVATION_MAX_FUTURE_SKEW_MS = 5_000;
+export const SWANBOT_BROWSER_DOM_URL_IDENTITY_PATTERN = /^uc_browser_url_[a-f0-9]{64}$/;
+
+function isBoundedSwanBotBrowserDomId(value: unknown): value is string {
+  return (
+    typeof value === 'string'
+    && value.length >= SWANBOT_BROWSER_DOM_ID_MIN_CHARS
+    && value.length <= SWANBOT_BROWSER_DOM_ID_MAX_CHARS
+    && /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function safeSwanBotBrowserDomOrigin(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 4_096) return null;
+  try {
+    const parsed = new URL(value);
+    if (
+      (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+      || !parsed.origin
+      || parsed.origin === 'null'
+    ) return null;
+    return parsed.origin.slice(0, 300);
+  } catch {
+    return null;
+  }
+}
+
+function splitSwanBotBrowserDomUrlTrailingPunctuation(value: string): {
+  candidate: string;
+  trailing: string;
+} {
+  const match = value.match(/[),.;!?]+$/);
+  const trailing = match ? match[0] : '';
+  return {
+    candidate: trailing ? value.slice(0, -trailing.length) : value,
+    trailing,
+  };
+}
+
+function sanitizeAbsoluteSwanBotBrowserDomUrl(value: string): string {
+  const { candidate, trailing } = splitSwanBotBrowserDomUrlTrailingPunctuation(value);
+  return `${safeSwanBotBrowserDomOrigin(candidate) || '[redacted URL]'}${trailing}`;
+}
+
+function sanitizeProtocolRelativeSwanBotBrowserDomUrl(value: string): string {
+  const { candidate, trailing } = splitSwanBotBrowserDomUrlTrailingPunctuation(value);
+  try {
+    const parsed = new URL(`https:${candidate}`);
+    if (!parsed.host) return `[redacted URL]${trailing}`;
+    return `//${parsed.host.slice(0, 260)}${trailing}`;
+  } catch {
+    return `[redacted URL]${trailing}`;
+  }
+}
+
+export function sanitizeSwanBotBrowserDomText(value: unknown, maxLength: number): string {
+  let text = String(value || '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  text = text.replace(
+    /\b(?:mailto|tel|data|blob|javascript|file):[^\s<>"']+/gi,
+    '[redacted URL]',
+  );
+  text = text.replace(
+    /\b(?:https?|ftp):\/\/[^\s<>"']+/gi,
+    sanitizeAbsoluteSwanBotBrowserDomUrl,
+  );
+  text = text.replace(
+    /(^|[\s([{"'=])\/\/[^\s<>"']+/gi,
+    (match, prefix: string) => (
+      `${prefix}${sanitizeProtocolRelativeSwanBotBrowserDomUrl(match.slice(prefix.length))}`
+    ),
+  );
+  text = text.replace(
+    /(^|[\s([{"'=])(?:\.\.?\/|\/(?!\/))[^\s<>"']+/g,
+    '$1[redacted relative URL]',
+  );
+  text = text.replace(
+    /(^|[\s([{"'=])[?#][A-Za-z0-9_.~-]+=[^\s<>"']+/g,
+    '$1[redacted URL parameters]',
+  );
+  text = text.replace(
+    /([?#&][A-Za-z0-9_.~%-]{1,100}=)[^&#\s<>"']+/g,
+    '$1[redacted]',
+  );
+  text = text.replace(
+    /\b(password|passwd|passcode|token|secret|api[_\s-]?key|access[_\s-]?token|refresh[_\s-]?token|client[_\s-]?secret|private[_\s-]?key|auth(?:orization)?|bearer|otp|email|card|cvv|cvc|payment|session(?:[_\s-]?id)?|sid|nonce|signature|sig|credential|cookie|ssn|social[_\s-]?security)\s*[:=]\s*[^\s|,;]+/gi,
+    '$1=[redacted]',
+  );
+  return text.slice(0, Math.max(0, maxLength));
+}
+
+/**
+ * Project the bridge DOM snapshot into the model-visible allowlist.
+ *
+ * The opaque process/context/page ids plus the bridge-issued URL HMAC are
+ * observation identity, not mutation authority. They let the next read-only
+ * `browser.locator_actionability` call fill its expected* arguments. Any
+ * malformed, oversized, stale, or future identity fails closed; bridge-only
+ * fields (tree/html/source/secrets) are never copied through this projection.
+ */
+export function buildSwanBotBrowserDomSnapshotResult(
+  rawData: unknown,
+  renderedText: unknown,
+  nowMs = Date.now(),
+): { ok: boolean; data?: unknown; error?: string } {
+  const data = rawData && typeof rawData === 'object'
+    ? rawData as Record<string, unknown>
+    : null;
+  const observedAt = data?.observedAt;
+  const observedAtMs = typeof observedAt === 'string'
+    && observedAt.length >= 10
+    && observedAt.length <= 64
+    ? Date.parse(observedAt)
+    : Number.NaN;
+  const identityIsFresh = Number.isFinite(observedAtMs)
+    && observedAtMs >= nowMs - SWANBOT_BROWSER_DOM_OBSERVATION_MAX_AGE_MS
+    && observedAtMs <= nowMs + SWANBOT_BROWSER_DOM_OBSERVATION_MAX_FUTURE_SKEW_MS;
+  const expectedUrl = data?.url;
+  const displayUrl = safeSwanBotBrowserDomOrigin(data?.displayUrl);
+  if (
+    !data
+    || !isBoundedSwanBotBrowserDomId(data.browserProcessId)
+    || !isBoundedSwanBotBrowserDomId(data.browserContextId)
+    || !isBoundedSwanBotBrowserDomId(data.pageId)
+    || !isBoundedSwanBotBrowserDomId(data.evidenceId)
+    || typeof expectedUrl !== 'string'
+    || expectedUrl.length > SWANBOT_BROWSER_DOM_URL_MAX_CHARS
+    || !SWANBOT_BROWSER_DOM_URL_IDENTITY_PATTERN.test(expectedUrl)
+    || !displayUrl
+    || !identityIsFresh
+  ) {
+    return {
+      ok: false,
+      error: 'Browser DOM snapshot returned invalid or stale page identity. Re-observe after reconnecting the browser bridge.',
+    };
+  }
+
+  const rawText = typeof renderedText === 'string' ? renderedText : '';
+  const text = sanitizeSwanBotBrowserDomText(
+    rawText,
+    SWANBOT_BROWSER_DOM_SNAPSHOT_TEXT_MAX_CHARS,
+  );
+  const nodeCount = typeof data.nodeCount === 'number' && Number.isFinite(data.nodeCount)
+    ? Math.max(0, Math.floor(data.nodeCount))
+    : 0;
+  return {
+    ok: true,
+    data: {
+      browserProcessId: data.browserProcessId,
+      browserContextId: data.browserContextId,
+      pageId: data.pageId,
+      url: displayUrl,
+      expectedUrl,
+      observedAt,
+      evidenceId: data.evidenceId,
+      title: sanitizeSwanBotBrowserDomText(
+        data.title,
+        SWANBOT_BROWSER_DOM_SNAPSHOT_TITLE_MAX_CHARS,
+      ),
+      nodeCount,
+      text,
+      readOnlyEvidence: true,
+      mutationAuthorization: false,
+      truncated:
+        data.truncated === true
+        || rawText.length > SWANBOT_BROWSER_DOM_SNAPSHOT_TEXT_MAX_CHARS,
+    },
+  };
+}
+
 async function dispatchBrowserDomSnapshot(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const { domSnapshot, renderBrowserTree } = await import('./browserBridge');
   const r = await domSnapshot({
@@ -2357,16 +3573,7 @@ async function dispatchBrowserDomSnapshot(input: Record<string, any>): Promise<{
   });
   if (!r.ok || !r.data) return r;
   const text = renderBrowserTree(r.data.tree).join('\n');
-  return {
-    ok: true,
-    data: {
-      url: r.data.url,
-      title: r.data.title,
-      nodeCount: r.data.nodeCount,
-      text: text.slice(0, 8192),
-      truncated: text.length > 8192,
-    },
-  };
+  return buildSwanBotBrowserDomSnapshotResult(r.data, text);
 }
 
 async function dispatchBrowserWpAdminSourceIntelligence(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
@@ -2685,10 +3892,12 @@ async function callSwanBotAI(
   maxTokens = 4096,
   systemDirective?: string,
   agentSubject?: AgentRuntimeSubjectMetadata | null,
+  clientLoopContext?: SwanbotV2ClientLoopContext,
 ): Promise<SwanBotEdgeCallResult | null> {
-  // Phase M4 router: v2 (typed loop) is now the DEFAULT; `/v2 off` opts
-  // a device back into v1. On any v2 transport failure we still fall
-  // through to v1 so a flaky v2 deploy never breaks chat, and after 2
+  // Phase M4 router: the v2 EDGE remains the default; `/v2 off` opts the
+  // device back into v1. Inside callSwanBotV2, the device-local typed client
+  // loop is a separate explicit canary (`uc_swanbot_v2_client_loop`) that
+  // remains default-off. On any v2 transport failure we fall through to v1, and after 2
   // consecutive transport failures the session circuit breaker skips v2
   // entirely until a v2 success, `/v2 on`, or a reload.
   // See `docs/SWANBOT_V2_MIGRATION_PLAN.md`.
@@ -2705,6 +3914,7 @@ async function callSwanBotAI(
             message, circleId, userId, discordContext, model, wikiContext,
             conversationMessages, thinkingLevel, maxTokens, systemDirective,
             agentSubject,
+            clientLoopContext,
           );
         } catch (v2Err) {
           // A thrown error IS a transport-level failure (invoke/network) —
@@ -2714,25 +3924,41 @@ async function callSwanBotAI(
           throw v2Err;
         }
         // #12: classify the outcome so the breaker only counts TRANSPORT
-        // failures. A 200-with-error-body (`model_unsupported_on_v2`,
-        // `key_missing`, …) is a PERMANENT CONFIG error — v2 IS reachable and
-        // answered — so it must NOT trip the breaker (one config error was
-        // disabling v2 for the whole session). We still SURFACE it
-        // (fail-visible) rather than silently masking it; v1 shares the same
-        // key/config and would usually hit the same wall. A real transport
-        // failure (null text, no body error) counts and falls through to v1.
-        const outcome: import('./swanbotRouting').SwanbotV2Outcome = v2.text
-          ? { kind: 'success' }
-          : v2.bodyError
-            ? { kind: 'body_error' }
-            : { kind: 'transport_failure' };
+        // failures. A structured terminal edge body (`key_missing`,
+        // `server_mutation_outcome_unknown`, …) proves v2 was reachable and
+        // deliberately stopped, so it must neither trip the breaker nor fall
+        // through to v1. We still surface it fail-visible. A real transport
+        // failure (null text, no body error) counts and may use v1.
+        const disposition = classifySwanBotV2CallDisposition(v2);
+        const mayFallbackToV1 = shouldFallbackSwanBotV2ToV1(v2);
+        const outcome: import('./swanbotRouting').SwanbotV2Outcome =
+          disposition === 'success'
+            ? { kind: 'success' }
+            : disposition === 'transport_failure'
+              ? { kind: 'transport_failure' }
+              // A user STOP is a neutral, reached-edge terminal. Reuse the
+              // non-breaker/non-fallback body-error bucket without presenting
+              // it as an actual error to the caller below.
+              : { kind: 'body_error' };
         if (v2OutcomeCountsTowardBreaker(outcome)) {
           recordSwanbotV2Outcome(outcome.kind === 'success');
         }
-        if (v2.text) return { response: v2.text };
+        if (disposition === 'cancelled') {
+          return { response: v2.text || SWANBOT_V2_CANCELLED_MESSAGE };
+        }
         if (v2.bodyError) {
-          console.warn('[SwanBot] v2 returned a config error body (not counted toward the breaker):', v2.bodyError.code || v2.bodyError.message);
+          console.warn('[SwanBot] v2 returned a terminal edge body (not counted toward the breaker or v1 fallback):', v2.bodyError.code || v2.bodyError.message);
           return { response: null, error: v2.bodyError };
+        }
+        if (v2.text) return { response: v2.text };
+        if (!mayFallbackToV1) {
+          return {
+            response: null,
+            error: {
+              code: 'v2_terminal_without_payload',
+              message: 'The v2 run reached a terminal state without a displayable result. It was not replayed through v1.',
+            },
+          };
         }
         console.log('[SwanBot] v2 returned null (transport) — falling back to v1.');
       }
@@ -4277,6 +5503,14 @@ async function getSwanBotResponseImpl(
       enrichedContext.maxTokens || 4096,
       (enrichedContext as any).systemDirective,
       agentSubjectPayload,
+      {
+        threadId: enrichedContext.threadId,
+        activePluginIds: enrichedContext.activePluginIds,
+        signal: enrichedContext.signal,
+        toolApprovalGate: enrichedContext.toolApprovalGate,
+        userConstraints: enrichedContext.userConstraints,
+        alwaysConfirmFloor: enrichedContext.alwaysConfirmFloor,
+      },
     );
     const aiResponse = aiResult?.response || null;
     if (aiResponse) {
@@ -4329,6 +5563,14 @@ async function getSwanBotResponseImpl(
             enrichedContext.maxTokens || 4096,
             (enrichedContext as any).systemDirective,
             agentSubjectPayload,
+            {
+              threadId: enrichedContext.threadId,
+              activePluginIds: enrichedContext.activePluginIds,
+              signal: enrichedContext.signal,
+              toolApprovalGate: enrichedContext.toolApprovalGate,
+              userConstraints: enrichedContext.userConstraints,
+              alwaysConfirmFloor: enrichedContext.alwaysConfirmFloor,
+            },
           );
           const failoverText = failoverResult?.response || null;
           if (failoverText) {
@@ -5053,7 +6295,13 @@ export async function executeToolUseLoop(opts: {
             tool: block.name,
             args: (block.input || {}) as Record<string, unknown>,
             category: String(verdict.floorCategory || 'sensitive'),
-            context: { circleId: opts.circleId, userId: opts.userId, runId: opts.runId },
+            context: {
+              circleId: opts.circleId,
+              userId: opts.userId,
+              runId: opts.runId,
+              toolUseId: block.id,
+              iteration: round + 1,
+            },
           });
           if (!floor.passed) {
             toolEvents.push({

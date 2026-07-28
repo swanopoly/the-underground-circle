@@ -349,12 +349,44 @@ function readJsonBody(req, maxBytes = 512 * 1024) {
   });
 }
 
+function requestUsesLoopbackHost(req) {
+  const hostHeader = String(req?.headers?.host || '').trim();
+  if (!hostHeader || /[\s/@\\]/.test(hostHeader)) return false;
+  try {
+    const hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+    return hostname === 'localhost'
+      || hostname === '127.0.0.1'
+      || hostname === '::1'
+      || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 function isAllowedPairOrigin(req) {
-  const origin = String(req?.headers?.origin || '');
-  if (!origin) return true;
-  if (origin.startsWith('http://localhost')) return true;
-  if (origin.startsWith('http://127.0.0.1')) return true;
-  if (origin === 'https://app.chrisswanson.xyz') return true;
+  const origin = String(req?.headers?.origin || '').trim();
+  const loopbackHost = requestUsesLoopbackHost(req);
+  if (!origin) return loopbackHost;
+  const configuredOrigins = String(process.env.UC_BRIDGE_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (configuredOrigins.includes(origin)) return true;
+  // Implicit browser origins are valid only when the bridge itself is reached
+  // by a loopback Host. Tunnel Hosts require an exact configured origin.
+  if (!loopbackHost) return false;
+  try {
+    const parsed = new URL(origin);
+    const host = parsed.hostname.toLowerCase();
+    const isLocalhost = host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host === '[::1]';
+    if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && isLocalhost) return true;
+    if (parsed.protocol === 'https:' && host === 'app.chrisswanson.xyz') return true;
+  } catch {
+    return false;
+  }
   return false;
 }
 

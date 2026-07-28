@@ -14,12 +14,16 @@
  *     legacy loop passed (R19 — approval fingerprints hash tool+args via
  *     `stableApprovalJson`; any normalization here would invalidate every
  *     cached approval).
- *   - Tool events keep the legacy shape `{ tool, input, result, status,
+ *   - In-memory tool events keep the legacy shape `{ tool, input, result, status,
  *     metadata }` with the legacy status vocabulary
  *     (passed/failed/manual_required/blocked) and the legacy metadata keys
  *     (toolPolicy, approvalRequest, browserPlan, design-app capture) so
- *     design-manifest capture, browser-plan extraction, ledger persistence,
- *     and run metadata stay byte-compatible.
+ *     design-manifest capture, browser-plan extraction, and proof extraction
+ *     stay compatible. This exact metadata is transient: the session extracts
+ *     dedicated browser/design product records, then projects policy/receipt
+ *     metadata through `sanitizeToolActionMetadataForPersistence`. Durable
+ *     action previews replace both `input` and `result` with value-free schema
+ *     summaries at their write boundary.
  *   - The loop result keeps the legacy shape `{ response, toolEvents,
  *     routing?, incomplete?, checkpoint? }` including the cap-exhaustion
  *     limit note + progress summary + resumable checkpoint.
@@ -254,10 +258,11 @@ function safeStringify(value: unknown): string {
  *     nudges (observe→act→VERIFY gate, stuck-loop breaker) — the raw
  *     structured payload is moved off the model path into metadata-driven
  *     events, matching the legacy loop's token profile.
- *   - `metadata` = legacy dispatch metadata (toolPolicy, approvalRequest,
+ *   - transient `metadata` = legacy dispatch metadata (toolPolicy, approvalRequest,
  *     browserPlan for browser.plan_task, design-app capture) plus the two
  *     internal side-channel keys the event mapper consumes (R14: metadata
- *     rides events, never the model-visible content).
+ *     rides in-memory events, never model-visible content or durable storage
+ *     without an explicit projection).
  */
 export function shapeLegacyToolHandlerResult(args: {
   toolName: string;
@@ -283,6 +288,11 @@ export function shapeLegacyToolHandlerResult(args: {
     : null;
   const metadata = withDesignAppRuntimeCaptureMetadata(
     {
+      // Preserve runtime-owned hidden receipts/identity from the bridge. These
+      // remain on AgentToolResult.metadata and therefore ride typed events,
+      // never the model-visible `data.text` below. Canonical adapter fields
+      // follow so a handler cannot override legacy status/event semantics.
+      ...(inner.metadata || {}),
       ...(toolName === 'browser.plan_task'
         ? { browserPlan: (raw as Record<string, unknown> | undefined)?.plan || null }
         : {}),
@@ -311,9 +321,9 @@ export function shapeLegacyToolHandlerResult(args: {
 // ─── Tool event mapping (R14 → legacy toolEvents) ───────────────────────────
 
 /**
- * Builds the legacy tool-event record from a `tool_call_result` event.
- * Strips the internal side-channel keys so persisted metadata matches the
- * legacy dispatch metadata exactly.
+ * Builds the in-memory legacy tool-event record from a `tool_call_result`
+ * event. Strips internal side-channel keys. Exact input remains available for
+ * same-run loop/proof logic; durable consumers must summarize it first.
  */
 export function buildLegacyToolEventFromResult(args: {
   toolName: string;

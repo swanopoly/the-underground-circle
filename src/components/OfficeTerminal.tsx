@@ -25,6 +25,7 @@ import {
   deleteTerminalMessage,
 } from '../lib/officeTerminal';
 import { supabase } from '../lib/supabase';
+import { subscribeWithReconnect } from '../lib/subscribeWithReconnect';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from '../lib/privacyMode';
 import { CircleOfficeAgent } from '../lib/circleOffice';
 import { awardPoints } from '../services/rewardService';
@@ -1375,10 +1376,15 @@ export default function OfficeTerminal({
   }, [selectTarget, selectTargets]);
 
   // ── Load history + subscribe ───────────────────────────────────────────────
-  useEffect(() => {
-    deletedIdsRef.current.clear();
-
-    loadTerminalHistory(circleId, 50).then(async ({ messages: hist }) => {
+  // Authoritative transcript load — used for the initial fetch AND as the
+  // realtime catch-up. Messages/responses written while the socket was down
+  // never arrive as events, so a reconnect that does not replay this leaves the
+  // terminal permanently missing whatever the agent said during the gap.
+  const reloadTranscript = useCallback(async () => {
+    // Never throws: this runs as a realtime catch-up, and a rejected catch-up
+    // would escape the subscription wrapper's synchronous try/catch.
+    try {
+      const { messages: hist } = await loadTerminalHistory(circleId, 50);
       setMessages(hist);
       setLoading(false);
       // Phase 3: load existing responses for history messages
@@ -1393,7 +1399,17 @@ export default function OfficeTerminal({
         }
         setResponses(map);
       }
-    });
+    } catch (err) {
+      console.error('[OfficeTerminal] transcript load failed:', err);
+      setLoading(false);
+    }
+  }, [circleId]);
+
+  useEffect(() => {
+    deletedIdsRef.current.clear();
+
+    void reloadTranscript();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [circleId]);
 
   useEffect(() => {
@@ -1421,9 +1437,10 @@ export default function OfficeTerminal({
           return next;
         });
       },
+      () => { void reloadTranscript(); },
     );
     return unsub;
-  }, [circleId]);
+  }, [circleId, reloadTranscript]);
 
   // Phase 2 broadcast subscription removed — Phase 3 postgres_changes on
   // office_terminal_responses is now the single source of truth for responses.
@@ -1431,8 +1448,10 @@ export default function OfficeTerminal({
   // Phase 3: Subscribe to office_terminal_responses for this circle's responses.
   // Single stable channel — never re-created on messages change to avoid missing events.
   useEffect(() => {
-    const channel = supabase
-      .channel(`terminal-responses:${circleId}`)
+    const handle = subscribeWithReconnect({
+      channelName: `terminal-responses:${circleId}`,
+      onCatchUp: () => { void reloadTranscript(); },
+      setup: (channel) => channel
       .on(
         'postgres_changes',
         {
@@ -1475,13 +1494,13 @@ export default function OfficeTerminal({
             return next;
           });
         }
-      )
-      .subscribe();
+      ),
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      handle.unsubscribe();
     };
-  }, [circleId]);
+  }, [circleId, reloadTranscript]);
 
   // Scroll to bottom on new messages
   useEffect(() => {

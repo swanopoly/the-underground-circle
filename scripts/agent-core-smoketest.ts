@@ -17,6 +17,10 @@
  *      partitions a round into ordered groups; absent provider = legacy.
  *   8. `onRoundComplete` round-boundary hook (O1 nudge parity) — note appended
  *      between rounds, skipped on the final round, errors swallowed, async ok.
+ *   9. Handler-entry `dispatched` telemetry and fail-closed post-result
+ *      inter-call stop enforcement with fully closed skipped results.
+ *  10. Provider tool-use identities are bounded, nonempty, and unique for the
+ *      complete run before any handler enters.
  *
  * Run with: `npx tsx scripts/agent-core-smoketest.ts`
  *
@@ -140,7 +144,12 @@ async function case2_toolRoundtrip() {
   }
   // Event stream must have fired tool_call_start and tool_call_result.
   const hasStart  = events.some((e) => e.kind === 'tool_call_start'  && e.toolUseId === 'tu_1');
-  const hasResult = events.some((e) => e.kind === 'tool_call_result' && e.toolUseId === 'tu_1' && e.result.ok === true);
+  const hasResult = events.some(
+    (e) => e.kind === 'tool_call_result'
+      && e.toolUseId === 'tu_1'
+      && e.result.ok === true
+      && e.dispatched === true,
+  );
   assert(hasStart,  'case2: tool_call_start fired');
   assert(hasResult, 'case2: tool_call_result fired with ok=true');
 }
@@ -148,6 +157,7 @@ async function case2_toolRoundtrip() {
 // ─── Case 3 — tool handler throws → caught, loop continues ─────────────────
 
 async function case3_toolThrows() {
+  const events: AgentEvent[] = [];
   const tool: AgentToolDefinition = {
     name: 'boom',
     description: 'always throws',
@@ -164,6 +174,7 @@ async function case3_toolThrows() {
       { stop_reason: 'tool_use', content: [toolUse] },
       { stop_reason: 'end_turn', content: [{ type: 'text', text: 'recovered' }] },
     ]),
+    onEvent: (event) => events.push(event),
   });
   assertEqual(result.text, 'recovered', 'case3: loop recovered');
   const toolResult = (result.messages[2].content as AgentMessageContentBlock[])[0];
@@ -173,6 +184,13 @@ async function case3_toolThrows() {
     assert(toolResult.content.includes('"ok":false'), 'case3: ok=false');
     assert(toolResult.content.includes('kaboom'), 'case3: error message propagated');
   }
+  const resultEvent = events.find(
+    (event) => event.kind === 'tool_call_result' && event.toolUseId === 'tu_2',
+  );
+  assert(
+    resultEvent?.kind === 'tool_call_result' && resultEvent.dispatched === true,
+    'case3: a throwing handler is still marked dispatched because entry occurred',
+  );
 }
 
 // ─── Case 4 — interactive tool forces sequential dispatch ──────────────────
@@ -241,6 +259,7 @@ async function case6_unknownTool() {
     name: 'doesNotExist',
     input: {},
   };
+  const events: AgentEvent[] = [];
   const result = await runAgent({
     initialMessages: [{ role: 'user', content: 'call ghost' }],
     tools: [],
@@ -248,12 +267,24 @@ async function case6_unknownTool() {
       { stop_reason: 'tool_use', content: [ghostUse] },
       { stop_reason: 'end_turn', content: [{ type: 'text', text: 'skipped' }] },
     ]),
+    onEvent: (event) => events.push(event),
   });
   const toolResult = (result.messages[2].content as AgentMessageContentBlock[])[0];
   assert(toolResult.type === 'tool_result', 'case6: tool_result emitted');
   if (toolResult.type === 'tool_result') {
     assert(toolResult.content.includes('not registered'), 'case6: unregistered error surfaced');
   }
+  const resultEvent = events.find(
+    (event) => event.kind === 'tool_call_result' && event.toolUseId === 'tu_ghost',
+  );
+  assert(
+    resultEvent?.kind === 'tool_call_result' && resultEvent.dispatched === false,
+    'case6: an unregistered request is explicitly marked pre-dispatch',
+  );
+  assert(
+    resultEvent?.kind === 'tool_call_result' && resultEvent.result.metadata === undefined,
+    'case6: an unregistered pre-dispatch block carries no mutation receipt metadata',
+  );
 }
 
 // ─── Case 7 — pre-turn compaction fires + emits context_compressed ─────────
@@ -296,6 +327,7 @@ async function case7_compactionPreTurn() {
 
 async function case8_toolApprovalGate() {
   let handlerCalls = 0;
+  const events: AgentEvent[] = [];
   const tool: AgentToolDefinition = {
     name: 'guarded',
     description: 'gated tool',
@@ -308,27 +340,52 @@ async function case8_toolApprovalGate() {
   const useApproved: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_ok',  name: 'guarded', input: { n: 1 } };
   const useRejected: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_no',  name: 'guarded', input: { n: 2 } };
   const useGateBoom: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_err', name: 'guarded', input: { n: 3 } };
+  const useConstraintBlock: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_constraint', name: 'guarded', input: { n: 4 } };
 
   const result = await runAgent({
     initialMessages: [{ role: 'user', content: 'gate test' }],
     tools: [tool],
     provider: scriptedProvider([
-      { stop_reason: 'tool_use', content: [useApproved, useRejected, useGateBoom] },
+      { stop_reason: 'tool_use', content: [useApproved, useRejected, useGateBoom, useConstraintBlock] },
       { stop_reason: 'end_turn', content: [{ type: 'text', text: 'gated' }] },
     ]),
+    toolConstraintGuard: ({ toolUseId }) => toolUseId === 'tu_constraint'
+      ? { block: true, reason: 'user said never' }
+      : undefined,
     toolApprovalGate: async ({ toolUseId }) => {
       if (toolUseId === 'tu_ok') return { decision: 'approve' };
       if (toolUseId === 'tu_no') return { decision: 'reject', reason: 'circle policy' };
       throw new Error('gate exploded'); // tu_err — must fail CLOSED (reject)
     },
+    onEvent: (event) => events.push(event),
   });
 
   assertEqual(result.text, 'gated', 'case8: loop completed');
   assertEqual(handlerCalls, 1, 'case8: only the approved call ran the handler');
+  const dispatchedById = new Map(
+    events
+      .filter((event): event is Extract<AgentEvent, { kind: 'tool_call_result' }> => event.kind === 'tool_call_result')
+      .map((event) => [event.toolUseId, event.dispatched]),
+  );
+  assertEqual(dispatchedById.get('tu_ok'), true, 'case8: approved handler result is marked dispatched');
+  assertEqual(dispatchedById.get('tu_no'), false, 'case8: policy rejection is marked pre-dispatch');
+  assertEqual(dispatchedById.get('tu_err'), false, 'case8: gate failure is marked pre-dispatch');
+  assertEqual(dispatchedById.get('tu_constraint'), false, 'case8: constraint rejection is marked pre-dispatch');
+  for (const blockedId of ['tu_no', 'tu_err', 'tu_constraint']) {
+    const blockedEvent = events.find(
+      (event) => event.kind === 'tool_call_result' && event.toolUseId === blockedId,
+    );
+    assert(
+      blockedEvent?.kind === 'tool_call_result'
+        && blockedEvent.result.metadata?.mutationDispatchReceipt === undefined,
+      `case8: ${blockedId} pre-dispatch block cannot carry a mutation receipt`,
+    );
+  }
 
   const blocks = result.messages[2].content as AgentMessageContentBlock[];
   const byId = (id: string) => blocks.find((b) => b.type === 'tool_result' && b.tool_use_id === id);
   const ok = byId('tu_ok'); const no = byId('tu_no'); const err = byId('tu_err');
+  const constraint = byId('tu_constraint');
   assert(!!ok && ok.type === 'tool_result' && ok.is_error !== true, 'case8: approved call succeeded');
   if (no && no.type === 'tool_result') {
     assertEqual(no.is_error, true, 'case8: rejected call is_error');
@@ -340,20 +397,41 @@ async function case8_toolApprovalGate() {
     assertEqual(err.is_error, true, 'case8: gate throw fails closed');
     assert(err.content.includes('approval gate failed'), 'case8: gate failure reason surfaced');
   } else { assert(false, 'case8: gate-throw tool_result missing'); }
+  if (constraint && constraint.type === 'tool_result') {
+    assertEqual(constraint.is_error, true, 'case8: constraint block is_error');
+    assert(constraint.content.includes('was blocked by a user constraint'), 'case8: constraint block is explicit');
+  } else { assert(false, 'case8: constraint-blocked tool_result missing'); }
 }
 
 // ─── Case 9 — iteration_complete checkpoint + metadata side channel ─────────
 
 async function case9_checkpointAndMetadata() {
+  let handlerContext: {
+    toolName?: string;
+    toolUseId?: string;
+    iteration: number;
+  } | null = null;
   const tool: AgentToolDefinition = {
     name: 'capture',
     description: 'returns hidden metadata',
     input_schema: { type: 'object', properties: {} },
-    async handler() {
+    async handler(_input, ctx) {
+      handlerContext = {
+        toolName: ctx.toolName,
+        toolUseId: ctx.toolUseId,
+        iteration: ctx.iteration,
+      };
       return {
         ok: true,
         data: { visible: 'yes' },
-        metadata: { hiddenManifest: 'design-capture-7' },
+        metadata: {
+          hiddenManifest: 'design-capture-7',
+          mutationDispatchReceipt: {
+            schemaVersion: 1,
+            actionId: 'tu_meta',
+            tool: 'capture',
+          },
+        },
       };
     },
   };
@@ -369,22 +447,40 @@ async function case9_checkpointAndMetadata() {
     onEvent: (e) => events.push(e),
   });
 
+  assertEqual(
+    handlerContext,
+    { toolName: 'capture', toolUseId: 'tu_meta', iteration: 1 },
+    'case9: handler entry receives the exact model tool name/id and provider iteration',
+  );
+
   // R14 — metadata flows through the event…
   const resultEvent = events.find((e) => e.kind === 'tool_call_result' && e.toolUseId === 'tu_meta');
   assert(!!resultEvent, 'case9: tool_call_result fired');
   if (resultEvent && resultEvent.kind === 'tool_call_result' && resultEvent.result.ok) {
     assertEqual(
       resultEvent.result.metadata,
-      { hiddenManifest: 'design-capture-7' },
+      {
+        hiddenManifest: 'design-capture-7',
+        mutationDispatchReceipt: {
+          schemaVersion: 1,
+          actionId: 'tu_meta',
+          tool: 'capture',
+        },
+      },
       'case9: event carries metadata',
     );
+    assertEqual(resultEvent.dispatched, true, 'case9: receipt-bearing result entered its handler');
   }
   // …but is STRIPPED from the model-visible tool_result content.
   const toolResult = (result.messages[2].content as AgentMessageContentBlock[])[0];
   assert(toolResult.type === 'tool_result', 'case9: tool_result emitted');
   if (toolResult.type === 'tool_result') {
-    assert(!toolResult.content.includes('hiddenManifest'), 'case9: metadata hidden from model');
-    assert(toolResult.content.includes('visible'), 'case9: data still model-visible');
+    const visibleText = typeof toolResult.content === 'string'
+      ? toolResult.content
+      : JSON.stringify(toolResult.content);
+    assert(!visibleText.includes('hiddenManifest'), 'case9: metadata hidden from model');
+    assert(!visibleText.includes('mutationDispatchReceipt'), 'case9: mutation receipt hidden from model');
+    assert(visibleText.includes('visible'), 'case9: data still model-visible');
   }
 
   // R12 — iteration_complete fired after the round with a consistent snapshot
@@ -945,6 +1041,233 @@ async function case13_tieredCompaction() {
   assert(originalUntouched, 'case13e: executor replaced message objects without mutating originals');
 }
 
+// ─── Case 14 — fail-closed per-result inter-call stop guard ─────────────────
+
+async function case14_toolResultStopGuard() {
+  let mutationHandlerCalls = 0;
+  const observationTool: AgentToolDefinition = {
+    name: 'observe_page',
+    description: 'returns the current page state',
+    input_schema: { type: 'object', properties: {} },
+    async handler() {
+      return { ok: true, data: { state: 'CAPTCHA challenge detected' } };
+    },
+  };
+  const mutationTool: AgentToolDefinition = {
+    name: 'click_submit',
+    description: 'mutates the page',
+    input_schema: { type: 'object', properties: {} },
+    async handler() {
+      mutationHandlerCalls += 1;
+      return { ok: true, data: { clicked: true } };
+    },
+  };
+  const toolTurn: ProviderTurnResult = {
+    stop_reason: 'tool_use',
+    content: [
+      { type: 'tool_use', id: 'tu_stop', name: 'observe_page', input: {} },
+      { type: 'tool_use', id: 'tu_must_skip', name: 'click_submit', input: {} },
+    ],
+  };
+
+  // a) The guard runs after observation result #1 and BEFORE handler #2 can
+  //    enter. The core still closes both requested tool_use blocks before it
+  //    emits iteration_complete and returns, even on the final allowed round.
+  let providerCalls = 0;
+  let guardCalls = 0;
+  let guardSawLatestResult = false;
+  const events: AgentEvent[] = [];
+  const resultA = await runAgent({
+    initialMessages: [{ role: 'user', content: 'continue until captcha' }],
+    tools: [observationTool, mutationTool],
+    provider: {
+      async turn() {
+        providerCalls += 1;
+        return providerCalls === 1
+          ? toolTurn
+          : { stop_reason: 'end_turn', content: [{ type: 'text', text: 'must not be reached' }] };
+      },
+    },
+    maxIterations: 1,
+    toolResultStopGuard: (ctx) => {
+      guardCalls += 1;
+      guardSawLatestResult = ctx.latestToolResult.toolUseId === 'tu_stop'
+        && ctx.latestToolResult.resultText?.includes('CAPTCHA') === true
+        && ctx.latestToolResult.enforcementText?.includes('CAPTCHA') === true
+        && ctx.completedToolResults.length === 1;
+      return {
+        stop: true,
+        reason: 'user stop condition matched: captcha',
+        responseText: 'Stopped for CAPTCHA.',
+      };
+    },
+    onEvent: (event) => events.push(event),
+  });
+  assertEqual(resultA.text, 'Stopped for CAPTCHA.', 'case14a: guard response becomes terminal text');
+  assertEqual(resultA.iterations, 1, 'case14a: stopped on the first completed round');
+  assertEqual(resultA.hitMaxIterations, false, 'case14a: boundary stop is not mislabeled cap exhaustion');
+  assertEqual(providerCalls, 1, 'case14a: no provider turn occurs after the stop verdict');
+  assertEqual(guardCalls, 1, 'case14a: guard runs even on the final allowed iteration');
+  assert(guardSawLatestResult, 'case14a: guard receives observation result before the next handler');
+  assertEqual(mutationHandlerCalls, 0, 'case14a: later mutation handler never enters after CAPTCHA match');
+  const resultBlocks = resultA.messages[resultA.messages.length - 1].content as AgentMessageContentBlock[];
+  assertEqual(resultBlocks.length, 2, 'case14a: both requested tool_use blocks receive matching results');
+  const skipped = resultBlocks[1];
+  assert(
+    skipped?.type === 'tool_result'
+      && skipped.tool_use_id === 'tu_must_skip'
+      && skipped.is_error === true
+      && typeof skipped.content === 'string'
+      && skipped.content.includes('was not run'),
+    'case14a: remaining mutation is closed with an explicit skipped error result',
+  );
+  const skippedEvent = events.find(
+    (event) => event.kind === 'tool_call_result' && event.toolUseId === 'tu_must_skip',
+  );
+  assert(
+    skippedEvent?.kind === 'tool_call_result' && skippedEvent.dispatched === false,
+    'case14a: skipped mutation telemetry is authoritatively pre-dispatch',
+  );
+  assert(
+    skippedEvent?.kind === 'tool_call_result'
+      && skippedEvent.result.metadata?.mutationDispatchReceipt === undefined,
+    'case14a: safety-stopped pre-dispatch mutation carries no mutation receipt',
+  );
+  const eventKinds = events.map((event) => event.kind);
+  const checkpointIndex = eventKinds.indexOf('iteration_complete');
+  const stoppedIndex = eventKinds.indexOf('round_boundary_stopped');
+  const finalIndex = eventKinds.indexOf('final_response');
+  assert(
+    checkpointIndex >= 0 && checkpointIndex < stoppedIndex && stoppedIndex < finalIndex,
+    'case14a: checkpoint precedes boundary-stop telemetry and terminal response',
+  );
+
+  // b) Enforcement predicate failures are fail-closed and never re-enter the
+  //    provider. The failure copy is generic and does not leak thrown details.
+  let failClosedProviderCalls = 0;
+  let failClosedMutationCalls = 0;
+  const failClosedMutationTool: AgentToolDefinition = {
+    ...mutationTool,
+    async handler() {
+      failClosedMutationCalls += 1;
+      return { ok: true, data: { clicked: true } };
+    },
+  };
+  const resultB = await runAgent({
+    initialMessages: [{ role: 'user', content: 'observe safely' }],
+    tools: [observationTool, failClosedMutationTool],
+    provider: {
+      async turn() {
+        failClosedProviderCalls += 1;
+        return failClosedProviderCalls === 1
+          ? {
+              ...toolTurn,
+              content: [
+                { type: 'tool_use', id: 'tu_guard_throw', name: 'observe_page', input: {} },
+                { type: 'tool_use', id: 'tu_guard_throw_skip', name: 'click_submit', input: {} },
+              ],
+            }
+          : { stop_reason: 'end_turn', content: [{ type: 'text', text: 'must not be reached' }] };
+      },
+    },
+    maxIterations: 3,
+    toolResultStopGuard: () => {
+      throw new Error('secret predicate details');
+    },
+  });
+  assertEqual(failClosedProviderCalls, 1, 'case14b: thrown guard cannot be bypassed by another turn');
+  assert(resultB.text.includes('safety check could not verify'), 'case14b: thrown guard returns generic fail-closed copy');
+  assert(!resultB.text.includes('secret predicate details'), 'case14b: thrown guard details are not leaked');
+  assertEqual(resultB.hitMaxIterations, false, 'case14b: guard failure is an intentional stop, not cap exhaustion');
+  assertEqual(failClosedMutationCalls, 0, 'case14b: thrown guard fails closed before later handler entry');
+}
+
+// ─── Case 15 — provider tool-use identity is a run-wide capability ─────────
+
+async function case15_toolUseIdentityGuard() {
+  let handlerCalls = 0;
+  const tool: AgentToolDefinition = {
+    name: 'identity_probe',
+    description: 'counts real handler entries',
+    input_schema: { type: 'object', properties: {} },
+    async handler() {
+      handlerCalls += 1;
+      return { ok: true, data: { entered: true } };
+    },
+  };
+
+  const duplicateRound = await runAgent({
+    initialMessages: [{ role: 'user', content: 'duplicate id test' }],
+    tools: [tool],
+    provider: scriptedProvider([{
+      stop_reason: 'tool_use',
+      content: [
+        { type: 'tool_use', id: 'tu_duplicate', name: tool.name, input: { n: 1 } },
+        { type: 'tool_use', id: 'tu_duplicate', name: tool.name, input: { n: 2 } },
+      ],
+    }]),
+  });
+  assertEqual(handlerCalls, 0, 'case15a: duplicate same-round ids block every handler');
+  assert(
+    duplicateRound.text.includes('invalid, or reused tool-call identity'),
+    'case15a: duplicate identity returns an explicit fail-closed result',
+  );
+  assertEqual(
+    duplicateRound.messages.length,
+    1,
+    'case15a: malformed assistant tool-use turn is not added to resumable history',
+  );
+
+  const emptyId = await runAgent({
+    initialMessages: [{ role: 'user', content: 'empty id test' }],
+    tools: [tool],
+    provider: scriptedProvider([{
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: '', name: tool.name, input: {} }],
+    }]),
+  });
+  assertEqual(handlerCalls, 0, 'case15b: empty id blocks handler entry');
+  assert(emptyId.text.includes('No requested tool was run'), 'case15b: empty id failure says nothing ran');
+
+  const oversizedId = await runAgent({
+    initialMessages: [{ role: 'user', content: 'oversized id test' }],
+    tools: [tool],
+    provider: scriptedProvider([{
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: `tu_${'x'.repeat(181)}`, name: tool.name, input: {} }],
+    }]),
+  });
+  assertEqual(handlerCalls, 0, 'case15c: oversized id blocks handler entry');
+  assert(oversizedId.text.includes('No requested tool was run'), 'case15c: oversized id fails closed');
+
+  let providerCalls = 0;
+  const reusedAcrossRounds = await runAgent({
+    initialMessages: [{ role: 'user', content: 'run-wide reuse test' }],
+    tools: [tool],
+    provider: {
+      async turn() {
+        providerCalls += 1;
+        return {
+          stop_reason: 'tool_use',
+          content: [{
+            type: 'tool_use',
+            id: 'tu_run_wide',
+            name: tool.name,
+            input: { round: providerCalls },
+          }],
+        };
+      },
+    },
+    maxIterations: 3,
+  });
+  assertEqual(handlerCalls, 1, 'case15d: a reused later-round id cannot enter a second handler');
+  assertEqual(providerCalls, 2, 'case15d: run stops on the first reused later-round identity');
+  assert(
+    reusedAcrossRounds.text.includes('reused tool-call identity'),
+    'case15d: run-wide reuse failure is explicit',
+  );
+}
+
 // ─── Run all ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -962,6 +1285,8 @@ async function main() {
     ['case11_onRoundCompleteHook',  case11_onRoundCompleteHook],
     ['case12_abortedNotCapExhausted', case12_abortedNotCapExhausted],
     ['case13_tieredCompaction',      case13_tieredCompaction],
+    ['case14_toolResultStopGuard',    case14_toolResultStopGuard],
+    ['case15_toolUseIdentityGuard',   case15_toolUseIdentityGuard],
   ];
   for (const [name, fn] of cases) {
     const before = failures;

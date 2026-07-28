@@ -1,7 +1,7 @@
 /**
- * swanbot-v2-client-loop-flag-smoketest — pins the INERT loop-convergence
- * rollout flag `src/lib/swanbotV2ClientLoopFlag.ts` (Phase 1 of
- * docs/LOOP_CONVERGENCE_RUNBOOK.md). Load-bearing assertions:
+ * swanbot-v2-client-loop-flag-smoketest — pins the live, default-off
+ * loop-convergence canary flag `src/lib/swanbotV2ClientLoopFlag.ts`.
+ * Load-bearing assertions:
  *
  *   PURE NORMALIZER (normalizeClientLoopFlagValue): DEFAULT OFF — true ONLY
  *   for the exact byte-for-byte 'true'. Every other value — 'false', '',

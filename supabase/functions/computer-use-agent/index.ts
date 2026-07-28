@@ -41,9 +41,6 @@ import { byokMissingMessage, isServiceRoleRequest, resolveUserModelApiKey } from
 import { detectRepeatedToolFailure, hashToolInput } from "../../../src/lib/toolLoopStuckCore.ts";
 import { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } from "../../../src/lib/toolLoopSolver.ts";
 import {
-  BOOKING_SAFETY_BLOCK,
-  BOOKING_FORM_SUBMISSION_PROFILE,
-  BOOKING_SEARCH_BEHAVIOR,
   resolveRunCaps,
   HARD_MAX_ITERATIONS,
   HARD_MAX_TOKENS,
@@ -51,7 +48,6 @@ import {
   DEFAULT_ASK_TIMEOUT_MS,
   detectFinalPaySubmission,
   isPayConfirmQuestion,
-  PAY_BACKSTOP_TOOL_RESULT,
 } from "../_shared/booking-edge-contract.ts";
 
 const corsHeaders = {
@@ -235,18 +231,13 @@ const BASH_TOOL = {
 const ASK_USER_TOOL = {
   name: "ask_user",
   description:
-    "Pause and ask the user to confirm ONLY the final money/booking commit. " +
-    "Call this EXACTLY ONCE on the whole task: immediately before the FINAL " +
-    "pay/book/reserve/purchase submission that commits money or a binding " +
-    "reservation ('Book now', 'Reserve', 'Place order', 'Complete booking', " +
-    "'Confirm purchase', 'Submit payment') — state the exact final amount and " +
-    "the merchant/target in the question so the user confirms real live numbers. " +
-    "Do NOT call this before filling credentials, payment, personal, or guest " +
-    "details, and do NOT call it for intermediate steps (room/rate selection, " +
-    "'Continue', 'Next', 'Review') — those are all zero-ask; do them directly. " +
-    "Still use kind 'human_takeover' when the user must do a 2FA/CAPTCHA/human-only " +
-    "step in the live session, and still ask before using a saved vault credential " +
-    "via fill_saved_login. The tool returns the user's choice as a string.",
+    "Pause for a user question or human-only checkpoint. Use kind 'human_takeover' " +
+    "for 2FA, CAPTCHA, payment-card entry, or another step the user must perform " +
+    "in the live browser. Saved-credential use and every native browser mutation " +
+    "are independently gated by the edge runtime; an answer to this tool never " +
+    "authorizes a later or different click, typing, keyboard, or credential call. " +
+    "Never include a password, token, payment-card value, or text intended for a " +
+    "form field in the question/context. The tool returns the user's choice.",
   input_schema: {
     type: "object",
     properties: {
@@ -285,7 +276,9 @@ const ASK_USER_TOOL = {
 const FILL_SAVED_LOGIN_TOOL = {
   name: "fill_saved_login",
   description:
-    "Fill a login form with a saved vault credential after user approval. " +
+    "Request one saved-vault login fill. The edge itself will show the user " +
+    "an exact one-call approval before any browser mutation, so do not call " +
+    "ask_user separately for this tool. " +
     "Use this only after navigating to the site's login page and focusing the username/email field. " +
     "This tool never returns the secret. It types the username and secret directly into the browser.",
   input_schema: {
@@ -327,6 +320,311 @@ const FILL_SAVED_LOGIN_TOOL = {
   },
 };
 
+const COMPUTER_USE_POLICY_SCHEMA_VERSION = 1;
+const POLICY_CONSTRAINT_LIMIT = 8;
+const POLICY_CONSTRAINT_CHAR_LIMIT = 160;
+const PRE_RUN_GRANT_MAX_MS = 30 * 60 * 1000;
+const ALWAYS_CONFIRM_CATEGORIES = new Set([
+  "browser_mutation",
+  "opaque_target",
+  "credentials",
+  "external_side_effect",
+]);
+
+type ComputerUseExecutionMode = "interactive" | "scheduled_observation";
+type ComputerUsePolicySource = "chat" | "queue" | "watch" | "service_watch";
+
+interface ComputerUsePreRunBrowserPermission {
+  kind: "explicit_user_grant";
+  grantId: string;
+  scope: "low_consequence_browser";
+  issuedAt: string;
+  expiresAt: string;
+}
+
+interface ComputerUsePolicyEnvelope {
+  schemaVersion: 1;
+  executionMode: ComputerUseExecutionMode;
+  source: ComputerUsePolicySource;
+  userConstraints: string[];
+  alwaysConfirmCategories: string[];
+  preRunBrowserPermission?: ComputerUsePreRunBrowserPermission;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function forcedScheduledPolicy(): ComputerUsePolicyEnvelope {
+  return {
+    schemaVersion: 1,
+    executionMode: "scheduled_observation",
+    source: "service_watch",
+    userConstraints: ["Observe and report only; do not change browser or application data."],
+    alwaysConfirmCategories: [
+      "browser_mutation",
+      "opaque_target",
+      "credentials",
+      "external_side_effect",
+    ],
+  };
+}
+
+/**
+ * Validate the caller policy before opening a Browserbase session.
+ *
+ * Service-role watch calls are forced into the most restrictive policy even
+ * when an older scheduler omits the envelope. All user-authenticated calls
+ * must carry a complete v1 envelope; a missing/malformed envelope is a 400,
+ * never implicit mutation authority.
+ */
+function validateComputerUsePolicyEnvelope(
+  raw: unknown,
+  forceScheduled: boolean,
+  nowMs = Date.now(),
+): { ok: true; policy: ComputerUsePolicyEnvelope } | { ok: false; error: string } {
+  if (forceScheduled) return { ok: true, policy: forcedScheduledPolicy() };
+  if (!isRecord(raw)) return { ok: false, error: "computer_use_policy_required" };
+  if (raw.schemaVersion !== COMPUTER_USE_POLICY_SCHEMA_VERSION) {
+    return { ok: false, error: "computer_use_policy_version_invalid" };
+  }
+  const executionMode = raw.executionMode;
+  const source = raw.source;
+  const validModeAndSource =
+    (executionMode === "interactive" && (source === "chat" || source === "queue"))
+    || (executionMode === "scheduled_observation" && source === "watch");
+  if (!validModeAndSource) return { ok: false, error: "computer_use_policy_mode_invalid" };
+
+  if (!Array.isArray(raw.userConstraints) || raw.userConstraints.length > POLICY_CONSTRAINT_LIMIT) {
+    return { ok: false, error: "computer_use_policy_constraints_invalid" };
+  }
+  const userConstraints: string[] = [];
+  for (const constraint of raw.userConstraints) {
+    if (typeof constraint !== "string") {
+      return { ok: false, error: "computer_use_policy_constraints_invalid" };
+    }
+    const bounded = constraint.replace(/\s+/g, " ").trim();
+    if (!bounded || bounded.length > POLICY_CONSTRAINT_CHAR_LIMIT || userConstraints.includes(bounded)) {
+      return { ok: false, error: "computer_use_policy_constraints_invalid" };
+    }
+    userConstraints.push(bounded);
+  }
+
+  if (!Array.isArray(raw.alwaysConfirmCategories) || raw.alwaysConfirmCategories.length > 4) {
+    return { ok: false, error: "computer_use_policy_confirm_categories_invalid" };
+  }
+  const alwaysConfirmCategories: string[] = [];
+  for (const category of raw.alwaysConfirmCategories) {
+    if (typeof category !== "string"
+      || !ALWAYS_CONFIRM_CATEGORIES.has(category)
+      || alwaysConfirmCategories.includes(category)) {
+      return { ok: false, error: "computer_use_policy_confirm_categories_invalid" };
+    }
+    alwaysConfirmCategories.push(category);
+  }
+
+  let preRunBrowserPermission: ComputerUsePreRunBrowserPermission | undefined;
+  if (raw.preRunBrowserPermission !== undefined) {
+    const grant = raw.preRunBrowserPermission;
+    if (!isRecord(grant)) return { ok: false, error: "computer_use_pre_run_permission_invalid" };
+    const grantId = typeof grant.grantId === "string" ? grant.grantId.trim() : "";
+    const issuedAt = typeof grant.issuedAt === "string" ? Date.parse(grant.issuedAt) : NaN;
+    const expiresAt = typeof grant.expiresAt === "string" ? Date.parse(grant.expiresAt) : NaN;
+    if (
+      grant.kind !== "explicit_user_grant"
+      || grant.scope !== "low_consequence_browser"
+      || grantId.length < 8
+      || grantId.length > 128
+      || !Number.isFinite(issuedAt)
+      || !Number.isFinite(expiresAt)
+      || issuedAt > nowMs + 60_000
+      || expiresAt <= nowMs
+      || expiresAt - issuedAt <= 0
+      || expiresAt - issuedAt > PRE_RUN_GRANT_MAX_MS
+    ) {
+      return { ok: false, error: "computer_use_pre_run_permission_invalid" };
+    }
+    preRunBrowserPermission = {
+      kind: "explicit_user_grant",
+      grantId,
+      scope: "low_consequence_browser",
+      issuedAt: String(grant.issuedAt),
+      expiresAt: String(grant.expiresAt),
+    };
+  }
+
+  return {
+    ok: true,
+    policy: {
+      schemaVersion: 1,
+      executionMode: executionMode as ComputerUseExecutionMode,
+      source: source as ComputerUsePolicySource,
+      userConstraints,
+      alwaysConfirmCategories,
+      ...(preRunBrowserPermission ? { preRunBrowserPermission } : {}),
+    },
+  };
+}
+
+type NativeComputerActionClass =
+  | { kind: "observation_navigation"; action: string }
+  | { kind: "mutation"; action: string; opaqueTarget: true }
+  | { kind: "unknown_mutation"; action: string };
+
+function classifyNativeComputerAction(input: unknown): NativeComputerActionClass {
+  const action = isRecord(input) && typeof input.action === "string"
+    ? input.action.trim().toLowerCase()
+    : "";
+  if (["screenshot", "wait", "mouse_move", "scroll"].includes(action)) {
+    return { kind: "observation_navigation", action };
+  }
+  if (["left_click", "right_click", "double_click", "type", "key"].includes(action)) {
+    // Anthropic's current native schema gives coordinates/current focus, not
+    // a trusted semantic locator. Treat every target as opaque.
+    return { kind: "mutation", action, opaqueTarget: true };
+  }
+  return { kind: "unknown_mutation", action: action || "(missing)" };
+}
+
+function redactToolInputForTelemetry(tool: string, input: unknown): unknown {
+  if (!isRecord(input)) return {};
+  if (tool === "computer") {
+    const action = typeof input.action === "string" ? input.action : "(missing)";
+    if (action === "type" || action === "key") {
+      return {
+        action,
+        text: "[redacted]",
+      };
+    }
+    const out: Record<string, unknown> = { action };
+    if (Array.isArray(input.coordinate)) {
+      out.coordinate = input.coordinate.slice(0, 2).map((value) =>
+        typeof value === "number" && Number.isFinite(value) ? value : null);
+    }
+    if (typeof input.scroll_direction === "string") out.scroll_direction = input.scroll_direction.slice(0, 16);
+    if (typeof input.duration === "number" && Number.isFinite(input.duration)) out.duration = input.duration;
+    return out;
+  }
+  if (tool === "fill_saved_login") {
+    return { credential: "[redacted]", purpose: "[redacted]", submit: input.submit === true };
+  }
+  if (tool === "ask_user") {
+    return {
+      kind: input.kind === "human_takeover" ? "human_takeover" : "confirm",
+      question: "[confirmation text omitted from telemetry]",
+    };
+  }
+  return {};
+}
+
+function scrubSensitiveToolUseForHistory(toolUse: any): void {
+  const tool = typeof toolUse?.name === "string" ? toolUse.name : "";
+  if (tool === "fill_saved_login" || tool === "ask_user") {
+    toolUse.input = redactToolInputForTelemetry(tool, toolUse?.input);
+    return;
+  }
+  if (tool === "computer") {
+    const action = classifyNativeComputerAction(toolUse?.input).action;
+    if (action === "type" || action === "key") {
+      toolUse.input = redactToolInputForTelemetry(tool, toolUse?.input);
+    }
+  }
+}
+
+function buildExactMutationConfirmation(
+  action: NativeComputerActionClass & { kind: "mutation" },
+  input: unknown,
+  payOrBookingCommit: boolean,
+): { question: string; context: string } {
+  const record = isRecord(input) ? input : {};
+  const coordinate = Array.isArray(record.coordinate)
+    && record.coordinate.length >= 2
+    && record.coordinate.slice(0, 2).every((value) => typeof value === "number" && Number.isFinite(value))
+    ? ` at screen coordinates (${record.coordinate[0]}, ${record.coordinate[1]})`
+    : " at an unspecified screen location";
+  let detail: string;
+  switch (action.action) {
+    case "left_click":
+      detail = `one left click${coordinate}`;
+      break;
+    case "right_click":
+      detail = `one right click${coordinate}`;
+      break;
+    case "double_click":
+      detail = `one double click${coordinate}`;
+      break;
+    case "type": {
+      detail = "one typing action (contents hidden) in the currently focused field";
+      break;
+    }
+    default:
+      detail = "one keyboard action (key details hidden) at the current focus";
+      break;
+  }
+  const consequence = payOrBookingCommit ? " This may commit a payment or binding booking." : "";
+  return {
+    question: `Allow ${detail}?${consequence}`,
+    context:
+      "This approval is for this exact call only. The target is coordinate/focus based, so its semantic identity cannot be proven; approval will not carry forward.",
+  };
+}
+
+function canRunMutationWithoutLiveConfirmation(
+  policy: ComputerUsePolicyEnvelope,
+  action: NativeComputerActionClass & { kind: "mutation" },
+): boolean {
+  // A pre-run permission is necessary but never sufficient. Native Computer
+  // Use mutations are all opaque today, and user constraints/always-confirm
+  // floors cannot be interpreted by the model as permission to bypass this.
+  if (!policy.preRunBrowserPermission) return false;
+  if (policy.userConstraints.length > 0 || policy.alwaysConfirmCategories.length > 0) return false;
+  if (action.opaqueTarget) return false;
+  return true;
+}
+
+function isAffirmativeChoice(choice: string): boolean {
+  return /^(yes|y|continue|done|approve|approved|ok|okay|use|log in)/i.test(String(choice || "").trim());
+}
+
+function resolveAllowedConfirmationChoice(
+  storedChoice: string,
+  options: string[],
+): string | null {
+  const exact = options.find((option) => option === storedChoice);
+  if (exact) return exact;
+  if (isAffirmativeChoice(storedChoice)) {
+    return options.find((option) => isAffirmativeChoice(option)) || null;
+  }
+  if (/^(n|no|nope|cancel|stop|decline|reject|not now)\b/i.test(storedChoice.trim())) {
+    return options.find((option) =>
+      /^(n|no|cancel|stop|decline|reject)\b/i.test(option.trim())) || null;
+  }
+  return null;
+}
+
+function validateNativeMutationInput(
+  action: NativeComputerActionClass & { kind: "mutation" },
+  input: unknown,
+): string | null {
+  const record = isRecord(input) ? input : {};
+  if (["left_click", "right_click", "double_click"].includes(action.action)) {
+    const coordinate = record.coordinate;
+    if (!Array.isArray(coordinate)
+      || coordinate.length !== 2
+      || !coordinate.every((value) => typeof value === "number" && Number.isFinite(value))
+      || coordinate[0] < 0
+      || coordinate[0] >= 1280
+      || coordinate[1] < 0
+      || coordinate[1] >= 800) {
+      return "click_coordinate_invalid";
+    }
+    return null;
+  }
+  if (typeof record.text !== "string") return "keyboard_text_invalid";
+  if (record.text.length > 10_000) return "keyboard_text_too_large";
+  return null;
+}
+
 interface AgentRequest {
   task: string;
   circleId: string;
@@ -363,6 +661,9 @@ interface AgentRequest {
    *  `created_by` user id. Honored ONLY when the request carries the
    *  service-role key — see the scheduled-path check in the handler. */
   scheduledBy?: string;
+  /** Required for user-authenticated runs. Service watch calls are always
+   *  forced to scheduled_observation, including legacy callers that omit it. */
+  policy?: unknown;
 }
 
 Deno.serve(async (req: Request) => {
@@ -444,6 +745,17 @@ Deno.serve(async (req: Request) => {
   // exempt. Service-role + explicit (circle_id, user_id) equality checks the
   // VERIFIED user's own membership and avoids the circle_members RLS recursion.
   const isScheduledServiceCall = Boolean(scheduledBy) && isServiceRoleRequest(req);
+  const policyResult = validateComputerUsePolicyEnvelope(body.policy, isScheduledServiceCall);
+  if (!policyResult.ok) {
+    return new Response(
+      JSON.stringify({
+        error: "A valid Computer Use policy envelope is required.",
+        code: policyResult.error,
+      }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+  const executionPolicy = policyResult.policy;
   if (!isScheduledServiceCall && supabase && body.circleId) {
     const { data: membership } = await supabase
       .from("circle_members")
@@ -500,10 +812,22 @@ Deno.serve(async (req: Request) => {
         wanted && normalizeTaskForReplay(row.task) === wanted && Array.isArray(row.action_trace) && row.action_trace.length > 0);
       if (prior) {
         const steps = (prior.action_trace as Array<{ tool: string; input: unknown }>)
+          // Historical traces may predate telemetry redaction. Never copy
+          // typed text, key material, or credential calls back into a prompt.
+          .filter((a) => {
+            if (a.tool === "fill_saved_login") return false;
+            if (a.tool !== "computer") return true;
+            const classified = classifyNativeComputerAction(a.input);
+            return classified.kind !== "unknown_mutation"
+              && classified.action !== "type"
+              && classified.action !== "key";
+          })
           .slice(0, 40)
-          .map((a, i) => `${i + 1}. ${a.tool}(${JSON.stringify(a.input ?? {}).slice(0, 200)})`)
+          .map((a, i) => `${i + 1}. ${a.tool}(${JSON.stringify(redactToolInputForTelemetry(a.tool, a.input)).slice(0, 200)})`)
           .join("\n");
-        replayBlock = `PROVEN ACTION SEQUENCE — this exact task succeeded before (${String(prior.completed_at).slice(0, 10)}). Follow it step by step instead of re-exploring:\n${steps}\n\nReplay rules: before each action, confirm the visible state still matches what the step expects; if it doesn't, STOP following the script at that point and re-ground normally (observe, then act). Approval/confirmation steps still apply — the script never skips an ask_user. Skip exploration the script already answers.`;
+        if (steps) {
+          replayBlock = `PROVEN ACTION SEQUENCE — this exact task succeeded before (${String(prior.completed_at).slice(0, 10)}). Follow it step by step instead of re-exploring:\n${steps}\n\nReplay rules: before each action, confirm the visible state still matches what the step expects; if it doesn't, STOP following the script at that point and re-ground normally (observe, then act). Every mutation still requires the runtime's current approval policy; a prior trace is never consent. Skip exploration the script already answers.`;
+        }
       }
     } catch { /* replay is an optimization — never block the run */ }
   }
@@ -568,9 +892,9 @@ Deno.serve(async (req: Request) => {
           const origins = Array.isArray(c?.allowed_origins) && c.allowed_origins.length
             ? ` [origins: ${c.allowed_origins.slice(0, 3).join(", ")}]`
             : (c?.site_url ? ` [site: ${c.site_url}]` : "");
-          return `- credential_id="${c.id}" — ${c.platform || "site"}/${c.label || "login"}${c.username ? ` (user: ${c.username})` : ""}${origins}`;
+          return `- credential_id="${c.id}" — ${c.platform || "site"}/${c.label || "login"}${origins}`;
         }).join("\n");
-        credentialInventory = `SAVED LOGINS AVAILABLE (circle vault). When a page requires signing in and it matches one of these, call fill_saved_login with the matching credential_id (after approval) instead of asking the user to type a password — the secret is typed directly into the page and never shown to you. Only these are available:\n${lines}\n\nRules: match the current page's origin to the credential's site/origins before using it; if none match the site you're on, ask the user. Never guess a credential_id.`;
+        credentialInventory = `SAVED LOGINS AVAILABLE (circle vault). When a page requires signing in and it matches one of these, call fill_saved_login with the matching credential_id; the edge will request exact one-call approval and type the secret directly without showing it to you. Only these are available:\n${lines}\n\nRules: match the current page's origin to the credential's site/origins before using it; if none match the site you're on, ask the user. Never guess a credential_id.`;
       }
     } catch { /* credential inventory is best-effort; never block the run */ }
   }
@@ -668,14 +992,8 @@ Deno.serve(async (req: Request) => {
       let usage: UsageBreakdown = { ...EMPTY_USAGE };
       const startTime = Date.now();
       const DEADLINE_MS = runCaps.deadlineMs;
-      let credentialFillApprovedUntil = 0;
-      // Server-side pay-floor backstop (WI-7). `payConfirmed` arms once the
-      // user affirmatively answers a pay/book-class ask_user this run; until
-      // then, a click that looks like the final pay/book submission is blocked
-      // with an injected tool_result forcing ask_user first. `lastKnownUrl`
-      // tracks the most recent observed page URL so the detector can see
-      // checkout/payment surfaces.
-      let payConfirmed = false;
+      // Tracks the most recent observed page URL so the exact per-call gate
+      // can warn when a mutation also looks like a pay/book commit.
       let lastKnownUrl: string | null = null;
       // Time spent paused on ask_user does not count against the work
       // deadline (D5) — a human fetching a 2FA code should not starve the
@@ -770,31 +1088,25 @@ Deno.serve(async (req: Request) => {
         const recordProgress = (iter: number, tool: string, input: unknown) => {
           let detail = "";
           try {
-            const i = input as Record<string, unknown>;
-            detail = String(i?.url || i?.selector || i?.text || i?.question || JSON.stringify(i ?? {})).slice(0, 100);
+            const safeInput = redactToolInputForTelemetry(tool, input);
+            detail = JSON.stringify(safeInput).slice(0, 100);
           } catch { detail = ""; }
           progressLog.push({ iter, tool, detail });
           if (progressLog.length > 24) progressLog.shift();
         };
 
-        // Guided-replay trace (D7c): full tool inputs, REDACTED — any
-        // credential-shaped key is masked at write time so the persisted
-        // trace can never carry a secret. Bounded per action and overall.
-        const SENSITIVE_KEY_RE = /password|secret|token|otp|credential|passcode|pin|cvv|card/i;
-        const redactForTrace = (input: unknown): unknown => {
-          if (!input || typeof input !== "object") {
-            return typeof input === "string" ? input.slice(0, 200) : input;
-          }
-          const out: Record<string, unknown> = {};
-          for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-            if (SENSITIVE_KEY_RE.test(key)) { out[key] = "[redacted]"; continue; }
-            out[key] = typeof value === "string" ? value.slice(0, 200) : value;
-          }
-          return out;
-        };
+        // Guided-replay trace (D7c): only successfully completed, safe-to-
+        // replay actions are recorded. Typed/key/credential inputs are
+        // omitted rather than merely key-name redacted: native `text` was a
+        // historical leak seam and a placeholder must never be typed later.
         const actionTrace: Array<{ tool: string; input: unknown }> = [];
         const recordTrace = (tool: string, input: unknown) => {
-          actionTrace.push({ tool, input: redactForTrace(input) });
+          if (tool === "fill_saved_login" || tool === "ask_user") return;
+          if (tool === "computer") {
+            const action = classifyNativeComputerAction(input).action;
+            if (action === "type" || action === "key") return;
+          }
+          actionTrace.push({ tool, input: redactToolInputForTelemetry(tool, input) });
           if (actionTrace.length > 40) actionTrace.shift();
         };
         const emitPartialResult = async (iter: number, stopReason: string, message: string) => {
@@ -903,14 +1215,25 @@ Deno.serve(async (req: Request) => {
           });
 
           // Record the assistant's turn verbatim so tool_use_id refs resolve
-          // next iteration.
+          // next iteration. Secret-bearing tool inputs are scrubbed in-place
+          // after dispatch so subsequent model calls never receive typed/key
+          // text or credential/question payloads from history.
           messages.push({ role: "assistant", content: claudeResponse.content });
 
           // Surface any thinking / text blocks as reasoning events.
+          const turnContainsSecretBearingTool = claudeResponse.content.some((block: any) => {
+            if (block?.type !== "tool_use") return false;
+            if (block.name === "fill_saved_login" || block.name === "ask_user") return true;
+            return block.name === "computer"
+              && ["type", "key"].includes(classifyNativeComputerAction(block.input).action);
+          });
           for (const block of claudeResponse.content) {
             if (block.type === "text" && block.text) {
-              emit("reasoning", { text: block.text });
-              lastReasoning = block.text;
+              const safeReasoning = turnContainsSecretBearingTool
+                ? "[Reasoning withheld because this turn contains redacted form, keyboard, credential, or confirmation data.]"
+                : block.text;
+              emit("reasoning", { text: safeReasoning });
+              lastReasoning = safeReasoning;
             }
           }
 
@@ -1001,49 +1324,61 @@ Deno.serve(async (req: Request) => {
             | { type: "text"; text: string }
           > = [];
           // Did THIS round push anything into the stuck-detection ring?
-          // Gate-handled calls (ask_user, fill_saved_login, pay-floor block)
-          // deliberately don't touch the ring — so a round made ONLY of them
-          // must not re-evaluate the ring's stale tail, or the run gets
-          // killed right after the user answered (stale-verdict bug).
+          // Gate-only ask_user calls deliberately don't touch the ring, so a
+          // round made only of them must not re-evaluate a stale failure tail.
+          // A verified saved-login dispatch does touch the ring as a real
+          // browser operation.
           let ringTouchedThisRound = false;
           for (const tu of toolUses) {
-            emit("action", { tool: tu.name, input: tu.input });
-            recordProgress(iter + 1, tu.name, tu.input);
-            recordTrace(tu.name, tu.input);
+            const rawToolInput = tu.input;
+            const safeToolInput = redactToolInputForTelemetry(tu.name, rawToolInput);
+            let mutationCall = false;
+            let mutationDispatchStarted = false;
             try {
               // Stop-and-confirm: when Claude calls `ask_user`, pause the
               // loop and wait for the client to write a decision. No real
               // browser action fires until the user answers (or times out).
               if (tu.name === "ask_user") {
-                const question = String((tu.input as any)?.question || "Confirm this action?");
-                const isTakeover = (tu.input as any)?.kind === "human_takeover";
-                const options = Array.isArray((tu.input as any)?.options) && (tu.input as any).options.length
-                  ? ((tu.input as any).options as string[])
-                  : isTakeover
-                    ? ["Done, continue", "Cancel the task"]
-                    : ["Yes, continue", "No, cancel"];
-                const ctx = typeof (tu.input as any)?.context === "string" ? (tu.input as any).context : null;
+                const rawQuestion = String((rawToolInput as any)?.question || "");
+                const rawContext = typeof (rawToolInput as any)?.context === "string"
+                  ? (rawToolInput as any).context
+                  : null;
+                const isTakeover = (rawToolInput as any)?.kind === "human_takeover";
+                const isPayConfirm = isPayConfirmQuestion(rawQuestion, rawContext);
+                // Model-authored questions/options can echo arbitrary form
+                // text or secrets. Show fixed, bounded copy; the exact
+                // mutation gate later identifies the actual single call.
+                const question = isTakeover
+                  ? "The browser needs a human-only step. Open the live session, complete it there, then choose Done."
+                  : isPayConfirm
+                    ? "Review the final payment or booking state in the live browser. Do you want the agent to continue?"
+                    : "The browser agent needs your decision before it can continue.";
+                const options = isTakeover
+                  ? ["Done, continue", "Cancel the task"]
+                  : ["Yes, continue", "No, cancel"];
+                const ctx = isTakeover
+                  ? "Nothing you type in the live browser is copied into chat, telemetry, or model history."
+                  : "This answer is guidance only and does not authorize a later browser mutation.";
+                emit("action", { tool: tu.name, input: safeToolInput });
+                scrubSensitiveToolUseForHistory(tu);
                 // Takeover asks: the user must act in the live session view
                 // (2FA, CAPTCHA). While the loop is parked here NO tools run
                 // and NO screenshots are captured — whatever the user types
                 // in the live view never enters model context.
-                const takeoverCtx = isTakeover
-                  ? `${ctx ? `${ctx} — ` : ""}Open the live session view to complete this step yourself. Nothing you type there is captured while the agent waits.`
-                  : ctx;
                 // Pay/book confirmations get the longer (>=300s) window so a
                 // human reviewing the final amount / fetching a card isn't
                 // auto-cancelled. Takeovers keep their existing 300s; ordinary
                 // asks keep 120s.
-                const isPayConfirm = isPayConfirmQuestion(question, ctx);
                 const askTimeoutMs = isTakeover || isPayConfirm
                   ? PAY_CONFIRM_TIMEOUT_MS
                   : DEFAULT_ASK_TIMEOUT_MS;
                 const waitStarted = Date.now();
                 const choice = await askUserAndWait(
-                  supabase, runId, question, options, takeoverCtx, emit,
+                  supabase, runId, question, options, ctx, emit,
                   askTimeoutMs,
                 );
                 confirmationWaitMs += Date.now() - waitStarted;
+                recordProgress(iter + 1, tu.name, safeToolInput);
                 const timedOut = choice === "__timeout__" || /did not respond within/i.test(choice);
                 // Pay-confirm timeout: instead of feeding a "treat as No" back
                 // into the loop and terminating, hand the run back as a
@@ -1062,70 +1397,215 @@ Deno.serve(async (req: Request) => {
                   // can confirm & resume the SAME session.
                   break agentLoop;
                 }
-                if (isAffirmativeChoice(choice) && isCredentialApprovalQuestion(question, ctx)) {
-                  credentialFillApprovedUntil = Date.now() + 2 * 60 * 1000;
-                }
-                // Arm the pay-floor backstop once the user affirmatively OKs a
-                // pay/book-class confirmation. From here the final submit click
-                // is allowed to proceed.
-                if (isAffirmativeChoice(choice) && isPayConfirm) {
-                  payConfirmed = true;
-                }
                 toolResults.push({
                   type: "tool_result",
                   tool_use_id: tu.id,
-                  content: [{ type: "text", text: `User chose: ${choice}` }],
+                  content: [{
+                    type: "text",
+                    text: isAffirmativeChoice(choice)
+                      ? "User chose the affirmative option for this question only."
+                      : "User declined or did not complete this question.",
+                  }],
                 });
                 continue;
               }
 
               if (tu.name === "fill_saved_login") {
-                const out = await fillSavedLoginFromVault({
+                mutationCall = true;
+                scrubSensitiveToolUseForHistory(tu);
+                if (executionPolicy.executionMode === "scheduled_observation") {
+                  const message = "Scheduled Computer Use is observation-only. Saved-login filling was blocked before any browser mutation.";
+                  await emitPartialResult(iter + 1, "scheduled_mutation_blocked", message);
+                  emit("error", { message });
+                  break agentLoop;
+                }
+                const waitStarted = Date.now();
+                const choice = await askUserAndWait(
+                  supabase,
+                  runId,
+                  "Allow this one saved-login fill in the currently observed login form?",
+                  ["Yes, run this action", "No, stop"],
+                  "Credential id, username, password, purpose, and typed values remain redacted. Approval applies to this call only.",
+                  emit,
+                  DEFAULT_ASK_TIMEOUT_MS,
+                );
+                confirmationWaitMs += Date.now() - waitStarted;
+                if (!isAffirmativeChoice(choice)) {
+                  const message = "Saved-login filling was not approved. No browser mutation was dispatched.";
+                  await emitPartialResult(iter + 1, "mutation_not_approved", message);
+                  emit("error", { message });
+                  break agentLoop;
+                }
+                const before = await bbCommand(body.browserbase, sessionId, "screenshot", {});
+                if (!before.screenshot) {
+                  const message = "Could not obtain the required fresh pre-action screenshot. Saved-login filling was not dispatched.";
+                  await emitPartialResult(iter + 1, "mutation_precondition_failed", message);
+                  emit("error", { message });
+                  break agentLoop;
+                }
+                emit("screenshot", { b64: before.screenshot, url: before.currentUrl });
+                emit("action", { tool: tu.name, input: safeToolInput });
+                await fillSavedLoginFromVault({
                   creds: body.browserbase,
                   sessionId,
-                  input: tu.input,
+                  input: rawToolInput,
                   circleId: body.circleId,
                   userSupabase,
-                  approved: Date.now() <= credentialFillApprovedUntil,
+                  approved: true,
+                  mutationMaxAttempts: 1,
+                  onMutationDispatchStart: () => {
+                    mutationDispatchStarted = true;
+                  },
                 });
+                const after = await bbCommand(body.browserbase, sessionId, "screenshot", {});
+                if (!after.screenshot) throw new Error("post-action screenshot unavailable");
+                if (after.currentUrl) lastKnownUrl = after.currentUrl;
+                emit("screenshot", { b64: after.screenshot, url: after.currentUrl });
+                recordProgress(iter + 1, tu.name, safeToolInput);
                 toolResults.push({
                   type: "tool_result",
                   tool_use_id: tu.id,
-                  content: [{ type: "text", text: out.text || "Saved login filled. Secret was not returned." }],
+                  content: [
+                    { type: "image", source: { type: "base64", media_type: "image/png", data: after.screenshot } },
+                    { type: "text", text: "Saved-login action dispatched once and followed by a fresh verification screenshot. Secrets were not returned." },
+                  ],
                 });
+                browserActionRing.push({ name: tu.name, inputHash: hashToolInput(safeToolInput), ok: true });
+                if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
+                ringTouchedThisRound = true;
                 continue;
               }
 
-              // Server-side pay-floor backstop (WI-7). Even with every client
-              // gate removed, the final pay/book submission must not fire
-              // without an affirmative confirmation this run. If this click
-              // looks like the final commit (checkout/payment URL + pay-verb
-              // reasoning, or explicit pay-action reasoning) and the user
-              // hasn't confirmed, inject a tool_result error forcing ask_user
-              // first — the real click never runs.
-              if (detectFinalPaySubmission({
-                toolName: tu.name,
-                action: (tu.input as any)?.action ?? null,
-                actionText: (tu.input as any)?.text ?? null,
-                lastReasoning,
-                lastUrl: lastKnownUrl,
-                payConfirmed,
-                booking: body.booking === true,
-              })) {
-                emit("reasoning", { text: "[pay floor] Blocked a final-submit click — need explicit confirmation first." });
+              if (tu.name !== "computer" && tu.name !== "bash") {
+                const message = "An unknown tool was blocked before dispatch.";
+                await emitPartialResult(iter + 1, "unknown_tool_blocked", message);
+                emit("error", { message });
+                scrubSensitiveToolUseForHistory(tu);
+                break agentLoop;
+              }
+
+              const actionClass = tu.name === "computer"
+                ? classifyNativeComputerAction(rawToolInput)
+                : null;
+              if (actionClass?.kind === "unknown_mutation") {
+                mutationCall = true;
+                scrubSensitiveToolUseForHistory(tu);
+                const message = "An unknown native computer action was treated as a mutation and blocked before dispatch.";
+                await emitPartialResult(iter + 1, "unknown_mutation_blocked", message);
+                emit("error", { message });
+                break agentLoop;
+              }
+              if (actionClass?.kind === "mutation") {
+                mutationCall = true;
+                if (executionPolicy.executionMode === "scheduled_observation") {
+                  scrubSensitiveToolUseForHistory(tu);
+                  const message = `Scheduled Computer Use is observation-only. The ${actionClass.action} mutation was blocked before dispatch.`;
+                  await emitPartialResult(iter + 1, "scheduled_mutation_blocked", message);
+                  emit("error", { message });
+                  break agentLoop;
+                }
+
+                const mutationInputError = validateNativeMutationInput(actionClass, rawToolInput);
+                if (mutationInputError) {
+                  scrubSensitiveToolUseForHistory(tu);
+                  const message = `The ${actionClass.action} mutation had invalid or out-of-bounds input and was blocked before approval or dispatch.`;
+                  await emitPartialResult(iter + 1, mutationInputError, message);
+                  emit("error", { message });
+                  break agentLoop;
+                }
+
+                const payOrBookingCommit = detectFinalPaySubmission({
+                  toolName: tu.name,
+                  action: (rawToolInput as any)?.action ?? null,
+                  actionText: (rawToolInput as any)?.text ?? null,
+                  lastReasoning,
+                  lastUrl: lastKnownUrl,
+                  // Earlier ask_user answers are guidance, not reusable
+                  // authorization. The exact gate below owns this one call.
+                  payConfirmed: false,
+                  booking: body.booking === true,
+                });
+                // Keep only the local rawToolInput reference needed for this
+                // dispatch; scrub the conversation copy before waiting on a
+                // human or making another model call.
+                scrubSensitiveToolUseForHistory(tu);
+                if (!canRunMutationWithoutLiveConfirmation(executionPolicy, actionClass)) {
+                  const confirmation = buildExactMutationConfirmation(
+                    actionClass,
+                    rawToolInput,
+                    payOrBookingCommit,
+                  );
+                  const waitStarted = Date.now();
+                  const choice = await askUserAndWait(
+                    supabase,
+                    runId,
+                    confirmation.question,
+                    ["Yes, run this action", "No, stop"],
+                    confirmation.context,
+                    emit,
+                    payOrBookingCommit ? PAY_CONFIRM_TIMEOUT_MS : DEFAULT_ASK_TIMEOUT_MS,
+                  );
+                  confirmationWaitMs += Date.now() - waitStarted;
+                  if (!isAffirmativeChoice(choice)) {
+                    scrubSensitiveToolUseForHistory(tu);
+                    const message = `The ${actionClass.action} mutation was not approved. No browser mutation was dispatched.`;
+                    await emitPartialResult(iter + 1, "mutation_not_approved", message);
+                    emit("error", { message });
+                    break agentLoop;
+                  }
+                }
+
+                const before = await bbCommand(body.browserbase, sessionId, "screenshot", {});
+                if (!before.screenshot) {
+                  scrubSensitiveToolUseForHistory(tu);
+                  const message = `Could not obtain the required fresh pre-action screenshot. The ${actionClass.action} mutation was not dispatched.`;
+                  await emitPartialResult(iter + 1, "mutation_precondition_failed", message);
+                  emit("error", { message });
+                  break agentLoop;
+                }
+                emit("screenshot", { b64: before.screenshot, url: before.currentUrl });
+                emit("action", { tool: tu.name, input: safeToolInput });
+                mutationDispatchStarted = true;
+                await runTool(body.browserbase, sessionId, tu.name, rawToolInput, {
+                  mutationMaxAttempts: 1,
+                  mutationAuthorization: APPROVED_MUTATION_DISPATCH,
+                });
+                const after = await bbCommand(body.browserbase, sessionId, "screenshot", {});
+                if (!after.screenshot) throw new Error("post-action screenshot unavailable");
+                const out: ToolOutcome = {
+                  screenshot: after.screenshot,
+                  currentUrl: after.currentUrl,
+                  text: "Action dispatched once and followed by a fresh verification screenshot.",
+                };
+                scrubSensitiveToolUseForHistory(tu);
+                if (out.currentUrl) lastKnownUrl = out.currentUrl;
+                emit("screenshot", { b64: out.screenshot, url: out.currentUrl });
+                recordProgress(iter + 1, tu.name, safeToolInput);
+                recordTrace(tu.name, safeToolInput);
                 toolResults.push({
                   type: "tool_result",
                   tool_use_id: tu.id,
-                  content: [{ type: "text", text: PAY_BACKSTOP_TOOL_RESULT }],
+                  content: [
+                    { type: "image", source: { type: "base64", media_type: "image/png", data: out.screenshot } },
+                    { type: "text", text: out.text },
+                  ],
                 });
+                browserActionRing.push({ name: tu.name, inputHash: hashToolInput(safeToolInput), ok: true });
+                if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
+                ringTouchedThisRound = true;
                 continue;
               }
 
-              const out = await runTool(body.browserbase, sessionId, tu.name, tu.input);
+              // Observation/navigation actions and the non-executing bash
+              // refusal remain available to both interactive and watch runs.
+              emit("action", { tool: tu.name, input: safeToolInput });
+              const out = await runTool(body.browserbase, sessionId, tu.name, rawToolInput);
               if (out.currentUrl) lastKnownUrl = out.currentUrl;
               if (out.screenshot) {
                 emit("screenshot", { b64: out.screenshot, url: out.currentUrl });
               }
+              recordProgress(iter + 1, tu.name, safeToolInput);
+              recordTrace(tu.name, safeToolInput);
               toolResults.push({
                 type: "tool_result",
                 tool_use_id: tu.id,
@@ -1140,22 +1620,38 @@ Deno.serve(async (req: Request) => {
               // semantics — only THROWN tool errors count as failures; a
               // visually-failed action with a clean screenshot stays the
               // model's job to judge from pixels).
-              browserActionRing.push({ name: tu.name, inputHash: hashToolInput(tu.input), ok: true });
+              browserActionRing.push({ name: tu.name, inputHash: hashToolInput(safeToolInput), ok: true });
               if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
               ringTouchedThisRound = true;
-            } catch (err: any) {
-              emit("error", { message: `Tool ${tu.name} failed: ${err?.message || err}` });
+            } catch {
+              scrubSensitiveToolUseForHistory(tu);
+              if (mutationCall) {
+                const stopReason = mutationDispatchStarted
+                  ? "mutation_outcome_unknown"
+                  : "mutation_precondition_failed";
+                const message = mutationDispatchStarted
+                  ? `The ${tu.name === "computer" ? classifyNativeComputerAction(rawToolInput).action : "saved-login"} mutation was dispatched once, but its result could not be verified. Outcome is unknown; it will not be replayed automatically.`
+                  : `The ${tu.name === "computer" ? classifyNativeComputerAction(rawToolInput).action : "saved-login"} mutation failed before dispatch and was not run.`;
+                await emitPartialResult(iter + 1, stopReason, message);
+                emit("error", { message });
+                // Do not add a failure ring/solver payload: mutation errors
+                // may contain request text, and an ambiguous dispatch must
+                // never be retried by the model or replay machinery.
+                break agentLoop;
+              }
+              const safeError = `Tool ${String(tu.name || "(missing)").slice(0, 60)} failed without exposing request parameters.`;
+              emit("error", { message: safeError });
               toolResults.push({
                 type: "tool_result",
                 tool_use_id: tu.id,
-                content: [{ type: "text", text: `Tool error: ${err?.message || err}` }],
+                content: [{ type: "text", text: safeError }],
               });
               // P61: record the failure for the progress-based detector.
-              browserActionRing.push({ name: tu.name, inputHash: hashToolInput(tu.input), ok: false });
+              browserActionRing.push({ name: tu.name, inputHash: hashToolInput(safeToolInput), ok: false });
               if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
               ringTouchedThisRound = true;
-              lastBrowserToolError = String(err?.message || err).slice(0, 300);
-              lastFailingBrowserCall = { tool: tu.name, input: tu.input };
+              lastBrowserToolError = safeError;
+              lastFailingBrowserCall = { tool: tu.name, input: safeToolInput };
             }
           }
           // Mid-run steering (plan §4e): unconsumed notes ride the same
@@ -1247,10 +1743,17 @@ Deno.serve(async (req: Request) => {
           source:   "computer-use-agent",
           model:    agentModel,
           usage,
-          metadata: { task: body.task.slice(0, 200), runId },
+          metadata: {
+            runId,
+            executionMode: executionPolicy.executionMode,
+            source: executionPolicy.source,
+          },
         });
-      } catch (err: any) {
-        const errMsg = err?.message || "agent crashed unexpectedly";
+      } catch {
+        // Runtime/provider errors can echo request parameters. Keep the
+        // persisted/SSE copy generic; no typed text, credential, or tool input
+        // crosses this final catch boundary.
+        const errMsg = "Computer Use stopped unexpectedly without exposing browser action parameters.";
         // Mark the run failed in DB too so the history panel and
         // follow-up context both reflect the outcome.
         if (supabase && runId) {
@@ -1292,7 +1795,7 @@ Deno.serve(async (req: Request) => {
 // System prompt the agent reads on every turn. Kept stable across calls so
 // prompt caching (cache_control below) turns the second+ turn into a cache
 // hit — ~10% of the input-token cost.
-const AGENT_SYSTEM_PROMPT = `You are an autonomous web agent driving a real Chrome browser on behalf of a user.
+const AGENT_SYSTEM_PROMPT = `You are a browser agent driving a real Chrome browser on behalf of a user.
 
 BEHAVIOR
 - Take screenshots frequently (before acting, after a page loads, and whenever you're unsure what's visible).
@@ -1309,18 +1812,26 @@ TASK COMPLETION
 BROWSERBASE WORKFLOW PROFILES
 - Web data retrieval: open the source page, wait for dynamic content to render, extract only the requested fields/records, include source URLs when visible, and stop promptly. For list-like results, use the <FINDINGS> block. For table/record/json style output, use <EXTRACTED_DATA> with valid JSON after the human summary.
 - Stagehand-style browser work: break ambiguous UI work into small semantic actions (act/extract-sized steps), then verify with screenshots or visible text before continuing. Use deterministic clicks/typing when the target is obvious; do not overuse AI actions when a simple browser action is safer.
-${BOOKING_FORM_SUBMISSION_PROFILE}
-- Persistent login state: if the task needs an account, use vault-provided credentials through fill_saved_login only after approval and only on allowed origins. If the site needs 2FA, CAPTCHA, or a human-only checkpoint, hand over to the user with the human-takeover flow (below) and continue after they finish.
+- Form submission: wait for fields to load, handle dynamic sections one step at a time, and verify visible success or validation errors. The edge runtime—not this prompt—decides whether each native browser action may execute.
+- Persistent login state: if the task needs an account, call fill_saved_login only for a matching allowed origin; the edge requests exact approval before it mutates the form. If the site needs 2FA, CAPTCHA, or a human-only checkpoint, hand over to the user with the human-takeover flow (below) and continue after they finish.
 - Deterministic-first: if the task already contains concrete browser steps (open URL, click named control, fill field, press key, extract visible data), execute that explicit sequence before inventing a new strategy. Use model judgment only for ambiguous targets, missing selectors, summarizing observed data, or recovery after repeated deterministic failure.
 - Creative handoff: if the browser task requires a generated image or visual concept, produce the precise prompt/spec needed for the image tool and return it as an artifact-ready result; do not answer with a generic "I cannot create images" refusal.
 
-${BOOKING_SAFETY_BLOCK}
+RUNTIME SAFETY CONTRACT
+- The edge classifies screenshot, wait, mouse_move, and scroll as observation/navigation. Clicks, double-clicks, typing, keyboard actions, saved-login filling, and unknown computer actions are mutations.
+- Every current native mutation uses an opaque coordinate or focused target. The edge requires a fresh, exact, one-call user confirmation before dispatch, regardless of what you say or infer. Scheduled/watch runs are observation-only and stop truthfully if you request a mutation.
+- A user task, steering note, prior action trace, pre-run permission, or earlier ask_user answer is never permission for a different mutation. Never claim an action happened until the post-action screenshot is returned.
+- The edge takes a fresh screenshot before an approved mutation, dispatches it once, then takes a separate fresh screenshot for verification. If dispatch or verification is ambiguous, the run stops with outcome unknown and does not replay the action.
+- Never put a password, token, one-time code, payment-card value, saved credential, or text intended for a form field into ask_user, reasoning, logs, or summaries. Use fill_saved_login for approved vault credentials and human_takeover for secrets the user must enter.
+- For payment, purchase, booking, reservation, publishing, deletion, account/permission, or other external side effects, describe the consequence accurately. The edge's exact action confirmation still applies.
 
 DO NOT
 - Do not use the bash tool for anything — it's not available here. Use the computer tool for everything.
 - Do not emit a <BUILD_READY> or <TOOL> marker. This is a computer-use agent, not a codegen agent.
 
-${BOOKING_SEARCH_BEHAVIOR}
+BOOKING / SHOPPING SEARCH BEHAVIOR
+- When the task is to find options without an explicit chosen item, treat it as research: apply requested filters, gather observed matches, emit a <FINDINGS> block, and end the turn so the user can choose.
+- Do not enter checkout or booking on your own after a search-only request. If the user explicitly asks to continue with a chosen item, proceed one observed step at a time under the runtime safety contract.
 
 STRUCTURED FINDINGS (for research / comparison / list tasks)
 If the user asked for a list of items — products, articles, results, places, options, anything
@@ -1445,8 +1956,20 @@ async function askUserAndWait(
         .eq("id", confirmationId)
         .maybeSingle();
       if (data?.choice && data?.resolved_at) {
-        emit("confirmation_resolved", { id: confirmationId, choice: data.choice });
-        return String(data.choice);
+        const storedChoice = String(data.choice);
+        // UI buttons persist the exact option label, while Chat can resolve a
+        // live confirmation with a bounded natural reply such as "yes" or
+        // "no". Map only canonical affirmative/negative aliases onto an
+        // existing fixed option; arbitrary text (including model-authored
+        // option labels) is never forwarded or treated as authorization.
+        const allowedChoice = resolveAllowedConfirmationChoice(storedChoice, options);
+        if (!allowedChoice) {
+          const rejected = options.find((o) => /^no/i.test(o) || /cancel|stop/i.test(o)) || "No";
+          emit("confirmation_resolved", { id: confirmationId, choice: rejected });
+          return rejected;
+        }
+        emit("confirmation_resolved", { id: confirmationId, choice: allowedChoice });
+        return allowedChoice;
       }
     } catch { /* transient — keep polling */ }
     await new Promise((r) => setTimeout(r, POLL_MS));
@@ -1461,15 +1984,6 @@ async function askUserAndWait(
   } catch {}
   emit("confirmation_resolved", { id: confirmationId, choice: "__timeout__" });
   return `User did not respond within ${Math.round(TIMEOUT_MS / 60_000)} minute(s) — treating as a No / cancel. Try again and wait for the user.`;
-}
-
-function isAffirmativeChoice(choice: string): boolean {
-  return /^(yes|y|continue|approve|approved|ok|okay|use|log in)/i.test(String(choice || "").trim());
-}
-
-function isCredentialApprovalQuestion(question: string, context: string | null): boolean {
-  const haystack = `${question || ""} ${context || ""}`.toLowerCase();
-  return /\b(credential|password|login|log in|sign in|username|vault|secret)\b/.test(haystack);
 }
 
 function normalizeRpcPayload(data: unknown): any {
@@ -1566,10 +2080,10 @@ function hostAllowed(currentUrl: string | null | undefined, allowedOrigins: stri
 }
 
 function coordinate(input: unknown): [number, number] | null {
-  if (!Array.isArray(input) || input.length < 2) return null;
+  if (!Array.isArray(input) || input.length !== 2) return null;
   const x = Number(input[0]);
   const y = Number(input[1]);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x >= 1280 || y < 0 || y >= 800) return null;
   return [x, y];
 }
 
@@ -1580,6 +2094,8 @@ async function fillSavedLoginFromVault(args: {
   circleId: string;
   userSupabase: any;
   approved: boolean;
+  mutationMaxAttempts: number;
+  onMutationDispatchStart: () => void;
 }): Promise<ToolOutcome> {
   const credentialId = String(args.input?.credential_id || "").trim();
   const purpose = String(args.input?.purpose || "computer_use_login").slice(0, 240);
@@ -1608,7 +2124,7 @@ async function fillSavedLoginFromVault(args: {
 
   const policy = credentialPolicy(credential);
   if (policy.require_approval !== false && !args.approved) {
-    throw new Error("Saved credential use needs user approval first. Call ask_user, then retry fill_saved_login.");
+    throw new Error("Saved credential use was not approved by the runtime.");
   }
   if (!credentialAllowedActions(credential).includes("login")) {
     throw new Error("This credential policy does not allow login actions.");
@@ -1638,18 +2154,25 @@ async function fillSavedLoginFromVault(args: {
 
   const usernameCoordinate = coordinate(args.input?.username_coordinate);
   const passwordCoordinate = coordinate(args.input?.password_coordinate);
+  if (args.input?.username_coordinate !== undefined && !usernameCoordinate) {
+    throw new Error("username coordinate invalid");
+  }
+  if (args.input?.password_coordinate !== undefined && !passwordCoordinate) {
+    throw new Error("password coordinate invalid");
+  }
+  args.onMutationDispatchStart();
   if (usernameCoordinate) {
-    await bbCommand(args.creds, args.sessionId, "click", { x: usernameCoordinate[0], y: usernameCoordinate[1] }, false);
+    await bbCommand(args.creds, args.sessionId, "click", { x: usernameCoordinate[0], y: usernameCoordinate[1] }, false, args.mutationMaxAttempts);
   }
-  await bbCommand(args.creds, args.sessionId, "type", { text: username }, false);
+  await bbCommand(args.creds, args.sessionId, "type", { text: username }, false, args.mutationMaxAttempts);
   if (passwordCoordinate) {
-    await bbCommand(args.creds, args.sessionId, "click", { x: passwordCoordinate[0], y: passwordCoordinate[1] }, false);
+    await bbCommand(args.creds, args.sessionId, "click", { x: passwordCoordinate[0], y: passwordCoordinate[1] }, false, args.mutationMaxAttempts);
   } else {
-    await bbCommand(args.creds, args.sessionId, "key", { key: "Tab" }, false);
+    await bbCommand(args.creds, args.sessionId, "key", { key: "Tab" }, false, args.mutationMaxAttempts);
   }
-  await bbCommand(args.creds, args.sessionId, "type", { text: secret }, false);
+  await bbCommand(args.creds, args.sessionId, "type", { text: secret }, false, args.mutationMaxAttempts);
   if (args.input?.submit === true) {
-    await bbCommand(args.creds, args.sessionId, "key", { key: "Enter" }, false);
+    await bbCommand(args.creds, args.sessionId, "key", { key: "Enter" }, false, args.mutationMaxAttempts);
   }
 
   return {
@@ -1792,11 +2315,20 @@ interface ToolOutcome {
   text?: string;
 }
 
+// Module-private capability token: even a future accidental direct runTool()
+// call cannot dispatch a native mutation without going through the exact
+// approval + pre-observation branch above.
+const APPROVED_MUTATION_DISPATCH = Symbol("approved_mutation_dispatch");
+
 async function runTool(
   creds: BrowserbaseCreds,
   sessionId: string,
   name: string,
   input: any,
+  options?: {
+    mutationMaxAttempts?: number;
+    mutationAuthorization?: typeof APPROVED_MUTATION_DISPATCH;
+  },
 ): Promise<ToolOutcome> {
   if (name === "bash") {
     // We don't expose a real shell from the cloud browser — return a polite
@@ -1809,29 +2341,35 @@ async function runTool(
   // Playwright-compatible actions; we map the Anthropic action names
   // (`screenshot`, `left_click`, `type`, `key`, `mouse_move`, `scroll`) to
   // Playwright calls via the REST bridge.
-  const action = input.action as string;
+  const action = String(input?.action || "").trim().toLowerCase();
+  if (
+    ["left_click", "right_click", "double_click", "type", "key"].includes(action)
+    && options?.mutationAuthorization !== APPROVED_MUTATION_DISPATCH
+  ) {
+    throw new Error("Native mutation missing exact-call authorization.");
+  }
   switch (action) {
     case "screenshot":
       return await bbCommand(creds, sessionId, "screenshot", {});
     case "left_click":
-      return await bbCommand(creds, sessionId, "click", { x: input.coordinate?.[0], y: input.coordinate?.[1] });
+      return await bbCommand(creds, sessionId, "click", { x: input.coordinate?.[0], y: input.coordinate?.[1] }, false, options?.mutationMaxAttempts ?? 1);
     case "right_click":
-      return await bbCommand(creds, sessionId, "click", { x: input.coordinate?.[0], y: input.coordinate?.[1], button: "right" });
+      return await bbCommand(creds, sessionId, "click", { x: input.coordinate?.[0], y: input.coordinate?.[1], button: "right" }, false, options?.mutationMaxAttempts ?? 1);
     case "double_click":
-      return await bbCommand(creds, sessionId, "dblclick", { x: input.coordinate?.[0], y: input.coordinate?.[1] });
+      return await bbCommand(creds, sessionId, "dblclick", { x: input.coordinate?.[0], y: input.coordinate?.[1] }, false, options?.mutationMaxAttempts ?? 1);
     case "mouse_move":
       return await bbCommand(creds, sessionId, "mouse_move", { x: input.coordinate?.[0], y: input.coordinate?.[1] });
     case "type":
-      return await bbCommand(creds, sessionId, "type", { text: input.text });
+      return await bbCommand(creds, sessionId, "type", { text: input.text }, false, options?.mutationMaxAttempts ?? 1);
     case "key":
-      return await bbCommand(creds, sessionId, "key", { key: input.text });
+      return await bbCommand(creds, sessionId, "key", { key: input.text }, false, options?.mutationMaxAttempts ?? 1);
     case "scroll":
       return await bbCommand(creds, sessionId, "scroll", { dx: input.scroll_direction === "right" ? 300 : input.scroll_direction === "left" ? -300 : 0, dy: input.scroll_direction === "down" ? 300 : input.scroll_direction === "up" ? -300 : 0 });
     case "wait":
       await new Promise((r) => setTimeout(r, Math.min((input.duration ?? 1) * 1000, 5000)));
       return { text: "waited" };
     default:
-      return { text: `Unknown action: ${action}` };
+      throw new Error("Unknown native computer action blocked.");
   }
 }
 
@@ -1845,8 +2383,9 @@ async function bbCommand(
   command: string,
   params: Record<string, any>,
   returnScreenshot: boolean = true,
+  maxAttempts: number = 3,
 ): Promise<ToolOutcome> {
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = Math.max(1, Math.min(3, Math.floor(maxAttempts)));
   let lastErr: unknown = null;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {

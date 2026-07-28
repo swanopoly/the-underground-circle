@@ -16,18 +16,66 @@ import type { AutoApproveCategory } from './chatAutoApproveSettings';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
 import { createFilesInRoomFromArtifact, createWorkspaceFromArtifact, type RoomArtifactApplyResult, type WorkspaceCreationResult } from './chatWorkspace';
 import { focusRoomWorkspaceFile, primeRoomWorkspaceLaunch } from './roomWorkspaceLauncher';
-import { detectClaudeCodeBridge, execBridgeCommand } from './claudeCodeDetector';
 import { describeComputerUsePlan, toBrowserPlanCardData, type BrowserPlanCardData } from './computerUse';
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import { boundListWithBudget, formatBulletList, resolveResponseFormat, truncateText, truncationMarker, type ToolResponseFormat } from './toolResultFormatters';
 import type { DesktopBridgeError, DesktopResult } from './desktopBridgeProtocol';
+import type {
+  BoundedNativeOpenPathObservation,
+  NativeOpenPathApprovalProposal,
+  NativeOpenPathDispatchResult,
+  NativeSemanticActionApprovalProposal,
+  NativeSemanticActionDeps,
+} from './computerAppAdapter';
+import type { NativeSemanticActionExecution } from './desktopBridge';
 import { getPlugin } from './pluginRegistry';
 import {
+  buildOpenSwanApprovalAuditPayload,
+  buildOpenSwanApprovalAuthorityBindingDigest,
   buildOpenSwanToolApprovalKey,
+  buildOpenSwanToolApprovalDigest,
+  createOpenSwanRuntimeApprovalReceipt,
+  isOpenSwanApprovalAuditPayload,
   resolveOpenSwanRuntimeApprovalDecision,
+  type OpenSwanRuntimeApprovalAuthority,
+  type OpenSwanRuntimeApprovalCallIdentity,
   type OpenSwanRuntimeApprovalDecision,
+  type OpenSwanRuntimeApprovalReceipt,
   type OpenSwanRuntimeApprovalRow,
 } from './openswanToolApprovals';
+import {
+  authorizeComputerAppMutation,
+  buildComputerAppToolArgsFingerprint,
+  buildComputerAppToolArgsFingerprintAsync,
+  buildComputerAppVerificationReceipt,
+  createComputerAppObservationEpoch,
+  dispatchAuthorizedComputerAppMutation,
+  genericNativeUiMutationFamilyForTool,
+  normalizeGuardedBrowserFillIntent,
+  normalizeGuardedBrowserSelectIntent,
+  normalizeGuardedBrowserToggleIntent,
+  prepareGenericNativeUiMutationGuard,
+  recheckGenericNativeUiMutationGuardAtHandlerEntry,
+  resolveComputerAppMutationPolicy,
+  type GenericNativeUiMutationGuard,
+  type GenericNativeUiMutationObservationDeps,
+  type GenericNativeUiMutationTool,
+  type ComputerAppMutationContract,
+  type ComputerAppMutationAuthorization,
+  type ComputerAppMutationDispatchReceipt,
+  type ComputerAppObservationEpoch,
+  type ComputerAppSealedMutationArgs,
+  type ComputerAppVerificationReceipt,
+} from './computerAppGrounding';
+import {
+  buildAgentActionCallIdentity,
+  createAgentActionCallStore,
+  type AgentActionCallFinalState,
+  type AgentActionCallIdentity,
+  type AgentActionCallState,
+  type AgentActionCallStore,
+  type AgentActionCallsRpcClient,
+} from './agentActionCalls';
 import {
   normalizeWordPressTrashPostMutation,
   normalizeWordPressUpdatePostMutation,
@@ -56,18 +104,19 @@ import {
   suggestCapabilitiesForMessage,
 } from './chatCapabilityManifest';
 import {
-  buildMessagingPayload,
   describeMessagingNotify,
   validateMessagingNotifyArgs,
   type MessagingField,
   type MessagingProvider,
 } from './messagingNotify';
 import { sanitizeErrorForModel } from './errorSanitizer';
+import { redactSecrets } from './secretRedactionCore';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 export type OpenSwanRuntimeToolName =
   | OpenSwanToolName
   | 'browser.plan_task'
+  | 'browser.locator_actionability'
   | 'search_memories'
   | 'save_memory'
   | 'fetch_url'
@@ -259,11 +308,9 @@ export type OpenSwanRuntimeToolName =
   | 'codebase.search'
   | 'coordination.file_status'
   | 'todo.write'
-  // ── Coding-agent upgrade P2/P3 (docs/CODING_AGENT_UPGRADE_PLAN.md) —
-  //    policy-gated local shell + git execution through the bridge execFile
-  //    endpoint (argv array — never a shell string). Classification lives in
-  //    the pure cores shellCommandPolicy/gitCommandPolicy via
-  //    localExecPlanCore: read → auto, mutate → ask, catastrophic → refused.
+  // ── Fixed read-only local git/node diagnostics. Package scripts, shells,
+  //    builds, tests, and mutations must run through a connected coding agent
+  //    with its normal approval flow, never this bridge endpoint.
   | 'local.run_shell'
   | 'git.run'
   // ── Phase-3 mass-agent deploy (runtime-only; not a planner tool). Lets the
@@ -339,6 +386,10 @@ export type OpenSwanRuntimeToolContext = {
   activeSoulKey?: string;
   runId?: string;
   activePluginIds?: string[];
+  /** Exact typed-loop call identity, forwarded by the handler adapter. */
+  toolName?: string;
+  toolUseId?: string;
+  iteration?: number;
   /**
    * QW1 (defense-in-depth): the turn's parsed user "never do X" constraints, so
    * the runtime chokepoint can HARD-block a forbidden tool call even if a caller
@@ -349,6 +400,189 @@ export type OpenSwanRuntimeToolContext = {
    */
   userConstraints?: ChatComputerUserConstraints | null;
 };
+
+export type OpenSwanApprovalReceiptMetadata =
+  Omit<OpenSwanRuntimeApprovalReceipt, 'approvalKey'> & {
+  /**
+   * Compatibility alias for consumers that predate receipt schema v2. This is
+   * the cryptographic exact-args digest, never the canonical approval key.
+   */
+  approvalKeyDigest: string;
+};
+
+export type OpenSwanRuntimeToolInternalMetadata = {
+  openSwanApprovalReceipt?: OpenSwanApprovalReceiptMetadata;
+  mutationDispatchReceipt?: ComputerAppMutationDispatchReceipt;
+  computerAppVerificationReceipt?: ComputerAppVerificationReceipt;
+};
+
+export type OpenSwanRuntimeToolResultWithMetadata<T extends OpenSwanRuntimeToolName> =
+  OpenSwanToolExecutionResultMap[T] & {
+    metadata?: OpenSwanRuntimeToolInternalMetadata;
+  };
+
+const issuedOpenSwanApprovalReceiptMetadata = new WeakSet<object>();
+const issuedOpenSwanMutationDispatchReceipts = new WeakSet<object>();
+const issuedOpenSwanComputerAppVerificationReceipts = new WeakSet<object>();
+
+function deepFreezeOpenSwanApprovalArgs(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    deepFreezeOpenSwanApprovalArgs(entry);
+  }
+  return Object.freeze(value);
+}
+
+/**
+ * Detach mutation arguments from the caller before the first await and freeze
+ * the canonical JSON clone. The approval digest and the eventual dispatcher
+ * therefore see the same immutable values even if a caller retains and
+ * mutates its original object while approval I/O is in flight.
+ */
+function sealOpenSwanRuntimeMutationArgs(
+  tool: OpenSwanRuntimeToolName,
+  args: Record<string, unknown>,
+): Record<string, unknown> | null {
+  try {
+    const canonical = JSON.parse(buildOpenSwanToolApprovalKey(tool, args)) as {
+      args?: unknown;
+    };
+    if (!canonical.args || typeof canonical.args !== 'object' || Array.isArray(canonical.args)) {
+      return null;
+    }
+    return deepFreezeOpenSwanApprovalArgs(canonical.args) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function attachOpenSwanApprovalReceiptMetadata<T extends OpenSwanRuntimeToolName>(
+  tool: T,
+  result: OpenSwanToolExecutionResultMap[T],
+  receipt: OpenSwanRuntimeApprovalReceipt | null,
+  context: OpenSwanRuntimeToolContext,
+): OpenSwanRuntimeToolResultWithMetadata<T> {
+  if (
+    !receipt
+    || !result
+    || typeof result !== 'object'
+    || Array.isArray(result)
+    || receipt.toolName !== tool
+    || receipt.userId !== context.userId
+    || receipt.circleId !== context.circleId
+    || receipt.runId !== context.runId
+    || receipt.toolUseId !== context.toolUseId
+    || receipt.iteration !== context.iteration
+  ) {
+    return result as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  const { approvalKey, ...receiptWithoutRawKey } = receipt;
+  const callReceipt: OpenSwanApprovalReceiptMetadata = Object.freeze({
+    ...receiptWithoutRawKey,
+    approvalKeyDigest: receipt.approvalDigest,
+  });
+  issuedOpenSwanApprovalReceiptMetadata.add(callReceipt);
+  const existingMetadata = (
+    'metadata' in result
+    && result.metadata
+    && typeof result.metadata === 'object'
+    && !Array.isArray(result.metadata)
+  )
+    ? result.metadata as Record<string, unknown>
+    : {};
+  return {
+    ...result,
+    metadata: {
+      ...existingMetadata,
+      openSwanApprovalReceipt: callReceipt,
+    },
+  } as OpenSwanRuntimeToolResultWithMetadata<T>;
+}
+
+/**
+ * Build the narrow receipt envelope accepted by outbound edge dispatchers.
+ * The canonical approval key (which contains exact arguments) never crosses
+ * this boundary; edges independently recompute the v2 digest from their
+ * ephemeral request args and re-verify the consumed durable row.
+ */
+function buildOpenSwanEdgeApprovalReceipt(
+  tool: OpenSwanRuntimeToolName,
+  receipt: OpenSwanRuntimeApprovalReceipt | null,
+  context: OpenSwanRuntimeToolContext,
+): OpenSwanApprovalReceiptMetadata | null {
+  if (
+    !receipt
+    || receipt.schemaVersion !== 2
+    || receipt.toolName !== tool
+    || receipt.userId !== context.userId
+    || receipt.circleId !== context.circleId
+    || receipt.runId !== context.runId
+    || receipt.toolUseId !== context.toolUseId
+    || receipt.iteration !== context.iteration
+  ) {
+    return null;
+  }
+  const { approvalKey: _ephemeralApprovalKey, ...safeReceipt } = receipt;
+  void _ephemeralApprovalKey;
+  return Object.freeze({
+    ...safeReceipt,
+    approvalKeyDigest: receipt.approvalDigest,
+  });
+}
+
+/**
+ * Lift trusted internal runtime metadata off a tool result before it becomes
+ * `data.raw` or formatter input. A bridge-supplied look-alike receipt is always
+ * stripped from model-visible output but is returned as trusted metadata only
+ * when this module issued the exact receipt object. The entire reserved
+ * top-level `metadata` envelope is stripped: unknown internal fields must be
+ * handled by their issuing runtime, never echoed to the model by default.
+ */
+export function splitOpenSwanRuntimeToolResultMetadata<T>(result: T): {
+  raw: T;
+  metadata?: OpenSwanRuntimeToolInternalMetadata;
+} {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return { raw: result };
+  const record = result as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, 'metadata')) return { raw: result };
+  const metadata = record.metadata;
+  const rawRecord = { ...record };
+  delete rawRecord.metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return { raw: rawRecord as T };
+  }
+  const metadataRecord = metadata as Record<string, unknown>;
+  const approvalCandidate = metadataRecord.openSwanApprovalReceipt;
+  const trustedApproval = approvalCandidate
+    && typeof approvalCandidate === 'object'
+    && !Array.isArray(approvalCandidate)
+    && issuedOpenSwanApprovalReceiptMetadata.has(approvalCandidate as object)
+      ? approvalCandidate as OpenSwanApprovalReceiptMetadata
+      : null;
+  const dispatchCandidate = metadataRecord.mutationDispatchReceipt;
+  const trustedDispatch = dispatchCandidate
+    && typeof dispatchCandidate === 'object'
+    && !Array.isArray(dispatchCandidate)
+    && issuedOpenSwanMutationDispatchReceipts.has(dispatchCandidate as object)
+      ? dispatchCandidate as ComputerAppMutationDispatchReceipt
+      : null;
+  const verificationCandidate = metadataRecord.computerAppVerificationReceipt;
+  const trustedVerification = verificationCandidate
+    && typeof verificationCandidate === 'object'
+    && !Array.isArray(verificationCandidate)
+    && issuedOpenSwanComputerAppVerificationReceipts.has(verificationCandidate as object)
+      ? verificationCandidate as ComputerAppVerificationReceipt
+      : null;
+  const trustedMetadata: OpenSwanRuntimeToolInternalMetadata = {
+    ...(trustedApproval ? { openSwanApprovalReceipt: trustedApproval } : {}),
+    ...(trustedDispatch ? { mutationDispatchReceipt: trustedDispatch } : {}),
+    ...(trustedVerification ? { computerAppVerificationReceipt: trustedVerification } : {}),
+  };
+  return {
+    raw: rawRecord as T,
+    ...(Object.keys(trustedMetadata).length > 0 ? { metadata: trustedMetadata } : {}),
+  };
+}
 
 type CreateRoomWorkspaceArgs = {
   circleId: string;
@@ -473,10 +707,41 @@ export type OpenSwanToolExecutionArgs = {
   'browser.dom_snapshot': { maxNodes?: number; interestingOnly?: boolean; response_format?: ToolResponseFormat };
   'browser.wp_admin_source_intelligence': { maxChars?: number; maxMenuItems?: number; maxRows?: number; response_format?: ToolResponseFormat };
   'browser.verification_state': Record<string, never>;
+  'browser.locator_actionability': {
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    expectedUrl: string;
+    exact?: true;
+  } & (
+    | { role: string; name: string; selector?: never }
+    | { selector: string; role?: never; name?: never }
+  );
   'browser.click_role': { role: string; name?: string; selector?: string; exact?: boolean; nth?: number; timeoutMs?: number; taskContext?: string };
-  'browser.fill_field': { role?: string; name?: string; selector?: string; text: string; submit?: boolean; exact?: boolean; timeoutMs?: number; taskContext?: string };
+  'browser.set_toggle': { role: 'checkbox' | 'switch' | 'radio'; name?: string; selector?: string; desiredState: boolean; submit?: false; exact?: true; timeoutMs?: number; taskContext?: string };
+  'browser.fill_field': {
+    role?: string;
+    text: string;
+    submit?: false;
+    exact?: boolean;
+    timeoutMs?: number;
+    taskContext?: string;
+  } & (
+    | { name: string; selector?: never }
+    | { name?: never; selector: string }
+  );
   'browser.fill_credential_field': { item?: string; credentialId?: string; credentialField: 'username' | 'email' | 'password'; vault?: string; siteUrl?: string; expectedOrigin?: string; role?: string; name?: string; selector?: string; submit?: boolean; exact?: boolean; nth?: number; timeoutMs?: number; taskContext?: string };
-  'browser.select_option': { role?: string; name?: string; selector?: string; value: string; exact?: boolean; timeoutMs?: number; taskContext?: string };
+  'browser.select_option': {
+    role?: 'combobox';
+    name?: string;
+    selector?: string;
+    value: string;
+    matchBy: 'value' | 'label';
+    submit?: false;
+    exact?: true;
+    timeoutMs?: number;
+    taskContext?: string;
+  };
   'browser.upload_file': { filePath: string; name?: string; selector?: string; buttonRole?: string; buttonName?: string; buttonSelector?: string; exact?: boolean; timeoutMs?: number; taskContext?: string };
   'browser.press_key': { combo: string; taskContext?: string };
   'browser.screenshot': { fullPage?: boolean };
@@ -551,12 +816,12 @@ export type OpenSwanToolExecutionArgs = {
   'vault.resolve_for_task': VaultResolveTaskArgs;
   'desktop.launch_app':      { appName: string };
   'desktop.focus_app':       { appName: string };
-  'desktop.type_text':       { text: string };
-  'desktop.paste_text':      { text: string; appName?: string; restoreClipboard?: boolean };
+  'desktop.type_text':       { appName: string; text: string };
+  'desktop.paste_text':      { appName: string; text: string; restoreClipboard?: boolean };
   'desktop.run_applescript': { intent?: 'create_note' | 'create_reminder'; params?: Record<string, unknown>; scriptLines?: string[]; args?: string[]; summary?: string };
   'desktop.convert_image':   { source: string; format?: string };
-  'desktop.press_keys':      { combo: string };
-  'desktop.menu_click':      { appName?: string; menuPath: string[] };
+  'desktop.press_keys':      { appName: string; combo: string };
+  'desktop.menu_click':      { appName: string; menuPath: string[] };
   'desktop.indesign_document_status': { appName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.indesign_text_inventory': { appName?: string; query?: string; expectedDocumentName?: string; sourceDocumentPath?: string; maxItems?: number };
   'desktop.indesign_set_layer_state': { appName?: string; layerName: string; action: 'show' | 'hide' | 'lock' | 'unlock'; expectedDocumentName?: string; sourceDocumentPath?: string };
@@ -605,21 +870,28 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.shortcuts_list':    Record<string, never>;
   'desktop.shortcuts_run':     { name: string };
   'desktop.window_manage':     { action: 'focus' | 'raise' | 'minimize' | 'unminimize' | 'zoom' | 'resize'; appName?: string; width?: number; height?: number };
-  'desktop.mouse_move':        { x: number; y: number };
-  'desktop.mouse_click':       { x: number; y: number; button?: 'left' | 'right'; count?: number };
-  'desktop.mouse_down':        { x: number; y: number; button?: 'left' | 'right' };
-  'desktop.mouse_up':          { x?: number; y?: number; button?: 'left' | 'right' };
-  'desktop.mouse_drag':        { fromX: number; fromY: number; toX: number; toY: number; durationMs?: number };
-  'desktop.mouse_scroll':      { deltaY?: number; deltaX?: number; x?: number; y?: number };
+  'desktop.mouse_move':        { appName: string; x: number; y: number };
+  'desktop.mouse_click':       { appName: string; x: number; y: number; button?: 'left' | 'right'; count?: number };
+  'desktop.mouse_down':        { appName: string; x: number; y: number; button?: 'left' | 'right' };
+  'desktop.mouse_up':          { appName: string; x?: number; y?: number; button?: 'left' | 'right' };
+  'desktop.mouse_drag':        { appName: string; fromX: number; fromY: number; toX: number; toY: number; durationMs?: number };
+  'desktop.mouse_scroll':      { appName: string; deltaY?: number; deltaX?: number; x?: number; y?: number };
   'desktop.wait_for_app':      { appName: string; timeoutMs?: number };
   'desktop.screenshot':        { region?: [number, number, number, number] };
   'desktop.open_url':          { url: string };
   'desktop.open_path':         { path: string };
-  'desktop.click_at':          { x: number; y: number };
+  'desktop.click_at':          { appName: string; x: number; y: number };
   'desktop.screen_size':       Record<string, never>;
   'desktop.read_a11y_tree':    { appName?: string; maxDepth?: number; maxNodes?: number; target?: string; slice?: 'interactive' | 'full'; response_format?: ToolResponseFormat };
-  'desktop.click_element':     { pid: number; path: string };
-  'desktop.set_element_value': { pid: number; path: string; text: string };
+  'desktop.click_element':     {
+    action?: 'press';
+    appName: string;
+    pid: number;
+    path: string;
+    expectedRole: string;
+    expectedLabel: string;
+  };
+  'desktop.set_element_value': { appName: string; pid: number; path: string; text: string };
   'skills.view':        { name: string };
   'skills.manage':      { action: 'create' | 'patch' | 'delete' | 'write_file' | 'remove_file'; name: string; content?: string; description?: string; version?: string; tags?: string[]; relpath?: string; mimeType?: string; rationale?: string };
   'user_memory.manage': { action: 'append' | 'replace' | 'delete'; scope?: 'global' | 'circle'; content?: string; rationale?: string };
@@ -749,7 +1021,9 @@ export type OpenSwanToolExecutionResultMap = {
   'browser.dom_snapshot': BrowserToolExecutionResult;
   'browser.wp_admin_source_intelligence': BrowserToolExecutionResult;
   'browser.verification_state': BrowserToolExecutionResult;
+  'browser.locator_actionability': BrowserToolExecutionResult;
   'browser.click_role': BrowserToolExecutionResult;
+  'browser.set_toggle': BrowserToolExecutionResult;
   'browser.fill_field': BrowserToolExecutionResult;
   'browser.fill_credential_field': BrowserToolExecutionResult;
   'browser.select_option': BrowserToolExecutionResult;
@@ -843,8 +1117,8 @@ export type OpenSwanToolExecutionResultMap = {
   'vault.revoke': { ok: boolean; resultsText: string };
   'vault.runbook': { ok: boolean; resultsText: string };
   'vault.resolve_for_task': { ok: boolean; resultsText: string };
-  'desktop.launch_app':        { ok: boolean; resultsText: string };
-  'desktop.focus_app':         { ok: boolean; resultsText: string };
+  'desktop.launch_app':        { ok: boolean; resultsText: string; completionVerified?: boolean; outcomeUnknown?: boolean; proof?: Record<string, unknown> };
+  'desktop.focus_app':         { ok: boolean; resultsText: string; completionVerified?: boolean; outcomeUnknown?: boolean; proof?: Record<string, unknown> };
   'desktop.type_text':         { ok: boolean; resultsText: string };
   'desktop.paste_text':        { ok: boolean; resultsText: string };
   'desktop.run_applescript':   { ok: boolean; resultsText: string };
@@ -908,7 +1182,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.wait_for_app':      { ok: boolean; resultsText: string };
   'desktop.screenshot':        { ok: boolean; resultsText: string; base64?: string; mimeType?: string; sizeBytes?: number };
   'desktop.open_url':          { ok: boolean; resultsText: string };
-  'desktop.open_path':         { ok: boolean; resultsText: string };
+  'desktop.open_path':         { ok: boolean; resultsText: string; completionVerified?: boolean; outcomeUnknown?: boolean; proof?: Record<string, unknown> };
   'desktop.click_at':          { ok: boolean; resultsText: string };
   'desktop.screen_size':       { ok: boolean; resultsText: string; width?: number; height?: number };
   'desktop.read_a11y_tree':    { ok: boolean; resultsText: string };
@@ -1072,14 +1346,53 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
-    name: 'browser.click_role',
-    label: 'Click Browser Element',
+    name: 'browser.locator_actionability',
+    label: 'Inspect Browser Target Actionability',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Click a browser element by ARIA role/name or selector using Playwright locator auto-waiting. Use after browser.dom_snapshot to pick the target. Never click CAPTCHA, MFA, or "not a robot" verification controls; use browser.verification_state and pause for the human instead. Approval-gated browser action.',
+    description:
+      'Read-only, fail-closed advisory evidence for one exact browser target. Resolves exactly one semantic role/name pair or one browser-native non-positional CSS selector, rechecks the current browser process/context/page/URL identity, and returns only bounded structural checks: attached, unique, sampled-stable, enabled, editable when relevant, receives events/not obscured, and current opaque page identity. Copy a fresh DOM snapshot browserProcessId/browserContextId/pageId/url into expectedBrowserProcessId/expectedBrowserContextId/expectedPageId/expectedUrl. Never mutates the page or returns HTML, page text, locator text, values, or secrets. This snapshot does not authorize or bind a later mutation; re-observe after any DOM change and use the mutation path approval/proof gate.',
     inputSchema: {
       type: 'object',
       properties: {
-        role: { type: 'string', description: 'ARIA role of the target, e.g. button, link, checkbox.' },
+        role: { type: 'string', minLength: 1, maxLength: 100, description: 'Exact ARIA role from a fresh browser observation. Pair with name; omit for selector.' },
+        name: { type: 'string', minLength: 1, maxLength: 500, description: 'Exact accessible name from the same observation. Pair with role; omit for selector.' },
+        selector: { type: 'string', minLength: 1, maxLength: 1_000, description: 'One browser-native CSS selector. Playwright engines, XPath, comments, escapes, and positional pseudo-classes are rejected. Omit role and name.' },
+        exact: { type: 'boolean', enum: [true], description: 'Semantic matching is always exact.' },
+        expectedBrowserProcessId: { type: 'string', minLength: 20, maxLength: 180, description: 'Opaque browser process id from the fresh observation.' },
+        expectedBrowserContextId: { type: 'string', minLength: 20, maxLength: 180, description: 'Opaque browser context id from the fresh observation.' },
+        expectedPageId: { type: 'string', minLength: 20, maxLength: 180, description: 'Opaque page/document id from the fresh observation.' },
+        expectedUrl: { type: 'string', minLength: 1, maxLength: 4_096, description: 'Exact URL from the same observation. Compared locally and not returned.' },
+      },
+      required: [
+        'expectedBrowserProcessId',
+        'expectedBrowserContextId',
+        'expectedPageId',
+        'expectedUrl',
+      ],
+      oneOf: [
+        { required: ['role', 'name'], not: { required: ['selector'] } },
+        {
+          required: ['selector'],
+          not: {
+            anyOf: [
+              { required: ['role'] },
+              { required: ['name'] },
+            ],
+          },
+        },
+      ],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser.click_role',
+    label: 'Click Browser Element',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Click a non-state, non-selection browser element by ARIA role/name or selector using Playwright locator auto-waiting. Use after browser.dom_snapshot to pick the target. Checkbox/switch/radio roles must use browser.set_toggle; combobox/listbox/option roles must use browser.select_option. Never click CAPTCHA, MFA, or "not a robot" verification controls; use browser.verification_state and pause for the human instead. Approval-gated browser action.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        role: { type: 'string', description: 'ARIA role of a non-state, non-selection target, e.g. button, link, tab. Checkbox, switch, radio, combobox, listbox, and option are not accepted.' },
         name: { type: 'string', description: 'Accessible name of the target element.' },
         selector: { type: 'string', description: 'CSS selector fallback when role/name cannot identify the element.' },
         exact: { type: 'boolean', description: 'Match the accessible name exactly instead of substring.' },
@@ -1091,23 +1404,51 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'browser.set_toggle',
+    label: 'Set Browser Toggle',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Set one exact non-consequential checkbox, switch, or radio to an explicit boolean state, then verify that same element without submitting or navigating. Use after browser.dom_snapshot. This sealed canary refuses login, credentials, MFA/CAPTCHA, payment, delete, publish, send, purchase, and other consequential controls. Approval-gated browser action.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        role: { type: 'string', enum: ['checkbox', 'switch', 'radio'], description: 'Semantic role of the state control.' },
+        name: { type: 'string', description: 'Exact accessible name from a fresh DOM snapshot.' },
+        selector: { type: 'string', description: 'Exact CSS selector fallback when no accessible name is available.' },
+        desiredState: { type: 'boolean', description: 'The explicit checked/on state to verify after the mutation.' },
+        submit: { type: 'boolean', enum: [false], description: 'Must be false; this tool never submits.' },
+        exact: { type: 'boolean', enum: [true], description: 'Must be true when supplied.' },
+        timeoutMs: { type: 'number', description: 'Bounded locator wait timeout in milliseconds.' },
+        taskContext: { type: 'string', description: 'Original user task context for safety classification. It is not persisted in approval metadata.' },
+      },
+      required: ['role', 'desiredState'],
+      anyOf: [
+        { required: ['name'] },
+        { required: ['selector'] },
+      ],
+    },
+  },
+  {
     name: 'browser.fill_field',
     label: 'Fill Browser Field',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Fill a browser text field by ARIA role/name or selector in the persistent local browser profile. Use after browser.dom_snapshot to pick the target; use browser.select_option for dropdowns. Do not fill one-time verification, MFA, CAPTCHA, or bot-check fields; pause for the human instead. Approval-gated browser action.',
+    description: 'Draft non-secret text into one exact browser field by exactly one locator: accessible name OR selector, never both. Then verify the value without submitting. Use after browser.dom_snapshot to pick the target; use browser.select_option for dropdowns and the dedicated vault tool for credentials. This canary never submits and never fills login, OTP, MFA, CAPTCHA, or bot-check fields. Approval-gated browser action.',
     inputSchema: {
       type: 'object',
       properties: {
         role: { type: 'string', description: 'ARIA role of the target field, e.g. textbox, searchbox.' },
-        name: { type: 'string', description: 'Accessible name of the target field.' },
-        selector: { type: 'string', description: 'CSS selector fallback when role/name cannot identify the field.' },
-        text: { type: 'string', description: 'Text to fill into the field.' },
-        submit: { type: 'boolean', description: 'Press Enter after filling to submit.' },
+        name: { type: 'string', minLength: 1, maxLength: 500, description: 'Accessible name of the target field. Do not also pass selector.' },
+        selector: { type: 'string', minLength: 1, maxLength: 1_000, description: 'CSS selector fallback when an accessible name is unavailable. Do not also pass name.' },
+        text: { type: 'string', description: 'Non-secret draft text to fill into the field. The action does not submit.' },
         exact: { type: 'boolean', description: 'Match the accessible name exactly instead of substring.' },
         timeoutMs: { type: 'number', description: 'Locator wait timeout in milliseconds.' },
         taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' },
       },
       required: ['text'],
+      oneOf: [
+        { required: ['name'], not: { required: ['selector'] } },
+        { required: ['selector'], not: { required: ['name'] } },
+      ],
+      additionalProperties: false,
     },
   },
   {
@@ -1140,19 +1481,25 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'browser.select_option',
     label: 'Select Browser Option',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Select a dropdown/combobox option by ARIA role/name or selector in the persistent local browser profile. Use for <select>-style controls; use browser.fill_field for free-text inputs. Approval-gated browser action.',
+    description: 'Set one exact option on one native single-value HTML <select>, then verify that same control without submitting or navigating. Use after browser.dom_snapshot for bounded local presentation/accessibility preferences. Custom ARIA comboboxes, multi-selects, account/security/privacy/payment/publishing controls, and unknown settings fail closed. Approval-gated sealed browser action.',
     inputSchema: {
       type: 'object',
       properties: {
-        role: { type: 'string', description: 'ARIA role of the dropdown, e.g. combobox, listbox.' },
-        name: { type: 'string', description: 'Accessible name of the dropdown.' },
-        selector: { type: 'string', description: 'CSS selector fallback when role/name cannot identify the control.' },
-        value: { type: 'string', description: 'Option value or visible label to select.' },
-        exact: { type: 'boolean', description: 'Match the accessible name exactly instead of substring.' },
-        timeoutMs: { type: 'number', description: 'Locator wait timeout in milliseconds.' },
-        taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' },
+        role: { type: 'string', enum: ['combobox'], description: 'Native select accessibility role. Omit only when using an exact CSS selector.' },
+        name: { type: 'string', description: 'Exact accessible name from a fresh DOM snapshot.' },
+        selector: { type: 'string', description: 'Exact CSS selector fallback when no accessible name is available.' },
+        value: { type: 'string', description: 'Exact option value or visible label to select, according to matchBy.' },
+        matchBy: { type: 'string', enum: ['value', 'label'], description: 'Select by exact option value or exact visible label; no fuzzy fallback is permitted.' },
+        submit: { type: 'boolean', enum: [false], description: 'Must be false; this tool never submits.' },
+        exact: { type: 'boolean', enum: [true], description: 'Must be true when supplied.' },
+        timeoutMs: { type: 'number', minimum: 500, maximum: 30_000, description: 'Bounded locator wait timeout in milliseconds.' },
+        taskContext: { type: 'string', description: 'Original user task context for local preference safety classification. It is not persisted in approval metadata.' },
       },
-      required: ['value'],
+      required: ['value', 'matchBy'],
+      anyOf: [
+        { required: ['name'] },
+        { required: ['selector'] },
+      ],
     },
   },
   {
@@ -1219,19 +1566,19 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'verification.typecheck',
     label: 'Typecheck',
     surfaces: ['room_chat', 'task_run', 'office'],
-    description: 'Validate that code compiles and type contracts still hold. Use after generating or editing code, before claiming it works.',
+    description: 'Use after code changes to record the required typecheck command and delegate it through a connected coding agent; the local bridge does not execute package scripts directly.',
   },
   {
     name: 'verification.tests',
     label: 'Run Tests',
     surfaces: ['room_chat', 'task_run', 'office'],
-    description: 'Run or recommend tests and regression checks for the current task. Use before reporting a change as done so claims carry proof.',
+    description: 'Use after implementation changes to record the required test command and delegate it through a connected coding agent; the local bridge does not execute package scripts directly.',
   },
   {
     name: 'verification.lint',
     label: 'Lint',
     surfaces: ['room_chat', 'task_run', 'office'],
-    description: 'Check style and static-analysis quality expectations. Use after code edits to catch style and lint regressions early.',
+    description: 'Use after file edits to record the required lint command and delegate it through a connected coding agent; the local bridge does not execute package scripts directly.',
   },
   {
     name: 'verification.preview',
@@ -2637,26 +2984,23 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       required: ['query'],
     },
   },
-  // ─── Local shell + git execution (coding-agent P2/P3) ────────────────────
+  // ─── Fixed local git/node diagnostics ───────────────────────────────────
   {
     name: 'local.run_shell',
-    label: 'Run Local Shell Command (argv)',
+    label: 'Run Read-Only Local Diagnostic',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    // Pinned override: the run-and-fix loop (edit → test → fix) depends on
-    // this being callable without a tools.search unlock round-trip.
     disclosure: 'pinned',
     description:
-      'Runs ONE command in a granted local project directory via the desktop ' +
-      'bridge as an argv array (execFile — pipes/&&/redirection are inert ' +
-      'text; run one command per call). Use after code edits for tests, ' +
-      'builds, typecheck, lint, and dev CLIs. Read-only commands run ' +
-      'immediately; commands that install or modify anything require HITL ' +
-      'approval; catastrophic commands (sudo, rm -rf /, curl|sh) are refused ' +
-      'outright. Output is untrusted data, tail-capped.',
+      'Runs one fixed read-only diagnostic in a granted local project. ' +
+      'Supported forms are node --version, node --check <relative .js/.cjs/.mjs>, ' +
+      'and the documented read-only git status/diff/log/rev-parse/branch/ls-files ' +
+      'forms. Shells, package runners, tests, builds, compilers, scripts, and ' +
+      'mutations are refused; delegate those to a connected coding agent with ' +
+      'its normal approval flow. Output is untrusted data and tail-capped.',
     inputSchema: {
       type: 'object',
       properties: {
-        argv: { type: 'array', description: 'The command as an argv array — binary at [0], one element per argument (e.g. ["npm","test"]). Never a joined shell string.', items: { type: 'string', description: 'One argv element, passed literally to execFile.' } },
+        argv: { type: 'array', description: 'A supported read-only argv array, for example ["node","--check","src/app.js"] or ["git","status","--short"].', items: { type: 'string', description: 'One literal argv element.' } },
         cwd: { type: 'string', description: 'Directory to run in — must be inside a granted local root (usually the repo root).' },
         timeoutMs: { type: 'number', description: 'Optional timeout in ms, clamped to 1s–600s (default 120s).' },
       },
@@ -2665,24 +3009,22 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
   },
   {
     name: 'git.run',
-    label: 'Run Git Command',
+    label: 'Run Read-Only Git Diagnostic',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     // Pinned override: git status/diff/log are core coding-loop reads.
     disclosure: 'pinned',
     description:
-      'Runs a git subcommand in a granted local repository via the bridge ' +
-      '(execFile argv — the commit message travels as its OWN argv element, ' +
-      'never shell-interpolated). Use status/diff/log/show/blame to inspect ' +
-      'repo state (these run immediately); add/commit/checkout/stash and ' +
-      'other writes mutate the repo and require HITL approval. Force-push, ' +
-      'hard reset, and config-injection flags are refused. Output is ' +
-      'untrusted data.',
+      'Runs a fixed read-only git diagnostic in a granted local repository. ' +
+      'Supported verbs are status, diff, log, rev-parse, branch --show-current, ' +
+      'and ls-files with a narrow safe flag allowlist. Git mutations, config, ' +
+      'external diff/textconv, hooks, arbitrary revisions/pathspecs, and package ' +
+      'commands are refused. Delegate mutations to a connected coding agent. ' +
+      'Output is untrusted data.',
     inputSchema: {
       type: 'object',
       properties: {
-        verb: { type: 'string', description: 'The git subcommand, e.g. "status", "diff", "commit".' },
-        args: { type: 'array', description: 'Flags/paths AFTER the verb, one argv element each (e.g. ["-n","5"] or ["--","src/lib/foo.ts"]).', items: { type: 'string', description: 'One argv element after the verb.' } },
-        message: { type: 'string', description: 'Commit/tag message — passed as its own argv element after -m; only used by verbs that take -m.' },
+        verb: { type: 'string', description: 'One supported read-only git verb: status, diff, log, rev-parse, branch, or ls-files.' },
+        args: { type: 'array', description: 'Safe flags after the verb, such as ["--short"], ["--check"], or ["--oneline","-5"].', items: { type: 'string', description: 'One allowlisted literal argument.' } },
         repoPath: { type: 'string', description: 'Repository directory — must be inside a granted local root.' },
         timeoutMs: { type: 'number', description: 'Optional timeout in ms, clamped to 1s–600s (default 120s).' },
       },
@@ -2775,13 +3117,16 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Type Text on Desktop',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      "Types text into whatever app has focus, character by character. Use desktop.focus_app first; prefer desktop.paste_text for long or multiline text. " +
+      "Types text into one freshly observed exact frontmost app, character by character. Supply appName exactly as returned by desktop.window_state or desktop.observe_app; never infer it from task text. Prefer desktop.paste_text for long or multiline text. " +
       "Max 4000 chars per call. For explicit Return/Enter, call " +
       "desktop.press_keys with combo=\"Return\". HITL-gated desktop action.",
     inputSchema: {
       type: 'object',
-      properties: { text: { type: 'string', description: 'Text to type. ≤4000 chars per call.' } },
-      required: ['text'],
+      properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
+        text: { type: 'string', description: 'Text to type. ≤4000 chars per call.' },
+      },
+      required: ['appName', 'text'],
     },
   },
   {
@@ -2789,15 +3134,15 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Paste Text on Desktop',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      'Pastes text into the focused or named desktop app by temporarily setting the clipboard, sending Cmd+V, then restoring the previous clipboard. Prefer this over desktop.type_text for long or multiline text. HITL-gated desktop action.',
+      'Pastes text into one freshly observed exact frontmost desktop app by temporarily setting the clipboard, sending Cmd+V, then restoring the previous clipboard. Supply appName exactly from desktop.window_state or desktop.observe_app; never infer it from task text. Prefer this over desktop.type_text for long or multiline text. HITL-gated desktop action.',
     inputSchema: {
       type: 'object',
       properties: {
         text: { type: 'string', description: 'Text to paste. <=20000 chars per call.' },
-        appName: { type: 'string', description: 'Optional app to focus before pasting.' },
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         restoreClipboard: { type: 'boolean', description: 'Defaults true.' },
       },
-      required: ['text'],
+      required: ['appName', 'text'],
     },
   },
   {
@@ -2805,13 +3150,16 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Press Desktop Keys',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      "Presses a key combo in the focused desktop app. Use desktop.focus_app first so the combo lands in the right app. Modifiers: Cmd/Shift/Opt/Alt/Ctrl/Fn. Terminal " +
+      "Presses a key combo in one freshly observed exact frontmost desktop app. Supply appName exactly from desktop.window_state or desktop.observe_app; never infer it from task text. Modifiers: Cmd/Shift/Opt/Alt/Ctrl/Fn. Terminal " +
       "keys: a-z, 0-9, or named keys Return/Tab/Space/Escape/Delete/Left/" +
       "Right/Up/Down/F1-F12. Chain calls for multi-step actions. HITL-gated desktop action.",
     inputSchema: {
       type: 'object',
-      properties: { combo: { type: 'string', description: 'Examples: "Cmd+T", "Cmd+Shift+N", "Return", "Escape".' } },
-      required: ['combo'],
+      properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
+        combo: { type: 'string', description: 'Examples: "Cmd+T", "Cmd+Shift+N", "Return", "Escape".' },
+      },
+      required: ['appName', 'combo'],
     },
   },
   {
@@ -2824,10 +3172,10 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        appName: { type: 'string', description: 'Optional target app. If omitted, uses the frontmost app.' },
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app; never infer it.' },
         menuPath: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 6, description: 'Menu titles from the menu bar down, e.g. ["File","Export","PNG"]. 2–6 items.' },
       },
-      required: ['menuPath'],
+      required: ['appName', 'menuPath'],
     },
   },
   {
@@ -3588,30 +3936,32 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'desktop.mouse_move',
     label: 'Move Desktop Mouse',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Moves or hovers the local mouse cursor to explicit screen coordinates without clicking. Use for hover-revealed UI before desktop.mouse_click; use desktop.screen_size first to keep coordinates in bounds. HITL-gated desktop action.',
+    description: 'Moves or hovers the local mouse cursor over one freshly observed exact frontmost app. Supply appName exactly from desktop.window_state or desktop.observe_app and use desktop.screen_size first to keep coordinates in bounds; never infer app identity. HITL-gated desktop action.',
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         x: { type: 'number', description: 'Screen X coordinate in pixels (0 = left edge).' },
         y: { type: 'number', description: 'Screen Y coordinate in pixels (0 = top edge).' },
       },
-      required: ['x', 'y'],
+      required: ['appName', 'x', 'y'],
     },
   },
   {
     name: 'desktop.mouse_click',
     label: 'Click Desktop Mouse',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Clicks the local mouse at explicit screen coordinates via the input helper, with right-click and double-click support. Prefer desktop.click_element (accessibility) when the control is in the a11y tree; use this instead of desktop.click_at when a right or double click is needed. HITL-gated desktop action.',
+    description: 'Clicks the local mouse at explicit screen coordinates via the input helper, with right-click and double-click support. Prefer the observe-first desktop.click_element accessibility canary only when its narrow low-consequence semantic contract applies; use this instead of desktop.click_at when a reviewed right or double click is needed. Never use coordinates to bypass a semantic safety or approval rejection. HITL-gated desktop action.',
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         x: { type: 'number', description: 'Screen X coordinate in pixels.' },
         y: { type: 'number', description: 'Screen Y coordinate in pixels.' },
         button: { type: 'string', description: '"left" (default) or "right".' },
         count: { type: 'number', description: 'Click count: 1 (default) or 2 for double-click.' },
       },
-      required: ['x', 'y'],
+      required: ['appName', 'x', 'y'],
     },
   },
   {
@@ -3622,11 +3972,12 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         x: { type: 'number', description: 'Screen X coordinate in pixels.' },
         y: { type: 'number', description: 'Screen Y coordinate in pixels.' },
         button: { type: 'string', description: '"left" (default) or "right".' },
       },
-      required: ['x', 'y'],
+      required: ['appName', 'x', 'y'],
     },
   },
   {
@@ -3637,10 +3988,12 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         x: { type: 'number', description: 'Optional release X coordinate in pixels.' },
         y: { type: 'number', description: 'Optional release Y coordinate in pixels.' },
         button: { type: 'string', description: '"left" (default) or "right".' },
       },
+      required: ['appName'],
     },
   },
   {
@@ -3651,13 +4004,14 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         fromX: { type: 'number', description: 'Drag start X coordinate in pixels.' },
         fromY: { type: 'number', description: 'Drag start Y coordinate in pixels.' },
         toX: { type: 'number', description: 'Drag end X coordinate in pixels.' },
         toY: { type: 'number', description: 'Drag end Y coordinate in pixels.' },
         durationMs: { type: 'number', description: 'Optional drag duration in milliseconds.' },
       },
-      required: ['fromX', 'fromY', 'toX', 'toY'],
+      required: ['appName', 'fromX', 'fromY', 'toX', 'toY'],
     },
   },
   {
@@ -3668,11 +4022,13 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         deltaY: { type: 'number', description: 'Vertical scroll amount; positive scrolls down.' },
         deltaX: { type: 'number', description: 'Horizontal scroll amount; positive scrolls right.' },
         x: { type: 'number', description: 'Optional X coordinate to scroll at.' },
         y: { type: 'number', description: 'Optional Y coordinate to scroll at.' },
       },
+      required: ['appName'],
     },
   },
   {
@@ -3737,8 +4093,9 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Open File or Folder',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      "Runs `open <path>` — launches a file with its default app or reveals a folder in Finder. Rejects paths " +
-      "containing shell metacharacters. Use for \"open ~/Downloads\", \"open the README.md in my repo\", etc. HITL-gated desktop action.",
+      "Opens one freshly-statted exact local path with its default app, then accepts completion only when a fresh " +
+      "frontmost-app observation contains exact file/folder-name evidence. Missing proof becomes outcome-unknown and is never replayed. " +
+      "Use for \"open ~/Downloads\" or \"open the README.md in my repo\". Approval-gated sealed desktop action.",
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string', description: 'Absolute or ~-relative path. No shell metacharacters.' } },
@@ -3752,15 +4109,16 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     description:
       "Single left-click at absolute screen coordinates (x, y). Uses `cliclick` when installed (reliable), falls back to " +
       "AppleScript System Events click-at-coords (best-effort — often fails silently on macOS 13+). Call " +
-      "desktop.screen_size first so coords stay in bounds. Prefer desktop.click_element (a11y) or desktop.press_keys when the target is reachable that way; " +
+      "desktop.screen_size first so coords stay in bounds. Prefer the narrow observe-first desktop.click_element canary (a11y) or desktop.press_keys when its reviewed contract applies; " +
       "use desktop.mouse_click instead for right or double clicks. HITL-gated desktop action.",
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         x: { type: 'integer', minimum: 0, description: 'Screen X coordinate in pixels (0 = left edge).' },
         y: { type: 'integer', minimum: 0, description: 'Screen Y coordinate in pixels (0 = top edge).' },
       },
-      required: ['x', 'y'],
+      required: ['appName', 'x', 'y'],
     },
   },
   {
@@ -3791,16 +4149,20 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
   },
   {
     name: 'desktop.click_element',
-    label: 'Click Accessibility Element',
+    label: 'Press Safe Accessibility Control',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Clicks a UI element addressed by accessibility PID and dotted path from desktop.read_a11y_tree. Prefer this over coordinate clicks (desktop.click_at / desktop.mouse_click) whenever the control appears in the a11y tree — it keeps working when windows move. HITL-gated desktop action.',
+    description: 'Use after desktop.read_a11y_tree. Observe-first, approval-gated native semantic press canary for one exact low-consequence presentation/help/settings control. Requires the exact app, PID, dotted accessibility path, role, and label from that observation; the runtime re-observes and binds a one-shot target before approval, rechecks it at handler entry, and accepts completion only from exact-target after-state proof. It rejects text/state controls, modal actions, unknown semantics, destructive/payment/auth/permission/send/publish targets, coordinate fallbacks, and automatic replay.',
     inputSchema: {
       type: 'object',
       properties: {
+        action: { type: 'string', enum: ['press'], description: 'Only the semantic AX press action is supported.' },
+        appName: { type: 'string', description: 'Exact frontmost macOS app name from the observation.' },
         pid: { type: 'number', description: 'Process id of the target app, from desktop.read_a11y_tree.' },
         path: { type: 'string', description: 'Dotted element path from desktop.read_a11y_tree, e.g. "1.2.0.3".' },
+        expectedRole: { type: 'string', description: 'Exact accessibility role from the same observation, such as AXButton.' },
+        expectedLabel: { type: 'string', description: 'Exact bounded label from the same observation.' },
       },
-      required: ['pid', 'path'],
+      required: ['appName', 'pid', 'path', 'expectedRole', 'expectedLabel'],
     },
   },
   {
@@ -3811,11 +4173,12 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
         pid: { type: 'number', description: 'Process id of the target app, from desktop.read_a11y_tree.' },
         path: { type: 'string', description: 'Dotted element path from desktop.read_a11y_tree, e.g. "1.2.0.3".' },
         text: { type: 'string', description: 'New value to set on the field.' },
       },
-      required: ['pid', 'path', 'text'],
+      required: ['appName', 'pid', 'path', 'text'],
     },
   },
 ];
@@ -3919,17 +4282,8 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       family: 'verification',
       approvalMode: 'auto',
       mutatesState: false,
-      // externalSideEffect: true — these handlers spawn real shell commands
-      // (npm run typecheck / test / lint) through the bridge /exec, the same
-      // external surface local.run_shell/git.run use (see the
-      // TOOL_DEPENDENCY_DOMAINS exec note). Marking the side effect keeps
-      // each verification.* call a sequential singleton barrier in
-      // partitionParallelSafeBatch — concurrent npm processes in one working
-      // tree contend on CPU/caches and blow past the bridge's 30s exec
-      // timeout. Approval stays 'auto': maybeRequestToolApproval only gates
-      // 'ask' tools, so no new HITL prompt is introduced.
-      externalSideEffect: true,
-      summary: 'Runs or plans local verification checks for correctness.',
+      externalSideEffect: false,
+      summary: 'Plans a verification requirement; direct package-script execution is disabled and must be delegated to a connected coding agent.',
     };
   }
 
@@ -3960,6 +4314,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       'browser.dom_snapshot',
       'browser.wp_admin_source_intelligence',
       'browser.verification_state',
+      'browser.locator_actionability',
       'browser.screenshot',
     ]);
     const readOnly = readOnlyTools.has(tool);
@@ -3970,7 +4325,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       externalSideEffect: !readOnly,
       approvalKind: readOnly ? undefined : 'browser_action',
       summary: readOnly
-        ? 'Observes the persistent local browser with DOM snapshots, redacted WordPress admin source intelligence, or screenshots.'
+        ? 'Observes the persistent local browser with DOM snapshots, bounded target-actionability evidence, redacted WordPress admin source intelligence, or screenshots.'
         : 'Controls the persistent local browser with Playwright navigation, role clicks, fills, or key presses.',
     };
   }
@@ -4300,20 +4655,14 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
   }
 
   if (tool === 'local.run_shell' || tool === 'git.run') {
-    // Static floor is 'ask' — the args-aware fast path in
-    // maybeRequestToolApproval auto-passes read-classified commands and
-    // refuses blocked ones using the SAME pure core the executor re-runs
-    // (localExecPlanCore). Catalog/subagent surfaces that can't see args
-    // stay on this conservative floor.
     return {
       family: 'code',
-      approvalMode: 'ask',
-      mutatesState: true,
+      approvalMode: 'auto',
+      mutatesState: false,
       externalSideEffect: true,
-      approvalKind: 'privileged_action',
       summary: tool === 'git.run'
-        ? 'Runs a policy-gated git command in a granted local repo via the bridge execFile endpoint (reads auto; writes HITL-approved; force-push refused).'
-        : 'Runs a policy-gated shell command in a granted local directory via the bridge execFile endpoint (reads auto; mutations HITL-approved; catastrophic commands refused).',
+        ? 'Runs a fixed read-only git diagnostic; every mutation and extensibility escape is refused.'
+        : 'Runs a fixed read-only git/node diagnostic; shells, package scripts, tests, builds, and mutations are refused.',
     };
   }
 
@@ -4516,10 +4865,8 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   'codebase.search': { reads: ['codebase_index'] },
   'coordination.file_status': { reads: ['agent_locks'] },
   'todo.write': { writes: ['agent_todo'] },
-  // Exec tools never parallelize anyway ('ask' + externalSideEffect) —
-  // listed for honesty: both can rewrite the working tree.
-  'local.run_shell': { writes: ['desktop_files'] },
-  'git.run': { writes: ['desktop_files'] },
+  'local.run_shell': { reads: ['desktop_files'] },
+  'git.run': { reads: ['desktop_files'] },
   // Kanban tasks.
   'tasks.create': { writes: ['circle_tasks'] },
   'tasks.update_status': { writes: ['circle_tasks'] },
@@ -4634,6 +4981,7 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   // Local browser ('ask'-gated mutations + observation reads).
   'browser.open_url': { writes: ['browser_page'] },
   'browser.click_role': { writes: ['browser_page'] },
+  'browser.set_toggle': { writes: ['browser_page'] },
   'browser.fill_field': { writes: ['browser_page'] },
   'browser.fill_credential_field': { reads: ['vault'], writes: ['browser_page'] },
   'browser.select_option': { writes: ['browser_page'] },
@@ -4643,6 +4991,7 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   'browser.dom_snapshot': { reads: ['browser_page'] },
   'browser.wp_admin_source_intelligence': { reads: ['browser_page'] },
   'browser.verification_state': { reads: ['browser_page'] },
+  'browser.locator_actionability': { reads: ['browser_page'] },
   'browser.screenshot': { reads: ['browser_page'] },
   // WordPress publishing.
   'wp.create_slide': { writes: ['wordpress'] },
@@ -4771,15 +5120,15 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   // touch logged-in accounts, so keep them out of read-only modes.
   'browser.open_url': ['execute'],
   'browser.click_role': ['execute'],
+  'browser.set_toggle': ['execute'],
   'browser.fill_field': ['execute'],
   'browser.fill_credential_field': ['execute'],
   'browser.select_option': ['execute'],
   'browser.upload_file': ['execute'],
   'browser.press_key': ['execute'],
   'browser.close': ['execute', 'support'],
-  // Coding-agent exec tools (P2/P3) — their read tiers power build/support
-  // loops (run tests, git status), but both CAN mutate, so they stay out of
-  // the read-only modes entirely.
+  // Fixed read-only diagnostics; package scripts and mutations are not
+  // executable through these tools.
   'local.run_shell': ['execute', 'build', 'support'],
   'git.run': ['execute', 'build'],
   // Desktop write/control actions only belong in execute mode. Read-only
@@ -4927,7 +5276,9 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'browser.dom_snapshot',
   'browser.wp_admin_source_intelligence',
   'browser.verification_state',
+  'browser.locator_actionability',
   'browser.click_role',
+  'browser.set_toggle',
   'browser.fill_field',
   'browser.fill_credential_field',
   'browser.select_option',
@@ -5124,8 +5475,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'codebase.search',
   'coordination.file_status',
   'todo.write',
-  // Coding-agent P2/P3: the run-and-fix loop (edit → run tests → fix) runs
-  // THROUGH these; reads auto-pass, mutations stay ask-gated in-loop.
+  // Fixed read-only git/node diagnostics remain eligible in the loop.
   'local.run_shell',
   'git.run',
 ]);
@@ -5586,115 +5936,197 @@ function renderTaskLine(task: Record<string, any>): string {
   return `- [${task.status}] ${task.title}${task.priority ? ` (${task.priority})` : ''}${task.assigned_to ? ` — assignee: ${task.assigned_to}` : ''} — id: ${String(task.id).slice(0, 8)}`;
 }
 
+function openSwanApprovalCallIdentity(
+  tool: OpenSwanRuntimeToolName,
+  context: OpenSwanRuntimeToolContext,
+): OpenSwanRuntimeApprovalCallIdentity | null {
+  if (
+    context.toolName !== tool
+    || typeof context.toolUseId !== 'string'
+    || typeof context.runId !== 'string'
+    || !Number.isInteger(context.iteration)
+  ) {
+    return null;
+  }
+  return {
+    userId: context.userId,
+    circleId: context.circleId,
+    runId: context.runId,
+    toolName: tool,
+    toolUseId: context.toolUseId,
+    iteration: Number(context.iteration),
+  };
+}
+
 /**
- * approval-resume: cross-run approval honor. Each chat turn creates a NEW
- * agent run, so an approval the user grants AFTER a turn ends (e.g. via
- * RunApprovalBanner) lives on the previous run's row — the run-scoped lookup
- * in `maybeRequestToolApproval` can never see it, and the retry turn would
- * ask again. This second lookup is deliberately narrow: same circle, same
- * title, requested within the last 15 minutes, and honored ONLY on an exact
- * toolApprovalKey match. Pending rows from other runs are never honored
- * (those stay run-scoped).
- *
- * Single-use consume semantics (audit + no blanket pass):
- * - The NEWEST exact-key row in the window decides. A newer 'rejected' row
- *   VETOES an older approval (newest-intent-wins, mirroring the run-scoped
- *   resolver's block rule).
- * - An approved row is honored at most once ACROSS runs: honoring stamps
- *   `payload.consumedByRunId` via a conditional update (lost race → not
- *   honored, fall back to the normal ask flow). Rows consumed by ANOTHER run
- *   are skipped; rows consumed by THIS run keep passing, so multiple gate
- *   layers checking the same call inside the same retry run all pass instead
- *   of deadlocking mid-dispatch.
- * - On honor, a run-scoped 'approved' copy is recorded on the EXECUTING run
- *   (pre-consumed, so other runs' cross-run lookups skip it) — the audit
- *   trail shows the gated call went through approval, and run-scoped
- *   resolvers return 'pass' for subsequent checks in this run.
- * Fail-closed: any error just falls back to the normal ask flow.
+ * Atomically exchange one approved intent row for one runtime-issued dispatch
+ * receipt. The JSON-path NULL predicate is the single-use compare-and-set:
+ * only one worker can stamp `dispatchBindingDigest`; every replay (including
+ * the same run/call), competing cross-run consumer, and category-auto replay
+ * observes zero updated rows and fails closed. No raw arguments are written.
  */
-async function findCrossRunApprovedToolPass(
-  circleId: string,
-  title: string,
-  tool: string,
-  args: Record<string, unknown>,
-  runId: string,
-): Promise<string | null> {
+async function consumeOpenSwanApprovalAuthority(input: {
+  authority: OpenSwanRuntimeApprovalAuthority;
+  source: OpenSwanRuntimeApprovalReceipt['source'];
+  tool: OpenSwanRuntimeToolName;
+  args: Record<string, unknown>;
+  context: OpenSwanRuntimeToolContext;
+}): Promise<OpenSwanRuntimeApprovalReceipt | null> {
+  const identity = openSwanApprovalCallIdentity(input.tool, input.context);
+  const row = input.authority.row;
+  const payload = row.payload;
+  if (
+    !identity
+    || !(await hasAuthenticatedPersistedOpenSwanCallIdentity(input.tool, input.context))
+    || !isOpenSwanApprovalAuditPayload(payload)
+    || row.circle_id !== input.context.circleId
+    || row.requested_by !== input.context.userId
+    || (
+      input.source !== 'cross_run'
+      && row.run_id !== input.context.runId
+    )
+  ) {
+    return null;
+  }
+  const safePayload = payload as Record<string, unknown>;
+  const approvalRunId = String(row.run_id || '');
+  const exactDigest = await buildOpenSwanToolApprovalDigest(input.tool, input.args);
+  if (!exactDigest || exactDigest !== input.authority.approvalDigest) return null;
+  const approvalKey = buildOpenSwanToolApprovalKey(input.tool, input.args);
+  const authorityBindingDigest = await buildOpenSwanApprovalAuthorityBindingDigest({
+    approvalId: input.authority.approvalId,
+    approvalRunId,
+    approvalDigest: exactDigest,
+    status: input.authority.status,
+    source: input.source,
+    identity,
+  });
+  if (!authorityBindingDigest) return null;
+  const consumedAt = new Date().toISOString();
+  const consumedPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: input.tool,
+    approvalDigest: exactDigest,
+    policyFamily: String(safePayload.policyFamily || ''),
+    approvalMode: safePayload.approvalMode === 'auto' ? 'auto' : 'ask',
+    mutatesState: safePayload.mutatesState === true,
+    externalSideEffect: safePayload.externalSideEffect === true,
+    autoApproveCategory: typeof safePayload.autoApproveCategory === 'string'
+      ? safePayload.autoApproveCategory
+      : null,
+    floorCategory: typeof safePayload.floorCategory === 'string'
+      ? safePayload.floorCategory
+      : null,
+    dispatchBindingDigest: authorityBindingDigest,
+    dispatchConsumedAt: consumedAt,
+  });
+  const requestedAtMs = Date.parse(String(row.requested_at || ''));
+  const timeoutSeconds = Number(row.timeout_seconds);
+  if (
+    !consumedPayload
+    || !Number.isFinite(requestedAtMs)
+    || !Number.isFinite(timeoutSeconds)
+    || timeoutSeconds < 1
+    || timeoutSeconds > 86_400
+  ) {
+    return null;
+  }
+  const expiryCutoff = new Date(Date.now() - timeoutSeconds * 1_000).toISOString();
+  try {
+    let consumeQuery = supabase
+      .from('agent_run_approvals')
+      .update({ payload: consumedPayload })
+      .eq('id', input.authority.approvalId)
+      .eq('circle_id', input.context.circleId)
+      .eq('requested_by', input.context.userId)
+      .eq('status', input.authority.status)
+      .eq('payload->>approvalSchemaVersion', '2')
+      .eq('payload->>toolApprovalDigest', exactDigest)
+      .is('payload->>dispatchBindingDigest', null)
+      .gt('requested_at', expiryCutoff);
+    if (input.source !== 'cross_run') {
+      consumeQuery = consumeQuery.eq('run_id', input.context.runId);
+    }
+    const { data, error } = await consumeQuery.select('id');
+    if (error || !Array.isArray(data) || data.length !== 1) return null;
+    return createOpenSwanRuntimeApprovalReceipt({
+      approvalId: input.authority.approvalId,
+      approvalRunId,
+      approvalKey,
+      approvalDigest: exactDigest,
+      authorityBindingDigest,
+      status: input.authority.status,
+      source: input.source,
+      consumedAt,
+      identity,
+    });
+  } catch {
+    return null;
+  }
+}
+
+type CrossRunApprovalLookup =
+  | { kind: 'pass'; receipt: OpenSwanRuntimeApprovalReceipt }
+  | { kind: 'blocked'; approvalId: string; message: string }
+  | { kind: 'none' }
+  | { kind: 'lookup_failed' };
+
+async function findCrossRunApprovedToolPass(input: {
+  title: string;
+  tool: OpenSwanRuntimeToolName;
+  args: Record<string, unknown>;
+  approvalDigest: string;
+  context: OpenSwanRuntimeToolContext & { runId: string };
+}): Promise<CrossRunApprovalLookup> {
   try {
     const { data, error } = await supabase
       .from('agent_run_approvals')
-      .select('id,status,payload')
-      .eq('circle_id', circleId)
-      .eq('title', title)
-      .in('status', ['approved', 'auto_approved', 'rejected'])
+      .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
+      .eq('circle_id', input.context.circleId)
+      .eq('requested_by', input.context.userId)
+      .eq('title', input.title)
+      .in('status', ['approved', 'auto_approved', 'pending', 'rejected', 'expired'])
       .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString())
       .order('requested_at', { ascending: false })
       .limit(8);
-    if (error || !Array.isArray(data)) return null;
-    const key = buildOpenSwanToolApprovalKey(tool, args);
-    for (const row of data as OpenSwanRuntimeApprovalRow[]) {
-      const status = String(row.status || '').toLowerCase();
-      const payload = row.payload && typeof row.payload === 'object'
-        ? (row.payload as Record<string, unknown>)
-        : null;
-      const payloadKey = payload ? payload.toolApprovalKey : null;
-      if (typeof payloadKey !== 'string' || payloadKey !== key) continue;
-      // Rows are newest-first: the first exact-key match is the user's latest
-      // intent. A newer rejection vetoes any older approval in the window.
-      if (status === 'rejected') return null;
-      if (status !== 'approved' && status !== 'auto_approved') continue;
-      const rowId = String(row.id || '');
-      if (!rowId) continue;
-      const consumedBy = payload && typeof payload.consumedByRunId === 'string'
-        ? payload.consumedByRunId
-        : null;
-      // Already consumed by THIS run → keep honoring so every gate layer for
-      // the same call in the same retry run passes. Consumed by another run →
-      // spent; keep scanning (an older unconsumed duplicate approval, if any,
-      // is still older intent than this approval, so honoring it is fine).
-      if (consumedBy) {
-        if (consumedBy === runId) return rowId;
-        continue;
-      }
-      // Conditionally consume: only succeeds if no other run raced us.
-      const { data: stamped, error: stampError } = await supabase
-        .from('agent_run_approvals')
-        .update({ payload: { ...(payload || {}), consumedByRunId: runId } })
-        .eq('id', rowId)
-        .is('payload->>consumedByRunId', null)
-        .select('id');
-      if (stampError || !Array.isArray(stamped) || stamped.length === 0) continue;
-      // Audit: record a run-scoped approved copy on the executing run so the
-      // run history shows this gated call passed approval. Pre-consumed so no
-      // OTHER run's cross-run lookup can honor the copy; run-scoped lookups in
-      // THIS run resolve 'pass' from it. Best-effort — the consume stamp above
-      // already made the honor decision.
-      await supabase
-        .from('agent_run_approvals')
-        .insert({
-          run_id: runId,
-          circle_id: circleId,
-          approval_kind: 'privileged_action',
-          title,
-          description: `Cross-run approval honored (source: ${rowId.slice(0, 8)})`,
-          status: 'approved',
-          resolved_at: new Date().toISOString(),
-          payload: {
-            tool,
-            args,
-            toolApprovalKey: key,
-            toolApprovalKeyVersion: 1,
-            honoredCrossRunApprovalId: rowId,
-            consumedByRunId: runId,
-          },
-        })
-        .then(({ error: copyError }) => {
-          if (copyError) console.warn('[OpenSwanToolRuntime] cross-run approval audit copy failed:', copyError.message);
-        });
-      return rowId;
+    if (error || !Array.isArray(data)) return { kind: 'lookup_failed' };
+    const decision = resolveOpenSwanRuntimeApprovalDecision({
+      tool: input.tool,
+      approvalDigest: input.approvalDigest,
+      rows: data as OpenSwanRuntimeApprovalRow[],
+    });
+    if (decision.kind === 'new') return { kind: 'none' };
+    if (decision.kind !== 'pass') {
+      return {
+        kind: 'blocked',
+        approvalId: decision.approvalId,
+        message: decision.message,
+      };
     }
-    return null;
+    // A same-run row was already checked before this lookup. Cross-run resume
+    // must consume authority from a genuinely different source run.
+    if (decision.authority.row.run_id === input.context.runId) {
+      return {
+        kind: 'blocked',
+        approvalId: decision.authority.approvalId,
+        message: `Approval for ${input.tool} was not a valid cross-run authority. Nothing was run.`,
+      };
+    }
+    const receipt = await consumeOpenSwanApprovalAuthority({
+      authority: decision.authority,
+      source: 'cross_run',
+      tool: input.tool,
+      args: input.args,
+      context: input.context,
+    });
+    return receipt
+      ? { kind: 'pass', receipt }
+      : {
+          kind: 'blocked',
+          approvalId: decision.authority.approvalId,
+          message: `Approval authority for ${input.tool} could not be atomically consumed. Nothing was run.`,
+        };
   } catch {
-    return null;
+    return { kind: 'lookup_failed' };
   }
 }
 
@@ -5737,31 +6169,111 @@ export function toolAutoApproveCategory(tool: string): AutoApproveCategory | nul
   return null;
 }
 
+type OpenSwanToolApprovalBlockStatus =
+  | 'pending'
+  | 'rejected'
+  | 'failed_to_create'
+  | 'lookup_failed'
+  | 'no_run_context'
+  | 'invalid_identity'
+  | 'invalid_binding'
+  | 'authority_unavailable';
+
+type OpenSwanToolApprovalGateResult =
+  | { kind: 'not_required' }
+  | { kind: 'allowed'; receipt: OpenSwanRuntimeApprovalReceipt }
+  | {
+      kind: 'blocked';
+      approvalId: string;
+      message: string;
+      status: OpenSwanToolApprovalBlockStatus;
+    };
+
+async function recordCategoryAutoApprovedToolPass(input: {
+  tool: OpenSwanRuntimeToolName;
+  args: Record<string, unknown>;
+  context: OpenSwanRuntimeToolContext & { runId: string };
+  policy: OpenSwanToolPolicy;
+  title: string;
+  category: AutoApproveCategory;
+  approvalDigest: string;
+}): Promise<OpenSwanRuntimeApprovalReceipt | null> {
+  const payload = buildOpenSwanApprovalAuditPayload({
+    toolName: input.tool,
+    approvalDigest: input.approvalDigest,
+    policyFamily: input.policy.family,
+    approvalMode: input.policy.approvalMode,
+    mutatesState: input.policy.mutatesState,
+    externalSideEffect: input.policy.externalSideEffect,
+    autoApproveCategory: input.category,
+  });
+  if (!payload) return null;
+  try {
+    const { data, error } = await supabase
+      .from('agent_run_approvals')
+      .insert({
+        run_id: input.context.runId,
+        circle_id: input.context.circleId,
+        approval_kind: input.policy.approvalKind || 'privileged_action',
+        title: input.title,
+        description: `Category auto-approval recorded for ${input.tool}.`,
+        status: 'auto_approved',
+        requested_by: input.context.userId,
+        resolved_at: new Date().toISOString(),
+        timeout_seconds: 300,
+        payload,
+      })
+      .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
+      .single();
+    if (error || !data) return null;
+    const row = data as OpenSwanRuntimeApprovalRow;
+    const approvalId = String(row.id || '');
+    return consumeOpenSwanApprovalAuthority({
+      authority: {
+        approvalId,
+        approvalDigest: input.approvalDigest,
+        status: 'auto_approved',
+        row,
+      },
+      source: 'category_auto',
+      tool: input.tool,
+      args: input.args,
+      context: input.context,
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function maybeRequestToolApproval(
   tool: OpenSwanRuntimeToolName,
   args: Record<string, unknown>,
   context: OpenSwanRuntimeToolContext,
-): Promise<{ approvalId: string; message: string; status: 'pending' | 'rejected' | 'failed_to_create' | 'lookup_failed' | 'no_run_context' } | null> {
+): Promise<OpenSwanToolApprovalGateResult> {
   const policy = getOpenSwanToolPolicy(tool, context.activePluginIds);
   // Non-'ask' tools and the approvals.* mechanism itself never gate here.
   if (policy.approvalMode !== 'ask' || tool.startsWith('approvals.')) {
-    return null;
+    return { kind: 'not_required' };
   }
-  // Coding-agent P2/P3 (local.run_shell / git.run): the approval need is
-  // ARGS-dependent — decided by the same pure core the executor re-runs.
-  // read → auto (no approval row), blocked → refused here (no approval row),
-  // mutate → falls through to the standard ask flow below.
-  if (tool === 'local.run_shell' || tool === 'git.run') {
-    const { planLocalExec } = await import('./localExecPlanCore');
-    const plan = planLocalExec(tool, args);
-    if (plan.approvalTier === 'never') {
-      return {
-        approvalId: '',
-        status: 'rejected',
-        message: `${tool} refused: ${plan.reason}${plan.preview ? ` (${plan.preview})` : ''}`,
-      };
-    }
-    if (plan.approvalTier === 'auto') return null;
+  if (
+    !openSwanApprovalCallIdentity(tool, context)
+    || !(await hasAuthenticatedPersistedOpenSwanCallIdentity(tool, context))
+  ) {
+    return {
+      kind: 'blocked',
+      approvalId: '',
+      status: 'invalid_identity',
+      message: `${tool} requires an authenticated persisted run plus exact provider toolUseId and iteration. No approval authority was issued and the tool was not run.`,
+    };
+  }
+  const toolApprovalDigest = await buildOpenSwanToolApprovalDigest(tool, args);
+  if (!toolApprovalDigest) {
+    return {
+      kind: 'blocked',
+      approvalId: '',
+      status: 'invalid_binding',
+      message: `${tool} requires a SHA-256 exact-argument binding, but one could not be produced. The tool was not run.`,
+    };
   }
   // auto-approve-memory: honor the user's per-category "Remember:
   // auto-approve" settings (chatAutoApproveSettings) at the tool-loop
@@ -5769,8 +6281,9 @@ async function maybeRequestToolApproval(
   // user-forbidden ('never') → blocked; the always-confirm floor
   // (pay/delete/login/grant — args-detected via constraintBlocksToolCall,
   // plus substring-matched on category AND tool name) → require_approval —
-  // it beats every auto path; a category the user set to 'auto' → skip the
-  // approval row. An explicit circle policy (non-'ask') wins over the user
+  // it beats every auto path; a category the user set to 'auto' → authorize
+  // only after a durable exact-call auto_approved row is recorded. An explicit
+  // circle policy (non-'ask') wins over the user
   // default, mirroring resolveAutoApproveDecision. Any read/import error
   // falls through to the normal ask flow (fail-closed).
   //
@@ -5778,8 +6291,8 @@ async function maybeRequestToolApproval(
   // `categoryAuto`, honored below AFTER the run-scoped approval lookup, so an
   // approval the user explicitly REJECTED in this run (block) or one still
   // pending (defer) keeps precedence over a category the user later flipped
-  // to 'auto' mid-run. No-run-context calls honor it before the fail-closed
-  // no_run_context return (no run-scoped rows can exist without a runId).
+  // to 'auto' mid-run. Calls without run context remain blocked because no
+  // genuine durable approval receipt can exist without a run row.
   let categoryAuto = false;
   const autoApproveCategory = toolAutoApproveCategory(tool);
   if (autoApproveCategory) {
@@ -5822,6 +6335,7 @@ async function maybeRequestToolApproval(
       if (categoryDecision.kind === 'auto_approve') categoryAuto = true;
       if (categoryDecision.kind === 'blocked') {
         return {
+          kind: 'blocked',
           approvalId: '',
           status: 'rejected',
           message: `${tool} refused: ${categoryDecision.reason}. The tool was not run.`,
@@ -5839,11 +6353,8 @@ async function maybeRequestToolApproval(
   // ordinary non-floor 'ask' mutations (desktop/browser writes etc.), which
   // previously slipped through here as a silent skip.
   if (!context.runId) {
-    // Without a runId there are no run-scoped rejected/pending rows to
-    // outrank a category the user set to 'auto' — honor it here so no-run
-    // category-auto calls keep executing instead of failing closed.
-    if (categoryAuto) return null;
     return {
+      kind: 'blocked',
       approvalId: '',
       status: 'no_run_context',
       message: `${tool} requires approval, but no run context was available to record it — the tool was not run.`,
@@ -5853,31 +6364,48 @@ async function maybeRequestToolApproval(
   const title = `OpenSwan approval required: ${tool}`;
   const { data: existing, error: existingError } = await supabase
     .from('agent_run_approvals')
-    .select('id,status,payload')
+    .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
     .eq('run_id', context.runId)
+    .eq('circle_id', context.circleId)
+    .eq('requested_by', context.userId)
     .eq('title', title)
     .order('requested_at', { ascending: false })
     .limit(8);
 
   if (existingError) {
     return {
+      kind: 'blocked',
       approvalId: '',
       status: 'lookup_failed',
-      message: `Approval lookup failed for ${tool}: ${existingError.message}. Tool not executed.`,
+      message: `The approval service could not verify ${tool}. Nothing was run; retry after the service is healthy.`,
     };
   }
 
   const decision: OpenSwanRuntimeApprovalDecision = resolveOpenSwanRuntimeApprovalDecision({
     tool,
-    args,
-    rows: (existing || []) as any,
+    approvalDigest: toolApprovalDigest,
+    rows: (existing || []) as OpenSwanRuntimeApprovalRow[],
   });
 
   if (decision.kind === 'pass') {
-    return null;
+    const receipt = await consumeOpenSwanApprovalAuthority({
+      authority: decision.authority,
+      source: 'run_scoped',
+      tool,
+      args,
+      context,
+    });
+    if (receipt) return { kind: 'allowed', receipt };
+    return {
+      kind: 'blocked',
+      approvalId: decision.authority.approvalId,
+      status: 'authority_unavailable',
+      message: `Approval authority for ${tool} could not be atomically consumed or was consumed by a competing call. The tool was not run.`,
+    };
   }
   if (decision.kind === 'defer') {
     return {
+      kind: 'blocked',
       approvalId: decision.approvalId,
       status: 'pending',
       message: decision.message,
@@ -5885,6 +6413,7 @@ async function maybeRequestToolApproval(
   }
   if (decision.kind === 'block') {
     return {
+      kind: 'blocked',
       approvalId: decision.approvalId,
       status: 'rejected',
       message: decision.message,
@@ -5893,47 +6422,88 @@ async function maybeRequestToolApproval(
 
   // decision.kind === 'new': no run-scoped rejection (block) or pending row
   // (defer) claimed precedence — NOW a category the user auto-approved may
-  // skip the approval row (same placement as the cross-run pass below).
-  if (categoryAuto) return null;
+  // create a durable exact-call auto_approved audit row. A later gate pass
+  // reuses that row through the run-scoped resolver above.
+  if (categoryAuto && autoApproveCategory) {
+    const receipt = await recordCategoryAutoApprovedToolPass({
+      tool,
+      args,
+      context: { ...context, runId: context.runId },
+      policy,
+      title,
+      category: autoApproveCategory,
+      approvalDigest: toolApprovalDigest,
+    });
+    if (receipt) return { kind: 'allowed', receipt };
+    return {
+      kind: 'blocked',
+      approvalId: '',
+      status: 'failed_to_create',
+      message: `Category auto-approval applied to ${tool}, but its durable audit receipt could not be created — the tool was not run.`,
+    };
+  }
 
   // Before creating a fresh approval row, honor an exact-match approval the
   // user granted on a PREVIOUS run in the last 15 minutes (approve → retry
-  // turn actually resumes instead of re-asking). The helper consumes the row
-  // (single-use) and records a run-scoped approved copy on THIS run.
-  const crossRunPassId = await findCrossRunApprovedToolPass(context.circleId, title, tool, args, context.runId);
-  if (crossRunPassId) return null;
-
-  const toolApprovalKey = buildOpenSwanToolApprovalKey(tool, args);
-
-  // Show the user WHAT will run (secret-redacted) instead of a generic
-  // "review the tool input" line — buildApprovalPreview is pure + smoke-pinned.
-  const { buildApprovalPreview } = await import('./approvalPreviewCore');
-  const preview = buildApprovalPreview(tool, args);
+  // turn actually resumes instead of re-asking). The helper atomically
+  // consumes the source row once and mints no reusable run-scoped copy.
+  const crossRunPass = await findCrossRunApprovedToolPass({
+    title,
+    tool,
+    args,
+    approvalDigest: toolApprovalDigest,
+    context: { ...context, runId: context.runId },
+  });
+  if (crossRunPass.kind === 'pass') {
+    return { kind: 'allowed', receipt: crossRunPass.receipt };
+  }
+  if (crossRunPass.kind === 'blocked') {
+    return {
+      kind: 'blocked',
+      approvalId: crossRunPass.approvalId,
+      status: 'authority_unavailable',
+      message: crossRunPass.message,
+    };
+  }
+  if (crossRunPass.kind === 'lookup_failed') {
+    return {
+      kind: 'blocked',
+      approvalId: '',
+      status: 'lookup_failed',
+      message: `Cross-run approval lookup failed for ${tool}. Tool not executed.`,
+    };
+  }
 
   const { requestRunApproval } = await import('./agentRunSystem');
+  const approvalPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: tool,
+    approvalDigest: toolApprovalDigest,
+    policyFamily: policy.family,
+    approvalMode: policy.approvalMode,
+    mutatesState: policy.mutatesState,
+    externalSideEffect: policy.externalSideEffect,
+  });
+  if (!approvalPayload) {
+    return {
+      kind: 'blocked',
+      approvalId: '',
+      status: 'invalid_binding',
+      message: `Approval metadata for ${tool} could not be reduced to the safe structural allowlist. The tool was not run.`,
+    };
+  }
   const approval = await requestRunApproval({
     runId: context.runId,
     circleId: context.circleId,
     approvalKind: policy.approvalKind || 'privileged_action',
     title,
-    description: `${preview.title} — ${preview.detail}`,
+    description: `Approve one exact ${tool} provider call. Sensitive arguments are hidden and bound by SHA-256.`,
     requestedBy: context.userId,
-    payload: {
-      tool,
-      args,
-      toolApprovalKey,
-      toolApprovalKeyVersion: 1,
-      policyFamily: policy.family,
-      approvalMode: policy.approvalMode,
-      mutatesState: policy.mutatesState,
-      externalSideEffect: policy.externalSideEffect,
-      // Structured preview for the approval card UI (what/risk).
-      approvalPreview: { title: preview.title, detail: preview.detail, risk: preview.risk },
-    },
+    payload: approvalPayload,
   });
 
   if (!approval) {
     return {
+      kind: 'blocked',
       approvalId: '',
       status: 'failed_to_create',
       message: `Approval required for ${tool}, but the request could not be created.`,
@@ -5941,6 +6511,7 @@ async function maybeRequestToolApproval(
   }
 
   return {
+    kind: 'blocked',
     approvalId: approval.id,
     status: 'pending',
     message: `Approval requested for ${tool} (id: ${approval.id.slice(0, 8)}).`,
@@ -5967,7 +6538,11 @@ async function maybeBlockToolByConstraint(
   tool: OpenSwanRuntimeToolName,
   args: Record<string, unknown>,
   context: OpenSwanRuntimeToolContext,
-): Promise<{ message: string; status: 'blocked' | 'pending'; approvalId?: string } | null> {
+): Promise<
+  | { message: string; status: 'blocked' | 'pending'; approvalId?: string }
+  | { status: 'authorized'; receipt: OpenSwanRuntimeApprovalReceipt }
+  | null
+> {
   if (String(tool || '').startsWith('approvals.')) return null;
   try {
     const { constraintBlocksToolCall } = await import('./chatComputerRequestRouter');
@@ -6000,10 +6575,15 @@ async function maybeBlockToolByConstraint(
 
     // Without a run context we cannot record a confirmation — fail closed.
     const category = String(verdict.floorCategory || 'sensitive');
-    if (!context.runId || !context.circleId) {
+    if (
+      !context.runId
+      || !context.circleId
+      || !openSwanApprovalCallIdentity(tool, context)
+      || !(await hasAuthenticatedPersistedOpenSwanCallIdentity(tool, context))
+    ) {
       return {
         status: 'blocked',
-        message: `Always-confirm floor: "${category}" actions require explicit user confirmation, but no approval context was available — the tool was not run.`,
+        message: `Always-confirm floor: "${category}" actions require authenticated persisted run and exact provider call identity — the tool was not run.`,
       };
     }
     const title = `OpenSwan always-confirm floor: ${tool}`;
@@ -6013,9 +6593,10 @@ async function maybeBlockToolByConstraint(
     // asking the user a second time.
     const { data: existing, error: existingError } = await supabase
       .from('agent_run_approvals')
-      .select('id,status,payload')
+      .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
       .eq('run_id', context.runId)
       .eq('circle_id', context.circleId)
+      .eq('requested_by', context.userId)
       .order('requested_at', { ascending: false })
       .limit(20);
     if (existingError) {
@@ -6024,20 +6605,56 @@ async function maybeBlockToolByConstraint(
         message: `Always-confirm floor: approval lookup failed for "${tool}" (${category}) — the tool was not run.`,
       };
     }
+    const toolApprovalDigest = await buildOpenSwanToolApprovalDigest(tool, keyArgs);
+    if (!toolApprovalDigest) {
+      return {
+        status: 'blocked',
+        message: `Always-confirm floor: SHA-256 binding failed for "${tool}" (${category}) — the tool was not run.`,
+      };
+    }
     const decision = resolveOpenSwanRuntimeApprovalDecision({
       tool,
-      args: keyArgs,
+      approvalDigest: toolApprovalDigest,
       rows: (existing || []) as OpenSwanRuntimeApprovalRow[],
     });
-    if (decision.kind === 'pass') return null; // user already confirmed this exact call
+    if (decision.kind === 'pass') {
+      const receipt = await consumeOpenSwanApprovalAuthority({
+        authority: decision.authority,
+        source: 'run_scoped',
+        tool,
+        args: keyArgs,
+        context,
+      });
+      return receipt
+        ? { status: 'authorized', receipt }
+        : {
+            status: 'blocked',
+            approvalId: decision.authority.approvalId,
+            message: `Always-confirm floor: approval authority for "${tool}" was already consumed or could not be consumed atomically. The tool was not run.`,
+          };
+    }
     if (decision.kind === 'defer') {
       return { status: 'pending', approvalId: decision.approvalId, message: `Always-confirm floor: confirmation still pending for this ${category} action ("${tool}"). It was not run.` };
     }
     if (decision.kind === 'block') {
       return { status: 'blocked', approvalId: decision.approvalId, message: `The user rejected this ${category} action ("${tool}"). Do not retry it.` };
     }
-    const toolApprovalKey = buildOpenSwanToolApprovalKey(tool, keyArgs);
     const { requestRunApproval } = await import('./agentRunSystem');
+    const approvalPayload = buildOpenSwanApprovalAuditPayload({
+      toolName: tool,
+      approvalDigest: toolApprovalDigest,
+      policyFamily: 'always_confirm_floor',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: true,
+      floorCategory: category,
+    });
+    if (!approvalPayload) {
+      return {
+        status: 'blocked',
+        message: `Always-confirm floor: safe approval metadata could not be created for "${tool}" — the tool was not run.`,
+      };
+    }
     const approval = await requestRunApproval({
       runId: context.runId,
       circleId: context.circleId,
@@ -6045,26 +6662,21 @@ async function maybeBlockToolByConstraint(
       title,
       description: `Always-confirm floor (${category}): approve this exact action before it runs. Required in every autonomy mode.`,
       requestedBy: context.userId,
-      payload: {
-        tool,
-        args: keyArgs,
-        toolApprovalKey,
-        toolApprovalKeyVersion: 1,
-        policyFamily: 'always_confirm_floor',
-        floorCategory: category,
-        approvalMode: 'ask',
-        mutatesState: true,
-        externalSideEffect: true,
-      },
+      payload: approvalPayload,
     });
     if (!approval) {
       return { status: 'blocked', message: `Always-confirm floor: "${category}" confirmation is required, but the approval request could not be created — the tool was not run.` };
     }
     return { status: 'pending', approvalId: approval.id, message: `Always-confirm floor: requested confirmation for this ${category} action ("${tool}", id: ${approval.id.slice(0, 8)}). It was NOT run yet.` };
   } catch {
-    // Never let the backstop itself break dispatch — upstream gates already
-    // enforced the policy; this layer only adds redundancy.
-    return null;
+    // Read tools retain availability. Mutations fail closed when the runtime
+    // cannot establish whether a constraint/floor approval applies.
+    return getOpenSwanToolPolicy(tool, context.activePluginIds).mutatesState
+      ? {
+          status: 'blocked',
+          message: `Constraint and approval policy could not be verified for ${tool}. The mutating tool was not run.`,
+        }
+      : null;
   }
 }
 
@@ -6182,7 +6794,9 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'browser.dom_snapshot':
     case 'browser.wp_admin_source_intelligence':
     case 'browser.verification_state':
+    case 'browser.locator_actionability':
     case 'browser.click_role':
+    case 'browser.set_toggle':
     case 'browser.fill_field':
     case 'browser.fill_credential_field':
     case 'browser.select_option':
@@ -6300,8 +6914,12 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
       }
       return verificationResult.stdout || `${tool} passed.`;
     }
-    default:
-      return JSON.stringify(result);
+    default: {
+      // Internal approval receipts are a runtime side channel, not
+      // model-visible tool output. Known formatters above select explicit
+      // business fields; the generic fallback must strip the side channel.
+      return JSON.stringify(splitOpenSwanRuntimeToolResultMetadata(result).raw);
+    }
   }
 }
 
@@ -6342,28 +6960,12 @@ export async function executeOpenSwanTool<T extends OpenSwanToolName>(
     case 'verification.tests':
     case 'verification.lint': {
       const verificationTool = tool as 'verification.typecheck' | 'verification.tests' | 'verification.lint';
-      // SECURITY: verification.* are fixed-purpose tools that run via the local
-      // bridge /exec under an auto-approve policy. Do NOT honor a model-supplied
-      // `command` — an out-of-schema `command` key would be auto-approved
-      // arbitrary shell execution on the user's machine. Pin to the known command.
       const command = DEFAULT_VERIFICATION_COMMANDS[verificationTool];
-      const bridgeOk = await detectClaudeCodeBridge();
-      if (!bridgeOk) {
-        return {
-          ok: false,
-          executed: false,
-          command,
-          error: 'Local coding bridge unavailable',
-        } as OpenSwanToolExecutionResultMap[T];
-      }
-      const result = await execBridgeCommand(command);
       return {
-        ok: result.ok,
-        executed: true,
+        ok: false,
+        executed: false,
         command,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        error: result.error,
+        error: `Direct package-script execution is disabled at the local bridge boundary. Delegate "${command}" to a connected coding agent with its normal approval flow and attach that agent's result before claiming verification.`,
       } as OpenSwanToolExecutionResultMap[T];
     }
     default:
@@ -6371,17 +6973,3199 @@ export async function executeOpenSwanTool<T extends OpenSwanToolName>(
   }
 }
 
+type PreparedGuardedBrowserFill = {
+  dispatchArgs: {
+    targetId: string;
+    targetFingerprint: string;
+    text: string;
+    timeoutMs: number;
+    taskContext?: string;
+    credentialSemantics: false;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    expectedUrl: string;
+  };
+  /**
+   * Durable approval identity for this exact transient fill. Raw draft text,
+   * locators/task context, target capability ids, and exact URLs never enter
+   * the approval row. SHA-256 bindings preserve exact-call matching without
+   * turning durable approval storage into a copy of potentially private form
+   * content or signed URL query parameters.
+   */
+  approvalArgs: {
+    approvalSchemaVersion: 2;
+    operation: 'guarded_non_secret_draft_fill';
+    role: string;
+    locatorKind: 'accessible_name' | 'selector';
+    submit: false;
+    exact: boolean;
+    timeoutMs: number;
+    credentialSemantics: false;
+    draftTextLength: number;
+    normalizedIntentSha256: string;
+    pageUrlSha256: string;
+    pageOrigin: string;
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    targetFingerprint: string;
+  };
+  beforeEpoch: ReturnType<typeof createComputerAppObservationEpoch>;
+};
+
+type PreparedGuardedBrowserToggle = {
+  dispatchArgs: {
+    targetId: string;
+    targetFingerprint: string;
+    desiredState: boolean;
+    submit: false;
+    timeoutMs: number;
+    taskContext?: string;
+    credentialSemantics: false;
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    expectedUrl: string;
+  };
+  /**
+   * Durable approval data contains only bounded semantics plus digests of the
+   * exact locator/task intent and URL. The one-shot target capability, exact
+   * locator, task context, and URL never enter the approval row.
+   */
+  approvalArgs: {
+    approvalSchemaVersion: 2;
+    targetSummary: string;
+    operation: 'guarded_non_consequential_toggle';
+    role: 'checkbox' | 'switch' | 'radio';
+    locatorKind: 'accessible_name' | 'selector';
+    desiredState: boolean;
+    observedState: boolean;
+    submit: false;
+    exact: true;
+    timeoutMs: number;
+    credentialSemantics: false;
+    normalizedIntentSha256: string;
+    pageUrlSha256: string;
+    pageOrigin: string;
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    targetFingerprint: string;
+  };
+  role: 'checkbox' | 'switch' | 'radio';
+  beforeState: boolean;
+  beforeEpoch: ReturnType<typeof createComputerAppObservationEpoch>;
+};
+
+type PreparedGuardedBrowserSelect = {
+  dispatchArgs: {
+    targetId: string;
+    targetFingerprint: string;
+    optionFingerprint: string;
+    matchBy: 'value' | 'label';
+    submit: false;
+    timeoutMs: number;
+    taskContext?: string;
+    credentialSemantics: false;
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    expectedUrl: string;
+  };
+  /**
+   * Durable approval data contains bounded semantics plus cryptographic
+   * bindings only. Raw option value/label, locator, task context, exact URL,
+   * and the one-shot target capability remain transient.
+   */
+  approvalArgs: {
+    approvalSchemaVersion: 2;
+    targetSummary: string;
+    operation: 'guarded_native_select_preference';
+    role: 'combobox';
+    locatorKind: 'accessible_name' | 'selector';
+    matchBy: 'value' | 'label';
+    selectionAlreadyMatched: boolean;
+    submit: false;
+    exact: true;
+    timeoutMs: number;
+    credentialSemantics: false;
+    normalizedIntentSha256: string;
+    pageUrlSha256: string;
+    pageOrigin: string;
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    targetFingerprint: string;
+    optionFingerprint: string;
+  };
+  beforeOptionFingerprint: string | null;
+  beforeEpoch: ReturnType<typeof createComputerAppObservationEpoch>;
+};
+
+async function sha256HexForGuardedApproval(value: string): Promise<string> {
+  if (
+    typeof value !== 'string'
+    || value.length > 100_000
+    || typeof globalThis.crypto?.subtle?.digest !== 'function'
+    || typeof TextEncoder === 'undefined'
+  ) {
+    throw new Error('SHA-256 approval binding is unavailable.');
+  }
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  );
+  const bytes = new Uint8Array(digest);
+  let hex = '';
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
+  return `sha256:${hex}`;
+}
+
+function browserApprovalOrigin(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      // URL.origin omits userinfo, path, query, and fragment.
+      return parsed.origin.toLowerCase().slice(0, 300);
+    }
+    return `${parsed.protocol || 'opaque:'}//opaque`.slice(0, 300);
+  } catch {
+    return 'opaque://invalid';
+  }
+}
+
+function buildGuardedToggleApprovalTargetSummary(args: {
+  role: 'checkbox' | 'switch' | 'radio';
+  name?: string;
+  selector?: string;
+  desiredState: boolean;
+  observedState: boolean;
+  pageOrigin: string;
+}): string {
+  const originHost = (() => {
+    try {
+      const parsed = new URL(args.pageOrigin);
+      return parsed.host.toLowerCase().slice(0, 100) || 'current site';
+    } catch {
+      return 'current site';
+    }
+  })();
+  const cleanName = String(args.name || '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  const redacted = redactSecrets(cleanName, { mask: '[redacted]' });
+  const unsafeLabel = (
+    redacted.redactionCount > 0
+    || /(?:^|[^a-z])(?:password|passcode|one[- ]?time|otp|mfa|captcha|secret|token|credential|api[-_ ]?key|session[-_ ]?id)(?:[^a-z]|$)/i.test(cleanName)
+    || /@/.test(cleanName)
+    || /\b\d{6,}\b/.test(cleanName)
+  );
+  const target = args.name
+    ? unsafeLabel || !redacted.text
+      ? `Exact named ${args.role}`
+      : `"${redacted.text.slice(0, 80)}" ${args.role}`
+    : `Exact selector-based ${args.role}`;
+  const before = args.observedState ? 'on' : 'off';
+  const after = args.desiredState ? 'on' : 'off';
+  return `${target} on ${originHost}: ${before} → ${after}`.slice(0, 180);
+}
+
+function buildGuardedSelectApprovalTargetSummary(args: {
+  name?: string;
+  selector?: string;
+  matchBy: 'value' | 'label';
+  selectionAlreadyMatched: boolean;
+  pageOrigin: string;
+}): string {
+  const originHost = (() => {
+    try {
+      const parsed = new URL(args.pageOrigin);
+      return parsed.host.toLowerCase().slice(0, 100) || 'current site';
+    } catch {
+      return 'current site';
+    }
+  })();
+  const cleanName = String(args.name || '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  const redacted = redactSecrets(cleanName, { mask: '[redacted]' });
+  const unsafeLabel = (
+    redacted.redactionCount > 0
+    || /(?:^|[^a-z])(?:password|passcode|one[- ]?time|otp|mfa|captcha|secret|token|credential|api[-_ ]?key|session[-_ ]?id)(?:[^a-z]|$)/i.test(cleanName)
+    || /@/.test(cleanName)
+    || /\b\d{6,}\b/.test(cleanName)
+  );
+  const target = args.name
+    ? unsafeLabel || !redacted.text
+      ? 'Exact named native select'
+      : `"${redacted.text.slice(0, 80)}" native select`
+    : 'Exact selector-based native select';
+  const state = args.selectionAlreadyMatched
+    ? 'verify the already-selected option'
+    : `select one exact option by ${args.matchBy}`;
+  return `${target} on ${originHost}: ${state}`.slice(0, 180);
+}
+
+async function prepareGuardedBrowserFill(
+  input: unknown,
+  context: OpenSwanRuntimeToolContext,
+): Promise<
+  | { ok: true; prepared: PreparedGuardedBrowserFill }
+  | { ok: false; result: OpenSwanToolExecutionResultMap['browser.fill_field'] }
+> {
+  if (
+    context.toolName !== 'browser.fill_field'
+    || typeof context.toolUseId !== 'string'
+    || !context.toolUseId
+    || context.toolUseId.length > 180
+    || !Number.isInteger(context.iteration)
+    || Number(context.iteration) < 1
+    || typeof context.runId !== 'string'
+    || !context.runId
+    || context.runId.length > 100
+    || `${context.runId}:${context.toolUseId}:guarded-fill-v1`.length > 180
+  ) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'Browser fill stopped before observation because exact run, tool-call, and iteration identity was unavailable. No field was changed.',
+      },
+    };
+  }
+  const normalized = normalizeGuardedBrowserFillIntent(input);
+  if (!normalized.ok) {
+    return { ok: false, result: { ok: false, resultsText: normalized.error } };
+  }
+  const locatorCount = Number(Boolean(normalized.args.name))
+    + Number(Boolean(normalized.args.selector));
+  if (locatorCount !== 1) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'Browser fill stopped before observation because exactly one accessible name or selector is required. No field was changed.',
+      },
+    };
+  }
+  const locatorKind: PreparedGuardedBrowserFill['approvalArgs']['locatorKind'] =
+    normalized.args.name ? 'accessible_name' : 'selector';
+  try {
+    const {
+      domSnapshot,
+      extractBrowserPageIdentity,
+      observeGuardedNonSecretFillTarget,
+    } = await import('./browserBridge');
+    const pageObservation = await domSnapshot({ maxNodes: 100, interestingOnly: true });
+    if (!pageObservation.ok || !pageObservation.data) {
+      return {
+        ok: false,
+        result: browserToolFailureResult(pageObservation, 'Could not collect the fresh browser identity required before filling.'),
+      };
+    }
+    const pageIdentity = extractBrowserPageIdentity(pageObservation.data);
+    if (!pageIdentity) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          resultsText: 'The browser bridge did not return complete process/context/page/URL identity. Update or restart the bridge, then collect a fresh DOM snapshot.',
+        },
+      };
+    }
+    const targetObservation = await observeGuardedNonSecretFillTarget({
+      role: normalized.args.role,
+      ...(normalized.args.name ? { name: normalized.args.name } : {}),
+      ...(normalized.args.selector ? { selector: normalized.args.selector } : {}),
+      exact: normalized.args.exact,
+      timeoutMs: normalized.args.timeoutMs,
+      ...(normalized.args.taskContext ? { taskContext: normalized.args.taskContext } : {}),
+      credentialSemantics: false,
+      expectedBrowserContextId: pageIdentity.browserContextId,
+      expectedPageId: pageIdentity.pageId,
+      expectedUrl: pageIdentity.url,
+    });
+    if (!targetObservation.ok || !targetObservation.data) {
+      return {
+        ok: false,
+        result: browserToolFailureResult(
+          targetObservation,
+          'Could not observe one exact non-credential browser field before approval.',
+        ),
+      };
+    }
+    const target = targetObservation.data;
+    if (
+      target.browserProcessId !== pageIdentity.browserProcessId
+      || target.browserContextId !== pageIdentity.browserContextId
+      || target.pageId !== pageIdentity.pageId
+      || target.url !== pageIdentity.url
+    ) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          resultsText: 'The browser changed while resolving the exact field. Collect a fresh DOM snapshot and try again; no field was changed.',
+        },
+      };
+    }
+    const normalizedIntentSha256 = await sha256HexForGuardedApproval(
+      buildOpenSwanToolApprovalKey(
+        'browser.fill_field:guarded-intent-v2',
+        normalized.args as unknown as Record<string, unknown>,
+      ),
+    );
+    const pageUrlSha256 = await sha256HexForGuardedApproval(target.url);
+    const beforeEpoch = createComputerAppObservationEpoch({
+      id: target.evidenceId,
+      surface: 'browser',
+      capturedAt: target.observedAt,
+      freshnessMs: 15_000,
+      target: {
+        browserProcessId: target.browserProcessId,
+        browserSessionId: target.browserContextId,
+        browserTabId: target.pageId,
+        browserTargetFingerprint: target.targetFingerprint,
+        url: target.url,
+      },
+      evidenceIds: [pageIdentity.evidenceId, target.evidenceId],
+    });
+    return {
+      ok: true,
+      prepared: {
+        dispatchArgs: {
+          targetId: target.targetId,
+          targetFingerprint: target.targetFingerprint,
+          text: normalized.args.text,
+          timeoutMs: normalized.args.timeoutMs,
+          ...(normalized.args.taskContext ? { taskContext: normalized.args.taskContext } : {}),
+          credentialSemantics: false,
+          expectedBrowserContextId: target.browserContextId,
+          expectedPageId: target.pageId,
+          expectedUrl: target.url,
+        },
+        approvalArgs: {
+          approvalSchemaVersion: 2,
+          operation: 'guarded_non_secret_draft_fill',
+          role: normalized.args.role,
+          locatorKind,
+          submit: false,
+          exact: normalized.args.exact,
+          timeoutMs: normalized.args.timeoutMs,
+          credentialSemantics: false,
+          draftTextLength: normalized.args.text.length,
+          normalizedIntentSha256,
+          pageUrlSha256,
+          pageOrigin: browserApprovalOrigin(target.url),
+          expectedBrowserProcessId: target.browserProcessId,
+          expectedBrowserContextId: target.browserContextId,
+          expectedPageId: target.pageId,
+          targetFingerprint: target.targetFingerprint,
+        },
+        beforeEpoch,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: sanitizeErrorForModel(error, { context: 'browser observation' }),
+      },
+    };
+  }
+}
+
+async function prepareGuardedBrowserToggle(
+  input: unknown,
+  context: OpenSwanRuntimeToolContext,
+): Promise<
+  | { ok: true; prepared: PreparedGuardedBrowserToggle }
+  | { ok: false; result: OpenSwanToolExecutionResultMap['browser.set_toggle'] }
+> {
+  if (
+    context.toolName !== 'browser.set_toggle'
+    || typeof context.toolUseId !== 'string'
+    || !context.toolUseId
+    || context.toolUseId.length > 180
+    || !Number.isInteger(context.iteration)
+    || Number(context.iteration) < 1
+    || typeof context.runId !== 'string'
+    || !context.runId
+    || context.runId.length > 100
+    || `${context.runId}:${context.toolUseId}:guarded-toggle-v1`.length > 180
+  ) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'Browser toggle stopped before observation because exact run, tool-call, and iteration identity was unavailable. No control was changed.',
+      },
+    };
+  }
+  const normalized = normalizeGuardedBrowserToggleIntent(input);
+  if (!normalized.ok) {
+    return { ok: false, result: { ok: false, resultsText: normalized.error } };
+  }
+  try {
+    const {
+      domSnapshot,
+      extractBrowserPageIdentity,
+      observeGuardedBrowserToggleTarget,
+    } = await import('./browserBridge');
+    const pageObservation = await domSnapshot({ maxNodes: 100, interestingOnly: true });
+    if (!pageObservation.ok || !pageObservation.data) {
+      return {
+        ok: false,
+        result: browserToolFailureResult(
+          pageObservation,
+          'Could not collect the fresh browser identity required before setting the control.',
+        ),
+      };
+    }
+    const pageIdentity = extractBrowserPageIdentity(pageObservation.data);
+    if (!pageIdentity) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          resultsText: 'The browser bridge did not return complete process/context/page/URL identity. Update or restart the bridge, then collect a fresh DOM snapshot.',
+        },
+      };
+    }
+    const targetObservation = await observeGuardedBrowserToggleTarget({
+      role: normalized.args.role,
+      ...(normalized.args.name ? { name: normalized.args.name } : {}),
+      ...(normalized.args.selector ? { selector: normalized.args.selector } : {}),
+      desiredState: normalized.args.desiredState,
+      submit: false,
+      exact: true,
+      timeoutMs: normalized.args.timeoutMs,
+      ...(normalized.args.taskContext ? { taskContext: normalized.args.taskContext } : {}),
+      credentialSemantics: false,
+      expectedBrowserProcessId: pageIdentity.browserProcessId,
+      expectedBrowserContextId: pageIdentity.browserContextId,
+      expectedPageId: pageIdentity.pageId,
+      expectedUrl: pageIdentity.url,
+    });
+    if (!targetObservation.ok || !targetObservation.data) {
+      return {
+        ok: false,
+        result: browserToolFailureResult(
+          targetObservation,
+          'Could not observe one exact non-consequential checkbox, switch, or radio before approval.',
+        ),
+      };
+    }
+    const target = targetObservation.data;
+    if (
+      target.browserProcessId !== pageIdentity.browserProcessId
+      || target.browserContextId !== pageIdentity.browserContextId
+      || target.pageId !== pageIdentity.pageId
+      || target.url !== pageIdentity.url
+      || target.role !== normalized.args.role
+      || target.desiredState !== normalized.args.desiredState
+    ) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          resultsText: 'The browser changed while resolving the exact state control. Collect a fresh DOM snapshot and try again; no control was changed.',
+        },
+      };
+    }
+    const normalizedIntentSha256 = await sha256HexForGuardedApproval(
+      buildOpenSwanToolApprovalKey(
+        'browser.set_toggle:guarded-intent-v2',
+        normalized.args as unknown as Record<string, unknown>,
+      ),
+    );
+    const pageUrlSha256 = await sha256HexForGuardedApproval(target.url);
+    const pageOrigin = browserApprovalOrigin(target.url);
+    const targetSummary = buildGuardedToggleApprovalTargetSummary({
+      role: normalized.args.role,
+      ...(normalized.args.name ? { name: normalized.args.name } : {}),
+      ...(normalized.args.selector ? { selector: normalized.args.selector } : {}),
+      desiredState: normalized.args.desiredState,
+      observedState: target.currentState,
+      pageOrigin,
+    });
+    const beforeEpoch = createComputerAppObservationEpoch({
+      id: target.evidenceId,
+      surface: 'browser',
+      capturedAt: target.observedAt,
+      freshnessMs: 15_000,
+      target: {
+        browserProcessId: target.browserProcessId,
+        browserSessionId: target.browserContextId,
+        browserTabId: target.pageId,
+        browserTargetFingerprint: target.targetFingerprint,
+        url: target.url,
+      },
+      evidenceIds: [pageIdentity.evidenceId, target.evidenceId],
+    });
+    return {
+      ok: true,
+      prepared: {
+        dispatchArgs: {
+          targetId: target.targetId,
+          targetFingerprint: target.targetFingerprint,
+          desiredState: normalized.args.desiredState,
+          submit: false,
+          timeoutMs: normalized.args.timeoutMs,
+          ...(normalized.args.taskContext ? { taskContext: normalized.args.taskContext } : {}),
+          credentialSemantics: false,
+          expectedBrowserProcessId: target.browserProcessId,
+          expectedBrowserContextId: target.browserContextId,
+          expectedPageId: target.pageId,
+          expectedUrl: target.url,
+        },
+        approvalArgs: {
+          approvalSchemaVersion: 2,
+          targetSummary,
+          operation: 'guarded_non_consequential_toggle',
+          role: normalized.args.role,
+          desiredState: normalized.args.desiredState,
+          observedState: target.currentState,
+          pageOrigin: browserApprovalOrigin(target.url),
+          locatorKind: normalized.args.name ? 'accessible_name' : 'selector',
+          submit: false,
+          exact: true,
+          timeoutMs: normalized.args.timeoutMs,
+          credentialSemantics: false,
+          normalizedIntentSha256,
+          pageUrlSha256,
+          expectedBrowserProcessId: target.browserProcessId,
+          expectedBrowserContextId: target.browserContextId,
+          expectedPageId: target.pageId,
+          targetFingerprint: target.targetFingerprint,
+        },
+        role: normalized.args.role,
+        beforeState: target.currentState,
+        beforeEpoch,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: sanitizeErrorForModel(error, { context: 'browser toggle observation' }),
+      },
+    };
+  }
+}
+
+async function prepareGuardedBrowserSelect(
+  input: unknown,
+  context: OpenSwanRuntimeToolContext,
+): Promise<
+  | { ok: true; prepared: PreparedGuardedBrowserSelect }
+  | { ok: false; result: OpenSwanToolExecutionResultMap['browser.select_option'] }
+> {
+  if (
+    context.toolName !== 'browser.select_option'
+    || typeof context.toolUseId !== 'string'
+    || !context.toolUseId
+    || context.toolUseId.length > 180
+    || !Number.isInteger(context.iteration)
+    || Number(context.iteration) < 1
+    || typeof context.runId !== 'string'
+    || !context.runId
+    || context.runId.length > 100
+    || `${context.runId}:${context.toolUseId}:guarded-select-v1`.length > 180
+  ) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'Browser option selection stopped before observation because exact run, tool-call, and iteration identity was unavailable. No selection was changed.',
+      },
+    };
+  }
+  const normalized = normalizeGuardedBrowserSelectIntent(input);
+  if (!normalized.ok) {
+    return { ok: false, result: { ok: false, resultsText: normalized.error } };
+  }
+  try {
+    const {
+      domSnapshot,
+      extractBrowserPageIdentity,
+      observeGuardedBrowserSelectTarget,
+    } = await import('./browserBridge');
+    const pageObservation = await domSnapshot({ maxNodes: 100, interestingOnly: true });
+    if (!pageObservation.ok || !pageObservation.data) {
+      return {
+        ok: false,
+        result: browserToolFailureResult(
+          pageObservation,
+          'Could not collect the fresh browser identity required before selecting an option.',
+        ),
+      };
+    }
+    const pageIdentity = extractBrowserPageIdentity(pageObservation.data);
+    if (!pageIdentity) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          resultsText: 'The browser bridge did not return complete process/context/page/URL identity. Update or restart the bridge, then collect a fresh DOM snapshot.',
+        },
+      };
+    }
+    const targetObservation = await observeGuardedBrowserSelectTarget({
+      role: 'combobox',
+      ...(normalized.args.name ? { name: normalized.args.name } : {}),
+      ...(normalized.args.selector ? { selector: normalized.args.selector } : {}),
+      matchBy: normalized.args.matchBy,
+      value: normalized.args.value,
+      submit: false,
+      exact: true,
+      timeoutMs: normalized.args.timeoutMs,
+      ...(normalized.args.taskContext ? { taskContext: normalized.args.taskContext } : {}),
+      credentialSemantics: false,
+      expectedBrowserProcessId: pageIdentity.browserProcessId,
+      expectedBrowserContextId: pageIdentity.browserContextId,
+      expectedPageId: pageIdentity.pageId,
+      expectedUrl: pageIdentity.url,
+    });
+    if (!targetObservation.ok || !targetObservation.data) {
+      return {
+        ok: false,
+        result: browserToolFailureResult(
+          targetObservation,
+          'Could not observe one exact safe native select and option before approval.',
+        ),
+      };
+    }
+    const target = targetObservation.data;
+    if (
+      target.browserProcessId !== pageIdentity.browserProcessId
+      || target.browserContextId !== pageIdentity.browserContextId
+      || target.pageId !== pageIdentity.pageId
+      || target.url !== pageIdentity.url
+      || target.matchBy !== normalized.args.matchBy
+    ) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          resultsText: 'The browser changed while resolving the exact native select and option. Collect a fresh DOM snapshot and try again; no selection was changed.',
+        },
+      };
+    }
+    const normalizedIntentSha256 = await sha256HexForGuardedApproval(
+      buildOpenSwanToolApprovalKey(
+        'browser.select_option:guarded-intent-v2',
+        normalized.args as unknown as Record<string, unknown>,
+      ),
+    );
+    const pageUrlSha256 = await sha256HexForGuardedApproval(target.url);
+    const pageOrigin = browserApprovalOrigin(target.url);
+    const targetSummary = buildGuardedSelectApprovalTargetSummary({
+      ...(normalized.args.name ? { name: normalized.args.name } : {}),
+      ...(normalized.args.selector ? { selector: normalized.args.selector } : {}),
+      matchBy: normalized.args.matchBy,
+      selectionAlreadyMatched: target.selectionMatches,
+      pageOrigin,
+    });
+    const beforeEpoch = createComputerAppObservationEpoch({
+      id: target.evidenceId,
+      surface: 'browser',
+      capturedAt: target.observedAt,
+      freshnessMs: 15_000,
+      target: {
+        browserProcessId: target.browserProcessId,
+        browserSessionId: target.browserContextId,
+        browserTabId: target.pageId,
+        browserTargetFingerprint: target.targetFingerprint,
+        url: target.url,
+      },
+      evidenceIds: [pageIdentity.evidenceId, target.evidenceId],
+    });
+    return {
+      ok: true,
+      prepared: {
+        dispatchArgs: {
+          targetId: target.targetId,
+          targetFingerprint: target.targetFingerprint,
+          optionFingerprint: target.optionFingerprint,
+          matchBy: normalized.args.matchBy,
+          submit: false,
+          timeoutMs: normalized.args.timeoutMs,
+          ...(normalized.args.taskContext ? { taskContext: normalized.args.taskContext } : {}),
+          credentialSemantics: false,
+          expectedBrowserProcessId: target.browserProcessId,
+          expectedBrowserContextId: target.browserContextId,
+          expectedPageId: target.pageId,
+          expectedUrl: target.url,
+        },
+        approvalArgs: {
+          approvalSchemaVersion: 2,
+          targetSummary,
+          operation: 'guarded_native_select_preference',
+          role: 'combobox',
+          locatorKind: normalized.args.name ? 'accessible_name' : 'selector',
+          matchBy: normalized.args.matchBy,
+          selectionAlreadyMatched: target.selectionMatches,
+          submit: false,
+          exact: true,
+          timeoutMs: normalized.args.timeoutMs,
+          credentialSemantics: false,
+          normalizedIntentSha256,
+          pageUrlSha256,
+          pageOrigin,
+          expectedBrowserProcessId: target.browserProcessId,
+          expectedBrowserContextId: target.browserContextId,
+          expectedPageId: target.pageId,
+          targetFingerprint: target.targetFingerprint,
+          optionFingerprint: target.optionFingerprint,
+        },
+        beforeOptionFingerprint: target.currentOptionFingerprint,
+        beforeEpoch,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: sanitizeErrorForModel(error, { context: 'browser select observation' }),
+      },
+    };
+  }
+}
+
+function attachComputerAppMutationMetadata<T extends OpenSwanRuntimeToolName>(
+  result: OpenSwanToolExecutionResultMap[T],
+  dispatchReceipt: ComputerAppMutationDispatchReceipt,
+  verificationReceipt?: ComputerAppVerificationReceipt | null,
+): OpenSwanRuntimeToolResultWithMetadata<T> {
+  issuedOpenSwanMutationDispatchReceipts.add(dispatchReceipt);
+  if (verificationReceipt) {
+    issuedOpenSwanComputerAppVerificationReceipts.add(verificationReceipt);
+  }
+  const existingMetadata = (
+    result
+    && typeof result === 'object'
+    && !Array.isArray(result)
+    && 'metadata' in result
+    && result.metadata
+    && typeof result.metadata === 'object'
+    && !Array.isArray(result.metadata)
+  )
+    ? result.metadata as Record<string, unknown>
+    : {};
+  return {
+    ...result,
+    metadata: {
+      ...existingMetadata,
+      mutationDispatchReceipt: dispatchReceipt,
+      ...(verificationReceipt
+        ? { computerAppVerificationReceipt: verificationReceipt }
+        : {}),
+    },
+  } as OpenSwanRuntimeToolResultWithMetadata<T>;
+}
+
+type DurableAgentActionLease = {
+  identity: AgentActionCallIdentity;
+  claimToken: string;
+  store: AgentActionCallStore;
+  startAttempted: boolean;
+  started: boolean;
+  startDuplicate?: {
+    kind: 'duplicate';
+    priorState: Exclude<AgentActionCallState, 'claimed'>;
+    error: string;
+  };
+};
+
+type DurableComputerAppDispatchResult<T> =
+  | {
+      ok: true;
+      value: T;
+      dispatchReceipt: ComputerAppMutationDispatchReceipt;
+      lease: DurableAgentActionLease;
+    }
+  | {
+      ok: false;
+      error: unknown;
+      dispatchReceipt?: ComputerAppMutationDispatchReceipt;
+      outcomeUnknown: boolean;
+      durableStateSealed: boolean;
+      priorState?: AgentActionCallState;
+    };
+
+async function claimDurableAgentAction(
+  action: ComputerAppMutationContract,
+  authorization: ComputerAppMutationAuthorization,
+  approvalId: string,
+  context: OpenSwanRuntimeToolContext,
+): Promise<
+  | { ok: true; lease: DurableAgentActionLease }
+  | { ok: false; error: string; priorState?: AgentActionCallState }
+> {
+  const identityResult = await buildAgentActionCallIdentity(
+    {
+      userId: context.userId,
+      circleId: context.circleId,
+      runId: String(context.runId || ''),
+      toolUseId: String(context.toolUseId || ''),
+      action,
+      authorization,
+    },
+    { fingerprintContractBinding: buildComputerAppToolArgsFingerprintAsync },
+  );
+  if (!identityResult.ok) {
+    return {
+      ok: false,
+      error: 'Durable action identity could not be bound to this exact authorized tool call.',
+    };
+  }
+  const store = createAgentActionCallStore(
+    supabase as unknown as AgentActionCallsRpcClient,
+  );
+  const claim = await store.claim({
+    identity: identityResult.value,
+    ttlSeconds: 120,
+    metadata: {
+      surface: action.surface,
+      risk: action.risk,
+      approvalId,
+      observationEpochId: action.observationEpochId,
+      source: 'openswan_tool_runtime',
+      actor: 'user_authorized_agent',
+    },
+  });
+  if (claim.ok && claim.disposition === 'duplicate') {
+    return {
+      ok: false,
+      priorState: claim.call.state,
+      error: `This exact provider tool call already has durable state ${claim.call.state}; it was not executed again.`,
+    };
+  }
+  if (
+    !claim.ok
+    || (claim.disposition !== 'claimed' && claim.disposition !== 'already_claimed')
+    || claim.call.state !== 'claimed'
+    || !claim.call.claimToken
+  ) {
+    const code = claim.ok ? 'duplicate_or_state_conflict' : claim.code;
+    const recovery = code === 'rpc_error'
+      ? 'Ensure migration 20260726_agent_action_calls.sql (or RUN_THIS_SQL.sql section 26) is applied and the authenticated Supabase RPC surface is reachable.'
+      : code === 'not_authenticated' || code === 'run_identity_mismatch'
+        ? 'Start a persisted agent run owned by the current authenticated user and circle, then issue a fresh tool call.'
+        : code === 'invalid_input'
+          ? 'Use a persisted UUID run plus the exact bounded provider tool-call identity.'
+          : 'Re-observe and issue a fresh tool call only after the prior durable state is reconciled.';
+    return {
+      ok: false,
+      error: `Durable action claim failed closed (${code}). The action was not dispatched. ${recovery}`,
+    };
+  }
+  return {
+    ok: true,
+    lease: {
+      identity: identityResult.value,
+      claimToken: claim.call.claimToken,
+      store,
+      startAttempted: false,
+      started: false,
+    },
+  };
+}
+
+async function finishDurableAgentAction(
+  lease: DurableAgentActionLease,
+  finalState: AgentActionCallFinalState,
+  metadata: Record<string, unknown>,
+): Promise<boolean> {
+  const finished = await lease.store.finish({
+    identity: lease.identity,
+    claimToken: lease.claimToken,
+    finalState,
+    metadata,
+  });
+  return (
+    finished.ok
+    && (finished.disposition === 'finished' || finished.disposition === 'already_finished')
+    && finished.call.state === finalState
+  );
+}
+
+function durableStartDuplicateResult<T>(
+  duplicate: NonNullable<DurableAgentActionLease['startDuplicate']>,
+): DurableComputerAppDispatchResult<T> {
+  const outcomeUnknown = duplicate.priorState === 'dispatched'
+    || duplicate.priorState === 'outcome_unknown';
+  return {
+    ok: false,
+    error: duplicate.error,
+    outcomeUnknown,
+    durableStateSealed: duplicate.priorState === 'verified'
+      || duplicate.priorState === 'failed'
+      || duplicate.priorState === 'outcome_unknown',
+    priorState: duplicate.priorState,
+  };
+}
+
+async function dispatchDurableComputerAppMutation<T, TArgs>(input: {
+  action: ComputerAppMutationContract;
+  authorization: ComputerAppMutationAuthorization;
+  approvalId: string;
+  context: OpenSwanRuntimeToolContext;
+  normalizedArgs: TArgs;
+  handler: (sealedArgs: ComputerAppSealedMutationArgs<TArgs>) => T | Promise<T>;
+}): Promise<DurableComputerAppDispatchResult<T>> {
+  const claimed = await claimDurableAgentAction(
+    input.action,
+    input.authorization,
+    input.approvalId,
+    input.context,
+  );
+  if (!claimed.ok) {
+    const outcomeUnknown = claimed.priorState === 'dispatched'
+      || claimed.priorState === 'outcome_unknown';
+    return {
+      ok: false,
+      error: claimed.error,
+      outcomeUnknown,
+      durableStateSealed: claimed.priorState === 'verified'
+        || claimed.priorState === 'failed'
+        || claimed.priorState === 'outcome_unknown',
+      ...(claimed.priorState ? { priorState: claimed.priorState } : {}),
+    };
+  }
+  const { lease } = claimed;
+  try {
+    const dispatched = await dispatchAuthorizedComputerAppMutation({
+      action: input.action,
+      authorization: input.authorization,
+      normalizedArgs: input.normalizedArgs,
+      handler: async (sealedArgs) => {
+        lease.startAttempted = true;
+        const started = await lease.store.start({
+          identity: lease.identity,
+          claimToken: lease.claimToken,
+        });
+        if (
+          started.ok
+          && started.disposition === 'duplicate'
+          && started.call.state !== 'claimed'
+        ) {
+          lease.startDuplicate = {
+            kind: 'duplicate',
+            priorState: started.call.state,
+            error: `This exact provider tool call reached durable state ${started.call.state} before this worker entered the app handler. The genuine prior state was preserved and the app handler was not invoked.`,
+          };
+          throw new Error(lease.startDuplicate.error);
+        }
+        if (
+          !started.ok
+          || started.disposition !== 'started'
+          || started.call.state !== 'dispatched'
+        ) {
+          throw new Error(
+            'Durable action start was not confirmed at handler entry. The app handler was not invoked and this call must not be replayed automatically.',
+          );
+        }
+        lease.started = true;
+        return input.handler(sealedArgs);
+      },
+    });
+    if (!dispatched.ok) {
+      if (lease.startDuplicate) {
+        return durableStartDuplicateResult<T>(lease.startDuplicate);
+      }
+      const durableStateSealed = lease.started
+        ? await finishDurableAgentAction(lease, 'outcome_unknown', {
+            surface: input.action.surface,
+            risk: input.action.risk,
+            approvalId: input.approvalId,
+            observationEpochId: input.action.observationEpochId,
+            completionVerified: false,
+            outcomeUnknown: true,
+            source: 'openswan_tool_runtime',
+          })
+        : false;
+      return {
+        ok: false,
+        error: dispatched.error,
+        dispatchReceipt: dispatched.dispatchReceipt,
+        outcomeUnknown: true,
+        durableStateSealed,
+      };
+    }
+    return {
+      ok: true,
+      value: dispatched.value,
+      dispatchReceipt: dispatched.dispatchReceipt,
+      lease,
+    };
+  } catch (error) {
+    if (lease.startDuplicate) {
+      return durableStartDuplicateResult<T>(lease.startDuplicate);
+    }
+    let durableStateSealed = false;
+    if (lease.started) {
+      durableStateSealed = await finishDurableAgentAction(lease, 'outcome_unknown', {
+        surface: input.action.surface,
+        risk: input.action.risk,
+        approvalId: input.approvalId,
+        observationEpochId: input.action.observationEpochId,
+        completionVerified: false,
+        outcomeUnknown: true,
+        source: 'openswan_tool_runtime',
+      });
+    } else if (!lease.startAttempted) {
+      // Do not finalize the shared durable row here. A concurrent worker can
+      // hold the same claim token and may already have atomically advanced the
+      // row to dispatched even though this worker failed before its callback.
+      // Leaving the claimed lease to expire/reclaim avoids a cross-process
+      // dispatched -> failed race and is truthful: this worker caused no app
+      // side effect.
+      durableStateSealed = false;
+    }
+    return {
+      ok: false,
+      error,
+      outcomeUnknown: lease.startAttempted,
+      durableStateSealed,
+    };
+  }
+}
+
+async function executeGuardedBrowserFill(
+  prepared: PreparedGuardedBrowserFill,
+  approvalReceipt: OpenSwanRuntimeApprovalReceipt,
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<'browser.fill_field'>> {
+  const actionId = `${context.runId}:${context.toolUseId}`;
+  // Bind the exact transient handler args (including the one-shot target
+  // capability and exact URL) without persisting those values. The dispatcher
+  // recomputes this digest from a deep-frozen canonical clone at handler entry.
+  const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+    prepared.dispatchArgs,
+  );
+  if (!toolArgsFingerprint) {
+    return {
+      ok: false,
+      resultsText: 'Browser fill stopped before handler authorization because cryptographic argument binding was unavailable. No field was changed.',
+    };
+  }
+  const action: ComputerAppMutationContract = {
+    schemaVersion: 1,
+    actionId,
+    tool: 'browser.fill_field',
+    surface: 'browser',
+    observationEpochId: prepared.beforeEpoch.id,
+    expectedTarget: prepared.beforeEpoch.target,
+    toolArgsFingerprint,
+    risk: 'medium',
+    approvalRequired: true,
+    idempotencyKey: `${actionId}:guarded-fill-v1`,
+    verification: {
+      kind: 'browser_dom',
+      predicate: 'The exact target field value matches the requested draft value without submitting.',
+      evidenceTools: ['browser.fill_field:inputValue'],
+    },
+    outcomeUnknownPolicy: 'verify_before_retry',
+  };
+  const expectedRuntimeApprovalKey = buildOpenSwanToolApprovalKey(
+    'browser.fill_field',
+    prepared.approvalArgs,
+  );
+  const policy = await resolveComputerAppMutationPolicy({
+    action,
+    approvalGate: async (request) => {
+      if (
+        approvalReceipt.approvalKey !== expectedRuntimeApprovalKey
+        || !approvalReceipt.approvalId
+        || (approvalReceipt.status !== 'approved' && approvalReceipt.status !== 'auto_approved')
+      ) {
+        return {
+          decision: 'pending',
+          approvalId: null,
+          approvalKey: request.approvalKey,
+        };
+      }
+      return {
+        decision: approvalReceipt.status,
+        approvalId: approvalReceipt.approvalId,
+        approvalKey: request.approvalKey,
+      };
+    },
+  });
+  const authorization = authorizeComputerAppMutation({
+    action,
+    policy,
+    epoch: prepared.beforeEpoch,
+  });
+  if (!authorization.allowed) {
+    return {
+      ok: false,
+      resultsText: `Browser fill stopped before handler entry: ${authorization.blockers
+        .map((blocker) => `${blocker.code}: ${blocker.detail}`)
+        .join(' ') || authorization.summary}`,
+    };
+  }
+
+  const dispatched = await dispatchDurableComputerAppMutation({
+    action,
+    authorization,
+    approvalId: approvalReceipt.approvalId,
+    context,
+    normalizedArgs: prepared.dispatchArgs,
+    handler: async (sealedArgs) => {
+      const {
+        extractBrowserFillProofMetadata,
+        fillGuardedNonSecretField,
+      } = await import('./browserBridge');
+      const result = await fillGuardedNonSecretField({ ...sealedArgs });
+      if (!result.ok || !result.data) {
+        throw new Error(
+          result.error
+          || result.recoveryHint
+          || 'Guarded browser fill did not return verified proof.',
+        );
+      }
+      const proof = extractBrowserFillProofMetadata(result.data);
+      if (!proof) throw new Error('Guarded browser fill returned invalid or unredacted proof.');
+      return proof;
+    },
+  });
+  if (!dispatched.ok) {
+    const failedResult: OpenSwanToolExecutionResultMap['browser.fill_field'] = {
+      ok: false,
+      resultsText: dispatched.priorState === 'verified'
+        ? 'This exact browser fill call is already durably verified and was not executed again.'
+        : dispatched.priorState === 'failed'
+          ? 'This exact browser fill call is already durably recorded as a known pre-dispatch failure and was not executed again. Collect a fresh observation and issue a new tool call if retry is still appropriate.'
+          : dispatched.outcomeUnknown
+        ? `Browser fill reached the durable dispatch boundary, but its result is outcome-unknown and must not be replayed automatically. Collect a fresh observation and report the uncertain outcome before any new call: ${sanitizeErrorForModel(dispatched.error, { context: 'browser fill' })}`
+        : `Browser fill stopped before app-handler entry because its durable action claim could not be safely completed: ${sanitizeErrorForModel(dispatched.error, { context: 'browser fill durable claim' })}`,
+    };
+    return dispatched.dispatchReceipt
+      ? attachComputerAppMutationMetadata<'browser.fill_field'>(
+          failedResult,
+          dispatched.dispatchReceipt,
+        )
+      : failedResult;
+  }
+
+  const proof = dispatched.value;
+  const afterEpoch = createComputerAppObservationEpoch({
+    id: proof.evidenceId,
+    surface: 'browser',
+    capturedAt: proof.observedAt,
+    freshnessMs: 15_000,
+    target: {
+      browserProcessId: proof.browserProcessId,
+      browserSessionId: proof.browserContextId,
+      browserTabId: proof.pageId,
+      browserTargetFingerprint: proof.targetFingerprint,
+      url: proof.url,
+    },
+    evidenceIds: [proof.evidenceId],
+  });
+  const verificationReceipt = buildComputerAppVerificationReceipt({
+    action,
+    authorization,
+    dispatchReceipt: dispatched.dispatchReceipt,
+    beforeEpoch: prepared.beforeEpoch,
+    afterEpoch,
+    predicateSatisfied: (
+      proof.valueMatches === true
+      && proof.valueLength === proof.expectedLength
+      && proof.targetFingerprint === prepared.dispatchArgs.targetFingerprint
+    ),
+    evidenceIds: [proof.evidenceId],
+  });
+  const durableState = verificationReceipt.canComplete ? 'verified' : 'outcome_unknown';
+  const durableStateSealed = await finishDurableAgentAction(
+    dispatched.lease,
+    durableState,
+    {
+      surface: action.surface,
+      risk: action.risk,
+      approvalId: approvalReceipt.approvalId,
+      observationEpochId: action.observationEpochId,
+      verificationKind: action.verification.kind,
+      evidenceCount: verificationReceipt.evidenceIds.length,
+      completionVerified: verificationReceipt.canComplete,
+      outcomeUnknown: !verificationReceipt.canComplete,
+      source: 'openswan_tool_runtime',
+    },
+  );
+  const durableWarning = durableStateSealed
+    ? ''
+    : ' Durable finalization acknowledgement was unavailable; the exact call remains replay-blocked and must not be submitted again.';
+  const result: OpenSwanToolExecutionResultMap['browser.fill_field'] = verificationReceipt.canComplete
+    ? {
+        ok: true,
+        resultsText: proof.mutationPerformed
+          ? `Filled and verified the browser field (${proof.expectedLength} characters) without submitting it.${durableWarning}`
+          : `Verified the browser field already contained the approved draft (${proof.expectedLength} characters), so it was not filled a second time or submitted.${durableWarning}`,
+      }
+    : {
+        ok: false,
+        resultsText: `Browser field completion was not accepted because fresh after-state proof was ${verificationReceipt.status}: ${verificationReceipt.blockers.join(' ')}${durableWarning}`,
+      };
+  return attachComputerAppMutationMetadata<'browser.fill_field'>(
+    result,
+    dispatched.dispatchReceipt,
+    verificationReceipt,
+  );
+}
+
+async function executeGuardedBrowserToggle(
+  prepared: PreparedGuardedBrowserToggle,
+  approvalReceipt: OpenSwanRuntimeApprovalReceipt,
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<'browser.set_toggle'>> {
+  const actionId = `${context.runId}:${context.toolUseId}`;
+  const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+    prepared.dispatchArgs,
+  );
+  if (!toolArgsFingerprint) {
+    return {
+      ok: false,
+      resultsText: 'Browser toggle stopped before handler authorization because cryptographic argument binding was unavailable. No control was changed.',
+    };
+  }
+  const action: ComputerAppMutationContract = {
+    schemaVersion: 1,
+    actionId,
+    tool: 'browser.set_toggle',
+    surface: 'browser',
+    observationEpochId: prepared.beforeEpoch.id,
+    expectedTarget: prepared.beforeEpoch.target,
+    toolArgsFingerprint,
+    risk: 'medium',
+    approvalRequired: true,
+    idempotencyKey: `${actionId}:guarded-toggle-v1`,
+    verification: {
+      kind: 'browser_dom',
+      predicate: 'The exact approved state control equals the requested boolean state without submission or navigation.',
+      evidenceTools: ['browser.set_toggle:checked-state'],
+    },
+    outcomeUnknownPolicy: 'verify_before_retry',
+  };
+  const expectedRuntimeApprovalKey = buildOpenSwanToolApprovalKey(
+    'browser.set_toggle',
+    prepared.approvalArgs,
+  );
+  const policy = await resolveComputerAppMutationPolicy({
+    action,
+    approvalGate: async (request) => {
+      if (
+        approvalReceipt.approvalKey !== expectedRuntimeApprovalKey
+        || !approvalReceipt.approvalId
+        || (approvalReceipt.status !== 'approved' && approvalReceipt.status !== 'auto_approved')
+      ) {
+        return {
+          decision: 'pending',
+          approvalId: null,
+          approvalKey: request.approvalKey,
+        };
+      }
+      return {
+        decision: approvalReceipt.status,
+        approvalId: approvalReceipt.approvalId,
+        approvalKey: request.approvalKey,
+      };
+    },
+  });
+  const authorization = authorizeComputerAppMutation({
+    action,
+    policy,
+    epoch: prepared.beforeEpoch,
+  });
+  if (!authorization.allowed) {
+    return {
+      ok: false,
+      resultsText: `Browser toggle stopped before handler entry: ${authorization.blockers
+        .map((blocker) => `${blocker.code}: ${blocker.detail}`)
+        .join(' ') || authorization.summary}`,
+    };
+  }
+  const dispatched = await dispatchDurableComputerAppMutation({
+    action,
+    authorization,
+    approvalId: approvalReceipt.approvalId,
+    context,
+    normalizedArgs: prepared.dispatchArgs,
+    handler: async (sealedArgs) => {
+      const {
+        extractBrowserToggleProofMetadata,
+        setGuardedBrowserToggleState,
+      } = await import('./browserBridge');
+      const result = await setGuardedBrowserToggleState({ ...sealedArgs });
+      if (!result.ok || !result.data) {
+        throw new Error(
+          result.error
+          || result.recoveryHint
+          || 'Guarded browser toggle did not return verified proof.',
+        );
+      }
+      const proof = extractBrowserToggleProofMetadata(result.data);
+      if (!proof) throw new Error('Guarded browser toggle returned invalid or unredacted proof.');
+      return proof;
+    },
+  });
+  if (!dispatched.ok) {
+    const failedResult: OpenSwanToolExecutionResultMap['browser.set_toggle'] = {
+      ok: false,
+      resultsText: dispatched.priorState === 'verified'
+        ? 'This exact browser toggle call is already durably verified and was not executed again.'
+        : dispatched.priorState === 'failed'
+          ? 'This exact browser toggle call is already durably recorded as a known pre-dispatch failure and was not executed again. Collect a fresh observation and issue a new tool call if retry is still appropriate.'
+          : dispatched.outcomeUnknown
+        ? `Browser toggle reached the durable dispatch boundary, but its result is outcome-unknown and must not be replayed automatically. Collect a fresh observation and report the uncertain outcome before any new call: ${sanitizeErrorForModel(dispatched.error, { context: 'browser toggle' })}`
+        : `Browser toggle stopped before app-handler entry because its durable action claim could not be safely completed: ${sanitizeErrorForModel(dispatched.error, { context: 'browser toggle durable claim' })}`,
+    };
+    return dispatched.dispatchReceipt
+      ? attachComputerAppMutationMetadata<'browser.set_toggle'>(
+          failedResult,
+          dispatched.dispatchReceipt,
+        )
+      : failedResult;
+  }
+  const proof = dispatched.value;
+  const afterEpoch = createComputerAppObservationEpoch({
+    id: proof.evidenceId,
+    surface: 'browser',
+    capturedAt: proof.observedAt,
+    freshnessMs: 15_000,
+    target: {
+      browserProcessId: proof.browserProcessId,
+      browserSessionId: proof.browserContextId,
+      browserTabId: proof.pageId,
+      browserTargetFingerprint: proof.targetFingerprint,
+      url: proof.url,
+    },
+    evidenceIds: [proof.evidenceId],
+  });
+  const verificationReceipt = buildComputerAppVerificationReceipt({
+    action,
+    authorization,
+    dispatchReceipt: dispatched.dispatchReceipt,
+    beforeEpoch: prepared.beforeEpoch,
+    afterEpoch,
+    predicateSatisfied: (
+      proof.stateMatches === true
+      && proof.currentState === prepared.dispatchArgs.desiredState
+      && proof.desiredState === prepared.dispatchArgs.desiredState
+      && proof.previousState === prepared.beforeState
+      && proof.role === prepared.role
+      && proof.targetFingerprint === prepared.dispatchArgs.targetFingerprint
+    ),
+    evidenceIds: [proof.evidenceId],
+  });
+  const durableState = verificationReceipt.canComplete ? 'verified' : 'outcome_unknown';
+  const durableStateSealed = await finishDurableAgentAction(
+    dispatched.lease,
+    durableState,
+    {
+      surface: action.surface,
+      risk: action.risk,
+      approvalId: approvalReceipt.approvalId,
+      observationEpochId: action.observationEpochId,
+      verificationKind: action.verification.kind,
+      evidenceCount: verificationReceipt.evidenceIds.length,
+      completionVerified: verificationReceipt.canComplete,
+      outcomeUnknown: !verificationReceipt.canComplete,
+      source: 'openswan_tool_runtime',
+    },
+  );
+  const stateLabel = prepared.dispatchArgs.desiredState ? 'on/checked' : 'off/unchecked';
+  const durableWarning = durableStateSealed
+    ? ''
+    : ' Durable finalization acknowledgement was unavailable; the exact call remains replay-blocked and must not be submitted again.';
+  const result: OpenSwanToolExecutionResultMap['browser.set_toggle'] = verificationReceipt.canComplete
+    ? {
+        ok: true,
+        resultsText: proof.mutationPerformed
+          ? `Set and verified the browser ${prepared.role} ${stateLabel} without submitting or navigating.${durableWarning}`
+          : `Verified the browser ${prepared.role} was already ${stateLabel}, so it was not activated a second time.${durableWarning}`,
+      }
+    : {
+        ok: false,
+        resultsText: `Browser toggle completion was not accepted because fresh after-state proof was ${verificationReceipt.status}: ${verificationReceipt.blockers.join(' ')}${durableWarning}`,
+      };
+  return attachComputerAppMutationMetadata<'browser.set_toggle'>(
+    result,
+    dispatched.dispatchReceipt,
+    verificationReceipt,
+  );
+}
+
+async function executeGuardedBrowserSelect(
+  prepared: PreparedGuardedBrowserSelect,
+  approvalReceipt: OpenSwanRuntimeApprovalReceipt,
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<'browser.select_option'>> {
+  const actionId = `${context.runId}:${context.toolUseId}`;
+  const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+    prepared.dispatchArgs,
+  );
+  if (!toolArgsFingerprint) {
+    return {
+      ok: false,
+      resultsText: 'Browser option selection stopped before handler authorization because cryptographic argument binding was unavailable. No selection was changed.',
+    };
+  }
+  const action: ComputerAppMutationContract = {
+    schemaVersion: 1,
+    actionId,
+    tool: 'browser.select_option',
+    surface: 'browser',
+    observationEpochId: prepared.beforeEpoch.id,
+    expectedTarget: prepared.beforeEpoch.target,
+    toolArgsFingerprint,
+    risk: 'medium',
+    approvalRequired: true,
+    idempotencyKey: `${actionId}:guarded-select-v1`,
+    verification: {
+      kind: 'browser_dom',
+      predicate: 'The exact approved native single-value select equals the exact approved option without submission or navigation.',
+      evidenceTools: ['browser.select_option:selected-option-fingerprint'],
+    },
+    outcomeUnknownPolicy: 'verify_before_retry',
+  };
+  const expectedRuntimeApprovalKey = buildOpenSwanToolApprovalKey(
+    'browser.select_option',
+    prepared.approvalArgs,
+  );
+  const policy = await resolveComputerAppMutationPolicy({
+    action,
+    approvalGate: async (request) => {
+      if (
+        approvalReceipt.approvalKey !== expectedRuntimeApprovalKey
+        || !approvalReceipt.approvalId
+        || (approvalReceipt.status !== 'approved' && approvalReceipt.status !== 'auto_approved')
+      ) {
+        return {
+          decision: 'pending',
+          approvalId: null,
+          approvalKey: request.approvalKey,
+        };
+      }
+      return {
+        decision: approvalReceipt.status,
+        approvalId: approvalReceipt.approvalId,
+        approvalKey: request.approvalKey,
+      };
+    },
+  });
+  const authorization = authorizeComputerAppMutation({
+    action,
+    policy,
+    epoch: prepared.beforeEpoch,
+  });
+  if (!authorization.allowed) {
+    return {
+      ok: false,
+      resultsText: `Browser option selection stopped before handler entry: ${authorization.blockers
+        .map((blocker) => `${blocker.code}: ${blocker.detail}`)
+        .join(' ') || authorization.summary}`,
+    };
+  }
+  const dispatched = await dispatchDurableComputerAppMutation({
+    action,
+    authorization,
+    approvalId: approvalReceipt.approvalId,
+    context,
+    normalizedArgs: prepared.dispatchArgs,
+    handler: async (sealedArgs) => {
+      const {
+        extractBrowserSelectProofMetadata,
+        setGuardedBrowserSelectOption,
+      } = await import('./browserBridge');
+      const result = await setGuardedBrowserSelectOption({ ...sealedArgs });
+      if (!result.ok || !result.data) {
+        throw new Error(
+          result.error
+          || result.recoveryHint
+          || 'Guarded browser option selection did not return verified proof.',
+        );
+      }
+      const proof = extractBrowserSelectProofMetadata(result.data);
+      if (!proof) {
+        throw new Error('Guarded browser option selection returned invalid or unredacted proof.');
+      }
+      return proof;
+    },
+  });
+  if (!dispatched.ok) {
+    const failedResult: OpenSwanToolExecutionResultMap['browser.select_option'] = {
+      ok: false,
+      resultsText: dispatched.priorState === 'verified'
+        ? 'This exact browser option-selection call is already durably verified and was not executed again.'
+        : dispatched.priorState === 'failed'
+          ? 'This exact browser option-selection call is already durably recorded as a known pre-dispatch failure and was not executed again. Collect a fresh observation and issue a new tool call if retry is still appropriate.'
+          : dispatched.outcomeUnknown
+        ? `Browser option selection reached the durable dispatch boundary, but its result is outcome-unknown and must not be replayed automatically. Collect a fresh observation and report the uncertain outcome before any new call: ${sanitizeErrorForModel(dispatched.error, { context: 'browser select' })}`
+        : `Browser option selection stopped before app-handler entry because its durable action claim could not be safely completed: ${sanitizeErrorForModel(dispatched.error, { context: 'browser select durable claim' })}`,
+    };
+    return dispatched.dispatchReceipt
+      ? attachComputerAppMutationMetadata<'browser.select_option'>(
+          failedResult,
+          dispatched.dispatchReceipt,
+        )
+      : failedResult;
+  }
+  const proof = dispatched.value;
+  const afterEpoch = createComputerAppObservationEpoch({
+    id: proof.evidenceId,
+    surface: 'browser',
+    capturedAt: proof.observedAt,
+    freshnessMs: 15_000,
+    target: {
+      browserProcessId: proof.browserProcessId,
+      browserSessionId: proof.browserContextId,
+      browserTabId: proof.pageId,
+      browserTargetFingerprint: proof.targetFingerprint,
+      url: proof.url,
+    },
+    evidenceIds: [proof.evidenceId],
+  });
+  const verificationReceipt = buildComputerAppVerificationReceipt({
+    action,
+    authorization,
+    dispatchReceipt: dispatched.dispatchReceipt,
+    beforeEpoch: prepared.beforeEpoch,
+    afterEpoch,
+    predicateSatisfied: (
+      proof.selectionMatches === true
+      && proof.matchBy === prepared.dispatchArgs.matchBy
+      && proof.optionFingerprint === prepared.dispatchArgs.optionFingerprint
+      && proof.currentOptionFingerprint === prepared.dispatchArgs.optionFingerprint
+      && proof.previousOptionFingerprint === prepared.beforeOptionFingerprint
+      && proof.targetFingerprint === prepared.dispatchArgs.targetFingerprint
+    ),
+    evidenceIds: [proof.evidenceId],
+  });
+  const durableState = verificationReceipt.canComplete ? 'verified' : 'outcome_unknown';
+  const durableStateSealed = await finishDurableAgentAction(
+    dispatched.lease,
+    durableState,
+    {
+      surface: action.surface,
+      risk: action.risk,
+      approvalId: approvalReceipt.approvalId,
+      observationEpochId: action.observationEpochId,
+      verificationKind: action.verification.kind,
+      evidenceCount: verificationReceipt.evidenceIds.length,
+      completionVerified: verificationReceipt.canComplete,
+      outcomeUnknown: !verificationReceipt.canComplete,
+      source: 'openswan_tool_runtime',
+    },
+  );
+  const durableWarning = durableStateSealed
+    ? ''
+    : ' Durable finalization acknowledgement was unavailable; the exact call remains replay-blocked and must not be submitted again.';
+  const result: OpenSwanToolExecutionResultMap['browser.select_option'] = verificationReceipt.canComplete
+    ? {
+        ok: true,
+        resultsText: proof.mutationPerformed
+          ? `Selected and verified the exact browser option by ${prepared.dispatchArgs.matchBy} without submitting or navigating.${durableWarning}`
+          : `Verified the exact browser option by ${prepared.dispatchArgs.matchBy} was already selected, so it was not selected a second time.${durableWarning}`,
+      }
+    : {
+        ok: false,
+        resultsText: `Browser option completion was not accepted because fresh after-state proof was ${verificationReceipt.status}: ${verificationReceipt.blockers.join(' ')}${durableWarning}`,
+      };
+  return attachComputerAppMutationMetadata<'browser.select_option'>(
+    result,
+    dispatched.dispatchReceipt,
+    verificationReceipt,
+  );
+}
+
+function hasExactOpenSwanRuntimeCallIdentity(
+  tool: OpenSwanRuntimeToolName,
+  context: OpenSwanRuntimeToolContext,
+): boolean {
+  return (
+    context.toolName === tool
+    && typeof context.toolUseId === 'string'
+    && context.toolUseId.length > 0
+    && context.toolUseId.length <= 180
+    && typeof context.runId === 'string'
+    && context.runId.length > 0
+    && context.runId.length <= 100
+    && Number.isInteger(context.iteration)
+    && Number(context.iteration) >= 1
+  );
+}
+
+const OPEN_SWAN_RUNTIME_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const OPEN_SWAN_RUNTIME_CALL_ID_RE =
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
+
+async function hasAuthenticatedPersistedOpenSwanCallIdentity(
+  tool: OpenSwanRuntimeToolName,
+  context: OpenSwanRuntimeToolContext,
+): Promise<boolean> {
+  if (
+    !hasExactOpenSwanRuntimeCallIdentity(tool, context)
+    || !OPEN_SWAN_RUNTIME_UUID_RE.test(String(context.userId || ''))
+    || !OPEN_SWAN_RUNTIME_UUID_RE.test(String(context.circleId || ''))
+    || !OPEN_SWAN_RUNTIME_UUID_RE.test(String(context.runId || ''))
+    || !OPEN_SWAN_RUNTIME_CALL_ID_RE.test(String(context.toolUseId || ''))
+    || Number(context.iteration) > 1_000
+  ) {
+    return false;
+  }
+  try {
+    const auth = await supabase.auth.getUser();
+    if (
+      auth.error
+      || !auth.data.user
+      || auth.data.user.id !== context.userId
+    ) {
+      return false;
+    }
+    const { data, error } = await supabase
+      .from('agent_runs')
+      .select('id,user_id,circle_id')
+      .eq('id', String(context.runId))
+      .eq('user_id', context.userId)
+      .eq('circle_id', context.circleId)
+      .maybeSingle();
+    if (error || !data) return false;
+    const row = data as {
+      id?: string | null;
+      user_id?: string | null;
+      circle_id?: string | null;
+    };
+    return (
+      row.id === context.runId
+      && row.user_id === context.userId
+      && row.circle_id === context.circleId
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function executeGuardedNativeAppActivation(
+  tool: 'desktop.launch_app' | 'desktop.focus_app',
+  args: OpenSwanToolExecutionArgs['desktop.launch_app'] | OpenSwanToolExecutionArgs['desktop.focus_app'],
+): Promise<
+  OpenSwanToolExecutionResultMap['desktop.launch_app']
+  | OpenSwanToolExecutionResultMap['desktop.focus_app']
+> {
+  const appName = String(args?.appName || '').trim();
+  try {
+    const [
+      { executeObservedNativeAppActivation },
+      desktopBridge,
+    ] = await Promise.all([
+      import('./computerAppAdapter'),
+      import('./desktopBridge'),
+    ]);
+    if (!(await desktopBridge.isDesktopBridgeAvailable())) {
+      return {
+        ok: false,
+        resultsText: 'Desktop bridge offline. Start it with `node scripts/claude-bridge.js`, pair once from the UC app, then retry.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      };
+    }
+    const activation = await executeObservedNativeAppActivation(
+      tool === 'desktop.focus_app' ? 'focus_app' : 'launch_app',
+      appName,
+      {
+        observeApp: desktopBridge.observeApp,
+        launchApp: desktopBridge.launchApp,
+        focusApp: desktopBridge.focusApp,
+        waitForApp: desktopBridge.waitForApp,
+      },
+    );
+    const data = activation.data || {};
+    const proof = (
+      data.proof
+      && typeof data.proof === 'object'
+      && !Array.isArray(data.proof)
+    )
+      ? data.proof as Record<string, unknown>
+      : undefined;
+    return {
+      ok: activation.ok,
+      resultsText: activation.message,
+      completionVerified: data.completionVerified === true,
+      outcomeUnknown: data.outcomeUnknown === true,
+      ...(proof ? { proof } : {}),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      resultsText: sanitizeErrorForModel(error, { context: 'native app activation' }),
+      completionVerified: false,
+      outcomeUnknown: false,
+    };
+  }
+}
+
+async function executeGuardedNativeOpenPath(
+  args: OpenSwanToolExecutionArgs['desktop.open_path'],
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<'desktop.open_path'>> {
+  type NativeOpenPathBridgeData = NonNullable<NativeOpenPathDispatchResult['data']>;
+  type NativeOpenPathDurableSuccess = Extract<
+    DurableComputerAppDispatchResult<NativeOpenPathBridgeData>,
+    { ok: true }
+  >;
+  type NativeOpenPathDurableFailure = Extract<
+    DurableComputerAppDispatchResult<NativeOpenPathBridgeData>,
+    { ok: false }
+  >;
+  type NativeOpenPathApprovalBlock = Extract<
+    OpenSwanToolApprovalGateResult,
+    { kind: 'blocked' }
+  >;
+
+  // Authentication and exact provider identity are established before bridge
+  // availability, file stat, app/window state, or any other local observation.
+  if (
+    !(await hasAuthenticatedPersistedOpenSwanCallIdentity('desktop.open_path', context))
+    || `${context.runId}:${context.toolUseId}:native-open-path-v1`.length > 180
+  ) {
+    return {
+      ok: false,
+      resultsText: 'Local open stopped before observation because exact authenticated run and provider tool-call identity was unavailable. Nothing was opened.',
+      completionVerified: false,
+      outcomeUnknown: false,
+    };
+  }
+
+  let approvalReceipt: OpenSwanRuntimeApprovalReceipt | null = null;
+  let approvalBlock: NativeOpenPathApprovalBlock | null = null;
+  let approvalProposal: NativeOpenPathApprovalProposal | null = null;
+  let approvalArgs: Record<string, unknown> | null = null;
+  let mutationAction: ComputerAppMutationContract | null = null;
+  let mutationAuthorization: ComputerAppMutationAuthorization | null = null;
+  let mutationBeforeEpoch: ComputerAppObservationEpoch | null = null;
+  let successfulDispatch: NativeOpenPathDurableSuccess | null = null;
+  let failedDispatch: NativeOpenPathDurableFailure | null = null;
+
+  try {
+    const [
+      { executeObservedNativeOpenPath },
+      desktopBridge,
+    ] = await Promise.all([
+      import('./computerAppAdapter'),
+      import('./desktopBridge'),
+    ]);
+    if (!(await desktopBridge.isDesktopBridgeAvailable())) {
+      return {
+        ok: false,
+        resultsText: 'Desktop bridge offline. Start it, pair once from the UC app, then issue a fresh exact local-open call.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      };
+    }
+
+    const adapterResult = await executeObservedNativeOpenPath(
+      String(args?.path || ''),
+      {
+        statFile: desktopBridge.statFile,
+        observeApp: desktopBridge.observeApp,
+        fingerprint: buildComputerAppToolArgsFingerprintAsync,
+        approvalGate: async (proposal) => {
+          approvalProposal = proposal;
+          approvalArgs = {
+            approvalSchemaVersion: proposal.schemaVersion,
+            operation: proposal.operation,
+            targetFingerprint: proposal.targetFingerprint,
+            targetKind: proposal.targetKind,
+            approvalRequired: proposal.approvalRequired,
+            risk: proposal.risk,
+          };
+          const gate = await maybeRequestToolApproval(
+            'desktop.open_path',
+            approvalArgs,
+            context,
+          );
+          if (gate.kind === 'blocked') {
+            approvalBlock = gate;
+            return {
+              approved: false,
+              ...(gate.approvalId ? { approvalId: gate.approvalId } : {}),
+              reason: gate.message,
+            };
+          }
+          if (gate.kind !== 'allowed' || !gate.receipt) {
+            return {
+              approved: false,
+              reason: 'No exact runtime approval receipt was issued.',
+            };
+          }
+          approvalReceipt = gate.receipt;
+          return {
+            approved: true,
+            approvalId: gate.receipt.approvalId,
+          };
+        },
+        dispatchOpenPath: async (request): Promise<NativeOpenPathDispatchResult> => {
+          const proposal = approvalProposal as NativeOpenPathApprovalProposal | null;
+          const receipt = approvalReceipt as OpenSwanRuntimeApprovalReceipt | null;
+          const exactApprovalArgs = approvalArgs;
+          if (
+            !proposal
+            || !receipt
+            || !exactApprovalArgs
+            || request.targetFingerprint !== proposal.targetFingerprint
+            || request.approvalId !== receipt.approvalId
+          ) {
+            return {
+              ok: false,
+              mutationAttempted: false,
+              outcomeUnknown: false,
+              errorCode: 'approval_required',
+            };
+          }
+
+          const beforeEpoch = createComputerAppObservationEpoch({
+            id: proposal.evidenceId,
+            surface: 'file',
+            capturedAt: proposal.observedAt,
+            freshnessMs: 15_000,
+            target: {
+              documentId: proposal.targetFingerprint,
+            },
+            evidenceIds: [proposal.evidenceId],
+          });
+          const dispatchArgs = {
+            path: request.path,
+            targetFingerprint: request.targetFingerprint,
+            approvalId: request.approvalId,
+          };
+          const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+            dispatchArgs,
+          );
+          if (!toolArgsFingerprint) {
+            return {
+              ok: false,
+              mutationAttempted: false,
+              outcomeUnknown: false,
+              errorCode: 'invalid_input',
+            };
+          }
+          const actionId = `${context.runId}:${context.toolUseId}`;
+          const action: ComputerAppMutationContract = {
+            schemaVersion: 1,
+            actionId,
+            tool: 'desktop.open_path',
+            surface: 'file',
+            observationEpochId: beforeEpoch.id,
+            expectedTarget: beforeEpoch.target,
+            toolArgsFingerprint,
+            risk: 'medium',
+            approvalRequired: true,
+            idempotencyKey: `${actionId}:native-open-path-v1`,
+            verification: {
+              kind: 'app_state',
+              predicate: 'A fresh frontmost-app observation contains exact evidence for the approved local file or folder.',
+              evidenceTools: ['desktop.observe_app:frontmost-exact-target'],
+            },
+            outcomeUnknownPolicy: 'never_retry',
+          };
+          const expectedRuntimeApprovalKey = buildOpenSwanToolApprovalKey(
+            'desktop.open_path',
+            exactApprovalArgs,
+          );
+          const policy = await resolveComputerAppMutationPolicy({
+            action,
+            approvalGate: async (requestApproval) => {
+              if (
+                receipt.approvalKey !== expectedRuntimeApprovalKey
+                || !receipt.approvalId
+                || (receipt.status !== 'approved' && receipt.status !== 'auto_approved')
+              ) {
+                return {
+                  decision: 'pending',
+                  approvalId: null,
+                  approvalKey: requestApproval.approvalKey,
+                };
+              }
+              return {
+                decision: receipt.status,
+                approvalId: receipt.approvalId,
+                approvalKey: requestApproval.approvalKey,
+              };
+            },
+          });
+          const authorization = authorizeComputerAppMutation({
+            action,
+            policy,
+            epoch: beforeEpoch,
+          });
+          mutationAction = action;
+          mutationAuthorization = authorization;
+          mutationBeforeEpoch = beforeEpoch;
+          if (!authorization.allowed) {
+            return {
+              ok: false,
+              mutationAttempted: false,
+              outcomeUnknown: false,
+              errorCode: 'approval_required',
+            };
+          }
+
+          const dispatched = await dispatchDurableComputerAppMutation({
+            action,
+            authorization,
+            approvalId: receipt.approvalId,
+            context,
+            normalizedArgs: dispatchArgs,
+            handler: async (sealedArgs) => {
+              // One and only one mutation call. The durable helper has already
+              // transitioned claimed -> dispatched immediately before entry.
+              const bridgeResult = await desktopBridge.openPath(sealedArgs.path);
+              if (!bridgeResult.ok || !bridgeResult.data) {
+                throw new Error('The sealed local-open bridge call returned no exact dispatch receipt.');
+              }
+              return bridgeResult.data;
+            },
+          });
+          if (!dispatched.ok) {
+            failedDispatch = dispatched;
+            return {
+              ok: false,
+              mutationAttempted: dispatched.outcomeUnknown,
+              outcomeUnknown: dispatched.outcomeUnknown,
+              errorCode: dispatched.outcomeUnknown
+                ? 'stale_bridge'
+                : 'approval_required',
+            };
+          }
+          successfulDispatch = dispatched;
+          return {
+            ok: true,
+            data: dispatched.value,
+            mutationAttempted: true,
+            outcomeUnknown: false,
+          };
+        },
+      },
+    );
+
+    const completedDispatch = successfulDispatch as NativeOpenPathDurableSuccess | null;
+    const durableFailure = failedDispatch as NativeOpenPathDurableFailure | null;
+    const completedAction = mutationAction as ComputerAppMutationContract | null;
+    const completedAuthorization = mutationAuthorization as ComputerAppMutationAuthorization | null;
+    const completedBeforeEpoch = mutationBeforeEpoch as ComputerAppObservationEpoch | null;
+    const completedApproval = approvalReceipt as OpenSwanRuntimeApprovalReceipt | null;
+    const completedProposal = approvalProposal as NativeOpenPathApprovalProposal | null;
+    const blockedApproval = approvalBlock as NativeOpenPathApprovalBlock | null;
+    const proof = (
+      adapterResult.data?.proof
+      && typeof adapterResult.data.proof === 'object'
+      && !Array.isArray(adapterResult.data.proof)
+    )
+      ? adapterResult.data.proof as Record<string, unknown>
+      : null;
+    const after = (
+      proof?.after
+      && typeof proof.after === 'object'
+      && !Array.isArray(proof.after)
+    )
+      ? proof.after as BoundedNativeOpenPathObservation
+      : null;
+
+    let verificationReceipt: ComputerAppVerificationReceipt | null = null;
+    let durableStateSealed = false;
+    if (
+      completedDispatch
+      && completedAction
+      && completedAuthorization
+      && completedBeforeEpoch
+      && completedApproval
+      && completedProposal
+    ) {
+      const afterEpoch = (
+        after
+        && Number.isFinite(Date.parse(after.observedAt))
+        && /^[a-f0-9]{64}$/.test(after.evidenceFingerprint)
+      )
+        ? createComputerAppObservationEpoch({
+            id: `${completedProposal.evidenceId}:after`,
+            surface: 'file',
+            capturedAt: after.observedAt,
+            freshnessMs: 15_000,
+            target: {
+              documentId: completedProposal.targetFingerprint,
+            },
+            evidenceIds: [
+              completedProposal.evidenceId,
+              after.evidenceFingerprint,
+            ],
+          })
+        : null;
+      const exactPredicateSatisfied = Boolean(
+        adapterResult.ok
+        && proof
+        && proof.targetFingerprint === completedProposal.targetFingerprint
+        && proof.evidenceId === completedProposal.evidenceId
+        && proof.mutationAttempted === true
+        && proof.dispatchAcknowledged === true
+        && proof.dispatchTargetMatched === true
+        && proof.explicitAppMatched === true
+        && proof.completionVerified === true
+        && proof.outcomeUnknown === false
+        && proof.replayAllowed === false
+        && after
+        && after.appRunning === true
+        && after.frontmost === true
+        && after.targetEvidenceMatched === true
+      );
+      verificationReceipt = buildComputerAppVerificationReceipt({
+        action: completedAction,
+        authorization: completedAuthorization,
+        dispatchReceipt: completedDispatch.dispatchReceipt,
+        beforeEpoch: completedBeforeEpoch,
+        afterEpoch,
+        predicateSatisfied: exactPredicateSatisfied,
+        evidenceIds: afterEpoch?.evidenceIds || [],
+      });
+      const canComplete = verificationReceipt.canComplete === true;
+      durableStateSealed = await finishDurableAgentAction(
+        completedDispatch.lease,
+        canComplete ? 'verified' : 'outcome_unknown',
+        {
+          surface: completedAction.surface,
+          risk: completedAction.risk,
+          approvalId: completedApproval.approvalId,
+          observationEpochId: completedAction.observationEpochId,
+          verificationKind: completedAction.verification.kind,
+          evidenceCount: verificationReceipt.evidenceIds.length,
+          completionVerified: canComplete,
+          outcomeUnknown: !canComplete,
+          source: 'openswan_tool_runtime',
+        },
+      );
+    }
+
+    const completionAccepted = Boolean(
+      verificationReceipt?.canComplete
+      && durableStateSealed,
+    );
+    let result: OpenSwanToolExecutionResultMap['desktop.open_path'];
+    if (completionAccepted) {
+      result = {
+        ok: true,
+        resultsText: 'Opened and durably verified the exact approved local target in the frontmost app.',
+        completionVerified: true,
+        outcomeUnknown: false,
+        ...(proof ? { proof } : {}),
+      };
+    } else if (completedDispatch) {
+      result = {
+        ok: false,
+        resultsText: 'The exact approved local-open call crossed the durable dispatch boundary without accepted post-open proof. Treat the outcome as unknown and never replay it automatically.',
+        completionVerified: false,
+        outcomeUnknown: true,
+        ...(proof ? { proof } : {}),
+      };
+    } else if (durableFailure) {
+      result = {
+        ok: false,
+        resultsText: durableFailure.priorState === 'verified'
+          ? 'This exact local-open provider call is already durably verified and was not executed again.'
+          : durableFailure.priorState === 'failed'
+            ? 'This exact local-open provider call is already durably recorded as a pre-dispatch failure and was not executed again.'
+            : durableFailure.outcomeUnknown
+              ? 'This exact local-open provider call reached the durable dispatch boundary earlier. Its outcome remains unknown and it was not replayed.'
+              : adapterResult.message,
+        completionVerified: false,
+        outcomeUnknown: durableFailure.outcomeUnknown,
+        ...(proof ? { proof } : {}),
+      };
+    } else {
+      result = {
+        ok: false,
+        resultsText: adapterResult.message,
+        completionVerified: false,
+        outcomeUnknown: adapterResult.data?.outcomeUnknown === true,
+      };
+    }
+
+    if (completedDispatch) {
+      result = attachComputerAppMutationMetadata<'desktop.open_path'>(
+        result,
+        completedDispatch.dispatchReceipt,
+        durableStateSealed ? verificationReceipt : null,
+      );
+    } else if (durableFailure?.dispatchReceipt) {
+      result = attachComputerAppMutationMetadata<'desktop.open_path'>(
+        result,
+        durableFailure.dispatchReceipt,
+      );
+    }
+
+    if (completedApproval) {
+      return attachOpenSwanApprovalReceiptMetadata(
+        'desktop.open_path',
+        result,
+        completedApproval,
+        context,
+      );
+    }
+    if (blockedApproval) {
+      return {
+        ...result,
+        ...(blockedApproval.status === 'pending'
+          ? {
+              approvalRequest: {
+                id: blockedApproval.approvalId,
+                required: true,
+                status: blockedApproval.status,
+              },
+            }
+          : {}),
+      } as OpenSwanRuntimeToolResultWithMetadata<'desktop.open_path'>;
+    }
+    return result;
+  } catch (error) {
+    const completedDispatch = successfulDispatch as NativeOpenPathDurableSuccess | null;
+    const durableFailure = failedDispatch as NativeOpenPathDurableFailure | null;
+    const completedApproval = approvalReceipt as OpenSwanRuntimeApprovalReceipt | null;
+    let result: OpenSwanToolExecutionResultMap['desktop.open_path'] = {
+      ok: false,
+      resultsText: 'The sealed local-open runtime failed without a safe completion receipt. Nothing will be replayed automatically.',
+      completionVerified: false,
+      outcomeUnknown: Boolean(completedDispatch || durableFailure?.outcomeUnknown),
+    };
+    // Never surface the raw exception: bridge/provider errors can contain a
+    // private path or application name.
+    void error;
+    if (completedDispatch) {
+      result = attachComputerAppMutationMetadata<'desktop.open_path'>(
+        result,
+        completedDispatch.dispatchReceipt,
+      );
+    } else if (durableFailure?.dispatchReceipt) {
+      result = attachComputerAppMutationMetadata<'desktop.open_path'>(
+        result,
+        durableFailure.dispatchReceipt,
+      );
+    }
+    return completedApproval
+      ? attachOpenSwanApprovalReceiptMetadata(
+          'desktop.open_path',
+          result,
+          completedApproval,
+          context,
+        )
+      : result;
+  }
+}
+
+async function executeGuardedNativeSemanticPress(
+  args: OpenSwanToolExecutionArgs['desktop.click_element'],
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<'desktop.click_element'>> {
+  type NativeDurableDispatchSuccess = Extract<
+    DurableComputerAppDispatchResult<NativeSemanticActionExecution>,
+    { ok: true }
+  >;
+  type NativeDurableDispatchFailure = Extract<
+    DurableComputerAppDispatchResult<NativeSemanticActionExecution>,
+    { ok: false }
+  >;
+  type NativeApprovalBlock = Extract<
+    OpenSwanToolApprovalGateResult,
+    { kind: 'blocked' }
+  >;
+  if (
+    !hasExactOpenSwanRuntimeCallIdentity('desktop.click_element', context)
+    || `${context.runId}:${context.toolUseId}:native-semantic-v1`.length > 180
+  ) {
+    return {
+      ok: false,
+      resultsText: 'Native semantic press stopped before observation because exact persisted run and provider tool-call identity was unavailable. No app action was attempted.',
+    };
+  }
+
+  let approvalReceipt: OpenSwanRuntimeApprovalReceipt | null = null;
+  let approvalBlock: NativeApprovalBlock | null = null;
+  let approvalProposal: NativeSemanticActionApprovalProposal | null = null;
+  let approvalArgs: Record<string, unknown> | null = null;
+  let mutationAction: ComputerAppMutationContract | null = null;
+  let mutationAuthorization: ComputerAppMutationAuthorization | null = null;
+  let mutationBeforeEpoch: ComputerAppObservationEpoch | null = null;
+  let nativeExecution: NativeSemanticActionExecution | null = null;
+  let successfulDispatch: NativeDurableDispatchSuccess | null = null;
+  let failedDispatch: NativeDurableDispatchFailure | null = null;
+  let latestBridgeFailure: DesktopResult<NativeSemanticActionExecution> | null = null;
+
+  try {
+    const [
+      {
+        createNativeSemanticActionBridgeDeps,
+        executeObservedNativeSemanticAction,
+      },
+      desktopBridge,
+    ] = await Promise.all([
+      import('./computerAppAdapter'),
+      import('./desktopBridge'),
+    ]);
+    if (!(await desktopBridge.isDesktopBridgeAvailable())) {
+      return {
+        ok: false,
+        resultsText: 'Desktop bridge offline. Start it with `node scripts/claude-bridge.js`, pair once from the UC app, then retry from a fresh accessibility observation.',
+      };
+    }
+
+    const baseDeps = createNativeSemanticActionBridgeDeps(async (proposal) => {
+      approvalProposal = proposal;
+      approvalArgs = {
+        approvalSchemaVersion: 1,
+        operation: proposal.operation,
+        action: proposal.action,
+        appName: proposal.app,
+        pid: proposal.pid,
+        targetRole: proposal.targetRole,
+        targetSummary: proposal.targetSummary,
+        targetFingerprint: proposal.targetFingerprint,
+        risk: proposal.risk,
+        approvalRequired: true,
+      };
+      const gate = await maybeRequestToolApproval(
+        'desktop.click_element',
+        approvalArgs,
+        context,
+      );
+      if (gate.kind !== 'allowed') {
+        if (gate.kind === 'blocked') approvalBlock = gate;
+        return {
+          approved: false,
+          reason: gate.kind === 'blocked'
+            ? gate.message
+            : 'The native semantic action requires a genuine durable approval receipt.',
+        };
+      }
+      approvalReceipt = gate.receipt;
+      return {
+        approved: true,
+        approvalId: gate.receipt.approvalId,
+      };
+    });
+
+    const deps: NativeSemanticActionDeps = {
+      ...baseDeps,
+      performSemanticAction: async (dispatchArgs) => {
+        const proposal = approvalProposal;
+        const receipt = approvalReceipt;
+        const runtimeApprovalArgs = approvalArgs;
+        if (
+          !proposal
+          || !receipt
+          || !runtimeApprovalArgs
+          || dispatchArgs.approvalId !== receipt.approvalId
+          || dispatchArgs.targetFingerprint !== proposal.targetFingerprint
+        ) {
+          return {
+            ok: false,
+            error: 'Native semantic dispatch refused because the one-shot target and genuine runtime approval were not bound.',
+            errorCode: 'approval_required',
+          };
+        }
+        const freshnessMs = Math.max(
+          1_000,
+          Math.min(
+            120_000,
+            Date.parse(proposal.expiresAt) - Date.parse(proposal.observedAt),
+          ),
+        );
+        const beforeEpoch = createComputerAppObservationEpoch({
+          id: proposal.evidenceId,
+          surface: 'desktop',
+          capturedAt: proposal.observedAt,
+          freshnessMs,
+          target: {
+            appName: proposal.app,
+            pid: proposal.pid,
+            accessibilityGeneration: proposal.indexGeneration,
+            accessibilityTargetFingerprint: proposal.targetFingerprint,
+          },
+          evidenceIds: [proposal.evidenceId],
+        });
+        const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+          dispatchArgs,
+        );
+        if (!toolArgsFingerprint) {
+          return {
+            ok: false,
+            error: 'Native semantic dispatch stopped because cryptographic argument binding was unavailable.',
+            errorCode: 'invalid_input',
+          };
+        }
+        const actionId = `${context.runId}:${context.toolUseId}`;
+        const action: ComputerAppMutationContract = {
+          schemaVersion: 1,
+          actionId,
+          tool: 'desktop.click_element',
+          surface: 'desktop',
+          observationEpochId: beforeEpoch.id,
+          expectedTarget: beforeEpoch.target,
+          toolArgsFingerprint,
+          risk: 'medium',
+          approvalRequired: true,
+          idempotencyKey: `${actionId}:native-semantic-v1`,
+          verification: {
+            kind: 'accessibility',
+            predicate: 'The exact approved low-consequence accessibility target disappeared or changed semantics after one acknowledged native press.',
+            evidenceTools: ['desktop.semantic_action:exact-target-diff'],
+          },
+          outcomeUnknownPolicy: 'verify_before_retry',
+        };
+        const expectedRuntimeApprovalKey = buildOpenSwanToolApprovalKey(
+          'desktop.click_element',
+          runtimeApprovalArgs,
+        );
+        const policy = await resolveComputerAppMutationPolicy({
+          action,
+          approvalGate: async (request) => {
+            if (
+              receipt.approvalKey !== expectedRuntimeApprovalKey
+              || !receipt.approvalId
+              || (receipt.status !== 'approved' && receipt.status !== 'auto_approved')
+            ) {
+              return {
+                decision: 'pending',
+                approvalId: null,
+                approvalKey: request.approvalKey,
+              };
+            }
+            return {
+              decision: receipt.status,
+              approvalId: receipt.approvalId,
+              approvalKey: request.approvalKey,
+            };
+          },
+        });
+        const authorization = authorizeComputerAppMutation({
+          action,
+          policy,
+          epoch: beforeEpoch,
+        });
+        mutationAction = action;
+        mutationAuthorization = authorization;
+        mutationBeforeEpoch = beforeEpoch;
+        if (!authorization.allowed) {
+          return {
+            ok: false,
+            error: `Native semantic dispatch stopped before handler entry: ${authorization.blockers
+              .map((blocker) => `${blocker.code}: ${blocker.detail}`)
+              .join(' ') || authorization.summary}`,
+            errorCode: 'approval_required',
+          };
+        }
+        const dispatched = await dispatchDurableComputerAppMutation({
+          action,
+          authorization,
+          approvalId: receipt.approvalId,
+          context,
+          normalizedArgs: dispatchArgs,
+          handler: async (sealedArgs) => {
+            const bridgeResult = await desktopBridge.performNativeSemanticAction({
+              targetId: sealedArgs.targetId,
+              targetFingerprint: sealedArgs.targetFingerprint,
+              approvalId: sealedArgs.approvalId,
+            });
+            if (!bridgeResult.ok || !bridgeResult.data) {
+              latestBridgeFailure = bridgeResult;
+              throw new Error(
+                bridgeResult.error
+                || bridgeResult.recoveryHint
+                || 'Native semantic bridge dispatch did not return exact-target proof.',
+              );
+            }
+            return bridgeResult.data;
+          },
+        });
+        if (!dispatched.ok) {
+          failedDispatch = dispatched;
+          if (latestBridgeFailure) return latestBridgeFailure;
+          return {
+            ok: false,
+            error: sanitizeErrorForModel(dispatched.error, {
+              context: 'native semantic durable dispatch',
+            }),
+            errorCode: dispatched.outcomeUnknown ? 'stale_bridge' : 'approval_required',
+          };
+        }
+        successfulDispatch = dispatched;
+        nativeExecution = dispatched.value;
+        return { ok: true, data: dispatched.value };
+      },
+    };
+
+    const adapterResult = await executeObservedNativeSemanticAction(
+      {
+        action: 'press',
+        appName: String(args?.appName || ''),
+        expectedPid: Number(args?.pid || 0),
+        targetPath: String(args?.path || ''),
+        expectedRole: String(args?.expectedRole || ''),
+        expectedLabel: String(args?.expectedLabel || ''),
+      },
+      deps,
+    );
+
+    let result: OpenSwanToolExecutionResultMap['desktop.click_element'] = {
+      ok: adapterResult.ok,
+      resultsText: adapterResult.message,
+    };
+    let verificationReceipt: ComputerAppVerificationReceipt | null = null;
+    // These values are assigned by the dependency callbacks above. TypeScript
+    // intentionally does not model side effects across callback invocation, so
+    // snapshot the declared unions after the adapter has completed.
+    const completedDispatch = successfulDispatch as NativeDurableDispatchSuccess | null;
+    const durableFailure = failedDispatch as NativeDurableDispatchFailure | null;
+    const completedExecution = nativeExecution as NativeSemanticActionExecution | null;
+    const completedAction = mutationAction as ComputerAppMutationContract | null;
+    const completedAuthorization = mutationAuthorization as ComputerAppMutationAuthorization | null;
+    const completedBeforeEpoch = mutationBeforeEpoch as ComputerAppObservationEpoch | null;
+    const completedApproval = approvalReceipt as OpenSwanRuntimeApprovalReceipt | null;
+    const completedProposal = approvalProposal as NativeSemanticActionApprovalProposal | null;
+    const blockedApproval = approvalBlock as NativeApprovalBlock | null;
+
+    if (
+      completedDispatch
+      && completedExecution
+      && completedAction
+      && completedAuthorization
+      && completedBeforeEpoch
+      && completedApproval
+      && completedProposal
+    ) {
+      const proof = completedExecution.proof;
+      const after = proof.after;
+      if (after) {
+        const afterEpoch = createComputerAppObservationEpoch({
+          id: `${proof.evidenceId}:after`,
+          surface: 'desktop',
+          capturedAt: after.observedAt,
+          freshnessMs: 15_000,
+          target: {
+            appName: after.app,
+            pid: after.pid,
+            accessibilityGeneration: after.treeFingerprint,
+            accessibilityTargetFingerprint: after.targetFingerprint,
+          },
+          evidenceIds: [proof.evidenceId, after.treeFingerprint],
+        });
+        verificationReceipt = buildComputerAppVerificationReceipt({
+          action: completedAction,
+          authorization: completedAuthorization,
+          dispatchReceipt: completedDispatch.dispatchReceipt,
+          beforeEpoch: completedBeforeEpoch,
+          afterEpoch,
+          predicateSatisfied: (
+            adapterResult.ok
+            && completedExecution.completionVerified === true
+            && completedExecution.outcomeUnknown === false
+            && completedExecution.replayAllowed === false
+            && proof.completionVerified === true
+            && proof.outcomeUnknown === false
+            && proof.replayAllowed === false
+            && proof.mutationAttempted === true
+            && proof.mutationPerformed === true
+            && proof.dispatchAcknowledged === true
+            && (
+              proof.diff.kind === 'target_disappeared'
+              || proof.diff.kind === 'target_semantics_changed'
+            )
+          ),
+          evidenceIds: [proof.evidenceId, after.treeFingerprint],
+        });
+      }
+      const canComplete = verificationReceipt?.canComplete === true;
+      const durableStateSealed = await finishDurableAgentAction(
+        completedDispatch.lease,
+        canComplete ? 'verified' : 'outcome_unknown',
+        {
+          surface: completedAction.surface,
+          risk: completedAction.risk,
+          approvalId: completedApproval.approvalId,
+          observationEpochId: completedAction.observationEpochId,
+          verificationKind: completedAction.verification.kind,
+          evidenceCount: verificationReceipt?.evidenceIds.length || 0,
+          completionVerified: canComplete,
+          outcomeUnknown: !canComplete,
+          source: 'openswan_tool_runtime',
+        },
+      );
+      const durableWarning = durableStateSealed
+        ? ''
+        : ' Durable finalization acknowledgement was unavailable; the exact call remains replay-blocked and must not be submitted again.';
+      result = canComplete
+        ? {
+            ok: true,
+            resultsText: `Pressed and verified the exact approved native control in ${completedProposal.app}.${durableWarning}`,
+          }
+        : {
+            ok: false,
+            resultsText: `Native semantic press reached the app handler, but exact-target completion was not accepted. Treat the outcome as unknown and do not replay it automatically.${durableWarning}`,
+          };
+    } else if (durableFailure) {
+      result = {
+        ok: false,
+        resultsText: durableFailure.priorState === 'verified'
+          ? 'This exact native semantic call is already durably verified and was not executed again. Do not issue a replacement call for the same action.'
+          : durableFailure.priorState === 'failed'
+            ? 'This exact native semantic call is already durably recorded as a known pre-dispatch failure and was not executed again. Re-observe before deciding whether a new call is appropriate.'
+            : durableFailure.outcomeUnknown
+              ? 'Native semantic press reached the durable dispatch boundary, but its outcome is unknown. Do not replay it automatically; re-observe the app and report the uncertain outcome.'
+              : adapterResult.message,
+      };
+    }
+
+    if (completedDispatch) {
+      result = attachComputerAppMutationMetadata<'desktop.click_element'>(
+        result,
+        completedDispatch.dispatchReceipt,
+        verificationReceipt,
+      );
+    } else if (durableFailure?.dispatchReceipt) {
+      result = attachComputerAppMutationMetadata<'desktop.click_element'>(
+        result,
+        durableFailure.dispatchReceipt,
+      );
+    }
+
+    if (completedApproval) {
+      return attachOpenSwanApprovalReceiptMetadata(
+        'desktop.click_element',
+        result,
+        completedApproval,
+        context,
+      );
+    }
+    if (blockedApproval) {
+      return {
+        ...result,
+        ...(blockedApproval.status === 'pending'
+          ? {
+              approvalRequest: {
+                id: blockedApproval.approvalId,
+                required: true,
+                status: blockedApproval.status,
+              },
+            }
+          : {}),
+      } as OpenSwanRuntimeToolResultWithMetadata<'desktop.click_element'>;
+    }
+    return result;
+  } catch (error) {
+    const completedDispatch = successfulDispatch as NativeDurableDispatchSuccess | null;
+    const durableFailure = failedDispatch as NativeDurableDispatchFailure | null;
+    const completedApproval = approvalReceipt as OpenSwanRuntimeApprovalReceipt | null;
+    let result: OpenSwanToolExecutionResultMap['desktop.click_element'] = {
+      ok: false,
+      resultsText: sanitizeErrorForModel(error, {
+        context: 'native semantic action runtime',
+      }),
+    };
+    if (completedDispatch) {
+      result = attachComputerAppMutationMetadata<'desktop.click_element'>(
+        result,
+        completedDispatch.dispatchReceipt,
+      );
+    } else if (durableFailure?.dispatchReceipt) {
+      result = attachComputerAppMutationMetadata<'desktop.click_element'>(
+        result,
+        durableFailure.dispatchReceipt,
+      );
+    }
+    return completedApproval
+      ? attachOpenSwanApprovalReceiptMetadata(
+          'desktop.click_element',
+          result,
+          completedApproval,
+          context,
+        )
+      : result;
+  }
+}
+
+type PreparedGenericNativeUiMutation = {
+  tool: GenericNativeUiMutationTool;
+  dispatchArgs: OpenSwanToolExecutionArgs[GenericNativeUiMutationTool];
+  approvalArgs: Record<string, unknown>;
+  guard: GenericNativeUiMutationGuard;
+  observationDeps: GenericNativeUiMutationObservationDeps;
+  toolArgsFingerprint: string;
+};
+
+type GenericNativeUiBridgeAck = {
+  resultsText: string;
+};
+
+const GENERIC_NATIVE_UI_MUTATION_TOOLS: ReadonlySet<OpenSwanRuntimeToolName> =
+  new Set<OpenSwanRuntimeToolName>([
+    'desktop.type_text',
+    'desktop.paste_text',
+    'desktop.press_keys',
+    'desktop.menu_click',
+    'desktop.click_at',
+    'desktop.mouse_move',
+    'desktop.mouse_click',
+    'desktop.mouse_down',
+    'desktop.mouse_up',
+    'desktop.mouse_drag',
+    'desktop.mouse_scroll',
+    'desktop.set_element_value',
+  ]);
+
+function isGenericNativeUiMutationTool(
+  tool: OpenSwanRuntimeToolName,
+): tool is GenericNativeUiMutationTool {
+  return GENERIC_NATIVE_UI_MUTATION_TOOLS.has(tool);
+}
+
+function exactGenericNativeUiRuntimeAppName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const appName = value.trim();
+  return (
+    appName.length > 0
+    && appName.length <= 120
+    && !/[\u0000-\u001f\u007f]/.test(appName)
+  )
+    ? appName
+    : null;
+}
+
+function genericNativeUiCoordinatePairs(
+  tool: GenericNativeUiMutationTool,
+  args: Record<string, unknown>,
+): Array<readonly [number, number]> | null {
+  const pair = (x: unknown, y: unknown): readonly [number, number] | null => (
+    typeof x === 'number'
+    && typeof y === 'number'
+    && Number.isSafeInteger(x)
+    && Number.isSafeInteger(y)
+  )
+    ? [x, y] as const
+    : null;
+  if (tool === 'desktop.click_at' || tool === 'desktop.mouse_move'
+    || tool === 'desktop.mouse_click' || tool === 'desktop.mouse_down') {
+    const point = pair(args.x, args.y);
+    return point ? [point] : null;
+  }
+  if (tool === 'desktop.mouse_up' || tool === 'desktop.mouse_scroll') {
+    const hasX = typeof args.x === 'number';
+    const hasY = typeof args.y === 'number';
+    if (!hasX && !hasY) return [];
+    if (hasX !== hasY) return null;
+    const point = pair(args.x, args.y);
+    return point ? [point] : null;
+  }
+  if (tool === 'desktop.mouse_drag') {
+    const from = pair(args.fromX, args.fromY);
+    const to = pair(args.toX, args.toY);
+    return from && to ? [from, to] : null;
+  }
+  return [];
+}
+
+function genericNativeUiCoordinatesFitScreen(
+  tool: GenericNativeUiMutationTool,
+  args: Record<string, unknown>,
+  width: number,
+  height: number,
+): boolean {
+  if (
+    !Number.isSafeInteger(width)
+    || !Number.isSafeInteger(height)
+    || width < 320
+    || height < 240
+    || width > 32_768
+    || height > 32_768
+  ) {
+    return false;
+  }
+  const points = genericNativeUiCoordinatePairs(tool, args);
+  return Boolean(
+    points
+    && points.every(([x, y]) => x >= 0 && y >= 0 && x < width && y < height),
+  );
+}
+
+function createGenericNativeUiObservationDeps(
+  tool: GenericNativeUiMutationTool,
+  dispatchArgs: OpenSwanToolExecutionArgs[GenericNativeUiMutationTool],
+): GenericNativeUiMutationObservationDeps {
+  const family = genericNativeUiMutationFamilyForTool(tool);
+  const needsCoordinateProof = family === 'coordinate' || family === 'mouse';
+  const sealedArgs = dispatchArgs as unknown as Record<string, unknown>;
+  return {
+    digest: buildComputerAppToolArgsFingerprintAsync,
+    observeFrontmostApp: async (observationArgs) => {
+      const desktopBridge = await import('./desktopBridge');
+      const observed = await desktopBridge.observeApp(observationArgs);
+      if (!observed.ok || !observed.data) return observed;
+      const data: Record<string, unknown> = {
+        ...observed.data,
+        observedAt: new Date().toISOString(),
+      };
+      if (needsCoordinateProof) {
+        const screen = await desktopBridge.getScreenSize();
+        if (
+          !screen.ok
+          || !screen.data
+          || Number(data.windowCount || 0) <= 0
+          || !genericNativeUiCoordinatesFitScreen(
+            tool,
+            sealedArgs,
+            screen.data.width,
+            screen.data.height,
+          )
+        ) {
+          return {
+            ok: false,
+            errorCode: 'observation_unavailable',
+          };
+        }
+      } else if (
+        Number(data.windowCount || 0) === 0
+        && typeof data.indexGeneration === 'number'
+        && Number.isSafeInteger(data.indexGeneration)
+        && data.indexGeneration > 0
+      ) {
+        data.fallbackSignal = {
+          kind: 'accessibility_generation',
+          generation: data.indexGeneration,
+        };
+      }
+      return { ok: true, data };
+    },
+  };
+}
+
+async function prepareGuardedGenericNativeUiMutation(
+  tool: GenericNativeUiMutationTool,
+  dispatchArgs: OpenSwanToolExecutionArgs[GenericNativeUiMutationTool],
+  context: OpenSwanRuntimeToolContext,
+): Promise<
+  | { ok: true; prepared: PreparedGenericNativeUiMutation }
+  | { ok: false; result: { ok: false; resultsText: string } }
+> {
+  if (!hasExactOpenSwanRuntimeCallIdentity(tool, context)) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'The native UI action stopped before observation because exact persisted run and provider tool-call identity was unavailable. No app action was attempted.',
+      },
+    };
+  }
+  const appName = exactGenericNativeUiRuntimeAppName(
+    (dispatchArgs as unknown as Record<string, unknown>).appName,
+  );
+  if (!appName) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'The native UI action stopped before observation because an exact appName from desktop.window_state or desktop.observe_app is required. Re-observe the frontmost app and issue a new tool call; do not infer app identity from task text.',
+      },
+    };
+  }
+  if (tool === 'desktop.set_element_value') {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'desktop.set_element_value stopped before approval because the generic native lane cannot yet seal a fresh exact accessibility target generation and dotted-path identity through handler entry. Re-observe the field and use another guarded input method; no app action was attempted.',
+      },
+    };
+  }
+  const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+    dispatchArgs,
+  );
+  if (!toolArgsFingerprint) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'The native UI action stopped before observation because cryptographic argument binding was unavailable. No app action was attempted.',
+      },
+    };
+  }
+  const observationDeps = createGenericNativeUiObservationDeps(
+    tool,
+    dispatchArgs,
+  );
+  const preparedGuard = await prepareGenericNativeUiMutationGuard({
+    tool,
+    expectedResolvedAppName: appName,
+    toolArgsFingerprint,
+    deps: observationDeps,
+  });
+  if (!preparedGuard.ok) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: `${preparedGuard.message} Re-observe the exact frontmost app and issue a new tool call. No app action was attempted.`,
+      },
+    };
+  }
+  const approvalArgs = deepFreezeOpenSwanApprovalArgs({
+    ...(dispatchArgs as unknown as Record<string, unknown>),
+    approvalBindingSha256: preparedGuard.guard.approvalBindingSha256,
+  }) as Record<string, unknown>;
+  return {
+    ok: true,
+    prepared: {
+      tool,
+      dispatchArgs,
+      approvalArgs,
+      guard: preparedGuard.guard,
+      observationDeps,
+      toolArgsFingerprint,
+    },
+  };
+}
+
+async function dispatchGenericNativeUiBridgeMutation(
+  tool: GenericNativeUiMutationTool,
+  sealedArgs: ComputerAppSealedMutationArgs<
+    OpenSwanToolExecutionArgs[GenericNativeUiMutationTool]
+  >,
+): Promise<GenericNativeUiBridgeAck> {
+  const desktopBridge = await import('./desktopBridge');
+  const args = sealedArgs as unknown as Record<string, unknown>;
+  let result: DesktopResult<Record<string, unknown>>;
+  switch (tool) {
+    case 'desktop.type_text':
+      result = await desktopBridge.typeText(String(args.text || '')) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.paste_text':
+      result = await desktopBridge.pasteText(String(args.text || ''), {
+        appName: String(args.appName || ''),
+        restoreClipboard: args.restoreClipboard !== false,
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.press_keys':
+      result = await desktopBridge.pressKeys(String(args.combo || '')) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.menu_click':
+      result = await desktopBridge.clickMenu({
+        appName: String(args.appName || ''),
+        menuPath: Array.isArray(args.menuPath)
+          ? args.menuPath.map((part) => String(part))
+          : [],
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.click_at':
+      result = await desktopBridge.clickAt(
+        Number(args.x),
+        Number(args.y),
+      ) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.mouse_move':
+      result = await desktopBridge.mouseMove(
+        Number(args.x),
+        Number(args.y),
+      ) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.mouse_click':
+      result = await desktopBridge.mouseClick({
+        x: Number(args.x),
+        y: Number(args.y),
+        button: args.button === 'right' ? 'right' : 'left',
+        count: typeof args.count === 'number' ? args.count : undefined,
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.mouse_down':
+      result = await desktopBridge.mouseDown({
+        x: Number(args.x),
+        y: Number(args.y),
+        button: args.button === 'right' ? 'right' : 'left',
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.mouse_up': {
+      const hasCoords = typeof args.x === 'number' && typeof args.y === 'number';
+      result = await desktopBridge.mouseUp({
+        x: hasCoords ? Number(args.x) : undefined,
+        y: hasCoords ? Number(args.y) : undefined,
+        button: args.button === 'right' ? 'right' : 'left',
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+    }
+    case 'desktop.mouse_drag':
+      result = await desktopBridge.mouseDrag({
+        fromX: Number(args.fromX),
+        fromY: Number(args.fromY),
+        toX: Number(args.toX),
+        toY: Number(args.toY),
+        durationMs: typeof args.durationMs === 'number'
+          ? args.durationMs
+          : undefined,
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.mouse_scroll':
+      result = await desktopBridge.mouseScroll({
+        deltaY: typeof args.deltaY === 'number' ? args.deltaY : undefined,
+        deltaX: typeof args.deltaX === 'number' ? args.deltaX : undefined,
+        x: typeof args.x === 'number' ? args.x : undefined,
+        y: typeof args.y === 'number' ? args.y : undefined,
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+    case 'desktop.set_element_value':
+      result = await desktopBridge.setElementValue({
+        appName: String(args.appName || ''),
+        pid: Number(args.pid || 0),
+        path: String(args.path || ''),
+        text: String(args.text || ''),
+      }) as DesktopResult<Record<string, unknown>>;
+      break;
+  }
+  if (!result.ok) {
+    throw new Error(
+      'The desktop bridge did not acknowledge the exact approved native UI action. Its outcome is unknown and it must not be replayed automatically.',
+    );
+  }
+  const data = result.data || {};
+  switch (tool) {
+    case 'desktop.type_text':
+      return { resultsText: `Typed ${Number(data.chars || 0)} characters into the approved frontmost app.` };
+    case 'desktop.paste_text':
+      return { resultsText: `Pasted ${Number(data.chars || 0)} characters into the approved frontmost app.` };
+    case 'desktop.press_keys':
+      return { resultsText: 'Sent the approved key combination to the exact frontmost app.' };
+    case 'desktop.menu_click':
+      return { resultsText: 'Activated the approved native menu path in the exact frontmost app.' };
+    case 'desktop.click_at':
+    case 'desktop.mouse_click':
+      return { resultsText: 'Sent the approved bounded click to the exact frontmost app.' };
+    case 'desktop.mouse_move':
+      return { resultsText: 'Moved the pointer to the approved bounded location over the exact frontmost app.' };
+    case 'desktop.mouse_down':
+      return { resultsText: 'Started the approved bounded mouse hold over the exact frontmost app.' };
+    case 'desktop.mouse_up':
+      return { resultsText: 'Released the approved mouse button over the exact frontmost app.' };
+    case 'desktop.mouse_drag':
+      return { resultsText: 'Completed the approved bounded mouse drag over the exact frontmost app.' };
+    case 'desktop.mouse_scroll':
+      return { resultsText: 'Sent the approved mouse-wheel input to the exact frontmost app.' };
+    case 'desktop.set_element_value':
+      return { resultsText: `Set the approved accessibility field value (${Number(data.chars || 0)} characters).` };
+  }
+}
+
+async function executeGuardedGenericNativeUiMutation(
+  prepared: PreparedGenericNativeUiMutation,
+  approvalReceipt: OpenSwanRuntimeApprovalReceipt,
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<GenericNativeUiMutationTool>> {
+  const expectedRuntimeApprovalKey = buildOpenSwanToolApprovalKey(
+    prepared.tool,
+    prepared.approvalArgs,
+  );
+  if (
+    approvalReceipt.approvalKey !== expectedRuntimeApprovalKey
+    || !approvalReceipt.approvalId
+    || (approvalReceipt.status !== 'approved' && approvalReceipt.status !== 'auto_approved')
+  ) {
+    return {
+      ok: false,
+      resultsText: 'The native UI action stopped before handler entry because no genuine approval receipt was bound to the exact arguments, app process, and surface. Re-observe and issue a new tool call. No app action was attempted.',
+    };
+  }
+
+  // One-shot and deliberately adjacent to the durable action construction:
+  // clones, replays, TTL expiry, PID drift, or window drift stop here before
+  // the durable dispatcher can enter the bridge handler.
+  const entry = await recheckGenericNativeUiMutationGuardAtHandlerEntry({
+    guard: prepared.guard,
+    approvalBindingSha256: prepared.guard.approvalBindingSha256,
+    deps: prepared.observationDeps,
+  });
+  if (!entry.ok) {
+    return {
+      ok: false,
+      resultsText: `${entry.message} Re-observe the exact frontmost app and issue a new tool call. No app action was attempted.`,
+    };
+  }
+  const sealedRecord = prepared.dispatchArgs as unknown as Record<string, unknown>;
+  if (
+    prepared.tool === 'desktop.set_element_value'
+    && (
+      !Number.isSafeInteger(sealedRecord.pid)
+      || Number(sealedRecord.pid) <= 0
+      || entry.epoch.target.pid !== sealedRecord.pid
+    )
+  ) {
+    return {
+      ok: false,
+      resultsText: 'The native UI action stopped at handler entry because the supplied accessibility process did not match the freshly observed approved process. Re-observe the exact app and field, then issue a new tool call. No app action was attempted.',
+    };
+  }
+
+  const actionId = `${context.runId}:${context.toolUseId}`;
+  const action: ComputerAppMutationContract = {
+    schemaVersion: 1,
+    actionId,
+    tool: prepared.tool,
+    surface: 'desktop',
+    observationEpochId: entry.epoch.id,
+    expectedTarget: entry.epoch.target,
+    toolArgsFingerprint: prepared.toolArgsFingerprint,
+    risk: 'medium',
+    approvalRequired: true,
+    idempotencyKey: `${actionId}:generic-native-ui-v1`,
+    verification: {
+      kind: prepared.tool === 'desktop.set_element_value'
+        ? 'accessibility'
+        : 'app_state',
+      predicate: 'The exact approved native input was acknowledged without changing app process or target surface before dispatch.',
+      evidenceTools: [`${prepared.tool}:bridge-acknowledgement`],
+    },
+    outcomeUnknownPolicy: 'verify_before_retry',
+  };
+  const policy = await resolveComputerAppMutationPolicy({
+    action,
+    approvalGate: async (request) => ({
+      decision: approvalReceipt.status,
+      approvalId: approvalReceipt.approvalId,
+      approvalKey: request.approvalKey,
+    }),
+  });
+  const authorization = authorizeComputerAppMutation({
+    action,
+    policy,
+    epoch: entry.epoch,
+  });
+  if (!authorization.allowed) {
+    return {
+      ok: false,
+      resultsText: `The native UI action stopped before durable handler entry: ${authorization.blockers
+        .map((blocker) => blocker.code)
+        .join(', ') || 'authorization unavailable'}. Re-observe and issue a new tool call. No app action was attempted.`,
+    };
+  }
+
+  const dispatched = await dispatchDurableComputerAppMutation({
+    action,
+    authorization,
+    approvalId: approvalReceipt.approvalId,
+    context,
+    normalizedArgs: prepared.dispatchArgs,
+    handler: async (sealedArgs) => dispatchGenericNativeUiBridgeMutation(
+      prepared.tool,
+      sealedArgs,
+    ),
+  });
+  if (!dispatched.ok) {
+    const result = {
+      ok: false,
+      resultsText: dispatched.priorState === 'verified'
+        ? 'This exact native UI call is already durably verified and was not executed again.'
+        : dispatched.priorState === 'failed'
+          ? 'This exact native UI call is already durably recorded as failed and was not executed again. Re-observe and issue a new tool call if recovery is appropriate.'
+          : dispatched.outcomeUnknown
+            ? 'The native UI action reached the durable dispatch boundary, but its outcome is unknown and it must not be replayed automatically. Inspect the app before deciding on a new action.'
+            : 'The native UI action stopped before app-handler entry because its durable claim could not be safely completed. Re-observe and issue a new tool call.',
+    } as OpenSwanToolExecutionResultMap[GenericNativeUiMutationTool];
+    return dispatched.dispatchReceipt
+      ? attachComputerAppMutationMetadata<GenericNativeUiMutationTool>(
+          result,
+          dispatched.dispatchReceipt,
+        )
+      : result;
+  }
+
+  // These legacy bridge endpoints acknowledge dispatch but do not return a
+  // machine-checkable after-state. Seal outcome_unknown (never automatic
+  // replay) while reporting the acknowledged input truthfully.
+  const durableStateSealed = await finishDurableAgentAction(
+    dispatched.lease,
+    'outcome_unknown',
+    {
+      surface: action.surface,
+      risk: action.risk,
+      approvalId: approvalReceipt.approvalId,
+      observationEpochId: action.observationEpochId,
+      verificationKind: action.verification.kind,
+      evidenceCount: 0,
+      completionVerified: false,
+      outcomeUnknown: true,
+      source: 'openswan_tool_runtime',
+    },
+  );
+  const result = {
+    ok: false,
+    resultsText: `${dispatched.value.resultsText} The bridge acknowledged dispatch, but completion is incomplete because no independent after-state proof was returned. The outcome is unknown and this exact call is replay-blocked.${durableStateSealed ? '' : ' Durable finalization acknowledgement was unavailable, so do not submit it again.'}`,
+    completionVerified: false,
+    outcomeUnknown: true,
+  } as OpenSwanToolExecutionResultMap[GenericNativeUiMutationTool];
+  return attachComputerAppMutationMetadata<GenericNativeUiMutationTool>(
+    result,
+    dispatched.dispatchReceipt,
+  );
+}
+
 export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
   tool: T,
   args: OpenSwanToolExecutionArgs[T],
   context: OpenSwanRuntimeToolContext,
-): Promise<OpenSwanToolExecutionResultMap[T]> {
+): Promise<OpenSwanRuntimeToolResultWithMetadata<T>> {
+  if (
+    tool === 'browser.click_role'
+    && ['checkbox', 'switch', 'radio', 'combobox', 'listbox', 'option'].includes(
+      String((args as OpenSwanToolExecutionArgs['browser.click_role'])?.role || '').trim().toLowerCase(),
+    )
+  ) {
+    const role = String((args as OpenSwanToolExecutionArgs['browser.click_role'])?.role || '').trim().toLowerCase();
+    return {
+      ok: false,
+      resultsText: ['checkbox', 'switch', 'radio'].includes(role)
+        ? 'browser.click_role refuses checkbox, switch, and radio targets. Use browser.set_toggle with one exact target and an explicit desiredState.'
+        : 'browser.click_role refuses combobox, listbox, and option targets. Use browser.select_option with one exact native select and option instead.',
+    } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  const initialDispatchPolicy = getOpenSwanToolPolicy(tool, context.activePluginIds);
+  const incomingArgs = (args || {}) as Record<string, unknown>;
+  const sealedMutationArgs = (
+    initialDispatchPolicy.mutatesState
+    || initialDispatchPolicy.approvalMode === 'ask'
+  )
+    ? sealOpenSwanRuntimeMutationArgs(tool, incomingArgs)
+    : incomingArgs;
+  if (!sealedMutationArgs) {
+    return {
+      ok: false,
+      resultsText: `${tool} stopped before approval because its exact mutation arguments could not be cloned and sealed. Nothing was run.`,
+    } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  const runtimeArgs = sealedMutationArgs as OpenSwanToolExecutionArgs[T];
   // QW1 defense-in-depth: HARD constraint/floor backstop runs FIRST, before the
   // approval gate — a user-forbidden or unconfirmed floored (pay/delete/login/
   // grant) action never dispatches from the runtime chokepoint even if an
   // upstream gate was missed.
-  const constraintGate = await maybeBlockToolByConstraint(tool, (args || {}) as Record<string, unknown>, context);
-  if (constraintGate) {
+  const constraintGate = await maybeBlockToolByConstraint(
+    tool,
+    runtimeArgs as Record<string, unknown>,
+    context,
+  );
+  const floorApprovalReceipt = constraintGate?.status === 'authorized'
+    ? constraintGate.receipt
+    : null;
+  if (constraintGate && constraintGate.status !== 'authorized') {
     const approvalRequest = constraintGate.status === 'pending'
       ? { id: constraintGate.approvalId, required: true, status: constraintGate.status }
       : undefined;
@@ -6399,8 +10183,66 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
       ...(approvalRequest ? { approvalRequest } : {}),
     } as unknown as OpenSwanToolExecutionResultMap[T];
   }
-  const approvalGate = await maybeRequestToolApproval(tool, (args || {}) as Record<string, unknown>, context);
-  if (approvalGate) {
+  if (tool === 'desktop.open_path') {
+    const guardedResult = await executeGuardedNativeOpenPath(
+      runtimeArgs as OpenSwanToolExecutionArgs['desktop.open_path'],
+      context,
+    );
+    return guardedResult as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  if (tool === 'desktop.click_element') {
+    const guardedResult = await executeGuardedNativeSemanticPress(
+      runtimeArgs as OpenSwanToolExecutionArgs['desktop.click_element'],
+      context,
+    );
+    return guardedResult as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  let preparedBrowserFill: PreparedGuardedBrowserFill | null = null;
+  let preparedBrowserToggle: PreparedGuardedBrowserToggle | null = null;
+  let preparedBrowserSelect: PreparedGuardedBrowserSelect | null = null;
+  let preparedGenericNativeUi: PreparedGenericNativeUiMutation | null = null;
+  let approvalArgs = runtimeArgs as Record<string, unknown>;
+  if (isGenericNativeUiMutationTool(tool)) {
+    const prepared = await prepareGuardedGenericNativeUiMutation(
+      tool,
+      runtimeArgs as OpenSwanToolExecutionArgs[GenericNativeUiMutationTool],
+      context,
+    );
+    if (!prepared.ok) {
+      return prepared.result as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    preparedGenericNativeUi = prepared.prepared;
+    approvalArgs = preparedGenericNativeUi.approvalArgs;
+  }
+  if (tool === 'browser.fill_field') {
+    const prepared = await prepareGuardedBrowserFill(runtimeArgs, context);
+    if (!prepared.ok) {
+      return prepared.result as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    preparedBrowserFill = prepared.prepared;
+    // Approval binds the canonical args plus bridge-issued stable target
+    // identity collected before the approval lookup/request. A navigation,
+    // reload, tab change, or bridge restart therefore requires a new approval.
+    approvalArgs = preparedBrowserFill.approvalArgs as unknown as Record<string, unknown>;
+  }
+  if (tool === 'browser.set_toggle') {
+    const prepared = await prepareGuardedBrowserToggle(runtimeArgs, context);
+    if (!prepared.ok) {
+      return prepared.result as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    preparedBrowserToggle = prepared.prepared;
+    approvalArgs = preparedBrowserToggle.approvalArgs as unknown as Record<string, unknown>;
+  }
+  if (tool === 'browser.select_option') {
+    const prepared = await prepareGuardedBrowserSelect(runtimeArgs, context);
+    if (!prepared.ok) {
+      return prepared.result as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    preparedBrowserSelect = prepared.prepared;
+    approvalArgs = preparedBrowserSelect.approvalArgs as unknown as Record<string, unknown>;
+  }
+  const approvalGate = await maybeRequestToolApproval(tool, approvalArgs, context);
+  if (approvalGate.kind === 'blocked') {
     const approvalRequest = approvalGate.status === 'pending'
       ? { id: approvalGate.approvalId, required: true, status: approvalGate.status }
       : undefined;
@@ -6419,9 +10261,135 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
     } as unknown as OpenSwanToolExecutionResultMap[T];
   }
 
-  const result = await dispatchOpenSwanRuntimeTool(tool, args, context);
+  const approvalReceipt = approvalGate.kind === 'allowed'
+    ? approvalGate.receipt
+    : floorApprovalReceipt;
+  if (tool === 'desktop.launch_app' || tool === 'desktop.focus_app') {
+    if (!approvalReceipt || !hasExactOpenSwanRuntimeCallIdentity(tool, context)) {
+      return {
+        ok: false,
+        resultsText: `${tool} stopped before app observation because no genuine exact-call approval receipt and provider tool-call identity were available. No app action was attempted.`,
+        completionVerified: false,
+        outcomeUnknown: false,
+      } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    const guardedResult = await executeGuardedNativeAppActivation(
+      tool,
+      runtimeArgs as OpenSwanToolExecutionArgs['desktop.launch_app'] | OpenSwanToolExecutionArgs['desktop.focus_app'],
+    );
+    return attachOpenSwanApprovalReceiptMetadata(
+      tool,
+      guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
+      approvalReceipt,
+      context,
+    );
+  }
+  if (isGenericNativeUiMutationTool(tool)) {
+    if (!preparedGenericNativeUi || !approvalReceipt) {
+      return {
+        ok: false,
+        resultsText: 'The native UI action stopped before handler entry because no genuine exact-call approval receipt was available. Re-observe the frontmost app and issue a new tool call. No app action was attempted.',
+      } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    const guardedResult = await executeGuardedGenericNativeUiMutation(
+      preparedGenericNativeUi,
+      approvalReceipt,
+      context,
+    );
+    return attachOpenSwanApprovalReceiptMetadata(
+      tool,
+      guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
+      approvalReceipt,
+      context,
+    );
+  }
+  if (tool === 'browser.fill_field') {
+    if (!preparedBrowserFill || !approvalReceipt) {
+      return {
+        ok: false,
+        resultsText: 'Browser fill stopped before handler entry because no genuine exact-call approval receipt was available. No field was changed.',
+      } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    const guardedResult = await executeGuardedBrowserFill(
+      preparedBrowserFill,
+      approvalReceipt,
+      context,
+    );
+    maybeInvalidateContextSnapshotAfterTool(tool, guardedResult, context.circleId);
+    return attachOpenSwanApprovalReceiptMetadata(
+      tool,
+      guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
+      approvalReceipt,
+      context,
+    );
+  }
+  if (tool === 'browser.set_toggle') {
+    if (!preparedBrowserToggle || !approvalReceipt) {
+      return {
+        ok: false,
+        resultsText: 'Browser toggle stopped before handler entry because no genuine exact-call approval receipt was available. No control was changed.',
+      } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    const guardedResult = await executeGuardedBrowserToggle(
+      preparedBrowserToggle,
+      approvalReceipt,
+      context,
+    );
+    maybeInvalidateContextSnapshotAfterTool(tool, guardedResult, context.circleId);
+    return attachOpenSwanApprovalReceiptMetadata(
+      tool,
+      guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
+      approvalReceipt,
+      context,
+    );
+  }
+  if (tool === 'browser.select_option') {
+    if (!preparedBrowserSelect || !approvalReceipt) {
+      return {
+        ok: false,
+        resultsText: 'Browser option selection stopped before handler entry because no genuine exact-call approval receipt was available. No selection was changed.',
+      } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    const guardedResult = await executeGuardedBrowserSelect(
+      preparedBrowserSelect,
+      approvalReceipt,
+      context,
+    );
+    maybeInvalidateContextSnapshotAfterTool(tool, guardedResult, context.circleId);
+    return attachOpenSwanApprovalReceiptMetadata(
+      tool,
+      guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
+      approvalReceipt,
+      context,
+    );
+  }
+  const dispatchPolicy = getOpenSwanToolPolicy(tool, context.activePluginIds);
+  if (
+    dispatchPolicy.mutatesState
+    && dispatchPolicy.approvalMode === 'ask'
+    && (
+      !approvalReceipt
+      || approvalReceipt.toolName !== tool
+      || approvalReceipt.userId !== context.userId
+      || approvalReceipt.circleId !== context.circleId
+      || approvalReceipt.runId !== context.runId
+      || approvalReceipt.toolUseId !== context.toolUseId
+      || approvalReceipt.iteration !== context.iteration
+    )
+  ) {
+    return {
+      ok: false,
+      resultsText: `${tool} stopped at the raw mutation dispatcher because no exact, atomically consumed approval receipt was available. Nothing was run.`,
+    } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  const result = await dispatchOpenSwanRuntimeTool(
+    tool,
+    runtimeArgs,
+    context,
+    approvalReceipt,
+  );
   maybeInvalidateContextSnapshotAfterTool(tool, result, context.circleId);
-  return result;
+  return attachOpenSwanApprovalReceiptMetadata(tool, result, approvalReceipt, context);
 }
 
 /**
@@ -6512,6 +10480,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
   tool: T,
   args: OpenSwanToolExecutionArgs[T],
   context: OpenSwanRuntimeToolContext,
+  approvalReceipt: OpenSwanRuntimeApprovalReceipt | null,
 ): Promise<OpenSwanToolExecutionResultMap[T]> {
   switch (tool) {
     case 'search_memories': {
@@ -6566,7 +10535,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const overflow = Math.max(0, text.length - charCap);
         return {
           ok: true,
-          resultsText: `Browser DOM snapshot for ${r.data.title || r.data.url} (${r.data.nodeCount} nodes):\n${fenceUntrustedObservationText(text.slice(0, charCap))}${overflow > 0 ? `\n${truncationMarker(overflow)}` : ''}`,
+          resultsText: [
+            `Browser DOM snapshot for ${r.data.title || r.data.url} (${r.data.nodeCount} nodes):`,
+            `Fresh identity for read-only target evidence: expectedBrowserProcessId=${r.data.browserProcessId}; expectedBrowserContextId=${r.data.browserContextId}; expectedPageId=${r.data.pageId}; expectedUrl=${r.data.url}`,
+            fenceUntrustedObservationText(text.slice(0, charCap)),
+            overflow > 0 ? truncationMarker(overflow) : '',
+          ].filter(Boolean).join('\n'),
         } as any;
       } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
@@ -6638,9 +10612,40 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `No browser bot verification detected on ${r.data.title || r.data.url || 'current page'}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
+    case 'browser.locator_actionability': {
+      try {
+        const { locatorActionability } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.locator_actionability'];
+        const r = await locatorActionability(a);
+        if (!r.ok || !r.data) {
+          return browserToolFailureResult(r, 'Browser target actionability inspection failed.') as any;
+        }
+        const evidence = r.data;
+        return {
+          ok: true,
+          resultsText: [
+            'Browser locator actionability (read-only bounded evidence):',
+            `actionable=${evidence.actionable ? 'yes' : 'no'}; unique=yes; attached=${evidence.attached ? 'yes' : 'no'}; visible=${evidence.visible ? 'yes' : 'no'}; stable=${evidence.stable ? 'yes' : 'no'} (${evidence.stableWindowMs}ms); enabled=${evidence.enabled ? 'yes' : 'no'}`,
+            `editable=${evidence.editableRelevant ? (evidence.editable ? 'yes' : 'no') : 'not-applicable'}; inViewport=${evidence.inViewport ? 'yes' : 'no'}; receivesEvents=${evidence.receivesEvents ? 'yes' : 'no'}; obscured=${evidence.obscured ? 'yes' : 'no'}`,
+            `identity process=${evidence.browserProcessId}; context=${evidence.browserContextId}; page=${evidence.pageId}; origin=${evidence.currentUrlOrigin}; urlMatchesExpected=yes; evidence=${evidence.evidenceId}; mutationAuthorization=no`,
+          ].join('\n'),
+        } as any;
+      } catch (e: any) {
+        return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any;
+      }
+    }
     case 'browser.click_role': {
       try {
         const a = args as OpenSwanToolExecutionArgs['browser.click_role'];
+        const role = String(a.role || '').trim().toLowerCase();
+        if (['checkbox', 'switch', 'radio', 'combobox', 'listbox', 'option'].includes(role)) {
+          return {
+            ok: false,
+            resultsText: ['checkbox', 'switch', 'radio'].includes(role)
+              ? 'browser.click_role refuses checkbox, switch, and radio targets. Use browser.set_toggle with an explicit desiredState.'
+              : 'browser.click_role refuses combobox, listbox, and option targets. Use browser.select_option with one exact native select and option.',
+          } as any;
+        }
         const gate = detectAutomationVerificationGate([a.role, a.name, a.selector]);
         if (gate) {
           return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
@@ -6651,6 +10656,11 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `Clicked browser ${a.role}${a.name ? ` "${a.name}"` : a.selector ? ` selector ${a.selector}` : ''}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
+    case 'browser.set_toggle':
+      return {
+        ok: false,
+        resultsText: 'browser.set_toggle is available only through the sealed runtime approval and proof gateway.',
+      } as any;
     case 'browser.fill_field': {
       try {
         const a = args as OpenSwanToolExecutionArgs['browser.fill_field'];
@@ -6768,17 +10778,10 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.select_option': {
-      try {
-        const a = args as OpenSwanToolExecutionArgs['browser.select_option'];
-        const gate = detectAutomationVerificationGate([a.role, a.name, a.selector, a.value]);
-        if (gate) {
-          return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
-        }
-        const { selectOption } = await import('./browserBridge');
-        const r = await selectOption({ ...a, role: a.role || 'combobox' });
-        if (!r.ok) return browserToolFailureResult(r, 'Browser select failed.') as any;
-        return { ok: true, resultsText: `Selected browser option "${a.value}"${a.name ? ` in "${a.name}"` : a.selector ? ` in ${a.selector}` : ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
+      return {
+        ok: false,
+        resultsText: 'browser.select_option is available only through the sealed runtime approval and exact-option proof gateway.',
+      } as any;
     }
     case 'browser.upload_file': {
       try {
@@ -7914,6 +11917,9 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             runId: context.runId || null,
             toolName,
             toolArgs: a as Record<string, unknown>,
+            approvalReceipt: toolName === 'custom_api.request'
+              ? buildOpenSwanEdgeApprovalReceipt(toolName, approvalReceipt, context)
+              : undefined,
             integrationId: a.integrationId,
             apiName: a.apiName,
             toolNamespace: a.toolNamespace,
@@ -7925,7 +11931,10 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           },
         });
         if (error) {
-          return { ok: false, resultsText: `Custom API proxy failed: ${error.message}` } as any;
+          return {
+            ok: false,
+            resultsText: 'Custom API proxy was unavailable or returned a redacted failure. No uncertain action was replayed.',
+          } as any;
         }
         const response = data && typeof data === 'object' ? data as Record<string, any> : {};
         // Record fail-visible integration health (W4) so a later integrations.list
@@ -7943,13 +11952,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           recordIntegrationOutcomeNow(healthKey, { verdict: outcome.verdict, status: outcome.status });
         }
         if (response.ok !== true) {
-          const message = String(response.message || response.error || response.statusText || 'Custom API request failed.');
           const statusText = response.status ? `HTTP ${response.status}` : 'blocked';
           return {
             ok: false,
             status: typeof response.status === 'number' ? response.status : undefined,
             approvalVerified: response.approvalVerified === true,
-            resultsText: `Custom API ${statusText}: ${message}`,
+            resultsText: `Custom API ${statusText}: the proxy returned a redacted failure. Review the run receipt before retrying; no automatic replay occurred.`,
           } as any;
         }
         return {
@@ -7958,8 +11966,11 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           approvalVerified: response.approvalVerified === true,
           resultsText: formatCustomApiProxyResult(toolName, response),
         } as any;
-      } catch (e: any) {
-        return { ok: false, resultsText: `Custom API request failed: ${e.message || String(e)}` } as any;
+      } catch {
+        return {
+          ok: false,
+          resultsText: 'Custom API request failed inside the redacted runtime boundary. No uncertain action was replayed.',
+        } as any;
       }
     }
     case 'integration.compose_action': {
@@ -8043,30 +12054,27 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           return { ok: false, resultsText: validated.error } as any;
         }
         const v = validated.value;
-        // Build the provider payload client-side too, so a payload is always
-        // present even if the edge rebuilds it. The edge is the source of truth
-        // for the actual send (it re-scrubs from messageArgs).
-        const payload = buildMessagingPayload(v.provider, {
-          title: v.title,
-          body: v.body,
-          linkUrl: v.linkUrl,
-          fields: v.fields,
-        });
         const { data, error } = await supabase.functions.invoke('messaging-notify', {
           body: {
             circleId: context.circleId,
             runId: context.runId || null,
             provider: v.provider,
-            // Pass the EXACT original args as toolArgs so the edge's approval
-            // key equals the one maybeRequestToolApproval stored for this call.
+            // The edge recomputes the exact v2 digest from these ephemeral args
+            // and matches it to the consumed, redacted runtime receipt.
             toolName: 'messaging.notify',
             toolArgs: rawArgs,
-            messageArgs: { title: v.title, body: v.body, linkUrl: v.linkUrl, fields: v.fields },
-            payload,
+            approvalReceipt: buildOpenSwanEdgeApprovalReceipt(
+              'messaging.notify',
+              approvalReceipt,
+              context,
+            ),
           },
         });
         if (error) {
-          return { ok: false, resultsText: `Messaging notify failed: ${error.message}` } as any;
+          return {
+            ok: false,
+            resultsText: 'Messaging notify was unavailable or returned a redacted failure. No uncertain post was replayed.',
+          } as any;
         }
         const response = data && typeof data === 'object' ? data as Record<string, any> : {};
         const providerLabel = response.integration?.label || v.provider;
@@ -8089,13 +12097,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
               resultsText: String(response.hint || `No connected ${v.provider} channel. Connect ${v.provider} in Marketplace and paste an incoming webhook URL, then try again.`),
             } as any;
           }
-          const detail = String(response.providerMessage || response.message || response.error || response.statusText || 'Message was not posted.');
           const statusText = response.status ? `HTTP ${response.status}` : 'blocked';
           return {
             ok: false,
             status: typeof response.status === 'number' ? response.status : undefined,
             approvalVerified: response.approvalVerified === true,
-            resultsText: `${describeMessagingNotify(rawArgs)} — failed (${statusText}): ${detail}`,
+            resultsText: `${describeMessagingNotify(rawArgs)} — failed (${statusText}) inside the redacted edge boundary. Review the run receipt before retrying; no automatic replay occurred.`,
           } as any;
         }
         const postOutcome = buildIntegrationActionOutcome({
@@ -8112,8 +12119,11 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           approvalVerified: response.approvalVerified === true,
           resultsText: `${postOutcome.summary}. ${describeMessagingNotify(rawArgs)}.`,
         } as any;
-      } catch (e: any) {
-        return { ok: false, resultsText: `Messaging notify failed: ${e.message || String(e)}` } as any;
+      } catch {
+        return {
+          ok: false,
+          resultsText: 'Messaging notify failed inside the redacted runtime boundary. No uncertain post was replayed.',
+        } as any;
       }
     }
     case 'office.list_agents': {
@@ -8273,14 +12283,19 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const prompt = policy.prompt;
         const policySummary = formatAgentAppCapabilityBuildoutPolicySummary(policy);
 
-        // Provider-agnostic: route the buildout to whichever connected coding
-        // agent is available (Codex, Claude Code, Gemini, Cursor) instead of
-        // hard-failing when Codex isn't connected.
+        // Route only to providers whose bridge exposes the bounded, strict
+        // APP_CAPABILITY_* result contract that the recovery loop can poll.
+        // Codex and Claude Code currently satisfy that contract. Gemini and
+        // Cursor remain valid general delegation targets, but selecting them
+        // here would strand the buildout in `requested` because their session
+        // summaries do not yet expose a trustworthy capability-result field.
         const { dispatchConnectedAgentTask } = await import('./connectedAgentDispatch');
         const dispatch = await dispatchConnectedAgentTask({
           prompt,
           sessionName: 'App Capability Buildout',
           sessionId: a.sessionId,
+          providerOrder: ['codex', 'claude-code'],
+          allowedProviders: ['codex', 'claude-code'],
           launchIfMissing: a.launchIfMissing,
           circleId: context.circleId,
           userId: context.userId,
@@ -8780,14 +12795,39 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       try {
         const { requestRunApproval } = await import('./agentRunSystem');
         const a = args as any;
+        const approvalDigest = await buildOpenSwanToolApprovalDigest(
+          'approvals.request',
+          {
+            runId: a.runId,
+            approvalKind: a.approvalKind,
+            title: a.title,
+            description: a.description,
+            payload: a.payload || {},
+            timeoutSeconds: a.timeoutSeconds,
+          },
+        );
+        const safePayload = buildOpenSwanApprovalAuditPayload({
+          toolName: 'approvals.request',
+          approvalDigest,
+          policyFamily: 'manual_approval',
+          approvalMode: 'ask',
+          mutatesState: false,
+          externalSideEffect: false,
+        });
+        if (!safePayload) {
+          return {
+            ok: false,
+            resultsText: 'Failed to create a SHA-256-bound, secret-safe approval request. Nothing was persisted.',
+          } as any;
+        }
         const approval = await requestRunApproval({
           runId: a.runId,
           circleId: context.circleId,
           approvalKind: a.approvalKind,
-          title: a.title,
-          description: a.description,
+          title: `OpenSwan manual approval: ${String(a.approvalKind || 'tool_use').slice(0, 40)}`,
+          description: 'Review one exact SHA-256-bound action. Raw commands, paths, values, URLs, and credentials are not stored in this approval row.',
           requestedBy: context.userId,
-          payload: a.payload || {},
+          payload: safePayload,
           timeoutSeconds: typeof a.timeoutSeconds === 'number' ? a.timeoutSeconds : undefined,
         });
         if (!approval) return { ok: false, resultsText: 'Failed to request approval.' } as any;
@@ -8831,52 +12871,27 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     }
     // ── Desktop automation (Claude Code bridge) ─────────────────────────
     case 'desktop.launch_app': {
-      try {
-        const { launchApp, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline. Start it with `node scripts/claude-bridge.js` and pair once from the UC app.' } as any;
-        }
-        const r = await launchApp(String((args as any).appName || ''));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Launched ${(r.data?.appName) || 'app'}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: 'desktop.launch_app is available only through the runtime approval and fresh native-app proof gateway.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      } as any;
     }
     case 'desktop.focus_app': {
-      try {
-        const { focusApp, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        }
-        const r = await focusApp(String((args as any).appName || ''));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Focused ${(r.data?.appName) || 'app'}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: 'desktop.focus_app is available only through the runtime approval and fresh native-app proof gateway.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      } as any;
     }
-    case 'desktop.type_text': {
-      try {
-        const { typeText, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        }
-        const r = await typeText(String((args as any).text || ''));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Typed ${r.data?.chars ?? 0} chars into focused app.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
+    case 'desktop.type_text':
     case 'desktop.paste_text': {
-      try {
-        const { pasteText, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        }
-        const a = args as any;
-        const r = await pasteText(String(a.text || ''), {
-          appName: a.appName ? String(a.appName) : undefined,
-          restoreClipboard: a.restoreClipboard !== false,
-        });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Pasted ${r.data?.chars ?? 0} chars${r.data?.appName ? ` into ${r.data.appName}` : ''}${r.data?.restoredClipboard ? ' and restored the previous clipboard.' : '.'}` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: `${tool} is sealed behind the generic native UI observation, exact-approval binding, one-shot handler-entry recheck, and durable dispatch gateway. The raw desktop bridge path cannot dispatch it.`,
+      } as any;
     }
     case 'desktop.run_applescript': {
       try {
@@ -8907,31 +12922,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `Saved ${r.data?.outputPath || 'image'} (${r.data?.format || ''}, ${r.data?.bytes ?? 0} bytes).` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
-    case 'desktop.press_keys': {
-      try {
-        const { pressKeys, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        }
-        const r = await pressKeys(String((args as any).combo || ''));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Pressed ${r.data?.combo || ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
+    case 'desktop.press_keys':
     case 'desktop.menu_click': {
-      try {
-        const { clickMenu, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        }
-        const a = args as any;
-        const r = await clickMenu({
-          appName: a.appName ? String(a.appName) : undefined,
-          menuPath: Array.isArray(a.menuPath) ? a.menuPath.map(String) : [],
-        });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Clicked menu ${(r.data?.menuPath || []).join(' > ')}${r.data?.appName ? ` in ${r.data.appName}` : ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: `${tool} is sealed behind the generic native UI observation, exact-approval binding, one-shot handler-entry recheck, and durable dispatch gateway. The raw desktop bridge path cannot dispatch it.`,
+      } as any;
     }
     case 'desktop.list_running_apps': {
       try {
@@ -9238,69 +13234,16 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `Window action "${r.data?.action || a.action}" completed${r.data?.appName ? ` for ${r.data.appName}` : ''}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
-    case 'desktop.mouse_move': {
-      try {
-        const { mouseMove, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const a = args as any;
-        const r = await mouseMove(Number(a.x), Number(a.y));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Moved mouse to (${r.data?.x}, ${r.data?.y}).` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
-    case 'desktop.mouse_click': {
-      try {
-        const { mouseClick, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const a = args as any;
-        const r = await mouseClick({ x: Number(a.x), y: Number(a.y), button: a.button === 'right' ? 'right' : 'left', count: typeof a.count === 'number' ? a.count : undefined });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `${r.data?.button || 'left'} click x${r.data?.count || 1} at (${r.data?.x}, ${r.data?.y}).` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
-    case 'desktop.mouse_down': {
-      try {
-        const { mouseDown, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const a = args as any;
-        const r = await mouseDown({ x: Number(a.x), y: Number(a.y), button: a.button === 'right' ? 'right' : 'left' });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Held ${r.data?.button || 'left'} mouse down at (${r.data?.x}, ${r.data?.y}).` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
-    case 'desktop.mouse_up': {
-      try {
-        const { mouseUp, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const a = args as any;
-        const hasCoords = typeof a.x === 'number' && typeof a.y === 'number';
-        const r = await mouseUp({
-          x: hasCoords ? Number(a.x) : undefined,
-          y: hasCoords ? Number(a.y) : undefined,
-          button: a.button === 'right' ? 'right' : 'left',
-        });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Released ${r.data?.button || 'left'} mouse${r.data?.x != null && r.data?.y != null ? ` at (${r.data.x}, ${r.data.y})` : ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
-    case 'desktop.mouse_drag': {
-      try {
-        const { mouseDrag, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const a = args as any;
-        const r = await mouseDrag({ fromX: Number(a.fromX), fromY: Number(a.fromY), toX: Number(a.toX), toY: Number(a.toY), durationMs: typeof a.durationMs === 'number' ? a.durationMs : undefined });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Dragged mouse from (${r.data?.fromX}, ${r.data?.fromY}) to (${r.data?.toX}, ${r.data?.toY}) over ${r.data?.durationMs || 0}ms.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
+    case 'desktop.mouse_move':
+    case 'desktop.mouse_click':
+    case 'desktop.mouse_down':
+    case 'desktop.mouse_up':
+    case 'desktop.mouse_drag':
     case 'desktop.mouse_scroll': {
-      try {
-        const { mouseScroll, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const r = await mouseScroll(args as any);
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Scrolled mouse deltaX=${r.data?.deltaX ?? 0}, deltaY=${r.data?.deltaY ?? 0}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: `${tool} is sealed behind the generic native UI observation, live screen-bounds proof, exact-approval binding, one-shot handler-entry recheck, and durable dispatch gateway. The raw desktop bridge path cannot dispatch it.`,
+      } as any;
     }
     case 'desktop.wait_for_app': {
       try {
@@ -9349,27 +13292,18 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'desktop.open_path': {
-      try {
-        const { openPath, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        }
-        const r = await openPath(String((args as any).path || ''));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Opened ${r.data?.path}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: 'desktop.open_path is sealed behind the authenticated stat, approval, durable dispatch, and fresh frontmost-app proof gateway. The raw desktop bridge path cannot dispatch it.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      } as any;
     }
     case 'desktop.click_at': {
-      try {
-        const { clickAt, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) {
-          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        }
-        const a = args as any;
-        const r = await clickAt(Number(a.x), Number(a.y));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Clicked at (${r.data?.x}, ${r.data?.y}) via ${r.data?.via}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: 'desktop.click_at is sealed behind the generic native UI observation, live screen-bounds proof, exact-approval binding, one-shot handler-entry recheck, and durable dispatch gateway. The raw desktop bridge path cannot dispatch it.',
+      } as any;
     }
     case 'desktop.screen_size': {
       try {
@@ -10322,24 +14256,16 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'desktop.click_element': {
-      try {
-        const { clickElement, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const a = args as any;
-        const r = await clickElement({ pid: Number(a.pid || 0), path: String(a.path || '') });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Clicked accessibility element ${String(a.path || '')} via ${r.data?.method || 'unknown'}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: 'desktop.click_element is sealed behind the observe-first native semantic-action gateway and cannot dispatch through the raw desktop bridge path.',
+      } as any;
     }
     case 'desktop.set_element_value': {
-      try {
-        const { setElementValue, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const a = args as any;
-        const r = await setElementValue({ pid: Number(a.pid || 0), path: String(a.path || ''), text: String(a.text || '') });
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        return { ok: true, resultsText: `Set accessibility element ${String(a.path || '')} via ${r.data?.method || 'unknown'} (${r.data?.chars || 0} chars).` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: 'desktop.set_element_value is sealed behind the generic native UI observation, exact app/PID/window approval binding, one-shot handler-entry recheck, and durable dispatch gateway. The raw desktop bridge path cannot dispatch it.',
+      } as any;
     }
     // ── Memory Save ─────────────────────────────────────────────────────
     case 'save_memory': {

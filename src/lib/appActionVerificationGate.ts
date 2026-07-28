@@ -30,7 +30,7 @@
 // new state. Read/observation tools (read_a11y_tree, screenshot, dom_snapshot,
 // window_state, list_running_apps, file_stat, file_search, verification_state)
 // are intentionally absent — they ARE the observation, not a mutation.
-const MUTATING_APP_ACTION_RE = /\b(?:click_element|set_element_value|menu_click|type_text|paste_text|press_keys|click_at|mouse_click|mouse_down|mouse_up|mouse_drag|mouse_scroll|launch_app|focus_app|open_url|open_path|click_role|fill_field|fill_credential_field|press_key)\b/i;
+const MUTATING_APP_ACTION_RE = /\b(?:click_element|set_element_value|menu_click|type_text|paste_text|press_keys|click_at|mouse_click|mouse_down|mouse_up|mouse_drag|mouse_scroll|launch_app|focus_app|open_url|open_path|click_role|set_toggle|fill_field|fill_credential_field|press_key)\b/i;
 
 const OBSERVE_HINT = 'desktop.read_a11y_tree / desktop.screenshot (or browser.dom_snapshot / browser.screenshot)';
 

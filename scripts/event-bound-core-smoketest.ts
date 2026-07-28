@@ -1,7 +1,9 @@
 /**
  * event-bound-core-smoketest — the PURE agent_run_events payload bounder
  * (src/lib/eventBoundCore.ts). Load-bearing behavior exercised here:
- *   boundEventPayload — normal payloads round-trip unchanged; cyclic → '[cyclic]'
+ *   boundEventPayload — non-tool payloads round-trip unchanged, tool inputs
+ *   and arbitrary tool-result bodies become value-free schema summaries,
+ *   allowlisted receipt metadata survives, cyclic → '[cyclic]'
  *   (no throw, no infinite loop); huge strings clipped; deep nesting → '[max-depth]';
  *   wide arrays/objects capped with omission markers; every kept string
  *   secret-masked; TOTAL serialized size always <= the ceiling; opts clamp;
@@ -19,9 +21,13 @@
 import {
   EVENT_PAYLOAD_MAX_CHARS,
   EVENT_MAX_DEPTH,
+  PERSISTED_TOOL_FAILURE_TEXT,
   boundEventPayload,
   boundToolCallsAggregate,
+  summarizeToolInputForPersistence,
+  summarizeToolResultForPersistence,
 } from '../src/lib/eventBoundCore';
+import { readFileSync } from 'node:fs';
 
 let passes = 0;
 let failures = 0;
@@ -62,6 +68,9 @@ function main(): void {
   assertEq(EVENT_MAX_DEPTH, 6, '(1) EVENT_MAX_DEPTH');
   assertEq(typeof boundEventPayload, 'function', '(1) boundEventPayload is a fn');
   assertEq(typeof boundToolCallsAggregate, 'function', '(1) boundToolCallsAggregate is a fn');
+  assertEq(typeof summarizeToolInputForPersistence, 'function', '(1) tool input summary is a fn');
+  assertEq(typeof summarizeToolResultForPersistence, 'function', '(1) tool result summary is a fn');
+  assertEq(typeof PERSISTED_TOOL_FAILURE_TEXT, 'string', '(1) persisted failure copy is fixed');
 
   const normal = {
     iteration: 3,
@@ -69,10 +78,299 @@ function main(): void {
     tool_use_id: 'toolu_abc',
     input: { path: '/src/x.ts', limit: 100, deep: false },
   };
-  const rNormal = boundEventPayload('tool_call_start', normal);
-  assertEq(JSON.stringify(rNormal), JSON.stringify(normal), '(1) normal telemetry payload round-trips byte-identical');
+  const rNormal = boundEventPayload('tool_call_start', normal) as any;
+  assertEq(rNormal.iteration, normal.iteration, '(1) tool telemetry preserves iteration');
+  assertEq(rNormal.tool, normal.tool, '(1) tool telemetry preserves tool name');
+  assertEq(rNormal.tool_use_id, normal.tool_use_id, '(1) tool telemetry preserves provider call identity');
+  assertEq(rNormal.input?.redacted, true, '(1) tool telemetry replaces raw input with a redacted summary');
+  assertEq(rNormal.input?.fieldCount, 3, '(1) tool telemetry summary preserves field count');
+  assertEq(rNormal.input?.schemaVersion, 2, '(1) tool telemetry uses key-free summary schema v2');
+  assert(
+    rNormal.input?.fieldKinds?.some((field: any) => field.kind === 'string' && field.count === 1),
+    '(1) tool telemetry summary preserves aggregate value kinds',
+  );
+  assert(!JSON.stringify(rNormal).includes('/src/x.ts'), '(1) tool telemetry stores no raw path value');
   const usage = { iteration: 5, stop_reason: 'end_turn', usage: null };
   assertEq(JSON.stringify(boundEventPayload('turn_end', usage)), JSON.stringify(usage), '(1) turn_end payload unchanged');
+
+  const shortSecret = 'hunter2';
+  const privateInput = {
+    password: shortSecret,
+    text: 'private message text',
+    path: '/Users/example/private.txt',
+    nested: { token: 'short-token', body: 'nested private body' },
+  };
+  const privateSummary = summarizeToolInputForPersistence('desktop.type_text', privateInput);
+  const privateSerialized = JSON.stringify(privateSummary);
+  assertEq(privateSummary.redacted, true, '(1) direct tool input summary is explicitly redacted');
+  assert(!privateSerialized.includes(shortSecret), '(1) short password is absent from direct summary');
+  assert(!privateSerialized.includes('private message text'), '(1) arbitrary typed text is absent from direct summary');
+  assert(!privateSerialized.includes('/Users/example/private.txt'), '(1) local path is absent from direct summary');
+  assert(!privateSerialized.includes('short-token'), '(1) nested secret value is absent from direct summary');
+  assert(!privateSerialized.includes('nested private body'), '(1) nested arbitrary content is absent from direct summary');
+  assert(
+    (privateSummary.fieldKinds as any[])?.some((field) => field.kind === 'redacted' && field.count === 1),
+    '(1) sensitive field presence is retained only as an aggregate count',
+  );
+  const dynamicKeySummary = summarizeToolInputForPersistence('custom.dynamic_map', {
+    customer_ssn_123456789: 'value',
+    private_filename_psych_notes: 'value',
+    hunter2: 'value',
+  });
+  const dynamicKeySerialized = JSON.stringify(dynamicKeySummary);
+  assert(!dynamicKeySerialized.includes('customer_ssn_123456789'), '(1) dynamic customer keys never persist');
+  assert(!dynamicKeySerialized.includes('private_filename_psych_notes'), '(1) dynamic filename keys never persist');
+  assert(!dynamicKeySerialized.includes('hunter2'), '(1) arbitrary dynamic keys never persist');
+
+  const privateResult = summarizeToolResultForPersistence(
+    '/Users/private/tool',
+    {
+      status: '/Users/private/result.log',
+      message: 'hunter2',
+      nested: { content: 'private content' },
+    },
+    '/Users/private/status',
+  );
+  const privateResultSerialized = JSON.stringify(privateResult);
+  assertEq(privateResult.tool, 'unknown', '(1) invalid tool-name values collapse to unknown');
+  assertEq(privateResult.status, 'unknown', '(1) invalid result status values collapse to unknown');
+  assert(!privateResultSerialized.includes('hunter2'), '(1) successful result summary omits arbitrary values');
+  assert(!privateResultSerialized.includes('/Users/private'), '(1) successful result summary omits paths');
+  assert(!privateResultSerialized.includes('private content'), '(1) successful result summary omits nested content');
+
+  const sessionRuntimeSource = readFileSync('src/lib/openswanSessionRuntime.ts', 'utf8');
+  const subagentSource = readFileSync('src/lib/subagentRegistry.ts', 'utf8');
+  const compatibilityLoopSource = readFileSync('src/lib/openswanRuntimeToolLoop.ts', 'utf8');
+  const persistenceSource = readFileSync('src/lib/agentRunPersistence.ts', 'utf8');
+  const ledgerPersistenceSource = readFileSync('src/lib/agentRunLedgerPersistence.ts', 'utf8');
+  for (const [label, source] of [
+    ['OpenSwan session', sessionRuntimeSource],
+    ['subagent registry', subagentSource],
+    ['compatibility loop', compatibilityLoopSource],
+  ] as const) {
+    assert(
+      source.includes('summarizeToolInputForPersistence'),
+      `(1) ${label} uses value-free persisted tool-input summaries`,
+    );
+    assert(
+      source.includes('summarizeToolResultForPersistence'),
+      `(1) ${label} uses value-free persisted tool-result summaries`,
+    );
+    assert(
+      source.includes('sanitizeToolActionMetadataForPersistence'),
+      `(1) ${label} projects hidden action metadata before persistence`,
+    );
+  }
+  assert(
+    !sessionRuntimeSource.includes('input: event.input,'),
+    '(1) OpenSwan direct run-event telemetry never persists raw provider tool input',
+  );
+  assert(
+    !sessionRuntimeSource.includes("input_preview: typeof evt.input === 'string'"),
+    '(1) OpenSwan action previews never serialize raw tool input',
+  );
+  assert(
+    !subagentSource.includes("input_preview: typeof evt.input === 'string'"),
+    '(1) delegated action previews never serialize raw tool input',
+  );
+  assert(
+    subagentSource.includes('body: PERSISTED_TOOL_FAILURE_TEXT')
+      && !subagentSource.includes("body: err.message"),
+    '(1) delegated run failure steps persist fixed redacted copy',
+  );
+  assert(
+    !compatibilityLoopSource.includes('input_preview: JSON.stringify(event.input'),
+    '(1) compatibility action previews never serialize raw tool input',
+  );
+  assert(
+    !sessionRuntimeSource.includes('evt.result.slice')
+      && !compatibilityLoopSource.includes('event.result.slice'),
+    '(1) successful action previews never persist raw result strings',
+  );
+  assert(
+    sessionRuntimeSource.includes('tool_loop_failed_text_fallback')
+      && !sessionRuntimeSource.includes('toolErr?.message')
+      && !sessionRuntimeSource.includes('turnErr instanceof Error ? turnErr.message'),
+    '(1) session fallback telemetry omits raw tool/turn exceptions',
+  );
+  assert(
+    persistenceSource.includes("error_code: 'agent_run_failed'")
+      && !persistenceSource.includes('stack: err instanceof Error ? err.stack'),
+    '(1) terminal run errors persist only a stable redacted code',
+  );
+  assert(
+    !ledgerPersistenceSource.includes('raw_error: action.output_preview')
+      && !ledgerPersistenceSource.includes('raw_error: event.summary')
+      && ledgerPersistenceSource.includes('raw_error: PERSISTED_TOOL_FAILURE_TEXT'),
+    '(1) ledger failure rows never persist raw tool/provider error text',
+  );
+
+  const failedToolPayload = boundEventPayload('tool_call_result', {
+    iteration: 4,
+    tool: 'desktop.launch_app',
+    ok: false,
+    error: '401 token=short-secret /Users/example/private.log',
+  }) as any;
+  const failedToolSerialized = JSON.stringify(failedToolPayload);
+  assertEq(failedToolPayload.error, PERSISTED_TOOL_FAILURE_TEXT, '(1) failed tool telemetry uses fixed redacted copy');
+  assertEq(failedToolPayload.error_code, 'tool_call_failed', '(1) failed tool telemetry carries a stable recovery code');
+  assertEq(failedToolPayload.redacted, true, '(1) failed tool telemetry declares redaction');
+  assert(!failedToolSerialized.includes('short-secret'), '(1) failed tool telemetry omits provider exception details');
+  assert(!failedToolSerialized.includes('/Users/example/private.log'), '(1) failed tool telemetry omits local paths');
+
+  const privateSuccessValue = 'private-success-body-hunter2';
+  const privateSuccessPath = '/Users/example/private/customer-payroll.txt';
+  const dynamicPrivateKey = 'customer_ssn_123_45_6789';
+  const receiptFingerprint = `args-v2:sha256:${'b'.repeat(64)}`;
+  const successfulToolPayload = boundEventPayload('tool_call_result', {
+    iteration: 5,
+    tool: 'desktop.click',
+    tool_use_id: 'toolu_private_success',
+    ok: true,
+    duration_ms: 19,
+    dispatched: true,
+    result: {
+      body: privateSuccessValue,
+      path: privateSuccessPath,
+      nested: {
+        token: 'short-private-token',
+        content: 'nested-private-content',
+      },
+    },
+    output: privateSuccessValue,
+    data: { privatePath: privateSuccessPath },
+    content: 'private-content-field',
+    body: 'private-body-field',
+    path: privateSuccessPath,
+    [dynamicPrivateKey]: 'dynamic-private-value',
+    metadata: {
+      computerActionReceipt: {
+        schemaVersion: 1,
+        tool: 'desktop.click',
+        surface: 'desktop',
+        toolArgsFingerprint: receiptFingerprint,
+        handlerEnteredAt: '2026-07-27T12:00:00.000Z',
+        outcome: 'succeeded',
+        status: 'pending',
+        mutates: true,
+        approvalRequired: true,
+        iteration: 5,
+        durationMs: 19,
+        body: privateSuccessValue,
+        path: privateSuccessPath,
+        [dynamicPrivateKey]: 'must-not-survive',
+      },
+      verificationReceipt: {
+        verdict: 'verified',
+        committed: true,
+        commitRef: 'abcdef1234567',
+        editedFileCount: 2,
+        checkCount: 1,
+        passedCheckCount: 1,
+        failedCheckCount: 0,
+        editedFiles: [privateSuccessPath],
+      },
+      computerAppVerificationReceipt: {
+        schemaVersion: true,
+        status: true,
+        checkedAt: privateSuccessPath,
+        canComplete: 'yes',
+        evidenceCount: false,
+        blockerCount: '0',
+      },
+      unrecognizedReceipt: {
+        body: privateSuccessValue,
+        path: privateSuccessPath,
+      },
+    },
+  }) as any;
+  const successfulToolSerialized = JSON.stringify(successfulToolPayload);
+  assertEq(successfulToolPayload.iteration, 5, '(1) successful tool summary preserves iteration');
+  assertEq(successfulToolPayload.tool, 'desktop.click', '(1) successful tool summary preserves safe tool identity');
+  assertEq(successfulToolPayload.tool_use_id, 'toolu_private_success', '(1) successful tool summary preserves safe call identity');
+  assertEq(successfulToolPayload.ok, true, '(1) successful tool summary preserves success state');
+  assertEq(successfulToolPayload.dispatched, true, '(1) successful tool summary preserves dispatch truth');
+  assertEq(successfulToolPayload.result_summary?.schemaVersion, 2, '(1) raw success payload becomes schema-v2 summary');
+  assertEq(successfulToolPayload.result_summary?.redacted, true, '(1) success result summary declares redaction');
+  assertEq(successfulToolPayload.result_summary?.status, 'success', '(1) success result summary keeps only controlled status');
+  assertEq(successfulToolPayload.result_summary?.resultKind, 'object', '(1) success result summary keeps only structural kind');
+  assertEq(successfulToolPayload.result_summary?.fieldCount, 7, '(1) all future/raw success fields contribute only a count');
+  for (const rawField of ['result', 'output', 'data', 'content', 'body', 'path', dynamicPrivateKey]) {
+    assert(
+      !Object.prototype.hasOwnProperty.call(successfulToolPayload, rawField),
+      `(1) raw success field is absent: ${rawField}`,
+    );
+  }
+  for (const rawValue of [
+    privateSuccessValue,
+    privateSuccessPath,
+    'short-private-token',
+    'nested-private-content',
+    'private-content-field',
+    'private-body-field',
+    'dynamic-private-value',
+    dynamicPrivateKey,
+  ]) {
+    assert(
+      !successfulToolSerialized.includes(rawValue),
+      `(1) raw success value/key is absent: ${rawValue}`,
+    );
+  }
+  assertEq(
+    successfulToolPayload.metadata?.computerActionReceipt?.toolArgsFingerprint,
+    receiptFingerprint,
+    '(1) allowlisted action fingerprint survives the final event boundary',
+  );
+  assertEq(
+    successfulToolPayload.metadata?.computerActionReceipt?.outcome,
+    'succeeded',
+    '(1) allowlisted action outcome survives the final event boundary',
+  );
+  assertEq(
+    successfulToolPayload.metadata?.computerActionReceipt?.status,
+    'pending',
+    '(1) allowlisted pending receipt status survives the final event boundary',
+  );
+  assertEq(
+    successfulToolPayload.metadata?.verificationReceipt?.commitRef,
+    'abcdef1234567',
+    '(1) allowlisted verification commit survives the final event boundary',
+  );
+  assert(
+    !Object.prototype.hasOwnProperty.call(
+      successfulToolPayload.metadata?.computerActionReceipt || {},
+      'body',
+    ),
+    '(1) free-form receipt body is removed',
+  );
+  assert(
+    !Object.prototype.hasOwnProperty.call(successfulToolPayload.metadata || {}, 'unrecognizedReceipt'),
+    '(1) unrecognized metadata namespace is removed',
+  );
+  assert(
+    !Object.prototype.hasOwnProperty.call(
+      successfulToolPayload.metadata || {},
+      'computerAppVerificationReceipt',
+    ),
+    '(1) receipt fields with the wrong primitive types cannot survive',
+  );
+
+  const cyclicSuccessResult: any = { label: privateSuccessValue };
+  cyclicSuccessResult.self = cyclicSuccessResult;
+  const boundedCyclicSuccess = boundEventPayload('tool_call_result', {
+    tool: 'desktop.read_a11y_tree',
+    ok: true,
+    result: cyclicSuccessResult,
+  }) as any;
+  assertEq(
+    boundedCyclicSuccess.result_summary?.resultKind,
+    'object',
+    '(1) cyclic successful results reduce to structure without traversal',
+  );
+  assert(
+    !JSON.stringify(boundedCyclicSuccess).includes(privateSuccessValue),
+    '(1) cyclic successful result values never reach durable output',
+  );
 
   // ─── (2) cyclic input → '[cyclic]', no throw, serialized bounded ────────────
   const selfObj: any = { name: 'root' };

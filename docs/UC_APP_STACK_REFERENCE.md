@@ -1,7 +1,7 @@
 # The Underground Circle - App Stack Reference
 
 > Current app map for agents before writing code.
-> Last reviewed: 2026-07-17
+> Last reviewed: 2026-07-27
 
 `AGENTS.md` and `docs/AGENTS_ROADMAP.md` own agent workflow and runtime
 ownership. This file maps the app.
@@ -52,10 +52,11 @@ ownership. This file maps the app.
 | Chat computer request route | `src/lib/chatComputerRequestRouter.ts` |
 | Chat computer request UX | `src/lib/chatComputerRequestUx.ts` |
 | Computer task evidence contract | `src/lib/computerTaskEvidenceContract.ts`, `src/lib/computerTaskEvidenceRecovery.ts` |
-| Chat plan execution | `src/lib/runChatAutomationPlan.ts` |
+| Chat plan execution | `src/lib/runChatAutomationPlan.ts`, `src/lib/chatAgentContextPack.ts` |
 | SwanBot client path | `src/lib/swanbot.ts`, `src/lib/swanbotClientToolDispatcher.ts` |
 | SwanBot edge path | `supabase/functions/swanbot-ai/index.ts` |
-| SwanBot v2 typed loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts` |
+| SwanBot v2 typed loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts`, `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `src/lib/swanbotV2BatchRuntime.ts`, `src/lib/swanbotV2BatchPolicy.ts`, `src/lib/swanbotV2ClientLoopFlag.ts` |
+| SwanBot continuation checkpoint privacy | `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/migrations/20260726_swanbot_continuation_privacy.sql`, `docs/RUN_THIS_SQL.sql` §29 |
 | SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts`, `scripts/swanbot-openswan-readiness-report.ts` |
 | Typed agent loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan session runtime | `src/lib/openswanSessionRuntime.ts` |
@@ -66,14 +67,22 @@ ownership. This file maps the app.
 | Cross-provider routing | `src/lib/crossProviderRouter.ts`, `src/lib/universalInvoke.ts` |
 | Billing preference | `src/lib/billingPriority.ts` |
 | BlackSwan routing | `src/lib/blackswanRouting.ts` |
-| Computer task runtime | `src/lib/computerTaskRuntime.ts` |
-| Browser computer use | `src/lib/computerUse.ts`, `supabase/functions/computer-use-agent/index.ts` |
+| Computer task runtime and truthful outcomes | `src/lib/computerTaskRuntime.ts`, `src/lib/computerTaskOutcome.ts` |
+| Browser computer use and typed mutation handoffs | `src/lib/computerUseAgent.ts`, `src/lib/useComputerUseTask.ts`, `src/lib/useComputerUseQueue.ts`, `supabase/functions/computer-use-agent/index.ts`, `src/lib/computerUse.ts`; cloud starts require a bounded v1 policy, while legacy recorder mutations remain value-stripped typed OpenSwan handoffs |
 | Agent Monitor | `src/lib/agentMonitorState.ts`, `src/components/agent-monitor/AgentMonitorHost.tsx`, `src/components/ComputerUseLiveCard.tsx` |
 | Computer capability expansion | `src/lib/computerCapabilityRegistry.ts`, `src/lib/computerCapabilityExpansion.ts` |
 | Local desktop awareness | `src/lib/localComputerAwarenessIntent.ts` |
 | WordPress/Dealer Inspire admin automation | `src/lib/wpAdmin.ts`, `src/lib/computerAppTaskStrategy.ts`, `src/lib/chatComputerRequestRouter.ts`, `src/lib/userTaskPipelines.ts`, `src/lib/wordpressAdminSourceIntelligence.ts` |
 | Office bridge readiness | `src/lib/bridgeHealthDiag.ts`, `src/lib/officeBridgeReadiness.ts`, `src/screens/circles/tabs/office/Whiteboard.tsx` |
+| Desktop bridge authentication boundary | `scripts/desktop-bridge-security.js`, `scripts/claude-bridge.js`, `scripts/codex-bridge.js`, `scripts/cursor-bridge.js`, `scripts/gemini-bridge.js`, `src/lib/bridgeAuth.ts`, `src/lib/desktopBridge.ts` |
 | App automation control surfaces | `src/lib/appAutomationControlSurfaces.ts` |
+| App observation epochs and mutation receipts | `src/lib/computerAppGrounding.ts` |
+| Guarded browser mutation canaries | typed `browser.fill_field`, `browser.set_toggle`, and `browser.select_option` in `src/lib/openswanToolRuntime.ts`, `src/lib/browserBridge.ts`, `scripts/browser-bridge.js` |
+| Narrow native semantic-press canary | typed `desktop.click_element` in `src/lib/openswanToolRuntime.ts`, `src/lib/computerAppAdapter.ts`, `src/lib/desktopBridge.ts` |
+| Durable exact action-call ledger | `src/lib/agentActionCalls.ts`, `supabase/migrations/20260726_agent_action_calls.sql`, `docs/RUN_THIS_SQL.sql` §26 |
+| Exact single-use approval authority | `src/lib/chatApprovalGate.ts`, `src/lib/openswanToolApprovals.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/swanbot.ts`, `supabase/migrations/20260726_database_authority_guards.sql` / `docs/RUN_THIS_SQL.sql` §28 |
+| Scheduled external-action authority | `src/lib/scheduledActions.ts`, `supabase/functions/scheduled-action-runner/index.ts`, `supabase/migrations/20260726_scheduled_action_mutation_guard.sql` |
+| Office durable command authority | `src/lib/officeTerminal.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `supabase/migrations/20260726_database_authority_guards.sql` / `docs/RUN_THIS_SQL.sql` §28 |
 | Engineering/CAD operation runbooks | `src/lib/engineeringCadOperationRunbooks.ts` |
 | Adobe app profiles | `src/lib/adobeCreativeCloudApps.ts` |
 | Design object manifest | `src/lib/designAppObjectManifest.ts` |
@@ -120,6 +129,7 @@ supabase/
   functions/
     _shared/
       swanbot-continuation.ts
+      swanbot-continuation-crypto.ts
     swanbot-ai/
     swanbot-v2-ai/
     llm-proxy/
@@ -145,7 +155,14 @@ docs/
    builds one hidden best-path route with the selected pipeline, app strategy,
    surface order, approval reason, recommended tools, fallback pipelines, and
    completion proof before dispatch.
-4. Stable plan kinds go through `runChatAutomationPlan`.
+4. Stable plan kinds go through `runChatAutomationPlan`, which attaches both
+   the user-facing Plan Card preview and one redacted, immutable
+   `chatAgentContextPack`. The same pack is available to approval/transport
+   handlers before execution. The real app/file/hybrid computer handler and
+   both connected app-capability retry paths pass it through `AgentRunRequest`;
+   `agentRuntime` injects the bounded `compactPrompt` into model context and
+   saves a bounded projection in run metadata. Other non-computer
+   connected-agent entrypoints are still being migrated.
 5. Plain agent/model turns route through SwanBot/OpenSwan runtime paths.
 6. Provider choice is resolved by selected model, connected providers,
    `serviceProfileSouls`, and cross-provider routing helpers.
@@ -210,6 +227,16 @@ integration provider registry aligned.
   its contract before falling back to generic recovery.
 - Native browser execution uses `supabase/functions/computer-use-agent/index.ts`
   and Browserbase.
+- The older `src/lib/computerUse.ts` lane cannot safely execute any of its six
+  mutations because it does not carry genuine authenticated user/circle/
+  persisted-run identity, provider `toolUseId`/iteration, durable action
+  claim, and exact OpenSwan approval. Planned `navigate`, `click`, `fill`,
+  `select`, `press_key`, and `scroll` actions therefore fail visibly as
+  value-stripped structured non-executable typed OpenSwan handoffs before
+  screenshot, Stagehand, MCP, or bridge mutation I/O. They must continue as
+  fresh Chat/OpenSwan typed calls and never fall back to a legacy/raw path.
+  Saved-plan replay preflights the whole plan and permits only the reviewed
+  observation allowlist.
 - Local app/browser/file awareness uses bridge tools and
   `src/lib/localComputerAwarenessIntent.ts`.
 - `src/lib/computerCapabilityExpansion.ts` is the pure planner for deciding
@@ -236,6 +263,395 @@ integration provider registry aligned.
   `src/lib/computerAppPreflight.ts`, grounded by
   `src/lib/computerAppGrounding.ts`, and given app-specific prompt contracts by
   helpers such as `src/lib/designAppAutomation.ts`.
+- `src/lib/computerAppGrounding.ts` also owns the pure hard-contract foundation
+  beneath those prompts: a short-lived observation epoch identifies the exact
+  app/process/window/document or browser session/tab and exposes an explicit
+  revocation function that callers must invoke after focus, navigation, modal,
+  or mutation changes. A proposed mutation carries the matching target, a
+  deterministic secret-safe fingerprint derived from canonical normalized
+  arguments, runtime-issued exact-call approval policy, idempotency key,
+  verification predicate, and safe outcome-unknown policy. Unknown mutators
+  default to reviewable medium risk, duplicate/capacity in-process
+  authorization fails closed, and a single-use sealed wrapper rechecks
+  observation/policy expiry before recording actual handler entry. Completion
+  requires a distinct newer runtime-issued after-state with complete target
+  identity.
+- Typed OpenSwan `browser.fill_field` is one of three integrated browser consumers
+  of that contract. `agentExecutionCore` first reserves a bounded provider-issued
+  `toolUseId` for the full run and gives the handler the exact tool/id/iteration
+  context. The runtime then canonicalizes one exact non-secret draft, takes a
+  fresh DOM observation, then asks `POST /browser/fill_target` to resolve and
+  inspect exactly one field before the approval lookup. The browser bridge
+  issues opaque process/context/live-document identity (`pageId` rotates on
+  navigation or reload), binds the current URL, and returns a short-lived,
+  single-use `targetId` backed by that exact ElementHandle plus an HMAC
+  privacy-safe v2 `targetFingerprint` over inspected semantics and keyed
+  document/node/frame structure. The id is dispatch-only and is excluded from
+  durable approval, receipts, and model output. Approval stores SHA-256
+  bindings for the exact normalized intent and page URL plus bounded safe
+  origin/length and opaque process/context/page/fingerprint metadata; raw draft
+  text, URL path/query/fragment, locator, and task context are not persisted.
+  It still requires a genuine receipt backed by an `agent_run_approvals` row.
+- The source-default SwanBot v2 edge schema for `browser.fill_field` is now
+  lockstep with that sealed contract: one exact accessible `name` xor CSS
+  `selector`, optional `textbox`/`searchbox` role, bounded non-secret `text`,
+  optional bounded task context/exactness/timeout, and no submit field or
+  unrecognized properties. It cannot model a credential fill, dropdown
+  selection, or submit side effect through the generic text-fill shape. The
+  edge schema, app normalizer/sealed runtime, browser client request builders,
+  and bridge target/perform endpoints independently enforce exactly one locator
+  (`name` XOR `selector`); both-present and neither-present inputs fail before
+  observation or dispatch.
+- Guarded handler entry consumes the target id once. It rechecks the live
+  identity, target fingerprint, direct attributes, associated label text,
+  `aria-labelledby`/`aria-describedby` text, and containing-form context for
+  credential/recovery/seed/private-key/payment/CVV signals before filling.
+  App-side and bridge-side classifiers also reject obvious secret-bearing draft
+  values without reflecting them. The mutation action SHA-256-binds the exact
+  transient dispatch args; the sealed dispatcher recomputes that digest from a
+  deep-frozen clone, invalidates the bound observation epoch, and passes only
+  those sealed args to the handler. It reads the same handle first and skips
+  `fill()` when the value already equals the approved draft, avoiding duplicate
+  input/change handlers after an outcome-unknown attempt. Whether skipped or
+  filled, proof uses one renderer capture of value, semantics, document, node,
+  and frame state bracketed by stable browser identity checks. Proof contains
+  only the approved fingerprint, `valueMatches`, bounded
+  actual/expected lengths, a `mutationPerformed` boolean, and observation
+  identity. The filled or observed value and ephemeral id are never echoed. Navigation, page/context close,
+  bridge restart, capability expiry/replay, detachment, or target drift fails
+  closed and requires a fresh target observation.
+- Typed OpenSwan `browser.set_toggle` is the second sealed consumer, and the
+  SwanBot v2 client catalog routes it through the same exact tool/id/iteration
+  gateway. It accepts only one checkbox, switch, or radio plus an explicit
+  boolean state. Model normalization and bridge inspection both require
+  positive presentation/accessibility semantics; account, authentication,
+  security, privacy, sharing, subscription, notification, network, payment,
+  destructive, publishing, messaging, and unknown settings fail closed. Its
+  approval card stores a bounded secret-redacted target summary plus digests
+  and opaque identity, never the raw selector, task context, full URL, or
+  one-shot target id. The bridge verifies the exact same handle before replay,
+  clicks it at most once only when state differs, and proves the final boolean
+  without submitting or navigating. Generic `browser.click_role` now inspects
+  its resolved handle and refuses native/ARIA state controls, their labels, and
+  descendants even when caller role or selector semantics are spoofed.
+- Typed OpenSwan `browser.select_option` is the third sealed browser consumer.
+  It accepts one native single-value `<select>` and one exact option value or
+  label, takes a fresh dedicated target/option observation, binds the same
+  exact provider-call and approval identity, selects at most once, and verifies
+  the exact option on the same live handle without submitting or navigating.
+  Multi-select, ambiguous options, protected/unknown settings, stale handles,
+  and target drift fail closed. Generic click refuses select/combobox/listbox/
+  option targets, labels, and descendants, so raw click cannot bypass this
+  dedicated stateful lane.
+- `src/lib/agentActionCalls.ts` and the §26 `agent_action_calls` RPC contract
+  provide the durable cross-process boundary for fill, toggle, select, the
+  native semantic press, `desktop.open_path`, manual automation file writes,
+  and approval-gated external edge mutations. An authenticated claim binds
+  user, circle, persisted
+  run, tool, provider `toolUseId`, action id, argument fingerprint,
+  authorization-contract fingerprint, and idempotency key; no raw args,
+  selector, URL, text content, or unrestricted metadata is stored. The exact
+  transition is `claimed → dispatched → verified / outcome_unknown`; `failed`
+  is valid only while the row is still undispatched `claimed`.
+- Handler entry atomically records `dispatched`, and duplicate or terminal
+  calls never invoke the bridge handler. Concurrent claimers may receive the
+  same token, so a worker that loses before its callback leaves the claim
+  unfinalized/reclaimable instead of overwriting another worker's dispatched
+  action. Once start is confirmed, any error maps only to `outcome_unknown`.
+  Verified fresh proof remains `ok: true` if final database acknowledgement is
+  unavailable, but the runtime warns that the exact call remains replay-blocked.
+  The TypeScript parser independently rejects a forged `failed` row with a
+  non-null `dispatchedAt`.
+- Approval rows remain the durable authorization source. The hidden tool-event
+  receipt replaces the canonical approval key/args with a privacy-safe digest
+  and is stripped from model-visible raw/formatted results. All four guarded
+  canaries emit issued mutation-dispatch and computer-app verification
+  receipts; `agentRunPersistence` stores only their bounded primitive
+  allowlists. SwanBot continuation transport carries only those sanitized
+  subsets outside model content, re-sanitizes them at the edge, and persists
+  correlated client result events on resume.
+- SwanBot v2 and OpenSwan converge in source on this canonical typed runtime.
+  The default edge continuation client merges hard constraints parsed from the
+  raw turn with richer upstream constraints, then runs the executable
+  constraint/always-confirm floor before an optional live exact-call review
+  callback. Missing required approval, rejection, and callback exceptions fail
+  closed before handler entry. When a review callback is present, calls are
+  serialized so concurrent approval prompts cannot reorder user decisions. A
+  non-empty always-confirm floor applies to every non-read browser/desktop call,
+  including bland or opaque keypresses and unknown/future mutations without
+  keyword-bearing arguments.
+- Every browser/desktop mutation currently registered as client-delegated in
+  SwanBot v2 is intercepted before the raw browser/desktop dispatchers and
+  enters `executeOpenSwanRuntimeTool` with the provider name, tool-use id, and
+  iteration. The four guarded canaries retain their sealed action, durable call,
+  and sanitized hidden-receipt contracts. Other current mutations gain the
+  canonical policy/approval chokepoint, but that does not retroactively give
+  them the canaries' proof contract or establish a universal gateway for future
+  tools, direct callers, or new mutation families.
+- Each paused edge turn minimizes and AES-256-GCM seals its exact model/tool
+  snapshot through `_shared/swanbot-continuation-crypto.ts`; the public
+  `agent_runs.metadata.continuation` field is a value-free CAS envelope, not a
+  plaintext snapshot. It exposes only bounded identity/version/nonce,
+  resume/claim state, counters/tool identities/timestamps, an `expiresAt`
+  exactly ten minutes after `pausedAt`, and the authenticated ciphertext
+  envelope. Public `agent_run_events` tool inputs are value-free structural
+  schemas and failures use stable redacted codes/copy; exact arguments/errors
+  remain transient for live approval, dispatch, proof, and model-loop work.
+- Deployments must explicitly set a dedicated
+  `SWANBOT_CONTINUATION_ENCRYPTION_SECRET` and
+  `SWANBOT_CONTINUATION_ENCRYPTION_KEY_VERSION`; never derive or reuse the
+  service-role key or another shared credential. The source `v1` fallback is
+  not a rotation configuration. Without the encryption key, SwanBot withholds
+  all `clientOnly` tools before the model turn and dispatches no local action.
+- Before local execution, a client-generated exact claim compare-and-sets
+  `pending` / `client_pending` to `dispatch_claimed` /
+  `client_dispatching`; only the exact echoed claim may enter a handler. Exact
+  results then compare-and-set that state to `results_claimed` /
+  `client_resuming` before model resume, and the result claim binds every
+  next-pending or terminal write. Only an exact same-claim dispatch retry
+  carrying the already-winning claim is idempotently acknowledged. A competing
+  claim, mixed protocol/state, acknowledgement ambiguity, expired lease, failed
+  claim-bound transition, or post-claim loop error becomes
+  `outcome_unknown` with no reopen or automatic replay. Readiness ignores all
+  three active stop-reason rows: `client_pending`, `client_dispatching`, and
+  `client_resuming`.
+- Terminal success is proof-bound, not prose-bound. A dispatched
+  client-delegated mutation with `ok: false`, missing accepted verification, or
+  outcome-unknown latches across continuation rounds and cannot be converted
+  to completion by model `end_turn`; the edge persists failed/no-replay,
+  suppresses a completed Feed card, and returns a structured non-fallback 409.
+  Fresh terminal compare-and-set results are inspected and exactly reread:
+  late user cancellation wins, while any other ambiguity stops before
+  publication. The client treats `cancelled: true` as a neutral reached-edge
+  terminal regardless of empty/nonempty model text, so STOP cannot fall
+  through to v1 or count against the transport breaker. Other reached-edge
+  empty terminals are also non-fallback. Direct WordPress/workspace mutation
+  handlers stamp value-free receipts immediately before their provider/DB/UI
+  boundary and require concrete returned identity/state for completion;
+  unsupported after-state proof remains outcome-unknown. The immutable
+  `turnRequestId` survives every fresh pending/terminal/cancel/failure metadata
+  update, so lost-response retries collide before another model/Feed run.
+- A fresh modern v2 turn sends one client-generated UUID `turnRequestId` on
+  every transport attempt and the edge inserts it as `agent_runs.id`; a
+  duplicate collides before model/tool work. Legacy/no-identity starts have
+  server writers withheld. Those memory/task/mission/message/room/approval
+  writers also latch before handler entry. If a later provider/runtime failure
+  makes the write ambiguous, v2 persists `server_mutation_outcome_unknown`
+  with `replayAllowed: false` and requires verification before new action.
+  The client recovers that structured non-2xx error before the v1 fallback
+  branch, preventing a completed write from being retried under a new run.
+- Section 29 defines a service-role-only atomic sweep for active unsafe or
+  expired SwanBot continuations. Its named `pg_cron` job runs every three
+  minutes when cron exists and emits a stable NOTICE otherwise. Missing,
+  legacy/plaintext, malformed, state-mismatched, or expired active checkpoints
+  lose the continuation and receive only a value-free
+  `continuationResumeOutcome` with `replayAllowed: false`: `client_pending`
+  becomes `failed_before_dispatch`, while
+  `client_dispatching`/`client_resuming` become `outcome_unknown`. The
+  migration separately performs a one-time terminal/non-active checkpoint
+  scrub. AES-GCM additional authenticated data binds the canonical exact
+  run/user/circle row without exposing those identifiers in the public
+  envelope, so cross-row ciphertext transplantation fails closed. A §29
+  protected-row trigger rejects authenticated INSERT/UPDATE/DELETE attempts
+  against active SwanBot v2 continuations while preserving existing reads,
+  service-role/Postgres maintenance, and only the exact owner STOP transition
+  plus one write-once bounded cancellation-provenance merge.
+- Legacy `computerUse.ts` is now observation-only: all six legacy Computer Use
+  mutation kinds—`navigate`, `click`, `fill`, `select`, `press_key`, and
+  `scroll`—become value-stripped, non-executable typed OpenSwan
+  handoffs before screenshot, Stagehand, MCP, or bridge I/O. Recording replay
+  preflights the complete plan and runs zero steps if any browser/desktop
+  mutation is present; only a reviewed observation allowlist can replay.
+- Hosted Browserbase Computer Use is separately source-hardened as of
+  2026-07-26. `computerUseAgent` carries a bounded schema-v1 execution-policy
+  envelope that the edge validates before provider/session work.
+  Authenticated Chat/queue starts require an interactive envelope;
+  watch/service calls are forced scheduled observation-only, and authenticated
+  legacy callers without the policy receive HTTP 400. All three root Chat
+  starts—automatic browser launch, booking-session continuation, and manual
+  approved launch—preserve router-derived user constraints and the
+  opaque-target/credential/external-side-effect confirmation floors. The
+  single-task and queue hooks acquire synchronous start reservations before
+  imports or credential lookup, count pending reservations against capacity,
+  and invalidate them on cancellation/clear.
+- The cloud edge treats left/right/double click, type, key, and saved-login
+  filling as mutations and treats unknown native actions as blocked mutations.
+  Every current opaque coordinate/focus call requires durable exact-call live
+  confirmation, including when a pre-run grant exists. Approved work requires
+  a fresh pre-action screenshot, one-attempt mutation dispatch, and a fresh
+  post-action screenshot. Missing pre-proof blocks before dispatch; ambiguous
+  post-dispatch state ends `mutation_outcome_unknown` with no replay.
+  Type/key/credential/question inputs are redacted or suppressed across SSE,
+  progress/action traces, model history, guided replay, stuck-solver payloads,
+  usage metadata, and errors.
+- Root Chat's `computerTaskRuntime` no longer calls the deterministic app
+  adapter or bridge open/wait helpers before authenticated `executeAgentRun`.
+  Read-only live observation may remain before the loop, but app/hybrid
+  mutations do not. This removes the pre-agent app-adapter and attachment-open
+  bypasses. Uploaded desktop files remain staged and return a
+  value-free, non-executable `desktop.open_path` handoff without raw path,
+  identity, approval, receipt, or proof. Exact staged context remains only in
+  the authenticated task prompt and is redacted from result,
+  capability-buildout, and action-trace telemetry.
+- Approval authority is exact and one-use across the audited chat surfaces.
+  Chat SHA-binds the complete normalized plan plus user/circle/thread/room and
+  consumes `agent_approvals.applied_at` before one transport dispatch.
+  OpenSwan SHA-binds canonical tool arguments plus authenticated run/provider
+  call identity and atomically stamps one dispatch binding. SwanBot WordPress
+  writes and its generic risk floor use the same schema-v2 digest and claim
+  semantics. Durable/model-visible payloads contain only bounded labels and
+  safe digests, never raw commands, paths, values, credentials, or canonical
+  approval keys.
+- Durable OpenSwan/subagent tool-call telemetry is value-free as well:
+  `eventBoundCore` persists only bounded field/type/shape summaries, collapses
+  unknown result/output/data/content/path fields to a value-free result schema,
+  and permits receipt metadata only through exact namespace/field/type/value
+  allowlists. `agentRunSystem.addStep` independently reapplies the same fresh
+  projection at the final `agent_run_steps` insert boundary for tool input,
+  tool output, tool-bound metadata/title/body, and malformed tool names. The
+  Run History drawer projects each whole tool step to controlled labels and
+  hides legacy raw name/title/body/output fields; non-tool message/plan
+  metadata/title/body remains compatible. Exact arguments/results remain
+  transient for approval, dispatch, proof, and model work; `event-bound-core`
+  guards this in readiness and both release gates.
+- Legacy direct local-file, image-conversion, and diagnostic launch paths
+  return only value-free, non-executable typed-tool handoffs. The executable
+  `desktop.open_path` gateway instead requires a fresh exact stat and path
+  digests, authenticated run/provider call, exact approval, §26 claim/start,
+  one bridge attempt, and a fresh exact frontmost-app proof. Ambiguity seals
+  `outcome_unknown` and cannot replay.
+- `automation-executor` keeps service/scheduled invocations read-only. A manual
+  room-file mutation needs exact fresh single-use authority plus the §26
+  ledger. Every scheduled external action separately needs fresh per-occurrence
+  approval, one durable claim, and one dispatch. Timeout or any post-dispatch
+  error persists `outcome_unknown`; the Pending Actions UI shows a redacted
+  verify-first roadblock with no retry, and recurrence starts without reused
+  authority.
+- Office Realtime payloads are advisory wakeups only. After client
+  authentication/shape checks, §28 `invoke_agent` locks the exact durable
+  message/circle/expected command, verifies membership plus owned
+  target/scope, and returns canonical command/sender/targets/model. Claims are
+  idempotent per message and agent subject, including synthetic `blackswan`;
+  stream/completion writes require the same claimant, membership, live state,
+  bounded payload, CAS, and multi-target completion coverage.
+- Section 28 also validates allowlisted schema-v2 payloads and immutable
+  bindings for protected `chat.*` `agent_approvals` and tool-digest
+  `agent_run_approvals`. Resolution is member-only while pending and stamps the
+  resolver server-side; expiry/one-shot consume is requester-only; protected
+  rows cannot be deleted or converted from legacy v1. Legacy unrelated and
+  scheduled rows remain outside those trigger predicates.
+- Source catalog parity is pinned at **25 server-side + 57 client-delegated =
+  82 total**. `browser.locator_actionability` is a read-only advisory
+  observation for one fresh exact target, not authorization or target binding
+  for a later mutation. The bridge-side `browser.dom_snapshot` walker redacts
+  every editable value before transport; skips hidden, inert, and executable
+  source descendants; canonicalizes bounded roles; and returns only controlled
+  field structure and lengths. Entry/capture/exit identity checks bind the tree
+  and title to one exact process/context/page/URL. The model sees an HTTP(S)
+  origin-only display URL; exact actionability drift checks use a
+  process-scoped HMAC URL identity. HMAC identities rotate on bridge restart,
+  and raw/forged legacy URL identities plus non-HTTP snapshots fail closed. The device-local typed client remains opt-in/default-off; current
+  SwanBot v2 edge source has not been deployed/re-verified, production
+  telemetry is missing, and §26/§29 have not been applied. There is no live
+  proof yet for encrypted resume/key rotation, claim races, three-minute cron
+  expiry, or historical checkpoint scrubbing. Pre-deployment plaintext/legacy
+  continuations fail closed or are scrubbed only after the edge is deployed
+  and §29 is applied. The updated `computer-use-agent` edge is also
+  source-only: it has not been deployed/re-verified. No live Browserbase/DB
+  confirmation integration or live native-app GUI run was performed. Its HTTP
+  400 for authenticated legacy callers without a v1 policy is intentional.
+- Native `desktop.click_element` is a narrow semantic-press canary, not a
+  general desktop click gateway. It observes a fresh indexed accessibility
+  tree, binds exact app/PID/path/role/label/fingerprint identity, proposes one
+  low-consequence target, requires a genuine exact approval, performs one
+  target-bound press, and accepts completion only when a refreshed observation
+  proves that exact target disappeared or changed semantics. Coordinates,
+  ambiguous targets, stale indexes, target drift, consequential actions, and
+  arbitrary desktop mutations remain outside this lane.
+- Native `desktop.launch_app` and `desktop.focus_app` use one proof-bearing
+  helper across the deterministic adapter, typed OpenSwan, and SwanBot v2.
+  Every mutation takes a fresh before/after observation, resolves only an exact
+  installed name or bounded explicit alias, binds a positive PID for running
+  targets, rejects dispatch identity swaps, no-ops when the postcondition
+  already holds, and marks attempted-but-unverified work outcome-unknown with
+  replay disabled. Bridge acknowledgement alone is not completion. This is
+  bounded activation proof, not yet a general sealed native mutation gateway.
+- `/desktop diag` is an authenticated read-only health/pairing/running-app
+  probe. Supplying an app (`/desktop diag <app>`) still performs no launch,
+  focus, open, click, or type mutation; it returns a value-free,
+  non-executable `desktop.launch_app` typed-runtime handoff that requires a
+  fresh authenticated run, provider call identity, exact approval, dispatch
+  receipt, and post-launch focus proof.
+- The sealed browser gateway covers
+  non-submit/non-credential fill, clearly local presentation/accessibility
+  toggle, and one exact option in a native HTML single-value select; the native
+  gateway covers one exact low-consequence semantic press plus fail-closed
+  dispatch protection for 11 generic typing, paste, keys, menu, bounded
+  coordinate/mouse-gesture, and scroll actions. Each guarded call requires an
+  exact freshly observed app name, process, and surface before approval; stable
+  exact-call approval binding; a private one-shot handler-entry recheck; and
+  §26 claim/start before one bridge attempt. Coordinate and mouse actions also
+  require live screen bounds and a visible exact-app window. PID, surface,
+  bounds/window, args, TTL, clone, or replay drift stops before mutation.
+  Acknowledgement-only endpoints return `ok: false`,
+  `completionVerified: false`, and `outcomeUnknown: true`, then seal
+  replay-blocked `outcome_unknown`; they are never reported as verified
+  completion. `desktop.set_element_value` requires `appName` in its schema but
+  stops before approval until a fresh accessibility generation and dotted-path
+  identity can be sealed through handler entry. SwanBot v2 no longer
+  raw-dispatches those browser/desktop mutations in its current client catalog.
+  The separately vault/origin-gated credential tool retains its own
+  compatibility boundary. Submit, upload, browser navigation/close,
+  generalized native after-state verification, future catalog additions, and
+  non-typed callers still need explicit universal-gateway coverage. The
+  separate hosted cloud edge now
+  exact-confirms opaque native clicks/typing/keys, but that one-call screenshot
+  boundary is not the local semantic target/ledger proof contract.
+  Source/contract smokes and app typecheck verify this slice; current edge
+  source is not deployed/re-verified, §29 is not applied, and pre-deployment
+  plaintext/legacy pending continuations do not gain the fail-closed/scrub
+  boundary until those steps. No live browser/native GUI execution or live
+  Postgres contention/race proof was performed. The §26 and §29 migrations are
+  authored and mirrored but have not been applied or verified against a live
+  database, so durable cross-process behavior and checkpoint cleanup are not
+  operational claims.
+- Non-browser task results use `src/lib/computerTaskOutcome.ts`. Only
+  authoritative `completed` outcomes count as app success or produce a
+  completion message; partial, blocked, input/approval, failed, and cancelled
+  states remain explicit in persisted Chat metadata. Successful deterministic
+  app calls without fresh proof remain partial; read/observation results are
+  their own proof. String-only agent responses for verified tasks remain
+  inconclusive until structured tool/proof outcomes reach `agentRuntime`. The
+  same path forwards the
+  live Chat thread, plugin ids, cancellation signal, route constraints, and
+  always-confirm floor through `agentRuntime` into `SwanBotContext`. Those
+  values are consumed by the opt-in typed client canary; the default edge route
+  remains non-cancellable. The path does not promote a plan-level approval into
+  exact tool-call consent.
+- Unfamiliar-app self-healing state records the connected provider. Delayed
+  buildout polling accepts dedicated bounded capability receipts from Codex and
+  Claude Code, requires exact or unique sufficiently long session identity, and
+  converts unsupported Gemini/Cursor result polling into explicit incomplete
+  evidence. Claude's transcript JSONL id is reconciled to its managed launch id
+  only from one unambiguous anchored UC marker; missing or conflicting claims
+  fail closed. `agent.build_app_capability` is therefore hard-limited to
+  Codex/Claude until the other bridges provide the same strict result field.
+- `src/lib/agentRunPersistence.ts` keeps authoritative typed-loop dispatch truth
+  (`true`, `false`, or legacy unknown) and only bounded primitive receipt
+  allowlists for computer action, mutation dispatch, app verification, and
+  generic verification. The guarded browser fill/toggle/select and native
+  semantic-press canaries now produce the mutation-dispatch and
+  app-verification namespaces, but other computer mutation handlers do not;
+  four narrow canaries are not proof that the universal gateway is enforced.
+- Claude, Codex, Cursor, and Gemini bridge servers share the local
+  `scripts/desktop-bridge-security.js` boundary: explicit loopback binding,
+  Host/Origin/source checks, one-time short-lived pairing challenges, and
+  bearer-token validation. The Claude desktop surface additionally enforces
+  exact file grants and a fixed read-only exec-file allowlist that rejects
+  shell-family launchers. Intentional tunnel access additionally requires the
+  exact emitted Host in `UC_BRIDGE_ALLOWED_HOSTS` and the exact browser origin
+  in `UC_BRIDGE_ALLOWED_ORIGINS`; setting only an
+  `EXPO_PUBLIC_*_BRIDGE_URL` does not relax the server boundary.
 - `src/lib/appAutomationControlSurfaces.ts` owns the research-backed
   control-surface ladder for app tasks. Photoshop prefers UXP DOM/modal
   execution, then batchPlay/action descriptors or cloud Photoshop API where
@@ -376,6 +792,19 @@ integration provider registry aligned.
 - Local migrations are append-only in `supabase/migrations/`.
 - Consolidated idempotent agent SQL is in `docs/RUN_THIS_SQL.sql`.
 - Roadmap section 5 owns applied/pending status.
+- `20260726_agent_action_calls.sql` is mirrored as §26 but is **not applied or
+  live-DB verified**. Apply and verify its table/RPC contract before relying on
+  cross-process guarded-action replay prevention.
+- `20260726_scheduled_action_mutation_guard.sql` is mirrored as §27 but is
+  **not applied or live-DB verified**. Apply it before relying on the durable
+  scheduled claim/dispatch/outcome-unknown state machine.
+- `20260726_database_authority_guards.sql` is mirrored as §28 but is **not
+  applied or live-DB verified**. The 146-assertion source/byte-identity guard is not proof of
+  Office RPC concurrency or approval resolve/consume behavior; local
+  Docker/Supabase was unavailable for this review.
+- `20260726_swanbot_continuation_privacy.sql` is mirrored as §29 but is **not
+  applied or live-DB verified**. Source verification does not prove encrypted
+  resume/key rotation, live claim races, cron expiry, or the historical scrub.
 - Use `NOTIFY pgrst, 'reload schema';` after schema changes when relevant.
 
 ## Validation
@@ -387,6 +816,33 @@ npm run smoke:export-traces
 npm run typecheck
 npm run build
 ```
+
+The 2026-07-27 guarded-action slice is source-verified by the focused
+103-assertion `agent-action-calls` ledger smoke, `agent-action-runtime-wiring`,
+read-only `browser-locator-actionability`, browser fill/toggle/select,
+computer-app grounding, `swanbot-v2-batch-policy`,
+`swanbot-v2-continuation`, `swanbot-v2-edge-fill-schema`,
+`computer-use-mutation-handoff`, readiness, and typed-runtime invariant smokes
+plus app typecheck. Locator actionability remains advisory and cannot authorize
+or bind a later mutation. Those checks do not substitute for deploying the current
+edge, applying §26/§29 to Postgres, proving encrypted continuation/key-rotation,
+cron-expiry, continuation/action-call races, or running a live browser/native
+GUI task.
+`openswan-generic-native-ui-runtime`, `browser-dom-snapshot-privacy`, and
+`swanbot-v2-terminal-integrity` each run exactly once in both Chat/SwanBot daily
+and release chains and in `smoke:all`; these are source/contract gates, not live
+database, Browserbase, native-GUI, or deployed-edge proof.
+The 2026-07-26 cloud/root-Chat slice is source-verified by
+`computer-use-cloud-policy`, `chat-computer-request-router`, and
+`computer-task-runtime-context`. The cloud-policy and runtime-context guards
+run exactly once in all Chat/SwanBot daily and release gates, `smoke:all`, and
+canonical readiness. Exact approval, direct-handoff, open-path, automation,
+scheduled-action, Office broadcast, and database-authority guards share that
+same exactly-once gate contract. This does not prove a deployed edge, live
+Browserbase/confirmation-database integration, or live native-app execution.
+It also does not prove §26/§27/§28/§29 application, live Realtime/RLS behavior,
+encrypted resume/key rotation or cron expiry, concurrent claims, external
+provider dispatch, or automation/scheduler edge deployment.
 
 Use focused smoke scripts from `package.json` for runtime changes. Use
 `npm run check:swanbot-chat:release` before bundling a larger

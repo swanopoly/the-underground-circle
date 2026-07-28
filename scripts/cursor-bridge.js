@@ -33,8 +33,14 @@ const {
   safeProjectDir,
   saveManagedTerminalSession,
 } = require('./terminal-launch-utils');
+const {
+  createPairingChallengeStore,
+  isBridgeRequestSourceAllowed,
+  isPairingRequestSourceAllowed,
+} = require('./desktop-bridge-security');
 
-const PORT = 7781;
+const PORT = Math.max(1024, Math.min(65535, Number(process.env.UC_CURSOR_BRIDGE_PORT) || 7781));
+const BRIDGE_BIND_HOST = '127.0.0.1';
 const ACTIVE_THRESHOLD = 300_000;   // 5min → active (Cursor sessions persist longer)
 const IDLE_THRESHOLD = 86_400_000;  // 24h → include sessions from today
 const SCAN_INTERVAL = 5000;
@@ -52,6 +58,7 @@ const CORS = {
 let cachedSessions = [];
 let lastScanTime = '';
 let managedSessions = loadManagedTerminalSessions('cursor');
+const pairingChallenges = createPairingChallengeStore({ ttlMs: 30_000, maxEntries: 64 });
 
 // ── Shared desktop bridge token ─────────────────────────────────────────────
 
@@ -556,18 +563,63 @@ const server = http.createServer(async (req, res) => {
       bridge: 'cursor',
       version: '1.1.0',
       sessions: cachedSessions.length,
-      cursorDir: CURSOR_DIR,
       capabilities: ['sessions', 'launch', 'terminal-send', 'composer-send'],
     });
     return;
   }
 
   if (url === '/pair' && req.method === 'POST') {
-    if (!isAllowedPairOrigin(req)) {
-      writeJson(res, 403, { ok: false, error: 'Pairing origin not allowlisted.' });
+    const sourceCheck = isPairingRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+    if (!sourceCheck.ok) {
+      writeJson(res, 403, {
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Pairing is available only through an allowed loopback bridge request.',
+      });
+      return;
+    }
+    let pairInput;
+    try {
+      pairInput = await readJsonBody(req, 2048);
+    } catch (err) {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'pairing_body_invalid',
+        error: String(err?.message || err || 'Invalid pairing request body.').slice(0, 300),
+      });
+      return;
+    }
+    const pairingChallenge = String(pairInput?.pairingChallenge || '').trim();
+    if (!pairingChallenge) {
+      const issued = pairingChallenges.issue(req.socket.remoteAddress);
+      writeJson(res, 428, {
+        ok: false,
+        code: 'pairing_challenge_required',
+        challenge: issued.challenge,
+        expiresAt: new Date(issued.expiresAt).toISOString(),
+        error: 'Retry pairing once with the short-lived challenge.',
+      });
+      return;
+    }
+    if (!pairingChallenges.consume(pairingChallenge, req.socket.remoteAddress)) {
+      writeJson(res, 403, {
+        ok: false,
+        code: 'pairing_challenge_invalid',
+        error: 'Pairing challenge is invalid, expired, already used, or belongs to another source.',
+      });
       return;
     }
     writeJson(res, 200, { ok: true, token: getOrCreateBridgeToken(), bridge: 'cursor' });
+    return;
+  }
+
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  if (!sourceCheck.ok) {
+    writeJson(res, 403, {
+      ok: false,
+      code: sourceCheck.code,
+      error: 'Bridge access is available only through an allowed loopback or explicitly configured tunnel request.',
+    });
     return;
   }
 
@@ -619,9 +671,9 @@ server.on('error', (err) => {
 
 process.on('uncaughtException', (err) => console.error('[cursor-bridge] Uncaught:', err.message));
 
-server.listen(PORT, () => {
+server.listen(PORT, BRIDGE_BIND_HOST, () => {
   console.log(`\n  Cursor Bridge`);
-  console.log(`  Serving on http://localhost:${PORT}`);
+  console.log(`  Serving on http://${BRIDGE_BIND_HOST}:${PORT} (loopback only)`);
   console.log(`  Scanning ${PROJECTS_DIR}`);
   console.log(`  Found ${cachedSessions.length} session(s)\n`);
   console.log(`  Endpoints:`);

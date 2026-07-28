@@ -3,8 +3,10 @@
  *
  * Captures every client-delegated tool call (desktop.*, browser.*)
  * while a recording session is active. On `stop`, the trace is saved
- * as a named recording in localStorage. `/replay <name>` later reads
- * the trace and re-fires the same calls in order.
+ * as a named recording in localStorage. `/replay <name>` may later repeat
+ * only the explicitly reviewed observation allowlist. A recording containing
+ * any browser/desktop mutation returns a typed OpenSwan runtime handoff and
+ * executes zero steps.
  *
  * Why localStorage (not Supabase yet): recordings are per-device —
  * the bridge + AX grant + browser profile are all on THIS Mac, so
@@ -12,19 +14,10 @@
  * someone else's AX tree which is meaningless. When we eventually
  * ship a cloud-executor path (UC-cloud-future), recordings can sync.
  *
- * Replay strategy per step:
- * - `browser.click_role` / `browser.fill_field` — re-fire verbatim;
- *   role + name is already semantic.
- * - `desktop.set_element_value` — re-fire by semantic target when
- *   recorded from an AX field; fall back to the captured path.
- * - `desktop.click_element` — re-fetch the a11y tree for the
- *   captured app, locate the element by role + label (not path,
- *   because paths shift when the app's tree changes), click it.
- * - `desktop.click_at` — best-effort, fires the same pixel coord
- *   (may break if the screen resolution changed; recorded only as
- *   a fallback).
- * - Everything else (launch_app, type_text, press_keys, open_url,
- *   screenshot, wait_for_app) — re-fire verbatim.
+ * Mutation recordings are useful as planning evidence, but they are never
+ * authority to replay a side effect. A fresh authenticated run must observe
+ * the target, issue a new provider tool-use identity, obtain exact approval,
+ * claim the action durably, dispatch once, and verify fresh after-state.
  */
 
 const STORE_KEY = 'uc_recordings_v1';

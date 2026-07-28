@@ -74,6 +74,7 @@ export const READONLY_CLIENT_TOOLS: ReadonlySet<string> = new Set([
   'desktop.app_reachability',
   // browser reads
   'browser.dom_snapshot',
+  'browser.locator_actionability',
   'browser.verification_state',
   'browser.screenshot',
   // codebase / coordination reads

@@ -32,6 +32,13 @@ import {
   buildAgentRuntimeSubjectPayload,
   type AgentRuntimeSubjectMetadata,
 } from './agentRuntimeSubject';
+import { resolveMemoryLookupIds } from './memoryLookupKeyCore';
+import {
+  deriveAgentTaskTerminalOutcome,
+  type AgentTaskCompletionExpectation,
+  type AgentTaskTerminalOutcome,
+} from './computerTaskOutcome';
+import type { ChatAgentContextPack } from './chatAgentContextPack';
 
 // ─── Unified Types ──────────────────────────────────────────────────────────
 
@@ -83,6 +90,29 @@ export interface AgentRunRequest {
   targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   model?: string;
   connectedProviders?: ConnectedProviderSet | string[];
+  /**
+   * Volatile typed-loop context. Callers should supply only values owned by
+   * their live surface; omitting `toolApprovalGate` deliberately keeps
+   * ask-before and always-confirm tool calls fail-closed.
+   */
+  threadId?: SwanBotContext['threadId'];
+  activePluginIds?: SwanBotContext['activePluginIds'];
+  signal?: SwanBotContext['signal'];
+  toolApprovalGate?: SwanBotContext['toolApprovalGate'];
+  userConstraints?: SwanBotContext['userConstraints'];
+  alwaysConfirmFloor?: SwanBotContext['alwaysConfirmFloor'];
+  /**
+   * Redacted, bounded plan/guardrail/proof handoff built by the Chat
+   * dispatcher. It is injected into the actual model prompt and projected
+   * onto run metadata; it is not merely UI preview data.
+   */
+  agentContextPack?: ChatAgentContextPack;
+  /**
+   * `response` is ordinary chat: receiving a model response completes the
+   * request. `verified_task` is mutation/computer work and fails closed unless
+   * the runtime supplies a structured terminal outcome.
+   */
+  completionExpectation?: AgentTaskCompletionExpectation;
   mode?: 'talk' | 'build' | 'plan' | 'execute' | 'review' | 'research' | 'support' | 'design';
   capabilityProfile?: string;
   context?: {
@@ -108,7 +138,10 @@ function normalizeConnectedProviders(value?: ConnectedProviderSet | string[]): C
 }
 
 export interface AgentRunResult {
+  /** Transport compatibility flag: true means a model response was returned. */
   success: boolean;
+  /** Authoritative task-level terminal outcome. */
+  terminalOutcome: AgentTaskTerminalOutcome;
   response: string;
   runId?: string | null;
   artifacts?: { kind: ArtifactKind; title: string; content?: string; url?: string }[];
@@ -323,6 +356,145 @@ export function detectHandoff(
   return null;
 }
 
+// ─── Run-outcome memory capture ─────────────────────────────────────────────
+
+/**
+ * Distil ONE durable lesson from a finished run, or nothing at all.
+ *
+ * THE GAP THIS CLOSES: `executeAgentRun` is the single entry point for Chat,
+ * Rooms, Feed, Office Terminal AND the Computer-Use / app-automation pipeline,
+ * and it created ZERO memories. The two `recordArchiveDerived…` calls beside
+ * this one SCORE memories the run consumed (a `memory_evaluations` insert plus
+ * an update on an existing row) — they never CREATE one. So "the WP media
+ * uploader needs the Add New click before #wp-media-grid exists" and "the
+ * Photoshop bridge has no exportLayersToWeb" were thrown away every single run.
+ *
+ * SAFETY PROPERTIES, in priority order:
+ *  1. NEVER fails, slows or alters the run. Every caller invokes this as a bare
+ *     `void` with no `await`, the whole body is inside one try/catch, and each
+ *     awaited step is individually recoverable. The function returns `void` so
+ *     nothing downstream can accidentally depend on it. It is invoked AFTER the
+ *     response is already in hand and the run row is already finalized.
+ *  2. Credential-shape refusal on BOTH sides: `runOutcomeMemoryCore` refuses
+ *     credential-shaped content itself, and the write goes through
+ *     `memoryService.saveMemoryWithContext` → `agentRunSystem.saveMemory`,
+ *     which is the single `memory_entries` chokepoint carrying the same
+ *     `detectCredentialMemoryContent` gate. One standard, two layers.
+ *  3. HONEST provenance. `source_run_id` is the real `runId` (uuid-validated —
+ *     the column is a uuid, and a bad value would throw inside a fire-and-
+ *     forget path), and `source_surface` is the run's REAL surface. It
+ *     deliberately does NOT go through `memoryService.saveAgentMemory`, which
+ *     hard-codes `sourceSurface: 'feed_task'` for every caller and drops the
+ *     run id entirely — that path would make a Chat lesson claim it came from a
+ *     Feed task.
+ *  4. Bounded. No raw prompt or raw response is persisted: the core emits a
+ *     clamped intent line plus at most two clamped, referent-bearing sentences.
+ *
+ * The shared quality bar (`memoryConsolidation.isHighQualityMemory`) is applied
+ * here as the final gate rather than reimplemented in the core, so there is
+ * exactly one standard for what a memory is allowed to be.
+ */
+async function captureRunOutcomeMemory(args: {
+  circleId: string;
+  userId: string;
+  agentId?: string | null;
+  agentName?: string | null;
+  input: import('./runOutcomeMemoryCore').RunOutcomeMemoryInput;
+}): Promise<void> {
+  try {
+    const { buildRunOutcomeMemory } = await import('./runOutcomeMemoryCore');
+    const decision = buildRunOutcomeMemory(args.input);
+    if (!decision.capture) return;
+    const { memory } = decision;
+
+    const { isHighQualityMemory } = await import('./memoryConsolidation');
+    if (!isHighQualityMemory({ kind: memory.memoryKind, title: memory.title, content: memory.content })) return;
+
+    const agentId = typeof args.agentId === 'string' && args.agentId.trim() ? args.agentId.trim() : null;
+
+    // Duplicate lessons are the dilution risk this whole feature has to avoid:
+    // a lane that fails the same way every run would otherwise write a
+    // near-identical row every run and crowd out everything else. The core's
+    // fingerprint excludes the clock and the run id precisely so repeats
+    // collide here. Same `.contains('metadata', …)` pattern
+    // `memoryService.upsertAgentMemoryTarget` already uses.
+    try {
+      let query = supabase
+        .from('memory_entries')
+        .select('id')
+        .eq('circle_id', args.circleId)
+        .eq('is_active', true)
+        .contains('metadata', { runOutcomeFingerprint: memory.fingerprint })
+        .limit(1);
+      if (agentId) query = query.eq('agent_id', agentId);
+      else query = query.eq('user_id', args.userId);
+      const { data: existing } = await query;
+      if (existing && existing.length > 0) return;
+    } catch {
+      // A failed dedupe probe must not block the lesson — a rare duplicate is
+      // strictly better than losing the capture.
+    }
+
+    const { saveMemoryWithContext } = await import('./memoryService');
+    await saveMemoryWithContext({
+      // `agent` scope keeps the lesson with the agent that learned it and is
+      // already what `buildMemoryContext` reads back (scopes include 'agent'
+      // whenever an agent id resolves). Without an agent id, `user` scope is
+      // the honest fallback — also read back — rather than a fabricated key.
+      scope: agentId ? 'agent' : 'user',
+      circleId: args.circleId,
+      userId: args.userId,
+      agentId: agentId || undefined,
+      memoryKind: memory.memoryKind,
+      title: memory.title,
+      content: memory.content,
+      sourceRunId: memory.sourceRunId || undefined,
+      sourceSurface: memory.sourceSurface,
+      visibility: 'private',
+      importance: memory.importance,
+      retrievalMode: memory.retrievalMode,
+      sourceType: 'run',
+      sourceId: memory.sourceRunId || undefined,
+      excerpt: memory.excerpt,
+      evaluation: {
+        kind: 'quality',
+        score: memory.importance,
+        passed: true,
+        feedback: memory.lessonKind === 'failure'
+          ? 'Run blocker distilled at the agent-run finalization barrier.'
+          : 'Run pattern distilled at the agent-run finalization barrier.',
+      },
+      metadata: {
+        ...memory.metadata,
+        agentId: agentId,
+        agentName: typeof args.agentName === 'string' ? args.agentName.slice(0, 120) : null,
+        access: agentId ? 'agent_private' : 'user_private',
+      },
+    });
+  } catch {
+    // Capture is best-effort by contract. A memory that fails to save must
+    // never surface as a run failure.
+  }
+}
+
+/** Project the immutable chat context pack onto the core's automation input. */
+function runOutcomeAutomationInput(
+  pack: ChatAgentContextPack | undefined,
+): import('./runOutcomeMemoryCore').RunOutcomeAutomationInput | null {
+  if (!pack || typeof pack !== 'object') return null;
+  return {
+    executionKind: pack.executionKind || null,
+    routeId: pack.routeId || null,
+    risk: pack.risk || null,
+    pipelineId: pack.lane?.pipelineId || null,
+    pipelineTitle: pack.lane?.pipelineTitle || null,
+    category: pack.lane?.category || null,
+    pattern: pack.lane?.pattern || null,
+    primarySurface: pack.lane?.primarySurface || null,
+    recommendedTools: Array.isArray(pack.recommendedTools) ? pack.recommendedTools : null,
+  };
+}
+
 // ─── Unified Execution ──────────────────────────────────────────────────────
 
 /**
@@ -376,6 +548,42 @@ export async function executeAgentRun(
               : null;
   const activeSoulKey = soulKeyForProfile(profileResolution.resolvedProfile);
   const subjectPayload = buildAgentRuntimeSubjectPayload(request);
+  /**
+   * Every write key this agent subject has ever used. The subject key rotates
+   * (session-derived bridge agent → published `circle_office_agents` uuid, or a
+   * bridge reconnect minting a new session key), so a read under the live key
+   * alone loses everything the agent wrote before the rotation. The Office
+   * memory panel already read alias-aware; the model did not.
+   */
+  const memoryLookupAliases = resolveMemoryLookupIds(
+    subjectPayload.swanContextPatch.agentSubjectKey || request.agentId,
+    [
+      subjectPayload.subject?.legacyAgentIds,
+      subjectPayload.subject?.agentDbId,
+      subjectPayload.subject?.agentSessionKey,
+      subjectPayload.swanContextPatch.agentLegacyIds,
+      subjectPayload.swanContextPatch.agentDbId,
+      subjectPayload.swanContextPatch.agentSessionKey,
+      request.agentId,
+      request.agentDbId,
+      request.agentSessionKey,
+      request.agentLegacyIds,
+    ],
+  );
+  const agentContextPrompt = typeof request.agentContextPack?.compactPrompt === 'string'
+    ? request.agentContextPack.compactPrompt.trim().slice(0, 3_000)
+    : '';
+  const agentContextMetadata = agentContextPrompt
+    ? {
+        version: request.agentContextPack?.version || 'chat_agent_context_pack_v1',
+        executionKind: String(request.agentContextPack?.executionKind || '').slice(0, 80),
+        routeId: request.agentContextPack?.routeId
+          ? String(request.agentContextPack.routeId).slice(0, 120)
+          : null,
+        risk: String(request.agentContextPack?.risk || '').slice(0, 40),
+        compactPrompt: agentContextPrompt,
+      }
+    : null;
 
   // Track the run in the unified system (non-blocking — don't fail if DB is unavailable)
   let runId: string | null = null;
@@ -397,6 +605,7 @@ export async function executeAgentRun(
         routingIntent: routeAnalysis.route.intent,
         routingComplexity: routeAnalysis.route.complexity,
         connectedProviders: connectedProviders ? Array.from(connectedProviders) : [],
+        ...(agentContextMetadata ? { chatAgentContextPack: agentContextMetadata } : {}),
       },
     });
     if (run) runId = run.id;
@@ -407,6 +616,7 @@ export async function executeAgentRun(
     const modeContract = buildOpenSwanModeResponseContract(mode);
     const contextParts: string[] = [];
     let integrationPreflightSummary: string | null = null;
+    if (agentContextPrompt) contextParts.push(agentContextPrompt);
 
     // Inject memory context
     try {
@@ -417,8 +627,20 @@ export async function executeAgentRun(
         userId,
         subjectPayload.swanContextPatch.agentSubjectKey || request.agentId,
         subjectPayload.swanContextPatch.agentName || request.agentName,
+        memoryLookupAliases,
       );
-      if (memCtx) contextParts.push(memCtx);
+      // SECURITY (2026-07-24): retrieved memory is UNTRUSTED content (CLAUDE.md
+      // Critical Guarantees). buildMemoryContext splices together memory_entries
+      // rows AND the free-text circle_memory shared doc, any of which a circle
+      // member or a save_memory-holding agent can author. This is the memory
+      // path for every agent run, Kanban task run and computer task — i.e. the
+      // surfaces that actually execute tools — so it was the highest-leverage
+      // unfenced injection point in the app.
+      if (memCtx) {
+        const { wrapUntrusted } = await import('./untrustedContent');
+        const fenced = wrapUntrusted(memCtx);
+        if (fenced) contextParts.push(`## Memory Context\n${fenced}`);
+      }
     } catch {}
 
     const inferredProfileKey = request.capabilityProfile || modePolicy.preferredCapabilityProfile || inferTaskCapabilityProfile({
@@ -522,6 +744,12 @@ export async function executeAgentRun(
       sessionProfile: profileResolution.resolvedProfile,
       resolvedSkills: skillResolution.skills,
       resolvedSkillsPromptBlock: skillResolution.promptBlock,
+      threadId: request.threadId,
+      activePluginIds: request.activePluginIds,
+      signal: request.signal,
+      toolApprovalGate: request.toolApprovalGate,
+      userConstraints: request.userConstraints,
+      alwaysConfirmFloor: request.alwaysConfirmFloor,
     };
 
     // Mark run as running
@@ -531,6 +759,10 @@ export async function executeAgentRun(
 
     // 3. Call SwanBot
     const response = await getSwanBotResponse(fullPrompt, swanContext);
+    const terminalOutcome = deriveAgentTaskTerminalOutcome({
+      transportSuccess: true,
+      expectation: request.completionExpectation,
+    });
 
     // 4. Extract artifacts from the response
     const artifacts = extractArtifacts(response);
@@ -539,6 +771,9 @@ export async function executeAgentRun(
     const persistedArtifacts = [...(artifacts || []), ...modeSummaryArtifacts];
     const observedEval = buildOpenSwanObservedEvalSummary({
       run: {
+        // Agent-run status is transport lifecycle, not task proof. A returned
+        // response completes the run even when taskTerminalOutcome remains
+        // inconclusive.
         status: 'completed',
         mode: mode || 'talk',
         provider: 'openswan',
@@ -547,6 +782,7 @@ export async function executeAgentRun(
           resolvedSessionProfile: profileResolution.resolvedProfile,
           routingIntent: routeAnalysis.route.intent,
           modeOutcomeSummary,
+          taskTerminalOutcome: terminalOutcome,
         },
       },
       artifacts: persistedArtifacts.map((artifact) => ({
@@ -557,13 +793,15 @@ export async function executeAgentRun(
     });
     void import('./memoryService')
       .then(({ recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal }) => Promise.all([
-        recordArchiveDerivedMemorySuccess({
-          memoryReferences: context?.memoryRefs || [],
-          observedEval,
-          userId,
-          source: 'agent_runtime_passive_success',
-          runId,
-        }),
+        terminalOutcome.status === 'completed'
+          ? recordArchiveDerivedMemorySuccess({
+              memoryReferences: context?.memoryRefs || [],
+              observedEval,
+              userId,
+              source: 'agent_runtime_passive_success',
+              runId,
+            })
+          : Promise.resolve(),
         recordArchiveDerivedMemoryWeakSignal({
           memoryReferences: context?.memoryRefs || [],
           observedEval,
@@ -573,6 +811,34 @@ export async function executeAgentRun(
         }),
       ]))
       .catch(() => {});
+
+    // 4b. Distil a durable lesson from this run (see captureRunOutcomeMemory).
+    // Fires at the finalization barrier, beside the archive-derived SCORING
+    // above — which never creates a memory. Bare `void`: not awaited, cannot
+    // fail, cannot slow, cannot alter the run.
+    void captureRunOutcomeMemory({
+      circleId,
+      userId,
+      agentId: subjectPayload.swanContextPatch.agentSubjectKey || request.agentId || null,
+      agentName: subjectPayload.swanContextPatch.agentName || request.agentName || null,
+      input: {
+        nowMs: Date.now(),
+        runId,
+        surface,
+        mode,
+        taskKind: activeTaskKind,
+        profile: profileResolution.resolvedProfile,
+        impactDomain: inferredProfile?.impactDomain || null,
+        routingIntent: routeAnalysis.route.intent,
+        prompt,
+        response,
+        terminalStatus: terminalOutcome.status,
+        terminalReason: terminalOutcome.reason,
+        observedEval,
+        artifacts: persistedArtifacts.map((artifact) => ({ kind: artifact.kind, title: artifact.title })),
+        automation: runOutcomeAutomationInput(request.agentContextPack),
+      },
+    });
 
     // 5. Detect handoff signals
     const handoffSuggestion = detectHandoff(response, surface);
@@ -636,6 +902,7 @@ export async function executeAgentRun(
           })),
           modeOutcomeSummary,
           observedEval,
+          taskTerminalOutcome: terminalOutcome,
         });
         await updateRunStatus(runId, 'completed');
       } catch {}
@@ -643,6 +910,7 @@ export async function executeAgentRun(
 
     return {
       success: true,
+      terminalOutcome,
       runId,
       response,
       artifacts: persistedArtifacts,
@@ -656,8 +924,42 @@ export async function executeAgentRun(
     if (runId) {
       try { const { updateRunStatus } = await import('./agentRunSystem'); await updateRunStatus(runId, 'failed'); } catch {}
     }
+    const failureOutcome = deriveAgentTaskTerminalOutcome({
+      transportSuccess: false,
+      structuredStatus: err?.name === 'AbortError' ? 'cancelled' : null,
+    });
+
+    // Failure barrier. A failed run is the MORE valuable memory — not
+    // repeating it is the product's whole point — so the same fire-and-forget
+    // capture runs here. The core refuses `cancelled` outright (a user abort
+    // teaches nothing) and refuses generic reasons like "Unknown error".
+    // `inferredProfile` is scoped inside the try above, so this path passes
+    // only what is genuinely in scope rather than guessing.
+    void captureRunOutcomeMemory({
+      circleId,
+      userId,
+      agentId: subjectPayload.swanContextPatch.agentSubjectKey || request.agentId || null,
+      agentName: subjectPayload.swanContextPatch.agentName || request.agentName || null,
+      input: {
+        nowMs: Date.now(),
+        runId,
+        surface,
+        mode,
+        taskKind: activeTaskKind,
+        profile: profileResolution.resolvedProfile,
+        routingIntent: routeAnalysis.route.intent,
+        prompt,
+        response: '',
+        errorMessage: typeof err?.message === 'string' ? err.message : '',
+        terminalStatus: failureOutcome.status,
+        terminalReason: failureOutcome.reason,
+        automation: runOutcomeAutomationInput(request.agentContextPack),
+      },
+    });
+
     return {
       success: false,
+      terminalOutcome: failureOutcome,
       runId,
       response: `Something went wrong: ${err?.message || 'Unknown error'}`,
       handoffSuggestion: null,

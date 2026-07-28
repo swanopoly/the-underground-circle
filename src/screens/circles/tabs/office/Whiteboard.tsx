@@ -12,6 +12,8 @@ import { isBlackSwanAvailable } from '../../../../lib/blackswanLLM';
 import { CronJob } from '../../../../lib/openswanService';
 import { useAgentActivity, AgentActivity } from '../../../../services/agentActivityLogger';
 import { supabase } from '../../../../lib/supabase';
+import { safeGetUser } from '../../../../lib/authSession';
+import { subscribeWithReconnect, type ResilientSubscriptionHandle } from '../../../../lib/subscribeWithReconnect';
 import { BADGES, getEarnedBadges, getNextBadge, formatPoints, Badge } from '../../../../lib/badges';
 import {
   calculateAgentScore, calculateFarmMetrics,
@@ -106,17 +108,29 @@ function useRewardState(): RewardState {
   const [lifetimeXP, setLifetimeXP] = useState(0);
 
   useEffect(() => {
-    let sub: any;
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (!user) return;
-      supabase.from('user_points').select('lifetime_points').eq('user_id', user.id).single()
-        .then(({ data }) => { if (data) setLifetimeXP(data.lifetime_points ?? 0); });
-      sub = supabase.channel('wb_rewards_' + user.id)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'user_points', filter: `user_id=eq.${user.id}` },
-          (p: any) => { if (p.new?.lifetime_points != null) setLifetimeXP(p.new.lifetime_points); })
-        .subscribe();
+    let handle: ResilientSubscriptionHandle | null = null;
+    let cancelled = false;
+    // safeGetUser instead of a bare supabase.auth.getUser() (CLAUDE.md: migrate
+    // while touching the file) — the raw call can reject and this had no catch.
+    void safeGetUser().then(({ value: user }) => {
+      if (!user || cancelled) return;
+      const loadXp = () => {
+        void supabase.from('user_points').select('lifetime_points').eq('user_id', user.id).single()
+          .then(({ data }) => { if (data && !cancelled) setLifetimeXP(data.lifetime_points ?? 0); });
+      };
+      loadXp();
+      handle = subscribeWithReconnect({
+        channelName: 'wb_rewards_' + user.id,
+        onCatchUp: loadXp,
+        setup: (channel) => channel.on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'user_points', filter: `user_id=eq.${user.id}` },
+          (p: any) => { if (p.new?.lifetime_points != null) setLifetimeXP(p.new.lifetime_points); },
+        ),
+      });
+      if (cancelled) { handle.unsubscribe(); handle = null; }
     });
-    return () => { if (sub) supabase.removeChannel(sub); };
+    return () => { cancelled = true; if (handle) handle.unsubscribe(); };
   }, []);
 
   const earned = getEarnedBadges(lifetimeXP);

@@ -70,48 +70,38 @@ and every mutating tool stays approval-gated.
   `ask`-gated, `desktop_files` write family, refuses a truncated read, create via
   empty-oldString). No LOCKSTEP bridge mirror needed — it orchestrates the existing
   `file_read`/`file_write_text` endpoints with the pure core in between.
-- **P2 — Shell/bash tool.** ✅ DONE + WIRED (2026-07-13). Pure cores:
-  `src/lib/shellCommandPolicy.ts` (smoke `shell-command-policy`, 99 —
-  classifyShellCommand → read(auto) / mutate(ask) / blocked(never), compound/
-  redirection/`$(…)` escalation, catastrophic patterns refused, timeout clamp,
-  secret-redacted preview) + `src/lib/localExecPlanCore.ts` (smoke
-  `local-exec-plan-core`, 49 — argv validation/bounds, policy composition,
-  tail-biased result formatter). Wiring: bridge `POST /desktop/exec_file`
-  (execFile ARGV — never a shell; write-scoped grant on cwd, argv bounds,
-  hard binary blocklist, 4MB buffer + 64KB tail-cap, non-zero exit = data
-  not error) + `desktopBridge.execFileOnBridge` + the **`local.run_shell`**
-  tool (pinned; static policy floor 'ask', args-aware fast path in
-  `maybeRequestToolApproval` auto-passes read-classified commands and refuses
-  blocked ones via the SAME core the executor re-runs). Run-and-fix gate is
-  exec-aware: `classifyExecCallForGate` in `runAndFixGateCore.ts` counts a
-  test/build/lint run through the shell as verification (round-hook now
-  forwards tool `input`; smoke `run-and-fix-gate-core` 96). LIVE-BRIDGE pass
-  pending: restart `npm run bridge` to pick up the endpoint, then exercise
-  read/mutate/blocked + timeout paths end-to-end. Edge parity: CODE-SIDE DONE
-  2026-07-14 — v2 catalog carries all 6 coding client tools (see below);
-  awaiting `supabase functions deploy swanbot-v2-ai`.
-- **P3 — Git tools.** ✅ DONE + WIRED (2026-07-13). Pure core:
-  `src/lib/gitCommandPolicy.ts` + smoke `git-command-policy` (185) — read
-  verbs→auto, write→ask, force-push / `reset --hard` / `-c` config-injection /
-  `--upload-pack` blocked, commit message is its own argv element. Wiring:
-  same `exec_file` bridge endpoint + `localExecPlanCore.planGitRunExec`
-  (prepends the git binary) + the **`git.run`** tool (pinned; read auto /
-  write ask via the same args-aware gate path; repoPath must sit inside the
-  write-scoped grant). Gate awareness: only WORKTREE-changing verbs
-  (checkout/stash/reset/…) re-dirty the run-and-fix state — commit after a
-  green run stays clean. Same live-bridge + edge-parity follow-ups as P2.
+- **P2 — Local diagnostic compatibility surface.** 🔒 SECURITY-CONSTRAINED
+  2026-07-24. `local.run_shell` remains as a compatibility tool name, but the
+  live bridge and client both accept only `node --version`,
+  `node --check <relative .js/.cjs/.mjs>`, and fixed read-only git
+  status/diff/log/rev-parse/branch/ls-files forms. Shells, package scripts,
+  tests, builds, environment launchers, redirection, and mutations are refused.
+  Full build/test/fix work delegates to a paired connected coding agent through
+  its structured `/spawn` route. The older `shellCommandPolicy` and
+  `localExecPlanCore` remain reusable policy/planning cores but no longer widen
+  the local bridge endpoint.
+- **P3 — Git diagnostic compatibility surface.** 🔒 SECURITY-CONSTRAINED
+  2026-07-24. `git.run` accepts the same fixed read-only git diagnostics with
+  an exact read grant. Commit/checkout/stash/reset/push/config and extension
+  escapes are refused locally; mutating repository work belongs in a paired
+  connected coding-agent run with file coordination and approval. The broader
+  `gitCommandPolicy` remains a pure planning core, not authority to bypass the
+  bridge allowlist.
 - **v2 chat-path parity (2026-07-14).** The default chat loop (`swanbot-v2-ai`)
   now advertises all six coding client tools — `desktop.edit_file`,
   `local.run_shell`, `git.run`, `codebase.search`, `todo.write`,
   `coordination.file_status` — as a `clientOnly` group (new `coding`
   TOOL_GROUP; selected in build/design modes + coding-keyword turns). The
   client routes them through `dispatchCodingClientTool` in `swanbot.ts` →
-  `executeOpenSwanRuntimeTool`, so the constraint floor, args-aware shell/git
-  approval, and file leases apply identically to the typed loop; long output
+  `executeOpenSwanRuntimeTool`, so the constraint floor and file leases apply
+  identically to the typed loop. The shell/git compatibility names are still
+  advertised but enforce the 2026-07-24 read-only diagnostic allowlist; full
+  coding execution delegates to a connected agent. Long output
   survives the client-tool serializer's 2k-per-string clip as chunked
   `parts[]` (head+tail preserved). Parity nets updated: dispatcher-parity
-  parser recognizes the new prefixes, readiness pins re-set to 79 total / 54
-  client-delegated (docs re-pinned). PENDING: `supabase functions deploy
+  parser recognizes the new prefixes, readiness pins re-set to 80 total / 55
+  client-delegated after the guarded browser-toggle canary (docs re-pinned).
+  PENDING: `supabase functions deploy
   swanbot-v2-ai` to make it live. That same deploy also ships the pre-turn
   context compaction mirror (2026-07-21: `_shared/context-compaction.ts`
   wired into `runLoop`, `context_compaction_tier` run events; lockstep smoke
@@ -174,9 +164,11 @@ and every mutating tool stays approval-gated.
      in `openswanSessionRuntime.ts` (legacy reliability nudges keep priority).
 
 ## 4. Guardrails carried through every phase
-Mutating tools (edit/write/shell/git-write) stay approval-gated with a visible
-diff/preview; execFile-array (never a shell string) for shell/git; path grants
-enforced by the bridge; secrets never in prompts/logs; pure cores are
+Direct file edits stay approval-gated with a visible diff/preview. The local
+diagnostic bridge uses execFile argv plus a fixed read-only git/node allowlist;
+shell/git mutations are delegated to connected coding agents instead of being
+granted to the browser-facing bridge. Path grants are enforced by the bridge;
+secrets never enter prompts/logs; pure cores are
 smoke-tested before wiring; `verifiedInvocation`-style gating where a live host is
 required. Nothing here weakens the existing approval floor.
 

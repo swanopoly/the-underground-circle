@@ -11,7 +11,7 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
 import {
-  View, Text, Pressable, TextInput, ScrollView, StyleSheet, Platform,
+  View, Text, Pressable, ScrollView, StyleSheet, Platform,
   ActivityIndicator,
 } from 'react-native';
 import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../lib/officeAgents';
@@ -38,18 +38,10 @@ const QUICK_COMMANDS = [
   { label: 'ls',         cmd: 'ls -la',              icon: '📁' },
   { label: 'disk',       cmd: 'df -h /',             icon: '💾' },
   { label: 'uptime',     cmd: 'uptime',              icon: '⏱️' },
-  { label: 'top',        cmd: 'ps aux --sort=-%cpu | head -8', icon: '📊' },
   { label: 'node -v',    cmd: 'node -v',             icon: '🟢' },
 ];
 
 // ── Kill commands per provider ───────────────────────────────────────────────
-
-const KILL_COMMANDS: Record<string, string> = {
-  'claude-code': 'pkill -f "claude" 2>/dev/null; echo "✓ Claude Code processes terminated"',
-  'codex':       'pkill -f "codex" 2>/dev/null; echo "✓ Codex processes terminated"',
-  'gemini':      'pkill -f "gemini" 2>/dev/null; echo "✓ Gemini CLI processes terminated"',
-  'openswan':    'pkill -f "openswan" 2>/dev/null; echo "✓ OpenSwan processes terminated"',
-};
 
 const BRIDGE_PORTS: Record<string, number> = {
   'claude-code': 7778,
@@ -64,7 +56,6 @@ const BRIDGE_PORTS: Record<string, number> = {
 export default function AgentControlCard({
   agent, circleId, control, onClose, onOpenPanel, onDisconnect, onRunCommand, embedded = false,
 }: Props) {
-  const [cmdInput, setCmdInput] = useState('');
   const [cmdOutput, setCmdOutput] = useState('');
   const [cmdRunning, setCmdRunning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -123,16 +114,9 @@ export default function AgentControlCard({
   const handleKill = useCallback(async () => {
     setSaving(true);
     setCmdOutput('');
-    let processKilled = false;
     try {
-      // Try to kill via bridge — only for providers with a bridge
-      const hasBridge = !!BRIDGE_PORTS[provider];
-      if (onRunCommand && hasBridge && KILL_COMMANDS[provider]) {
-        const result = await onRunCommand(KILL_COMMANDS[provider]);
-        processKilled = result.ok;
-        setCmdOutput(result.stdout || result.stderr || 'Kill signal sent');
-      }
-      // Always update DB regardless of bridge status
+      // Local process termination is intentionally not exposed through the
+      // diagnostics bridge. This control pauses the UC agent record only.
       await upsertAgentControl(circleId, agent.sessionKey, agent.name, { is_paused: true });
       const { data: auth } = await supabase.auth.getUser();
       if (auth.user) {
@@ -140,16 +124,12 @@ export default function AgentControlCard({
           status: 'offline', current_task: 'Killed by user', updated_at: new Date().toISOString(),
         }).eq('circle_id', circleId).eq('owner_id', auth.user.id).eq('name', agent.name);
       }
-      if (processKilled) {
-        setStatusMsg('Agent process terminated');
-      } else {
-        setStatusMsg('Agent marked offline — process may still be running (bridge unreachable)');
-      }
+      setStatusMsg('Agent marked offline — local CLI process was not terminated');
     } catch (e: any) {
       setCmdOutput(`Error: ${e.message}`);
     }
     setSaving(false);
-  }, [circleId, agent, provider, onRunCommand]);
+  }, [circleId, agent]);
 
   const handleResume = useCallback(async () => {
     setSaving(true);
@@ -173,15 +153,6 @@ export default function AgentControlCard({
   const handleDisconnect = useCallback(async () => {
     setSaving(true);
     try {
-      // Try to kill agent process + bridge — only for providers that have a bridge
-      const hasBridge = !!BRIDGE_PORTS[provider];
-      if (onRunCommand && hasBridge) {
-        const killResult = await onRunCommand(KILL_COMMANDS[provider] || 'true').catch(() => ({ ok: false }));
-        if (killResult.ok) {
-          const port = BRIDGE_PORTS[provider];
-          await onRunCommand(`lsof -ti:${port} | xargs kill -9 2>/dev/null; echo "✓ Bridge on :${port} killed"`).catch(() => {});
-        }
-      }
       // Always DELETE the agent from the circle (not just mark offline — removes the pixel agent)
       const { data: auth } = await supabase.auth.getUser();
       if (auth.user) {
@@ -194,7 +165,7 @@ export default function AgentControlCard({
     } catch {}
     setSaving(false);
     onDisconnect();
-  }, [circleId, agent, provider, onRunCommand, onDisconnect]);
+  }, [circleId, agent, onDisconnect]);
 
   // ── Remote shell ───────────────────────────────────────────────────────────
 
@@ -288,43 +259,20 @@ export default function AgentControlCard({
       {/* ── Remote shell — only in standalone mode, Terminal tab handles it when embedded ── */}
       {!embedded && onRunCommand && bridgeOk && (
         <View style={c.shell}>
-          <Text style={c.shellTitle}>REMOTE SHELL</Text>
+          <Text style={c.shellTitle}>READ-ONLY DIAGNOSTICS</Text>
 
           {/* Quick commands */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={c.qcScroll}>
             {QUICK_COMMANDS.map(q => (
               <Pressable
                 key={q.cmd}
-                onPress={() => { setCmdInput(q.cmd); runCmd(q.cmd); }}
+                onPress={() => runCmd(q.cmd)}
                 style={[c.qcBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
                 <Text style={c.qcText}>{q.icon} {q.label}</Text>
               </Pressable>
             ))}
           </ScrollView>
-
-          {/* Input row */}
-          <View style={c.inputRow}>
-            <Text style={c.prompt}>$</Text>
-            <TextInput
-              style={c.input}
-              value={cmdInput}
-              onChangeText={setCmdInput}
-              placeholder="run a command..."
-              placeholderTextColor="#3b3b5b"
-              onSubmitEditing={() => cmdInput.trim() && runCmd(cmdInput.trim())}
-              returnKeyType="send"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Pressable
-              style={[c.runBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-              onPress={() => cmdInput.trim() && runCmd(cmdInput.trim())}
-              disabled={cmdRunning}
-            >
-              <Text style={c.runBtnText}>{cmdRunning ? '...' : 'RUN'}</Text>
-            </Pressable>
-          </View>
 
           {/* Output */}
           {(cmdOutput || cmdRunning) ? (
@@ -351,28 +299,8 @@ export default function AgentControlCard({
                   : provider === 'gemini' ? 'gemini-bridge.js'
                   : provider === 'cursor' ? 'cursor-bridge.js'
                   : 'claude-bridge.js';
-                // Try to start via the proxy/exec endpoint on any available bridge
-                const ports = [7778, 7779, 7780, 7781];
-                let started = false;
-                for (const p of ports) {
-                  try {
-                    const r = await fetch(`http://localhost:${p}/exec`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ command: `cd /home/swan/the-underground-circle && nohup node scripts/${script} > /tmp/${script}.log 2>&1 & echo STARTED` }),
-                      signal: AbortSignal.timeout(3000),
-                    });
-                    const d = await r.json();
-                    if (d.ok && d.stdout?.includes('STARTED')) { started = true; break; }
-                  } catch {}
-                }
-                if (started) {
-                  setCmdOutput('Bridge starting...');
-                  setTimeout(() => { checkBridge(); setCmdRunning(false); }, 3000);
-                } else {
-                  setCmdOutput(`Run manually: node scripts/${script}`);
-                  setCmdRunning(false);
-                }
+                setCmdOutput(`Automatic shell restart is disabled. Run manually: node scripts/${script}`);
+                setCmdRunning(false);
               } catch {
                 setCmdOutput('Could not auto-start. Run manually.');
                 setCmdRunning(false);

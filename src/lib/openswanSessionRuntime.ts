@@ -2,7 +2,10 @@ import { buildAgenticCodingPrompt, detectAgenticCodingProfile, type AgenticCodin
 import { getChatPromptLaneSpec } from './chatPromptAssembly';
 import { addArtifact, addStep, completeRunUnlessCancelled, createRun, failRunUnlessCancelled, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunProgressUnlessCancelled, updateRunStatus } from './agentRunSystem';
 import { planTelemetrySchedule } from './openswanTelemetryDeferCore';
-import { startRunHeartbeat } from './agentRunPersistence';
+import {
+  sanitizeToolActionMetadataForPersistence,
+  startRunHeartbeat,
+} from './agentRunPersistence';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './openswanExecution';
 import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
@@ -55,6 +58,11 @@ import {
 import { createRunAndFixGateState, foldRunAndFixRound, markNudgeSent, planVerificationNudge } from './runAndFixGateCore';
 import { buildUserActionReceipt } from './userActionReceiptCore';
 import { estimateRunCostUsd } from './runCostRollupCore';
+import {
+  PERSISTED_TOOL_FAILURE_TEXT,
+  summarizeToolInputForPersistence,
+  summarizeToolResultForPersistence,
+} from './eventBoundCore';
 import { resolveCapabilityFallback } from './capabilityFallbackCore';
 import { getModelCapabilityFlags, getModelCodingTier } from './modelCapabilities';
 import { getModelContextWindow } from './modelContextBudgetCore';
@@ -94,9 +102,12 @@ import {
 } from './agentDevelopmentStandards';
 import {
   buildDesignAppRuntimeManifestLedgerActions,
-  stripDesignAppRuntimeCaptureMetadata,
 } from './designAppRuntimeManifest';
-import { persistAgentRunLedgerPreview, persistRuntimeToolActions } from './agentRunLedgerPersistence';
+import {
+  persistAgentRunLedgerPreview,
+  persistRuntimeToolActions,
+  sanitizeArtifactRefsForPersistence,
+} from './agentRunLedgerPersistence';
 import { buildRouteDecisionRecordFromRuntime, buildRouteDecisionTelemetryPayload } from './routeDecisionTelemetry';
 import { buildAgentRuntimeSubject, type AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 
@@ -1089,7 +1100,7 @@ async function runTypedCoreToolLoop(args: {
                 iteration: event.iteration,
                 tool: event.toolName,
                 tool_use_id: event.toolUseId,
-                input: event.input,
+                input: summarizeToolInputForPersistence(event.toolName, event.input),
               },
             }).then(() => {}, () => {});
           } else if (event.kind === 'tool_call_result') {
@@ -1104,7 +1115,11 @@ async function runTypedCoreToolLoop(args: {
                 ok: traceResult?.ok === true,
                 duration_ms: event.durationMs,
                 ...(traceResult && traceResult.ok !== true && traceResult.error
-                  ? { error: String(traceResult.error).slice(0, 500) }
+                  ? {
+                      error: PERSISTED_TOOL_FAILURE_TEXT,
+                      error_code: 'tool_call_failed',
+                      redacted: true,
+                    }
                   : {}),
               },
             }).then(() => {}, () => {});
@@ -2160,7 +2175,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // Map tool events to the SwanBotStructuredToolAction shape expected downstream.
       // Design-app captures are intentionally hidden: they are used only to
       // create the redacted design.object_manifest ledger action below.
-      runtimeToolActions = toolLoopResult.toolEvents.map((evt) => {
+      const transientToolActions = toolLoopResult.toolEvents.map((evt) => {
         const status: 'completed' | 'failed' | 'manual_required' | 'blocked' =
           evt.status === 'passed' ? 'completed' : evt.status === 'manual_required' ? 'manual_required' : evt.status === 'blocked' ? 'blocked' : 'failed';
         return {
@@ -2168,23 +2183,47 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           tool_name: evt.tool,
           title: evt.tool.replace(/_/g, ' ').replace(/\./g, ' > '),
           status,
-          input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
-          output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
-          metadata: stripDesignAppRuntimeCaptureMetadata(evt.metadata || {}),
+          input_preview: JSON.stringify(
+            summarizeToolInputForPersistence(evt.tool, evt.input),
+          ).slice(0, 500),
+          output_preview: status === 'failed'
+            ? PERSISTED_TOOL_FAILURE_TEXT
+            : JSON.stringify(
+                summarizeToolResultForPersistence(evt.tool, evt.result, status),
+              ).slice(0, 1200),
+          // Browser plans remain available just long enough for the dedicated
+          // typed extraction below. No hidden metadata object crosses the
+          // durable action boundary wholesale.
+          metadata: evt.metadata || {},
         };
       });
+      browserPlans = extractBrowserPlansFromToolActions(transientToolActions);
+      runtimeToolActions = transientToolActions.map((action) => ({
+        ...action,
+        metadata: {
+          source: 'openswan_session_runtime',
+          ...(sanitizeToolActionMetadataForPersistence(action.metadata) || {}),
+        },
+      }));
       runtimeToolActions.push(...designManifestLedgerActions.map((action) => ({
         kind: 'tool' as const,
         tool_name: action.tool_name || 'design.object_manifest',
         title: action.title || 'Design object manifest',
         status: action.status === 'completed' || action.status === 'blocked' ? action.status : 'failed',
         input_preview: action.input_preview || null,
-        output_preview: action.output_preview || null,
+        output_preview: action.status === 'failed'
+          ? PERSISTED_TOOL_FAILURE_TEXT
+          : JSON.stringify(
+              summarizeToolResultForPersistence(
+                action.tool_name || 'design.object_manifest',
+                action.output_preview,
+                action.status,
+              ),
+            ).slice(0, 1200),
         artifact_refs: action.artifact_refs || [],
         metadata: action.metadata || {},
       })));
 
-      browserPlans = extractBrowserPlansFromToolActions(runtimeToolActions);
       browserPlanEvents = buildInitialBrowserPlanEvents(browserPlans);
 
       structured = {
@@ -2279,8 +2318,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         verificationResults: [],
       });
     }
-  } catch (toolErr) {
-    console.warn('[OpenSwanRuntime] Tool-use loop failed, falling back to text-only:', toolErr);
+  } catch {
+    console.warn('[OpenSwanRuntime] tool_loop_failed_text_fallback');
     // Fallback: use the old text-only path if the tool loop fails. Make the
     // degradation visible instead of silently answering without tools — emit a
     // stage update and record it in the transcript so the run shows it ran in a
@@ -2291,7 +2330,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     transcript = (await appendTranscriptEvent(transcriptKey, {
       kind: 'tool_activity',
       title: 'Degraded to text-only mode',
-      summary: `Tool loop failed; answered without tools. Reason: ${toolErr instanceof Error ? toolErr.message : String(toolErr)}`,
+      summary: 'Tool loop failed; answered without tools. Details were redacted.',
     })) || transcript;
   }
 
@@ -2355,8 +2394,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             title: action.title,
             status: action.status,
             outputPreview: action.output_preview || null,
-            artifactRefs: action.artifact_refs || null,
-            browserPlan: action.metadata?.browserPlan || null,
+            artifactRefs: sanitizeArtifactRefsForPersistence(action.artifact_refs),
             toolPolicy: action.metadata?.toolPolicy || null,
             approvalRequest: action.metadata?.approvalRequest || null,
             ledgerArtifactKind: action.metadata?.ledgerArtifactKind || null,
@@ -2937,8 +2975,10 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // barrier) so a late 'running' status write can't land after — and
       // resurrect — the 'failed' terminal write below.
       await Promise.allSettled(pendingTelemetry);
-      const errText = turnErr instanceof Error ? turnErr.message : String(turnErr);
-      await mergeRunMetadata(run.id, { runtime_error: errText.slice(0, 500) }).catch(() => undefined);
+      await mergeRunMetadata(run.id, {
+        runtime_error: 'openswan_turn_failed',
+        runtime_error_redacted: true,
+      }).catch(() => undefined);
       await failRunUnlessCancelled(run.id).catch(() => undefined);
     }
     throw turnErr;

@@ -524,7 +524,7 @@ const CONSTRAINT_CATEGORY_VERBS: Record<ChatComputerConstraintCategory, RegExp> 
   download: /\b(download|downloading)\b/i,
   upload: /\b(upload|uploading|attach|attaching)\b/i,
   save: /\b(save|saving|overwrite|overwriting|export|exporting)\b/i,
-  login: /\b(log ?in(?:to)?|sign ?in(?:to)?|authenticate|enter (?:my )?(?:password|credentials))\b/i,
+  login: /\b(log ?in(?:to)?|logging ?in(?:to)?|sign ?in(?:to)?|signing ?in(?:to)?|authenticate|enter (?:my )?(?:password|credentials))\b/i,
   grant: /\b(authorize|authorizing|grant(?:ing)?\s+(?:access|permission|consent)|connect (?:my |the |your )?account|link (?:my |the |your )?account|oauth)\b/i,
 };
 
@@ -781,6 +781,55 @@ export function formatChatComputerUserConstraintsPromptLines(
     lines.push(`User constraint: stop and hand back to the user if the task hits: ${constraints.stopConditions.join(', ')}.`);
   }
   return lines;
+}
+
+export interface ChatComputerUsePolicyInputs {
+  userConstraints: string[];
+  alwaysConfirmCategories: Array<
+    'opaque_target'
+    | 'credentials'
+    | 'external_side_effect'
+  >;
+}
+
+/**
+ * Preserve the chat router's deterministic constraint/floor analysis when a
+ * browser task crosses into the cloud Computer Use loop.
+ *
+ * Native Computer Use actions identify targets by coordinates/current focus,
+ * so every run carries `opaque_target`. The coarser edge categories are an
+ * additional fail-closed floor; the bounded user-authored constraint lines
+ * remain the source-of-truth context for the exact run.
+ */
+export function buildChatComputerUsePolicyInputs(
+  message: string,
+  options?: { booking?: boolean },
+): ChatComputerUsePolicyInputs {
+  const inputs = resolveChatComputerConstraintInputs(message);
+  const categories = new Set<ChatComputerUsePolicyInputs['alwaysConfirmCategories'][number]>([
+    'opaque_target',
+  ]);
+  const constraintCategories = [
+    ...(inputs.userConstraints?.forbidden || []),
+    ...(inputs.userConstraints?.approvalBefore || []),
+  ];
+  if (
+    inputs.alwaysConfirmFloor.includes('login')
+    || constraintCategories.includes('login')
+  ) {
+    categories.add('credentials');
+  }
+  if (
+    options?.booking
+    || inputs.alwaysConfirmFloor.length > 0
+    || constraintCategories.length > 0
+  ) {
+    categories.add('external_side_effect');
+  }
+  return {
+    userConstraints: formatChatComputerUserConstraintsPromptLines(inputs.userConstraints),
+    alwaysConfirmCategories: Array.from(categories),
+  };
 }
 
 function isPureCreativeGeneration(message: string): boolean {
@@ -1243,7 +1292,16 @@ function inferWordPressActionToolFromMessage(message: string, tools: string[]): 
   if (tools.includes('wp.upload_media') && /\b(?:upload|attach|media library|featured image|featured media)\b/i.test(text)) return 'wp.upload_media';
   if (tools.includes('wp.update_post') && contentMutation && !adminUiOnly) return 'wp.update_post';
   if (tools.includes('browser.upload_file') && /\b(?:upload|attach|choose file|select file)\b/i.test(text)) return 'browser.upload_file';
-  return firstTool(tools, ['browser.click_role', 'browser.fill_field']);
+  if (
+    tools.includes('browser.set_toggle')
+    && /\b(?:check|uncheck|checkbox|toggle|switch|turn (?:on|off)|enable|disable|opt (?:in|out)|radio)\b/i.test(text)
+  ) {
+    return 'browser.set_toggle';
+  }
+  // A toggle is safe only when the user's wording proves a toggle-shaped
+  // target. Do not let catalog ordering turn every generic admin mutation
+  // (text fields, buttons, plugin actions) into a fabricated checkbox.
+  return firstTool(tools, ['browser.click_role', 'browser.fill_field', 'browser.set_toggle']);
 }
 
 function buildActionItem(args: {
@@ -1527,7 +1585,7 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
         }));
       }
     } else {
-      const browserTool = firstTool(tools, ['browser.open_url', 'browser.dom_snapshot', 'browser.click_role', 'browser.fill_field']);
+      const browserTool = firstTool(tools, ['browser.open_url', 'browser.dom_snapshot', 'browser.set_toggle', 'browser.click_role', 'browser.fill_field']);
       if (browserTool) {
         addUniqueActionItem(items, buildActionItem({
           id: 'execute-browser-action',

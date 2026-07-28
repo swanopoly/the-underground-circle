@@ -162,7 +162,10 @@ const AUTO_MUTATION_DOCTRINE_FAMILIES = new Set(['coordination', 'approval', 'wo
 //      Google Workspace read tools (Phase B): GET-only planners from the pure
 //      googleWorkspaceOps contract core (smoke-pinned URLs, no mutation verbs),
 //      the user's OWN account via their user_google_credentials row (RLS),
-//      content untrusted-fenced. Every Workspace WRITE is a separate
+//      content untrusted-fenced), and the two local diagnostics below. Those
+//      diagnostics accept only fixed argv/verb allowlists inside an exact
+//      granted root; shells, package scripts, hooks, extensibility escapes,
+//      and mutations are refused before process launch. Every Workspace WRITE is a separate
 //      ask-gated tool (gmail.write / gdocs.append / gsheets.write / gcal.write).
 const AUTO_EXTERNAL_READ_TOOLS = new Set([
   'custom_api.read',
@@ -172,6 +175,8 @@ const AUTO_EXTERNAL_READ_TOOLS = new Set([
   'gsheets.read',
   'gdrive.read',
   'gcal.read',
+  'local.run_shell',
+  'git.run',
 ]);
 //  (c) listed per-tool exceptions with a stable, documented reason.
 const AUTO_MUTATION_TOOL_EXCEPTIONS = new Set([

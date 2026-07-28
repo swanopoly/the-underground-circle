@@ -267,6 +267,7 @@ function openSectionsFor(keys: ReadonlyArray<ControlPanelSectionKey>): ControlPa
 const OPENSWAN_GATEWAY_TUNNEL_COMMAND = 'cloudflared tunnel --url http://localhost:18789';
 const OPENSWAN_PROXY_TUNNEL_COMMAND = 'cloudflared tunnel --url http://localhost:18790';
 const BRIDGE_HOST_ENV_EXAMPLE = 'EXPO_PUBLIC_BRIDGE_HOST=https://your-tunnel.trycloudflare.com';
+const BRIDGE_TUNNEL_SERVER_ENV_EXAMPLE = 'UC_BRIDGE_ALLOWED_HOSTS=your-tunnel.trycloudflare.com UC_BRIDGE_ALLOWED_ORIGINS=https://app.chrisswanson.xyz';
 
 type ToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 
@@ -654,10 +655,11 @@ export default function OpenSwanConsole({
       // Reap eligibility (fail-safe floor): a dead heartbeat only proves death
       // for runs that OPTED IN to heartbeating (metadata.heartbeat, set by
       // agentRunPersistence.createPersistedRun). Everything else (edge v2 loops,
-      // legacy runtimes, 'client_pending' user-paced waits) gets at most the
-      // soft "stalled?" badge, NEVER the local 'failed' flip or the DB reap.
+      // legacy runtimes, or any active client-continuation phase) gets at most
+      // the soft "stalled?" badge, NEVER the local 'failed' flip or DB reap.
       const reapEligibleIds = new Set(runs
-        .filter((r) => r.metadata?.heartbeat === true && r.final_stop_reason !== 'client_pending')
+        .filter((r) => r.metadata?.heartbeat === true
+          && !['client_pending', 'client_dispatching', 'client_resuming'].includes(String(r.final_stop_reason || '')))
         .map((r) => r.id));
       const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
       const softStaleIds = new Set([
@@ -838,7 +840,8 @@ export default function OpenSwanConsole({
         now,
       );
       const reapEligibleIds = new Set(runs
-        .filter((r) => r.metadata?.heartbeat === true && r.final_stop_reason !== 'client_pending')
+        .filter((r) => r.metadata?.heartbeat === true
+          && !['client_pending', 'client_dispatching', 'client_resuming'].includes(String(r.final_stop_reason || '')))
         .map((r) => r.id));
       const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
       const softStaleIds = new Set([
@@ -2563,11 +2566,18 @@ export default function OpenSwanConsole({
                 copiedKey={copiedKey}
                 onCopy={handleCopyBridgeCommand}
               />
+              <BridgeCommandBox
+                label="Allow exact tunnel host"
+                command={BRIDGE_TUNNEL_SERVER_ENV_EXAMPLE}
+                copyKey="tunnel-server-allowlist"
+                copiedKey={copiedKey}
+                onCopy={handleCopyBridgeCommand}
+              />
             </View>
             <View style={styles.bridgeTunnelNote}>
               <Text style={styles.bridgeTunnelTitle}>Tunnel rule</Text>
               <Text style={styles.bridgeTunnelText}>
-                A single Cloudflare/ngrok URL maps to one local port. For all bridges, use per-port env URLs like EXPO_PUBLIC_CLAUDE_BRIDGE_URL, EXPO_PUBLIC_CODEX_BRIDGE_URL, EXPO_PUBLIC_GEMINI_BRIDGE_URL, EXPO_PUBLIC_CURSOR_BRIDGE_URL, and EXPO_PUBLIC_OPENSWAN_PROXY_URL, or use a reverse-proxy host template such as {BRIDGE_HOST_ENV_EXAMPLE.replace('https://your-tunnel.trycloudflare.com', 'https://bridge.example.com/{port}')}.
+                A single Cloudflare/ngrok URL maps to one local port. After the tunnel prints its hostname, restart that bridge with UC_BRIDGE_ALLOWED_HOSTS set to the exact tunnel host (include :port only when the Host header includes it) and UC_BRIDGE_ALLOWED_ORIGINS set to the exact browser origin. Then set the matching per-port client URL: EXPO_PUBLIC_CLAUDE_BRIDGE_URL, EXPO_PUBLIC_CODEX_BRIDGE_URL, EXPO_PUBLIC_GEMINI_BRIDGE_URL, EXPO_PUBLIC_CURSOR_BRIDGE_URL, or EXPO_PUBLIC_OPENSWAN_PROXY_URL. A reverse proxy may instead use {BRIDGE_HOST_ENV_EXAMPLE.replace('https://your-tunnel.trycloudflare.com', 'https://bridge.example.com/{port}')}, but every emitted Host still needs an exact server allowlist entry.
               </Text>
             </View>
           </View>

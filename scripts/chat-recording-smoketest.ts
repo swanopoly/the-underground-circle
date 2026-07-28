@@ -37,7 +37,10 @@ import {
   stopRecording,
 } from '../src/lib/chatRecording';
 // eslint-disable-next-line import/first
-import { findInTree } from '../src/lib/recordingChatCommands';
+import {
+  executeRecordingCommand,
+  findInTree,
+} from '../src/lib/recordingChatCommands';
 // eslint-disable-next-line import/first
 import {
   collectChatSessionArchiveRecoveryReliabilityTouched,
@@ -206,6 +209,152 @@ async function main() {
     assert((plan.input as any)._target.label === 'Email', 'plan: set target carried');
     assert((plan.input as any).text === 'hello@example.com', 'plan: set text carried');
     assert(plan.note?.includes('Email'), 'plan: set note mentions label');
+  }
+
+  // ─── /replay complete-plan mutation preflight ──────────────────
+  resetStore();
+  startRecording({ name: 'mixed replay', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'browser.dom_snapshot',
+    input: { maxNodes: 50 },
+    result: { ok: true },
+  }));
+  appendStep(buildStep({
+    tool: 'browser.fill_field',
+    input: { name: 'Draft', text: 'must not run' },
+    result: { ok: true },
+  }));
+  stopRecording({ description: 'read then mutate' });
+  {
+    const fired: Array<{ tool: string; input: Record<string, unknown> }> = [];
+    const outcome = await executeRecordingCommand('/replay mixed replay', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async (call) => {
+        fired.push(call);
+        return { ok: true };
+      },
+    });
+    assert(fired.length === 0, 'replay preflight: read-then-mutate plan dispatches zero tools');
+    assert(
+      outcome?.runtimeHandoff?.executable === false
+        && outcome.runtimeHandoff.kind === 'openswan_typed_runtime_plan'
+        && outcome.runtimeHandoff.reasonCode === 'sealed_runtime_identity_and_approval_required',
+      'replay preflight: mixed plan returns a structured non-executable OpenSwan handoff',
+    );
+    assert(
+      outcome?.runtimeHandoff?.blockedTools.includes('browser.fill_field')
+        && outcome.runtimeHandoff.totalSteps === 2
+        && outcome.runtimeHandoff.blockedStepCount === 1,
+      'replay preflight: handoff identifies the blocked mutation without recording arguments',
+    );
+    const serializedHandoff = JSON.stringify(outcome?.runtimeHandoff || {});
+    assert(
+      outcome?.runtimeHandoff?.requiredContext.includes('persisted_agent_run_id') === true
+        && outcome.runtimeHandoff.requiredContext.includes('provider_tool_use_id')
+        && outcome.runtimeHandoff.requiredContext.includes('fresh_observation')
+        && outcome.runtimeHandoff.requiredContext.includes('exact_openswan_runtime_approval')
+        && !serializedHandoff.includes('must not run')
+        && !serializedHandoff.includes('"runId"')
+        && !serializedHandoff.includes('"toolUseId"')
+        && !serializedHandoff.includes('"approvalId"'),
+      'replay preflight: handoff names requirements without copying inputs or fabricating runtime identities',
+    );
+    assert(
+      outcome?.message.includes('fresh authenticated Chat/OpenSwan run')
+        && outcome.message.includes('persisted run identity')
+        && outcome.message.includes('approve each exact mutating tool call')
+        && outcome.message.includes('zero replay steps were executed'),
+      'replay preflight: user message names the fresh-run, observation, and exact-approval recovery',
+    );
+  }
+
+  resetStore();
+  startRecording({ name: 'semantic replay', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'desktop.click_element',
+    input: { pid: 1234, path: '0.0.1' },
+    result: { ok: true },
+    a11yTarget: { role: 'AXButton', label: 'Continue', app: 'Example' },
+  }));
+  stopRecording({ description: 'semantic mutation' });
+  {
+    const fired: string[] = [];
+    const outcome = await executeRecordingCommand('/replay semantic replay', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async (call) => {
+        fired.push(call.tool);
+        return { ok: true };
+      },
+    });
+    assert(
+      fired.length === 0,
+      'replay preflight: semantic mutation cannot run its a11y re-discovery read',
+    );
+    assert(
+      outcome?.runtimeHandoff?.blockedTools.includes('desktop.click_element') === true,
+      'replay preflight: semantic mutation is handed to the typed runtime',
+    );
+  }
+
+  resetStore();
+  startRecording({ name: 'future mutation', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'desktop.future_mutation',
+    input: { arbitrary: true },
+    result: { ok: true },
+  }));
+  stopRecording({ description: 'future unknown desktop mutation' });
+  {
+    let fireCount = 0;
+    const outcome = await executeRecordingCommand('/replay future mutation', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async () => {
+        fireCount += 1;
+        return { ok: true };
+      },
+    });
+    assert(
+      fireCount === 0
+        && outcome?.runtimeHandoff?.blockedTools.includes('desktop.future_mutation') === true,
+      'replay preflight: future unknown desktop tools fail closed with zero dispatches',
+    );
+  }
+
+  resetStore();
+  startRecording({ name: 'read only', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'desktop.window_state',
+    input: {},
+    result: { ok: true },
+  }));
+  appendStep(buildStep({
+    tool: 'browser.dom_snapshot',
+    input: { maxNodes: 25 },
+    result: { ok: true },
+  }));
+  stopRecording({ description: 'observations only' });
+  {
+    const fired: string[] = [];
+    const outcome = await executeRecordingCommand('/replay read only', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async (call) => {
+        fired.push(call.tool);
+        return { ok: true };
+      },
+    });
+    assert(
+      fired.join(',') === 'desktop.window_state,browser.dom_snapshot',
+      'replay preflight: allowlisted read-only observations replay in order',
+    );
+    assert(
+      !outcome?.runtimeHandoff
+        && outcome?.message.includes('All 2 steps replayed successfully.'),
+      'replay preflight: read-only plan completes without a mutation handoff',
+    );
   }
 
   // ─── findInTree ─────────────────────────────────────────────────

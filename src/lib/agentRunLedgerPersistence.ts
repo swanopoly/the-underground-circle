@@ -2,6 +2,7 @@ import { supabase } from './supabase';
 import { classifyAgentFailure, type AgentFailureAssessment } from './agentFailureTaxonomy';
 import type { AgentRunLedgerEvent, AgentRunLedgerEventType, AgentRunLedgerPreview } from './agentRunLedger';
 import type { UserTaskPipelineRisk } from './userTaskPipelines';
+import { PERSISTED_TOOL_FAILURE_TEXT } from './eventBoundCore';
 
 type LedgerPersistStatus = 'persisted' | 'partial' | 'skipped' | 'schema_missing' | 'failed';
 
@@ -75,6 +76,27 @@ function redactString(value: string): string {
     .replace(SECRET_VALUE_RE, '[REDACTED_SECRET]')
     .replace(LOCAL_PATH_RE, redactLocalPath)
     .slice(0, 1600);
+}
+
+/**
+ * Artifact references in the generic action channel are untrusted strings.
+ * Persist stable opaque correlation tokens; the typed artifact/product records
+ * remain the authority for human-readable filenames and launch URLs.
+ */
+export function sanitizeArtifactRefsForPersistence(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const refs: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value.slice(0, 20)) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const opaque = `[artifact-ref#${stableHash(trimmed)}]`;
+    if (seen.has(opaque)) continue;
+    seen.add(opaque);
+    refs.push(opaque);
+  }
+  return refs;
 }
 
 export function sanitizeLedgerPayload(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
@@ -205,7 +227,7 @@ function previewEventRows(input: {
     status: eventStatus(event.eventType),
     sanitized_input: sanitizeLedgerPayload({ messageId: event.messageId, sessionId: event.sessionId }),
     sanitized_output: sanitizeLedgerPayload(event.metadata || {}),
-    artifact_refs: event.artifactRefs || [],
+    artifact_refs: sanitizeArtifactRefsForPersistence(event.artifactRefs),
     input_tokens: event.inputTokens || 0,
     output_tokens: event.outputTokens || 0,
     estimated_cost: event.costUsd || 0,
@@ -234,7 +256,7 @@ function extractPreviewFailures(preview: AgentRunLedgerPreview, actualRunId: str
       retryable: failure.retryable,
       user_action_required: failure.userActionRequired,
       recommended_recovery: failure.recommendedRecovery,
-      raw_error: stringifyError((event.metadata as any)?.failureInput || (event.metadata as any)?.error || failure.failureClass),
+      raw_error: PERSISTED_TOOL_FAILURE_TEXT,
       signals: failure.signals || [],
       metadata: sanitizeLedgerPayload({ source: 'preview', eventMetadata: event.metadata || {} }),
     });
@@ -289,7 +311,7 @@ export async function persistAgentRunLedgerPreview(input: {
     if (error) throw error;
     result.wrote.budget = true;
   } catch (error) {
-    result.warnings.push(`budget: ${stringifyError(error)}`);
+    result.warnings.push('budget_write_failed');
     if (isLedgerSchemaMissing(error)) result.status = 'schema_missing';
   }
 
@@ -302,7 +324,7 @@ export async function persistAgentRunLedgerPreview(input: {
     if (events.error) throw events.error;
     result.wrote.events = events.count;
   } catch (error) {
-    result.warnings.push(`events: ${stringifyError(error)}`);
+    result.warnings.push('event_batch_write_failed');
     if (isLedgerSchemaMissing(error)) result.status = 'schema_missing';
   }
 
@@ -315,7 +337,7 @@ export async function persistAgentRunLedgerPreview(input: {
     if (failures.error) throw failures.error;
     result.wrote.failures = failures.count;
   } catch (error) {
-    result.warnings.push(`failures: ${stringifyError(error)}`);
+    result.warnings.push('failure_batch_write_failed');
     if (isLedgerSchemaMissing(error)) result.status = 'schema_missing';
   }
 
@@ -377,7 +399,7 @@ export async function persistAgentRunToolEvent(input: {
     if (eventResult.error) throw eventResult.error;
     result.wrote.events = eventResult.count;
   } catch (error) {
-    result.warnings.push(`event: ${stringifyError(error)}`);
+    result.warnings.push('event_write_failed');
     if (isLedgerSchemaMissing(error)) result.status = 'schema_missing';
   }
 
@@ -397,14 +419,14 @@ export async function persistAgentRunToolEvent(input: {
           retryable: failure.retryable,
           user_action_required: failure.userActionRequired,
           recommended_recovery: failure.recommendedRecovery,
-          raw_error: `${input.event.tool}: ${input.event.summary}`,
+          raw_error: PERSISTED_TOOL_FAILURE_TEXT,
           signals: failure.signals,
           metadata: sanitizeLedgerPayload({ source: 'runtime_tool_event', tool: input.event.tool }),
         }], 'run_id,failure_key');
         if (failureResult.error) throw failureResult.error;
         result.wrote.failures = failureResult.count;
       } catch (error) {
-        result.warnings.push(`failure: ${stringifyError(error)}`);
+        result.warnings.push('failure_write_failed');
         if (isLedgerSchemaMissing(error)) result.status = 'schema_missing';
       }
     }
@@ -467,9 +489,7 @@ export async function persistRuntimeToolActions(input: {
       status: mapped.rowStatus,
       sanitized_input: sanitizeLedgerPayload({ inputPreview: action.input_preview || null }),
       sanitized_output: sanitizeLedgerPayload({ outputPreview: action.output_preview || null }),
-      artifact_refs: Array.isArray(action.artifact_refs)
-        ? action.artifact_refs.map((ref) => String(ref || '').trim()).filter(Boolean).slice(0, 20)
-        : [],
+      artifact_refs: sanitizeArtifactRefsForPersistence(action.artifact_refs),
       metadata: sanitizeLedgerPayload(action.metadata || {}),
     };
   });
@@ -479,7 +499,7 @@ export async function persistRuntimeToolActions(input: {
     if (eventResult.error) throw eventResult.error;
     result.wrote.events = eventResult.count;
   } catch (error) {
-    result.warnings.push(`events: ${stringifyError(error)}`);
+    result.warnings.push('event_batch_write_failed');
     if (isLedgerSchemaMissing(error)) result.status = 'schema_missing';
   }
 
@@ -498,7 +518,7 @@ export async function persistRuntimeToolActions(input: {
       retryable: failure.retryable,
       user_action_required: failure.userActionRequired,
       recommended_recovery: failure.recommendedRecovery,
-      raw_error: `${action.tool_name || action.title || 'tool'}: ${action.output_preview || ''}`,
+      raw_error: PERSISTED_TOOL_FAILURE_TEXT,
       signals: failure.signals,
       metadata: sanitizeLedgerPayload({ source: 'openswan_tool_action', actionMetadata: action.metadata || {} }),
     }];
@@ -509,7 +529,7 @@ export async function persistRuntimeToolActions(input: {
     if (failureResult.error) throw failureResult.error;
     result.wrote.failures = failureResult.count;
   } catch (error) {
-    result.warnings.push(`failures: ${stringifyError(error)}`);
+    result.warnings.push('failure_batch_write_failed');
     if (isLedgerSchemaMissing(error)) result.status = 'schema_missing';
   }
 
@@ -518,7 +538,7 @@ export async function persistRuntimeToolActions(input: {
       kind: 'openswan_tool_actions',
       status: result.status,
       warnings: result.warnings,
-      actions: input.actions,
+      actions: rows,
     });
   }
 

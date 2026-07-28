@@ -1,4 +1,5 @@
 import { storage } from './storage';
+import { normalizeComputerTaskOutcomeStatus } from './computerTaskOutcome';
 import {
   acknowledgeComputerTaskNotifications,
   appendComputerTaskNotification,
@@ -6,6 +7,7 @@ import {
   buildComputerTaskChecklistCard,
   buildComputerTaskStateSteps,
   compactComputerTaskActionTrace,
+  compactComputerTaskCapabilityBuildout,
   compactComputerTaskCheckpointRecovery,
   compactComputerTaskCheckpointEvidenceReadiness,
   compactComputerTaskComplexityPlan,
@@ -23,8 +25,6 @@ import {
   resolveComputerTaskPendingQuestion,
   upsertComputerTaskPendingQuestion,
   COMPUTER_TASK_NOTIFICATION_GLYPHS,
-  type ComputerTaskCapabilityBuildout,
-  type ComputerTaskCapabilityBuildoutStatus,
   type ComputerTaskNotification,
   type ComputerTaskPendingQuestion,
   type ComputerTaskPhase,
@@ -43,6 +43,7 @@ export {
   buildComputerTaskChecklistCard,
   buildComputerTaskStateSteps,
   compactComputerTaskActionTrace,
+  compactComputerTaskCapabilityBuildout,
   compactComputerTaskCheckpointRecovery,
   compactComputerTaskCheckpointEvidenceReadiness,
   compactComputerTaskComplexityPlan,
@@ -126,6 +127,7 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
       runId: parsed.runId ? String(parsed.runId) : null,
       sessionId: parsed.sessionId ? String(parsed.sessionId) : null,
       liveUrl: parsed.liveUrl ? String(parsed.liveUrl) : null,
+      outcomeStatus: normalizeComputerTaskOutcomeStatus(parsed.outcomeStatus),
       grounding: parsed.grounding && typeof parsed.grounding === 'object'
         ? {
             status: String(parsed.grounding.status || ''),
@@ -138,31 +140,7 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
             blockers: Array.isArray(parsed.grounding.blockers) ? parsed.grounding.blockers.map(String).filter(Boolean).slice(0, 8) : [],
           }
         : null,
-      capabilityBuildout: parsed.capabilityBuildout && typeof parsed.capabilityBuildout === 'object'
-        ? {
-            status: (parsed.capabilityBuildout.status || 'requested') as ComputerTaskCapabilityBuildoutStatus,
-            message: String(parsed.capabilityBuildout.message || ''),
-            appName: parsed.capabilityBuildout.appName ? String(parsed.capabilityBuildout.appName) : null,
-            buildoutKind: parsed.capabilityBuildout.buildoutKind ? String(parsed.capabilityBuildout.buildoutKind) : null,
-            risk: parsed.capabilityBuildout.risk ? String(parsed.capabilityBuildout.risk) : null,
-            sessionId: parsed.capabilityBuildout.sessionId ? String(parsed.capabilityBuildout.sessionId) : null,
-            launched: typeof parsed.capabilityBuildout.launched === 'boolean' ? parsed.capabilityBuildout.launched : null,
-            approvalId: parsed.capabilityBuildout.approvalId ? String(parsed.capabilityBuildout.approvalId) : null,
-            retryPlan: parsed.capabilityBuildout.retryPlan ? String(parsed.capabilityBuildout.retryPlan) : null,
-            summary: parsed.capabilityBuildout.summary ? String(parsed.capabilityBuildout.summary) : null,
-            controlSurface: parsed.capabilityBuildout.controlSurface ? String(parsed.capabilityBuildout.controlSurface) : null,
-            sourceRefs: Array.isArray(parsed.capabilityBuildout.sourceRefs) ? parsed.capabilityBuildout.sourceRefs.map(String).filter(Boolean).slice(0, 12) : [],
-            filesChanged: Array.isArray(parsed.capabilityBuildout.filesChanged) ? parsed.capabilityBuildout.filesChanged.map(String).filter(Boolean).slice(0, 40) : [],
-            verification: parsed.capabilityBuildout.verification ? String(parsed.capabilityBuildout.verification) : null,
-            userActionNeeded: parsed.capabilityBuildout.userActionNeeded ? String(parsed.capabilityBuildout.userActionNeeded) : null,
-            missingEvidence: Array.isArray(parsed.capabilityBuildout.missingEvidence) ? parsed.capabilityBuildout.missingEvidence.map(String).filter(Boolean).slice(0, 8) : [],
-            autoRetryStatus: parsed.capabilityBuildout.autoRetryStatus ? String(parsed.capabilityBuildout.autoRetryStatus) as ComputerTaskCapabilityBuildout['autoRetryStatus'] : null,
-            autoRetryAttemptedAt: parsed.capabilityBuildout.autoRetryAttemptedAt ? String(parsed.capabilityBuildout.autoRetryAttemptedAt) : null,
-            autoRetryCompletedAt: parsed.capabilityBuildout.autoRetryCompletedAt ? String(parsed.capabilityBuildout.autoRetryCompletedAt) : null,
-            autoRetryRunId: parsed.capabilityBuildout.autoRetryRunId ? String(parsed.capabilityBuildout.autoRetryRunId) : null,
-            updatedAt: String(parsed.capabilityBuildout.updatedAt || nowIso()),
-          }
-        : null,
+      capabilityBuildout: compactComputerTaskCapabilityBuildout(parsed.capabilityBuildout),
       complexity: parsed.complexity && typeof parsed.complexity === 'object'
         ? {
             level: String(parsed.complexity.level || ''),
@@ -280,6 +258,9 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
   // stored for the SAME task (a new task text starts a clean trail).
   // L2 action trace gets the same carry-over treatment: rebuilt records
   // that don't know about the field must not wipe the persisted trace.
+  // `outcomeStatus` deliberately does NOT carry over: omission on a new
+  // planning/executing transition must clear a prior terminal result even
+  // when the user reruns identical task text.
   let surfaceEscalations = record.surfaceEscalations;
   let actionTrace = record.actionTrace;
   if (surfaceEscalations === undefined || actionTrace === undefined) {
@@ -299,6 +280,8 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
     ...record,
     surfaceEscalations,
     actionTrace,
+    capabilityBuildout: compactComputerTaskCapabilityBuildout(record.capabilityBuildout),
+    outcomeStatus: normalizeComputerTaskOutcomeStatus(record.outcomeStatus),
     updatedAt: record.updatedAt || nowIso(),
   }));
 }

@@ -57,6 +57,40 @@ function assertNotHas(message: string, unexpected: OpenSwanToolName, profile?: A
   );
 }
 
+function assertToolOrder(
+  message: string,
+  before: OpenSwanToolName,
+  middle: OpenSwanToolName,
+  after: OpenSwanToolName,
+  profile?: AgenticCodingProfile,
+) {
+  const tools = toolsFor(message, profile);
+  const beforeIndex = tools.indexOf(before);
+  const middleIndex = tools.indexOf(middle);
+  const afterIndex = tools.indexOf(after);
+  assert(
+    beforeIndex >= 0
+      && middleIndex > beforeIndex
+      && afterIndex > middleIndex,
+    `"${message}" orders ${before} -> ${middle} -> ${after}`,
+    `indexes=${beforeIndex}/${middleIndex}/${afterIndex} saw ${tools.join(', ')}`,
+  );
+}
+
+function assertLocatorActionabilityReason(message: string, profile?: AgenticCodingProfile) {
+  const item = buildOpenSwanTaskPlan(message, profile || 'support').recommendedTools
+    .find((candidate) => candidate.tool === 'browser.locator_actionability');
+  const reason = item?.reason || '';
+  assert(
+    /read-only/i.test(reason)
+      && /advisory/i.test(reason)
+      && /later mutation/i.test(reason)
+      && /own approval\/proof gate/i.test(reason),
+    `"${message}" explains locator actionability is advisory and not mutation authority`,
+    `reason=${JSON.stringify(reason)}`,
+  );
+}
+
 function main() {
   assertHas(
     'tell me all the tabs I have open on my web browser',
@@ -207,8 +241,39 @@ function main() {
     'browser.click_role',
   );
   assertHas(
+    'turn on the Dark mode switch on the website',
+    'browser.set_toggle',
+  );
+  assertHas(
     'fill the login form in the browser',
     'browser.fill_field',
+  );
+  assertToolOrder(
+    'fill the login form in the browser',
+    'browser.dom_snapshot',
+    'browser.locator_actionability',
+    'browser.fill_field',
+  );
+  assertLocatorActionabilityReason('fill the login form in the browser');
+  assertToolOrder(
+    'click the Login button on the website',
+    'browser.dom_snapshot',
+    'browser.locator_actionability',
+    'browser.click_role',
+  );
+  assertToolOrder(
+    'log into Shopify and update this product page after I approve',
+    'browser.dom_snapshot',
+    'browser.locator_actionability',
+    'browser.fill_credential_field',
+  );
+  assertNotHas(
+    'extract the table and list all links from this website',
+    'browser.locator_actionability',
+  );
+  assertNotHas(
+    'inspect the login form fields and checkbox states without changing anything',
+    'browser.locator_actionability',
   );
   assertHas(
     'select Canada from the country dropdown in the browser',

@@ -14,7 +14,11 @@
  */
 
 import { supabase } from './supabase';
-import { boundEventPayload, boundToolCallsAggregate } from './eventBoundCore';
+import {
+  PERSISTED_TOOL_FAILURE_TEXT,
+  boundEventPayload,
+  boundToolCallsAggregate,
+} from './eventBoundCore';
 import { estimateRunCostUsd } from './runCostRollupCore';
 import { createRun, updateRunStatus, type AgentRun, type RunSurface } from './agentRunSystem';
 import type { AgentEvent, AgentRunResult, AgentToolResult } from './agentExecutionCore';
@@ -56,6 +60,440 @@ export type CreatePersistedRunOptions = {
   /** Optional extra metadata merged onto the run row. */
   metadata?: Record<string, unknown>;
 };
+
+type PersistedReceiptPrimitive = string | number | boolean | null;
+type PersistedReceiptSubset = Record<string, PersistedReceiptPrimitive>;
+
+/**
+ * The only AgentToolResult.metadata namespaces allowed into durable typed-loop
+ * telemetry. Tool metadata is a hidden runtime side channel and may contain
+ * policy objects, browser state, local paths, or provider payloads, so callers
+ * must never persist it wholesale.
+ */
+export type PersistedToolResultReceiptMetadata = Partial<Record<
+  | 'computerActionReceipt'
+  | 'mutationDispatchReceipt'
+  | 'computerAppVerificationReceipt'
+  | 'verificationReceipt',
+  PersistedReceiptSubset
+>>;
+
+export type PersistedToolActionMetadata = PersistedToolResultReceiptMetadata & {
+  toolPolicy?: {
+    family: string;
+    approvalMode: 'auto' | 'ask';
+    mutatesState: boolean;
+    externalSideEffect: boolean;
+    approvalKind?: string;
+  };
+  approvalRequest?: {
+    id?: string;
+    required: boolean;
+    status: string;
+  };
+  source?: string;
+  ledgerArtifactKind?: 'design_object_manifest';
+};
+
+type ReceiptFieldKind = 'string' | 'nullable_string' | 'number' | 'boolean';
+type ReceiptFieldSpec = readonly [name: string, kind: ReceiptFieldKind];
+
+const RECEIPT_STRING_MAX_CHARS = 240;
+const RECEIPT_NUMBER_ABS_MAX = 1_000_000_000_000;
+const RECEIPT_DERIVED_COUNT_MAX = 10_000;
+
+const COMPUTER_ACTION_RECEIPT_FIELDS: readonly ReceiptFieldSpec[] = [
+  ['schemaVersion', 'number'],
+  ['tool', 'string'],
+  ['surface', 'string'],
+  ['toolArgsFingerprint', 'string'],
+  ['argsFingerprint', 'string'],
+  ['handlerEnteredAt', 'string'],
+  ['handlerExitedAt', 'string'],
+  ['dispatchedAt', 'string'],
+  ['completedAt', 'string'],
+  ['outcome', 'string'],
+  ['status', 'string'],
+  ['risk', 'string'],
+  ['approvalState', 'string'],
+  ['mutates', 'boolean'],
+  ['approvalRequired', 'boolean'],
+  ['ok', 'boolean'],
+  ['canComplete', 'boolean'],
+  ['iteration', 'number'],
+  ['durationMs', 'number'],
+  ['evidenceCount', 'number'],
+  ['blockerCount', 'number'],
+] as const;
+
+const MUTATION_DISPATCH_RECEIPT_FIELDS: readonly ReceiptFieldSpec[] = [
+  ['schemaVersion', 'number'],
+  ['tool', 'string'],
+  ['authorizedAt', 'string'],
+  ['dispatchedAt', 'string'],
+] as const;
+
+const COMPUTER_APP_VERIFICATION_RECEIPT_FIELDS: readonly ReceiptFieldSpec[] = [
+  ['schemaVersion', 'number'],
+  ['status', 'string'],
+  ['checkedAt', 'string'],
+  ['canComplete', 'boolean'],
+  ['evidenceCount', 'number'],
+  ['blockerCount', 'number'],
+] as const;
+
+const VERIFICATION_RECEIPT_FIELDS: readonly ReceiptFieldSpec[] = [
+  ['verdict', 'string'],
+  ['committed', 'boolean'],
+  ['commitRef', 'string'],
+  ['editedFileCount', 'number'],
+  ['checkCount', 'number'],
+  ['passedCheckCount', 'number'],
+  ['failedCheckCount', 'number'],
+] as const;
+
+function receiptRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readReceiptField(record: Record<string, unknown>, key: string): unknown {
+  try {
+    return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function boundedReceiptString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  // Scan only a small bounded prefix, drop control characters, and collapse
+  // whitespace before clipping. The persistence-boundary event/tool-call
+  // bounders still perform the authoritative secret masking at write time.
+  const scan = value.slice(0, RECEIPT_STRING_MAX_CHARS * 4);
+  let out = '';
+  let pendingSpace = false;
+  for (let i = 0; i < scan.length && out.length < RECEIPT_STRING_MAX_CHARS; i++) {
+    const code = scan.charCodeAt(i);
+    if (code <= 32 || code === 127) {
+      pendingSpace = out.length > 0;
+      continue;
+    }
+    if (pendingSpace && out.length < RECEIPT_STRING_MAX_CHARS) out += ' ';
+    pendingSpace = false;
+    if (out.length < RECEIPT_STRING_MAX_CHARS) out += scan[i];
+  }
+  return out || undefined;
+}
+
+const RECEIPT_TOOL_RE = /^[A-Za-z][A-Za-z0-9_-]{0,79}\.[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+const RECEIPT_FINGERPRINT_RE = /^args-v2:sha256:[0-9a-f]{64}$/;
+const RECEIPT_COMMIT_RE = /^[0-9a-f]{7,64}$/;
+const RECEIPT_SURFACES = new Set([
+  'browser', 'desktop', 'vault', 'terminal', 'file', 'code', 'research', 'approval', 'system',
+]);
+const RECEIPT_OUTCOMES = new Set([
+  'succeeded', 'success', 'passed', 'completed', 'verified',
+  'failed', 'error', 'blocked', 'cancelled', 'inconclusive', 'outcome_unknown',
+]);
+const RECEIPT_STATUSES = new Set([
+  'pending', 'running', 'passed', 'completed', 'success', 'verified',
+  'failed', 'error', 'blocked', 'skipped', 'cancelled',
+  'manual_required', 'inconclusive', 'outcome_unknown',
+]);
+const RECEIPT_RISKS = new Set(['low', 'medium', 'high', 'critical']);
+const RECEIPT_APPROVAL_STATES = new Set([
+  'not_required', 'pending', 'approved', 'auto_approved', 'rejected',
+]);
+const RECEIPT_VERIFICATION_STATUSES = new Set(['verified', 'failed', 'inconclusive']);
+const RECEIPT_VERDICTS = new Set(['verified', 'unverified', 'failed']);
+const TOOL_POLICY_FAMILIES = new Set([
+  'code', 'verification', 'memory', 'knowledge', 'coordination',
+  'browser', 'workspace', 'approval', 'vault', 'agent',
+]);
+const TOOL_POLICY_APPROVAL_KINDS = new Set([
+  'tool_use', 'publish', 'external_send', 'file_write', 'browser_action',
+  'cost_threshold', 'privileged_action', 'plan_approval', 'deliverable_review',
+]);
+const APPROVAL_REQUEST_STATUSES = new Set([
+  'pending', 'approved', 'rejected', 'expired', 'consumed', 'cancelled',
+]);
+const TOOL_ACTION_SOURCES = new Set([
+  'openswan_runtime_tool_loop',
+  'openswan_session_runtime',
+  'subagent_runtime',
+]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function validatedReceiptString(field: string, value: unknown): string | undefined {
+  const bounded = boundedReceiptString(value);
+  if (!bounded) return undefined;
+  if (field === 'tool') return RECEIPT_TOOL_RE.test(bounded) ? bounded : undefined;
+  if (field === 'toolArgsFingerprint' || field === 'argsFingerprint') {
+    return RECEIPT_FINGERPRINT_RE.test(bounded) ? bounded : undefined;
+  }
+  if (
+    field === 'handlerEnteredAt'
+    || field === 'handlerExitedAt'
+    || field === 'authorizedAt'
+    || field === 'dispatchedAt'
+    || field === 'completedAt'
+    || field === 'checkedAt'
+  ) {
+    const timestamp = Date.parse(bounded);
+    return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === bounded
+      ? bounded
+      : undefined;
+  }
+  if (field === 'surface') return RECEIPT_SURFACES.has(bounded) ? bounded : undefined;
+  if (field === 'outcome') return RECEIPT_OUTCOMES.has(bounded) ? bounded : undefined;
+  if (field === 'status') return RECEIPT_STATUSES.has(bounded) || RECEIPT_VERIFICATION_STATUSES.has(bounded)
+    ? bounded
+    : undefined;
+  if (field === 'risk') return RECEIPT_RISKS.has(bounded) ? bounded : undefined;
+  if (field === 'approvalState') return RECEIPT_APPROVAL_STATES.has(bounded) ? bounded : undefined;
+  if (field === 'verdict') return RECEIPT_VERDICTS.has(bounded) ? bounded : undefined;
+  if (field === 'commitRef') return RECEIPT_COMMIT_RE.test(bounded) ? bounded : undefined;
+  return undefined;
+}
+
+function boundedReceiptNumber(field: string, value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  if (field === 'schemaVersion') return value === 1 ? 1 : undefined;
+  if (
+    field === 'iteration'
+    || field === 'evidenceCount'
+    || field === 'blockerCount'
+    || field === 'editedFileCount'
+    || field === 'checkCount'
+    || field === 'passedCheckCount'
+    || field === 'failedCheckCount'
+  ) {
+    return Number.isInteger(value) && value >= 0 && value <= RECEIPT_DERIVED_COUNT_MAX
+      ? value
+      : undefined;
+  }
+  if (field === 'durationMs') {
+    return Number.isInteger(value) && value >= 0 && value <= 86_400_000
+      ? value
+      : undefined;
+  }
+  return Math.max(-RECEIPT_NUMBER_ABS_MAX, Math.min(RECEIPT_NUMBER_ABS_MAX, value));
+}
+
+function boundedReceiptCount(value: unknown): number | undefined {
+  if (!Array.isArray(value)) return undefined;
+  try {
+    return Math.min(RECEIPT_DERIVED_COUNT_MAX, value.length);
+  } catch {
+    return undefined;
+  }
+}
+
+function readReceiptArrayItem(value: unknown[], index: number): unknown {
+  try {
+    return value[index];
+  } catch {
+    return undefined;
+  }
+}
+
+function pickReceiptFields(
+  value: unknown,
+  fields: readonly ReceiptFieldSpec[],
+): PersistedReceiptSubset | undefined {
+  const record = receiptRecord(value);
+  if (!record) return undefined;
+  const out: PersistedReceiptSubset = {};
+  for (const [field, kind] of fields) {
+    const raw = readReceiptField(record, field);
+    if (kind === 'boolean') {
+      if (typeof raw === 'boolean') out[field] = raw;
+      continue;
+    }
+    if (kind === 'number') {
+      const bounded = boundedReceiptNumber(field, raw);
+      if (bounded !== undefined) out[field] = bounded;
+      continue;
+    }
+    if (kind === 'nullable_string' && raw === null) {
+      out[field] = null;
+      continue;
+    }
+    const bounded = validatedReceiptString(field, raw);
+    if (bounded !== undefined) out[field] = bounded;
+  }
+  const projectedFields = Object.keys(out);
+  if (projectedFields.length === 0) return undefined;
+  // A version marker alone is not evidence. If every semantic field was
+  // invalid or rejected, omit the receipt instead of creating a misleading
+  // durable `{schemaVersion: 1}` shell.
+  if (projectedFields.length === 1 && projectedFields[0] === 'schemaVersion') return undefined;
+  return out;
+}
+
+function withDerivedCount(
+  receipt: PersistedReceiptSubset | undefined,
+  source: Record<string, unknown> | null,
+  sourceField: string,
+  outputField: string,
+): PersistedReceiptSubset | undefined {
+  const count = source ? boundedReceiptCount(readReceiptField(source, sourceField)) : undefined;
+  if (count === undefined) return receipt;
+  return { ...(receipt || {}), [outputField]: count };
+}
+
+function sanitizeVerificationReceipt(value: unknown): PersistedReceiptSubset | undefined {
+  const source = receiptRecord(value);
+  let receipt = pickReceiptFields(source, VERIFICATION_RECEIPT_FIELDS);
+  receipt = withDerivedCount(receipt, source, 'editedFiles', 'editedFileCount');
+  receipt = withDerivedCount(receipt, source, 'checks', 'checkCount');
+
+  const checks = source ? readReceiptField(source, 'checks') : undefined;
+  if (Array.isArray(checks)) {
+    let passed = 0;
+    let failed = 0;
+    const cap = boundedReceiptCount(checks) || 0;
+    for (let i = 0; i < cap; i++) {
+      const check = receiptRecord(readReceiptArrayItem(checks, i));
+      if (!check) continue;
+      if (readReceiptField(check, 'passed') === true) passed += 1;
+      else if (readReceiptField(check, 'passed') === false) failed += 1;
+    }
+    receipt = {
+      ...(receipt || {}),
+      passedCheckCount: passed,
+      failedCheckCount: failed,
+    };
+  }
+  return receipt && Object.keys(receipt).length > 0 ? receipt : undefined;
+}
+
+/**
+ * Return a compact, primitive-only proof/receipt subset from hidden tool result
+ * metadata. Unknown namespaces and free-form fields are intentionally dropped.
+ * This helper is total and side-effect free. Its field-specific validators are
+ * the first authority boundary; the event/tool-call bounders remain a
+ * defense-in-depth size and secret-pattern backstop at the final writes.
+ */
+export function sanitizeToolResultMetadataForPersistence(
+  metadata: unknown,
+): PersistedToolResultReceiptMetadata | undefined {
+  const source = receiptRecord(metadata);
+  if (!source) return undefined;
+  const out: PersistedToolResultReceiptMetadata = {};
+
+  const computerActionReceipt = pickReceiptFields(
+    readReceiptField(source, 'computerActionReceipt'),
+    COMPUTER_ACTION_RECEIPT_FIELDS,
+  );
+  if (computerActionReceipt) out.computerActionReceipt = computerActionReceipt;
+
+  const mutationDispatchReceipt = pickReceiptFields(
+    readReceiptField(source, 'mutationDispatchReceipt'),
+    MUTATION_DISPATCH_RECEIPT_FIELDS,
+  );
+  if (mutationDispatchReceipt) out.mutationDispatchReceipt = mutationDispatchReceipt;
+
+  const verificationSource = receiptRecord(readReceiptField(source, 'computerAppVerificationReceipt'));
+  let computerAppVerificationReceipt = pickReceiptFields(
+    verificationSource,
+    COMPUTER_APP_VERIFICATION_RECEIPT_FIELDS,
+  );
+  computerAppVerificationReceipt = withDerivedCount(
+    computerAppVerificationReceipt,
+    verificationSource,
+    'evidenceIds',
+    'evidenceCount',
+  );
+  computerAppVerificationReceipt = withDerivedCount(
+    computerAppVerificationReceipt,
+    verificationSource,
+    'blockers',
+    'blockerCount',
+  );
+  if (computerAppVerificationReceipt) {
+    out.computerAppVerificationReceipt = computerAppVerificationReceipt;
+  }
+
+  const verificationReceipt = sanitizeVerificationReceipt(
+    readReceiptField(source, 'verificationReceipt'),
+  );
+  if (verificationReceipt) out.verificationReceipt = verificationReceipt;
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Project hidden runtime metadata into the only policy/correlation shapes that
+ * durable action cards need. Browser plans and design-app captures are
+ * deliberately excluded: the session runtime extracts those into their
+ * dedicated, typed product records before calling this boundary.
+ */
+export function sanitizeToolActionMetadataForPersistence(
+  metadata: unknown,
+): PersistedToolActionMetadata | undefined {
+  const source = receiptRecord(metadata);
+  if (!source) return undefined;
+  const out: PersistedToolActionMetadata = {
+    ...(sanitizeToolResultMetadataForPersistence(source) || {}),
+  };
+
+  const policy = receiptRecord(readReceiptField(source, 'toolPolicy'));
+  if (policy) {
+    const family = readReceiptField(policy, 'family');
+    const approvalMode = readReceiptField(policy, 'approvalMode');
+    const mutatesState = readReceiptField(policy, 'mutatesState');
+    const externalSideEffect = readReceiptField(policy, 'externalSideEffect');
+    const approvalKind = readReceiptField(policy, 'approvalKind');
+    if (
+      typeof family === 'string'
+      && TOOL_POLICY_FAMILIES.has(family)
+      && (approvalMode === 'auto' || approvalMode === 'ask')
+      && typeof mutatesState === 'boolean'
+      && typeof externalSideEffect === 'boolean'
+    ) {
+      out.toolPolicy = {
+        family,
+        approvalMode,
+        mutatesState,
+        externalSideEffect,
+        ...(typeof approvalKind === 'string' && TOOL_POLICY_APPROVAL_KINDS.has(approvalKind)
+          ? { approvalKind }
+          : {}),
+      };
+    }
+  }
+
+  const approvalRequest = receiptRecord(readReceiptField(source, 'approvalRequest'));
+  if (approvalRequest) {
+    const id = readReceiptField(approvalRequest, 'id');
+    const required = readReceiptField(approvalRequest, 'required');
+    const status = readReceiptField(approvalRequest, 'status');
+    if (
+      typeof required === 'boolean'
+      && typeof status === 'string'
+      && APPROVAL_REQUEST_STATUSES.has(status)
+    ) {
+      out.approvalRequest = {
+        ...(typeof id === 'string' && UUID_RE.test(id) ? { id } : {}),
+        required,
+        status,
+      };
+    }
+  }
+
+  const actionSource = readReceiptField(source, 'source');
+  if (typeof actionSource === 'string' && TOOL_ACTION_SOURCES.has(actionSource)) {
+    out.source = actionSource;
+  }
+  if (readReceiptField(source, 'ledgerArtifactKind') === 'design_object_manifest') {
+    out.ledgerArtifactKind = 'design_object_manifest';
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 /**
  * #8: persist a single `solver_consultation` marker for a run that is NOT
@@ -156,6 +594,8 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
     input: unknown;
     ok: boolean;
     durationMs: number;
+    dispatched: boolean | null;
+    metadata?: PersistedToolResultReceiptMetadata;
     error?: string;
   }> = [];
   let lastStopReason: string | undefined;
@@ -204,9 +644,9 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
         // cap depth/size/strings, cyclic-safe, secret-masked, before insert.
         payload: boundEventPayload(kind, payload) as Record<string, unknown>,
       });
-    } catch (e) {
+    } catch {
       // Non-fatal — telemetry failures should never bubble.
-      console.warn('[agentRunPersistence] event insert failed:', e);
+      console.warn('[agentRunPersistence] event_insert_failed');
     }
   };
 
@@ -268,13 +708,17 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
         break;
       case 'tool_call_result': {
         const tr = event.result as AgentToolResult;
+        const dispatched = typeof event.dispatched === 'boolean' ? event.dispatched : null;
+        const metadata = sanitizeToolResultMetadataForPersistence(tr.metadata);
         toolCalls.push({
           toolName: event.toolName,
           toolUseId: event.toolUseId,
           input: undefined, // kept in tool_call_start event to save bytes
           ok: tr.ok,
           durationMs: event.durationMs,
-          error: tr.ok ? undefined : tr.error,
+          dispatched,
+          ...(metadata ? { metadata } : {}),
+          error: tr.ok ? undefined : PERSISTED_TOOL_FAILURE_TEXT,
         });
         void writeEvent('tool_call_result', {
           iteration: event.iteration,
@@ -282,6 +726,8 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
           tool_use_id: event.toolUseId,
           ok: tr.ok,
           duration_ms: event.durationMs,
+          dispatched,
+          ...(metadata ? { metadata } : {}),
           ...(tr.ok ? {} : { error: tr.error }),
         });
         break;
@@ -356,8 +802,8 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
           } : {}),
         })
         .eq('id', run.id);
-    } catch (e) {
-      console.warn('[agentRunPersistence] finalize columns update failed:', e);
+    } catch {
+      console.warn('[agentRunPersistence] finalize_columns_update_failed');
     }
 
     await updateRunStatus(run.id, status, {
@@ -366,8 +812,9 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
 
     if (err) {
       await writeEvent('error', {
-        message: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
+        message: PERSISTED_TOOL_FAILURE_TEXT,
+        error_code: 'agent_run_failed',
+        redacted: true,
       });
     }
   };

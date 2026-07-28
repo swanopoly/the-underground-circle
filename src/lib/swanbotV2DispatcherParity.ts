@@ -5,6 +5,7 @@
  *
  * The risk this guards (G1): a client-delegated tool added to the v2 edge
  * `TOOLS` array with no handler in `swanbotClientToolDispatcher.ts` (desktop.*
+ * plus narrowly shared browser evidence handlers)
  * cases) or in `swanbot.ts` `dispatchOneClientTool` (browser/workspace/
  * verification/credentials/wp cases). The dispatcher's `default` and
  * `dispatchOneClientTool`'s `default` both return a silent error/null, so a
@@ -91,12 +92,13 @@ export function parseV2ClientOnlyToolNames(v2Source: string): string[] {
 }
 
 /**
- * Extract `desktop.*` case labels handled by the root-owned desktop dispatcher
- * (`swanbotClientToolDispatcher.ts`). Each `case 'desktop.x':` is one handler.
+ * Extract tool case labels handled by the shared client dispatcher
+ * (`swanbotClientToolDispatcher.ts`). The compatibility export name predates
+ * the first read-only browser handler, so keep it stable for existing callers.
  */
 export function parseDesktopDispatcherToolNames(dispatcherSource: string): string[] {
   const names = new Set<string>();
-  const re = /case\s+'(desktop\.[a-z0-9_]+)'/g;
+  const re = /case\s+'([a-z][a-z0-9_]*\.[a-z0-9_]+)'/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(dispatcherSource))) names.add(m[1]);
   return Array.from(names);

@@ -255,8 +255,8 @@ function stripBuildoutTechnicalNoise(value: string | null | undefined, max = 320
     .replace(/\bAPP_CAPABILITY_(?:RESULT_JSON|SUMMARY|STATUS|CONTROL_SURFACE|SOURCE_REFS|FILES_CHANGED|RETRY_PLAN|VERIFICATION|USER_ACTION_NEEDED)\b:?/gi, '')
     .replace(/\b(?:session|approval)\s*(?:id)?\s*[:#]?\s*[a-z0-9_-]{8,}\b/gi, '')
     .replace(/\bConnected agents checked:.*$/i, '')
-    .replace(/\bSent Codex app capability buildout task to\s+[^\s.]+\.?/i, 'Started a connected app capability buildout.')
-    .replace(/\bLaunched Codex app capability buildout session(?:\s*\([^)]*\))?\.?/i, 'Started a connected app capability buildout.')
+    .replace(/\bSent (?:Codex|Claude(?: Code)?|Gemini|Cursor|connected-agent) app capability buildout task to\s+[^\s.]+\.?/i, 'Started a connected app capability buildout.')
+    .replace(/\bLaunched (?:Codex|Claude(?: Code)?|Gemini|Cursor|connected-agent) app capability buildout session(?:\s*\([^)]*\))?\.?/i, 'Started a connected app capability buildout.')
     .replace(/\s+/g, ' ')
     .trim();
   return text.slice(0, max).trim();
@@ -512,7 +512,7 @@ export function buildAgentAppCapabilityBuildoutStateHints(input: AgentAppCapabil
   if (status === 'requested') {
     return {
       phase: 'building_capability',
-      nextSteps: ['Wait for the connected Codex buildout result', retryPlan],
+      nextSteps: ['Wait for the connected coding-agent buildout result', retryPlan],
       blockers: [],
       suppressGenericRecovery: true,
     };
@@ -580,7 +580,7 @@ export function buildAgentAppCapabilityRetryPrompt(input: AgentAppCapabilityRetr
   return [
     dispatchPrefix,
     'CONNECTED APP CAPABILITY BUILDOUT READY',
-    'A connected Codex agent reported that the missing desktop/app capability has been added or made available. Retry the user task once using the new recipe, adapter, bridge tool, or planner route.',
+    'A connected coding agent reported that the missing desktop/app capability has been added or made available. Retry the user task once using the new recipe, adapter, bridge tool, or planner route.',
     appName ? `Target app: ${appName}` : '',
     summary ? `Buildout summary: ${summary}` : '',
     controlSurface ? `Chosen control surface: ${controlSurface}` : '',
@@ -756,7 +756,7 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
   ];
 
   const basePrompt = [
-    'You are Codex attached to The Underground Circle app.',
+    'You are a connected coding agent attached to The Underground Circle app.',
     'Task: build or propose the missing app-control capability needed so chat/SwanBot can complete a user request in an unfamiliar desktop/native app.',
     `Original user task: ${task}`,
     appName ? `Target app: ${appName}` : 'Target app: infer from the task and state your confidence.',

@@ -42,9 +42,11 @@ export type OpenSwanToolName =
   | 'browser.plan_task'
   | 'browser.open_url'
   | 'browser.dom_snapshot'
+  | 'browser.locator_actionability'
   | 'browser.wp_admin_source_intelligence'
   | 'browser.verification_state'
   | 'browser.click_role'
+  | 'browser.set_toggle'
   | 'browser.fill_field'
   | 'browser.fill_credential_field'
   | 'browser.select_option'
@@ -214,6 +216,10 @@ const RESEARCH_RE = /\b(research|compare|investigate|deep dive|tradeoff|best pra
 const AUTOMATION_RE = /\b(automate|workflow|task|pipeline|schedule|agent|orchestrate|runbook)\b/i;
 const PREVIEW_RE = /\b(html|css|landing page|webpage|preview|ui|screen|room|sandbox)\b/i;
 const BROWSER_RE = /\b(browser|website|web site|webpage|site|login|dashboard|click|fill|form|submit|data entry|scrape|extract data|web data retrieval|structured data|navigate|open url|browserbase|stagehand|computer[- ]use)\b/i;
+const BROWSER_TARGET_MUTATION_RE = /\b(click|press|uncheck|turn (?:on|off)|enable|disable|opt (?:in|out)|select|choose|fill|enter|log\s+in|sign\s+in|submit|upload|attach|import|navigate|install|update|edit|publish|delete|remove)\b|\bcheck\s+(?:the\s+)?(?:checkbox|radio)\b|\btoggle\s+(?:the\s+)?(?!state\b)[\w-]+|\btype\b(?=.{0,80}\b(?:into|in)\b)/i;
+const BROWSER_EXPLICIT_READ_ONLY_RE = /\b(read[- ]only|without (?:changing|clicking|typing|submitting|uploading)|do not (?:change|click|type|submit|upload)|don't (?:change|click|type|submit|upload)|just (?:read|inspect|list|extract))\b/i;
+const BROWSER_LOCATOR_ACTIONABILITY_REASON =
+  'Use read-only advisory actionability evidence for the fresh exact browser target after the DOM snapshot. A later mutation is separate and still needs its own approval/proof gate.';
 const DESKTOP_RE = /\b(desktop|computer|native app|window|finder|terminal|chrome|safari|slack|figma|indesign|photoshop|illustrator|notion|excel|word|zoom|cursor|visual studio code|vscode|launch app|open app|focus app|keystroke|keyboard|screen shot|screenshot|click at|auto\s*cad|autocad|cad|fusion\s*360|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|sketch\s*up|sketchup|freecad|librecad|qcad|rhino|revit|civil\s*3d|inventor|onshape|dwg|dxf|mlx|slx|engineering drawing|floor plan|technical drawing)\b/i;
 const BOT_VERIFICATION_RE = /\b(captcha|recaptcha|hcaptcha|turnstile|not a robot|human verification|bot verification|security check|cloudflare|2fa|mfa|otp|verification code)\b/i;
 const VAULT_RE = /\b(vault|credential|credentials|password|passwords|saved login|login information|username|secret|secrets|access to|grant access|revoke access)\b/i;
@@ -243,16 +249,16 @@ const PIPELINE_OPEN_SWAN_TOOLS: Partial<Record<UserTaskPipelineId, OpenSwanToolN
   knowledge_search: ['research.search', 'search_memories'],
   memory_second_brain: ['search_memories', 'save_memory'],
   browser_data_retrieval: ['browser.plan_task', 'browser.open_url', 'browser.dom_snapshot', 'browser.screenshot'],
-  browser_form_submission: ['browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_field', 'browser.fill_credential_field', 'browser.upload_file', 'vault.resolve_for_task', 'approvals.request'],
-  browser_navigation: ['browser.plan_task', 'browser.open_url', 'browser.dom_snapshot', 'browser.click_role', 'browser.screenshot'],
+  browser_form_submission: ['browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.set_toggle', 'browser.fill_field', 'browser.fill_credential_field', 'browser.upload_file', 'vault.resolve_for_task', 'approvals.request'],
+  browser_navigation: ['browser.plan_task', 'browser.open_url', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.click_role', 'browser.screenshot'],
   desktop_awareness: ['desktop.list_browser_tabs', 'desktop.window_state', 'desktop.list_running_apps', 'desktop.clipboard'],
   bridge_troubleshooting: ['desktop.list_browser_tabs', 'desktop.window_state', 'desktop.list_running_apps', 'integrations.list'],
   desktop_app_control: ['desktop.list_running_apps', 'desktop.launch_app', 'desktop.focus_app', 'desktop.read_a11y_tree', 'desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_set_layer_state', 'desktop.indesign_batch_find_change', 'desktop.indesign_batch_update_text_layers', 'desktop.indesign_update_text_layer', 'desktop.indesign_relink_asset', 'desktop.indesign_package_document', 'desktop.indesign_export_proof', 'desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_update_text_layer', 'desktop.photoshop_place_asset', 'desktop.photoshop_export_proof', 'desktop.screenshot', 'desktop.click_element', 'desktop.set_element_value', 'desktop.menu_click', 'desktop.paste_text'],
   local_files: ['desktop.file_list', 'desktop.file_read', 'desktop.file_search', 'desktop.file_stat', 'desktop.file_rename', 'desktop.file_write_text', 'desktop.file_copy', 'desktop.file_trash', 'desktop.file_mkdir', 'desktop.open_path'],
   terminal_agents: ['office.list_agents', 'messages.create', 'approvals.request'],
   vault_credentials: ['vault.find', 'vault.grants', 'vault.runbook', 'vault.resolve_for_task', 'approvals.request'],
-  wordpress_cms: ['wp.discover_types', 'wp.list_posts', 'browser.wp_admin_source_intelligence', 'wp.upload_media', 'wp.create_slide', 'wp.update_post', 'vault.resolve_for_task', 'vault.runbook', 'browser.plan_task', 'browser.open_url', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_credential_field', 'browser.upload_file', 'approvals.request'],
-  website_platform_admin: ['vault.resolve_for_task', 'browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'browser.click_role', 'approvals.request'],
+  wordpress_cms: ['wp.discover_types', 'wp.list_posts', 'browser.wp_admin_source_intelligence', 'wp.upload_media', 'wp.create_slide', 'wp.update_post', 'vault.resolve_for_task', 'vault.runbook', 'browser.plan_task', 'browser.open_url', 'browser.verification_state', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.fill_credential_field', 'browser.upload_file', 'approvals.request'],
+  website_platform_admin: ['vault.resolve_for_task', 'browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.fill_credential_field', 'browser.set_toggle', 'browser.fill_field', 'browser.upload_file', 'browser.click_role', 'approvals.request'],
   coding_build: ['code.inspect', 'code.generate', 'verification.typecheck', 'verification.tests'],
   debug_fix: ['code.inspect', 'code.generate', 'verification.typecheck', 'verification.tests'],
   code_review: ['code.review', 'verification.typecheck', 'verification.tests', 'verification.lint'],
@@ -271,7 +277,7 @@ const PIPELINE_OPEN_SWAN_TOOLS: Partial<Record<UserTaskPipelineId, OpenSwanToolN
   sales_leads_outreach: ['browser.plan_task', 'browser.dom_snapshot', 'research.search', 'vault.resolve_for_task', 'approvals.request'],
   analytics_reporting: ['desktop.file_read', 'browser.dom_snapshot', 'research.search', 'rooms.create_file'],
   meetings_calendar_email: ['desktop.list_running_apps', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.type_text', 'approvals.request'],
-  data_import_export: ['desktop.file_read', 'desktop.file_search', 'browser.dom_snapshot', 'browser.upload_file', 'browser.screenshot', 'approvals.request'],
+  data_import_export: ['desktop.file_read', 'desktop.file_search', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.upload_file', 'browser.screenshot', 'approvals.request'],
   finance_billing: ['browser.plan_task', 'browser.dom_snapshot', 'vault.resolve_for_task', 'approvals.request'],
   document_intelligence: ['desktop.file_search', 'desktop.file_read', 'browser.screenshot', 'approvals.request'],
   qa_testing: ['browser.plan_task', 'browser.open_url', 'browser.dom_snapshot', 'browser.screenshot', 'verification.tests'],
@@ -290,10 +296,10 @@ const PIPELINE_OPEN_SWAN_TOOLS: Partial<Record<UserTaskPipelineId, OpenSwanToolN
 };
 
 const STRATEGY_OPEN_SWAN_TOOLS: Partial<Record<ComputerAppTaskStrategy['id'], OpenSwanToolName[]>> = {
-  browser_semantic: ['browser.open_url', 'browser.dom_snapshot', 'browser.verification_state', 'browser.click_role', 'browser.fill_field', 'browser.press_key', 'browser.screenshot'],
-  credentialed_browser: ['vault.resolve_for_task', 'vault.runbook', 'vault.grants', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'approvals.request'],
-  approval_sensitive_browser: ['browser.open_url', 'browser.dom_snapshot', 'browser.verification_state', 'browser.click_role', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'browser.screenshot', 'vault.resolve_for_task', 'approvals.request'],
-  browser_file_transfer: ['desktop.file_search', 'desktop.file_stat', 'desktop.file_read', 'browser.open_url', 'browser.verification_state', 'browser.dom_snapshot', 'browser.upload_file', 'browser.click_role', 'browser.screenshot', 'approvals.request'],
+  browser_semantic: ['browser.open_url', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.verification_state', 'browser.set_toggle', 'browser.click_role', 'browser.fill_field', 'browser.press_key', 'browser.screenshot'],
+  credentialed_browser: ['vault.resolve_for_task', 'vault.runbook', 'vault.grants', 'browser.verification_state', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'approvals.request'],
+  approval_sensitive_browser: ['browser.open_url', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.verification_state', 'browser.set_toggle', 'browser.click_role', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'browser.screenshot', 'vault.resolve_for_task', 'approvals.request'],
+  browser_file_transfer: ['desktop.file_search', 'desktop.file_stat', 'desktop.file_read', 'browser.open_url', 'browser.verification_state', 'browser.dom_snapshot', 'browser.locator_actionability', 'browser.upload_file', 'browser.click_role', 'browser.screenshot', 'approvals.request'],
   agent_asset_acquisition: ['office.list_agents', 'agent.codex_acquire_asset', 'desktop.file_search', 'desktop.file_stat', 'desktop.file_read', 'approvals.request'],
   desktop_readonly: ['desktop.list_browser_tabs', 'desktop.window_state', 'desktop.list_running_apps', 'desktop.clipboard', 'desktop.file_list'],
   desktop_semantic: ['desktop.list_running_apps', 'desktop.window_state', 'desktop.launch_app', 'desktop.focus_app', 'desktop.read_a11y_tree', 'desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_set_layer_state', 'desktop.indesign_batch_find_change', 'desktop.indesign_batch_update_text_layers', 'desktop.indesign_update_text_layer', 'desktop.indesign_relink_asset', 'desktop.indesign_package_document', 'desktop.indesign_export_proof', 'desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_update_text_layer', 'desktop.photoshop_place_asset', 'desktop.photoshop_export_proof', 'desktop.click_element', 'desktop.set_element_value', 'desktop.menu_click', 'desktop.type_text', 'desktop.paste_text', 'desktop.press_keys', 'desktop.screenshot'],
@@ -427,6 +433,8 @@ function buildVerification(
 
 function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities?: import('./messageEntityExtractor').MessageEntities): OpenSwanToolPlanItem[] {
   const browserbaseWorkflow = classifyBrowserbaseWorkflow(message);
+  const browserTargetMutationIntent = !BROWSER_EXPLICIT_READ_ONLY_RE.test(message)
+    && BROWSER_TARGET_MUTATION_RE.test(message);
   const localComputerIntent = detectLocalComputerAwarenessIntent(message);
   const verificationGate = detectAutomationVerificationGate(message);
   const pipelineMatch = getBestUserTaskPipeline(message, { includeFallback: false });
@@ -447,9 +455,12 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
 
   if (pipelineMatch) {
     for (const tool of PIPELINE_OPEN_SWAN_TOOLS[pipelineMatch.pipeline.id] || []) {
+      if (tool === 'browser.locator_actionability' && !browserTargetMutationIntent) continue;
       tools.push({
         tool,
-        reason: `Selected by ${pipelineMatch.pipeline.title} pipeline.`,
+        reason: tool === 'browser.locator_actionability'
+          ? BROWSER_LOCATOR_ACTIONABILITY_REASON
+          : `Selected by ${pipelineMatch.pipeline.title} pipeline.`,
         priority: pipelineMatch.confidence >= 0.7 ? 'high' : 'medium',
       });
     }
@@ -464,9 +475,12 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
       });
     }
     for (const tool of STRATEGY_OPEN_SWAN_TOOLS[strategy.id] || []) {
+      if (tool === 'browser.locator_actionability' && !browserTargetMutationIntent) continue;
       tools.push({
         tool,
-        reason: `Required by ${strategy.label}: ${strategy.summary}`,
+        reason: tool === 'browser.locator_actionability'
+          ? BROWSER_LOCATOR_ACTIONABILITY_REASON
+          : `Required by ${strategy.label}: ${strategy.summary}`,
         priority: strategy.approvalCheckpoints.length > 0 ? 'high' : 'medium',
       });
     }
@@ -823,11 +837,28 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
     if (entities?.urls.length || /\bhttps?:\/\//i.test(message)) {
       tools.push({ tool: 'browser.open_url', reason: 'Open the target page in the persistent local browser profile before semantic actions.', priority: 'high' });
     }
-    if (/\b(read|inspect|see|show|find|extract|scrape|collect|data|table|list|links?|fields?|snapshot|dom)\b/i.test(message)) {
+    if (
+      browserTargetMutationIntent
+      || /\b(read|inspect|see|show|find|extract|scrape|collect|data|table|list|links?|fields?|snapshot|dom)\b/i.test(message)
+    ) {
       tools.push({ tool: 'browser.dom_snapshot', reason: 'Read a compact DOM/ARIA snapshot before choosing selectors or extracting page state.', priority: 'high' });
+    }
+    if (browserTargetMutationIntent) {
+      tools.push({
+        tool: 'browser.locator_actionability',
+        reason: BROWSER_LOCATOR_ACTIONABILITY_REASON,
+        priority: 'high',
+      });
     }
     if (/\b(click|press button|button|link|tab)\b/i.test(message)) {
       tools.push({ tool: 'browser.click_role', reason: 'Use Playwright role/name locators for semantic clicks instead of brittle coordinates.', priority: 'high' });
+    }
+    if (/\b(check|uncheck|checkbox|toggle|switch|turn (?:on|off)|enable|disable|opt (?:in|out)|radio)\b/i.test(message)) {
+      tools.push({
+        tool: 'browser.set_toggle',
+        reason: 'Set one exact non-consequential checkbox, switch, or radio state with fresh before/after DOM proof.',
+        priority: 'high',
+      });
     }
     if (/\b(select|dropdown|drop down|choose option|combobox|picker)\b/i.test(message)) {
       tools.push({ tool: 'browser.select_option', reason: 'Select browser dropdown values with Playwright locator auto-waiting.', priority: 'high' });

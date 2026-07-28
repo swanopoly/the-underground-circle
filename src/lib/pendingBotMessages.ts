@@ -1,5 +1,6 @@
 import { storage } from './storage';
 import { readPersistedChatBotMetadata } from './persistedChatMetadata';
+import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
 
 export type PendingBotMessageRecord = {
   localMessageId: string;
@@ -27,6 +28,7 @@ export type PendingBotMessageRecord = {
   browserSessions?: unknown[];
   recoveryOptions?: unknown[];
   recoveryReliability?: unknown;
+  computerTaskStatus?: ComputerTaskOutcomeStatus | null;
   computerHandoff?: unknown;
   chatAutomationPlanPreview?: unknown;
   modeOutcomeSummary?: { headline: string; bulletPoints?: string[]; blockers?: string[] } | null;

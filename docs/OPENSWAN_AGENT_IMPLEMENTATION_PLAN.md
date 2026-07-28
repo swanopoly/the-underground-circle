@@ -262,9 +262,10 @@ Give OpenSwan typed, auditable tools rather than generic text-only reasoning.
 - typed OpenSwan tool/runtime planning exists
 - tool events are persisted into run metadata and shared run surfaces
 - browser and internal app tool paths are integrated
-- shell/git execution shipped 2026-07-13 (`local.run_shell` / `git.run` tools
-  over the bridge `exec_file` endpoint; policy cores `shellCommandPolicy.ts` /
-  `gitCommandPolicy.ts` via `localExecPlanCore.ts`) — see
+- local `local.run_shell` / `git.run` compatibility tools are constrained as of
+  2026-07-24 to fixed read-only git diagnostics plus `node --check/--version`
+  over `exec_file`; builds, tests, package scripts, shells, and mutations
+  delegate to paired connected coding agents — see
   `docs/CODING_AGENT_UPGRADE_PLAN.md` P2/P3
 - formal toolset-by-surface policy remains future work
 

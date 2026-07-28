@@ -56,6 +56,11 @@ assert(adapterPolicy.prompt.includes('Official-source research checklist'), 'pol
 assert(adapterPolicy.researchChecklist.some((item) => item.includes('official vendor, OS, or framework documentation')), 'policy requires official docs before broad examples');
 assert(adapterPolicy.prompt.includes('FILES_CHANGED'), 'policy prompt requires file-change output contract');
 assert(adapterPolicy.prompt.includes('APP_CAPABILITY_RESULT_JSON'), 'policy prompt requires parseable JSON result contract');
+assert(
+  adapterPolicy.prompt.includes('You are a connected coding agent')
+    && !adapterPolicy.prompt.includes('You are Codex attached'),
+  'buildout prompt is provider-neutral for Codex and Claude Code',
+);
 assert(adapterPolicy.prompt.includes('APP_CAPABILITY_CONTROL_SURFACE'), 'policy prompt requires control-surface output contract');
 assert(adapterPolicy.prompt.includes('APP_CAPABILITY_SOURCE_REFS'), 'policy prompt requires source-ref output contract');
 assert(adapterPolicy.prompt.includes('controlSurface, sourceRefs'), 'policy JSON contract carries research evidence keys');
@@ -270,6 +275,27 @@ USER_ACTION_NEEDED: none
 });
 assert(sessionResult?.status === 'ready_to_retry', 'parser: session capability result is ready to retry', sessionResult?.status);
 
+const claudeSessionResult = parseAgentAppCapabilityBuildoutResultFromSession({
+  sessionId: 'claude-launch-test-1',
+  appCapabilityResultText: `
+APP_CAPABILITY_SUMMARY: Added a reusable SuperRender control recipe.
+APP_CAPABILITY_CONTROL_SURFACE: documented SuperRender CLI with accessibility verification.
+APP_CAPABILITY_SOURCE_REFS:
+- SuperRender official CLI docs: https://example.com/superrender/cli
+- src/lib/computerAppGrounding.ts
+FILES_CHANGED:
+- src/lib/computerAppGrounding.ts
+RETRY_PLAN: Retry the SuperRender queue task from chat.
+VERIFICATION: focused smoke passed.
+USER_ACTION_NEEDED: none
+`,
+});
+assert(
+  claudeSessionResult?.status === 'ready_to_retry',
+  'parser: Claude dedicated capability receipt is ready to retry',
+  claudeSessionResult?.status,
+);
+
 const incompleteResult = parseAgentAppCapabilityBuildoutResult(`
 APP_CAPABILITY_SUMMARY: Added an app recipe but did not include source refs.
 APP_CAPABILITY_CONTROL_SURFACE: menu and accessibility recipe
@@ -301,6 +327,10 @@ const retryPrompt = buildAgentAppCapabilityRetryPrompt({
   dispatchPrefix: 'Use desktop tools.',
 });
 assert(retryPrompt.includes('CONNECTED APP CAPABILITY BUILDOUT READY'), 'retry prompt names ready buildout state');
+assert(
+  retryPrompt.includes('connected coding agent') && !retryPrompt.includes('connected Codex agent'),
+  'retry prompt is provider-neutral',
+);
 assert(retryPrompt.includes('Do not call agent.build_app_capability again'), 'retry prompt prevents recursive buildout');
 assert(retryPrompt.includes('Re-observe app/window/a11y/screenshot state'), 'retry prompt requires fresh observation before mutation');
 assert(retryPrompt.includes('Chosen control surface'), 'retry prompt carries chosen control surface');

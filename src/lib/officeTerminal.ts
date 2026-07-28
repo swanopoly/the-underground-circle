@@ -9,18 +9,26 @@
  *   Sender calls sendTerminalCommand()
  *     → writes row to DB
  *     → broadcasts on `office:terminal:{circleId}`
- *   Each member's gateway subscribes via subscribeToTerminalCommands()
+ *   Each member subscribes via subscribeToTerminalCommands()
+ *     → authenticates and reloads the exact durable row
  *     → filters for @all or their own agent IDs
- *     → processes command, calls respondToCommand()
- *   All clients receive updates via Realtime Postgres changes on the table
+ *     → hands the command to agentInvocation's claimant RPC flow
+ *   Execution state is written only through invoke_agent, stream_response, and
+ *   mark_message_done; clients read updates via Realtime Postgres changes.
  */
 
 import { supabase } from './supabase';
+import { subscribeWithReconnect, type ResilientSubscriptionHandle } from './subscribeWithReconnect';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 
 const TERMINAL_HISTORY_CACHE_TTL_MS = 15_000;
 const TERMINAL_RESPONSES_CACHE_TTL_MS = 15_000;
+const TERMINAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EXECUTABLE_TERMINAL_MESSAGE_STATUSES = new Set<TerminalMessageStatus>(['pending', 'invoked']);
+// BlackSwan is a virtual Office agent rather than a UUID-backed row. It must
+// never be written into UUID columns or relayed as if it were a durable id.
+const BLACKSWAN_VIRTUAL_AGENT_ID = 'blackswan-default';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -76,6 +84,14 @@ export interface BroadcastCommandPayload {
   timestamp: string;
 }
 
+interface BroadcastCommandWakeupPayload {
+  messageId: string;
+  circleId: string;
+  targetAgentId: string | null;
+  targetAgentIds: string[] | null;
+  timestamp: string;
+}
+
 export interface BroadcastResponsePayload {
   messageId: string;
   circleId: string;
@@ -88,6 +104,184 @@ export interface BroadcastResponsePayload {
 }
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
+
+function isTerminalUuid(value: unknown): value is string {
+  return typeof value === 'string' && TERMINAL_UUID_RE.test(value);
+}
+
+function asTerminalRow(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function sanitizeTerminalTargetIds(
+  targetAgentId: unknown,
+  targetAgentIds: unknown,
+): {
+  targetAgentId: string | null;
+  targetAgentIds: string[] | null;
+  includesBlackSwan: boolean;
+} {
+  const rawIds = Array.isArray(targetAgentIds) ? targetAgentIds : [];
+  const safeIds = Array.from(new Set(rawIds.filter(isTerminalUuid)));
+  return {
+    targetAgentId: isTerminalUuid(targetAgentId) ? targetAgentId : null,
+    targetAgentIds: safeIds.length > 0 ? safeIds : null,
+    includesBlackSwan:
+      targetAgentId === BLACKSWAN_VIRTUAL_AGENT_ID
+      || rawIds.includes(BLACKSWAN_VIRTUAL_AGENT_ID),
+  };
+}
+
+function persistableTerminalTargetName(
+  value: unknown,
+  includesBlackSwan: boolean,
+): string {
+  const name = typeof value === 'string' && value.trim() ? value.trim() : '@all';
+  if (!includesBlackSwan || /blackswan|\bswan\b/i.test(name)) return name;
+  // Mixed multi-selects otherwise lose the virtual BlackSwan target when their
+  // UUID-only target list is persisted. Keep a bounded, non-id routing marker
+  // in the already-durable display-name column.
+  return `${name.slice(0, 160)} · @BlackSwan`;
+}
+
+function parseTerminalCommandWakeup(
+  expectedCircleId: string,
+  payload: unknown,
+): { messageId: string; circleId: string } | null {
+  const wakeup = asTerminalRow(payload);
+  if (
+    !isTerminalUuid(expectedCircleId)
+    || !wakeup
+    || !isTerminalUuid(wakeup.messageId)
+    || !isTerminalUuid(wakeup.circleId)
+    || wakeup.circleId !== expectedCircleId
+  ) {
+    return null;
+  }
+  return {
+    messageId: wakeup.messageId,
+    circleId: wakeup.circleId,
+  };
+}
+
+function reconstructExecutableTerminalCommand(
+  expected: { messageId: string; circleId: string },
+  value: unknown,
+): BroadcastCommandPayload | null {
+  const row = asTerminalRow(value);
+  if (
+    !row
+    || row.id !== expected.messageId
+    || row.circle_id !== expected.circleId
+    || !isTerminalUuid(row.id)
+    || !isTerminalUuid(row.circle_id)
+    || !isTerminalUuid(row.sender_id)
+    || !EXECUTABLE_TERMINAL_MESSAGE_STATUSES.has(row.status as TerminalMessageStatus)
+    || typeof row.command_text !== 'string'
+    || !row.command_text.trim()
+    || typeof row.sender_name !== 'string'
+  ) {
+    return null;
+  }
+
+  const rawTargetId = row.target_agent_id;
+  const rawTargetIds = row.target_agent_ids;
+  if (
+    (rawTargetId !== null && rawTargetId !== undefined && !isTerminalUuid(rawTargetId))
+    || (
+      rawTargetIds !== null
+      && rawTargetIds !== undefined
+      && (
+        !Array.isArray(rawTargetIds)
+        || rawTargetIds.some((id) => !isTerminalUuid(id))
+      )
+    )
+    || (row.model !== null && row.model !== undefined && typeof row.model !== 'string')
+  ) {
+    return null;
+  }
+
+  const targets = sanitizeTerminalTargetIds(rawTargetId, rawTargetIds);
+  const createdAt = typeof row.created_at === 'string' && row.created_at
+    ? row.created_at
+    : null;
+  if (
+    !createdAt
+    || !row.sender_name.trim()
+    || typeof row.target_agent_name !== 'string'
+    || !row.target_agent_name.trim()
+  ) {
+    return null;
+  }
+
+  return {
+    messageId: row.id,
+    circleId: row.circle_id,
+    senderId: row.sender_id,
+    senderName: row.sender_name,
+    commandText: row.command_text,
+    targetAgentId: targets.targetAgentId,
+    targetAgentName: persistableTerminalTargetName(row.target_agent_name, false),
+    targetAgentIds: targets.targetAgentIds,
+    model: typeof row.model === 'string' ? row.model : null,
+    // Subject metadata has no durable office_terminal_messages column. Never
+    // reconstruct it from the untrusted wake-up envelope.
+    timestamp: createdAt,
+  };
+}
+
+type TerminalAuthorityClient = Pick<typeof supabase, 'auth' | 'from'>;
+
+/**
+ * Resolve a Realtime wake-up into the exact RLS-visible durable command.
+ * Realtime Broadcast is not an authority boundary: only the authenticated row
+ * supplies command, sender, targets, model, timestamp, and executable state.
+ */
+export async function loadAuthorizedTerminalCommandFromWakeup(
+  expectedCircleId: string,
+  payload: unknown,
+  client: TerminalAuthorityClient = supabase,
+): Promise<BroadcastCommandPayload | null> {
+  const expected = parseTerminalCommandWakeup(expectedCircleId, payload);
+  if (!expected) return null;
+
+  try {
+    const { data: authData, error: authError } = await client.auth.getUser();
+    if (authError || !authData.user || !isTerminalUuid(authData.user.id)) return null;
+
+    const { data, error } = await client
+      .from('office_terminal_messages')
+      .select(
+        'id,circle_id,sender_id,sender_name,target_agent_id,target_agent_name,target_agent_ids,model,command_text,status,created_at',
+      )
+      .eq('id', expected.messageId)
+      .eq('circle_id', expected.circleId)
+      .maybeSingle();
+
+    if (error || !data) return null;
+    return reconstructExecutableTerminalCommand(expected, data);
+  } catch {
+    return null;
+  }
+}
+
+function isTerminalCommandForListener(
+  payload: BroadcastCommandPayload,
+  myAgentIds: ReadonlySet<string>,
+): boolean {
+  const targetsBlackSwan = /blackswan|\bswan\b/i.test(payload.targetAgentName);
+  if (payload.targetAgentIds?.length) {
+    return payload.targetAgentIds.some((id) => myAgentIds.has(id))
+      || (targetsBlackSwan && myAgentIds.has(BLACKSWAN_VIRTUAL_AGENT_ID));
+  }
+  if (payload.targetAgentId) return myAgentIds.has(payload.targetAgentId);
+  if (targetsBlackSwan) return myAgentIds.has(BLACKSWAN_VIRTUAL_AGENT_ID);
+
+  const targetName = payload.targetAgentName.trim().toLowerCase();
+  return !targetName || targetName === 'all' || targetName === '@all';
+}
 
 function fromRow(row: Record<string, unknown>): TerminalMessage {
   return {
@@ -115,8 +309,12 @@ function fromRow(row: Record<string, unknown>): TerminalMessage {
 
 // ─── Module state (broadcast channels) ───────────────────────────────────────
 
-const commandChannels  = new Map<string, RealtimeChannel>();
-const responseChannels = new Map<string, RealtimeChannel>();
+const commandChannels  = new Map<string, ResilientSubscriptionHandle>();
+// Send-only fallback: a broadcast channel for callers that dispatch commands
+// without ever subscribing. Kept separate from `commandChannels` so the two
+// lifecycles (handle vs raw channel) never collide.
+const sendOnlyCommandChannels = new Map<string, RealtimeChannel>();
+const responseChannels = new Map<string, ResilientSubscriptionHandle>();
 const terminalHistoryCache = new Map<string, { at: number; messages: TerminalMessage[] }>();
 const terminalHistoryInflight = new Map<string, Promise<{ messages: TerminalMessage[]; error?: string }>>();
 const terminalResponsesCache = new Map<string, { at: number; responses: TerminalResponse[] }>();
@@ -130,16 +328,17 @@ export async function sendTerminalCommand(
   const {
     circleId, senderId, senderName,
     commandText, targetAgentId = null, targetAgentName = '@all',
-    targetAgentIds = null, targetAgentSubject = null,
-    targetAgentSubjects = null, model = null,
+    targetAgentIds = null, model = null,
   } = params;
 
-  // Validate UUID fields — non-UUID agent IDs (e.g. 'default::blackswan') must be nullified
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const safeAgentId = targetAgentId && UUID_RE.test(targetAgentId) ? targetAgentId : null;
-  const safeAgentIds = targetAgentIds
-    ? targetAgentIds.filter((id: string) => UUID_RE.test(id))
-    : null;
+  if (!isTerminalUuid(circleId) || !isTerminalUuid(senderId)) {
+    return { error: 'Invalid terminal command identity.' };
+  }
+  const safeTargets = sanitizeTerminalTargetIds(targetAgentId, targetAgentIds);
+  const safeTargetName = persistableTerminalTargetName(
+    targetAgentName,
+    safeTargets.includesBlackSwan,
+  );
 
   // 1. Write to DB
   const { data, error } = await supabase
@@ -148,9 +347,9 @@ export async function sendTerminalCommand(
       circle_id:         circleId,
       sender_id:         senderId,
       sender_name:       senderName,
-      target_agent_id:   safeAgentId,
-      target_agent_name: targetAgentName,
-      target_agent_ids:  safeAgentIds && safeAgentIds.length > 0 ? safeAgentIds : null,
+      target_agent_id:   safeTargets.targetAgentId,
+      target_agent_name: safeTargetName,
+      target_agent_ids:  safeTargets.targetAgentIds,
       model:             model,
       command_text:      commandText,
       status:            'pending',
@@ -160,8 +359,12 @@ export async function sendTerminalCommand(
 
   if (error) return { error: error.message };
   const messageId = (data as Record<string, unknown>).id as string;
+  if (!isTerminalUuid(messageId)) {
+    return { error: 'Terminal command persistence returned an invalid message id.' };
+  }
 
-  // 2. Broadcast so all members get it immediately
+  // 2. Broadcast an advisory wake-up only. Receivers must fetch the exact
+  // authenticated durable row before any invocation.
   const channel = await getOrCreateCommandChannel(circleId);
   await channel.send({
     type: 'broadcast',
@@ -169,17 +372,10 @@ export async function sendTerminalCommand(
     payload: {
       messageId,
       circleId,
-      senderId,
-      senderName,
-      commandText,
-      targetAgentId,
-      targetAgentName,
-      targetAgentIds,
-      targetAgentSubject,
-      targetAgentSubjects,
-      model,
+      targetAgentId: safeTargets.targetAgentId,
+      targetAgentIds: safeTargets.targetAgentIds,
       timestamp: new Date().toISOString(),
-    } satisfies BroadcastCommandPayload,
+    } satisfies BroadcastCommandWakeupPayload,
   });
 
   return { messageId };
@@ -190,87 +386,62 @@ export async function sendTerminalCommand(
 export function subscribeToTerminalCommands(
   circleId: string,
   myAgentIds: string[],
-  onCommand: (payload: BroadcastCommandPayload) => void
+  onCommand: (payload: BroadcastCommandPayload) => void | Promise<void>
 ): () => void {
   const channelName = `office-terminal-cmd-${circleId}`;
+  const listenerIds = new Set(
+    myAgentIds.filter((id) => isTerminalUuid(id) || id === BLACKSWAN_VIRTUAL_AGENT_ID),
+  );
+  const authorizedMessageIds = new Set<string>();
+  const authorityReadsInFlight = new Set<string>();
+  if (!isTerminalUuid(circleId) || listenerIds.size === 0) return () => {};
 
   // Remove existing
   const existing = commandChannels.get(circleId);
-  if (existing) supabase.removeChannel(existing);
+  if (existing) existing.unsubscribe();
 
-  const channel = supabase.channel(channelName, {
-    config: { broadcast: { self: true } },
-  })
-    .on('broadcast', { event: 'command' }, ({ payload }) => {
-      const p = payload as BroadcastCommandPayload;
-      // Handle if: @all (no targets) OR single-targeted at me OR multi-targeted including me
-      const isForMe =
-        (!p.targetAgentId && !p.targetAgentIds?.length)              // @all
-        || (p.targetAgentId && myAgentIds.includes(p.targetAgentId)) // legacy single
-        || (p.targetAgentIds?.some(id => myAgentIds.includes(id)));  // multi-select
-      if (isForMe) onCommand(p);
-    })
-    .subscribe();
+  // Broadcast is ephemeral — there is no backlog to refetch, so no onCatchUp.
+  // Reconnect alone is the fix: a dropped command channel used to mean the
+  // terminal silently stopped dispatching to this agent until a full remount.
+  // `channelConfig` MUST be re-applied on reconnect or `self: true` is lost and
+  // the sender stops seeing its own commands after the first drop.
+  const handle = subscribeWithReconnect({
+    channelName,
+    channelConfig: { config: { broadcast: { self: true } } },
+    setup: (channel) => channel
+      .on('broadcast', { event: 'command' }, ({ payload }) => {
+        const expected = parseTerminalCommandWakeup(circleId, payload);
+        if (
+          !expected
+          || authorizedMessageIds.has(expected.messageId)
+          || authorityReadsInFlight.has(expected.messageId)
+        ) {
+          return;
+        }
 
-  commandChannels.set(circleId, channel);
+        authorityReadsInFlight.add(expected.messageId);
+        void loadAuthorizedTerminalCommandFromWakeup(circleId, payload)
+          .then(async (command) => {
+            if (!command) return;
+            authorizedMessageIds.add(command.messageId);
+            if (!isTerminalCommandForListener(command, listenerIds)) return;
+            await onCommand(command);
+          })
+          .catch(() => {
+            // Fail closed. Broadcast data and read errors never reach an agent.
+          })
+          .finally(() => {
+            authorityReadsInFlight.delete(expected.messageId);
+          });
+      }),
+  });
+
+  commandChannels.set(circleId, handle);
 
   return () => {
     commandChannels.delete(circleId);
-    supabase.removeChannel(channel);
+    handle.unsubscribe();
   };
-}
-
-// ─── Respond to a command ─────────────────────────────────────────────────────
-
-export async function respondToCommand(
-  messageId: string,
-  agentId: string,
-  agentName: string,
-  responseText: string,
-  tokenCost: number,
-  latencyMs: number,
-  circleId: string
-): Promise<{ error?: string }> {
-  // 1. Upsert into office_terminal_responses (Phase 3 schema)
-  const { error } = await supabase
-    .from('office_terminal_responses')
-    .upsert({
-      message_id:    messageId,
-      agent_id:      agentId,
-      agent_name:    agentName,
-      response_text: responseText,
-      token_count:   tokenCost,
-      latency_ms:    latencyMs,
-      status:        'done',
-      circle_id:     circleId,
-    }, { onConflict: 'message_id,agent_id' });
-
-  if (error) return { error: error.message };
-
-  // Also mark the parent message done
-  await supabase
-    .from('office_terminal_messages')
-    .update({ status: 'done' })
-    .eq('id', messageId);
-
-  // 2. Broadcast response
-  const channel = await getOrCreateCommandChannel(circleId);
-  await channel.send({
-    type: 'broadcast',
-    event: 'response',
-    payload: {
-      messageId,
-      circleId,
-      responseAgentId:   agentId,
-      responseAgentName: agentName,
-      responseText,
-      tokenCost,
-      latencyMs,
-      status: 'done',
-    } satisfies BroadcastResponsePayload,
-  });
-
-  return {};
 }
 
 // ─── Subscribe to response updates ───────────────────────────────────────────
@@ -282,19 +453,21 @@ export function subscribeToTerminalResponses(
   const channelName = `office-terminal-resp-${circleId}`;
 
   const existing = responseChannels.get(circleId);
-  if (existing) supabase.removeChannel(existing);
+  if (existing) existing.unsubscribe();
 
-  const channel = supabase.channel(channelName)
-    .on('broadcast', { event: 'response' }, ({ payload }) => {
-      onResponse(payload as BroadcastResponsePayload);
-    })
-    .subscribe();
+  const handle = subscribeWithReconnect({
+    channelName,
+    setup: (channel) => channel
+      .on('broadcast', { event: 'response' }, ({ payload }) => {
+        onResponse(payload as BroadcastResponsePayload);
+      }),
+  });
 
-  responseChannels.set(circleId, channel);
+  responseChannels.set(circleId, handle);
 
   return () => {
     responseChannels.delete(circleId);
-    supabase.removeChannel(channel);
+    handle.unsubscribe();
   };
 }
 
@@ -402,10 +575,16 @@ export async function loadTerminalHistory(
 export function subscribeToTerminalMessages(
   circleId: string,
   onUpdate: (msg: TerminalMessage) => void,
-  onDelete?: (id: string) => void
+  onDelete?: (id: string) => void,
+  /** Optional refetch replayed after a reconnect / silent-staleness window.
+   *  Terminal output that landed while the socket was down never arrives as an
+   *  event, so without this the transcript is permanently missing that gap. */
+  onCatchUp?: () => void,
 ): () => void {
-  const channel = supabase
-    .channel(`terminal-db-${circleId}`)
+  const handle = subscribeWithReconnect({
+    channelName: `terminal-db-${circleId}`,
+    onCatchUp,
+    setup: (channel) => channel
     .on('postgres_changes', {
       event: '*',
       schema: 'public',
@@ -422,10 +601,10 @@ export function subscribeToTerminalMessages(
 
       const msg = fromRow(row as Record<string, unknown>);
       onUpdate(msg);
-    })
-    .subscribe();
+    }),
+  });
 
-  return () => supabase.removeChannel(channel);
+  return () => handle.unsubscribe();
 }
 
 // ─── Delete a terminal message (hard delete — removes row + responses) ───────
@@ -621,7 +800,14 @@ export async function updateAgentLastCommand(
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 async function getOrCreateCommandChannel(circleId: string): Promise<RealtimeChannel> {
-  const existing = commandChannels.get(circleId);
+  // Prefer the live subscriber's channel — read through the handle, never
+  // cached, because reconnect swaps the underlying channel object and a stale
+  // reference would send into a removed channel (silently dropped commands).
+  const subscribed = commandChannels.get(circleId)?.getChannel();
+  if (subscribed) return subscribed;
+
+  // No active subscription (send-only caller): keep a private channel.
+  const existing = sendOnlyCommandChannels.get(circleId);
   if (existing) return existing;
 
   const channel = supabase.channel(`office-terminal-cmd-${circleId}`, {
@@ -639,7 +825,7 @@ async function getOrCreateCommandChannel(circleId: string): Promise<RealtimeChan
     });
   });
 
-  commandChannels.set(circleId, channel);
+  sendOnlyCommandChannels.set(circleId, channel);
   return channel;
 }
 
@@ -647,8 +833,11 @@ async function getOrCreateCommandChannel(circleId: string): Promise<RealtimeChan
 
 export function cleanupTerminalChannels(circleId: string): void {
   const cmd = commandChannels.get(circleId);
-  if (cmd) { supabase.removeChannel(cmd); commandChannels.delete(circleId); }
+  if (cmd) { cmd.unsubscribe(); commandChannels.delete(circleId); }
+
+  const send = sendOnlyCommandChannels.get(circleId);
+  if (send) { supabase.removeChannel(send); sendOnlyCommandChannels.delete(circleId); }
 
   const resp = responseChannels.get(circleId);
-  if (resp) { supabase.removeChannel(resp); responseChannels.delete(circleId); }
+  if (resp) { resp.unsubscribe(); responseChannels.delete(circleId); }
 }

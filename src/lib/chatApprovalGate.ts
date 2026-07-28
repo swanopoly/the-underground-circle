@@ -34,6 +34,7 @@ import type {
 } from './runChatAutomationPlan';
 import { resolveAutoApproveDecision, type AutoApproveDecision } from './chatAutoApproveSettings';
 import { detectAlwaysConfirmFloorCategories, type ChatComputerConstraintCategory } from './chatComputerRequestRouter';
+import { buildComputerAppToolArgsFingerprintAsync } from './computerAppGrounding';
 
 export type CreateApprovalGateOptions = {
   /** Session key stored on the approval row. Defaults to default::blackswan. */
@@ -47,8 +48,9 @@ export type CreateApprovalGateOptions = {
    */
   timeoutSeconds?: number;
   /**
-   * Extra transform on the synthesised description. Caller can prepend
-   * a circle prefix / localize / etc.
+   * Deprecated compatibility hook. Exact commands and mutation values are
+   * never persisted in approval descriptions; the gate uses a redacted
+   * structural summary regardless of caller-provided copy.
    */
   describe?: (plan: ChatAutomationPlan, ctx: ChatTransportContext) => string;
 };
@@ -133,28 +135,45 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
       return { pass: true };
     }
     const actionType = planActionType(plan);
-    const idemKey = buildIdempotencyKey(plan, ctx);
-    const description = opts.describe ? opts.describe(plan, ctx) : describeDefault(plan);
+    const approvalIntentFingerprint = await buildApprovalIntentFingerprint(plan, ctx);
+    if (!approvalIntentFingerprint) {
+      return {
+        pass: false,
+        deferred: {
+          approvalId: '',
+          message: 'Could not bind this action to an exact approval intent. Nothing was executed.',
+          category: 'error',
+          retryable: false,
+        },
+      };
+    }
+    const description = describeDefault(plan);
 
     // Look for any existing proposal with the same idempotency key on this
     // circle. If found, branch by status.
     const { data: existing, error: lookupError } = await supabase
       .from('agent_approvals')
-      .select('id, status, resolved_at, requested_at, timeout_seconds')
+      .select('id, status, resolved_at, resolved_by, requested_at, timeout_seconds, applied_at')
       .eq('circle_id', ctx.circleId)
+      .eq('session_key', sessionKey)
       .eq('action_type', actionType)
-      .contains('payload', { idempotencyKey: idemKey })
+      .contains('payload', {
+        approvalSchemaVersion: 2,
+        approvalIntentFingerprint,
+      })
       .order('requested_at', { ascending: false })
       .limit(1);
 
     if (lookupError) {
       // Fail closed: can't verify whether an approval exists, so don't run.
-      // Transient — re-running may succeed once the DB is reachable.
+      // Transient — re-running may succeed once the DB is reachable. Database
+      // messages can contain schema details or user values, so never surface
+      // them through a Chat outcome.
       return {
         pass: false,
         deferred: {
           approvalId: '',
-          message: `Approval lookup failed: ${lookupError.message}. Plan not executed.`,
+          message: 'Approval lookup failed. The plan was not executed; retry when the approval service is available.',
           category: 'error',
           retryable: true,
         },
@@ -163,20 +182,121 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
 
     const top = existing && existing.length > 0 ? existing[0] : null;
     let previousExpired = false;
+    let previousConsumed = false;
     if (top) {
       const status = String(top.status || '');
       if (status === 'approved' || status === 'auto_approved') {
-        // Silent-reuse fix: the idempotency key matches near-identical
-        // requests, so tell the user an earlier approval is covering this
-        // run instead of passing without a word.
-        const shortId = String(top.id).slice(0, 8);
-        return {
-          pass: true,
-          approvalId: top.id,
-          notice: status === 'auto_approved'
-            ? `Covered by auto-approval \`${shortId}\` for this action. Change the category in approval settings if this shouldn't run automatically.`
-            : `Covered by the approval \`${shortId}\` you already granted for this action — not asking again. Reject that approval if this shouldn't be covered.`,
-        };
+        const expiresAt = resolveApprovalRowExpiresAt(top.requested_at, top.timeout_seconds);
+        const requestedAt = Date.parse(String(top.requested_at || ''));
+        const resolvedAt = Date.parse(String(top.resolved_at || ''));
+        if (
+          !isUuid(String(top.resolved_by || ''))
+          || !Number.isFinite(requestedAt)
+          || !Number.isFinite(resolvedAt)
+          || resolvedAt < requestedAt
+          || resolvedAt > Date.now()
+          || expiresAt === null
+          || resolvedAt >= expiresAt
+        ) {
+          return {
+            pass: false,
+            deferred: {
+              approvalId: top.id,
+              message: 'The approval authority was malformed or resolved outside its valid window. Nothing was executed; request a fresh approval.',
+              category: 'rejected',
+              retryable: false,
+            },
+          };
+        }
+        if (expiresAt === null || expiresAt <= Date.now()) {
+          previousExpired = true;
+          try {
+            await supabase
+              .from('agent_approvals')
+              .update({ status: 'expired', resolved_at: new Date().toISOString() })
+              .eq('id', top.id)
+              .eq('circle_id', ctx.circleId)
+              .eq('session_key', sessionKey)
+              .eq('action_type', actionType)
+              .in('status', ['approved', 'auto_approved'])
+              .contains('payload', {
+                approvalSchemaVersion: 2,
+                approvalIntentFingerprint,
+              })
+              .is('applied_at', null);
+          } catch { /* fail closed below by filing a fresh proposal */ }
+        } else if (top.applied_at) {
+          // An approval authorizes one dispatch only. A completed/ambiguous
+          // prior attempt must never be replayed by reusing the same row.
+          previousConsumed = true;
+        } else {
+          // Claim the exact approval before handing control to a transport.
+          // The applied_at CAS is the durable one-shot dispatch boundary:
+          // only one competing client can obtain the authority to proceed.
+          const { data: consumed, error: consumeError } = await supabase
+            .from('agent_approvals')
+            .update({ applied_at: new Date().toISOString() })
+            .eq('id', top.id)
+            .eq('circle_id', ctx.circleId)
+            .eq('session_key', sessionKey)
+            .eq('action_type', actionType)
+            .eq('requested_at', top.requested_at)
+            .eq('resolved_at', top.resolved_at)
+            .eq('resolved_by', top.resolved_by)
+            .eq('timeout_seconds', top.timeout_seconds)
+            .in('status', ['approved', 'auto_approved'])
+            .contains('payload', {
+              approvalSchemaVersion: 2,
+              approvalIntentFingerprint,
+            })
+            .is('applied_at', null)
+            .select('id')
+            .maybeSingle();
+          if (consumeError) {
+            return {
+              pass: false,
+              deferred: {
+                approvalId: top.id,
+                message: 'Could not claim the exact approval safely. Nothing was executed.',
+                category: 'error',
+                retryable: false,
+              },
+            };
+          }
+          if (!consumed?.id) {
+            return {
+              pass: false,
+              deferred: {
+                approvalId: top.id,
+                message: 'That approval was already consumed by another dispatch. Nothing was replayed.',
+                category: 'rejected',
+                retryable: false,
+              },
+            };
+          }
+          // The network round-trip that won the CAS can itself cross the
+          // expiry boundary. Burn the one-shot row but do not dispatch.
+          if (Date.now() >= expiresAt) {
+            return {
+              pass: false,
+              deferred: {
+                approvalId: top.id,
+                message: 'That approval expired while it was being claimed. Nothing was executed.',
+                category: 'rejected',
+                retryable: false,
+              },
+            };
+          }
+
+          const shortId = String(top.id).slice(0, 8);
+          return {
+            pass: true,
+            approvalId: top.id,
+            notice: status === 'auto_approved'
+              ? `Claimed one-time auto-approval \`${shortId}\` for this exact action.`
+              : `Claimed one-time approval \`${shortId}\` for this exact action.`,
+          };
+        }
       }
       if (status === 'pending') {
         const expiresAt = resolveApprovalRowExpiresAt(top.requested_at, top.timeout_seconds);
@@ -233,22 +353,16 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
         action_type: actionType,
         description,
         payload: {
-          plan: {
-            source: plan.source,
-            intentKind: plan.intent.kind,
-            executionKind: plan.execution.kind,
-            routeId: plan.execution.routeId,
-            commandText: plan.execution.commandText ?? null,
-            modalKey: plan.execution.modalKey ?? null,
-            risk: plan.risk,
-            confidence: plan.confidence,
-            notes: plan.notes,
-          },
-          approvalReason: plan.approval.reason,
-          idempotencyKey: idemKey,
+          approvalSchemaVersion: 2,
+          approvalIntentFingerprint,
+          source: plan.source,
+          intentKind: plan.intent.kind,
+          executionKind: plan.execution.kind,
+          risk: plan.risk,
           userId: ctx.userId,
           roomId: ctx.roomId ?? null,
           threadId: ctx.threadId ?? null,
+          redacted: true,
         },
         timeout_seconds: timeoutSeconds,
       })
@@ -260,7 +374,7 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
         pass: false,
         deferred: {
           approvalId: '',
-          message: `Could not file approval: ${insertError.message}.`,
+          message: 'Could not file the approval request. Nothing was executed; retry when the approval service is available.',
           category: 'error',
           retryable: true,
         },
@@ -269,6 +383,8 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
 
     const filedPrefix = previousExpired
       ? `Your earlier approval for ${actionType} expired before anyone decided. Filed a fresh approval \`${inserted!.id.slice(0, 8)}\``
+      : previousConsumed
+        ? `The earlier one-time approval for ${actionType} was already consumed. Filed a fresh approval \`${inserted!.id.slice(0, 8)}\``
       : `Filed approval \`${inserted!.id.slice(0, 8)}\` for ${actionType}`;
     return {
       pass: false,
@@ -300,6 +416,10 @@ function resolveApprovalRowExpiresAt(requestedAt: unknown, timeoutSeconds: unkno
   return requested + timeout * 1000;
 }
 
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 /**
  * Deterministic action_type for an approval row. Used for both dedupe
  * lookups and for categorising rows in the HITL banner. Shape:
@@ -311,26 +431,31 @@ function planActionType(plan: ChatAutomationPlan): string {
 }
 
 /**
- * Cheap, stable-ish fingerprint of the plan + command text. Not a hash —
- * Postgres' `jsonb @> jsonb` match just needs equality. We trim / lower
- * the command text so trivial variations don't spawn multiple proposals.
+ * Cryptographic binding for the complete normalized plan and dispatch scope.
+ * The digest is persisted; raw commands, notes, paths, credentials, and
+ * mutation values are deliberately absent from the approval audit payload.
  */
-function buildIdempotencyKey(plan: ChatAutomationPlan, ctx: ChatTransportContext): string {
-  const command = (plan.execution.commandText || '').toLowerCase().trim().slice(0, 200);
-  const modal = plan.execution.modalKey || '';
-  return [
-    'v1',
-    ctx.circleId,
-    plan.execution.kind,
-    plan.execution.routeId ?? '',
-    modal,
-    command,
-  ].join('::');
+export async function buildApprovalIntentFingerprint(
+  plan: ChatAutomationPlan,
+  ctx: ChatTransportContext,
+): Promise<string> {
+  return buildComputerAppToolArgsFingerprintAsync({
+    schemaVersion: 2,
+    circleId: ctx.circleId,
+    userId: ctx.userId,
+    threadId: ctx.threadId ?? null,
+    roomId: ctx.roomId ?? null,
+    source: plan.source,
+    intent: plan.intent,
+    execution: plan.execution,
+    approval: plan.approval,
+    risk: plan.risk,
+    confidence: plan.confidence,
+    notes: plan.notes,
+  });
 }
 
 function describeDefault(plan: ChatAutomationPlan): string {
   const route = plan.execution.routeId ? ` (${plan.execution.routeId})` : '';
-  const reason = plan.approval.required && plan.approval.reason ? ` — ${plan.approval.reason}` : '';
-  const command = plan.execution.commandText ? `: "${plan.execution.commandText.slice(0, 120)}"` : '';
-  return `Approve chat action ${plan.execution.kind}${route}${command}${reason}`;
+  return `Approve one exact ${plan.execution.kind}${route} chat action. Sensitive arguments are redacted and cryptographically bound.`;
 }

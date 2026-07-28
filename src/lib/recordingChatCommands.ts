@@ -17,9 +17,32 @@ import {
   type ReplayInvocation,
 } from './chatRecording';
 
+export type RecordingReplayRuntimeRequirement =
+  | 'authenticated_user_id'
+  | 'circle_id'
+  | 'persisted_agent_run_id'
+  | 'provider_tool_use_id'
+  | 'tool_iteration'
+  | 'fresh_observation'
+  | 'exact_openswan_runtime_approval';
+
+export interface RecordingReplayRuntimeHandoff {
+  schemaVersion: 1;
+  kind: 'openswan_typed_runtime_plan';
+  sourceLane: 'recording_replay';
+  reasonCode: 'sealed_runtime_identity_and_approval_required';
+  executable: false;
+  blockedTools: string[];
+  blockedStepCount: number;
+  totalSteps: number;
+  requiredContext: RecordingReplayRuntimeRequirement[];
+  message: string;
+}
+
 export type RecordingCommandOutcome = {
   message: string;
   localOnly: true;
+  runtimeHandoff?: RecordingReplayRuntimeHandoff;
 };
 
 export interface RecordingCommandContext {
@@ -41,7 +64,7 @@ function usage(): string {
     '- `/record abort` — discard the current session',
     '- `/record list` — show saved recordings',
     '- `/record delete <name>` — delete a saved recording',
-    '- `/replay <name>` — re-fire a saved recording\'s steps',
+    '- `/replay <name>` — repeat observation-only steps; mutations return a safe OpenSwan handoff',
   ].join('\n');
 }
 
@@ -56,6 +79,63 @@ function formatAgo(ms: number): string {
   if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
   return `${Math.floor(sec / 86400)}d ago`;
+}
+
+/**
+ * `/replay` is a local convenience for observation-only recordings, not an
+ * alternate mutation runtime. The allowlist stays deliberately small. Any
+ * future browser/desktop tool is blocked until explicitly reviewed here.
+ */
+const READ_ONLY_REPLAY_OBSERVATION_TOOLS = new Set([
+  'browser.dom_snapshot',
+  'browser.screenshot',
+  'browser.verification_state',
+  'desktop.list_running_apps',
+  'desktop.read_a11y_tree',
+  'desktop.screen_size',
+  'desktop.screenshot',
+  'desktop.window_state',
+]);
+
+const RECORDING_REPLAY_RUNTIME_REQUIREMENTS: RecordingReplayRuntimeRequirement[] = [
+  'authenticated_user_id',
+  'circle_id',
+  'persisted_agent_run_id',
+  'provider_tool_use_id',
+  'tool_iteration',
+  'fresh_observation',
+  'exact_openswan_runtime_approval',
+];
+
+function buildReplayRuntimeHandoff(
+  plan: ReplayInvocation[],
+): RecordingReplayRuntimeHandoff | null {
+  const blockedSteps = plan.filter((step) => {
+    const tool = String(step.tool || '').trim().toLowerCase();
+    const isComputerSurface = tool.startsWith('browser.') || tool.startsWith('desktop.');
+    return isComputerSurface && !READ_ONLY_REPLAY_OBSERVATION_TOOLS.has(tool);
+  });
+  if (blockedSteps.length === 0) return null;
+  const blockedTools = Array.from(new Set(
+    blockedSteps.map((step) => String(step.tool || '').trim()).filter(Boolean),
+  )).slice(0, 20);
+  const message = 'Saved mutation replay requires the sealed OpenSwan typed runtime. '
+    + 'Start a fresh authenticated Chat/OpenSwan run with a persisted run identity, '
+    + 'freshly observe every target, and approve each exact mutating tool call. '
+    + 'This recording cannot fabricate provider tool-use IDs, iterations, run IDs, '
+    + 'observations, or approval receipts, so zero replay steps were executed.';
+  return {
+    schemaVersion: 1,
+    kind: 'openswan_typed_runtime_plan',
+    sourceLane: 'recording_replay',
+    reasonCode: 'sealed_runtime_identity_and_approval_required',
+    executable: false,
+    blockedTools,
+    blockedStepCount: blockedSteps.length,
+    totalSteps: plan.length,
+    requiredContext: [...RECORDING_REPLAY_RUNTIME_REQUIREMENTS],
+    message,
+  };
 }
 
 // ─── /record parser ────────────────────────────────────────────────
@@ -106,7 +186,7 @@ export async function executeRecordingCommand(
       if (!r.ok) return { message: `Recording error: ${r.error}`, localOnly: true };
       return {
         message: `Saved recording **${r.recording.name}** — ${r.recording.steps.length} steps, ${(r.recording.durationMs / 1000).toFixed(1)}s. `
-          + `Replay with \`/replay ${r.recording.name}\`.`,
+          + `Inspect observation-only steps with \`/replay ${r.recording.name}\`; mutation steps require a fresh OpenSwan run.`,
         localOnly: true,
       };
     }
@@ -172,6 +252,23 @@ async function doReplay(name: string, ctx: RecordingCommandContext): Promise<Rec
   if (plan.length === 0) {
     return { message: `Recording **${name}** has no successful steps to replay.`, localOnly: true };
   }
+  // Preflight the complete plan before the first observation or mutation.
+  // This prevents a semantic re-discovery read (or any earlier read-only step)
+  // from running before a later recorded mutation is discovered.
+  const runtimeHandoff = buildReplayRuntimeHandoff(plan);
+  if (runtimeHandoff) {
+    const blocked = runtimeHandoff.blockedTools.length > 0
+      ? runtimeHandoff.blockedTools.map((tool) => `\`${tool}\``).join(', ')
+      : 'one or more browser/desktop mutation steps';
+    return {
+      message: [
+        `Replay **${name}** was not executed because its ${runtimeHandoff.blockedStepCount} blocked step${runtimeHandoff.blockedStepCount === 1 ? '' : 's'} require the OpenSwan typed runtime: ${blocked}.`,
+        runtimeHandoff.message,
+      ].join('\n'),
+      localOnly: true,
+      runtimeHandoff,
+    };
+  }
 
   const lines: string[] = [`Replaying **${name}** — ${plan.length} steps`];
   let okCount = 0;
@@ -195,47 +292,20 @@ async function doReplay(name: string, ctx: RecordingCommandContext): Promise<Rec
   return { message: lines.join('\n'), localOnly: true };
 }
 
-/**
- * Fires a single replay invocation. For semantic desktop AX actions
- * with a captured target, we try re-discovery first (re-fetch the a11y
- * tree, find the element by label+role, act on its new path). If target
- * lookup fails, fall back to the original path as a last resort.
- */
+/** Fires one already-preflighted observation invocation. */
 async function runReplayStep(
   inv: ReplayInvocation,
   ctx: RecordingCommandContext,
 ): Promise<{ ok: boolean; note?: string; error?: string }> {
-  if ((inv.tool === 'desktop.click_element' || inv.tool === 'desktop.set_element_value') && (inv.input as any)._target) {
-    const target = (inv.input as any)._target as { role?: string; label?: string; app?: string };
-    if (target.app && target.label) {
-      // Refetch current tree — pid + text come back on this call.
-      const tree = await ctx.fireTool({ tool: 'desktop.read_a11y_tree', input: { appName: target.app, maxDepth: 8, maxNodes: 250 } });
-      if (tree.ok) {
-        const data = (tree.data || {}) as { pid?: number; text?: string };
-        const found = findInTree(data.text, target.label, target.role);
-        if (data.pid && found.path) {
-          const action = await ctx.fireTool({
-            tool: inv.tool,
-            input: inv.tool === 'desktop.set_element_value'
-              ? { pid: data.pid, path: found.path, text: inv.input.text }
-              : { pid: data.pid, path: found.path },
-          });
-          if (action.ok) return { ok: true, note: `resolved "${target.label}" → ${found.path}` };
-          return { ok: false, error: action.error || `${inv.tool} failed` };
-        }
-      }
-    }
-    // Fallback: original path (may fail if tree shifted).
-    const fallback = await ctx.fireTool({
-      tool: inv.tool,
-      input: inv.tool === 'desktop.set_element_value'
-        ? { pid: inv.input.pid, path: inv.input.path, text: inv.input.text }
-        : { pid: inv.input.pid, path: inv.input.path },
-    });
-    return { ok: fallback.ok, error: fallback.error, note: fallback.ok ? 'used recorded path (no semantic match)' : undefined };
+  const tool = String(inv.tool || '').trim().toLowerCase();
+  if (!READ_ONLY_REPLAY_OBSERVATION_TOOLS.has(tool)) {
+    return {
+      ok: false,
+      error: 'Replay invocation is outside the reviewed observation-only allowlist.',
+    };
   }
 
-  // Everything else: re-fire verbatim.
+  // Observation inputs are bounded by their individual runtime schemas.
   const cleanInput = { ...inv.input };
   delete (cleanInput as any)._target;
   const result = await ctx.fireTool({ tool: inv.tool, input: cleanInput });

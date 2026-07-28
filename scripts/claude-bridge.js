@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { exec, execSync, execFile, execFileSync } = require('child_process');
+const { exec, execSync, execFile, execFileSync, spawn } = require('child_process');
 const {
   appendOpenSwanWorktreeConfigPrompt,
   clampLaunchCount,
@@ -30,6 +30,18 @@ const {
   shellQuote,
   shellTextArg,
 } = require('./terminal-launch-utils');
+const {
+  canonicalizePathWithExistingAncestor,
+  createPairingChallengeStore,
+  isBridgeRequestSourceAllowed,
+  isPairingRequestSourceAllowed,
+  prepareSupportedDiagnosticCommand,
+  prepareSupportedExecInvocation,
+} = require('./desktop-bridge-security');
+const {
+  APP_CAPABILITY_LABEL_RE,
+  classifyAppCapabilityResultText,
+} = require('./codex-session-summary');
 
 // UC-3: Playwright-backed /browser/* surface. Lazy-loaded so the
 // bridge still boots on machines without playwright installed (we log
@@ -38,7 +50,8 @@ let browserBridge = null;
 try { browserBridge = require('./browser-bridge'); }
 catch (e) { console.warn('[bridge] playwright unavailable — /browser/* will 503:', e.message); }
 
-const PORT = 7778;
+const PORT = Number.parseInt(process.env.UC_CLAUDE_BRIDGE_PORT || '', 10) || 7778;
+const BRIDGE_BIND_HOST = '127.0.0.1';
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
 // Also scan Windows-side Claude sessions when running in WSL
 const CLAUDE_DIRS = [CLAUDE_DIR];
@@ -58,6 +71,8 @@ const IDLE_THRESHOLD = 3_600_000;    // 1h → still show session (was 5min — 
 const TAIL_BYTES = 2 * 1024 * 1024; // Read last 2MB of each JSONL (was 16KB — way too small for token counting)
 const SCAN_INTERVAL = 5000;        // Scan filesystem every 5s
 const LAUNCHED_SESSION_TTL = 12 * 60 * 60_000;
+const APP_CAPABILITY_RESULT_MAX_CHARS = 8_000;
+const CLAUDE_MANAGED_SESSION_MARKER_RE = /^\s*\[UC-CLAUDE-CODE:([A-Za-z0-9][A-Za-z0-9._-]{7,199})\]\s*(?:\n|$)/;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -116,10 +131,28 @@ function configuredBridgeOrigins() {
     .filter(Boolean);
 }
 
+function requestUsesLoopbackBridgeHost(req) {
+  const hostHeader = String(req?.headers?.host || '').trim();
+  if (!hostHeader || /[\s/@\\]/.test(hostHeader)) return false;
+  try {
+    const hostname = new URL(`http://${hostHeader}`).hostname.toLowerCase();
+    return hostname === 'localhost'
+      || hostname === '127.0.0.1'
+      || hostname === '::1'
+      || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 function isBridgeOriginAllowed(req) {
   const origin = String(req.headers.origin || '').trim();
-  if (!origin) return true;
+  const loopbackHost = requestUsesLoopbackBridgeHost(req);
+  if (!origin) return loopbackHost;
   if (configuredBridgeOrigins().includes(origin)) return true;
+  // Built-in browser origins are conveniences for a bridge addressed directly
+  // through localhost. A tunnel Host must opt into its exact browser origin.
+  if (!loopbackHost) return false;
   try {
     const parsed = new URL(origin);
     const host = parsed.hostname.toLowerCase();
@@ -130,7 +163,7 @@ function isBridgeOriginAllowed(req) {
       || host === '[::1]'
     );
     if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && isLocalhost) return true;
-    if (parsed.protocol === 'https:' && (host === 'app.chrisswanson.xyz' || host.endsWith('.chrisswanson.xyz'))) return true;
+    if (parsed.protocol === 'https:' && host === 'app.chrisswanson.xyz') return true;
   } catch {
     return false;
   }
@@ -140,6 +173,29 @@ function isBridgeOriginAllowed(req) {
 function isDesktopTokenValid(req) {
   const sentToken = req.headers['x-uc-desktop-token'];
   return !!sentToken && sentToken === getOrCreateDesktopToken();
+}
+
+function requireBridgeMutationAuth(req, res, headers) {
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isBridgeOriginAllowed);
+  if (!sourceCheck.ok) {
+    res.writeHead(403, headers);
+    res.end(JSON.stringify({
+      ok: false,
+      code: sourceCheck.code,
+      error: 'Bridge mutations are available only through an allowed loopback request.',
+    }));
+    return false;
+  }
+  if (!isDesktopTokenValid(req)) {
+    res.writeHead(401, headers);
+    res.end(JSON.stringify({
+      ok: false,
+      code: 'bridge_auth_required',
+      error: 'Missing or invalid desktop bridge token.',
+    }));
+    return false;
+  }
+  return true;
 }
 
 function buildCorsHeaders(req) {
@@ -161,6 +217,12 @@ let launchedSessions = loadManagedTerminalSessions('claude-code');
 const LOCAL_FILE_GRANT_DEFAULT_TTL_MS = 4 * 60 * 60 * 1000;
 const LOCAL_FILE_GRANT_MAX_TTL_MS = 12 * 60 * 60 * 1000;
 const localFileAccessGrants = new Map();
+const desktopPairingChallenges = createPairingChallengeStore({
+  ttlMs: 30_000,
+  maxEntries: 64,
+});
+const CLAUDE_SPAWN_LOG_ROOT = path.join(os.tmpdir(), 'uc-claude-spawns');
+const spawnedClaudeProcesses = new Map();
 
 // ── Device discovery cache (10s TTL) ────────────────────────────────────────
 const deviceCache = { data: null, timestamp: 0 };
@@ -332,6 +394,111 @@ function tailRead(filePath) {
   } catch { return []; }
 }
 
+function normalizeAppCapabilityResultText(value) {
+  const text = String(value || '')
+    .replace(/\r/g, '')
+    .trim()
+    .slice(0, APP_CAPABILITY_RESULT_MAX_CHARS);
+  return APP_CAPABILITY_LABEL_RE.test(text) ? text : '';
+}
+
+function textFromClaudeMessageContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+function extractAppCapabilityResultText(content) {
+  return normalizeAppCapabilityResultText(textFromClaudeMessageContent(content));
+}
+
+function extractClaudeManagedSessionId(content) {
+  const text = textFromClaudeMessageContent(content).replace(/\r/g, '');
+  const match = text.match(CLAUDE_MANAGED_SESSION_MARKER_RE);
+  return match?.[1] || '';
+}
+
+function withBoundedAppCapabilityResult(session) {
+  const appCapabilityResultText = normalizeAppCapabilityResultText(session?.appCapabilityResultText);
+  return {
+    ...session,
+    appCapabilityResultText: appCapabilityResultText || undefined,
+    appCapabilityResultStatus: appCapabilityResultText
+      ? classifyAppCapabilityResultText(appCapabilityResultText) || undefined
+      : undefined,
+  };
+}
+
+function mergeManagedClaudeSessions(managedSessions, transcriptSessions) {
+  const boundedManaged = managedSessions.map(withBoundedAppCapabilityResult);
+  const managedIds = new Set(boundedManaged.map((session) => String(session.sessionId || '')).filter(Boolean));
+  const claimsByManagedId = new Map();
+
+  for (const session of transcriptSessions) {
+    const managedSessionId = String(session?.managedSessionId || '');
+    if (!managedSessionId || !managedIds.has(managedSessionId) || session.kind === 'subagent') continue;
+    const claims = claimsByManagedId.get(managedSessionId) || [];
+    claims.push(withBoundedAppCapabilityResult(session));
+    claimsByManagedId.set(managedSessionId, claims);
+  }
+
+  const consumedTranscriptIds = new Map();
+  const mergedManaged = boundedManaged.map((managed) => {
+    const managedSessionId = String(managed.sessionId || '');
+    const claims = claimsByManagedId.get(managedSessionId) || [];
+    // Fail closed: two transcripts claiming one managed id are ambiguous.
+    if (claims.length !== 1) return managed;
+    const transcript = claims[0];
+    consumedTranscriptIds.set(String(transcript.sessionId || ''), managedSessionId);
+    const appCapabilityResultText = normalizeAppCapabilityResultText(
+      transcript.appCapabilityResultText || managed.appCapabilityResultText,
+    );
+    return {
+      ...managed,
+      ...transcript,
+      sessionId: managedSessionId,
+      transcriptSessionId: transcript.sessionId,
+      terminalTitle: managed.terminalTitle,
+      terminal: managed.terminal,
+      terminalPid: managed.terminalPid,
+      launchId: managed.launchId,
+      launchedAt: managed.launchedAt,
+      manageable: Boolean(managed.manageable),
+      displayName: managed.displayName || transcript.displayName,
+      task: managed.task || transcript.task,
+      prompt: managed.prompt || transcript.prompt,
+      recentActions: [
+        ...(managed.recentActions || []),
+        ...(transcript.recentActions || []),
+      ].filter(Boolean).slice(-8),
+      status: managed.status === 'active' || transcript.status === 'active'
+        ? 'active'
+        : transcript.status || managed.status,
+      lastActivity: new Date(managed.lastActivity || 0).getTime() > new Date(transcript.lastActivity || 0).getTime()
+        ? managed.lastActivity
+        : transcript.lastActivity,
+      appCapabilityResultText: appCapabilityResultText || undefined,
+      appCapabilityResultStatus: appCapabilityResultText
+        ? classifyAppCapabilityResultText(appCapabilityResultText) || undefined
+        : undefined,
+    };
+  });
+
+  const remainingTranscripts = transcriptSessions
+    .filter((session) => !consumedTranscriptIds.has(String(session.sessionId || '')))
+    .map((session) => {
+      const parentSessionId = consumedTranscriptIds.get(String(session.parentSessionId || ''));
+      return withBoundedAppCapabilityResult(parentSessionId
+        ? { ...session, parentSessionId }
+        : session);
+    });
+
+  return [...mergedManaged, ...remainingTranscripts];
+}
+
 // Extract LIVE subagents (Claude Code Task tool) for a parent session.
 // Claude Code writes each subagent's transcript to
 //   <claudeDir>/<projHash>/<parentSessionId>/subagents/agent-<id>.jsonl
@@ -445,9 +612,31 @@ function fullTokenScan(filePath, sessionId) {
     // Read the full file line by line using a stream-like approach
     // For very large files (>50MB), read in chunks
     let totalInput = 0, totalOutput = 0, cachedTokens = 0, newTokens = 0, msgCount = 0;
+    let managedSessionId = '';
+    let managedSessionMarkerChecked = false;
     const CHUNK = 4 * 1024 * 1024; // 4MB chunks
     const fd = fs.openSync(filePath, 'r');
     let leftover = '';
+    const consumeLine = (line) => {
+      if (!line.trim()) return;
+      try {
+        const entry = JSON.parse(line.trim());
+        if (!managedSessionMarkerChecked && (entry.type === 'human' || entry.type === 'user') && entry.message) {
+          managedSessionId = extractClaudeManagedSessionId(entry.message.content);
+          managedSessionMarkerChecked = true;
+        }
+        if (entry.type === 'assistant' && entry.message) {
+          msgCount++;
+          const u = entry.message.usage;
+          if (u) {
+            totalInput += u.input_tokens || 0;
+            totalOutput += u.output_tokens || 0;
+            cachedTokens += u.cache_read_input_tokens || 0;
+            newTokens += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+          }
+        }
+      } catch {}
+    };
 
     for (let offset = 0; offset < stat.size; offset += CHUNK) {
       const readSize = Math.min(CHUNK, stat.size - offset);
@@ -458,25 +647,22 @@ function fullTokenScan(filePath, sessionId) {
       leftover = lines.pop() || ''; // Last line may be partial
 
       for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const entry = JSON.parse(line.trim());
-          if (entry.type === 'assistant' && entry.message) {
-            msgCount++;
-            const u = entry.message.usage;
-            if (u) {
-              totalInput += u.input_tokens || 0;
-              totalOutput += u.output_tokens || 0;
-              cachedTokens += u.cache_read_input_tokens || 0;
-              newTokens += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-            }
-          }
-        } catch {}
+        consumeLine(line);
       }
     }
+    consumeLine(leftover);
     fs.closeSync(fd);
 
-    const result = { size: stat.size, totalInput, totalOutput, cachedTokens, newTokens, msgCount };
+    const result = {
+      size: stat.size,
+      totalInput,
+      totalOutput,
+      cachedTokens,
+      newTokens,
+      msgCount,
+      managedSessionId,
+      managedSessionMarkerChecked,
+    };
     _tokenCache.set(sessionId, result);
     return result;
   } catch (e) {
@@ -487,11 +673,11 @@ function fullTokenScan(filePath, sessionId) {
 // ── Scan ~/.claude/projects/ for active sessions ────────────────────────────
 
 function scanSessions() {
-  const sessions = [];
+  const transcriptSessions = [];
   for (const claudeDir of CLAUDE_DIRS) {
     if (!fs.existsSync(claudeDir)) continue;
     const scanned = scanDirectory(claudeDir);
-    sessions.push(...scanned);
+    transcriptSessions.push(...scanned);
   }
 
   launchedSessions = launchedSessions.filter((s) => {
@@ -503,7 +689,7 @@ function scanSessions() {
   });
 
   const seen = new Set();
-  return [...launchedSessions, ...sessions].filter((s) => {
+  return mergeManagedClaudeSessions(launchedSessions, transcriptSessions).filter((s) => {
     if (seen.has(s.sessionId)) return false;
     seen.add(s.sessionId);
     return true;
@@ -554,6 +740,10 @@ function scanDirectory(claudeDir) {
       // Rich live context — extracted from tail entries
       let lastUserMessage = '';
       let lastAssistantText = '';
+      let managedSessionId = '';
+      let managedSessionMarkerChecked = false;
+      let appCapabilityResultText = '';
+      let appCapabilityResultStatus = null;
       const recentToolCalls = []; // { tool, file, timestamp } — last 10 with context
       const activeFiles = new Set(); // files being read/edited/written
       let currentToolName = '';      // the tool being used RIGHT NOW (last tool_use in tail)
@@ -567,6 +757,8 @@ function scanDirectory(claudeDir) {
         cachedTokens = fullScan.cachedTokens;
         newTokens = fullScan.newTokens;
         messageCount = fullScan.msgCount;
+        managedSessionId = fullScan.managedSessionId || '';
+        managedSessionMarkerChecked = fullScan.managedSessionMarkerChecked === true;
       }
 
       // Use tail-read entries for metadata + live context
@@ -583,6 +775,10 @@ function scanDirectory(claudeDir) {
         // Capture last user message (Claude Code uses type 'user', not 'human')
         if ((entry.type === 'human' || entry.type === 'user') && entry.message) {
           const hContent = entry.message.content;
+          if (!managedSessionMarkerChecked) {
+            managedSessionId = extractClaudeManagedSessionId(hContent);
+            managedSessionMarkerChecked = true;
+          }
           if (typeof hContent === 'string' && hContent.trim()) {
             lastUserMessage = hContent.trim().slice(0, 500);
           } else if (Array.isArray(hContent)) {
@@ -598,6 +794,11 @@ function scanDirectory(claudeDir) {
           if (entry.message.model) model = entry.message.model;
           const content = entry.message.content;
           if (Array.isArray(content)) {
+            const capabilityResult = extractAppCapabilityResultText(content);
+            if (capabilityResult) {
+              appCapabilityResultText = capabilityResult;
+              appCapabilityResultStatus = classifyAppCapabilityResultText(capabilityResult);
+            }
             for (const c of content) {
               // Capture assistant text
               if (c.type === 'text' && c.text) {
@@ -660,6 +861,9 @@ function scanDirectory(claudeDir) {
         // Rich live context
         lastUserMessage,
         lastAssistantText,
+        managedSessionId: managedSessionId || undefined,
+        appCapabilityResultText: appCapabilityResultText || undefined,
+        appCapabilityResultStatus: appCapabilityResultStatus || undefined,
         recentToolCalls: recentToolCalls.slice(-10),
         activeFiles: [...activeFiles].slice(-10),
         currentToolName,
@@ -687,6 +891,7 @@ function buildClaudeManagedPrompt({ sessionId, displayName, index, count, prompt
 }
 
 function registerLaunchedClaudeSession(data) {
+  const appCapabilityResultText = normalizeAppCapabilityResultText(data.appCapabilityResultText);
   const session = {
     sessionId: data.sessionId,
     projectDir: data.projectDir || process.cwd(),
@@ -712,6 +917,10 @@ function registerLaunchedClaudeSession(data) {
     subagentCount: 0,
     lastUserMessage: data.prompt || data.task || '',
     lastAssistantText: '',
+    appCapabilityResultText: appCapabilityResultText || undefined,
+    appCapabilityResultStatus: appCapabilityResultText
+      ? classifyAppCapabilityResultText(appCapabilityResultText) || undefined
+      : undefined,
     recentToolCalls: [],
     activeFiles: [],
     currentToolName: '',
@@ -895,7 +1104,11 @@ const server = http.createServer(async (req, res) => {
 
   if (!isBridgeOriginAllowed(req)) {
     res.writeHead(403, CORS);
-    res.end(JSON.stringify({ ok: false, error: 'Origin blocked by bridge allowlist.' }));
+    res.end(JSON.stringify({
+      ok: false,
+      code: url === '/desktop/pair' ? 'pairing_origin_blocked' : 'bridge_origin_blocked',
+      error: 'Origin blocked by bridge allowlist.',
+    }));
     return;
   }
 
@@ -908,12 +1121,33 @@ const server = http.createServer(async (req, res) => {
       sessions: cachedSessions.length,
       mode: isClaudeBridgeBillingAllowed() ? 'billable-actions-enabled' : 'read-only-cost-guard',
       billableClaudeActionsEnabled: isClaudeBridgeBillingAllowed(),
-      capabilities: ['sessions', 'exec', 'desktop', 'browser', 'launch', 'spawn', 'terminal-send'],
+      capabilities: ['sessions', 'diagnostics', 'desktop', 'browser', 'launch', 'spawn', 'stagehand', 'terminal-send'],
     }));
     return;
   }
 
+  const sourceGuardExempt = url === '/desktop/pair'
+    || url === '/desktop/health'
+    || url === '/browser/health';
+  if (!sourceGuardExempt) {
+    const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isBridgeOriginAllowed);
+    if (!sourceCheck.ok) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Bridge access is available only through an allowed loopback or explicitly configured tunnel request.',
+      }));
+      return;
+    }
+  }
+
   if (url === '/sessions') {
+    if (!isDesktopTokenValid(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
+      return;
+    }
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ sessions: cachedSessions, timestamp: lastScanTime }));
     return;
@@ -993,6 +1227,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /context — aggregated context from ALL sessions for cross-session memory ──
   if (url === '/context') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const mainSessions = cachedSessions.filter(s => s.kind === 'main' || !s.kind);
     const sessionContexts = mainSessions.map(s => ({
       sessionId: s.sessionId,
@@ -1034,6 +1269,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /memory — serve synced agent memories from .agent-memory/context.md ──
   if (url === '/memory') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const memoryFile = path.join(__dirname, '..', '.agent-memory', 'context.md');
     try {
       const content = fs.readFileSync(memoryFile, 'utf-8');
@@ -1051,6 +1287,7 @@ const server = http.createServer(async (req, res) => {
   // Code skills into a circle via `/skill import` without hand-pasting URLs.
   // Scans one level deep (skill name = subdir name OR bare .md basename).
   if (url === '/skills') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const root = path.join(os.homedir(), '.claude', 'skills');
     try {
       const entries = fs.readdirSync(root, { withFileTypes: true });
@@ -1096,6 +1333,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /skills/<name> — return the raw SKILL.md content ──────────────────
   if (url.startsWith('/skills/')) {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const rawName = decodeURIComponent(url.slice('/skills/'.length));
     // Block traversal + absolute paths.
     if (!rawName || rawName.includes('..') || rawName.startsWith('/') || rawName.includes('\0')) {
@@ -1110,8 +1348,19 @@ const server = http.createServer(async (req, res) => {
       path.join(root, rawName),
     ];
     let found = null;
+    const canonicalRoot = realpathOrResolve(root);
     for (const c of candidates) {
-      if (fs.existsSync(c) && fs.statSync(c).isFile()) { found = c; break; }
+      if (!fs.existsSync(c)) continue;
+      const canonicalCandidate = realpathOrResolve(c);
+      if (
+        canonicalRoot
+        && canonicalCandidate
+        && isPathInsideRoot(canonicalCandidate, canonicalRoot)
+        && fs.statSync(canonicalCandidate).isFile()
+      ) {
+        found = canonicalCandidate;
+        break;
+      }
     }
     if (!found) {
       res.writeHead(404, CORS);
@@ -1129,91 +1378,93 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── POST /exec — run a shell command (restricted) ──────────────────────────
+  // ── POST /exec — retired unsafe shell compatibility route ─────────────────
   if (url === '/exec' && req.method === 'POST') {
-    // Only allow requests from localhost origins
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
-      res.writeHead(403, CORS);
-      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
-      return;
-    }
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
+    res.writeHead(410, CORS);
+    res.end(JSON.stringify({
+      ok: false,
+      code: 'legacy_shell_exec_retired',
+      error: 'The legacy shell endpoint is disabled. Use a structured desktop action or the read-only /desktop/exec_file policy.',
+    }));
+    return;
+  }
 
-    let body = '';
-    req.on('data', chunk => {
-      body += chunk;
-      // Prevent body flooding (max 10KB)
-      if (body.length > 10240) {
-        res.writeHead(413, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
-        req.destroy();
-      }
-    });
-    req.on('end', () => {
-      let command;
-      try {
-        const parsed = JSON.parse(body);
-        command = parsed.command;
-      } catch {
+  // ── POST /diagnostics — fixed, read-only local diagnostics ────────────────
+  if (url === '/diagnostics' && req.method === 'POST') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
+    readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+      if (bodyErr) {
         res.writeHead(400, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body. Expected { "command": "..." }' }));
+        res.end(JSON.stringify({ ok: false, error: bodyErr }));
         return;
       }
-      if (!command || typeof command !== 'string') {
+      const invocation = prepareSupportedDiagnosticCommand(parsed?.command, process.cwd());
+      if (!invocation.ok) {
         res.writeHead(400, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Missing "command" field' }));
+        res.end(JSON.stringify({ ok: false, code: invocation.code, error: invocation.error }));
         return;
       }
-
-      if (commandInvokesClaudeBilling(command) && !isClaudeBridgeBillingAllowed()) {
-        sendClaudeBillingBlocked(res, CORS, 'Running Claude/Anthropic commands through /exec');
-        return;
-      }
-
-      // Block dangerous patterns that could damage the system
-      const BLOCKED_PATTERNS = [
-        /\brm\s+(-[a-zA-Z]*\s+)*\//,     // rm with absolute paths
-        /\brm\s+(-[a-zA-Z]*\s+)*~/,       // rm in home directory
-        /\brmdir\s+(-[a-zA-Z]*\s+)*\//,   // rmdir with absolute paths
-        /\bmkfs\b/,                         // format filesystems
-        /\bdd\s+.*of=/,                     // dd write operations
-        />\s*\/dev\/sd/,                     // write to block devices
-        /\bcurl\b.*\|\s*(ba)?sh/,           // curl pipe to shell
-        /\bwget\b.*\|\s*(ba)?sh/,           // wget pipe to shell
-        /\bchmod\s+777\b/,                  // world-writable permissions
-        /\bpasswd\b/,                        // password changes
-        /\buseradd\b/,                       // user creation
-        /\buserdel\b/,                       // user deletion
-        /\bsudo\b/,                          // privilege escalation
-        /\bsu\s+-?\s/,                       // switch user
-        /\/etc\/shadow/,                     // shadow file access
-        /\/etc\/passwd/,                     // passwd file access
-        /\benv\b.*SECRET|KEY|TOKEN|PASS/i,   // env var exfiltration
-        /\bcrontab\s+-[er]/,                 // crontab editing
-        /\bshutdown\b/,                      // system shutdown
-        /\breboot\b/,                        // system reboot
-      ];
-
-      const blocked = BLOCKED_PATTERNS.some(p => p.test(command));
-      if (blocked) {
-        res.writeHead(403, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Command blocked: contains restricted pattern' }));
-        return;
-      }
-
-      exec(command, { timeout: 30000, maxBuffer: 1024 * 1024, shell: true }, (err, stdout, stderr) => {
+      execFile(invocation.binary, invocation.args, {
+        cwd: process.cwd(),
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+        encoding: 'utf8',
+        env: invocation.env,
+      }, (err, stdout, stderr) => {
         res.writeHead(200, CORS);
-        if (err && err.killed) {
-          res.end(JSON.stringify({ ok: false, error: 'Command timed out (30s)' }));
-        } else {
+        res.end(JSON.stringify({
+          ok: !err || err.code === 0,
+          stdout: String(stdout || '').slice(0, 65_536),
+          stderr: String(stderr || '').slice(0, 16_384),
+          code: err ? (Number(err.code) || 1) : 0,
+        }));
+      });
+    });
+    return;
+  }
+
+  // ── POST /stagehand/run — fixed runner, structured Browserbase payload ────
+  if (url === '/stagehand/run' && req.method === 'POST') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
+    readJsonBody(req, 1024 * 1024, (parsed, bodyErr) => {
+      if (bodyErr) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: bodyErr }));
+        return;
+      }
+      const payload = parsed?.payload;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'payload must be a structured Stagehand request' }));
+        return;
+      }
+      const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
+      const runnerPath = path.join(__dirname, 'stagehand-runner.mjs');
+      execFile(process.execPath, [runnerPath, encoded], {
+        cwd: path.join(__dirname, '..'),
+        timeout: 240_000,
+        maxBuffer: 8 * 1024 * 1024,
+        encoding: 'utf8',
+      }, (err, stdout, stderr) => {
+        if (err) {
+          res.writeHead(502, CORS);
           res.end(JSON.stringify({
-            ok: !err || err.code === 0,
-            stdout: (stdout || '').slice(0, 65536), // Cap output at 64KB
-            stderr: (stderr || '').slice(0, 16384),  // Cap stderr at 16KB
-            code: err ? err.code || 1 : 0,
+            ok: false,
+            error: String(stderr || err.message || 'Stagehand runner failed').slice(0, 64 * 1024),
           }));
+          return;
         }
+        let result;
+        try {
+          result = JSON.parse(String(stdout || '').trim());
+        } catch {
+          res.writeHead(502, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Stagehand runner returned invalid JSON' }));
+          return;
+        }
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify(result));
       });
     });
     return;
@@ -1335,6 +1586,7 @@ const server = http.createServer(async (req, res) => {
   //   - tasks: array of { task, model? } to spawn one per entry
   //   - useWorktree: if true, each session gets its own git worktree branch
   if (url === '/spawn' && req.method === 'POST') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     if (!isClaudeBridgeBillingAllowed()) {
       sendClaudeBillingBlocked(res, CORS, 'Spawning Claude Code sessions');
       return;
@@ -1358,30 +1610,74 @@ const server = http.createServer(async (req, res) => {
       }
       if (items.length === 0) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Missing task or tasks[]' })); return; }
 
-      const baseCwd = parsed.workdir || process.cwd();
+      const baseCwd = safeProjectDir(parsed.workdir, process.cwd());
       const useWorktree = !!parsed.useWorktree;
       const results = [];
+      try {
+        fs.mkdirSync(CLAUDE_SPAWN_LOG_ROOT, { recursive: true, mode: 0o700 });
+      } catch (err) {
+        res.writeHead(500, CORS);
+        res.end(JSON.stringify({ ok: false, error: `Could not prepare private spawn logs: ${err.message}` }));
+        return;
+      }
 
       for (let i = 0; i < items.length; i++) {
-        const { task, model } = items[i];
-        const modelFlag = model ? `--model ${model}` : '';
+        const task = String(items[i]?.task || '').trim();
+        const model = String(items[i]?.model || '').trim();
+        if (!task || task.length > 100_000) {
+          results.push({ ok: false, error: 'task must be 1..100000 characters', task: task.slice(0, 120) });
+          continue;
+        }
+        if (model && !/^[A-Za-z0-9._:-]{1,100}$/.test(model)) {
+          results.push({ ok: false, error: 'model contains unsupported characters', task: task.slice(0, 120) });
+          continue;
+        }
         // Optional: git worktree isolation per agent (shared helper, fail-open).
         const { cwd } = ensureOpenSwanWorktree({ baseCwd, useWorktree, index: i });
-
-        const escaped = task.replace(/'/g, "'\\''");
-        const logFile = `/tmp/claude-spawn-${Date.now()}-${i}.log`;
-        const cmd = `cd "${cwd}" && nohup claude ${modelFlag} --dangerously-skip-permissions -p "${escaped}" > "${logFile}" 2>&1 & echo $!`;
+        const spawnId = crypto.randomBytes(18).toString('hex');
+        const logFile = path.join(CLAUDE_SPAWN_LOG_ROOT, `${spawnId}.log`);
+        const args = [];
+        if (model) args.push('--model', model);
+        // Deliberately omit --dangerously-skip-permissions. Spawned agents
+        // inherit Claude Code's normal permission and approval behavior.
+        args.push('-p', task);
 
         try {
-          const pid = await new Promise((resolve, reject) => {
-            exec(cmd, { timeout: 15000, shell: '/bin/bash' }, (err, stdout) => {
-              if (err) reject(err);
-              else resolve(stdout.trim());
-            });
+          const logFd = fs.openSync(logFile, 'wx', 0o600);
+          const child = spawn('claude', args, {
+            cwd,
+            detached: true,
+            stdio: ['ignore', logFd, logFd],
           });
-          results.push({ ok: true, pid, task: task.slice(0, 120), cwd, logFile });
+          await new Promise((resolve, reject) => {
+            child.once('spawn', resolve);
+            child.once('error', reject);
+          }).finally(() => {
+            try { fs.closeSync(logFd); } catch {}
+          });
+          child.unref();
+          const pid = String(child.pid || '');
+          spawnedClaudeProcesses.set(spawnId, {
+            spawnId,
+            pid,
+            logFile,
+            cwd,
+            createdAt: Date.now(),
+          });
+          results.push({
+            ok: true,
+            spawnId,
+            pid,
+            task: task.slice(0, 120),
+            cwd,
+          });
         } catch (err) {
-          results.push({ ok: false, error: err.message, task: task.slice(0, 120) });
+          try { fs.unlinkSync(logFile); } catch {}
+          results.push({
+            ok: false,
+            error: String(err?.message || err || 'Claude spawn failed').slice(0, 500),
+            task: task.slice(0, 120),
+          });
         }
       }
 
@@ -1398,42 +1694,59 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── POST /spawn/status — inspect a spawned Claude Code process/log ───────
-  // Body: { pid, logFile, maxBytes? }
+  // ── POST /spawn/status — inspect a server-owned spawned process/log ──────
+  // Body: { spawnId, maxBytes? }. Raw pid/log paths are never accepted.
   if (url === '/spawn/status' && req.method === 'POST') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     let body = '';
     req.on('data', c => { body += c; if (body.length > 32000) req.destroy(); });
     req.on('end', () => {
       let parsed;
       try { parsed = JSON.parse(body || '{}'); } catch { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' })); return; }
 
-      const pid = String(parsed.pid || '').trim();
-      const logFile = String(parsed.logFile || '').trim();
-      if (!pid && !logFile) {
+      const spawnId = String(parsed.spawnId || '').trim();
+      if (!/^[a-f0-9]{36}$/.test(spawnId)) {
         res.writeHead(400, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Missing pid or logFile' }));
+        res.end(JSON.stringify({ ok: false, error: 'Missing or invalid spawnId' }));
+        return;
+      }
+      const record = spawnedClaudeProcesses.get(spawnId);
+      if (!record) {
+        res.writeHead(404, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Spawn handle not found or bridge restarted' }));
+        return;
+      }
+      const canonicalLog = realpathOrResolve(record.logFile);
+      const canonicalRoot = realpathOrResolve(CLAUDE_SPAWN_LOG_ROOT);
+      if (!canonicalLog || !canonicalRoot || !isPathInsideRoot(canonicalLog, canonicalRoot)) {
+        spawnedClaudeProcesses.delete(spawnId);
+        res.writeHead(403, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Spawn log path failed server containment validation' }));
         return;
       }
 
       const maxBytes = Math.max(4096, Math.min(parseInt(parsed.maxBytes, 10) || 131072, 262144));
-      const fileExists = !!logFile && fs.existsSync(logFile);
-      const output = fileExists ? readTailText(logFile, maxBytes) : '';
-      const isRunning = pid ? isProcessRunning(pid) : false;
+      const fileExists = fs.existsSync(canonicalLog);
+      const output = fileExists ? readTailText(canonicalLog, maxBytes) : '';
+      const isRunning = record.pid ? isProcessRunning(record.pid) : false;
       let lastUpdatedAt = null;
       let byteLength = 0;
       if (fileExists) {
         try {
-          const stats = fs.statSync(logFile);
+          const stats = fs.statSync(canonicalLog);
           lastUpdatedAt = stats.mtime.toISOString();
           byteLength = Number(stats.size || 0);
         } catch {}
+      }
+      if (!isRunning && Date.now() - record.createdAt > LAUNCHED_SESSION_TTL) {
+        spawnedClaudeProcesses.delete(spawnId);
       }
 
       res.writeHead(200, CORS);
       res.end(JSON.stringify({
         ok: true,
-        pid: pid || null,
-        logFile: logFile || null,
+        spawnId,
+        pid: record.pid || null,
         isRunning,
         completed: !isRunning,
         hasOutput: output.length > 0,
@@ -1447,6 +1760,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /devices — Discover all connected devices ──────────────────────────
   if (url === '/devices' && req.method === 'GET') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     res.writeHead(200, CORS);
     res.end(JSON.stringify(discoverDevices()));
     return;
@@ -1454,6 +1768,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /devices/printers — List printers with status ─────────────────────
   if (url === '/devices/printers' && req.method === 'GET') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const lpOut = safeExec('lpstat -p -d 2>/dev/null');
     const printers = [];
     if (lpOut) {
@@ -1474,13 +1789,8 @@ const server = http.createServer(async (req, res) => {
 
   // ── POST /devices/print — Print a file or text ────────────────────────────
   if (url === '/devices/print' && req.method === 'POST') {
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
-      res.writeHead(403, CORS);
-      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
-      return;
-    }
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
+    const parsedUrl = new URL(req.url, 'http://localhost');
 
     let body = '';
     req.on('data', chunk => {
@@ -1505,21 +1815,70 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ ok: false, error: 'Must provide "text" or "file"' }));
         return;
       }
-
-      let filePath = file;
-      if (text) {
-        filePath = path.join(os.tmpdir(), `claude-print-${Date.now()}.txt`);
-        fs.writeFileSync(filePath, text, 'utf-8');
+      if (printer != null && (typeof printer !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(printer))) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid printer name' }));
+        return;
+      }
+      if (text != null && (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 1024 * 1024)) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Print text must be a string no larger than 1 MB' }));
+        return;
+      }
+      if (file != null && (typeof file !== 'string' || file.length > 1024 || /[\x00-\x1f]/.test(file))) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid print file path' }));
+        return;
       }
 
-      const parts = ['lp'];
-      if (printer) parts.push('-d', printer);
-      if (copies && copies > 1) parts.push('-n', String(copies));
-      parts.push('--', filePath);
+      let filePath = file;
+      let tempDir = null;
+      if (text) {
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uc-bridge-print-'));
+        fs.chmodSync(tempDir, 0o700);
+        filePath = path.join(tempDir, 'print.txt');
+        fs.writeFileSync(filePath, text, 'utf-8');
+        fs.chmodSync(filePath, 0o600);
+      } else {
+        const validated = validateDesktopPathServer(file);
+        if (!validated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: validated.error }));
+          return;
+        }
+        filePath = expandDesktopPath(validated.path);
+        const fileGrant = requireLocalFileAccessGrant(req, parsedUrl, filePath, 'read');
+        if (!fileGrant.ok) {
+          res.writeHead(fileGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: fileGrant.error }));
+          return;
+        }
+        const canonicalFile = realpathOrResolve(filePath);
+        let isRegularFile = false;
+        if (canonicalFile) {
+          try {
+            isRegularFile = fs.statSync(canonicalFile).isFile();
+          } catch {}
+        }
+        if (!isRegularFile) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Print path must be a regular file' }));
+          return;
+        }
+        filePath = canonicalFile;
+      }
 
-      exec(parts.join(' '), { timeout: 15000 }, (err, stdout, stderr) => {
+      const args = [];
+      if (printer) args.push('-d', printer);
+      const safeCopies = Math.max(1, Math.min(20, Number(copies) || 1));
+      if (safeCopies > 1) args.push('-n', String(safeCopies));
+      args.push('--', filePath);
+
+      execFile('lp', args, { timeout: 15000 }, (err, stdout, stderr) => {
         // Clean up temp file
-        if (text) try { fs.unlinkSync(filePath); } catch {}
+        if (tempDir) {
+          try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+        }
 
         if (err) {
           res.writeHead(500, CORS);
@@ -1536,6 +1895,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /devices/serial — List serial ports ───────────────────────────────
   if (url === '/devices/serial' && req.method === 'GET') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const ports = [];
     const wsl = isWSL();
 
@@ -1581,13 +1941,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── POST /devices/serial/send — Send data to a serial port ────────────────
   if (url === '/devices/serial/send' && req.method === 'POST') {
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
-      res.writeHead(403, CORS);
-      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
-      return;
-    }
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
 
     let body = '';
     req.on('data', chunk => {
@@ -1614,27 +1968,45 @@ const server = http.createServer(async (req, res) => {
       }
 
       // Validate port path to prevent injection
-      if (!/^(\/dev\/tty[A-Za-z0-9\/]+|COM\d+)$/.test(port)) {
+      if (!/^(?:\/dev\/(?:tty|cu)\.[A-Za-z0-9._-]{1,128}|\/dev\/tty(?:USB|ACM|S)\d+|COM\d+)$/.test(port)) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: 'Invalid port path' }));
         return;
       }
-
-      let cmd;
-      if (baudRate) {
-        cmd = `stty -F ${port} ${baudRate} raw -echo 2>/dev/null; echo -ne ${JSON.stringify(data)} > ${port}`;
-      } else {
-        cmd = `echo -ne ${JSON.stringify(data)} > ${port}`;
+      if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > 64 * 1024) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Serial data must be a string no larger than 64 KB' }));
+        return;
       }
-
-      exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+      const parsedBaud = Number(baudRate || 0);
+      if (baudRate != null && (!Number.isInteger(parsedBaud) || parsedBaud < 300 || parsedBaud > 4_000_000)) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid baud rate' }));
+        return;
+      }
+      const writeSerial = () => {
+        fs.writeFile(port, Buffer.from(data, 'utf8'), { flag: 'w' }, (err) => {
+          if (err) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({ ok: false, error: err.message || 'Serial write failed' }));
+          } else {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true }));
+          }
+        });
+      };
+      if (!parsedBaud) {
+        writeSerial();
+        return;
+      }
+      const deviceFlag = process.platform === 'darwin' ? '-f' : '-F';
+      execFile('stty', [deviceFlag, port, String(parsedBaud), 'raw', '-echo'], { timeout: 5000 }, (err, _stdout, stderr) => {
         if (err) {
           res.writeHead(500, CORS);
-          res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
-        } else {
-          res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true }));
+          res.end(JSON.stringify({ ok: false, error: String(stderr || err.message || 'stty failed').slice(0, 500) }));
+          return;
         }
+        writeSerial();
       });
     });
     return;
@@ -1642,6 +2014,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /devices/3dprinter — Detect 3D printer services ───────────────────
   if (url === '/devices/3dprinter' && req.method === 'GET') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const services = [];
 
     // Check OctoPrint
@@ -1692,13 +2065,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── POST /devices/3dprinter/command — Send G-code to a 3D printer ─────────
   if (url === '/devices/3dprinter/command' && req.method === 'POST') {
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
-      res.writeHead(403, CORS);
-      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
-      return;
-    }
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
 
     let body = '';
     req.on('data', chunk => {
@@ -1709,7 +2076,7 @@ const server = http.createServer(async (req, res) => {
         req.destroy();
       }
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       let parsed;
       try { parsed = JSON.parse(body); } catch {
         res.writeHead(400, CORS);
@@ -1723,50 +2090,67 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ ok: false, error: 'Missing "target" or "command"' }));
         return;
       }
+      if (typeof command !== 'string' || command.length > 4096 || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(command)) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Printer command must be a string no larger than 4096 characters' }));
+        return;
+      }
+      if (apiKey != null && (typeof apiKey !== 'string' || apiKey.length > 512 || /[\x00-\x1f]/.test(apiKey))) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid printer API key' }));
+        return;
+      }
 
       if (target === 'octoprint') {
-        const headers = apiKey ? `-H "X-Api-Key: ${apiKey}"` : '';
-        const payload = JSON.stringify({ command });
-        const cmd = `curl -s -X POST http://localhost:5000/api/printer/command ${headers} -H "Content-Type: application/json" -d '${payload}'`;
-        exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(500, CORS);
-            res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
-          } else {
-            res.writeHead(200, CORS);
-            res.end(JSON.stringify({ ok: true, response: stdout || undefined }));
-          }
-        });
+        try {
+          const response = await fetch('http://127.0.0.1:5000/api/printer/command', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(apiKey ? { 'X-Api-Key': apiKey } : {}),
+            },
+            body: JSON.stringify({ command }),
+            signal: AbortSignal.timeout(15_000),
+          });
+          const responseText = (await response.text()).slice(0, 64 * 1024);
+          res.writeHead(response.ok ? 200 : 502, CORS);
+          res.end(JSON.stringify({ ok: response.ok, response: responseText || undefined }));
+        } catch (err) {
+          res.writeHead(502, CORS);
+          res.end(JSON.stringify({ ok: false, error: String(err?.message || err || 'OctoPrint request failed').slice(0, 500) }));
+        }
       } else if (target === 'klipper') {
-        const payload = JSON.stringify({ script: command });
-        const cmd = `curl -s -X POST http://localhost:7125/printer/gcode/script -H "Content-Type: application/json" -d '${payload}'`;
-        exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(500, CORS);
-            res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
-          } else {
-            res.writeHead(200, CORS);
-            res.end(JSON.stringify({ ok: true, response: stdout || undefined }));
-          }
-        });
+        try {
+          const response = await fetch('http://127.0.0.1:7125/printer/gcode/script', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ script: command }),
+            signal: AbortSignal.timeout(15_000),
+          });
+          const responseText = (await response.text()).slice(0, 64 * 1024);
+          res.writeHead(response.ok ? 200 : 502, CORS);
+          res.end(JSON.stringify({ ok: response.ok, response: responseText || undefined }));
+        } catch (err) {
+          res.writeHead(502, CORS);
+          res.end(JSON.stringify({ ok: false, error: String(err?.message || err || 'Klipper request failed').slice(0, 500) }));
+        }
       } else if (target === 'serial') {
         if (!port) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Serial target requires "port"' }));
           return;
         }
-        if (!/^(\/dev\/tty[A-Za-z0-9\/]+|COM\d+)$/.test(port)) {
+        if (!/^(?:\/dev\/(?:tty|cu)\.[A-Za-z0-9._-]{1,128}|\/dev\/tty(?:USB|ACM|S)\d+|COM\d+)$/.test(port)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Invalid port path' }));
           return;
         }
         // Send G-code with newline terminator
         const gcode = command.endsWith('\n') ? command : command + '\n';
-        const cmd = `echo -ne ${JSON.stringify(gcode)} > ${port}`;
-        exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+        fs.writeFile(port, Buffer.from(gcode, 'utf8'), { flag: 'w' }, (err) => {
           if (err) {
             res.writeHead(500, CORS);
-            res.end(JSON.stringify({ ok: false, error: stderr || err.message }));
+            res.end(JSON.stringify({ ok: false, error: err.message || 'Serial G-code write failed' }));
           } else {
             res.writeHead(200, CORS);
             res.end(JSON.stringify({ ok: true }));
@@ -1782,6 +2166,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /devices/network — Scan local network for devices ─────────────────
   if (url === '/devices/network' && req.method === 'GET') {
+    if (!requireBridgeMutationAuth(req, res, CORS)) return;
     const devices = [];
 
     // ARP table
@@ -1863,17 +2248,6 @@ const server = http.createServer(async (req, res) => {
           description: 'List all active Claude Code sessions detected by the bridge',
           inputSchema: { type: 'object', properties: {}, additionalProperties: false },
           annotations: { title: 'List Sessions', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-        },
-        {
-          name: 'exec_command',
-          description: 'Execute a shell command on the bridge host (restricted, dangerous commands are blocked)',
-          inputSchema: {
-            type: 'object',
-            properties: { command: { type: 'string', description: 'The shell command to execute' } },
-            required: ['command'],
-            additionalProperties: false
-          },
-          annotations: { title: 'Execute Command', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
         },
         {
           name: 'list_devices',
@@ -2000,53 +2374,6 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        if (toolName === 'exec_command') {
-          const command = toolArgs.command;
-          if (!command || typeof command !== 'string') {
-            mcpError(-32602, 'Missing or invalid "command" argument');
-            return;
-          }
-          const BLOCKED = [
-            /\brm\s+(-[a-zA-Z]*\s+)*\//,
-            /\brm\s+(-[a-zA-Z]*\s+)*~/,
-            /\brmdir\s+(-[a-zA-Z]*\s+)*\//,
-            /\bmkfs\b/,
-            /\bdd\s+.*of=/,
-            />\s*\/dev\/sd/,
-            /\bcurl\b.*\|\s*(ba)?sh/,
-            /\bwget\b.*\|\s*(ba)?sh/,
-            /\bchmod\s+777\b/,
-            /\bpasswd\b/,
-            /\buseradd\b/,
-            /\buserdel\b/,
-            /\bsudo\b/,
-            /\bsu\s+-?\s/,
-            /\/etc\/shadow/,
-            /\/etc\/passwd/,
-            /\benv\b.*SECRET|KEY|TOKEN|PASS/i,
-            /\bcrontab\s+-[er]/,
-            /\bshutdown\b/,
-            /\breboot\b/,
-          ];
-          if (BLOCKED.some(p => p.test(command))) {
-            mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'Command blocked: contains restricted pattern' }) }], isError: true });
-            return;
-          }
-          exec(command, { timeout: 30000, maxBuffer: 1024 * 1024, shell: true }, (err, stdout, stderr) => {
-            if (err && err.killed) {
-              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: 'Command timed out (30s)' }) }], isError: true });
-            } else {
-              mcpResult({ content: [{ type: 'text', text: JSON.stringify({
-                ok: !err || err.code === 0,
-                stdout: (stdout || '').slice(0, 65536),
-                stderr: (stderr || '').slice(0, 16384),
-                code: err ? err.code || 1 : 0,
-              }, null, 2) }] });
-            }
-          });
-          return;
-        }
-
         if (toolName === 'list_devices') {
           mcpResult({ content: [{ type: 'text', text: JSON.stringify(discoverDevices(), null, 2) }] });
           return;
@@ -2070,17 +2397,24 @@ const server = http.createServer(async (req, res) => {
 
         if (toolName === 'print_text') {
           const { text, printer } = toolArgs;
-          if (!text || typeof text !== 'string') {
+          if (!text || typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 1024 * 1024) {
             mcpError(-32602, 'Missing or invalid "text" argument');
             return;
           }
-          const tmpFile = path.join(os.tmpdir(), 'claude-mcp-print-' + Date.now() + '.txt');
+          if (printer != null && (typeof printer !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(printer))) {
+            mcpError(-32602, 'Invalid printer name');
+            return;
+          }
+          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uc-mcp-print-'));
+          fs.chmodSync(tmpDir, 0o700);
+          const tmpFile = path.join(tmpDir, 'print.txt');
           fs.writeFileSync(tmpFile, text, 'utf-8');
-          const parts = ['lp'];
-          if (printer) parts.push('-d', printer);
-          parts.push('--', tmpFile);
-          exec(parts.join(' '), { timeout: 15000 }, (err, stdout, stderr) => {
-            try { fs.unlinkSync(tmpFile); } catch {}
+          fs.chmodSync(tmpFile, 0o600);
+          const args = [];
+          if (printer) args.push('-d', printer);
+          args.push('--', tmpFile);
+          execFile('lp', args, { timeout: 15000 }, (err, stdout, stderr) => {
+            try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
             if (err) {
               mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
             } else {
@@ -2134,22 +2468,39 @@ const server = http.createServer(async (req, res) => {
             mcpError(-32602, 'Missing "port" or "data" argument');
             return;
           }
-          if (!/^(\/dev\/tty[A-Za-z0-9\/]+|COM\d+)$/.test(port)) {
+          if (!/^(?:\/dev\/(?:tty|cu)\.[A-Za-z0-9._-]{1,128}|\/dev\/tty(?:USB|ACM|S)\d+|COM\d+)$/.test(port)) {
             mcpError(-32602, 'Invalid port path');
             return;
           }
-          let cmd;
-          if (baudRate) {
-            cmd = 'stty -F ' + port + ' ' + baudRate + ' raw -echo 2>/dev/null; echo -ne ' + JSON.stringify(data) + ' > ' + port;
-          } else {
-            cmd = 'echo -ne ' + JSON.stringify(data) + ' > ' + port;
+          if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > 64 * 1024) {
+            mcpError(-32602, 'Serial data must be a string no larger than 64 KB');
+            return;
           }
-          exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+          const parsedBaud = Number(baudRate || 0);
+          if (baudRate != null && (!Number.isInteger(parsedBaud) || parsedBaud < 300 || parsedBaud > 4_000_000)) {
+            mcpError(-32602, 'Invalid baud rate');
+            return;
+          }
+          const writeSerial = () => {
+            fs.writeFile(port, Buffer.from(data, 'utf8'), { flag: 'w' }, (err) => {
+              if (err) {
+                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: err.message || 'Serial write failed' }) }], isError: true });
+              } else {
+                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
+              }
+            });
+          };
+          if (!parsedBaud) {
+            writeSerial();
+            return;
+          }
+          const deviceFlag = process.platform === 'darwin' ? '-f' : '-F';
+          execFile('stty', [deviceFlag, port, String(parsedBaud), 'raw', '-echo'], { timeout: 5000 }, (err, _stdout, stderr) => {
             if (err) {
-              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
-            } else {
-              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: String(stderr || err.message || 'stty failed').slice(0, 500) }) }], isError: true });
+              return;
             }
+            writeSerial();
           });
           return;
         }
@@ -2198,29 +2549,39 @@ const server = http.createServer(async (req, res) => {
         if (toolName === 'send_gcode') {
           const gcodeCmd = toolArgs.command;
           const target = toolArgs.printer || 'octoprint';
-          if (!gcodeCmd || typeof gcodeCmd !== 'string') {
+          if (!gcodeCmd || typeof gcodeCmd !== 'string' || gcodeCmd.length > 4096 || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(gcodeCmd)) {
             mcpError(-32602, 'Missing or invalid "command" argument');
             return;
           }
           if (target === 'octoprint') {
-            const payload = JSON.stringify({ command: gcodeCmd });
-            const cmd = 'curl -s -X POST http://localhost:5000/api/printer/command -H "Content-Type: application/json" -d \'' + payload + '\'';
-            exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
-              if (err) {
-                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
-              } else {
-                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true, response: stdout || undefined }) }] });
-              }
+            fetch('http://127.0.0.1:5000/api/printer/command', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ command: gcodeCmd }),
+              signal: AbortSignal.timeout(15_000),
+            }).then(async (response) => {
+              const responseText = (await response.text()).slice(0, 64 * 1024);
+              mcpResult({
+                content: [{ type: 'text', text: JSON.stringify({ ok: response.ok, response: responseText || undefined }) }],
+                ...(response.ok ? {} : { isError: true }),
+              });
+            }).catch((err) => {
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: String(err?.message || err || 'OctoPrint request failed').slice(0, 500) }) }], isError: true });
             });
           } else if (target === 'klipper') {
-            const payload = JSON.stringify({ script: gcodeCmd });
-            const cmd = 'curl -s -X POST http://localhost:7125/printer/gcode/script -H "Content-Type: application/json" -d \'' + payload + '\'';
-            exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
-              if (err) {
-                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: stderr || err.message }) }], isError: true });
-              } else {
-                mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: true, response: stdout || undefined }) }] });
-              }
+            fetch('http://127.0.0.1:7125/printer/gcode/script', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ script: gcodeCmd }),
+              signal: AbortSignal.timeout(15_000),
+            }).then(async (response) => {
+              const responseText = (await response.text()).slice(0, 64 * 1024);
+              mcpResult({
+                content: [{ type: 'text', text: JSON.stringify({ ok: response.ok, response: responseText || undefined }) }],
+                ...(response.ok ? {} : { isError: true }),
+              });
+            }).catch((err) => {
+              mcpResult({ content: [{ type: 'text', text: JSON.stringify({ ok: false, error: String(err?.message || err || 'Klipper request failed').slice(0, 500) }) }], isError: true });
             });
           } else {
             mcpError(-32602, 'Invalid printer target. Use "octoprint" or "klipper"');
@@ -2320,7 +2681,9 @@ const server = http.createServer(async (req, res) => {
            'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode',
            'illustrator_document_status', 'illustrator_export_proof',
            'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
-           ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element', 'set_element_value'] : [])]
+           ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper'))
+             ? ['a11y_tree', 'click_element', 'set_element_value', 'semantic_action_target', 'semantic_action']
+             : [])]
         : [],
       // Surface whether the more-reliable click backend is available
       // so clients can decide whether to attempt `click_at` at all.
@@ -2334,6 +2697,71 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.startsWith('/desktop/')) {
+    const sentToken = req.headers['x-uc-desktop-token'];
+
+    // `/desktop/pair` uses a short-lived, one-time challenge before returning
+    // the persistent bearer token. The challenge is bound to the loopback
+    // socket address. Host validation blocks DNS-rebinding names, while the
+    // normal origin allowlist continues to protect browser callers.
+    if (url === '/desktop/pair' && req.method === 'POST') {
+      const sourceCheck = isPairingRequestSourceAllowed(req, PORT, isBridgeOriginAllowed);
+      if (!sourceCheck.ok) {
+        res.writeHead(403, CORS);
+        res.end(JSON.stringify({
+          ok: false,
+          code: sourceCheck.code,
+          error: 'Desktop pairing is available only through an allowed loopback bridge request.',
+        }));
+        return;
+      }
+      let pairInput;
+      try {
+        pairInput = await new Promise((resolve, reject) => {
+          readJsonBody(req, 2048, (parsed, bodyErr) => {
+            if (bodyErr) reject(new Error(bodyErr));
+            else resolve(parsed || {});
+          });
+        });
+      } catch (err) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({
+          ok: false,
+          code: 'pairing_body_invalid',
+          error: String(err?.message || err || 'Invalid pairing request body.').slice(0, 300),
+        }));
+        return;
+      }
+      const pairingChallenge = String(pairInput?.pairingChallenge || '').trim();
+      if (!pairingChallenge) {
+        const issued = desktopPairingChallenges.issue(req.socket.remoteAddress);
+        res.writeHead(428, CORS);
+        res.end(JSON.stringify({
+          ok: false,
+          code: 'pairing_challenge_required',
+          challenge: issued.challenge,
+          expiresAt: new Date(issued.expiresAt).toISOString(),
+          error: 'Retry pairing once with the short-lived challenge.',
+        }));
+        return;
+      }
+      if (!desktopPairingChallenges.consume(pairingChallenge, req.socket.remoteAddress)) {
+        res.writeHead(403, CORS);
+        res.end(JSON.stringify({
+          ok: false,
+          code: 'pairing_challenge_invalid',
+          error: 'Pairing challenge is invalid, expired, already used, or belongs to another source.',
+        }));
+        return;
+      }
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({
+        ok: true,
+        token: getOrCreateDesktopToken(),
+        tokenFile: '~/.uc-desktop-token',
+      }));
+      return;
+    }
+
     if (process.platform !== 'darwin') {
       res.writeHead(501, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Desktop automation currently supported on macOS only.' }));
@@ -2341,18 +2769,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     const token = getOrCreateDesktopToken();
-    const sentToken = req.headers['x-uc-desktop-token'];
-
-    // `/desktop/pair` is the one-time exchange — returns the token
-    // value so the UC web app can cache it in encrypted localStorage.
-    // Still local-only (bridge binds to localhost by default) so only
-    // a same-machine request reaches this handler.
-    if (url === '/desktop/pair' && req.method === 'POST') {
-      res.writeHead(200, CORS);
-      res.end(JSON.stringify({ ok: true, token, tokenFile: '~/.uc-desktop-token' }));
-      return;
-    }
-
     if (!sentToken || sentToken !== token) {
       res.writeHead(401, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
@@ -2986,8 +3402,6 @@ end tell`;
           const sourceStat = fs.lstatSync(fromPath);
           const kind = sourceStat.isDirectory() ? 'directory' : sourceStat.isFile() ? 'file' : 'other';
           const destParent = path.dirname(toPath);
-          const destParentGrant = requireLocalFileAccessGrant(req, parsedUrl, destParent, 'write');
-          if (!destParentGrant.ok) { res.writeHead(destParentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: destParentGrant.error })); return; }
           const parentStat = fs.statSync(destParent);
           if (!parentStat.isDirectory()) throw new Error('destination parent is not a directory');
           const overwrite = parseBooleanOption(parsed?.overwrite, false);
@@ -3022,8 +3436,6 @@ end tell`;
           const writeGrant = requireLocalFileAccessGrant(req, parsedUrl, filePath, 'write');
           if (!writeGrant.ok) { res.writeHead(writeGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: writeGrant.error })); return; }
           const parentDir = path.dirname(filePath);
-          const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, parentDir, 'write');
-          if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
           const parentStat = fs.statSync(parentDir);
           if (!parentStat.isDirectory()) throw new Error('destination parent is not a directory');
           const append = parseBooleanOption(parsed?.append, false);
@@ -3064,8 +3476,6 @@ end tell`;
           const writeGrant = requireLocalFileAccessGrant(req, parsedUrl, dirPath, 'write');
           if (!writeGrant.ok) { res.writeHead(writeGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: writeGrant.error })); return; }
           const parentDir = path.dirname(dirPath);
-          const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, parentDir, 'write');
-          if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
           const recursive = parseBooleanOption(parsed?.recursive, true);
           if (fs.existsSync(dirPath)) {
             const stat = fs.statSync(dirPath);
@@ -3087,13 +3497,10 @@ end tell`;
     }
 
     // ── Coding-agent exec endpoint (CODING_AGENT_UPGRADE_PLAN P2/P3) ──────
-    // Runs ONE binary via execFile ARGV — never a shell, so pipes/&&/
-    // redirection inside args are inert text to the child. The app-side
-    // policy cores (shellCommandPolicy / gitCommandPolicy via
-    // localExecPlanCore) decide auto/ask and refuse catastrophic commands
-    // BEFORE this endpoint is called; the checks here are defense-in-depth
-    // only: write-scoped session grant on cwd, argv bounds, and a hard
-    // blocklist of privilege/disk binaries that no coding loop ever needs.
+    // This is intentionally not generic process execution. It supports only
+    // fixed-binary, read-only Git diagnostics and node --check/--version.
+    // User-controlled PATH resolution, shells, interpreters, package runners,
+    // compilers, hooks, pagers, external diffs, and arbitrary flags are denied.
     if (url === '/desktop/exec_file' && req.method === 'POST') {
       const parsedUrl = new URL(req.url, 'http://localhost');
       readJsonBody(req, 640 * 1024, (parsed, bodyErr) => {
@@ -3105,31 +3512,29 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'argv must be 1-256 strings, each <= 2048 chars, with no control characters' }));
           return;
         }
-        const binary = String(argv[0] || '').trim();
-        const binaryName = binary.split('/').pop().toLowerCase();
-        const EXEC_BLOCKED_BINARIES = new Set([
-          'sudo', 'doas', 'su', 'shutdown', 'reboot', 'halt', 'poweroff',
-          'mkfs', 'diskutil', 'dd', 'launchctl', 'nvram', 'csrutil', 'fdisk',
-        ]);
-        if (!binary || EXEC_BLOCKED_BINARIES.has(binaryName)) {
-          res.writeHead(400, CORS);
-          res.end(JSON.stringify({ ok: false, error: `binary "${binaryName || '(empty)'}" is refused by the exec endpoint` }));
-          return;
-        }
         const cwdValidated = validateDesktopPathServer(parsed?.cwd || '');
         if (!cwdValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `cwd: ${cwdValidated.error}` })); return; }
         try {
           const cwd = expandDesktopPath(cwdValidated.path);
-          // Executing a process can write anything the user can — require the
-          // WRITE-scoped session grant for the working directory, same floor
-          // as the file-write endpoints.
-          const grant = requireLocalFileAccessGrant(req, parsedUrl, cwd, 'write');
+          const grant = requireLocalFileAccessGrant(req, parsedUrl, cwd, 'read');
           if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
           const cwdStat = fs.statSync(cwd);
           if (!cwdStat.isDirectory()) throw new Error('cwd is not a directory');
+          const invocation = prepareSupportedExecInvocation(argv, cwd);
+          if (!invocation.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, code: invocation.code, error: invocation.error }));
+            return;
+          }
           const timeoutMs = Math.max(1000, Math.min(600000, Number(parsed?.timeoutMs) || 120000));
           const startedAt = Date.now();
-          execFile(binary, argv.slice(1), { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+          execFile(invocation.binary, invocation.args, {
+            cwd,
+            timeout: timeoutMs,
+            maxBuffer: 4 * 1024 * 1024,
+            encoding: 'utf8',
+            env: invocation.env,
+          }, (err, stdout, stderr) => {
             const durationMs = Date.now() - startedAt;
             const timedOut = Boolean(err && err.killed && durationMs >= timeoutMs - 100);
             const outputOverflow = Boolean(err && err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
@@ -3193,8 +3598,6 @@ end tell`;
           const kind = sourceStat.isDirectory() ? 'directory' : sourceStat.isFile() ? 'file' : 'other';
           if (kind === 'other') throw new Error('source is not a regular file or directory');
           const destParent = path.dirname(toPath);
-          const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, destParent, 'write');
-          if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
           const parentStat = fs.statSync(destParent);
           if (!parentStat.isDirectory()) throw new Error('destination parent is not a directory');
           const overwrite = parseBooleanOption(parsed?.overwrite, false);
@@ -3494,12 +3897,13 @@ end tell`;
             return;
           }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({
-            ok: true,
-            appName: targetName,
-            requestedAppName: appName,
-            appPath: resolved?.appPath,
-          }));
+            res.end(JSON.stringify({
+              ok: true,
+              appName: targetName,
+              requestedAppName: appName,
+              resolvedAppName: targetName,
+              appPath: resolved?.appPath,
+            }));
         };
         const doLaunch = () => {
           if (resolved?.appPath) {
@@ -3517,13 +3921,14 @@ end tell`;
           const frontmost = String(stdout || '').trim().toLowerCase();
           if (!probeErr && frontmost && frontmost === targetName.toLowerCase()) {
             res.writeHead(200, CORS);
-            res.end(JSON.stringify({
-              ok: true,
-              appName: targetName,
-              requestedAppName: appName,
-              appPath: resolved?.appPath,
-              alreadyFrontmost: true,
-            }));
+              res.end(JSON.stringify({
+                ok: true,
+                appName: targetName,
+                requestedAppName: appName,
+                resolvedAppName: targetName,
+                appPath: resolved?.appPath,
+                alreadyFrontmost: true,
+              }));
             return;
           }
           doLaunch();
@@ -3552,12 +3957,13 @@ end tell`;
             return;
           }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({
-            ok: true,
-            appName: targetAppName,
-            requestedAppName: appName,
-            appPath: resolved?.appPath,
-          }));
+            res.end(JSON.stringify({
+              ok: true,
+              appName: targetAppName,
+              requestedAppName: appName,
+              resolvedAppName: targetAppName,
+              appPath: resolved?.appPath,
+            }));
         });
       });
       return;
@@ -4299,12 +4705,6 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
           return;
         }
-        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
-        if (!parentGrant.ok) {
-          res.writeHead(parentGrant.status, CORS);
-          res.end(JSON.stringify({ ok: false, error: parentGrant.error }));
-          return;
-        }
         let sourceDocumentPath = '';
         if (rawSourceDocumentPath) {
           const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
@@ -5040,12 +5440,6 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
           return;
         }
-        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
-        if (!parentGrant.ok) {
-          res.writeHead(parentGrant.status, CORS);
-          res.end(JSON.stringify({ ok: false, error: parentGrant.error }));
-          return;
-        }
         let sourceDocumentPath = '';
         if (rawSourceDocumentPath) {
           const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
@@ -5683,7 +6077,7 @@ end tell`;
     //   - spawned via execFile argv (no shell string ever sees input);
     //   - both paths go through validateDesktopPathServer +
     //     expandDesktopPath + local-file grant checks (source read,
-    //     output + parent write);
+    //     exact output write);
     //   - extraArgs are a strict allowlist (OpenSCAD only):
     //     -Dname=<number|true|false>, --render, --imgsize=W,H.
     //     LOCKSTEP: `isAllowedCadCompileExtraArg` below mirrors
@@ -5776,8 +6170,6 @@ end tell`;
         if (!sourceGrant.ok) { res.writeHead(sourceGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: sourceGrant.error })); return; }
         const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
         if (!outputGrant.ok) { res.writeHead(outputGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: outputGrant.error })); return; }
-        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
-        if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
         let sourceStat = null;
         try { sourceStat = fs.statSync(sourcePath); } catch {}
         if (!sourceStat || !sourceStat.isFile()) {
@@ -5871,7 +6263,7 @@ end tell`;
     //   - spawned via execFile argv (no shell string ever sees input);
     //   - both paths go through validateDesktopPathServer +
     //     expandDesktopPath + local-file grant checks (source read,
-    //     output + parent write);
+    //     exact output write);
     //   - options are a strict per-engine allowlist. LOCKSTEP:
     //     `validateDesignExportOptionsServer` below mirrors
     //     validateDesignExportOptions in src/lib/designCliExecutor.ts
@@ -5953,8 +6345,6 @@ end tell`;
         if (!sourceGrant.ok) { res.writeHead(sourceGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: sourceGrant.error })); return; }
         const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
         if (!outputGrant.ok) { res.writeHead(outputGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: outputGrant.error })); return; }
-        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
-        if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
         let sourceStat = null;
         try { sourceStat = fs.statSync(sourcePath); } catch {}
         if (!sourceStat || !sourceStat.isFile()) {
@@ -6205,12 +6595,6 @@ end tell`;
         if (!outputGrant.ok) {
           res.writeHead(outputGrant.status, CORS);
           res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
-          return;
-        }
-        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
-        if (!parentGrant.ok) {
-          res.writeHead(parentGrant.status, CORS);
-          res.end(JSON.stringify({ ok: false, error: parentGrant.error }));
           return;
         }
         const built = buildIllustratorExportProofScript({ appName, outputPath, format, scalePercent, expectedDocumentName });
@@ -6537,7 +6921,9 @@ end tell`;
         const timeoutMs = Math.max(500, Math.min(30_000, Number(parsed?.timeoutMs ?? 5_000)));
         const intervalMs = 250;
         const deadline = Date.now() + timeoutMs;
-        const needle = appName.toLowerCase();
+        const resolved = resolveInstalledMacApp(appName);
+        const resolvedAppName = resolved?.name || appName;
+        const needle = resolvedAppName.toLowerCase();
         const script = 'tell application "System Events" to get name of every application process whose background only is false';
         const poll = () => {
           if (Date.now() > deadline) {
@@ -6551,10 +6937,16 @@ end tell`;
                 .split(',')
                 .map((s) => s.trim().toLowerCase())
                 .filter(Boolean);
-              if (running.some((a) => a === needle || a.includes(needle))) {
+              if (running.some((a) => a === needle)) {
                 const elapsedMs = timeoutMs - Math.max(0, deadline - Date.now());
                 res.writeHead(200, CORS);
-                res.end(JSON.stringify({ ok: true, appName, elapsedMs }));
+                res.end(JSON.stringify({
+                  ok: true,
+                  appName: resolvedAppName,
+                  requestedAppName: appName,
+                  resolvedAppName,
+                  elapsedMs,
+                }));
                 return;
               }
             }
@@ -6614,8 +7006,8 @@ end tell`;
     // POST { appName?, maxDepth?, maxNodes?, target? } — appName empty →
     // frontmost app. Composes what /desktop/window_state and
     // /desktop/a11y_tree gather separately: one System Events pass for
-    // frontmost app + resolved target process (exact name first, contains
-    // fallback — same matching family as /desktop/wait_for_app) + window
+    // frontmost app + resolved target process (one exact resolved name only;
+    // no substring fallback) + positive process id + window
     // count + first 8 window titles, then the identical pruned/indexed
     // a11y tree via collectA11yTreeForApp. Target app not running is VALID
     // observation data ({ ok:true, appRunning:false, tree:null }), not an
@@ -6631,28 +7023,30 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName. Letters, numbers, spaces, . - _ ( ) only, max 120 chars.' }));
           return;
         }
+        const resolved = appNameRaw ? resolveInstalledMacApp(appNameRaw) : null;
+        const resolvedAppName = resolved?.name || appNameRaw;
         const script = `
 tell application "System Events"
   set frontApp to ""
   try
     set frontApp to name of first application process whose frontmost is true
   end try
-  set targetName to "${escapeAppleScriptString(appNameRaw)}"
+  set targetName to "${escapeAppleScriptString(resolvedAppName)}"
   if targetName is "" then set targetName to frontApp
   set procName to ""
+  set procPid to 0
   set winCount to 0
   set titlesText to ""
   if targetName is not "" then
     set targetProc to missing value
     try
       set targetProc to first application process whose background only is false and name is targetName
-    on error
-      try
-        set targetProc to first application process whose background only is false and name contains targetName
-      end try
     end try
     if targetProc is not missing value then
       set procName to name of targetProc
+      try
+        set procPid to unix id of targetProc
+      end try
       tell targetProc
         set winCount to count of windows
         set emitted to 0
@@ -6666,7 +7060,7 @@ tell application "System Events"
       end tell
     end if
   end if
-  return frontApp & linefeed & procName & linefeed & (winCount as text) & linefeed & titlesText
+  return frontApp & linefeed & procName & linefeed & (procPid as text) & linefeed & (winCount as text) & linefeed & titlesText
 end tell
 `;
         exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 6000, maxBuffer: 256 * 1024 }, (err, stdout) => {
@@ -6678,61 +7072,494 @@ end tell
           const lines = String(stdout || '').split(/\r?\n/);
           const frontmostApp = (lines[0] || '').trim().slice(0, 160);
           const resolvedProc = (lines[1] || '').trim().slice(0, 160);
-          const windowCount = Math.max(0, Number((lines[2] || '').trim()) || 0);
-          const windowTitles = lines.slice(3)
+          const processId = Math.max(0, Math.trunc(Number((lines[2] || '').trim()) || 0));
+          const windowCount = Math.max(0, Number((lines[3] || '').trim()) || 0);
+          const windowTitles = lines.slice(4)
             .map((line) => line.trim())
             .filter(Boolean)
             .slice(0, 8)
             .map((title) => title.slice(0, 160));
           const appRunning = !!resolvedProc;
-          const base = {
-            ok: true,
-            app: resolvedProc || appNameRaw || frontmostApp,
-            appRunning,
-            frontmost: appRunning && !!frontmostApp && resolvedProc.toLowerCase() === frontmostApp.toLowerCase(),
-            frontmostApp: frontmostApp || null,
-            windowCount: appRunning ? windowCount : 0,
-            windowTitles: appRunning ? windowTitles : [],
-          };
-          if (!appRunning) {
-            // Absence IS the observation — the advisor turns this into a
-            // launch_app step; a 4xx here would read as a tool failure.
-            res.writeHead(200, CORS);
-            res.end(JSON.stringify({ ...base, tree: null, budget_used: 0 }));
-            return;
-          }
-          collectA11yTreeForApp({
-            appName: resolvedProc,
-            maxDepth: parsed?.maxDepth,
-            maxNodes: parsed?.maxNodes,
-            target: parsed?.target,
-          }, (result) => {
-            if (result.kind === 'payload') {
-              const payload = result.payload;
+          const continueObservation = (targetWindow) => {
+            const base = {
+              ok: true,
+              app: resolvedProc || resolvedAppName || frontmostApp,
+              requestedAppName: appNameRaw || null,
+              resolvedAppName: resolvedProc || resolvedAppName || frontmostApp,
+              processIdentityVersion: 1,
+              pid: appRunning ? processId : 0,
+              appRunning,
+              frontmost: appRunning && !!frontmostApp && resolvedProc.toLowerCase() === frontmostApp.toLowerCase(),
+              frontmostApp: frontmostApp || null,
+              windowCount: appRunning ? windowCount : 0,
+              windowTitles: appRunning ? windowTitles : [],
+              ...(targetWindow ? { targetWindow } : {}),
+            };
+            if (!appRunning) {
+              // Absence IS the observation — the advisor turns this into a
+              // launch_app step; a 4xx here would read as a tool failure.
               res.writeHead(200, CORS);
-              // Tree fields (pid, budget_used, tree, slice/target/…,
-              // index_generation) keep the exact /desktop/a11y_tree shape
-              // so clients reuse the same types.
-              res.end(JSON.stringify({
-                ...base,
-                ...payload,
-                ok: true,
-                app: String(payload.app || base.app),
-                budget_used: Number(payload.budget_used || 0),
-              }));
+              res.end(JSON.stringify({ ...base, tree: null, budget_used: 0 }));
               return;
             }
-            let a11yError;
-            if (result.kind === 'raw') {
-              let rawPayload = null;
-              try { rawPayload = JSON.parse(result.raw); } catch { rawPayload = null; }
-              a11yError = String((rawPayload && rawPayload.error) || result.raw || 'a11y tree unavailable').slice(0, 300);
-            } else {
-              a11yError = String(result.error || 'a11y tree unavailable').slice(0, 300);
-            }
-            res.writeHead(200, CORS);
-            res.end(JSON.stringify({ ...base, tree: null, budget_used: 0, a11yError }));
-          });
+            collectA11yTreeForApp({
+              appName: resolvedProc,
+              maxDepth: parsed?.maxDepth,
+              maxNodes: parsed?.maxNodes,
+              target: parsed?.target,
+            }, (result) => {
+              if (result.kind === 'payload') {
+                const payload = result.payload;
+                const treePid = Math.max(0, Math.trunc(Number(payload.pid || 0)));
+                if (treePid > 0 && processId > 0 && treePid !== processId) {
+                  res.writeHead(200, CORS);
+                  res.end(JSON.stringify({
+                    ...base,
+                    tree: null,
+                    budget_used: 0,
+                    a11yError: 'a11y tree process changed during app observation',
+                  }));
+                  return;
+                }
+                res.writeHead(200, CORS);
+                // Tree fields (pid, budget_used, tree, slice/target/…,
+                // index_generation) keep the exact /desktop/a11y_tree shape
+                // so clients reuse the same types.
+                res.end(JSON.stringify({
+                  ...base,
+                  ...payload,
+                  ok: true,
+                  app: String(payload.app || base.app),
+                  requestedAppName: base.requestedAppName,
+                  resolvedAppName: base.resolvedAppName,
+                  processIdentityVersion: 1,
+                  pid: processId,
+                  budget_used: Number(payload.budget_used || 0),
+                }));
+                return;
+              }
+              let a11yError;
+              if (result.kind === 'raw') {
+                let rawPayload = null;
+                try { rawPayload = JSON.parse(result.raw); } catch { rawPayload = null; }
+                a11yError = String((rawPayload && rawPayload.error) || result.raw || 'a11y tree unavailable').slice(0, 300);
+              } else {
+                a11yError = String(result.error || 'a11y tree unavailable').slice(0, 300);
+              }
+              res.writeHead(200, CORS);
+              res.end(JSON.stringify({ ...base, tree: null, budget_used: 0, a11yError }));
+            });
+          };
+          if (!appRunning) {
+            continueObservation(null);
+            return;
+          }
+          // A generic native mutation needs one concrete CGWindow identity and
+          // exact bounds, not just a process-owned title/count. The helper also
+          // verifies that this pid is still the focused application.
+          const inputHelperPath = path.join(__dirname, 'bin', 'uc-input-helper');
+          if (!fs.existsSync(inputHelperPath)) {
+            continueObservation(null);
+            return;
+          }
+          execFile(
+            inputHelperPath,
+            ['window-proof', '--pid', String(processId)],
+            { timeout: 3000, maxBuffer: 64 * 1024 },
+            (proofErr, proofStdout) => {
+              let proof = null;
+              try { proof = JSON.parse(String(proofStdout || '').trim()); } catch { proof = null; }
+              const targetWindow = (
+                !proofErr
+                && proof?.ok === true
+                && String(proof.appName || '') === resolvedProc
+                && Number(proof.pid) === processId
+                && Number.isInteger(Number(proof.windowId))
+                && Number(proof.windowId) > 0
+                && [proof.x, proof.y, proof.width, proof.height]
+                  .every((value) => Number.isInteger(Number(value)))
+                && Number(proof.width) > 0
+                && Number(proof.height) > 0
+              )
+                ? {
+                    id: Number(proof.windowId),
+                    x: Number(proof.x),
+                    y: Number(proof.y),
+                    width: Number(proof.width),
+                    height: Number(proof.height),
+                  }
+                : null;
+              continueObservation(targetWindow);
+            },
+          );
+        });
+      });
+      return;
+    }
+
+    // `/desktop/semantic_action_target` + `/desktop/semantic_action` are
+    // the guarded native-app mutation canary. The first endpoint seals ONE
+    // exact low-consequence AXPress target from the most recent fresh
+    // observe_app tree into a short-lived, one-shot capability. The second
+    // consumes that capability before doing any work, re-observes the same
+    // app/PID/tree, dispatches once, and requires a fresh after-tree diff.
+    //
+    // These endpoints intentionally do NOT generalize click_element:
+    // text/state controls, unknown labels, and consequential dialog targets
+    // remain blocked. OpenSwan can put its approval checkpoint between the
+    // two calls without ever receiving a replayable generic click primitive.
+    if (url === '/desktop/semantic_action_target' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: bodyErr, errorCode: 'invalid_input' }));
+          return;
+        }
+        const action = String(parsed?.action || '').trim();
+        const appName = String(parsed?.appName || '').trim().slice(0, 120);
+        const pid = Math.trunc(Number(parsed?.pid || 0));
+        const indexGeneration = Math.trunc(Number(parsed?.indexGeneration || 0));
+        const targetPath = String(parsed?.targetPath || '').trim();
+        const expectedRole = String(parsed?.expectedRole || '').trim().slice(0, 80);
+        const expectedLabel = String(parsed?.expectedLabel || '').trim().slice(0, 120);
+        if (
+          action !== 'press'
+          || !appName
+          || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)
+          || !(pid > 0)
+          || !(indexGeneration > 0)
+          || !/^[0-9]+(\.[0-9]+)*$/.test(targetPath)
+          || !expectedRole
+          || !expectedLabel
+        ) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'press, exact appName/PID/indexGeneration/path/role/label are required',
+            errorCode: 'invalid_input',
+          }));
+          return;
+        }
+
+        const cached = a11yIndexStateByPid.get(pid) || null;
+        const cachedAgeMs = cached ? Date.now() - Number(cached.at || 0) : Infinity;
+        if (
+          !cached
+          || cached.generation !== indexGeneration
+          || cachedAgeMs < 0
+          || cachedAgeMs > NATIVE_SEMANTIC_OBSERVATION_MAX_AGE_MS
+          || normalizeNativeSemanticAppIdentity(cached.app) !== normalizeNativeSemanticAppIdentity(appName)
+          || cached.semanticSlice !== 'full'
+          || cached.semanticMaxDepth !== 10
+          || cached.semanticMaxNodes !== 400
+          || !cached.semanticSnapshot
+        ) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'The exact accessibility observation is missing, superseded, or too old.',
+            errorCode: 'native_semantic_target_stale',
+            recoveryHint: 'Observe the exact app again, then prepare the semantic action from that fresh tree.',
+          }));
+          return;
+        }
+
+        const observedNode = cached.semanticSnapshot.nodesByPath[targetPath] || null;
+        const observedRole = String(observedNode?.role || '');
+        const observedLabel = String(observedNode?.label || '');
+        if (
+          !observedNode
+          || observedRole !== expectedRole
+          || normalizeNativeSemanticText(observedLabel) !== normalizeNativeSemanticText(expectedLabel)
+        ) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'The exact accessibility node identity or bounded semantics did not match the fresh observation.',
+            errorCode: 'native_semantic_target_stale',
+            recoveryHint: 'Observe the exact app again and use the exact fresh node path, role, and label.',
+          }));
+          return;
+        }
+
+        const classification = classifyNativeSemanticActionTarget(
+          observedNode,
+          nativeSemanticContextForTarget(cached.semanticSnapshot, targetPath),
+        );
+        if (!classification.ok) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'That native accessibility target is outside the narrow safe semantic-action canary.',
+            errorCode: 'native_semantic_target_blocked',
+            reason: classification.reason,
+          }));
+          return;
+        }
+
+        const issued = issueNativeSemanticActionTarget({
+          action: 'press',
+          app: appName,
+          pid,
+          indexGeneration,
+          targetPath,
+          targetRole: classification.role,
+          targetLabel: classification.label,
+          targetFingerprint: nativeSemanticNodeFingerprint(appName, pid, observedNode),
+          treeFingerprint: cached.semanticSnapshot.treeFingerprint,
+          nodeCount: cached.semanticSnapshot.nodeCount,
+          observedAtMs: Number(cached.at || Date.now()),
+        });
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          schemaVersion: 1,
+          action: issued.action,
+          targetId: issued.targetId,
+          targetFingerprint: issued.targetFingerprint,
+          evidenceId: issued.evidenceId,
+          observedAt: new Date(issued.observedAtMs).toISOString(),
+          expiresAt: new Date(issued.expiresAtMs).toISOString(),
+          app: issued.app,
+          resolvedAppName: issued.app,
+          pid: issued.pid,
+          targetPath: issued.targetPath,
+          targetRole: issued.targetRole,
+          targetLabel: issued.targetLabel,
+          indexGeneration: issued.indexGeneration,
+          targetSummary: buildNativeSemanticTargetSummary(issued),
+          approvalRequired: true,
+          risk: 'medium',
+        }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/semantic_action' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: bodyErr, errorCode: 'invalid_input' }));
+          return;
+        }
+        const targetId = String(parsed?.targetId || '').trim();
+        const targetFingerprint = String(parsed?.targetFingerprint || '').trim().toLowerCase();
+        const approvalId = String(parsed?.approvalId || '').trim();
+        if (
+          !/^[a-f0-9]{48}$/.test(targetId)
+          || !/^[a-f0-9]{64}$/.test(targetFingerprint)
+          || !/^[A-Za-z0-9._:-]{8,160}$/.test(approvalId)
+        ) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'valid one-shot targetId, targetFingerprint, and approvalId are required',
+            errorCode: 'invalid_input',
+          }));
+          return;
+        }
+
+        // Consume BEFORE fingerprint, expiry, freshness, or dispatch checks:
+        // every capability has exactly one presentation and can never be
+        // replayed after an uncertain transport or helper outcome.
+        const capability = consumeNativeSemanticActionTarget(targetId);
+        if (!capability) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'The one-shot native semantic target is unknown or has already been consumed.',
+            errorCode: 'native_semantic_target_replayed',
+            replayAllowed: false,
+          }));
+          return;
+        }
+        if (Date.now() > capability.expiresAtMs) {
+          writeNativeSemanticPreDispatchFailure(
+            res,
+            CORS,
+            capability,
+            'native_semantic_target_expired',
+            'The one-shot native semantic target expired before dispatch.',
+            approvalId,
+          );
+          return;
+        }
+        if (targetFingerprint !== capability.targetFingerprint) {
+          writeNativeSemanticPreDispatchFailure(
+            res,
+            CORS,
+            capability,
+            'native_semantic_target_stale',
+            'The sealed native semantic target fingerprint did not match.',
+            approvalId,
+          );
+          return;
+        }
+
+        collectFreshFrontmostNativeSemanticTree(capability, (beforeResult) => {
+          if (beforeResult.kind !== 'payload') {
+            writeNativeSemanticPreDispatchFailure(
+              res,
+              CORS,
+              capability,
+              'native_semantic_target_stale',
+              'A fresh pre-dispatch accessibility observation was unavailable.',
+              approvalId,
+            );
+            return;
+          }
+          const beforePayload = beforeResult.payload;
+          const beforePid = Math.trunc(Number(beforePayload.pid || 0));
+          const beforeApp = String(beforePayload.app || capability.app);
+          const beforeSnapshot = buildNativeSemanticTreeSnapshot(
+            beforePayload.tree,
+            beforeApp,
+            beforePid,
+          );
+          const beforeTarget = beforeSnapshot.nodesByPath[capability.targetPath] || null;
+          const beforeClassification = beforeTarget
+            ? classifyNativeSemanticActionTarget(
+                beforeTarget,
+                nativeSemanticContextForTarget(beforeSnapshot, capability.targetPath),
+              )
+            : { ok: false, reason: 'target_missing' };
+          const beforeTargetFingerprint = beforeTarget
+            ? nativeSemanticNodeFingerprint(capability.app, capability.pid, beforeTarget)
+            : '';
+          const exactBeforeTarget = (
+            beforePid === capability.pid
+            && normalizeNativeSemanticAppIdentity(beforeApp) === normalizeNativeSemanticAppIdentity(capability.app)
+            && beforeSnapshot.treeFingerprint === capability.treeFingerprint
+            && beforeSnapshot.nodeCount === capability.nodeCount
+            && beforeTargetFingerprint === capability.targetFingerprint
+            && beforeClassification.ok === true
+          );
+          if (!exactBeforeTarget) {
+            writeNativeSemanticPreDispatchFailure(
+              res,
+              CORS,
+              capability,
+              'native_semantic_target_stale',
+              'The app, PID, tree, or exact node semantics changed before dispatch.',
+              approvalId,
+              beforeSnapshot,
+            );
+            return;
+          }
+
+          const helperPath = path.join(__dirname, 'bin', 'uc-ax-helper');
+          if (!fs.existsSync(helperPath)) {
+            writeNativeSemanticPreDispatchFailure(
+              res,
+              CORS,
+              capability,
+              'helper_missing',
+              'The native accessibility helper is unavailable.',
+              approvalId,
+              beforeSnapshot,
+            );
+            return;
+          }
+
+          const dispatchedAt = Date.now();
+          execFile(
+            helperPath,
+            ['click', '--pid', String(capability.pid), '--path', capability.targetPath],
+            { timeout: 5000, maxBuffer: 1024 * 1024 },
+            (dispatchErr, stdout, stderr) => {
+              let dispatchPayload = null;
+              try { dispatchPayload = JSON.parse(String(stdout || '').trim()); } catch { dispatchPayload = null; }
+              const dispatchMethod = normalizeNativeSemanticDispatchMethod(dispatchPayload?.method);
+              const dispatchAcknowledged = (
+                dispatchPayload?.ok === true
+                && (dispatchMethod === 'ax_press' || dispatchMethod === 'cg_event')
+              );
+              const dispatchError = String(
+                dispatchPayload?.error || stderr || dispatchErr?.message || 'native semantic action was not acknowledged',
+              ).slice(0, 300);
+
+              setTimeout(() => {
+                collectA11yTreeForApp({
+                  appName: capability.app,
+                  maxDepth: 10,
+                  maxNodes: 400,
+                  slice: 'full',
+                }, (afterResult) => {
+                  const afterPayload = afterResult.kind === 'payload' ? afterResult.payload : null;
+                  const afterPid = Math.trunc(Number(afterPayload?.pid || 0));
+                  const afterApp = String(afterPayload?.app || capability.app);
+                  const afterSnapshot = afterPayload
+                    ? buildNativeSemanticTreeSnapshot(afterPayload.tree, afterApp, afterPid)
+                    : null;
+                  const afterTarget = afterSnapshot?.nodesByPath[capability.targetPath] || null;
+                  const afterTargetFingerprint = afterTarget
+                    ? nativeSemanticNodeFingerprint(capability.app, capability.pid, afterTarget)
+                    : null;
+                  const afterIdentityMatched = !!afterSnapshot
+                    && afterPid === capability.pid
+                    && normalizeNativeSemanticAppIdentity(afterApp) === normalizeNativeSemanticAppIdentity(capability.app);
+                  const targetDiffKind = !afterIdentityMatched
+                    ? 'identity_unavailable'
+                    : !afterTarget
+                      ? 'target_disappeared'
+                      : afterTargetFingerprint !== capability.targetFingerprint
+                        ? 'target_semantics_changed'
+                        : afterSnapshot.treeFingerprint !== beforeSnapshot.treeFingerprint
+                          ? 'tree_changed'
+                          : 'unchanged';
+                  // Global tree churn is not an exact-target postcondition:
+                  // animations, clocks, and unrelated app updates can all
+                  // change the tree. Completion requires the sealed target
+                  // itself to disappear or change its semantic fingerprint.
+                  const completionVerified = (
+                    dispatchAcknowledged
+                    && afterIdentityMatched
+                    && (
+                      targetDiffKind === 'target_disappeared'
+                      || targetDiffKind === 'target_semantics_changed'
+                    )
+                  );
+                  const outcomeUnknown = !completionVerified;
+                  const proof = buildNativeSemanticActionProof({
+                    capability,
+                    approvalId,
+                    beforeSnapshot,
+                    afterSnapshot: afterIdentityMatched ? afterSnapshot : null,
+                    dispatchedAt,
+                    dispatchAcknowledged,
+                    dispatchMethod,
+                    completionVerified,
+                    outcomeUnknown,
+                    targetDiffKind,
+                  });
+                  res.writeHead(200, CORS);
+                  res.end(JSON.stringify({
+                    ok: completionVerified,
+                    ...(!completionVerified ? {
+                      error: dispatchAcknowledged
+                        ? 'The action was dispatched once, but a fresh accessibility diff did not verify the outcome.'
+                        : dispatchError,
+                      errorCode: dispatchAcknowledged
+                        ? 'native_semantic_verification_failed'
+                        : 'native_semantic_dispatch_failed',
+                    } : {}),
+                    app: capability.app,
+                    pid: capability.pid,
+                    action: capability.action,
+                    targetRole: capability.targetRole,
+                    targetPathHash: nativeSemanticHash(capability.targetPath),
+                    targetLabelHash: nativeSemanticHash(normalizeNativeSemanticText(capability.targetLabel)),
+                    targetFingerprint: capability.targetFingerprint,
+                    evidenceId: capability.evidenceId,
+                    completionVerified,
+                    outcomeUnknown,
+                    replayAllowed: false,
+                    proof,
+                  }));
+                });
+              }, NATIVE_SEMANTIC_AFTER_OBSERVATION_DELAY_MS);
+            },
+          );
         });
       });
       return;
@@ -6890,8 +7717,12 @@ end tell
       if (p === '/browser/dom_snapshot' && req.method === 'GET') return browserBridge.handleDomSnapshot(req, res, CORS, parsedUrl);
       if (p === '/browser/page_source' && req.method === 'GET') return browserBridge.handlePageSource(req, res, CORS, parsedUrl);
       if (p === '/browser/verification_state' && req.method === 'GET') return browserBridge.handleVerificationState(req, res, CORS);
+      if (p === '/browser/locator_actionability' && req.method === 'POST') return browserBridge.handleLocatorActionability(req, res, CORS);
       if (p === '/browser/click_role' && req.method === 'POST') return browserBridge.handleClickRole(req, res, CORS);
+      if (p === '/browser/fill_target' && req.method === 'POST') return browserBridge.handleObserveGuardedFillTarget(req, res, CORS);
       if (p === '/browser/fill' && req.method === 'POST') return browserBridge.handleFill(req, res, CORS);
+      if (p === '/browser/toggle_target' && req.method === 'POST') return browserBridge.handleObserveGuardedToggleTarget(req, res, CORS);
+      if (p === '/browser/set_toggle' && req.method === 'POST') return browserBridge.handleSetToggle(req, res, CORS);
       if (p === '/browser/select' && req.method === 'POST') return browserBridge.handleSelect(req, res, CORS);
       if (p === '/browser/upload_file' && req.method === 'POST') return browserBridge.handleUploadFile(req, res, CORS);
       if (p === '/browser/press' && req.method === 'POST') return browserBridge.handlePress(req, res, CORS);
@@ -6908,7 +7739,7 @@ end tell
   }
 
   res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /exec, /devices/*, /mcp, /desktop/*, or /browser/*' }));
+  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /diagnostics, /spawn, /devices/*, /mcp, /desktop/*, or /browser/*' }));
 });
 
 // ─── Desktop-automation helpers (only used by the /desktop/* routes) ──────
@@ -7178,6 +8009,389 @@ function resolveA11yElementIndexFromEntry(entry, pid, elementIndex, indexGenerat
 }
 /* UC_SMOKE_EXTRACT_END resolveA11yElementIndexFromEntry */
 
+// ── Guarded exact native semantic action canary ─────────────────────────
+//
+// This is intentionally much smaller than the legacy click_element surface:
+// one AXPress action, one exact path, a tiny allowlist of presentation/help
+// controls, a short-lived in-memory capability, and fresh before/after
+// accessibility proof. Target IDs are bearer capabilities and therefore
+// never appear in execution receipts.
+
+const NATIVE_SEMANTIC_OBSERVATION_MAX_AGE_MS = 5000;
+// Long enough for a real human approval pause. Dispatch still performs a
+// strict fresh tree/PID/target comparison, so TTL is not the freshness gate.
+const NATIVE_SEMANTIC_TARGET_TTL_MS = 2 * 60_000;
+const NATIVE_SEMANTIC_TARGET_STORE_MAX = 32;
+const NATIVE_SEMANTIC_AFTER_OBSERVATION_DELAY_MS = 220;
+const nativeSemanticActionTargets = new Map();
+
+function normalizeNativeSemanticText(value) {
+  return String(value || '')
+    .replace(/[\u2026]/g, '...')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeNativeSemanticAppIdentity(value) {
+  return normalizeNativeSemanticText(value)
+    .replace(/\.app$/i, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function nativeSemanticHash(value) {
+  return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+/* UC_SMOKE_EXTRACT_START classifyNativeSemanticActionTarget */
+function classifyNativeSemanticActionTarget(node, contextText) {
+  const normalized = (value) => String(value || '')
+    .replace(/[\u2026]/g, '...')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const role = String(node?.role || '').trim().slice(0, 80);
+  const labelRaw = String(node?.label || '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const label = normalized(labelRaw);
+  const value = normalized(node?.value);
+  const roleKey = normalized(role).replace(/[\s_-]+/g, '');
+  const containerRoleKey = normalized(node?.containerRole).replace(/[\s_-]+/g, '');
+  const context = normalized(`${label} ${contextText || ''}`).slice(0, 2000);
+  const blockedRole = /textfield|textarea|textentry|searchfield|combobox|popupbutton|checkbox|switch|radiobutton|slider|incrementor|disclosuretriangle|securetextfield|link|cell|row|table|outline|webarea/;
+  const allowedRole = roleKey === 'axbutton' || roleKey === 'axmenuitem' || roleKey === 'axmenubaritem';
+  if (!role || blockedRole.test(roleKey)) return { ok: false, reason: 'state_or_text_control' };
+  if (!allowedRole) return { ok: false, reason: 'unsupported_role' };
+  if (/^ax(alert|dialog|sheet)$/.test(containerRoleKey)) return { ok: false, reason: 'modal_context' };
+  // Any value-bearing node may encode editable content or state. The canary
+  // does not try to interpret it.
+  if (value) return { ok: false, reason: 'value_bearing_target' };
+  if (!label) return { ok: false, reason: 'missing_label' };
+
+  const consequential = /\b(delete|remove|erase|trash|discard|reset|replace|overwrite|close without saving|quit|terminate|kill|pay|payment|purchase|buy|checkout|order|subscribe|subscription|billing|credit card|bank|wire|transfer|refund|sign in|signin|log in|login|log out|logout|password|passcode|authenticate|authentication|verify identity|account|credential|token|api key|allow|permission|authorize|authorization|access|privacy|camera|microphone|location|contacts|screen recording|accessibility|send|submit|publish|post|upload|install|update|accept|agree|consent|terms|license|confirm|approve)\b/;
+  if (consequential.test(context)) return { ok: false, reason: 'consequential_context' };
+
+  const presentationControl = /^(show|hide) (details|sidebar|toolbar|inspector|preview|info|information|status bar|tab bar)$/;
+  const viewControl = /^(zoom in|zoom out|actual size|fit to (window|screen|page)|enter full screen|exit full screen)$/;
+  const helpControl = /^(help|settings|preferences)$/;
+  const aboutControl = /^about(?: [a-z0-9][a-z0-9 ._'()&+-]{0,80})?$/;
+  if (
+    !presentationControl.test(label)
+    && !viewControl.test(label)
+    && !helpControl.test(label)
+    && !aboutControl.test(label)
+  ) {
+    return { ok: false, reason: 'unknown_semantics' };
+  }
+  return {
+    ok: true,
+    action: 'press',
+    role,
+    label: labelRaw,
+    risk: 'medium',
+  };
+}
+/* UC_SMOKE_EXTRACT_END classifyNativeSemanticActionTarget */
+
+function buildNativeSemanticTreeSnapshot(tree, app, pid) {
+  const nodesByPath = Object.create(null);
+  const canonical = [];
+  let nodeCount = 0;
+  (function walk(node, parentPath, inheritedContainerPath, inheritedContainerRole) {
+    if (!node || typeof node !== 'object' || nodeCount >= 400) return;
+    const nodePath = String(node.id || '').trim();
+    const role = String(node.role || '').trim().slice(0, 80);
+    if (!/^[0-9]+(\.[0-9]+)*$/.test(nodePath)) return;
+    const label = String(node.label || '')
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120);
+    const value = String(node.value || '')
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 160);
+    const roleKey = normalizeNativeSemanticText(role).replace(/[\s_-]+/g, '');
+    const containerPath = /ax(alert|dialog|sheet)/.test(roleKey)
+      ? nodePath
+      : inheritedContainerPath;
+    const containerRole = /ax(alert|dialog|sheet)/.test(roleKey)
+      ? role
+      : inheritedContainerRole;
+    const entry = {
+      id: nodePath,
+      role,
+      label,
+      value,
+      labelHash: nativeSemanticHash(normalizeNativeSemanticText(label)),
+      valueHash: nativeSemanticHash(normalizeNativeSemanticText(value)),
+      parentPath: parentPath || null,
+      containerPath: containerPath || null,
+      containerRole: containerRole || null,
+    };
+    nodesByPath[nodePath] = entry;
+    const children = Array.isArray(node.children) ? node.children : [];
+    canonical.push([
+      nodePath,
+      role,
+      entry.labelHash,
+      entry.valueHash,
+      children.length,
+    ].join('|'));
+    nodeCount += 1;
+    for (const child of children) walk(child, nodePath, containerPath, containerRole);
+  })(tree, null, null, null);
+  return {
+    observedAtMs: Date.now(),
+    app: String(app || '').trim().slice(0, 120),
+    pid: Math.max(0, Math.trunc(Number(pid || 0))),
+    nodeCount,
+    treeFingerprint: nativeSemanticHash(canonical.join('\n')),
+    nodesByPath,
+  };
+}
+
+function nativeSemanticContextForTarget(snapshot, targetPath) {
+  const target = snapshot?.nodesByPath?.[targetPath] || null;
+  if (!target) return '';
+  const chunks = [];
+  let cursor = target;
+  let steps = 0;
+  while (cursor && steps < 12) {
+    if (cursor.label) chunks.push(cursor.label);
+    if (cursor.value) chunks.push(cursor.value);
+    cursor = cursor.parentPath ? snapshot.nodesByPath[cursor.parentPath] : null;
+    steps += 1;
+  }
+  if (target.containerPath) {
+    for (const node of Object.values(snapshot.nodesByPath)) {
+      if (!node || node.containerPath !== target.containerPath) continue;
+      if (node.label) chunks.push(node.label);
+      if (node.value) chunks.push(node.value);
+      if (chunks.join(' ').length >= 1800) break;
+    }
+  }
+  return chunks.join(' ').slice(0, 2000);
+}
+
+function nativeSemanticNodeFingerprint(app, pid, node) {
+  if (!node) return '';
+  const labelHash = node.labelHash || nativeSemanticHash(normalizeNativeSemanticText(node.label));
+  const valueHash = node.valueHash || nativeSemanticHash(normalizeNativeSemanticText(node.value));
+  return nativeSemanticHash(JSON.stringify({
+    app: normalizeNativeSemanticAppIdentity(app),
+    pid: Math.max(0, Math.trunc(Number(pid || 0))),
+    path: String(node.id || ''),
+    role: String(node.role || ''),
+    labelHash,
+    valueHash,
+  }));
+}
+
+function purgeExpiredNativeSemanticActionTargets(nowMs) {
+  for (const [targetId, entry] of nativeSemanticActionTargets) {
+    if (Number(entry.expiresAtMs || 0) < nowMs) nativeSemanticActionTargets.delete(targetId);
+  }
+}
+
+function issueNativeSemanticActionTarget(input) {
+  const nowMs = Date.now();
+  purgeExpiredNativeSemanticActionTargets(nowMs);
+  while (nativeSemanticActionTargets.size >= NATIVE_SEMANTIC_TARGET_STORE_MAX) {
+    const oldestKey = nativeSemanticActionTargets.keys().next().value;
+    if (!oldestKey) break;
+    nativeSemanticActionTargets.delete(oldestKey);
+  }
+  const targetId = crypto.randomBytes(24).toString('hex');
+  const entry = {
+    schemaVersion: 1,
+    targetId,
+    evidenceId: `native-semantic-${crypto.randomBytes(12).toString('hex')}`,
+    issuedAtMs: nowMs,
+    expiresAtMs: nowMs + NATIVE_SEMANTIC_TARGET_TTL_MS,
+    ...input,
+  };
+  nativeSemanticActionTargets.set(targetId, entry);
+  return entry;
+}
+
+function consumeNativeSemanticActionTarget(targetId) {
+  const entry = nativeSemanticActionTargets.get(targetId) || null;
+  nativeSemanticActionTargets.delete(targetId);
+  return entry;
+}
+
+function collectFreshFrontmostNativeSemanticTree(capability, cb) {
+  if (process.platform !== 'darwin') {
+    cb({ kind: 'frontmost_unavailable', error: 'native semantic actions require macOS' });
+    return;
+  }
+  const frontmostScript = 'tell application "System Events" to get name of first application process whose frontmost is true';
+  execFile('/usr/bin/osascript', ['-e', frontmostScript], { timeout: 4000, maxBuffer: 64 * 1024 }, (err, stdout) => {
+    const frontmostApp = String(stdout || '').trim().slice(0, 120);
+    if (
+      err
+      || !frontmostApp
+      || normalizeNativeSemanticAppIdentity(frontmostApp) !== normalizeNativeSemanticAppIdentity(capability.app)
+    ) {
+      cb({ kind: 'frontmost_mismatch', error: 'the exact target app is no longer frontmost' });
+      return;
+    }
+    collectA11yTreeForApp({
+      appName: capability.app,
+      maxDepth: 10,
+      maxNodes: 400,
+      slice: 'full',
+    }, cb);
+  });
+}
+
+function buildNativeSemanticTargetSummary(capability) {
+  const label = String(capability?.targetLabel || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const role = String(capability?.targetRole || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const app = String(capability?.app || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return `Press "${label}" (${role}) in ${app}`.slice(0, 240);
+}
+
+function normalizeNativeSemanticDispatchMethod(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'ax_press') return 'ax_press';
+  if (normalized === 'cg_event') return 'cg_event';
+  return 'unknown';
+}
+
+function nativeSemanticProofSnapshot(snapshot, capability) {
+  if (!snapshot) return null;
+  const target = snapshot.nodesByPath[capability.targetPath] || null;
+  return {
+    observedAt: new Date(snapshot.observedAtMs).toISOString(),
+    app: String(snapshot.app || capability.app).slice(0, 120),
+    pid: Math.max(0, Math.trunc(Number(snapshot.pid || 0))),
+    nodeCount: Math.max(0, Math.trunc(Number(snapshot.nodeCount || 0))),
+    treeFingerprint: String(snapshot.treeFingerprint || ''),
+    targetPresent: !!target,
+    targetFingerprint: target
+      ? nativeSemanticNodeFingerprint(capability.app, capability.pid, target)
+      : null,
+  };
+}
+
+function buildNativeSemanticActionProof(input) {
+  const {
+    capability,
+    approvalId,
+    beforeSnapshot,
+    afterSnapshot,
+    dispatchedAt,
+    dispatchAcknowledged,
+    dispatchMethod,
+    completionVerified,
+    outcomeUnknown,
+    targetDiffKind,
+  } = input;
+  const before = nativeSemanticProofSnapshot(beforeSnapshot, capability);
+  const after = nativeSemanticProofSnapshot(afterSnapshot, capability);
+  return {
+    schemaVersion: 1,
+    operation: 'native_semantic_press',
+    action: capability.action,
+    app: capability.app,
+    pid: capability.pid,
+    targetRole: capability.targetRole,
+    targetPathHash: nativeSemanticHash(capability.targetPath),
+    targetLabelHash: nativeSemanticHash(normalizeNativeSemanticText(capability.targetLabel)),
+    targetFingerprint: capability.targetFingerprint,
+    evidenceId: capability.evidenceId,
+    approvalRequired: true,
+    approvalReceiptHash: nativeSemanticHash(approvalId).slice(0, 16),
+    mutationNeeded: true,
+    mutationAttempted: true,
+    mutationPerformed: completionVerified === true,
+    noOp: false,
+    dispatchedAt: new Date(dispatchedAt).toISOString(),
+    dispatchAcknowledged: dispatchAcknowledged === true,
+    dispatchMethod,
+    completionVerified: completionVerified === true,
+    outcomeUnknown: outcomeUnknown === true,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    before,
+    after,
+    diff: {
+      kind: targetDiffKind,
+      treeChanged: !!before && !!after && before.treeFingerprint !== after.treeFingerprint,
+      targetPresentBefore: before?.targetPresent === true,
+      targetPresentAfter: after?.targetPresent === true,
+    },
+  };
+}
+
+function writeNativeSemanticPreDispatchFailure(
+  res,
+  corsHeaders,
+  capability,
+  errorCode,
+  error,
+  approvalId,
+  beforeSnapshot,
+) {
+  const before = nativeSemanticProofSnapshot(beforeSnapshot || null, capability);
+  const proof = {
+    schemaVersion: 1,
+    operation: 'native_semantic_press',
+    action: capability.action,
+    app: capability.app,
+    pid: capability.pid,
+    targetRole: capability.targetRole,
+    targetPathHash: nativeSemanticHash(capability.targetPath),
+    targetLabelHash: nativeSemanticHash(normalizeNativeSemanticText(capability.targetLabel)),
+    targetFingerprint: capability.targetFingerprint,
+    evidenceId: capability.evidenceId,
+    approvalRequired: true,
+    approvalReceiptHash: nativeSemanticHash(approvalId).slice(0, 16),
+    mutationNeeded: true,
+    mutationAttempted: false,
+    mutationPerformed: false,
+    noOp: false,
+    dispatchAcknowledged: false,
+    dispatchMethod: 'none',
+    completionVerified: false,
+    outcomeUnknown: false,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    before,
+    after: null,
+    diff: {
+      kind: 'not_dispatched',
+      treeChanged: false,
+      targetPresentBefore: before?.targetPresent === true,
+      targetPresentAfter: false,
+    },
+  };
+  res.writeHead(200, corsHeaders);
+  res.end(JSON.stringify({
+    ok: false,
+    error,
+    errorCode,
+    app: capability.app,
+    pid: capability.pid,
+    action: capability.action,
+    targetRole: capability.targetRole,
+    targetPathHash: nativeSemanticHash(capability.targetPath),
+    targetLabelHash: nativeSemanticHash(normalizeNativeSemanticText(capability.targetLabel)),
+    targetFingerprint: capability.targetFingerprint,
+    evidenceId: capability.evidenceId,
+    completionVerified: false,
+    outcomeUnknown: false,
+    replayAllowed: false,
+    proof,
+  }));
+}
+
 // ── Shared a11y-tree collection (/desktop/a11y_tree + /desktop/observe_app) ─
 //
 // The EXACT tree pipeline `/desktop/a11y_tree` has always run — Swift
@@ -7254,10 +8468,19 @@ function collectA11yTreeForApp(opts, cb) {
     payload.index_generation = generation;
     const pidNum = Number(payload.pid || 0);
     if (pidNum > 0) {
+      const semanticSnapshot = buildNativeSemanticTreeSnapshot(
+        payload.tree,
+        String(payload.app || appName || ''),
+        pidNum,
+      );
       rememberA11yIndexMap(pidNum, {
         app: String(payload.app || appName || ''),
         generation,
         indexToPath: indexed.indexToPath,
+        semanticSnapshot,
+        semanticSlice: sliceMode,
+        semanticMaxDepth: maxDepth,
+        semanticMaxNodes: maxNodes,
         at: Date.now(),
       });
     }
@@ -7430,6 +8653,36 @@ function stripMacAppVersion(value) {
     .trim();
 }
 
+// A short, reviewable alias table is safer than substring resolution. It
+// covers the common vendor/display-name differences the app shortcuts use
+// while refusing ambiguous fragments such as "Code" (which could otherwise
+// match Xcode or Visual Studio Code depending on directory order).
+const MAC_APP_EXPLICIT_ALIAS_GROUPS = [
+  ['chrome', 'google chrome'],
+  ['edge', 'microsoft edge'],
+  ['zoom', 'zoom us'],
+  ['vscode', 'visual studio code'],
+  ['photoshop', 'adobe photoshop'],
+  ['indesign', 'adobe indesign'],
+  ['illustrator', 'adobe illustrator'],
+  ['premiere', 'premiere pro', 'adobe premiere pro'],
+  ['after effects', 'adobe after effects'],
+  ['acrobat', 'adobe acrobat'],
+  ['word', 'microsoft word'],
+  ['excel', 'microsoft excel'],
+  ['powerpoint', 'microsoft powerpoint'],
+  ['outlook', 'microsoft outlook'],
+  ['teams', 'microsoft teams'],
+  ['onenote', 'microsoft onenote'],
+];
+
+function isExplicitMacAppAlias(query, candidateName) {
+  const q = stripMacAppVersion(query);
+  const c = stripMacAppVersion(candidateName);
+  if (!q || !c) return false;
+  return MAC_APP_EXPLICIT_ALIAS_GROUPS.some((group) => group.includes(q) && group.includes(c));
+}
+
 function macAppVersionRank(value) {
   const text = String(value || '');
   const yearMatch = text.match(/\b(20\d{2}|19\d{2})\b/);
@@ -7474,13 +8727,7 @@ function scoreMacAppCandidate(query, candidateName) {
   const qNoVersion = stripMacAppVersion(query);
   const cNoVersion = stripMacAppVersion(candidateName);
   if (qNoVersion && cNoVersion && cNoVersion === qNoVersion) return 112;
-  if (c.includes(q)) return 96 + Math.min(q.length, 24);
-  if (q.includes(c)) return 82 + Math.min(c.length, 18);
-  if (qNoVersion && cNoVersion && cNoVersion.includes(qNoVersion)) return 88 + Math.min(qNoVersion.length, 18);
-  const qWords = qNoVersion.split(' ').filter(Boolean);
-  if (qWords.length > 0 && qWords.every((word) => cNoVersion.split(' ').includes(word))) {
-    return 72 + qWords.join('').length;
-  }
+  if (isExplicitMacAppAlias(query, candidateName)) return 104;
   return 0;
 }
 
@@ -8046,15 +9293,16 @@ function parseBooleanOption(raw, fallback) {
 
 function realpathOrResolve(targetPath) {
   try {
-    return fs.realpathSync.native ? fs.realpathSync.native(targetPath) : fs.realpathSync(targetPath);
+    return canonicalizePathWithExistingAncestor(targetPath);
   } catch {
-    return path.resolve(targetPath);
+    return '';
   }
 }
 
 function isPathInsideRoot(targetPath, rootPath) {
   const target = realpathOrResolve(targetPath);
   const root = realpathOrResolve(rootPath);
+  if (!target || !root) return false;
   if (target === root) return true;
   const rel = path.relative(root, target);
   return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -8067,7 +9315,29 @@ function cleanupLocalFileAccessGrants() {
   }
 }
 
+function finalizeGrantRoot(candidate, kind = 'directory') {
+  const root = realpathOrResolve(candidate);
+  if (!root) return { ok: false, error: 'local file grant path could not be canonicalized' };
+  const home = realpathOrResolve(os.homedir());
+  if (root === home) {
+    return {
+      ok: false,
+      error: 'home-directory-wide local file grants are refused; request exact project, folder, or file paths',
+    };
+  }
+  if (root === path.parse(root).root) {
+    return {
+      ok: false,
+      error: 'filesystem-root local file grants are refused; request exact project, folder, or file paths',
+    };
+  }
+  return { ok: true, root, kind };
+}
+
 function normalizeGrantRoot(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return { ok: false, error: 'each local file grant root must be an exact, non-empty path' };
+  }
   const validated = validateDesktopPathServer(raw);
   if (!validated.ok) return { ok: false, error: validated.error };
   const expanded = expandDesktopPath(validated.path);
@@ -8075,36 +9345,46 @@ function normalizeGrantRoot(raw) {
   try {
     const stat = fs.statSync(expanded);
     if (!stat.isDirectory()) {
-      const parentStat = fs.statSync(parent);
-      if (!parentStat.isDirectory()) return { ok: false, error: `${parent} is not a directory` };
-      return { ok: true, root: realpathOrResolve(parent) };
+      return finalizeGrantRoot(expanded, 'exact');
     }
   } catch (err) {
     try {
       const parentStat = fs.statSync(parent);
-      if (parentStat.isDirectory()) return { ok: true, root: realpathOrResolve(parent) };
+      if (parentStat.isDirectory()) {
+        return finalizeGrantRoot(expanded, 'exact');
+      }
     } catch {}
     return { ok: false, error: err.message || String(err) };
   }
-  return { ok: true, root: realpathOrResolve(expanded) };
+  return finalizeGrantRoot(expanded, 'directory');
 }
 
 function createLocalFileAccessGrant(input) {
   cleanupLocalFileAccessGrants();
-  const rawRoots = Array.isArray(input.roots) && input.roots.length > 0 ? input.roots : ['~'];
+  if (!Array.isArray(input.roots) || input.roots.length === 0) {
+    return {
+      ok: false,
+      error: 'local file grants require at least one exact, non-empty root; home-directory defaults are not allowed',
+    };
+  }
+  const rawRoots = input.roots;
   if (rawRoots.length > 12) return { ok: false, error: 'too many roots requested (max 12)' };
   const scope = String(input.scope || 'read').toLowerCase() === 'write' ? 'write' : 'read';
-  const roots = [];
+  const entries = [];
   for (const raw of rawRoots) {
     const normalized = normalizeGrantRoot(String(raw || ''));
     if (!normalized.ok) return { ok: false, error: normalized.error };
-    if (!roots.includes(normalized.root)) roots.push(normalized.root);
+    if (!entries.some((entry) => entry.root === normalized.root && entry.kind === normalized.kind)) {
+      entries.push({ root: normalized.root, kind: normalized.kind });
+    }
   }
+  const roots = entries.map((entry) => entry.root);
   const ttlMs = clampInt(input.ttlMs, LOCAL_FILE_GRANT_DEFAULT_TTL_MS, 60 * 1000, LOCAL_FILE_GRANT_MAX_TTL_MS);
   const token = crypto.randomBytes(24).toString('hex');
   const grant = {
     token,
     roots,
+    entries,
     scope,
     reason: String(input.reason || '').slice(0, 500),
     createdAt: Date.now(),
@@ -8148,7 +9428,15 @@ function requireLocalFileAccessGrant(req, parsedUrl, targetPath, requiredScope =
 	      error: 'Local file access requires a scoped session token. Retry through the chat runtime so it can prepare scoped file access before using file tools.',
 	    };
 	  }
-  const allowed = grant.roots.some((root) => isPathInsideRoot(targetPath, root));
+  const target = realpathOrResolve(targetPath);
+  const entries = Array.isArray(grant.entries)
+    ? grant.entries
+    : grant.roots.map((root) => ({ root, kind: 'directory' }));
+  const allowed = !!target && entries.some((entry) => {
+    const root = realpathOrResolve(entry.root);
+    if (!root) return false;
+    return entry.kind === 'exact' ? target === root : isPathInsideRoot(target, root);
+  });
   if (!allowed) {
     return {
       ok: false,
@@ -13779,15 +15067,15 @@ function ensureInputHelper() {
 }
 ensureInputHelper();
 
-server.listen(PORT, () => {
+server.listen(PORT, BRIDGE_BIND_HOST, () => {
   console.log(`\n  Claude Code Bridge`);
-  console.log(`  Serving on http://localhost:${PORT}`);
+  console.log(`  Serving on http://${BRIDGE_BIND_HOST}:${PORT} (loopback only)`);
   console.log(`  Scanning ${CLAUDE_DIRS.join(", ")}`);
   console.log(`  Found ${cachedSessions.length} active session(s)\n`);
   console.log(`  Endpoints:`);
   console.log(`    GET  /health              — Bridge status`);
   console.log(`    GET  /sessions            — Active Claude Code sessions`);
-  console.log(`    POST /exec                — Run a shell command
+  console.log(`    POST /diagnostics         — Run a fixed read-only diagnostic
     POST /launch              — Launch visible Claude Code terminal sessions
     POST /terminal/send       — Send a chat instruction to a managed terminal session
     POST /spawn               — Spawn a new Claude Code session with a task`);

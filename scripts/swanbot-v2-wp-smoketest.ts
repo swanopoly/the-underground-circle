@@ -17,8 +17,10 @@
 import { readFileSync } from 'node:fs';
 
 import {
-  buildOpenSwanToolApprovalKey,
+  buildOpenSwanApprovalAuditPayload,
+  buildOpenSwanToolApprovalDigest,
   resolveOpenSwanRuntimeApprovalDecision,
+  type OpenSwanRuntimeApprovalRow,
 } from '../src/lib/openswanToolApprovals';
 
 function validateWpSite(input: Record<string, any>) {
@@ -28,6 +30,25 @@ function validateWpSite(input: Record<string, any>) {
   if (!onePasswordItem) return { ok: false as const, error: 'onePasswordItem required' };
   const onePasswordVault = typeof input?.vault === 'string' && input.vault.trim() ? input.vault.trim() : undefined;
   return { ok: true as const, site: { siteUrl, onePasswordItem, onePasswordVault } };
+}
+
+type WpDispatchOperation =
+  | 'discover_types'
+  | 'list_posts'
+  | 'upload_media'
+  | 'create_slide'
+  | 'update_post'
+  | 'trash_post';
+
+function redactedWpDispatchFailure(operation: WpDispatchOperation) {
+  return {
+    ok: false as const,
+    error: 'WordPress request failed. Provider details were redacted.',
+    data: {
+      errorCode: `wordpress_${operation}_failed`,
+      redacted: true as const,
+    },
+  };
 }
 
 // Stub wpAdmin module — the dispatchers normally `await import('./wpAdmin')`.
@@ -51,8 +72,8 @@ async function dispatchWpDiscoverTypes(stubs: WpStubs, input: Record<string, any
       rest_base: t?.rest_base || slug,
     }));
     return { ok: true, data: { siteUrl: v.site.siteUrl, count: slim.length, types: slim } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('discover_types');
   }
 }
 
@@ -71,8 +92,8 @@ async function dispatchWpListPosts(stubs: WpStubs, input: Record<string, any>) {
       link: p.link,
     }));
     return { ok: true, data: { count: slim.length, posts: slim } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('list_posts');
   }
 }
 
@@ -86,8 +107,8 @@ async function dispatchWpUploadMedia(stubs: WpStubs, input: Record<string, any>)
   try {
     const media = await stubs.uploadMediaFromStorage(v.site, storagePath, fileName, mimeType);
     return { ok: true, data: { id: media.id, source_url: media.source_url, fileName } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('upload_media');
   }
 }
 
@@ -119,8 +140,8 @@ async function dispatchWpCreateSlide(stubs: WpStubs, input: Record<string, any>)
         },
       },
     };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('create_slide');
   }
 }
 
@@ -222,8 +243,8 @@ async function dispatchWpUpdatePost(stubs: WpStubs, input: Record<string, any>) 
         },
       },
     };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('update_post');
   }
 }
 
@@ -265,8 +286,8 @@ async function dispatchWpTrashPost(stubs: WpStubs, input: Record<string, any>) {
         },
       },
     };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
+  } catch {
+    return redactedWpDispatchFailure('trash_post');
   }
 }
 
@@ -289,14 +310,25 @@ async function dispatchWpClientTool(stubs: WpStubs, name: string, input: Record<
   }
 }
 
-type WpApprovalRow = { id?: string; status?: string; payload?: Record<string, unknown> | null };
-
 const WP_MUTATION_TOOLS = new Set(['wp.upload_media', 'wp.create_slide', 'wp.update_post', 'wp.trash_post']);
+const consumedWpApprovalIds = new Set<string>();
 
 function normalizeApprovalArgs(input: Record<string, any>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
-    if (key === 'approvalId' || key === 'approval_id' || key === 'toolApprovalKey' || key === 'approvalKey') continue;
+    if ([
+      'approvalId',
+      'approval_id',
+      'approvalKey',
+      'approvalReceipt',
+      'approvalSchemaVersion',
+      'authorityBindingDigest',
+      'dispatchBindingDigest',
+      'dispatchConsumedAt',
+      'toolApprovalDigest',
+      'toolApprovalKey',
+      'toolApprovalKeyVersion',
+    ].includes(key)) continue;
     out[key] = value;
   }
   return out;
@@ -306,15 +338,28 @@ async function dispatchWpClientToolWithApproval(
   stubs: WpStubs,
   name: string,
   input: Record<string, any>,
-  approvalRows: WpApprovalRow[] | 'lookup_error' = [],
+  approvalRows: OpenSwanRuntimeApprovalRow[] | 'lookup_error' = [],
 ) {
   if (!WP_MUTATION_TOOLS.has(name)) return dispatchWpClientTool(stubs, name, input);
   if (approvalRows === 'lookup_error') {
     return { ok: false, error: 'Approval check failed before running the WordPress action. I did not touch WordPress.' };
   }
   const args = normalizeApprovalArgs(input);
-  const decision = resolveOpenSwanRuntimeApprovalDecision({ tool: name, args, rows: approvalRows });
-  if (decision.kind === 'pass') return dispatchWpClientTool(stubs, name, input);
+  const approvalDigest = await buildOpenSwanToolApprovalDigest(name, args);
+  const decision = resolveOpenSwanRuntimeApprovalDecision({
+    tool: name,
+    approvalDigest,
+    rows: approvalRows,
+  });
+  if (decision.kind === 'pass') {
+    if (consumedWpApprovalIds.has(decision.approvalId)) {
+      return { ok: false, error: 'This WordPress approval was already consumed. I did not touch WordPress.' };
+    }
+    // Test-double for the production payload CAS. Claim immediately before
+    // dispatch so a repeated call with this row cannot execute twice.
+    consumedWpApprovalIds.add(decision.approvalId);
+    return dispatchWpClientTool(stubs, name, input);
+  }
   if (decision.kind === 'defer') {
     return {
       ok: false,
@@ -323,7 +368,10 @@ async function dispatchWpClientToolWithApproval(
     };
   }
   if (decision.kind === 'block') {
-    return { ok: false, error: 'This WordPress action was rejected. I did not touch WordPress.' };
+    return {
+      ok: false,
+      error: 'This WordPress approval was rejected, expired, malformed, or already consumed. I did not touch WordPress.',
+    };
   }
   return {
     ok: false,
@@ -340,24 +388,57 @@ function assert(cond: unknown, name: string, detail?: string) {
   if (cond) pass(name); else fail(`${name}${detail ? ' — ' + detail : ''}`);
 }
 
-function assertSwanBotWpApprovalGateSource() {
+function assertRedactedWpFailure(
+  result: any,
+  operation: WpDispatchOperation,
+  sensitiveFragments: string[],
+  label: string,
+) {
+  const serialized = JSON.stringify(result);
+  assert(
+    result?.ok === false
+      && result?.data?.errorCode === `wordpress_${operation}_failed`
+      && result?.data?.redacted === true,
+    `${label}: stable redacted failure receipt`,
+  );
+  assert(
+    sensitiveFragments.every((fragment) => !serialized.includes(fragment)),
+    `${label}: provider exception details do not leak`,
+  );
+}
+
+async function assertSwanBotWpApprovalGateSource() {
   const source = readFileSync('src/lib/swanbot.ts', 'utf8');
   assert(source.includes('SWANBOT_CLIENT_WP_MUTATION_TOOLS'), 'approval gate: mutating wp tool set exists');
   for (const tool of ['wp.upload_media', 'wp.create_slide', 'wp.update_post', 'wp.trash_post']) {
     assert(source.includes(`'${tool}'`), `approval gate: ${tool} is classified as mutating`);
     assert(
-      source.includes(`withSwanBotClientWordPressApproval(call.name, input, context, () => dispatch${tool === 'wp.upload_media' ? 'WpUploadMedia' : tool === 'wp.create_slide' ? 'WpCreateSlide' : tool === 'wp.update_post' ? 'WpUpdatePost' : 'WpTrashPost'}(input))`),
+      source.includes(`withSwanBotClientWordPressApproval(call.name, input, context, call.id, () => dispatch${tool === 'wp.upload_media' ? 'WpUploadMedia' : tool === 'wp.create_slide' ? 'WpCreateSlide' : tool === 'wp.update_post' ? 'WpUpdatePost' : 'WpTrashPost'}(input))`),
       `approval gate: ${tool} dispatch is wrapped`,
     );
   }
   assert(!/case 'wp\.discover_types':\s*return withSwanBotClientWordPressApproval/.test(source), 'approval gate: discover_types stays read-only direct');
   assert(!/case 'wp\.list_posts':\s*return withSwanBotClientWordPressApproval/.test(source), 'approval gate: list_posts stays read-only direct');
   assert(source.includes('resolveSwanBotClientToolApproval'), 'approval gate: resolver exists');
-  assert(source.includes('buildOpenSwanToolApprovalKey'), 'approval gate: reuses exact OpenSwan approval key');
+  assert(source.includes('buildOpenSwanToolApprovalDigest'), 'approval gate: reuses exact v2 OpenSwan approval digest');
+  assert(source.includes('buildOpenSwanApprovalAuditPayload'), 'approval gate: persists canonical digest-only audit payload');
   assert(source.includes('resolveOpenSwanRuntimeApprovalDecision'), 'approval gate: reuses OpenSwan approval decision matcher');
   assert(source.includes(".from('agent_run_approvals')"), 'approval gate: checks run approval rows before dispatch');
+  assert(source.includes(".is('payload->>dispatchBindingDigest', null)"), 'approval gate: single-use CAS blocks replay');
+  assert(source.includes('hasAuthenticatedPersistedSwanBotApprovalCall'), 'approval gate: requires authenticated persisted run identity');
   assert(source.includes('requestRunApproval'), 'approval gate: creates approval row when missing');
   assert(source.includes('I did not touch WordPress'), 'approval gate: blocked copy is customer-safe and explicit');
+  const wpDispatcherSource = source.slice(
+    source.indexOf('// ─── M3e: WordPress dispatchers'),
+    source.indexOf('// ─── UC-3: browser dispatchers'),
+  );
+  assert(!wpDispatcherSource.includes('e?.message || String(e)'), 'failure boundary: WordPress provider errors are not returned verbatim');
+  for (const operation of ['discover_types', 'list_posts', 'upload_media', 'create_slide', 'update_post', 'trash_post'] as const) {
+    assert(
+      wpDispatcherSource.includes(`redactedWpDispatchFailure('${operation}')`),
+      `failure boundary: ${operation} uses stable redacted failure`,
+    );
+  }
 
   const args = {
     siteUrl: 'https://example.com',
@@ -365,28 +446,59 @@ function assertSwanBotWpApprovalGateSource() {
     postId: 88,
     title: 'June Offer',
   };
-  const key = buildOpenSwanToolApprovalKey('wp.update_post', args);
+  const digest = await buildOpenSwanToolApprovalDigest('wp.update_post', args);
+  const payload = buildOpenSwanApprovalAuditPayload({
+    toolName: 'wp.update_post',
+    approvalDigest: digest,
+    policyFamily: 'wordpress',
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+  });
+  const baseRow = {
+    run_id: '33333333-3333-4333-8333-333333333333',
+    circle_id: '22222222-2222-4222-8222-222222222222',
+    requested_by: '11111111-1111-4111-8111-111111111111',
+    requested_at: new Date(Date.now() - 1_000).toISOString(),
+    timeout_seconds: 300,
+    payload,
+  } satisfies OpenSwanRuntimeApprovalRow;
   const approved = resolveOpenSwanRuntimeApprovalDecision({
     tool: 'wp.update_post',
-    args,
-    rows: [{ id: 'approval_1', status: 'approved', payload: { toolApprovalKey: key } }],
+    approvalDigest: digest,
+    rows: [{ ...baseRow, id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', status: 'approved' }],
   });
-  assert(approved.kind === 'pass', 'approval gate: exact approved wp key passes');
+  assert(approved.kind === 'pass', 'approval gate: exact approved v2 digest passes intent resolution');
   const pending = resolveOpenSwanRuntimeApprovalDecision({
     tool: 'wp.update_post',
-    args,
-    rows: [{ id: 'approval_2', status: 'pending', payload: { toolApprovalKey: key } }],
+    approvalDigest: digest,
+    rows: [{ ...baseRow, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', status: 'pending' }],
   });
-  assert(pending.kind === 'defer', 'approval gate: exact pending wp key defers');
+  assert(pending.kind === 'defer', 'approval gate: exact pending v2 digest defers');
+  const wrongDigest = await buildOpenSwanToolApprovalDigest('wp.update_post', { ...args, postId: 89 });
+  const wrongPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: 'wp.update_post',
+    approvalDigest: wrongDigest,
+    policyFamily: 'wordpress',
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+  });
   const wrongArgs = resolveOpenSwanRuntimeApprovalDecision({
     tool: 'wp.update_post',
-    args,
-    rows: [{ id: 'approval_3', status: 'approved', payload: { toolApprovalKey: buildOpenSwanToolApprovalKey('wp.update_post', { ...args, postId: 89 }) } }],
+    approvalDigest: digest,
+    rows: [{
+      ...baseRow,
+      id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      status: 'approved',
+      payload: wrongPayload,
+    }],
   });
-  assert(wrongArgs.kind === 'new', 'approval gate: approved wp key for different args does not pass');
+  assert(wrongArgs.kind === 'new', 'approval gate: approved v2 digest for different args does not pass');
 }
 
 async function assertWpClientApprovalMatrix() {
+  consumedWpApprovalIds.clear();
   const input = {
     siteUrl: 'https://example.com',
     onePasswordItem: 'Dealer WP',
@@ -394,8 +506,39 @@ async function assertWpClientApprovalMatrix() {
     title: 'June Offer',
   };
   const args = normalizeApprovalArgs(input);
-  const exactKey = buildOpenSwanToolApprovalKey('wp.update_post', args);
-  const wrongKey = buildOpenSwanToolApprovalKey('wp.update_post', { ...args, postId: 89 });
+  const exactDigest = await buildOpenSwanToolApprovalDigest('wp.update_post', args);
+  const wrongDigest = await buildOpenSwanToolApprovalDigest('wp.update_post', { ...args, postId: 89 });
+  const exactPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: 'wp.update_post',
+    approvalDigest: exactDigest,
+    policyFamily: 'wordpress',
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+  });
+  const wrongPayload = buildOpenSwanApprovalAuditPayload({
+    toolName: 'wp.update_post',
+    approvalDigest: wrongDigest,
+    policyFamily: 'wordpress',
+    approvalMode: 'ask',
+    mutatesState: true,
+    externalSideEffect: true,
+  });
+  const makeRow = (
+    id: string,
+    status: string,
+    payload: Record<string, unknown> | null = exactPayload,
+    requestedAt = new Date(Date.now() - 1_000).toISOString(),
+  ): OpenSwanRuntimeApprovalRow => ({
+    id,
+    run_id: '33333333-3333-4333-8333-333333333333',
+    circle_id: '22222222-2222-4222-8222-222222222222',
+    requested_by: '11111111-1111-4111-8111-111111111111',
+    requested_at: requestedAt,
+    timeout_seconds: 300,
+    status,
+    payload,
+  });
   const makeUpdateStubs = () => {
     const calls: any[] = [];
     const stubs = makeStubs({
@@ -415,51 +558,61 @@ async function assertWpClientApprovalMatrix() {
   {
     const { stubs, calls } = makeUpdateStubs();
     const r = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [
-      { id: 'pending_1', status: 'pending', payload: { toolApprovalKey: exactKey } },
+      makeRow('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'pending'),
     ]);
-    assert(!r.ok && /pending/.test((r as any).error) && calls.length === 0, 'approval matrix: pending exact row blocks wp update');
+    assert(!r.ok && /pending/.test((r as any).error) && calls.length === 0, 'approval matrix: pending exact v2 row blocks wp update');
   }
   {
     const { stubs, calls } = makeUpdateStubs();
     const r = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [
-      { id: 'rejected_1', status: 'rejected', payload: { toolApprovalKey: exactKey } },
+      makeRow('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'rejected'),
     ]);
-    assert(!r.ok && /rejected/.test((r as any).error) && calls.length === 0, 'approval matrix: rejected exact row blocks wp update');
+    assert(!r.ok && /rejected/.test((r as any).error) && calls.length === 0, 'approval matrix: rejected exact v2 row blocks wp update');
   }
   {
     const { stubs, calls } = makeUpdateStubs();
     const r = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [
-      { id: 'expired_1', status: 'expired', payload: { toolApprovalKey: exactKey } },
+      makeRow('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'expired'),
     ]);
-    assert(!r.ok && /Approval requested/.test((r as any).error) && calls.length === 0, 'approval matrix: expired exact row does not authorize wp update');
+    assert(!r.ok && /expired/.test((r as any).error) && calls.length === 0, 'approval matrix: expired exact v2 row fails closed');
   }
   {
     const { stubs, calls } = makeUpdateStubs();
     const r = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [
-      { id: 'wrong_1', status: 'approved', payload: { toolApprovalKey: wrongKey } },
+      makeRow('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'approved', wrongPayload),
     ]);
-    assert(!r.ok && /Approval requested/.test((r as any).error) && calls.length === 0, 'approval matrix: approved wrong-args row blocks wp update');
+    assert(!r.ok && /Approval requested/.test((r as any).error) && calls.length === 0, 'approval matrix: approved wrong-args v2 row requests a fresh exact approval');
   }
   {
     const { stubs, calls } = makeUpdateStubs();
     const r = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [
-      { id: 'generic_1', status: 'approved', payload: { tool: 'wp.update_post', app: 'wordpress', label: 'Update post', url: 'https://example.com' } },
+      makeRow(
+        'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        'approved',
+        {
+          toolApprovalKeyVersion: 1,
+          toolApprovalKey: JSON.stringify({ tool: 'wp.update_post', args }),
+          args,
+        },
+      ),
     ]);
-    assert(!r.ok && /Approval requested/.test((r as any).error) && calls.length === 0, 'approval matrix: generic approval payload does not authorize wp update');
+    assert(!r.ok && /malformed/.test((r as any).error) && calls.length === 0, 'approval matrix: legacy raw approval fails closed');
   }
   {
     const { stubs, calls } = makeUpdateStubs();
-    const r = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [
-      { id: 'approved_1', status: 'approved', payload: { toolApprovalKey: exactKey } },
-    ]);
-    assert(r.ok && calls.length === 1, 'approval matrix: approved exact row dispatches wp update once');
+    const approvedRow = makeRow('ffffffff-ffff-4fff-8fff-ffffffffffff', 'approved');
+    const first = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [approvedRow]);
+    const replay = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [approvedRow]);
+    assert(first.ok && calls.length === 1, 'approval matrix: approved exact v2 row dispatches wp update once');
+    assert(!replay.ok && /already consumed/.test((replay as any).error) && calls.length === 1, 'approval matrix: approved exact v2 row cannot replay');
   }
   {
     const { stubs, calls } = makeUpdateStubs();
-    const r = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [
-      { id: 'auto_1', status: 'auto_approved', payload: { toolApprovalKey: exactKey } },
-    ]);
-    assert(r.ok && calls.length === 1, 'approval matrix: auto-approved exact row dispatches wp update once');
+    const autoRow = makeRow('12121212-1212-4212-8212-121212121212', 'auto_approved');
+    const first = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [autoRow]);
+    const replay = await dispatchWpClientToolWithApproval(stubs, 'wp.update_post', input, [autoRow]);
+    assert(first.ok && calls.length === 1, 'approval matrix: auto-approved exact v2 row dispatches wp update once');
+    assert(!replay.ok && /already consumed/.test((replay as any).error) && calls.length === 1, 'approval matrix: auto-approved exact v2 row cannot replay');
   }
   {
     const { stubs, calls } = makeUpdateStubs();
@@ -521,7 +674,7 @@ function makeStubs(overrides: Partial<WpStubs> = {}): WpStubs {
 
 async function main() {
   // ─── client-only WordPress approval gate ───────────────────────
-  assertSwanBotWpApprovalGateSource();
+  await assertSwanBotWpApprovalGateSource();
   await assertWpClientApprovalMatrix();
 
   // ─── validateWpSite ────────────────────────────────────────────
@@ -555,10 +708,18 @@ async function main() {
     const r2 = await dispatchWpDiscoverTypes(manyStubs, { siteUrl: 'https://ex.com', onePasswordItem: 'WP' });
     assert((r2 as any).data?.count === 40, 'discover_types: truncated to 40');
 
-    // Bubble thrown errors
-    const badStubs = makeStubs({ discoverPostTypes: async () => { throw new Error('401 Unauthorized'); } });
+    const badStubs = makeStubs({
+      discoverPostTypes: async () => {
+        throw new Error('401 Unauthorized token=discover-secret /Users/example/.ssh/id_rsa');
+      },
+    });
     const r3 = await dispatchWpDiscoverTypes(badStubs, { siteUrl: 'https://ex.com', onePasswordItem: 'WP' });
-    assert(!r3.ok && /401/.test((r3 as any).error), 'discover_types: thrown error surfaced');
+    assertRedactedWpFailure(
+      r3,
+      'discover_types',
+      ['401', 'discover-secret', '/Users/example/.ssh/id_rsa'],
+      'discover_types',
+    );
   }
 
   // ─── list_posts ────────────────────────────────────────────────
@@ -589,6 +750,14 @@ async function main() {
     });
     const r5 = await dispatchWpListPosts(strStubs, { siteUrl: 'https://ex.com', onePasswordItem: 'WP' });
     assert((r5 as any).data?.posts?.[0].title === 'Plain Title', 'list_posts: string title preserved');
+
+    const badStubs = makeStubs({
+      listPosts: async () => {
+        throw new Error('403 rest_forbidden token=list-secret /private/tmp/wp.json');
+      },
+    });
+    const r6 = await dispatchWpListPosts(badStubs, { siteUrl: 'https://ex.com', onePasswordItem: 'WP' });
+    assertRedactedWpFailure(r6, 'list_posts', ['403', 'list-secret', '/private/tmp/wp.json'], 'list_posts');
   }
 
   // ─── upload_media ──────────────────────────────────────────────
@@ -614,6 +783,24 @@ async function main() {
     // Missing path/name
     const r3 = await dispatchWpUploadMedia(stubs, { siteUrl: 'https://ex.com', onePasswordItem: 'WP', storagePath: '', fileName: 'b' });
     assert(!r3.ok && /storagePath and fileName/.test((r3 as any).error), 'upload_media: missing path rejected');
+
+    const badStubs = makeStubs({
+      uploadMediaFromStorage: async () => {
+        throw new Error('403 upload failed token=upload-secret /Users/example/Pictures/private.png');
+      },
+    });
+    const r4 = await dispatchWpUploadMedia(badStubs, {
+      siteUrl: 'https://ex.com',
+      onePasswordItem: 'WP',
+      storagePath: 'private.png',
+      fileName: 'private.png',
+    });
+    assertRedactedWpFailure(
+      r4,
+      'upload_media',
+      ['403', 'upload-secret', '/Users/example/Pictures/private.png'],
+      'upload_media',
+    );
   }
 
   // ─── create_slide ──────────────────────────────────────────────
@@ -673,15 +860,23 @@ async function main() {
     });
     assert(r4.ok && calls[0].opts.slideType === 'custom_slide', 'create_slide: slideType passthrough');
 
-    // 1P resolve fails → error surfaced
-    const badStubs = makeStubs({ uploadImageAndCreateSlide: async () => { throw new Error('Could not resolve WordPress credentials from 1Password'); } });
+    const badStubs = makeStubs({
+      uploadImageAndCreateSlide: async () => {
+        throw new Error('Could not resolve 1Password item token=slide-secret /Users/example/.config/op');
+      },
+    });
     const r5 = await dispatchWpCreateSlide(badStubs, {
       siteUrl: 'https://ex.com',
       onePasswordItem: 'WP',
       storagePath: 'a',
       fileName: 'b.jpg',
     });
-    assert(!r5.ok && /1Password/.test((r5 as any).error), 'create_slide: 1P fail surfaced');
+    assertRedactedWpFailure(
+      r5,
+      'create_slide',
+      ['1Password', 'slide-secret', '/Users/example/.config/op'],
+      'create_slide',
+    );
   }
 
   // ─── update_post ───────────────────────────────────────────────
@@ -750,9 +945,18 @@ async function main() {
     });
     assert(!r4h.ok && /at most/.test((r4h as any).error), 'update_post: too many meta keys rejected');
 
-    const badStubs = makeStubs({ updatePost: async () => { throw new Error('403 rest_forbidden'); } });
+    const badStubs = makeStubs({
+      updatePost: async () => {
+        throw new Error('403 rest_forbidden token=update-secret /Users/example/draft.html');
+      },
+    });
     const r5 = await dispatchWpUpdatePost(badStubs, { siteUrl: 'https://ex.com', onePasswordItem: 'WP', postId: 88, title: 'x' });
-    assert(!r5.ok && /403/.test((r5 as any).error), 'update_post: thrown error surfaced');
+    assertRedactedWpFailure(
+      r5,
+      'update_post',
+      ['403', 'update-secret', '/Users/example/draft.html'],
+      'update_post',
+    );
   }
 
   // ─── trash_post ────────────────────────────────────────────────
@@ -828,13 +1032,22 @@ async function main() {
     });
     assert(!r5.ok && /Permanent delete is not supported/.test((r5 as any).error), 'trash_post: any force field rejected');
 
-    const badStubs = makeStubs({ trashPost: async () => { throw new Error('403 rest_forbidden'); } });
+    const badStubs = makeStubs({
+      trashPost: async () => {
+        throw new Error('403 rest_forbidden token=trash-secret /Users/example/trash.txt');
+      },
+    });
     const r6 = await dispatchWpClientTool(badStubs, 'wp.trash_post', {
       siteUrl: 'https://ex.com',
       onePasswordItem: 'WP',
       postId: 88,
     });
-    assert(!r6.ok && /403/.test((r6 as any).error), 'trash_post: thrown error surfaced');
+    assertRedactedWpFailure(
+      r6,
+      'trash_post',
+      ['403', 'trash-secret', '/Users/example/trash.txt'],
+      'trash_post',
+    );
   }
 
   if (failures > 0) {

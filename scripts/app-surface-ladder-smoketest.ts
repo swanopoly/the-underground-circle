@@ -27,7 +27,7 @@ const CATALOG = new Set([
   'desktop.press_keys', 'desktop.shortcuts_run', 'desktop.type_text',
   'desktop.click_at', 'desktop.read_a11y_tree',
   // browser
-  'browser.click_role', 'browser.fill_field', 'browser.select_option',
+  'browser.click_role', 'browser.set_toggle', 'browser.fill_field', 'browser.select_option',
   'browser.press_key', 'browser.dom_snapshot',
 ]);
 
@@ -67,7 +67,7 @@ assert.equal(browserClick![0].tool, 'browser.press_key', 'first browser fallback
 assert.equal(browserClick![1].tool, 'browser.dom_snapshot', 'then re-read the DOM to correct the locator');
 
 // Every browser ladder tool is real and never a coordinate click (none exists).
-for (const fromTool of ['browser.click_role', 'browser.fill_field', 'browser.select_option']) {
+for (const fromTool of ['browser.click_role', 'browser.set_toggle', 'browser.fill_field', 'browser.select_option']) {
   const steps = nextSurfaceForFailedAction(fromTool) || [];
   assert(steps.length > 0, `${fromTool} has a ladder`);
   for (const step of steps) {
@@ -83,6 +83,7 @@ assert(browserHint && browserHint.includes('browser.click_role'), 'browser hint 
 // ── observationToolForFailedAction: per-surface re-observe tool ──────────────
 assert.equal(observationToolForFailedAction('desktop.click_element'), 'desktop.read_a11y_tree', 'desktop action → a11y tree');
 assert.equal(observationToolForFailedAction('browser.click_role'), 'browser.dom_snapshot', 'browser action → DOM snapshot');
+assert.equal(observationToolForFailedAction('browser.set_toggle'), 'browser.dom_snapshot', 'browser toggle → DOM snapshot');
 assert.equal(observationToolForFailedAction('browser.fill_field'), 'browser.dom_snapshot', 'browser fill → DOM snapshot');
 assert.equal(observationToolForFailedAction('desktop.read_a11y_tree'), null, 'a non-action tool has no re-observe');
 assert.equal(observationToolForFailedAction('desktop.file_stat'), null, 'a file op has no re-observe');

@@ -28,6 +28,8 @@
 export const EVENT_PAYLOAD_MAX_CHARS = 8_000;
 /** Default recursion-depth ceiling; a node deeper than this becomes a marker. */
 export const EVENT_MAX_DEPTH = 6;
+/** Fixed durable/UI copy for a failed tool call. Raw provider text stays transient. */
+export const PERSISTED_TOOL_FAILURE_TEXT = 'Tool call failed (details redacted).';
 
 // --- Internal structural caps (tuning knobs, not part of the contract) --------
 const MAX_STRING_CHARS = 2_000;
@@ -47,6 +49,136 @@ const MASK = '[REDACTED]';
 const CYCLIC = '[cyclic]';
 const DEPTH_MARK = '[max-depth]';
 const TRUNC_MARK = '[truncated]';
+const TOOL_INPUT_SUMMARY_VERSION = 2;
+const TOOL_INPUT_MAX_FIELDS = 48;
+const SENSITIVE_TOOL_INPUT_KEY_RE =
+  /password|passwd|passcode|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key|refresh[_-]?token|access[_-]?token|client[_-]?secret|otp|pin|cvv|card/i;
+const SAFE_TOOL_RESULT_STATUSES = new Set([
+  'planned',
+  'running',
+  'passed',
+  'completed',
+  'success',
+  'verified',
+  'manual_required',
+  'blocked',
+  'failed',
+  'error',
+  'skipped',
+  'cancelled',
+  'inconclusive',
+  'outcome_unknown',
+]);
+type ToolResultReceiptFieldKind = 'string' | 'number' | 'boolean';
+type ToolResultReceiptFieldSpec = readonly [
+  field: string,
+  kind: ToolResultReceiptFieldKind,
+];
+
+const TOOL_RESULT_RECEIPT_FIELD_ALLOWLIST: Readonly<
+  Record<string, readonly ToolResultReceiptFieldSpec[]>
+> = {
+  computerActionReceipt: [
+    ['schemaVersion', 'number'],
+    ['tool', 'string'],
+    ['surface', 'string'],
+    ['toolArgsFingerprint', 'string'],
+    ['argsFingerprint', 'string'],
+    ['handlerEnteredAt', 'string'],
+    ['handlerExitedAt', 'string'],
+    ['dispatchedAt', 'string'],
+    ['completedAt', 'string'],
+    ['outcome', 'string'],
+    ['status', 'string'],
+    ['risk', 'string'],
+    ['approvalState', 'string'],
+    ['mutates', 'boolean'],
+    ['approvalRequired', 'boolean'],
+    ['ok', 'boolean'],
+    ['canComplete', 'boolean'],
+    ['iteration', 'number'],
+    ['durationMs', 'number'],
+    ['evidenceCount', 'number'],
+    ['blockerCount', 'number'],
+  ],
+  mutationDispatchReceipt: [
+    ['schemaVersion', 'number'],
+    ['tool', 'string'],
+    ['authorizedAt', 'string'],
+    ['dispatchedAt', 'string'],
+  ],
+  computerAppVerificationReceipt: [
+    ['schemaVersion', 'number'],
+    ['status', 'string'],
+    ['checkedAt', 'string'],
+    ['canComplete', 'boolean'],
+    ['evidenceCount', 'number'],
+    ['blockerCount', 'number'],
+  ],
+  verificationReceipt: [
+    ['verdict', 'string'],
+    ['committed', 'boolean'],
+    ['commitRef', 'string'],
+    ['editedFileCount', 'number'],
+    ['checkCount', 'number'],
+    ['passedCheckCount', 'number'],
+    ['failedCheckCount', 'number'],
+  ],
+};
+const TOOL_RESULT_RECEIPT_SURFACES = new Set([
+  'browser',
+  'desktop',
+  'vault',
+  'terminal',
+  'file',
+  'code',
+  'research',
+  'approval',
+  'system',
+]);
+const TOOL_RESULT_RECEIPT_OUTCOMES = new Set([
+  'succeeded',
+  'success',
+  'passed',
+  'completed',
+  'verified',
+  'failed',
+  'error',
+  'blocked',
+  'cancelled',
+  'inconclusive',
+  'outcome_unknown',
+]);
+const TOOL_RESULT_RECEIPT_RISKS = new Set(['low', 'medium', 'high', 'critical']);
+const TOOL_RESULT_RECEIPT_APPROVAL_STATES = new Set([
+  'not_required',
+  'pending',
+  'approved',
+  'auto_approved',
+  'rejected',
+]);
+const TOOL_RESULT_RECEIPT_STATUSES = new Set([
+  'pending',
+  'running',
+  'passed',
+  'completed',
+  'success',
+  'verified',
+  'failed',
+  'error',
+  'blocked',
+  'skipped',
+  'cancelled',
+  'manual_required',
+  'inconclusive',
+  'outcome_unknown',
+]);
+const TOOL_RESULT_RECEIPT_VERDICTS = new Set(['verified', 'unverified', 'failed']);
+const TOOL_RESULT_FINGERPRINT_RE = /^args-v2:sha256:[0-9a-f]{64}$/;
+const TOOL_RESULT_COMMIT_RE = /^[0-9a-f]{7,64}$/;
+const TOOL_RESULT_RECEIPT_TOOL_RE =
+  /^[A-Za-z][A-Za-z0-9_-]{0,79}\.[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+const TOOL_RESULT_EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,239}$/;
 
 interface BoundCfg {
   maxDepth: number;
@@ -139,6 +271,403 @@ function safeKind(kind: unknown): string {
   if (typeof kind !== 'string' || kind.length === 0) return 'unknown';
   const clipped = kind.length > 80 ? kind.slice(0, 80) : kind;
   return maskSecrets(clipped);
+}
+
+function safeToolName(value: unknown): string {
+  if (typeof value !== 'string') return 'unknown';
+  const clipped = value.slice(0, 180);
+  return /^[A-Za-z][A-Za-z0-9_-]{0,79}(?:\.[A-Za-z0-9][A-Za-z0-9._:-]{0,99})?$/.test(clipped)
+    ? clipped
+    : 'unknown';
+}
+
+function safeToolResultStatus(value: unknown): string {
+  if (typeof value !== 'string') return 'unknown';
+  return SAFE_TOOL_RESULT_STATUSES.has(value) ? value : 'unknown';
+}
+
+function safeToolResultEventId(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !TOOL_RESULT_EVENT_ID_RE.test(value)) return undefined;
+  return value;
+}
+
+function safeToolResultReceiptTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 48) return undefined;
+  try {
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeToolResultReceiptValue(
+  field: string,
+  kind: ToolResultReceiptFieldKind,
+  value: unknown,
+): unknown {
+  if (kind === 'boolean') return typeof value === 'boolean' ? value : undefined;
+  if (kind === 'number') {
+    if (typeof value !== 'number') return undefined;
+    if (!Number.isFinite(value)) return undefined;
+    if (field === 'schemaVersion') return value === 1 ? 1 : undefined;
+    if (!Number.isInteger(value) || value < 0) return undefined;
+    if (field === 'durationMs') return value <= 86_400_000 ? value : undefined;
+    return value <= 10_000 ? value : undefined;
+  }
+  if (typeof value !== 'string') return undefined;
+  if (field === 'tool') {
+    return TOOL_RESULT_RECEIPT_TOOL_RE.test(value) ? value : undefined;
+  }
+  if (field === 'toolArgsFingerprint' || field === 'argsFingerprint') {
+    return TOOL_RESULT_FINGERPRINT_RE.test(value) ? value : undefined;
+  }
+  if (
+    field === 'handlerEnteredAt'
+    || field === 'handlerExitedAt'
+    || field === 'authorizedAt'
+    || field === 'dispatchedAt'
+    || field === 'completedAt'
+    || field === 'checkedAt'
+  ) {
+    return safeToolResultReceiptTimestamp(value);
+  }
+  if (field === 'surface') {
+    return TOOL_RESULT_RECEIPT_SURFACES.has(value) ? value : undefined;
+  }
+  if (field === 'outcome') {
+    return TOOL_RESULT_RECEIPT_OUTCOMES.has(value) ? value : undefined;
+  }
+  if (field === 'status') {
+    return TOOL_RESULT_RECEIPT_STATUSES.has(value) ? value : undefined;
+  }
+  if (field === 'risk') {
+    return TOOL_RESULT_RECEIPT_RISKS.has(value) ? value : undefined;
+  }
+  if (field === 'approvalState') {
+    return TOOL_RESULT_RECEIPT_APPROVAL_STATES.has(value) ? value : undefined;
+  }
+  if (field === 'verdict') {
+    return TOOL_RESULT_RECEIPT_VERDICTS.has(value) ? value : undefined;
+  }
+  if (field === 'commitRef') {
+    return TOOL_RESULT_COMMIT_RE.test(value) ? value : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Defense-in-depth projection for the hidden receipt side channel. The
+ * primary persistence adapter already sanitizes these namespaces; this final
+ * event boundary repeats the field allowlist so a future direct caller cannot
+ * smuggle result text, paths, or provider payloads through `metadata`.
+ */
+function projectToolResultReceiptMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [namespace, fields] of Object.entries(TOOL_RESULT_RECEIPT_FIELD_ALLOWLIST)) {
+    let rawReceipt: unknown;
+    try {
+      rawReceipt = source[namespace];
+    } catch {
+      continue;
+    }
+    if (!rawReceipt || typeof rawReceipt !== 'object' || Array.isArray(rawReceipt)) continue;
+    const receiptSource = rawReceipt as Record<string, unknown>;
+    const receipt: Record<string, unknown> = {};
+    for (const [field, kind] of fields) {
+      let raw: unknown;
+      try {
+        raw = receiptSource[field];
+      } catch {
+        continue;
+      }
+      const safe = safeToolResultReceiptValue(field, kind, raw);
+      if (safe !== undefined) assignKey(receipt, field, safe);
+    }
+    const receiptFields = safeOwnKeys(receipt);
+    if (
+      receiptFields.length > 0
+      && !(receiptFields.length === 1 && receiptFields[0] === 'schemaVersion')
+    ) {
+      assignKey(out, namespace, receipt);
+    }
+  }
+  return safeOwnKeys(out).length > 0 ? out : undefined;
+}
+
+function toolInputValueKind(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  const kind = typeof value;
+  if (kind === 'object') return 'object';
+  if (kind === 'string') return 'string';
+  if (kind === 'number') return Number.isFinite(value as number) ? 'number' : 'non_finite_number';
+  if (kind === 'boolean') return 'boolean';
+  if (kind === 'bigint') return 'bigint';
+  if (kind === 'undefined') return 'undefined';
+  return 'unsupported';
+}
+
+/**
+ * Build a value-free summary of tool arguments for durable telemetry and UI
+ * previews. Exact arguments remain in memory for approval hashing, dispatch,
+ * loop control, and proof extraction; no argument value is copied here.
+ */
+export function summarizeToolInputForPersistence(
+  toolName: unknown,
+  input: unknown,
+): Record<string, unknown> {
+  const tool = safeToolName(toolName);
+  try {
+    if (input === null || input === undefined) {
+      return {
+        schemaVersion: TOOL_INPUT_SUMMARY_VERSION,
+        redacted: true,
+        tool,
+        inputKind: 'empty',
+        fieldCount: 0,
+        fieldKinds: [],
+      };
+    }
+    if (Array.isArray(input)) {
+      return {
+        schemaVersion: TOOL_INPUT_SUMMARY_VERSION,
+        redacted: true,
+        tool,
+        inputKind: 'array',
+        itemCount: Math.min(input.length, 10_000),
+        fieldKinds: [],
+      };
+    }
+    if (typeof input !== 'object') {
+      return {
+        schemaVersion: TOOL_INPUT_SUMMARY_VERSION,
+        redacted: true,
+        tool,
+        inputKind: toolInputValueKind(input),
+        fieldCount: 0,
+        fieldKinds: [],
+      };
+    }
+
+    const keys = safeOwnKeys(input as object);
+    const fieldKindCounts: Record<string, number> = {};
+    for (const key of keys.slice(0, TOOL_INPUT_MAX_FIELDS)) {
+      let value: unknown;
+      try {
+        value = (input as Record<string, unknown>)[key];
+      } catch {
+        value = undefined;
+      }
+      // Dynamic MCP/custom-tool maps may use data AS object keys (customer
+      // identifiers, filenames, selectors, etc.). Persist only aggregate value
+      // kinds, never the key names or their ordering.
+      const kind = SENSITIVE_TOOL_INPUT_KEY_RE.test(key)
+        ? 'redacted'
+        : toolInputValueKind(value);
+      fieldKindCounts[kind] = (fieldKindCounts[kind] || 0) + 1;
+    }
+    const summarizedFieldCount = Math.min(keys.length, TOOL_INPUT_MAX_FIELDS);
+    return {
+      schemaVersion: TOOL_INPUT_SUMMARY_VERSION,
+      redacted: true,
+      tool,
+      inputKind: 'object',
+      fieldCount: Math.min(keys.length, 10_000),
+      fieldKinds: Object.keys(fieldKindCounts)
+        .sort()
+        .map((kind) => ({ kind, count: fieldKindCounts[kind] })),
+      ...(keys.length > summarizedFieldCount
+        ? { omittedFieldCount: keys.length - summarizedFieldCount }
+        : {}),
+    };
+  } catch {
+    return {
+      schemaVersion: TOOL_INPUT_SUMMARY_VERSION,
+      redacted: true,
+      tool,
+      inputKind: 'unavailable',
+      fieldCount: 0,
+      fieldKinds: [],
+    };
+  }
+}
+
+/**
+ * Build the same value-free structural envelope for a tool result. Exact
+ * observations remain transient so the live model can reason, verify, and
+ * recover; durable transcripts, steps, action cards, and metadata retain only
+ * result shape and controlled status.
+ */
+export function summarizeToolResultForPersistence(
+  toolName: unknown,
+  result: unknown,
+  status: unknown,
+): Record<string, unknown> {
+  const structural = summarizeToolInputForPersistence(toolName, result);
+  const {
+    inputKind,
+    ...rest
+  } = structural;
+  return {
+    ...rest,
+    status: safeToolResultStatus(status),
+    resultKind: inputKind,
+  };
+}
+
+/**
+ * Strict-by-default durable projection for one tool result event.
+ *
+ * Only correlation/status scalars and the explicitly allowlisted receipt
+ * metadata survive verbatim. Every other present property — including current
+ * or future `result`, `output`, `data`, `content`, `body`, path-like, and
+ * dynamically named fields — is reduced together into a key-free structural
+ * summary. This keeps the generic boundary safe even if a future writer passes
+ * the provider result object instead of selecting telemetry fields first.
+ */
+function prepareToolResultPayload(source: Record<string, unknown>): Record<string, unknown> {
+  const prepared: Record<string, unknown> = {};
+  const rawResultFields: Record<string, unknown> = {};
+  let rawResultFieldCount = 0;
+  let sawError = false;
+  let ok: boolean | undefined;
+  let toolName: unknown = 'unknown';
+  let status: string = 'unknown';
+  try {
+    toolName = source.tool ?? source.toolName;
+  } catch {
+    toolName = 'unknown';
+  }
+
+  for (const key of safeOwnKeys(source)) {
+    let value: unknown;
+    try {
+      value = source[key];
+    } catch {
+      continue;
+    }
+    if (key === 'tool' || key === 'toolName') {
+      assignKey(prepared, key, safeToolName(value));
+      continue;
+    }
+    if (key === 'tool_use_id' || key === 'toolUseId') {
+      const id = safeToolResultEventId(value);
+      if (id) assignKey(prepared, key, id);
+      continue;
+    }
+    if (key === 'iteration') {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        prepared.iteration = Math.max(1, Math.min(1_000_000, Math.floor(value)));
+      }
+      continue;
+    }
+    if (key === 'duration_ms' || key === 'durationMs') {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        assignKey(prepared, key, Math.max(0, Math.min(86_400_000, Math.floor(value))));
+      }
+      continue;
+    }
+    if (key === 'ok') {
+      if (typeof value === 'boolean') {
+        ok = value;
+        prepared.ok = value;
+      }
+      continue;
+    }
+    if (
+      key === 'dispatched'
+      || key === 'client_delegated'
+      || key === 'clientDelegated'
+    ) {
+      if (typeof value === 'boolean' || value === null) assignKey(prepared, key, value);
+      continue;
+    }
+    if (key === 'status') {
+      const safeStatus = safeToolResultStatus(value);
+      if (safeStatus !== 'unknown') {
+        status = safeStatus;
+        prepared.status = safeStatus;
+      }
+      continue;
+    }
+    if (key === 'metadata') {
+      const metadata = projectToolResultReceiptMetadata(value);
+      if (metadata) prepared.metadata = metadata;
+      continue;
+    }
+    if (key === 'error') {
+      sawError = true;
+      continue;
+    }
+    if (key === 'error_code' || key === 'redacted') {
+      // Derived below from authoritative failure state; never trust caller copy.
+      continue;
+    }
+
+    // Unknown/future result fields are intentionally not copied. Bundle their
+    // values only long enough to derive a key-free structural summary.
+    assignKey(rawResultFields, key, value);
+    rawResultFieldCount += 1;
+  }
+
+  if (status === 'unknown') {
+    status = ok === true ? 'success' : ok === false || sawError ? 'failed' : 'unknown';
+  }
+  if (rawResultFieldCount > 0) {
+    prepared.result_summary = summarizeToolResultForPersistence(
+      toolName,
+      rawResultFields,
+      status,
+    );
+  }
+  if (sawError || ok === false) {
+    prepared.error = PERSISTED_TOOL_FAILURE_TEXT;
+    prepared.error_code = 'tool_call_failed';
+    prepared.redacted = true;
+  }
+  return prepared;
+}
+
+function preparePayloadForBounding(kind: unknown, payload: unknown): unknown {
+  const eventKind = safeKind(kind);
+  if (
+    (eventKind !== 'tool_call_start' && eventKind !== 'tool_call_result')
+    || !payload
+    || typeof payload !== 'object'
+    || Array.isArray(payload)
+  ) {
+    return payload;
+  }
+  const source = payload as Record<string, unknown>;
+  if (eventKind === 'tool_call_result') {
+    return prepareToolResultPayload(source);
+  }
+  const prepared: Record<string, unknown> = {};
+  for (const key of safeOwnKeys(source)) {
+    let value: unknown;
+    try {
+      value = source[key];
+    } catch {
+      continue;
+    }
+    if (eventKind === 'tool_call_start' && key === 'input') {
+      let toolName: unknown;
+      try {
+        toolName = source.tool ?? source.toolName;
+      } catch {
+        toolName = 'unknown';
+      }
+      prepared.input = summarizeToolInputForPersistence(toolName, value);
+    } else {
+      assignKey(prepared, key, value);
+    }
+  }
+  return prepared;
 }
 
 /** Clip a string to `maxStringChars`, mask secrets, then honor the budget. */
@@ -475,7 +1004,8 @@ export function boundEventPayload(
       maxObjectKeys: MAX_OBJECT_KEYS,
     };
     const budget: Budget = { remaining: maxChars };
-    const cloned = boundValue(payload, 0, new WeakSet<object>(), budget, cfg);
+    const preparedPayload = preparePayloadForBounding(kind, payload);
+    const cloned = boundValue(preparedPayload, 0, new WeakSet<object>(), budget, cfg);
     const result = cloned === undefined ? null : cloned;
 
     // Authoritative total-size guard: the per-node budget is approximate (it

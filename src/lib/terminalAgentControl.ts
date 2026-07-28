@@ -1,4 +1,4 @@
-import { bridgeAuthHeaders, ensureBridgeToken } from './bridgeAuth';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 import { sendTerminalAgentSessionMessage } from './bridgeTaskDispatcher';
 import { loadAgentIdentities, type TerminalAgentOfficeConfig } from './agentIdentity';
@@ -39,9 +39,7 @@ async function fetchProviderSessions(provider: typeof PROVIDERS[number]): Promis
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, {
-      headers: bridgeAuthHeaders(token),
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);

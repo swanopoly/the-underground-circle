@@ -9,6 +9,7 @@
 import { buildChatAutomationPlan, summarisePlanForTelemetry } from '../src/lib/chatAutomationPlanner';
 import { formatChatComputerTaskAutonomyPromptBlock } from '../src/lib/chatComputerTaskAutonomy';
 import {
+  buildChatComputerUsePolicyInputs,
   buildChatComputerRequestRoute,
   buildChatComputerRequestRoutePromptBlock,
   constraintBlocksToolCall,
@@ -1408,6 +1409,35 @@ for (const precisionCase of [
   // Ordinary navigation/extraction never fires the pay floor.
   assertStepPayFloor('browser.navigate', { url: 'https://marriott.com' }, false);
   assertStepPayFloor('browser.extract', { schema: 'rooms' }, false);
+
+  // Cloud Computer Use starts must preserve the router's hard constraints
+  // and translate its more specific floor into the edge's bounded categories.
+  {
+    const ordinary = buildChatComputerUsePolicyInputs('compare three espresso machines');
+    if (ordinary.userConstraints.length !== 0) {
+      fail('cloud policy: ordinary task must not invent user constraints');
+    } else if (ordinary.alwaysConfirmCategories.join(',') !== 'opaque_target') {
+      fail(`cloud policy: ordinary native run expected only opaque_target, got ${ordinary.alwaysConfirmCategories.join(',')}`);
+    } else pass('cloud policy: ordinary native run carries the opaque-target floor');
+
+    const constrained = buildChatComputerUsePolicyInputs(
+      "don't submit anything and ask me before logging in",
+    );
+    if (!constrained.userConstraints.some((line) => /never perform submit/i.test(line))) {
+      fail('cloud policy: explicit submit prohibition was not preserved');
+    } else if (!constrained.alwaysConfirmCategories.includes('credentials')) {
+      fail('cloud policy: login constraint must add the credentials floor');
+    } else if (!constrained.alwaysConfirmCategories.includes('external_side_effect')) {
+      fail('cloud policy: explicit action constraints must add the external-side-effect floor');
+    } else pass('cloud policy: user prohibitions and login confirmation survive handoff');
+
+    const booking = buildChatComputerUsePolicyInputs('continue with option two', {
+      booking: true,
+    });
+    if (!booking.alwaysConfirmCategories.includes('external_side_effect')) {
+      fail('cloud policy: a booking continuation must retain the external-side-effect floor');
+    } else pass('cloud policy: booking continuation retains the side-effect floor');
+  }
 }
 
 if (failures > 0) {

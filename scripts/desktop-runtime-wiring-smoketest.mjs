@@ -20,6 +20,7 @@ const files = {
   browserServer: fs.readFileSync('scripts/browser-bridge.js', 'utf8'),
   computerUse: fs.readFileSync('src/lib/computerUse.ts', 'utf8'),
   computerUseTask: fs.readFileSync('src/lib/useComputerUseTask.ts', 'utf8'),
+  computerTaskRuntime: fs.readFileSync('src/lib/computerTaskRuntime.ts', 'utf8'),
   appAdapter: fs.readFileSync('src/lib/computerAppAdapter.ts', 'utf8'),
   intent: fs.readFileSync('src/lib/localComputerAwarenessIntent.ts', 'utf8'),
   capabilities: fs.readFileSync('src/lib/computerCapabilityRegistry.ts', 'utf8'),
@@ -205,15 +206,34 @@ assert(files.pkg.scripts['smoke:all'].includes('smoke:direct-image-conversion-ru
 assert(files.pkg.scripts['smoke:all'].includes('smoke:desktop-task-ai-need'), 'smoke:all includes desktop task AI-need smoke');
 assert(files.pkg.scripts['smoke:all'].includes('smoke:computer-grant-gate'), 'smoke:all includes computer grant gate smoke');
 assert(files.bridge.includes('ensureInputHelper();'), 'bridge boot auto-builds input helper');
-assert(files.computerUse.includes('localBrowserOpenUrl'), 'computerUse: local navigation uses browser bridge directly');
+assert(
+  !files.computerUse.includes('localBrowserOpenUrl')
+  && files.computerUse.includes('buildComputerUseMutationRuntimeHandoff')
+  && files.computerUse.includes("navigate: 'browser.open_url'")
+  && files.computerUse.includes('return before screenshots, Stagehand session creation,'),
+  'computerUse: legacy navigation is a non-executable typed-runtime handoff',
+);
 assert(files.computerUse.includes('runLocalBrowserReadAction'), 'computerUse: local observe/extract uses browser bridge DOM snapshot');
 assert(files.computerUse.includes('chooseBrowserAutomationBackendPreference'), 'computerUse: backend optimizer is wired');
 assert(files.computerUse.includes('ensureDesktopBridgePaired'), 'computerUse: legacy MCP fallback sends paired desktop token');
 assert(files.computerUse.includes("jsonrpc: '2.0'") && files.computerUse.includes("id: `computer-use-"), 'computerUse: legacy MCP fallback sends JSON-RPC id');
 assert(files.browserClient.includes('ensureDesktopBridgePaired'), 'browserBridge: browser actions auto-pair with desktop bridge');
 assert(files.browserClient.includes('requiredEvidence') && files.browserClient.includes('recoveryHint') && files.browserClient.includes('browserFailureResult'), 'browserBridge: failures preserve structured recovery fields');
-assert(files.browserServer.includes('selectOption({ label: value }'), 'browser bridge: select falls back from option value to label');
-assert(files.browserServer.includes("getByRole('option'"), 'browser bridge: custom dropdown select falls back to role=option');
+assert(
+  files.browserClient.includes('observeGuardedBrowserSelectTarget')
+  && files.browserClient.includes('setGuardedBrowserSelectOption')
+  && files.browserClient.includes("selectMode: 'observe_guarded_native'")
+  && files.browserClient.includes("selectMode: 'guarded_native_single'"),
+  'browser bridge: native select uses separate sealed observation and one-shot mutation calls',
+);
+assert(
+  files.browserServer.includes("capabilityKind: 'guarded_select_v1'")
+  && files.browserServer.includes('targetHandle.selectOption(optionSpec, { timeout })')
+  && !files.browserServer.includes("launched.page.getByRole('option'")
+  && !files.browserServer.includes('await locator.selectOption(value')
+  && !files.browserServer.includes('await locator.selectOption({ label: value'),
+  'browser bridge: select mutates only the exact native-select handle with no custom-widget/global click fallback',
+);
 assert(files.browserServer.includes('handleUploadFile') && files.browserServer.includes('setInputFiles') && files.browserServer.includes('filechooser'), 'browser bridge: upload_file supports file input and file chooser paths');
 assert(files.runtime.includes("case 'browser.upload_file'") && files.runtime.includes('requestLocalFileSessionGrant'), 'OpenSwan runtime: browser upload auto-prepares a scoped local file grant');
 assert(!files.runtime.includes('hasActiveLocalFileSessionGrant'), 'OpenSwan runtime: desktop tools do not block on stale local file verification prechecks');
@@ -262,18 +282,72 @@ assert(files.bridge.includes('multiple images matched') && files.bridge.includes
 assert(files.bridge.includes('output_conflict') && files.bridge.includes('while (fs.existsSync(candidate)'), 'bridge convert_image avoids overwriting existing converted outputs');
 assert(files.client.includes('inferConvertImageGrantRoots(source)') && files.client.includes("ensureLocalFileGrantHeaders(grantRoots, 'write'"), 'desktopBridge: convert_image auto-prepares scoped write grant headers');
 assert(files.bridge.includes("if (url === '/desktop/convert_image'") && files.bridge.includes("requireLocalFileAccessGrant(req, parsedUrl, target, 'write'") && files.bridge.includes("requireLocalFileAccessGrant(req, parsedUrl, realSrc, 'write'"), 'bridge convert_image requires scoped write grants before conversion');
-assert(files.directLocalFileRuntime.includes('statFile(plan.path)') && files.directLocalFileRuntime.includes('searchFiles(searchTarget.rootPath') && files.directLocalFileRuntime.includes('resolved.path'), 'direct local file runtime verifies and resolves open_path before launch');
-assert(files.directLocalFileRuntime.includes('directLocalFileSafeFailureMessage') && files.directLocalFileRuntime.includes('I found more than one matching file. Send the exact path') && files.directLocalFileRuntime.includes('A file or folder already exists at the requested destination'), 'direct local file runtime rewrites raw adapter failures to customer-safe copy');
-assert(files.directImageConversionRuntime.includes('extractDirectLocalImageFormatConversionTask') && files.directImageConversionRuntime.includes('desktop.convert_image missing output proof') && files.directImageConversionRuntime.includes('The image tool did not return output proof'), 'direct image conversion runtime validates parser and proof before success');
-assert(files.directImageConversionRuntime.includes('output_conflict') && files.directImageConversionRuntime.includes('try {') && files.directImageConversionRuntime.includes('bridge_offline'), 'direct image conversion runtime normalizes bridge throws and output conflicts');
-assert(files.chatTransportHandlers.includes('That automation step hit an internal error. Technical details were saved for recovery.') && files.chatTransportHandlers.includes('rawError'), 'chat transport handlers hide thrown transport details from visible messages');
-assert(files.runChatAutomationPlan.includes('That automation step hit an internal error. Technical details were saved for recovery.') && files.runChatAutomationPlan.includes('rawError'), 'chat automation dispatcher hides thrown transport details from visible messages');
+assert(
+  files.directLocalFileRuntime.includes('buildDirectLocalFileMutationRuntimeHandoff')
+  && files.directLocalFileRuntime.includes('void executor;')
+  && files.directLocalFileRuntime.includes("status: 'handoff'")
+  && files.directLocalFileRuntime.includes('adapterCalled: false')
+  && files.directLocalFileRuntime.includes('mutationDispatched: false')
+  && files.directLocalFileRuntime.includes('carriesRawPath: false')
+  && files.directLocalFileRuntime.includes('carriesSecret: false')
+  && files.directLocalFileRuntime.includes('carriesReceipt: false')
+  && !files.directLocalFileRuntime.includes("import('./computerFileAdapter')")
+  && !files.directLocalFileRuntime.includes('await executor(')
+  && !files.directLocalFileRuntime.includes("status: 'completed'")
+  && !files.directLocalFileRuntime.includes('proofSignals:'),
+  'direct local file runtime is a value-free, non-executable typed-runtime handoff',
+);
+assert(
+  files.directImageConversionRuntime.includes('buildDirectImageConversionRuntimeHandoff')
+  && files.directImageConversionRuntime.includes('void bridge;')
+  && files.directImageConversionRuntime.includes("status: 'handoff'")
+  && files.directImageConversionRuntime.includes('bridgeCalled: false')
+  && files.directImageConversionRuntime.includes('mutationDispatched: false')
+  && files.directImageConversionRuntime.includes('carriesRawPath: false')
+  && files.directImageConversionRuntime.includes('carriesSecret: false')
+  && files.directImageConversionRuntime.includes('carriesReceipt: false')
+  && !files.directImageConversionRuntime.includes('await bridge.convertImage')
+  && !files.directImageConversionRuntime.includes('await bridge.statFile')
+  && !files.directImageConversionRuntime.includes('await bridge.searchFiles')
+  && !files.directImageConversionRuntime.includes("status: 'completed'")
+  && !files.directImageConversionRuntime.includes('proofSignals:'),
+  'direct image conversion runtime is a value-free, non-executable typed-runtime handoff',
+);
+assert(
+  files.chatTransportHandlers.includes('That automation step hit an internal error. No uncertain action was replayed.')
+  && files.chatTransportHandlers.includes("errorCode: 'transport_handler_error'")
+  && files.chatTransportHandlers.includes('redacted: true')
+  && !files.chatTransportHandlers.includes('rawError'),
+  'chat transport handlers redact thrown transport details from visible and durable outcomes',
+);
+assert(
+  files.runChatAutomationPlan.includes('That automation step hit an internal error. No uncertain action was replayed.')
+  && files.runChatAutomationPlan.includes("errorCode: 'transport_error'")
+  && files.runChatAutomationPlan.includes('redacted: true')
+  && !files.runChatAutomationPlan.includes('rawError'),
+  'chat automation dispatcher redacts thrown transport details from visible and durable outcomes',
+);
 // P12: the display policy moved to the chatUserFacingOutcomes owner — the
 // hook delegates (sanitizeComputerUseErrorMessage = translateComputerUseErrorMessage)
 // and the generic fallback literal lives in the delegate module.
 assert(files.computerUseTask.includes('sanitizeComputerUseErrorMessage') && files.computerUseTask.includes('rawErrorMessage') && files.computerUseTask.includes('translateComputerUseErrorMessage') && files.chatUserFacingOutcomes.includes('Computer Use could not finish. Technical details were saved for recovery.'), 'Computer Use live task state hides raw edge/fetch errors while retaining diagnostics');
-assert(files.chatTab.includes('executeDirectImageConversionRequest') && files.chatTab.includes('directImageConversion'), 'ChatTab: direct image conversion runtime is wired');
-assert(files.chatTab.includes('routeHasDirectLocalFileActionItems') && files.chatTab.includes('executeDirectLocalFileRequest') && files.chatTab.includes('directLocalFileAction'), 'ChatTab: direct local file runtime is wired');
+assert(
+  !files.chatTab.includes('executeDirectLocalFileRequest')
+  && !files.chatTab.includes('executeDirectImageConversionRequest')
+  && !files.chatTab.includes('directLocalFileAction:')
+  && !files.chatTab.includes('directImageConversion:')
+  && files.chatTab.includes('executeComputerTaskWithAgent'),
+  'ChatTab routes local file and image mutations only through the authenticated computer-task agent runtime',
+);
+assert(
+  files.computerTaskRuntime.includes('isDirectLocalFileMode(directLocalFilePlan.mode)')
+  && files.computerTaskRuntime.includes('isDirectLocalImageFormatConversionTask(args.task)')
+  && files.computerTaskRuntime.includes("requiredCapabilities.includes('file_write')")
+  && files.computerTaskRuntime.includes('shouldRunDeterministicReadOnlyFileAdapter')
+  && files.computerTaskRuntime.includes('result = await executeAgentRun({')
+  && (files.computerTaskRuntime.match(/await executeComputerFileTask\(/g) || []).length === 1,
+  'computer task runtime preserves deterministic reads while all file mutations enter authenticated agent execution',
+);
 assert(files.fileAdapter.includes('selectUnambiguousFileMatchForMutation') && files.fileAdapter.includes('Ambiguous local file mutation target'), 'file adapter: rename/copy/trash fail closed on ambiguous search matches');
 assert(files.client.includes("focusMode?: 'require' | 'best_effort' | 'skip'"), 'desktopBridge: paste supports focus modes');
 assert(files.bridge.includes("focusMode === 'best_effort'") && files.bridge.includes("focusMode === 'skip'"), 'bridge paste: supports best-effort and skip focus');
@@ -369,7 +443,11 @@ assert(files.bridge.includes('function resolvePhotoshopMacApp') && files.bridge.
 assert(files.bridge.includes('do javascript') && files.bridge.includes('photoshopJsxPrelude') && files.bridge.includes('layerHasMask'), 'bridge endpoint: Photoshop tools use script-backed document/layer inspection instead of only coordinates');
 assert(files.bridge.includes('requireLocalFileAccessGrant(req, parsedUrl, outputPath, \'write\')'), 'bridge endpoint: Photoshop proof export requires local file write grant');
 assert(files.bridge.includes('requireLocalFileAccessGrant(req, parsedUrl, assetPath, \'read\')'), 'bridge endpoint: Photoshop asset placement requires local file read grant');
-assert(files.bridge.includes('return { ok: true, root: realpathOrResolve(parent) }'), 'bridge file grants accept file/output paths by granting their containing folder');
+assert(
+  files.bridge.includes("return finalizeGrantRoot(expanded, 'exact')")
+    && files.bridge.includes("entry.kind === 'exact' ? target === root"),
+  'bridge file grants preserve exact file/output targets without widening to the containing folder',
+);
 assert(files.client.includes('homeAlias') && files.client.includes('root.startsWith(`${homeAlias}/`)'), 'desktopBridge: cached absolute home grants cover tilde file paths');
 assert(files.client.includes("ensureLocalFileGrantHeaders([assetPathResult.path], 'read'") && files.client.includes("ensureLocalFileGrantHeaders([outputPathResult.path], 'write'"), 'desktopBridge: Photoshop asset/proof tools auto-prepare scoped local file grant headers');
 assert(files.appAdapter.includes('bridgePhotoshopDocumentStatus') && files.appAdapter.includes('desktop_photoshop_document_status'), 'app adapter: Photoshop document status executes through bridge tool');
@@ -389,7 +467,12 @@ assert(files.aiModalAdvisor.includes('buildDesktopAIModalDecisionPrompt') && fil
 assert(files.aiModalAdvisor.includes('keep_requested_extension') && files.aiModalAdvisor.includes('findPreferredSaveExtensionMismatchButton') && files.aiModalAdvisor.includes('taskMentionsExtension') && files.aiModalAdvisor.includes('Auto-click a file-extension mismatch only when the popup keeps the extension requested by the user task.'), 'AI modal advisor: requested-extension mismatch popups are guarded by task intent');
 assert(files.browserAiModalAdvisor.includes('buildBrowserAIModalDecisionPrompt') && files.browserAiModalAdvisor.includes('validateBrowserAIModalCandidate') && files.browserAiModalAdvisor.includes('parseBrowserAIModalCandidate') && files.browserAiModalAdvisor.includes('Never accept credentials'), 'browser AI modal advisor: prompt and guardrail validator exist');
 assert(files.browserServer.includes('runWithBrowserDialogHandling') && files.browserServer.includes('browser_dialog_blocked') && files.browserServer.includes('decideBrowserDialogAction'), 'browser bridge: native browser dialogs route through guarded popup policy');
-assert(files.computerUse.includes('taskContext: browserTaskContext') && files.browserClient.includes('taskContext?: string'), 'browser runtime: original task context reaches browser popup handling');
+assert(
+  !files.computerUse.includes('taskContext: browserTaskContext')
+  && files.computerUse.includes('carriesRawInput: false')
+  && files.browserClient.includes('taskContext?: string'),
+  'browser runtime: legacy mutation handoffs omit task text while typed browser tools retain a bounded context seam',
+);
 assert(files.appAdapter.includes('verifySaveDialogOutputFile') && files.appAdapter.includes('desktop_save_output_verified'), 'app adapter: verifies local Photoshop save output before reporting completion');
 assert(files.appAdapter.includes('ensureSaveForWebFormat') && files.appAdapter.includes('desktop_save_for_web_format_selected'), 'app adapter: sets the requested Save for Web format before clicking Save');
 assert(files.intent.includes('local-save-for-web-save-button') && files.intent.includes('Cmd+Opt+Shift+S') && files.intent.includes('format: format || undefined'), 'local intent: Photoshop image exports carry the requested Save for Web format before filename dialog');
@@ -397,7 +480,32 @@ assert(files.intent.includes('expandPhotoshopTaskMacro') && files.intent.include
 assert(files.intent.includes('expandInDesignTaskMacro') && files.intent.includes('local-indesign-place-file') && files.intent.includes('local-indesign-export-file'), 'local intent: InDesign layout and export task macros are wired');
 assert(files.intent.includes('expandMacDashboardMacro') && files.intent.includes('local-mac-mission-control') && files.intent.includes('local-mac-system-settings-query'), 'local intent: Mac dashboard macros are wired');
 assert(files.intent.includes('COMPUTER_LAUNCH_APP_RE') && files.intent.includes('use\\s+') && files.intent.includes("kind: 'launch_app'"), 'local intent: computer-prefixed app launch routes to desktop.launch_app');
-assert(files.chatTab.includes('shouldRunImmediateLocalAppLaunch') && files.chatTab.includes("launch_app: { tool: 'desktop.launch_app'") && files.chatTab.includes('currentAttachments.length === 0 && shouldRunImmediateLocalAppLaunch(content)'), 'ChatTab: pure open-app requests execute through the desktop bridge before full computer-task planning');
+const localAwarenessBlock = files.chatTab.slice(
+  files.chatTab.indexOf('const executeLocalComputerAwarenessRequest'),
+  files.chatTab.indexOf('// ─── Send Crypto'),
+);
+const computerTaskBranch = files.chatTab.slice(
+  files.chatTab.indexOf("if (plan.execution.kind === 'run_computer_task') {"),
+  files.chatTab.indexOf("if (plan.execution.kind === 'run_openswan') {"),
+);
+const openSwanBranch = files.chatTab.slice(
+  files.chatTab.indexOf("if (plan.execution.kind === 'run_openswan') {"),
+  files.chatTab.indexOf('// R7 — apply handler state requests'),
+);
+assert(
+  !files.chatTab.includes('shouldRunImmediateLocalAppLaunch')
+  && !files.chatTab.includes('IMMEDIATE_LOCAL_APP_FOLLOWUP_RE')
+  && !localAwarenessBlock.includes('desktop.launch_app')
+  && !localAwarenessBlock.includes('desktop.focus_app')
+  && localAwarenessBlock.includes('desktop.list_browser_tabs')
+  && localAwarenessBlock.includes('desktop.list_running_apps')
+  && localAwarenessBlock.includes('desktop.window_state')
+  && localAwarenessBlock.includes('desktop.clipboard')
+  && computerTaskBranch.includes('executeSharedComputerTask(content)')
+  && !computerTaskBranch.includes('executeLocalComputerAwarenessRequest')
+  && openSwanBranch.includes('executeLocalComputerAwarenessRequest(content)'),
+  'ChatTab routes launch/focus through authenticated computer-task execution and keeps only read-only desktop awareness shortcuts',
+);
 assert(!files.chatTab.includes('getPredictiveChatCommands') && files.chatTab.includes('const showPredictiveCommands = false'), 'chat composer: predictive command pop-up is hidden');
 assert(files.appAdapter.includes('clickSaveForWebSaveButton') && files.appAdapter.includes('desktop_save_for_web_save_clicked'), 'app adapter: verifies Save for Web dialog before clicking Save');
 assert(files.capabilities.includes("bridgeTools.has('file_search')") && files.capabilities.includes("bridgeTools.has('file_read')") && files.capabilities.includes("bridgeTools.has('file_stat')") && files.capabilities.includes("bridgeTools.has('file_rename')"), 'capability audit: desktop bridge advertises file_search/file_read/file_stat/file_rename');

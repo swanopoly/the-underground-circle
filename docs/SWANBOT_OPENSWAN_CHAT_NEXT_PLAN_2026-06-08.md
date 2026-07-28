@@ -15,7 +15,7 @@ Three structural seams gate the cascade:
    (`getOpenSwanToolsForSurface`) exists but `openswanSessionRuntime` still runs
    the old loop.
 2. **v2 edge function is done but not default** — `swanbot-v2-ai` currently has
-   79 source-derived tools (54 client-delegated) and a readiness gate
+   82 source-derived tools (57 client-delegated) and a readiness gate
    (`swanbotOpenSwanReadiness.ts`), but v1 is still primary.
 3. **Chat still has six sequential routers** — Phase 1b
    (`ChatTab.sendMessage` -> `buildChatAutomationPlan` + single executor) hasn't
@@ -943,9 +943,11 @@ Pre-S1 gates + Phase 3 maturity items, per "build SwanBot as best as possible":
   `deriveSwanbotV2ToolParityFromSource()` in `swanbotOpenSwanReadiness.ts`
   parses the `swanbot-v2-ai` TOOLS array (Deno edge fn can't be imported
   from tsx) and the readiness smoke asserts EXACT match both directions.
-  Real counts re-pinned: **79 total / 54 client-delegated / 25 server** (2026-07-14: +6 coding-agent client tools).
+  Real counts re-pinned: **82 total / 57 client-delegated / 25 server** (2026-07-14: +6 coding-agent client tools; 2026-07-25: +1 guarded browser-toggle client tool; 2026-07-26: +1 sealed native-select client tool; 2026-07-27: +1 read-only advisory `browser.locator_actionability` tool, which does not authorize or bind a later mutation).
   Catalog growth or shrink now fails `smoke:swanbot-openswan-readiness`
-  until the constants are re-pinned deliberately.
+  until the constants are re-pinned deliberately. The focused locator
+  actionability smoke also runs once in both SwanBot/Chat daily and release
+  gates, `smoke:all`, and canonical readiness.
 - **R15 VERIFIED ALREADY SHIPPED** (was unrecorded) — `swanbot-v2-ai`
   already splits frozen/volatile: frozen block (identity, tool discipline,
   focused tool list, mode contract) carries `cache_control: ephemeral`;

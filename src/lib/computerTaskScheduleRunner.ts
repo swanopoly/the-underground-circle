@@ -70,7 +70,11 @@ import {
   recordComputerTaskScheduleNote,
 } from './computerTaskSchedules';
 import { fireComputerTaskWebNotification } from './computerTaskState';
-import { startComputerUseAgent, type AgentHandle } from './computerUseAgent';
+import {
+  buildComputerUsePolicyEnvelope,
+  startComputerUseAgent,
+  type AgentHandle,
+} from './computerUseAgent';
 import { resolveComputerUseCreds } from './computerUseCreds';
 import {
   buildFolderSnapshotFindings,
@@ -329,10 +333,11 @@ export function useComputerTaskScheduleRunner(opts: {
 
         setRunningScheduleId(schedule.id);
 
-        // Headless run. SAFETY: deliberately no `onConfirmationRequired`
-        // handler — the runner never grants approvals; an `ask_user` gate
-        // times out server-side and the run comes back partial (surfaced
-        // below as a failed check). By design for unattended watches.
+        // Headless run. The explicit scheduled_observation envelope is
+        // enforced server-side before every tool dispatch: reads/navigation
+        // can proceed, while any mutation ends as a truthful partial result.
+        // No confirmation handler is registered because an unattended watch
+        // must never approve an action on the user's behalf.
         const outcome = await new Promise<WatchRunOutcome>((resolve) => {
           let settled = false;
           const settle = (result: WatchRunOutcome) => {
@@ -348,6 +353,17 @@ export function useComputerTaskScheduleRunner(opts: {
             task: schedule.task,
             circleId,
             userId: schedule.created_by || userIdRef.current || undefined,
+            policy: buildComputerUsePolicyEnvelope({
+              executionMode: 'scheduled_observation',
+              source: 'watch',
+              userConstraints: ['Observe and report only; do not change browser or application data.'],
+              alwaysConfirmCategories: [
+                'browser_mutation',
+                'opaque_target',
+                'credentials',
+                'external_side_effect',
+              ],
+            }),
             browserbase: credsResult.creds.browserbase,
             onResult: ({ summary, findings }) =>
               settle({ ok: true, summary, findings: findings ?? null }),

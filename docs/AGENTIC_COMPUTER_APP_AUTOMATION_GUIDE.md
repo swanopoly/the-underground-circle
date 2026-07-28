@@ -151,6 +151,34 @@ Automation code must observe the current surface before mutating it:
 If observation fails, the next result should be a blocker with recovery options,
 not a blind retry.
 
+Browser DOM observation must minimize data before it leaves the local bridge.
+Never return any editable control value. Do not let hidden, inert, script,
+style, template, or noscript descendants reappear through an ancestor label;
+canonicalize bounded roles and keep only controlled field kind/state/length
+when that structure helps grounding. Bind tree/title to one coherent
+entry/capture/exit process/context/page/exact-URL observation. Expose only an
+HTTP(S) origin to the model and use a process-scoped opaque HMAC URL identity
+for exact read-only drift checks. Raw/forged URL identities and non-HTTP
+snapshots fail closed. That evidence is not approval or mutation target
+authority, and it must rotate across bridge restart or document navigation.
+
+For generic native input, an observation is authority only for one exact
+frontmost app process and surface. Require `appName` from the live
+`desktop.window_state` or `desktop.observe_app` result; never infer it from the
+task text. Bind exact normalized arguments plus app/PID/surface into approval,
+then collect another fresh observation at one-shot handler entry before the
+durable dispatch claim. Keep the approval digest stable across those two
+observations only when exact args, PID, and surface remain unchanged. Any PID,
+surface, argument, TTL, cloned-guard, or replay drift must stop before mutation.
+Coordinate and mouse actions additionally require both fresh screen bounds and
+a visible window belonging to the exact target app; screen bounds alone are
+never target authority. `desktop.set_element_value` requires `appName` at its
+schema boundary but currently stops before approval because its accessibility
+generation and dotted-path identity are not yet sealed through handler entry.
+If the bridge provides acknowledgement but no independent after-state, record
+`outcome_unknown`, disable automatic replay, and ask the normal recovery loop
+to inspect the app before proposing a new action.
+
 ### 3. Use Deterministic Control Surfaces
 
 Prefer control surfaces in this order:

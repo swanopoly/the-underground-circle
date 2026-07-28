@@ -258,41 +258,11 @@ async function tryStartViaReachableBridge(): Promise<LocalStarterResult> {
     };
   }
 
-  const capabilities = Array.isArray(health.json?.capabilities) ? health.json.capabilities.map(String) : [];
-  if (!capabilities.includes('exec')) {
-    return {
-      ok: false,
-      attempted: false,
-      detail: 'The reachable local bridge does not expose the restricted /exec repair endpoint.',
-    };
-  }
-
-  const command = buildDesktopBridgeBackgroundStartCommand(DESKTOP_BRIDGE_PORT);
-  try {
-    const result = await fetchJsonWithTimeout(`${base}/exec`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
-    }, 5000);
-    if (result.ok && result.json?.ok !== false) {
-      return {
-        ok: true,
-        attempted: true,
-        detail: 'Started npm run bridge in the background.',
-      };
-    }
-    return {
-      ok: false,
-      attempted: true,
-      detail: compact(result.json?.error || result.text || `HTTP ${result.status}`, 360),
-    };
-  } catch (error: any) {
-    return {
-      ok: false,
-      attempted: true,
-      detail: error?.message || 'Bridge starter request failed.',
-    };
-  }
+  return {
+    ok: false,
+    attempted: false,
+    detail: 'Automatic shell-based bridge restart is disabled. Restart the local supervisor manually, then retry pairing.',
+  };
 }
 
 function unavailableResult(detail: string): DesktopBridgeAutoConnectResult {

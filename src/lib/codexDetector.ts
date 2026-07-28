@@ -10,7 +10,13 @@ import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
-import { cacheBridgeToken, ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import {
+  bridgeAuthHeaders,
+  cacheBridgeToken,
+  ensureBridgeToken,
+  fetchBridgeAuthenticated,
+  requestBridgePairToken,
+} from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 
 const BRIDGE_PORT = 7779;
@@ -23,18 +29,14 @@ async function pairCodexBridge(bridgeUrl: string): Promise<string | null> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`${bridgeUrl}/pair`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    const token = typeof data?.token === 'string' ? data.token : null;
-    if (token) cacheBridgeToken(token);
-    return token;
+    try {
+      const paired = await requestBridgePairToken(`${bridgeUrl}/pair`, controller.signal);
+      if (!paired.ok || !paired.token) return null;
+      cacheBridgeToken(paired.token);
+      return paired.token;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return null;
   }
@@ -97,8 +99,7 @@ export async function detectCodexBridge(): Promise<boolean> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     // Check sessions endpoint, not just health — only detect if actual sessions exist
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -115,8 +116,7 @@ export async function fetchCodexSessions(): Promise<CodexSession[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -406,7 +406,7 @@ export async function launchCodexSessions(input: CodexLaunchRequest): Promise<Co
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 60_000);
       try {
-        return await fetch(`${bridgeUrl}/launch`, {
+        return await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
           body,
