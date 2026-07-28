@@ -3,7 +3,8 @@
 > How the memory system reaches the **default chat lane**. Every claim below was
 > read out of the current code, not inferred. Companion to
 > `docs/MEMORY_SYSTEM_AUDIT_2026-07-24.md` (which ranks the defects this fixes).
-> Date: 2026-07-28. Status: **P1–P5 all built and verified. Not yet run against a live model.**
+> Date: 2026-07-28. Status: **P1–P5 built, migrations APPLIED, edge functions
+> DEPLOYED to production.** Live model traffic not yet observed.
 
 ## The situation, precisely
 
@@ -200,9 +201,34 @@ files (`computerAppAdapter.ts`, `openswanToolRuntime.ts`, `swanbot.ts`); none in
 anything this touched. Smokes: `v2-memory-injection` **320**,
 `v2-save-memory-core` **213**, plus 12 adjacent memory/v2 suites — 14/14 green.
 
-**Not yet exercised against a live model.** Nothing here has run against real
-Anthropic traffic; `swanbot-v2-ai` needs a redeploy, and the agent lane in P4
-additionally needs `20260411_agent_memory_scope.sql` applied in production.
+### Shipped to production 2026-07-28
+
+Project `rjkniqiqdtroeholxacg`.
+
+- **Migrations applied** (directly, NOT via `supabase db push` — see below):
+  `20260724_agent_runs_agent_id.sql`, `20260728_memory_match_pinned.sql`,
+  `20260728_memory_security_and_indexes.sql`.
+- **Edge functions deployed**: `swanbot-v2-ai` (v13), `swanbot-ai` (v88),
+  `distil-soul-wisdom` (v7) — the last two carry the 07-24 privacy/fencing fixes,
+  which had never shipped.
+- **Pre-flight answered the audit's biggest unknown**: production was already on
+  the **owner-only** `memory_entries` revision, so **no private-memory incident
+  occurred**. `circle_memory` already had per-command policies, not `USING (true)`.
+- **Columns the v2 code depends on were verified present before deploy** —
+  `status`, `agent_id`, `pinned`, `source_run_id`, and `visibility` as
+  `NOT NULL DEFAULT 'circle_shared'` (so there are no NULL-visibility rows, and
+  the fail-closed NULL handling is moot).
+- The floor query shape was executed against production and returns real rows.
+
+**`supabase db push` must NOT be used on this project.** Only ONE migration
+(`20260213000000`) is in the remote migration history while 207 local files
+exist — production was built by hand through the SQL editor, which is why
+`docs/RUN_THIS_SQL.sql` exists. `db push` would try to replay ~206 historical
+migrations against a database that already has those objects. Apply individual
+files with `supabase db query --linked -f <file>`.
+
+**Still not exercised against a live model** — no real Anthropic traffic has
+gone through the new path yet.
 
 ## Phases
 
