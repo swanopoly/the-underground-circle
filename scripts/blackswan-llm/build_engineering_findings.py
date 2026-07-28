@@ -325,6 +325,37 @@ FINDINGS = [
         ),
         "evidence": "src/lib/openswanToolRuntime.ts browser.locator_actionability + desktop.press_keys; scripts/tool-description-lint-smoketest.ts",
     },
+    {
+        "id": "safe-production-dedupe-procedure",
+        "q": "I need to clean up ~4,600 duplicate rows in a production table. How do I do it without losing data?",
+        "a": (
+            "Pick an invariant that would DETECT data loss, then design the operation so you can assert it "
+            "before and after. Everything else follows from that.\n\n"
+            "For deduplication the invariant is `count(distinct md5(content))`. If it changes, you destroyed "
+            "something. That single check is what makes the operation safe to run at all, and it is what "
+            "caught an earlier, wrong plan: title-keyed dedupe looked correct until the data showed the "
+            "biggest group held 1,889 distinct contents under one template title.\n\n"
+            "The procedure that worked:\n\n"
+            "1. **Dry-run first.** A SELECT with the exact `row_number() OVER (PARTITION BY …)` the UPDATE "
+            "will use, reporting how many rows, how many circles, and how many pinned rows would be "
+            "touched. Numbers before actions.\n"
+            "2. **Key on content, not on the field that looks like an identity.** Partition by "
+            "`(circle_id, scope, lower(title), md5(content))`.\n"
+            "3. **Record the affected ids to a file with the reversal statement**, committed alongside the "
+            "change. 'Reversible in principle' is worthless without the id list.\n"
+            "4. **Soft-delete** (`is_active = false`) and stamp *why* into metadata "
+            "(`deactivated_reason`, `deactivated_by`) so a future reader can tell an ops action from an "
+            "application write.\n"
+            "5. **Re-assert the guards inside the UPDATE itself** — `pinned = false`, `is_active = true` — "
+            "not just in the dry-run. The dry-run and the write are separate transactions.\n"
+            "6. **Verify the invariant.** Here: 4,716 -> 3,478 active rows, distinct content 3,477 -> 3,477. "
+            "1,238 pure copies gone, zero information lost.\n\n"
+            "Afterwards, fix the monitoring that mis-measured it. The original check counted title-only "
+            "groups and would have kept reporting 3,357 'excess rows' that are legitimate distinct records "
+            "— a metric that recommends deleting real data is worse than no metric."
+        ),
+        "evidence": "ops-records/memory-dedupe-2026-07-28-deactivated-ids.json; scripts/memory-prod-invariants.mjs check 6",
+    },
 ]
 
 

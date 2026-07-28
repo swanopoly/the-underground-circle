@@ -126,17 +126,37 @@ async function main() {
       `rows=${n(r?.total)} null_user=${n(r?.null_user)} newest=${r?.newest ?? 'never'}`, r);
   }
 
-  // ── 6. Duplicate pressure — what the dedupe cores exist to prevent ───────
+  // ── 6. Duplicate pressure ────────────────────────────────────────────────
+  // Keyed on (title, CONTENT), not title alone. An earlier version of this
+  // check counted title-only groups and reported 4,595 "excess rows" — but the
+  // biggest group turned out to hold 1,889 DISTINCT contents, because
+  // `saveProceduralMemory` uses a category as the title and the run's steps as
+  // the content. Title-only pressure is a bucket-size signal, not a defect, and
+  // reporting it as one nearly justified deleting 1,889 real records.
   {
     const [r] = await q(`
-      select count(*) as dup_groups, coalesce(sum(c) - count(*), 0) as excess_rows
-      from (
-        select lower(title) as t, circle_id, count(*) as c
-        from memory_entries where is_active = true and coalesce(title,'') <> ''
-        group by 1, 2 having count(*) > 1
-      ) d;`);
-    rec(n(r?.excess_rows) < 500 ? 'PASS' : 'WARN', 'duplicate pressure is bounded',
-      `${n(r?.dup_groups)} duplicate title groups, ${n(r?.excess_rows)} excess rows`, r);
+      select
+        (select count(*) from (
+          select 1 from memory_entries where is_active = true
+          group by circle_id, scope, lower(coalesce(title,'')), md5(coalesce(content,''))
+          having count(*) > 1
+        ) g) as exact_dup_groups,
+        (select coalesce(sum(c) - count(*), 0) from (
+          select count(*) as c from memory_entries where is_active = true
+          group by circle_id, scope, lower(coalesce(title,'')), md5(coalesce(content,''))
+          having count(*) > 1
+        ) g2) as redundant_rows,
+        (select count(*) from memory_entries where is_active = true) as active,
+        (select count(distinct md5(coalesce(content,''))) from memory_entries where is_active = true) as distinct_content;`);
+    // Only byte-identical repeats are removable without losing information.
+    rec(n(r?.redundant_rows) === 0 ? 'PASS' : (n(r?.redundant_rows) < 300 ? 'WARN' : 'FAIL'),
+      'no exact-content duplicate rows',
+      `${n(r?.redundant_rows)} redundant rows across ${n(r?.exact_dup_groups)} exact-content groups`, r);
+    // Informational: how much of the table is distinct content at all.
+    const active = n(r?.active); const distinct = n(r?.distinct_content);
+    rec('PASS', 'content diversity (informational, NOT a defect)',
+      `${distinct} distinct contents across ${active} active rows`
+      + ` — a shared title with many distinct contents is a category bucket, not duplication`, r);
   }
 
   // ── 7. Privacy posture of the live policy set ────────────────────────────
