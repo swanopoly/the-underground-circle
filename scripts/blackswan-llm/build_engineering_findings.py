@@ -234,6 +234,50 @@ FINDINGS = [
         ),
         "evidence": "scripts/run-smokes.mjs; smoke:all chained 297 -> 484 suites",
     },
+    {
+        "id": "provenance-dropped-by-a-mid-chain-signature",
+        "q": "source_run_id is NULL on every memory row even though the writer passes a run id. Where does it go?",
+        "a": (
+            "A function in the middle of the chain didn't declare the parameter, so it was dropped "
+            "silently — TypeScript won't complain about an extra property that a `...opts` spread never "
+            "declares.\n\n"
+            "The chain here was `openswanSessionRuntime` -> `captureOpenSwanOutcomeMemory` -> "
+            "`saveSoulAwareAgentMemory` -> `saveAgentMemory` -> `upsertAgentMemoryTarget` -> "
+            "`saveMemoryWithContext`. The bottom accepted `sourceRunId` and the top had `run.id` in scope, "
+            "but **three** links in between never declared it. A live query confirmed the result: "
+            "`source_run_id` NULL on all 4,716 active rows.\n\n"
+            "The same chain also hardcoded `sourceSurface: 'feed_task'` at every call site, so an OpenSwan "
+            "session outcome was stamped as a Feed task — and `openswanMemoryStores` renders that back to "
+            "the model as `src:feed_task`. A wrong origin is worse than a missing one, because the model "
+            "and any future provenance UI both treat it as fact.\n\n"
+            "How to find this class of bug: don't read the writer and the schema and assume they connect. "
+            "Query the column. `count(*) filter (where col is not null)` on live data answers in one second "
+            "what code reading can miss for months. Then walk the chain link by link and check which "
+            "signature drops the field — with a spread-based chain, the compiler will not tell you."
+        ),
+        "evidence": "src/lib/memoryService.ts saveSoulAwareAgentMemory/saveAgentMemory/upsertAgentMemoryTarget; prod query 0/4716",
+    },
+    {
+        "id": "prod-invariants-vs-unit-tests",
+        "q": "We have 480+ passing smoke tests on our memory system. What can they still not tell us?",
+        "a": (
+            "Whether the deployed system is actually healthy. Pure-core tests prove the logic is right for "
+            "the inputs you thought of; they say nothing about the shape of real data.\n\n"
+            "A read-only invariant harness against the live database found three things in one run that a "
+            "full green suite had never surfaced:\n\n"
+            "- `source_run_id` set on **0 of 4,716** rows — the accountability claim was entirely unbacked.\n"
+            "- Only **738/4,716 (15.6%)** embedded, and `match_memories` filters `embedding IS NOT NULL`, so "
+            "84% of memory was invisible to semantic search.\n"
+            "- **4,621 of 4,716 (98%)** sitting in 26 duplicate-title groups.\n\n"
+            "Useful invariants to assert against production, all read-only: rows that no policy can ever "
+            "return (unreachable = silent data loss), provenance coverage, index presence, orphaned "
+            "satellite rows, whether a SECURITY DEFINER function should be INVOKER, and whether any SELECT "
+            "policy exposes private rows without an owner check.\n\n"
+            "Keep it strictly SELECT-only, separate WARN from FAIL (a warn is 'worth knowing', a fail is "
+            "'broken'), and run it after every deploy."
+        ),
+        "evidence": "scripts/memory-prod-invariants.mjs, first run 2026-07-28",
+    },
 ]
 
 

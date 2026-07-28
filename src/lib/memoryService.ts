@@ -1967,6 +1967,10 @@ export async function captureOpenSwanOutcomeMemory(opts: {
   response: string;
   artifacts?: Array<{ kind: string; title: string }>;
   verificationResults?: Array<{ ok: boolean; summary: string }>;
+  /** The run that produced this outcome. */
+  sourceRunId?: string;
+  /** The real originating surface (e.g. 'openswan_session'). */
+  sourceSurface?: string;
 }): Promise<void> {
   const failedChecks = (opts.verificationResults || []).filter((result) => !result.ok);
   const kind: AgentMemoryPromotionKind = failedChecks.length > 0 ? 'blocker' : 'success';
@@ -2000,6 +2004,8 @@ export async function captureOpenSwanOutcomeMemory(opts: {
       : 'OpenSwan blocker pattern captured from a verification failure.',
     namespace,
     sourceType: 'run',
+    sourceRunId: opts.sourceRunId,
+    sourceSurface: opts.sourceSurface,
     currentSoulKey: opts.spiritId ? `soul:${opts.spiritId}` : null,
   });
 
@@ -2556,6 +2562,10 @@ async function upsertAgentMemoryTarget(opts: {
   title: string;
   content: string;
   sourceSurface: string;
+  /** The run that produced this memory. Without it `memory_entries.source_run_id`
+   *  stays NULL and no memory can be traced back to its run — a live check on
+   *  2026-07-28 found it NULL on all 4,716 active rows. */
+  sourceRunId?: string;
   importance: number;
   retrievalMode: 'startup' | 'on_demand' | 'manual_only';
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
@@ -2634,6 +2644,7 @@ async function upsertAgentMemoryTarget(opts: {
     title: opts.title,
     content: opts.content,
     sourceSurface: opts.sourceSurface,
+    sourceRunId: opts.sourceRunId,
     visibility: 'private',
     importance: opts.importance,
     retrievalMode: opts.retrievalMode,
@@ -3069,6 +3080,14 @@ export async function saveAgentMemory(opts: {
   excerpt?: string;
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
   sourceId?: string;
+  /** The run that produced this memory (see upsertAgentMemoryTarget). */
+  sourceRunId?: string;
+  /** The REAL originating surface. This used to be hardcoded `'feed_task'` for
+   *  every caller, so an OpenSwan session outcome or an Office gateway write was
+   *  stamped as a Feed task — and `openswanMemoryStores` renders that back to the
+   *  model as `src:feed_task`. A wrong origin is worse than an absent one, so
+   *  callers that know their surface should pass it. */
+  sourceSurface?: string;
   evaluationScore?: number;
   feedback?: string;
   namespace?: MemoryNamespace;
@@ -3102,7 +3121,8 @@ export async function saveAgentMemory(opts: {
     memoryKind: opts.memoryKind || 'finding',
     title: opts.title,
     content: opts.content,
-    sourceSurface: 'feed_task',
+    sourceSurface: opts.sourceSurface || 'agent_run',
+    sourceRunId: opts.sourceRunId,
     importance: opts.importance ?? 0.7,
     retrievalMode: opts.memoryKind === 'instruction' ? 'startup' : 'on_demand',
     sourceType: opts.sourceType || 'run',
@@ -3140,7 +3160,8 @@ export async function saveAgentMemory(opts: {
       memoryKind: opts.memoryKind || 'finding',
       title: opts.title,
       content: opts.content,
-      sourceSurface: 'feed_task',
+      sourceSurface: opts.sourceSurface || 'agent_run',
+      sourceRunId: opts.sourceRunId,
       importance: Math.max(0.55, (opts.importance ?? 0.7) - 0.05),
       retrievalMode: opts.memoryKind === 'instruction' ? 'startup' : 'on_demand',
       sourceType: opts.sourceType || 'run',
@@ -3184,6 +3205,10 @@ export async function saveSoulAwareAgentMemory(opts: {
   excerpt?: string;
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
   sourceId?: string;
+  /** Run provenance, forwarded to saveAgentMemory. */
+  sourceRunId?: string;
+  /** Real originating surface, forwarded to saveAgentMemory. */
+  sourceSurface?: string;
   evaluationScore?: number;
   feedback?: string;
   namespace?: MemoryNamespace;
@@ -3238,6 +3263,13 @@ export async function saveSharedTaskMemory(opts: {
   excerpt?: string;
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
   sourceId?: string;
+  /** The run that produced this. NULL on every pre-2026-07-28 row. */
+  sourceRunId?: string;
+  /** Override when the caller is NOT Feed task execution (e.g.
+   *  `promoteAgentMemoriesToSharedPatterns`). The default stays `'feed_task'`
+   *  because that genuinely is this function's dominant caller — unlike
+   *  `saveAgentMemory`, where the same literal was a lie for every caller. */
+  sourceSurface?: string;
   evaluationScore?: number;
   feedback?: string;
   namespace?: MemoryNamespace;
@@ -3250,7 +3282,8 @@ export async function saveSharedTaskMemory(opts: {
     memoryKind: 'finding',
     title: opts.title,
     content: opts.content,
-    sourceSurface: 'feed_task',
+    sourceSurface: opts.sourceSurface || 'feed_task',
+    sourceRunId: opts.sourceRunId,
     visibility: 'circle_shared',
     importance: opts.importance ?? 0.7,
     retrievalMode: 'on_demand',

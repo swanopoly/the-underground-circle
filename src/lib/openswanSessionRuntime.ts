@@ -2891,6 +2891,14 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         response: structured.response,
         artifacts: (structured.artifacts || []).map((artifact) => ({ kind: artifact.kind, title: artifact.title })),
         verificationResults,
+        // Real provenance. A live check on 2026-07-28 found source_run_id NULL
+        // on all 4,716 active memories because this chain never carried a run
+        // id; `run` is already in scope here (mergeRunMetadata uses it above).
+        sourceRunId: run?.id,
+        // The honest surface. saveAgentMemory used to hardcode 'feed_task' for
+        // every caller, so an OpenSwan session outcome was rendered back to the
+        // model as `src:feed_task`.
+        sourceSurface: 'openswan_session',
       }).catch(() => {});
     }
   }
