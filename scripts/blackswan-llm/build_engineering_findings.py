@@ -278,6 +278,53 @@ FINDINGS = [
         ),
         "evidence": "scripts/memory-prod-invariants.mjs, first run 2026-07-28",
     },
+    {
+        "id": "failing-test-may-be-a-bad-fixture",
+        "q": "A smoke test asserts 4 tool handler calls but only 2 happen. Which is wrong, the test or the loop?",
+        "a": (
+            "Instrument before you decide. Here the loop was right and the fixture was wrong — and the "
+            "symptom pointed at the wrong subsystem entirely.\n\n"
+            "The suite is called `tool-loop-stuck-breaker`, so the obvious hypothesis is that a stuck guard "
+            "fired early. I checked two candidates and cleared both: the repeated-failure guard is "
+            "explicitly gated on `toolUses.length === 1`, and running the oscillation detector directly on "
+            "the fixture's call ring showed it does not trip until *after* round 2, by which point the "
+            "assertion would already be satisfied.\n\n"
+            "A ten-line probe that printed the result text and the event stream gave the real answer "
+            "immediately: `Stopped before tool dispatch because the model returned a missing, invalid, or "
+            "reused tool-call identity.` The fixture reused ONE `twoUses` array for both rounds, so round 2 "
+            "replayed tool_use ids `m1`/`m2`. The loop validates every provider `toolUseId` as a run-wide "
+            "unique capability and rejects a reused round before any handler enters — a deliberate, "
+            "documented safety property, not a bug.\n\n"
+            "Fix the fixture (fresh ids per round), never the guard. The general lesson: when a test fails, "
+            "read the actual error text before reasoning about the subsystem the test is named after. And "
+            "check whether the fixture violates an invariant the system deliberately enforces — a "
+            "hand-written fixture is often less realistic than production traffic."
+        ),
+        "evidence": "scripts/tool-loop-stuck-breaker-smoketest.ts; CLAUDE.md:237 run-wide-unique toolUseId",
+    },
+    {
+        "id": "tool-description-budget-vs-safety",
+        "q": "A lint says my tool description is too long and lacks when-to-use guidance. Just trim it?",
+        "a": (
+            "Trim the explanation, never the constraints — and add the guidance rather than suppressing the "
+            "rule.\n\n"
+            "Tool descriptions live in the CACHED system prefix and are paid for on every turn by every "
+            "user, which is why a length budget exists at all. But for a mutation-adjacent tool the "
+            "description is also where the safety contract is stated, so the parts that must survive any "
+            "edit are: read-only/fail-closed, what identity is rechecked, what is never returned (HTML, "
+            "text, values, secrets), and — most important — that the call does NOT authorize a later "
+            "mutation.\n\n"
+            "What compresses safely is narration: enumerated field lists, restated mechanics, and examples "
+            "the schema already encodes. Cutting an actionability tool from 782 to exactly 600 chars only "
+            "required dropping the redundant check enumeration and folding the expected* field list into "
+            "one clause.\n\n"
+            "The second rule is not bureaucratic either. In a family of more than three siblings the model "
+            "has to choose, and a description that only says what a tool *does* gives it nothing to choose "
+            "on. 'Use before a browser mutation…, and only after a fresh DOM snapshot' is both the guidance "
+            "and a real precondition."
+        ),
+        "evidence": "src/lib/openswanToolRuntime.ts browser.locator_actionability + desktop.press_keys; scripts/tool-description-lint-smoketest.ts",
+    },
 ]
 
 

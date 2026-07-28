@@ -1350,7 +1350,13 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Inspect Browser Target Actionability',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      'Read-only, fail-closed advisory evidence for one exact browser target. Resolves exactly one semantic role/name pair or one browser-native non-positional CSS selector, rechecks the current browser process/context/page/URL identity, and returns only bounded structural checks: attached, unique, sampled-stable, enabled, editable when relevant, receives events/not obscured, and current opaque page identity. Copy a fresh DOM snapshot browserProcessId/browserContextId/pageId/url into expectedBrowserProcessId/expectedBrowserContextId/expectedPageId/expectedUrl. Never mutates the page or returns HTML, page text, locator text, values, or secrets. This snapshot does not authorize or bind a later mutation; re-observe after any DOM change and use the mutation path approval/proof gate.',
+      'Use before a browser mutation to confirm one exact target is actionable, and only after a ' +
+      'fresh DOM snapshot. Read-only, fail-closed: resolves exactly one role/name pair or one ' +
+      'non-positional CSS selector, rechecks process/context/page/URL identity, and returns only ' +
+      'structural checks (attached, unique, stable, enabled, editable, unobscured). Copy the ' +
+      'snapshot browserProcessId/browserContextId/pageId/url into the matching expected* fields. ' +
+      'Never mutates; never returns HTML, text, values, or secrets. Does NOT authorize a later ' +
+      'mutation — re-observe after any DOM change and use the approval gate.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3150,7 +3156,10 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Press Desktop Keys',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      "Presses a key combo in one freshly observed exact frontmost desktop app. Supply appName exactly from desktop.window_state or desktop.observe_app; never infer it from task text. Modifiers: Cmd/Shift/Opt/Alt/Ctrl/Fn. Terminal " +
+      "Use for keyboard shortcuts in a desktop app when no more specific tool fits; prefer a " +
+      "semantic app action where one exists. Presses a key combo in one freshly observed exact " +
+      "frontmost desktop app. Supply appName exactly from desktop.window_state or " +
+      "desktop.observe_app; never infer it from task text. Modifiers: Cmd/Shift/Opt/Alt/Ctrl/Fn. Terminal " +
       "keys: a-z, 0-9, or named keys Return/Tab/Space/Escape/Delete/Left/" +
       "Right/Up/Down/F1-F12. Chain calls for multi-step actions. HITL-gated desktop action.",
     inputSchema: {

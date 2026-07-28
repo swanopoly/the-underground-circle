@@ -463,13 +463,20 @@ async function runAgentWiring() {
       input_schema: { type: 'object', properties: { k: { type: 'string' } } },
       async handler() { handlerCalls += 1; return { ok: false, error: 'element not found' }; },
     };
-    const twoUses: AgentMessageContentBlock[] = [
-      { type: 'tool_use', id: 'm1', name: 'mf', input: { k: 'a' } },
-      { type: 'tool_use', id: 'm2', name: 'mf', input: { k: 'b' } },
+    // Each ROUND must carry fresh tool_use ids. The loop validates every
+    // provider `toolUseId` as a run-wide-unique capability and rejects a reused
+    // round before any handler enters (CLAUDE.md: "bounded run-wide-unique
+    // capability"). Reusing one array for both rounds made this fixture trip
+    // that identity guard, so the run stopped after round 1 and the assertion
+    // below failed for a reason unrelated to what it is testing — the fixture
+    // was wrong, not the stuck-breaker.
+    const twoUses = (round: string): AgentMessageContentBlock[] => [
+      { type: 'tool_use', id: `${round}-1`, name: 'mf', input: { k: 'a' } },
+      { type: 'tool_use', id: `${round}-2`, name: 'mf', input: { k: 'b' } },
     ];
     const provider = scriptedProvider([
-      { stop_reason: 'tool_use', content: twoUses },
-      { stop_reason: 'tool_use', content: twoUses },
+      { stop_reason: 'tool_use', content: twoUses('r1') },
+      { stop_reason: 'tool_use', content: twoUses('r2') },
       { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] },
     ]);
     const events: AgentEvent[] = [];
