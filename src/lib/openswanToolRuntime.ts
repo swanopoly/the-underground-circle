@@ -4730,7 +4730,12 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
   if (tool === 'search_memories' || tool === 'save_memory') {
     return {
       family: 'memory',
-      approvalMode: tool === 'save_memory' ? 'auto' : 'auto',
+      // Both are 'auto' deliberately: a memory APPEND is not gated (the
+      // roadmap's HITL rule covers destructive replace/delete, which
+      // `user_memory.manage` files with a diff). This was written as a
+      // `save_memory ? 'auto' : 'auto'` ternary, which read like an intended
+      // distinction that had been lost rather than a settled policy.
+      approvalMode: 'auto',
       mutatesState: tool === 'save_memory',
       externalSideEffect: false,
       approvalKind: tool === 'save_memory' ? 'tool_use' : undefined,

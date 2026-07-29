@@ -43,7 +43,12 @@ OpenSwan should behave like an agent that **improves over time** and **can help 
 - Procedural memory as skills ([agentskills.io](https://agentskills.io) SKILL.md format so users can bring Claude Code / Cursor / Codex skills straight in).
 - Declarative memory scoped per circle + per user.
 - Post-hoc quality scoring + regression benchmarks today; offline self-evolution (DSPy/GEPA style) once we have ≥50 skills + ≥1K runs.
-- HITL gates on every write to memory or skill library.
+- HITL gates on destructive writes to memory or the skill library. Appends
+  (`save_memory`, `user_memory.manage` append) go through immediately;
+  `replace`/`delete` file an approval with a diff. This is the shipped rule
+  (see §2 "User memory agent tool"); the line previously read "every write",
+  which no code path has ever implemented and which read as a stronger
+  guarantee than the product makes.
 
 ---
 
