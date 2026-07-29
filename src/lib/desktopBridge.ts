@@ -4069,6 +4069,8 @@ export type PhotoshopUpdateTextLayerResult = {
   updatedLayers: number;
   replacementMatches: number;
   layerNames: string[];
+  /** Locked/hidden targets (layer or ancestor group) temporarily unlocked for the write, then restored. */
+  unlockedCount: number;
   docWasModified: boolean;
   docModified: boolean;
   docSaved: boolean;
@@ -4360,6 +4362,7 @@ export async function photoshopUpdateTextLayer(args: {
       updatedLayers: toNumber(d?.updatedLayers),
       replacementMatches: toNumber(d?.replacementMatches),
       layerNames: Array.isArray(d?.layerNames) ? d.layerNames.map((name: unknown) => String(name)).filter(Boolean).slice(0, 20) : [],
+      unlockedCount: toNumber(d?.unlockedCount),
       docWasModified: d?.docWasModified === true,
       docModified: d?.docModified === true,
       docSaved: d?.docSaved === true,

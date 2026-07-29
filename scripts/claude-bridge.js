@@ -5316,6 +5316,7 @@ end tell`;
             updatedLayers: Number.isFinite(Number(result?.updatedLayers)) ? Number(result.updatedLayers) : 0,
             replacementMatches: Number.isFinite(Number(result?.replacementMatches)) ? Number(result.replacementMatches) : 0,
             layerNames: Array.isArray(result?.layerNames) ? result.layerNames.slice(0, 20).map((name) => String(name || '').slice(0, 160)).filter(Boolean) : [],
+            unlockedCount: Number.isFinite(Number(result?.unlockedCount)) ? Number(result.unlockedCount) : 0,
             docWasModified: result?.docWasModified === true,
             docModified: result?.docModified === true,
             docSaved: result?.docSaved === true,
@@ -13588,6 +13589,7 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
       "\\"updatedLayers\\":" + jsonNumber(value.updatedLayers),
       "\\"replacementMatches\\":" + jsonNumber(value.replacementMatches),
       "\\"layerNames\\":" + layerNamesJson(value.layerNames),
+      "\\"unlockedCount\\":" + jsonNumber(value.unlockedCount),
       "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
       "\\"docModified\\":" + jsonBoolean(value.docModified),
       "\\"docSaved\\":" + jsonBoolean(value.docSaved),
@@ -13595,7 +13597,32 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
     ].join(",") + "}";
   }
 
-  function updateMatchingTextLayers(parent, prefix, result) {
+  // InDesign-parity lock discipline (the live Illustrator probe of 2026-07-29
+  // proved this bug class: object-model writes go straight through UI locks).
+  // A matched text layer — or any ANCESTOR GROUP — that is locked or hidden is
+  // temporarily unlocked/shown, written, and RESTORED after verification. The
+  // original write path had no lock/visibility handling at all: whether a
+  // locked layer was updated or opaquely errored depended on which lock flag
+  // the DOM happened to enforce, and a designer's lock was never restored
+  // because it was never recorded.
+  function unlockTarget(target, prop, desiredValue, unlocked) {
+    try {
+      if (!target) return;
+      var current = target[prop];
+      if (current !== desiredValue) {
+        unlocked.push({ target: target, prop: prop, value: current });
+        target[prop] = desiredValue;
+      }
+    } catch (_) {}
+  }
+
+  function restoreUnlocks(unlocked) {
+    for (var i = unlocked.length - 1; i >= 0; i -= 1) {
+      try { unlocked[i].target[unlocked[i].prop] = unlocked[i].value; } catch (_) {}
+    }
+  }
+
+  function updateMatchingTextLayers(parent, prefix, ancestors, result, unlocked) {
     var layers;
     try { layers = parent.layers; } catch (_) { return; }
     var q = String(layerName || "").toLowerCase();
@@ -13607,7 +13634,7 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
       var typename = "";
       try { typename = String(layer.typename || ""); } catch (_) {}
       if (/LayerSet/i.test(typename)) {
-        updateMatchingTextLayers(layer, pathText, result);
+        updateMatchingTextLayers(layer, pathText, ancestors.concat([layer]), result, unlocked);
         continue;
       }
       if (!isTextLayer(layer)) continue;
@@ -13616,6 +13643,14 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
       if (haystack.indexOf(q) < 0) continue;
       result.matchedLayers += 1;
       result.layerNames.push(pathText);
+      var before = unlocked.length;
+      for (var a = 0; a < ancestors.length; a += 1) {
+        unlockTarget(ancestors[a], "allLocked", false, unlocked);
+        unlockTarget(ancestors[a], "visible", true, unlocked);
+      }
+      unlockTarget(layer, "allLocked", false, unlocked);
+      unlockTarget(layer, "visible", true, unlocked);
+      result.unlockedCount += unlocked.length - before;
       try {
         layer.textItem.contents = replacementText;
         result.updatedLayers += 1;
@@ -13653,6 +13688,7 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
     updatedLayers: 0,
     replacementMatches: 0,
     layerNames: [],
+    unlockedCount: 0,
     docWasModified: false,
     docModified: false,
     docSaved: false,
@@ -13672,8 +13708,10 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
   try { app.activeDocument = doc; } catch (_) {}
   result.documentName = String(doc.name || "");
   try { result.docWasModified = doc.saved !== true; } catch (_) {}
-  updateMatchingTextLayers(doc, "", result);
+  var unlocked = [];
+  updateMatchingTextLayers(doc, "", [], result, unlocked);
   result.replacementMatches = countTextLayersWithContents(doc, replacementText);
+  restoreUnlocks(unlocked);
   try { result.docModified = doc.saved !== true; } catch (_) {}
   try { result.docSaved = doc.saved === true; } catch (_) {}
   return stringifyResult(result);

@@ -7,6 +7,8 @@
  * Run: npm run smoke:local-desktop-bridge-intent
  */
 
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   buildInDesignBannerClarification,
   buildPhotoshopGenerativeFillClarification,
@@ -2252,3 +2254,29 @@ function main() {
 }
 
 main();
+
+// ── Photoshop text-update lock discipline (live-probe class of 2026-07-29) ──
+// Object-model writes go straight through UI locks, so the update walker must
+// carry the InDesign-parity discipline: temporarily unlock/show the matched
+// layer AND its ancestor groups, write, RESTORE after verification, and report
+// how many targets needed it. Pinned at source level because this JSX has no
+// pure-module LOCKSTEP twin yet.
+{
+  const src = readFileSync(path.resolve(process.cwd(), 'scripts/claude-bridge.js'), 'utf8');
+  const start = src.indexOf('function buildPhotoshopUpdateTextLayerScript(');
+  const end = src.indexOf('function buildPhotoshopPlaceAssetScript(');
+  assert(start >= 0 && end > start, 'photoshop update builder is locatable');
+  const body = src.slice(start, end);
+  assert(body.includes('unlockTarget(layer, "allLocked", false, unlocked)'), 'update unlocks the matched layer');
+  assert(body.includes('unlockTarget(ancestors[a], "allLocked", false, unlocked)'), 'update unlocks ancestor groups too');
+  assert(body.includes('unlockTarget(layer, "visible", true, unlocked)'), 'hidden targets are shown for the write');
+  assert(body.includes('restoreUnlocks(unlocked)'), 'original lock/visibility is restored');
+  // lastIndexOf on both sides: indexOf would find the restoreUnlocks
+  // DEFINITION (which precedes everything) rather than its call site.
+  assert(
+    body.lastIndexOf('restoreUnlocks(unlocked)') > body.lastIndexOf('countTextLayersWithContents(doc, replacementText)'),
+    'restore happens AFTER verification counting',
+  );
+  assert(body.includes('result.unlockedCount +='), 'unlocked targets are counted, not silent');
+  assert(body.includes('jsonNumber(value.unlockedCount)'), 'unlockedCount is emitted in the JSX result');
+}

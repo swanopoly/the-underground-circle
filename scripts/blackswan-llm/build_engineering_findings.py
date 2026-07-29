@@ -575,6 +575,42 @@ FINDINGS = [
             "live scratch-document probe against Illustrator 2026 on 2026-07-29"
         ),
     },
+    {
+        "id": "photoshop-text-update-missing-family-lock-discipline",
+        "q": "Three sibling app adapters handle locked targets three different ways. Which one is the bug?",
+        "a": (
+            "The one with NO policy. In this codebase's design-app family, the InDesign text updater "
+            "had a deliberate contract: temporarily unlock the layer/item/story (recording each "
+            "original), write, verify, RESTORE the original lock state, and report `unlockedCount`. "
+            "The new Illustrator updater chose the other defensible contract: fail closed on a locked "
+            "target and tell the caller to unlock explicitly. Photoshop's text updater had NEITHER — "
+            "it wrote `layer.textItem.contents` with no lock or visibility check at all. Whether a "
+            "locked layer got updated or produced an opaque error depended on which flag the DOM "
+            "happened to enforce, a designer's lock was never restored because it was never recorded, "
+            "and hidden layers were edited invisibly.\n\n"
+            "Both explicit contracts are defensible; pick per lane and say so. Unlock-restore fits a "
+            "batch pipeline (dealership banners: update every disclaimer under one approval); "
+            "fail-closed fits a single-target precision edit. NO contract is the only wrong answer, "
+            "because it delegates your semantics to whatever the object model happens to do.\n\n"
+            "When porting the unlock-restore discipline, two details carry the correctness:\n"
+            "  1. Unlock the ANCESTOR CHAIN, not just the target — Photoshop groups (LayerSets) gate "
+            "their members in the UI, and a member inside a locked group is exactly the indirection "
+            "that slips past a target-only check.\n"
+            "  2. Restore AFTER verification counting, in reverse order — and when pinning that "
+            "ordering in a source-level test, compare lastIndexOf on both sides: indexOf finds the "
+            "helper's DEFINITION, which precedes everything, and the assertion passes vacuously.\n\n"
+            "Live-verified on a scratch PSD while 30 recovered user documents sat open, guarded by "
+            "expectedDocumentName: text inside a locked group updated with unlockedCount=1, the "
+            "group's lock verified RESTORED afterward, and an unlocked layer reported unlockedCount=0."
+        ),
+        "evidence": (
+            "scripts/claude-bridge.js buildPhotoshopUpdateTextLayerScript (unlockTarget/restoreUnlocks), "
+            "buildInDesignUpdateTextLayerScript (the established pattern), "
+            "src/lib/illustratorExtendScriptAdapters.ts (fail-closed variant), "
+            "scripts/local-desktop-bridge-intent-smoketest.ts source pins, "
+            "live scratch-PSD probe against Photoshop 2026 on 2026-07-29"
+        ),
+    },
 ]
 
 

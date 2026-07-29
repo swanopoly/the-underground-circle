@@ -14394,7 +14394,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
 	        return {
 	          ok: true,
 	          ...d,
-	          resultsText: `Updated ${d.updatedLayers} Photoshop text layer${d.updatedLayers === 1 ? '' : 's'} for ${layerName}${layerText}${d.documentName ? ` in ${d.documentName}` : ''}.`,
+	          resultsText: `Updated ${d.updatedLayers} Photoshop text layer${d.updatedLayers === 1 ? '' : 's'} for ${layerName}${layerText}${d.documentName ? ` in ${d.documentName}` : ''}.${(d as any).unlockedCount > 0 ? ` Temporarily unlocked/showed ${(d as any).unlockedCount} locked or hidden target(s) for the write; original lock/visibility restored.` : ''}`,
 	        } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
