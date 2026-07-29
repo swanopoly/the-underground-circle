@@ -611,6 +611,36 @@ FINDINGS = [
             "live scratch-PSD probe against Photoshop 2026 on 2026-07-29"
         ),
     },
+    {
+        "id": "unknown-app-menu-bar-discovery-and-its-limit",
+        "q": "Our agent needs to operate desktop apps it has no profile for. Where does it even start?",
+        "a": (
+            "On macOS, start with the menu bar: it is the app's complete, labelled, structured command "
+            "catalog, readable via System Events accessibility WITHOUT clicking, focusing, or launching "
+            "anything. A read-only menu inventory (names, enabled state, submenus) turns 'guess a menu "
+            "path and click blind' into 'read the catalog, then click an exact label'. Keep the reader "
+            "strictly read-only and never let it launch a non-running app — discovery must not have "
+            "side effects.\n\n"
+            "Two implementation lessons:\n"
+            "  1. Do NOT build JSON inside AppleScript — that is where escaping bugs live. Emit a "
+            "delimited line protocol (unit separator U+001F is effectively collision-free for menu "
+            "labels) and parse it on the calling side.\n"
+            "  2. When a deep-read of one named menu misses, return every available menu TITLE anyway. "
+            "A miss with no context is a dead end; a miss with the real catalog is a routing signal.\n\n"
+            "And the limit, learned live: some apps do not populate the native menu bar at all. Blender "
+            "exposes only Apple/Blender/Window — its real File/Edit/Render menus are drawn inside its "
+            "own GL window, invisible to System Events menu reads. Games and custom-chrome Electron "
+            "apps behave the same way. So the discovery ladder is: menu inventory first; if the bar "
+            "comes back near-empty, that RESULT is the signal to fall back to accessibility-tree "
+            "observation of the app's own window. The near-empty answer is not a failure of the tool — "
+            "it is the fact that routes the next step."
+        ),
+        "evidence": (
+            "scripts/claude-bridge.js buildMenuInventoryScript + /desktop/menu_inventory, "
+            "src/lib/openswanToolRuntime.ts desktop.menu_inventory (honest-miss routing), "
+            "live probes: Finder (8 menus/137 items), Blender (3 native menus only), 2026-07-29"
+        ),
+    },
 ]
 
 
