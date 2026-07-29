@@ -251,6 +251,9 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.photoshop_convert_color_mode'
   | 'desktop.illustrator_document_status'
   | 'desktop.illustrator_export_proof'
+  | 'desktop.illustrator_text_inventory'
+  | 'desktop.illustrator_set_layer_state'
+  | 'desktop.illustrator_update_text_layer'
   | 'desktop.cad_compile'
   | 'desktop.cad_inspect_file'
   | 'desktop.design_export'
@@ -849,6 +852,9 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.photoshop_convert_color_mode': { appName?: string; targetDocumentName?: string; mode: 'rgb' | 'cmyk' | 'grayscale' };
   'desktop.illustrator_document_status': { appName?: string; expectedDocumentName?: string };
   'desktop.illustrator_export_proof': { appName?: string; outputPath: string; format?: 'png' | 'svg'; scalePercent?: number; expectedDocumentName?: string };
+  'desktop.illustrator_text_inventory': { appName?: string; expectedDocumentName?: string };
+  'desktop.illustrator_set_layer_state': { appName?: string; layerName: string; visible?: boolean; locked?: boolean; expectedDocumentName?: string };
+  'desktop.illustrator_update_text_layer': { appName?: string; target: string; text: string; expectedDocumentName?: string };
   'desktop.cad_compile': { engine: 'openscad' | 'freecadcmd' | 'blender'; sourcePath: string; outputPath: string; extraArgs?: string[]; timeoutMs?: number };
   'desktop.cad_inspect_file': { path: string; maxBytes?: number };
   'desktop.design_export': { engine: 'inkscape' | 'sketchtool'; sourcePath: string; outputPath: string; options?: { widthPx?: number; heightPx?: number; pdfVersion?: string; format?: string; scale?: number }; timeoutMs?: number };
@@ -1152,6 +1158,9 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.photoshop_convert_color_mode': { ok: boolean; resultsText: string };
   'desktop.illustrator_document_status': { ok: boolean; resultsText: string };
   'desktop.illustrator_export_proof': { ok: boolean; resultsText: string };
+  'desktop.illustrator_text_inventory': { ok: boolean; resultsText: string };
+  'desktop.illustrator_set_layer_state': { ok: boolean; resultsText: string };
+  'desktop.illustrator_update_text_layer': { ok: boolean; resultsText: string };
   'desktop.cad_compile': { ok: boolean; resultsText: string };
   'desktop.cad_inspect_file': { ok: boolean; resultsText: string };
   'desktop.design_export': { ok: boolean; resultsText: string };
@@ -3659,6 +3668,55 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.illustrator_text_inventory',
+    label: 'Illustrator Text Inventory',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only inventory of the guarded Illustrator document\'s text frames via ExtendScript: frame/layer names, contents (bounded 600 chars each, 60 frames), locked/hidden state. Use before illustrator_update_text_layer or illustrator_set_layer_state to find the exact target name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.illustrator_set_layer_state',
+    label: 'Set Illustrator Layer State',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Shows/hides/locks/unlocks ONE exactly-named Illustrator layer via ExtendScript. Use after illustrator_document_status or illustrator_text_inventory supplies the exact layer name, and to unlock/show a frame before illustrator_update_text_layer. Fails closed on a missing or duplicate layer name, and success is proven by re-reading the layer\'s after-state — not by the script having run. The source document is never saved. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        layerName: { type: 'string', description: 'Exact layer name from illustrator_document_status / illustrator_text_inventory.' },
+        visible: { type: 'boolean', description: 'Target visibility. Omit to leave unchanged.' },
+        locked: { type: 'boolean', description: 'Target lock state. Omit to leave unchanged. At least one of visible/locked is required.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+      },
+      required: ['layerName'],
+    },
+  },
+  {
+    name: 'desktop.illustrator_update_text_layer',
+    label: 'Update Illustrator Text Layer',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Replaces the copy in ONE exactly-named Illustrator text frame (matched by frame name or its layer name) via ExtendScript. Use after illustrator_text_inventory supplies the exact frame/layer name; prefer this over generic typing for any Illustrator copy change. Locked/hidden/ambiguous targets fail closed; success requires the same-frame re-read to equal the requested copy. The source document is never saved — the user reviews and saves. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        target: { type: 'string', description: 'Exact text-frame name OR the exact name of the layer holding it (from illustrator_text_inventory).' },
+        text: { type: 'string', description: 'Replacement copy (<=20000 chars). Empty string clears the frame.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+      },
+      required: ['target', 'text'],
+    },
+  },
+  {
     name: 'desktop.cad_compile',
     label: 'Compile CAD Code (OpenSCAD / FreeCAD / Blender)',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -4576,6 +4634,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       'desktop.photoshop_document_status',
       'desktop.photoshop_layer_inventory',
       'desktop.illustrator_document_status',
+      'desktop.illustrator_text_inventory',
       'desktop.cad_inspect_file',
       'desktop.observe_app',
       'desktop.app_reachability',
@@ -5178,6 +5237,9 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.photoshop_convert_color_mode': ['execute'],
   'desktop.illustrator_document_status': ['execute'],
   'desktop.illustrator_export_proof': ['execute'],
+  'desktop.illustrator_text_inventory': ['execute'],
+  'desktop.illustrator_set_layer_state': ['execute'],
+  'desktop.illustrator_update_text_layer': ['execute'],
   'desktop.cad_compile': ['execute'],
   'desktop.cad_inspect_file': ['execute'],
   'desktop.design_export': ['execute'],
@@ -5412,6 +5474,9 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.photoshop_convert_color_mode',
   'desktop.illustrator_document_status',
   'desktop.illustrator_export_proof',
+  'desktop.illustrator_text_inventory',
+  'desktop.illustrator_set_layer_state',
+  'desktop.illustrator_update_text_layer',
   'desktop.cad_compile',
   'desktop.cad_inspect_file',
   'desktop.design_export',
@@ -6853,6 +6918,9 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.photoshop_convert_color_mode':
     case 'desktop.illustrator_document_status':
     case 'desktop.illustrator_export_proof':
+    case 'desktop.illustrator_text_inventory':
+    case 'desktop.illustrator_set_layer_state':
+    case 'desktop.illustrator_update_text_layer':
     case 'desktop.cad_compile':
     case 'desktop.cad_inspect_file':
     case 'desktop.design_export':
@@ -14117,6 +14185,86 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           ...d,
           resultsText: `Exported ${d.documentName || 'document'} as ${String(d.format || '').toUpperCase()} proof → ${d.outputFileName} (${d.sizeBytes} bytes). Source document not saved.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_text_inventory': {
+      try {
+        const { illustratorTextInventory, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await illustratorTextInventory({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+        });
+        if (!r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.status === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.status === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is not the expected ${a.expectedDocumentName}.` } as any;
+        if (!r.ok) return { ok: false, ...d, resultsText: `Illustrator text inventory failed: ${d.error || 'unknown error'}.` } as any;
+        // Frame contents are app/document text — untrusted observation content.
+        const rows = d.frames.map((f) =>
+          `- [${f.index}] ${f.name || '(unnamed)'} on layer ${f.layerName || '(none)'}: ${f.charCount} chars${f.locked ? ' LOCKED' : ''}${f.hidden ? ' HIDDEN' : ''}\n  ${JSON.stringify(f.contents)}${f.contentsTruncated ? ' …' : ''}`);
+        const body = fenceUntrustedObservationText(rows.join('\n'));
+        return {
+          ok: true,
+          ...d,
+          resultsText: `${d.documentName || 'Document'}: ${d.frameCount} text frame(s)${d.truncated ? ` (showing first ${d.frames.length})` : ''}.${rows.length ? `\n${body}` : ''}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_set_layer_state': {
+      try {
+        const { illustratorSetLayerState, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await illustratorSetLayerState({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          layerName: typeof a.layerName === 'string' ? a.layerName : '',
+          visible: typeof a.visible === 'boolean' ? a.visible : undefined,
+          locked: typeof a.locked === 'boolean' ? a.locked : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+        });
+        if (!r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (!r.ok || d.status !== 'applied') {
+          // Honest failure taxonomy: not_found/ambiguous/mismatch/not_applied
+          // each names its own unblock instead of a generic "failed".
+          return { ok: false, ...d, resultsText: `Illustrator layer state NOT applied (${d.status}): ${d.error || 'the after-state does not match the request'}.` } as any;
+        }
+        const bits: string[] = [];
+        if (d.afterVisible !== null && d.beforeVisible !== d.afterVisible) bits.push(`visible ${d.beforeVisible} → ${d.afterVisible}`);
+        if (d.afterLocked !== null && d.beforeLocked !== d.afterLocked) bits.push(`locked ${d.beforeLocked} → ${d.afterLocked}`);
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Layer ${JSON.stringify(d.layerName)} ${bits.length ? bits.join(', ') : 'already in the requested state (no-op)'} — verified from the re-read after-state. Source document not saved.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_update_text_layer': {
+      try {
+        const { illustratorUpdateTextLayer, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await illustratorUpdateTextLayer({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          target: typeof a.target === 'string' ? a.target : '',
+          text: typeof a.text === 'string' ? a.text : '',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+        });
+        if (!r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (!r.ok || d.status !== 'applied') {
+          return { ok: false, ...d, resultsText: `Illustrator copy update NOT applied (${d.status}): ${d.error || 'the re-read frame does not match the requested copy'}.${d.status === 'target_locked' || d.status === 'target_hidden' ? ' Use desktop.illustrator_set_layer_state first.' : ''}` } as any;
+        }
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Updated ${JSON.stringify(d.target)}: ${d.beforeCharCount} → ${d.afterCharCount} chars, verified by re-reading the same frame. Source document NOT saved — review in Illustrator and save to keep it.`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }

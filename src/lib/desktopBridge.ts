@@ -75,6 +75,9 @@ export type {
 import {
   validateIllustratorDocumentStatusParams,
   validateIllustratorExportProofParams,
+  validateIllustratorTextInventoryParams,
+  validateIllustratorSetLayerStateParams,
+  validateIllustratorUpdateTextLayerParams,
   type IllustratorExportProofFormat,
 } from './illustratorExtendScriptAdapters';
 
@@ -4981,6 +4984,195 @@ export async function illustratorExportProof(args: {
       sizeBytes: toNumber(d?.sizeBytes),
       docModified: d?.docModified === true,
       docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorTextFrameSummary = {
+  index: number;
+  name: string | null;
+  layerName: string | null;
+  charCount: number;
+  locked: boolean;
+  hidden: boolean;
+  contentsTruncated: boolean;
+  contents: string;
+};
+
+export type IllustratorTextInventory = {
+  appName: string;
+  appRunning: boolean;
+  status: string;
+  documentName: string | null;
+  frameCount: number;
+  truncated: boolean;
+  frames: IllustratorTextFrameSummary[];
+  expectedDocumentName: string | null;
+  error: string | null;
+};
+
+/** READ-ONLY inventory of the document's text frames (name/layer/contents). */
+export async function illustratorTextInventory(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+} = {}): Promise<DesktopResult<IllustratorTextInventory>> {
+  const validated = validateIllustratorTextInventoryParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_text_inventory', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorTextInventory>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const frames: IllustratorTextFrameSummary[] = Array.isArray(d?.frames)
+    ? d.frames.slice(0, 60).map((f: any) => ({
+        index: toNumber(f?.index),
+        name: f?.name ? String(f.name) : null,
+        layerName: f?.layerName ? String(f.layerName) : null,
+        charCount: toNumber(f?.charCount),
+        locked: f?.locked === true,
+        hidden: f?.hidden === true,
+        contentsTruncated: f?.contentsTruncated === true,
+        contents: typeof f?.contents === 'string' ? f.contents : '',
+      }))
+    : [];
+  return {
+    ok: d?.ok === true,
+    ...(d?.ok === true ? {} : { error: d?.error ? String(d.error) : 'Illustrator text inventory failed.' }),
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      status: d?.status ? String(d.status) : 'unknown',
+      documentName: d?.documentName ? String(d.documentName) : null,
+      frameCount: toNumber(d?.frameCount),
+      truncated: d?.truncated === true,
+      frames,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorLayerStateResult = {
+  appName: string;
+  appRunning: boolean;
+  status: string;
+  documentName: string | null;
+  layerName: string | null;
+  beforeVisible: boolean | null;
+  beforeLocked: boolean | null;
+  afterVisible: boolean | null;
+  afterLocked: boolean | null;
+  changed: boolean;
+  expectedDocumentName: string | null;
+  error: string | null;
+};
+
+/**
+ * Show/hide/lock/unlock ONE exactly-named layer. Mutating — approval-gated by
+ * the runtime. `ok` reflects the JSX's re-read after-state ("applied"), never
+ * merely that the script ran; ambiguous/duplicate layer names fail closed.
+ */
+export async function illustratorSetLayerState(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  layerName: string;
+  visible?: boolean | null;
+  locked?: boolean | null;
+}): Promise<DesktopResult<IllustratorLayerStateResult>> {
+  const validated = validateIllustratorSetLayerStateParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_set_layer_state', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    layerName: params.layerName,
+    visible: params.visible === null ? undefined : params.visible,
+    locked: params.locked === null ? undefined : params.locked,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorLayerStateResult>;
+  const d = r.data as any;
+  const nullableBool = (value: unknown): boolean | null => (typeof value === 'boolean' ? value : null);
+  return {
+    ok: d?.ok === true,
+    ...(d?.ok === true ? {} : { error: d?.error ? String(d.error) : 'Illustrator layer-state change was not applied.' }),
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      status: d?.status ? String(d.status) : 'unknown',
+      documentName: d?.documentName ? String(d.documentName) : null,
+      layerName: d?.layerName ? String(d.layerName) : null,
+      beforeVisible: nullableBool(d?.beforeVisible),
+      beforeLocked: nullableBool(d?.beforeLocked),
+      afterVisible: nullableBool(d?.afterVisible),
+      afterLocked: nullableBool(d?.afterLocked),
+      changed: d?.changed === true,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorUpdateTextResult = {
+  appName: string;
+  appRunning: boolean;
+  status: string;
+  documentName: string | null;
+  target: string | null;
+  beforeCharCount: number | null;
+  afterCharCount: number | null;
+  changed: boolean;
+  expectedDocumentName: string | null;
+  error: string | null;
+};
+
+/**
+ * Replace the copy in ONE exactly-named text frame (or the frame on an
+ * exactly-named layer). Mutating — approval-gated by the runtime. `ok` requires
+ * the JSX's same-frame re-read to equal the requested copy; locked/hidden/
+ * ambiguous targets fail closed. The source document is NEVER saved.
+ */
+export async function illustratorUpdateTextLayer(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  target: string;
+  text: string;
+}): Promise<DesktopResult<IllustratorUpdateTextResult>> {
+  const validated = validateIllustratorUpdateTextLayerParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_update_text_layer', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    target: params.target,
+    text: params.text,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorUpdateTextResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const nullableCount = (value: unknown): number | null => (value === null || value === undefined ? null : toNumber(value));
+  return {
+    ok: d?.ok === true,
+    ...(d?.ok === true ? {} : { error: d?.error ? String(d.error) : 'Illustrator text update was not applied.' }),
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      status: d?.status ? String(d.status) : 'unknown',
+      documentName: d?.documentName ? String(d.documentName) : null,
+      target: d?.target ? String(d.target) : null,
+      beforeCharCount: nullableCount(d?.beforeCharCount),
+      afterCharCount: nullableCount(d?.afterCharCount),
+      changed: d?.changed === true,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
       error: d?.error ? String(d.error) : null,
     },
   };

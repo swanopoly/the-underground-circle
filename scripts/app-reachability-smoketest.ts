@@ -370,7 +370,7 @@ assert(
   'map: photoshop commands',
 );
 assert(deepEq(REQUIRED_BRIDGE_COMMANDS_BY_DOC_SLUG.indesign, ['indesign_document_status']), 'map: indesign commands');
-assert(deepEq(REQUIRED_BRIDGE_COMMANDS_BY_DOC_SLUG.illustrator, ['illustrator_document_status']), 'map: illustrator commands');
+assert(deepEq(REQUIRED_BRIDGE_COMMANDS_BY_DOC_SLUG.illustrator, ['illustrator_document_status', 'illustrator_text_inventory']), 'map: illustrator commands');
 for (const slug of ['freecad', 'openscad', 'blender']) {
   assert(deepEq(REQUIRED_BRIDGE_COMMANDS_BY_DOC_SLUG[slug], ['cad_compile']), `map: ${slug} uses cad_compile`);
 }

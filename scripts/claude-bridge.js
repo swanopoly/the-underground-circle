@@ -2679,7 +2679,7 @@ const server = http.createServer(async (req, res) => {
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
            'photoshop_apply_adjustment_layer', 'photoshop_apply_selection_or_mask', 'photoshop_resize_canvas_or_image',
            'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode',
-           'illustrator_document_status', 'illustrator_export_proof',
+           'illustrator_document_status', 'illustrator_export_proof', 'illustrator_text_inventory', 'illustrator_set_layer_state', 'illustrator_update_text_layer',
            'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper'))
              ? ['a11y_tree', 'click_element', 'set_element_value', 'semantic_action_target', 'semantic_action']
@@ -6639,6 +6639,185 @@ end tell`;
             error: result?.error
               ? String(result.error).slice(0, 500)
               : (jsxOk && !fileExists ? 'output_not_created' : null),
+          }));
+        });
+      });
+      return;
+    }
+
+
+    // ── Illustrator text tools (LOCKSTEP src/lib/illustratorExtendScriptAdapters.ts) ──
+    //
+    // Validation mirrors the pure module's normalizers exactly: same 400
+    // messages, same bounds. The JSX proves every mutation from the re-read
+    // after-state (the emit's ok/status), never from "the script ran".
+    if (url === '/desktop/illustrator_text_inventory' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' })); return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' })); return;
+        }
+        const built = buildIllustratorTextInventoryScript({ appName, expectedDocumentName });
+        if (!built) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' })); return; }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 12000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator text inventory failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const toNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+          const frames = Array.isArray(result?.frames)
+            ? result.frames.slice(0, ILLUSTRATOR_MAX_TEXT_FRAMES).map((f) => ({
+                index: toNumber(f?.index),
+                name: f?.name ? String(f.name).slice(0, 260) : null,
+                layerName: f?.layerName ? String(f.layerName).slice(0, 260) : null,
+                charCount: toNumber(f?.charCount),
+                locked: f?.locked === true,
+                hidden: f?.hidden === true,
+                contentsTruncated: f?.contentsTruncated === true,
+                contents: typeof f?.contents === 'string' ? f.contents.slice(0, ILLUSTRATOR_MAX_TEXT_FRAME_CHARS) : '',
+              }))
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === false ? false : result != null,
+            status: result?.status ? String(result.status).slice(0, 80) : 'unknown',
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            frameCount: toNumber(result?.frameCount),
+            truncated: result?.truncated === true,
+            frames,
+            expectedDocumentName: expectedDocumentName || null,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/illustrator_set_layer_state' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawLayerName = typeof parsed?.layerName === 'string' ? parsed.layerName.trim() : '';
+        const rawVisible = parsed?.visible;
+        const rawLocked = parsed?.locked;
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' })); return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' })); return;
+        }
+        if (!rawLayerName) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'name is required — observe with illustrator_text_inventory and pass an exact target.' })); return;
+        }
+        if (rawLayerName.length > 260 || /[\x00-\x1f\u2028\u2029]/.test(rawLayerName)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'name exceeds 260 chars or contains control characters' })); return;
+        }
+        const validFlag = (value) => value === undefined || value === null || typeof value === 'boolean';
+        if (!validFlag(rawVisible) || !validFlag(rawLocked)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'visible/locked must be a boolean when provided.' })); return;
+        }
+        const visible = typeof rawVisible === 'boolean' ? rawVisible : null;
+        const locked = typeof rawLocked === 'boolean' ? rawLocked : null;
+        if (visible === null && locked === null) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'At least one of visible or locked must be supplied.' })); return;
+        }
+        const built = buildIllustratorSetLayerStateScript({ appName, expectedDocumentName, layerName: rawLayerName, visible, locked });
+        if (!built) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' })); return; }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 15000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator layer-state change failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const nullableBool = (value) => (typeof value === 'boolean' ? value : null);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === false ? false : result != null,
+            status: result?.status ? String(result.status).slice(0, 80) : 'unknown',
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            layerName: result?.layerName ? String(result.layerName).slice(0, 260) : null,
+            beforeVisible: nullableBool(result?.beforeVisible),
+            beforeLocked: nullableBool(result?.beforeLocked),
+            afterVisible: nullableBool(result?.afterVisible),
+            afterLocked: nullableBool(result?.afterLocked),
+            changed: result?.changed === true,
+            expectedDocumentName: expectedDocumentName || null,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/illustrator_update_text_layer' && req.method === 'POST') {
+      // 64KB body: the copy alone may legitimately be 20k chars.
+      readJsonBody(req, 64 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawTarget = typeof parsed?.target === 'string' ? parsed.target.trim() : '';
+        const rawText = parsed?.text;
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' })); return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' })); return;
+        }
+        if (!rawTarget) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'name is required — observe with illustrator_text_inventory and pass an exact target.' })); return;
+        }
+        if (rawTarget.length > 260 || /[\x00-\x1f\u2028\u2029]/.test(rawTarget)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'name exceeds 260 chars or contains control characters' })); return;
+        }
+        if (typeof rawText !== 'string') {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text must be a string' })); return;
+        }
+        if (rawText.length > ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `text exceeds ${ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS} chars` })); return;
+        }
+        if (/[\x00]/.test(rawText)) {
+          res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text cannot contain NUL' })); return;
+        }
+        const built = buildIllustratorUpdateTextLayerScript({ appName, expectedDocumentName, target: rawTarget, text: rawText });
+        if (!built) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' })); return; }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 15000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator text update failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const toNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+          const nullableCount = (value) => (value === null || value === undefined ? null : toNumber(value));
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === false ? false : result != null,
+            status: result?.status ? String(result.status).slice(0, 80) : 'unknown',
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            target: result?.target ? String(result.target).slice(0, 260) : null,
+            beforeCharCount: nullableCount(result?.beforeCharCount),
+            afterCharCount: nullableCount(result?.afterCharCount),
+            changed: result?.changed === true,
+            expectedDocumentName: expectedDocumentName || null,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
           }));
         });
       });
@@ -14524,6 +14703,10 @@ const ILLUSTRATOR_EXPORT_PROOF_FORMATS = ['png', 'svg'];
 const ILLUSTRATOR_MIN_SCALE_PERCENT = 50;
 const ILLUSTRATOR_MAX_SCALE_PERCENT = 400;
 const ILLUSTRATOR_DEFAULT_SCALE_PERCENT = 100;
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): text-tool bounds.
+const ILLUSTRATOR_MAX_TEXT_FRAMES = 60;
+const ILLUSTRATOR_MAX_TEXT_FRAME_CHARS = 600;
+const ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS = 20000;
 
 const runningIllustratorResolveCache = new Map();
 
@@ -14649,6 +14832,28 @@ function illustratorNotRunningJson(targetName, kind) {
       error: 'Illustrator is not running.',
     });
   }
+  if (kind === 'text_inventory') {
+    return JSON.stringify({
+      ok: false, appRunning: false, appName: targetName, status: 'not_running',
+      documentName: null, frameCount: 0, truncated: false, frames: [],
+      error: 'Illustrator is not running.',
+    });
+  }
+  if (kind === 'set_layer_state') {
+    return JSON.stringify({
+      ok: false, appRunning: false, appName: targetName, status: 'not_running',
+      documentName: null, layerName: null,
+      beforeVisible: null, beforeLocked: null, afterVisible: null, afterLocked: null,
+      changed: false, error: 'Illustrator is not running.',
+    });
+  }
+  if (kind === 'update_text_layer') {
+    return JSON.stringify({
+      ok: false, appRunning: false, appName: targetName, status: 'not_running',
+      documentName: null, target: null, beforeCharCount: null, afterCharCount: null,
+      changed: false, error: 'Illustrator is not running.',
+    });
+  }
   return JSON.stringify({
     appRunning: false,
     appName: targetName,
@@ -14664,6 +14869,316 @@ function illustratorNotRunningJson(targetName, kind) {
     documents: [],
     error: null,
   });
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): byte-identical copies
+// of illustratorTextFrameHelpersJsx and the three body builders — the pure TS
+// module is the smoke-tested source of truth; keep both sides in step.
+function illustratorTextFrameHelpersJsx() {
+  return `
+function frameLayerName(frame) {
+  try { return String(frame.layer.name || ""); } catch (_) { return ""; }
+}
+
+function frameOwnName(frame) {
+  try { return String(frame.name || ""); } catch (_) { return ""; }
+}
+
+function frameContents(frame) {
+  try { return String(frame.contents || ""); } catch (_) { return ""; }
+}
+
+function frameLocked(frame) {
+  try { return frame.locked === true; } catch (_) { return false; }
+}
+
+function frameHidden(frame) {
+  try { return frame.hidden === true; } catch (_) { return false; }
+}
+
+// A frame is addressable by its own name OR by its layer name. Layer-name
+// matching is what makes "update the headline layer" work in files where
+// designers never named the frame itself.
+function frameMatchesTarget(frame, target) {
+  var wanted = normalizeDocName(target);
+  if (!wanted) return false;
+  if (normalizeDocName(frameOwnName(frame)) === wanted) return true;
+  return normalizeDocName(frameLayerName(frame)) === wanted;
+}
+`;
+}
+
+function illustratorTextInventoryJsxBody() {
+  return `${illustratorTextFrameHelpersJsx()}
+  var out = { status: "unknown", documentName: null, frameCount: 0, truncated: false, frames: [], error: null };
+
+  if (collectionLength(app.documents) < 1) {
+    out.status = "no_document";
+    return emitInventory(out);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    out.error = "Expected Illustrator document is not open.";
+    return emitInventory(out);
+  }
+  out.documentName = String(doc.name || "");
+
+  var frames = null;
+  try { frames = doc.textFrames; } catch (_) { frames = null; }
+  var total = collectionLength(frames);
+  out.frameCount = total;
+  var limit = Math.min(total, ${ILLUSTRATOR_MAX_TEXT_FRAMES});
+  out.truncated = total > limit;
+
+  for (var i = 0; i < limit; i += 1) {
+    var f = null;
+    try { f = frames[i]; } catch (_) { f = null; }
+    if (!f) continue;
+    var body = frameContents(f);
+    out.frames.push({
+      index: i,
+      name: frameOwnName(f),
+      layerName: frameLayerName(f),
+      charCount: body.length,
+      locked: frameLocked(f),
+      hidden: frameHidden(f),
+      contents: body.length > ${ILLUSTRATOR_MAX_TEXT_FRAME_CHARS} ? body.substring(0, ${ILLUSTRATOR_MAX_TEXT_FRAME_CHARS}) : body,
+      contentsTruncated: body.length > ${ILLUSTRATOR_MAX_TEXT_FRAME_CHARS}
+    });
+  }
+  out.status = "ready";
+  return emitInventory(out);
+
+  function emitInventory(value) {
+    var parts = [];
+    for (var j = 0; j < value.frames.length; j += 1) {
+      var fr = value.frames[j];
+      parts.push("{" +
+        "\\"index\\":" + jsonNumber(fr.index) + "," +
+        "\\"name\\":" + jsonNullableString(fr.name) + "," +
+        "\\"layerName\\":" + jsonNullableString(fr.layerName) + "," +
+        "\\"charCount\\":" + jsonNumber(fr.charCount) + "," +
+        "\\"locked\\":" + jsonBoolean(fr.locked) + "," +
+        "\\"hidden\\":" + jsonBoolean(fr.hidden) + "," +
+        "\\"contentsTruncated\\":" + jsonBoolean(fr.contentsTruncated) + "," +
+        "\\"contents\\":" + jsonString(fr.contents) +
+      "}");
+    }
+    return "{" +
+      "\\"ok\\":" + jsonBoolean(value.status === "ready") + "," +
+      "\\"status\\":" + jsonString(value.status) + "," +
+      "\\"documentName\\":" + jsonNullableString(value.documentName) + "," +
+      "\\"frameCount\\":" + jsonNumber(value.frameCount) + "," +
+      "\\"truncated\\":" + jsonBoolean(value.truncated) + "," +
+      "\\"frames\\":" + jsonArray(parts) + "," +
+      "\\"error\\":" + jsonNullableString(value.error) +
+    "}";
+  }`;
+}
+
+function illustratorSetLayerStateJsxBody(args) {
+  return `  var targetLayerName = ${jsxLiteral(args.layerName)};
+  var wantVisible = ${args.visible === null ? 'null' : String(args.visible)};
+  var wantLocked = ${args.locked === null ? 'null' : String(args.locked)};
+
+  var out = {
+    status: "unknown", documentName: null, layerName: null,
+    beforeVisible: null, beforeLocked: null,
+    afterVisible: null, afterLocked: null,
+    changed: false, error: null
+  };
+
+  if (collectionLength(app.documents) < 1) { out.status = "no_document"; return emitLayerState(out); }
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    out.error = "Expected Illustrator document is not open.";
+    return emitLayerState(out);
+  }
+  out.documentName = String(doc.name || "");
+
+  // Exact, unambiguous match only. Two layers with the same name is a
+  // fail-closed condition — guessing which one the user meant is exactly the
+  // blind mutation this lane refuses.
+  var found = null, matches = 0;
+  try {
+    for (var i = 0; i < doc.layers.length; i += 1) {
+      if (normalizeDocName(String(doc.layers[i].name || "")) === normalizeDocName(targetLayerName)) {
+        matches += 1;
+        if (!found) found = doc.layers[i];
+      }
+    }
+  } catch (_) {}
+
+  if (!found) {
+    out.status = "layer_not_found";
+    out.error = "No layer with that exact name is present in the document.";
+    return emitLayerState(out);
+  }
+  if (matches > 1) {
+    out.status = "layer_ambiguous";
+    out.error = "More than one layer shares that name; rename or address a unique layer.";
+    return emitLayerState(out);
+  }
+
+  out.layerName = String(found.name || "");
+  try { out.beforeVisible = found.visible === true; } catch (_) {}
+  try { out.beforeLocked = found.locked === true; } catch (_) {}
+
+  // Unlock BEFORE changing visibility: Illustrator rejects visibility writes
+  // on a locked layer, which would otherwise report success while doing
+  // nothing. When the caller is locking, do that last for the same reason.
+  try { if (wantLocked === false) found.locked = false; } catch (_) {}
+  try { if (wantVisible !== null) found.visible = wantVisible; } catch (_) {}
+  try { if (wantLocked === true) found.locked = true; } catch (_) {}
+
+  try { out.afterVisible = found.visible === true; } catch (_) {}
+  try { out.afterLocked = found.locked === true; } catch (_) {}
+  out.changed = (out.beforeVisible !== out.afterVisible) || (out.beforeLocked !== out.afterLocked);
+
+  // Proof is the observed after-state, not the fact that we ran. If the DOM
+  // silently refused the write, this reports not_applied rather than success.
+  var visibleOk = wantVisible === null || out.afterVisible === wantVisible;
+  var lockedOk = wantLocked === null || out.afterLocked === wantLocked;
+  out.status = (visibleOk && lockedOk) ? "applied" : "not_applied";
+  if (!visibleOk || !lockedOk) out.error = "Illustrator did not accept the requested layer state.";
+  return emitLayerState(out);
+
+  function emitLayerState(v) {
+    return "{" +
+      "\\"ok\\":" + jsonBoolean(v.status === "applied") + "," +
+      "\\"status\\":" + jsonString(v.status) + "," +
+      "\\"documentName\\":" + jsonNullableString(v.documentName) + "," +
+      "\\"layerName\\":" + jsonNullableString(v.layerName) + "," +
+      "\\"beforeVisible\\":" + (v.beforeVisible === null ? "null" : jsonBoolean(v.beforeVisible)) + "," +
+      "\\"beforeLocked\\":" + (v.beforeLocked === null ? "null" : jsonBoolean(v.beforeLocked)) + "," +
+      "\\"afterVisible\\":" + (v.afterVisible === null ? "null" : jsonBoolean(v.afterVisible)) + "," +
+      "\\"afterLocked\\":" + (v.afterLocked === null ? "null" : jsonBoolean(v.afterLocked)) + "," +
+      "\\"changed\\":" + jsonBoolean(v.changed) + "," +
+      "\\"error\\":" + jsonNullableString(v.error) +
+    "}";
+  }`;
+}
+
+function illustratorUpdateTextLayerJsxBody(args) {
+  return `${illustratorTextFrameHelpersJsx()}
+  var target = ${jsxLiteral(args.target)};
+  var nextText = ${jsxLiteral(args.text)};
+
+  var out = {
+    status: "unknown", documentName: null, target: null,
+    beforeCharCount: null, afterCharCount: null, changed: false, error: null
+  };
+
+  if (collectionLength(app.documents) < 1) { out.status = "no_document"; return emitUpdate(out); }
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    out.error = "Expected Illustrator document is not open.";
+    return emitUpdate(out);
+  }
+  out.documentName = String(doc.name || "");
+
+  var frames = null;
+  try { frames = doc.textFrames; } catch (_) { frames = null; }
+  var found = null, matches = 0;
+  for (var i = 0; i < collectionLength(frames); i += 1) {
+    var f = null;
+    try { f = frames[i]; } catch (_) { f = null; }
+    if (f && frameMatchesTarget(f, target)) {
+      matches += 1;
+      if (!found) found = f;
+    }
+  }
+
+  if (!found) {
+    out.status = "target_not_found";
+    out.error = "No text frame matches that name or layer name.";
+    return emitUpdate(out);
+  }
+  if (matches > 1) {
+    out.status = "target_ambiguous";
+    out.error = "More than one text frame matches that name; address a unique frame.";
+    return emitUpdate(out);
+  }
+  // A locked or hidden frame silently swallows the write, so refuse up front
+  // rather than reporting a success the user cannot see.
+  if (frameLocked(found)) {
+    out.status = "target_locked";
+    out.error = "The target text frame is locked. Unlock it (illustrator_set_layer_state) and retry.";
+    return emitUpdate(out);
+  }
+  if (frameHidden(found)) {
+    out.status = "target_hidden";
+    out.error = "The target text frame is hidden. Show it (illustrator_set_layer_state) and retry.";
+    return emitUpdate(out);
+  }
+
+  out.target = frameOwnName(found) || frameLayerName(found);
+  out.beforeCharCount = frameContents(found).length;
+  try { found.contents = nextText; } catch (e) {
+    out.status = "write_refused";
+    out.error = "Illustrator refused the text write.";
+    return emitUpdate(out);
+  }
+
+  // Re-read the SAME frame — the write is only proven by the after-state.
+  var confirmed = frameContents(found);
+  out.afterCharCount = confirmed.length;
+  out.changed = out.afterCharCount !== out.beforeCharCount || confirmed === nextText;
+  out.status = confirmed === nextText ? "applied" : "not_applied";
+  if (out.status !== "applied") out.error = "The frame contents do not match the requested copy after the write.";
+  return emitUpdate(out);
+
+  function emitUpdate(v) {
+    return "{" +
+      "\\"ok\\":" + jsonBoolean(v.status === "applied") + "," +
+      "\\"status\\":" + jsonString(v.status) + "," +
+      "\\"documentName\\":" + jsonNullableString(v.documentName) + "," +
+      "\\"target\\":" + jsonNullableString(v.target) + "," +
+      "\\"beforeCharCount\\":" + (v.beforeCharCount === null ? "null" : jsonNumber(v.beforeCharCount)) + "," +
+      "\\"afterCharCount\\":" + (v.afterCharCount === null ? "null" : jsonNumber(v.afterCharCount)) + "," +
+      "\\"changed\\":" + jsonBoolean(v.changed) + "," +
+      "\\"error\\":" + jsonNullableString(v.error) +
+    "}";
+  }`;
+}
+
+function buildIllustratorTextInventoryScript({ appName, expectedDocumentName }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorTextInventoryJsxBody()}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'text_inventory'));
+}
+
+function buildIllustratorSetLayerStateScript({ appName, expectedDocumentName, layerName, visible, locked }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorSetLayerStateJsxBody({ layerName, visible, locked })}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'set_layer_state'));
+}
+
+function buildIllustratorUpdateTextLayerScript({ appName, expectedDocumentName, target, text }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorUpdateTextLayerJsxBody({ target, text })}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'update_text_layer'));
 }
 
 // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):

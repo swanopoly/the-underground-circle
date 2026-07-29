@@ -716,7 +716,11 @@ export function normalizeIllustratorUpdateText(value: unknown): IllustratorParam
   return { ok: true, value };
 }
 
-function illustratorTextFrameHelpersJsx(): string {
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): shared text-frame observers for the
+ * inventory and update scripts — byte-identical twin lives bridge-side.
+ */
+export function illustratorTextFrameHelpersJsx(): string {
   return `
 function frameLayerName(frame) {
   try { return String(frame.layer.name || ""); } catch (_) { return ""; }
@@ -750,18 +754,13 @@ function frameMatchesTarget(frame, target) {
 `;
 }
 
-export function buildIllustratorTextInventoryJsx(
-  params: IllustratorTextInventoryParams,
-): IllustratorExtendScriptBuild {
-  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
-  if (!appCheck.ok) return { jsx: '', errors: [appCheck.error] };
-  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
-  if (!docCheck.ok) return { jsx: '', errors: [docCheck.error] };
-
-  const jsx = `
-(function () {
-${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.value })}
-${illustratorTextFrameHelpersJsx()}
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): byte-identical twin bridge-side.
+ * Includes the shared text-frame helpers so the bridge can compose
+ * prelude + body exactly like buildIllustratorTextInventoryJsx does.
+ */
+export function illustratorTextInventoryJsxBody(): string {
+  return `${illustratorTextFrameHelpersJsx()}
   var out = { status: "unknown", documentName: null, frameCount: 0, truncated: false, frames: [], error: null };
 
   if (collectionLength(app.documents) < 1) {
@@ -826,7 +825,21 @@ ${illustratorTextFrameHelpersJsx()}
       "\\"frames\\":" + jsonArray(parts) + "," +
       "\\"error\\":" + jsonNullableString(value.error) +
     "}";
-  }
+  }`;
+}
+
+export function buildIllustratorTextInventoryJsx(
+  params: IllustratorTextInventoryParams,
+): IllustratorExtendScriptBuild {
+  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
+  if (!appCheck.ok) return { jsx: '', errors: [appCheck.error] };
+  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
+  if (!docCheck.ok) return { jsx: '', errors: [docCheck.error] };
+
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.value })}
+${illustratorTextInventoryJsxBody()}
 }());
 `;
   return { jsx, errors: [] };
@@ -858,36 +871,19 @@ export function normalizeIllustratorLayerFlag(
   return { ok: true, value };
 }
 
-export function buildIllustratorSetLayerStateJsx(
-  params: IllustratorSetLayerStateParams,
-): IllustratorExtendScriptBuild {
-  const errors: string[] = [];
-  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
-  if (!appCheck.ok) errors.push(appCheck.error);
-  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
-  if (!docCheck.ok) errors.push(docCheck.error);
-  const layerCheck = normalizeIllustratorTargetName(params.layerName);
-  if (!layerCheck.ok) errors.push(layerCheck.error);
-  const visibleCheck = normalizeIllustratorLayerFlag(params.visible, 'visible');
-  if (!visibleCheck.ok) errors.push(visibleCheck.error);
-  const lockedCheck = normalizeIllustratorLayerFlag(params.locked, 'locked');
-  if (!lockedCheck.ok) errors.push(lockedCheck.error);
-  if (errors.length) return { jsx: '', errors };
-
-  const visible = visibleCheck.ok ? visibleCheck.value : null;
-  const locked = lockedCheck.ok ? lockedCheck.value : null;
-  // A call that changes nothing is a caller bug, not a no-op to absorb: it
-  // would consume an approval and produce a "verified" receipt for no work.
-  if (visible === null && locked === null) {
-    return { jsx: '', errors: ['At least one of visible or locked must be supplied.'] };
-  }
-
-  const jsx = `
-(function () {
-${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.ok ? docCheck.value : '' })}
-  var targetLayerName = ${JSON.stringify(layerCheck.ok ? layerCheck.value : '')};
-  var wantVisible = ${visible === null ? 'null' : String(visible)};
-  var wantLocked = ${locked === null ? 'null' : String(locked)};
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): byte-identical twin bridge-side.
+ * Embeds go through jsxLiteral (NOT bare JSON.stringify): JSON.stringify
+ * emits U+2028/U+2029 raw, and a layer name is user text.
+ */
+export function illustratorSetLayerStateJsxBody(args: {
+  layerName: string;
+  visible: boolean | null;
+  locked: boolean | null;
+}): string {
+  return `  var targetLayerName = ${jsxLiteral(args.layerName)};
+  var wantVisible = ${args.visible === null ? 'null' : String(args.visible)};
+  var wantLocked = ${args.locked === null ? 'null' : String(args.locked)};
 
   var out = {
     status: "unknown", documentName: null, layerName: null,
@@ -965,7 +961,37 @@ ${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.ok ? docChe
       "\\"changed\\":" + jsonBoolean(v.changed) + "," +
       "\\"error\\":" + jsonNullableString(v.error) +
     "}";
+  }`;
+}
+
+export function buildIllustratorSetLayerStateJsx(
+  params: IllustratorSetLayerStateParams,
+): IllustratorExtendScriptBuild {
+  const errors: string[] = [];
+  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
+  if (!appCheck.ok) errors.push(appCheck.error);
+  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
+  if (!docCheck.ok) errors.push(docCheck.error);
+  const layerCheck = normalizeIllustratorTargetName(params.layerName);
+  if (!layerCheck.ok) errors.push(layerCheck.error);
+  const visibleCheck = normalizeIllustratorLayerFlag(params.visible, 'visible');
+  if (!visibleCheck.ok) errors.push(visibleCheck.error);
+  const lockedCheck = normalizeIllustratorLayerFlag(params.locked, 'locked');
+  if (!lockedCheck.ok) errors.push(lockedCheck.error);
+  if (errors.length) return { jsx: '', errors };
+
+  const visible = visibleCheck.ok ? visibleCheck.value : null;
+  const locked = lockedCheck.ok ? lockedCheck.value : null;
+  // A call that changes nothing is a caller bug, not a no-op to absorb: it
+  // would consume an approval and produce a "verified" receipt for no work.
+  if (visible === null && locked === null) {
+    return { jsx: '', errors: ['At least one of visible or locked must be supplied.'] };
   }
+
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.ok ? docCheck.value : '' })}
+${illustratorSetLayerStateJsxBody({ layerName: layerCheck.ok ? layerCheck.value : '', visible, locked })}
 }());
 `;
   return { jsx, errors: [] };
@@ -985,26 +1011,16 @@ export type IllustratorUpdateTextLayerParams = {
   text: string;
 };
 
-export function buildIllustratorUpdateTextLayerJsx(
-  params: IllustratorUpdateTextLayerParams,
-): IllustratorExtendScriptBuild {
-  const errors: string[] = [];
-  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
-  if (!appCheck.ok) errors.push(appCheck.error);
-  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
-  if (!docCheck.ok) errors.push(docCheck.error);
-  const targetCheck = normalizeIllustratorTargetName(params.target);
-  if (!targetCheck.ok) errors.push(targetCheck.error);
-  const textCheck = normalizeIllustratorUpdateText(params.text);
-  if (!textCheck.ok) errors.push(textCheck.error);
-  if (errors.length) return { jsx: '', errors };
-
-  const jsx = `
-(function () {
-${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.ok ? docCheck.value : '' })}
-${illustratorTextFrameHelpersJsx()}
-  var target = ${JSON.stringify(targetCheck.ok ? targetCheck.value : '')};
-  var nextText = ${JSON.stringify(textCheck.ok ? textCheck.value : '')};
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): byte-identical twin bridge-side.
+ * `text` is ARBITRARY user copy — jsxLiteral is mandatory here, because a
+ * U+2028/U+2029 in the copy would end the ES3 string literal mid-value
+ * under bare JSON.stringify and the script would not even parse.
+ */
+export function illustratorUpdateTextLayerJsxBody(args: { target: string; text: string }): string {
+  return `${illustratorTextFrameHelpersJsx()}
+  var target = ${jsxLiteral(args.target)};
+  var nextText = ${jsxLiteral(args.text)};
 
   var out = {
     status: "unknown", documentName: null, target: null,
@@ -1082,8 +1098,125 @@ ${illustratorTextFrameHelpersJsx()}
       "\\"changed\\":" + jsonBoolean(v.changed) + "," +
       "\\"error\\":" + jsonNullableString(v.error) +
     "}";
-  }
+  }`;
+}
+
+export function buildIllustratorUpdateTextLayerJsx(
+  params: IllustratorUpdateTextLayerParams,
+): IllustratorExtendScriptBuild {
+  const errors: string[] = [];
+  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
+  if (!appCheck.ok) errors.push(appCheck.error);
+  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
+  if (!docCheck.ok) errors.push(docCheck.error);
+  const targetCheck = normalizeIllustratorTargetName(params.target);
+  if (!targetCheck.ok) errors.push(targetCheck.error);
+  const textCheck = normalizeIllustratorUpdateText(params.text);
+  if (!textCheck.ok) errors.push(textCheck.error);
+  if (errors.length) return { jsx: '', errors };
+
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.ok ? docCheck.value : '' })}
+${illustratorUpdateTextLayerJsxBody({ target: targetCheck.ok ? targetCheck.value : '', text: textCheck.ok ? textCheck.value : '' })}
 }());
 `;
   return { jsx, errors: [] };
+}
+
+// ─── Aggregate validators (desktopBridge reuse, mirrors document_status) ────
+
+export type NormalizedIllustratorTextInventoryParams = {
+  appName: string;
+  expectedDocumentName: string;
+};
+
+export function validateIllustratorTextInventoryParams(
+  params: IllustratorTextInventoryParams,
+): { ok: true; params: NormalizedIllustratorTextInventoryParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+    },
+  };
+}
+
+export type NormalizedIllustratorSetLayerStateParams = {
+  appName: string;
+  expectedDocumentName: string;
+  layerName: string;
+  visible: boolean | null;
+  locked: boolean | null;
+};
+
+export function validateIllustratorSetLayerStateParams(
+  params: IllustratorSetLayerStateParams,
+): { ok: true; params: NormalizedIllustratorSetLayerStateParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  const layerName = normalizeIllustratorTargetName(params?.layerName);
+  if (!layerName.ok) errors.push(layerName.error);
+  const visible = normalizeIllustratorLayerFlag(params?.visible, 'visible');
+  if (!visible.ok) errors.push(visible.error);
+  const locked = normalizeIllustratorLayerFlag(params?.locked, 'locked');
+  if (!locked.ok) errors.push(locked.error);
+  if (
+    visible.ok && locked.ok
+    && visible.value === null && locked.value === null
+  ) {
+    errors.push('At least one of visible or locked must be supplied.');
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      layerName: layerName.ok ? layerName.value : '',
+      visible: visible.ok ? visible.value : null,
+      locked: locked.ok ? locked.value : null,
+    },
+  };
+}
+
+export type NormalizedIllustratorUpdateTextLayerParams = {
+  appName: string;
+  expectedDocumentName: string;
+  target: string;
+  text: string;
+};
+
+export function validateIllustratorUpdateTextLayerParams(
+  params: IllustratorUpdateTextLayerParams,
+): { ok: true; params: NormalizedIllustratorUpdateTextLayerParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  const target = normalizeIllustratorTargetName(params?.target);
+  if (!target.ok) errors.push(target.error);
+  const text = normalizeIllustratorUpdateText(params?.text);
+  if (!text.ok) errors.push(text.error);
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      target: target.ok ? target.value : '',
+      text: text.ok ? text.value : '',
+    },
+  };
 }

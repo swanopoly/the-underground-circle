@@ -300,15 +300,25 @@ type BridgeJsxFns = {
   illustratorJsxPrelude: (args: { expectedDocumentName: string }) => string;
   illustratorDocumentStatusJsxBody: () => string;
   illustratorExportProofJsxBody: (args: { outputPath: string; format: string; scalePercent: number | null }) => string;
+  illustratorTextInventoryJsxBody: () => string;
+  illustratorSetLayerStateJsxBody: (args: { layerName: string; visible: boolean | null; locked: boolean | null }) => string;
+  illustratorUpdateTextLayerJsxBody: (args: { target: string; text: string }) => string;
 };
 
 const bridgeFns = new Function(`
 ${extractBridgeConstLine('ILLUSTRATOR_DEFAULT_SCALE_PERCENT')}
+${extractBridgeConstLine('ILLUSTRATOR_MAX_TEXT_FRAMES')}
+${extractBridgeConstLine('ILLUSTRATOR_MAX_TEXT_FRAME_CHARS')}
 ${extractBridgeTopLevel('jsxLiteral')}
 ${extractBridgeTopLevel('illustratorJsxPrelude')}
 ${extractBridgeTopLevel('illustratorDocumentStatusJsxBody')}
 ${extractBridgeTopLevel('illustratorExportProofJsxBody')}
-return { illustratorJsxPrelude, illustratorDocumentStatusJsxBody, illustratorExportProofJsxBody };
+${extractBridgeTopLevel('illustratorTextFrameHelpersJsx')}
+${extractBridgeTopLevel('illustratorTextInventoryJsxBody')}
+${extractBridgeTopLevel('illustratorSetLayerStateJsxBody')}
+${extractBridgeTopLevel('illustratorUpdateTextLayerJsxBody')}
+return { illustratorJsxPrelude, illustratorDocumentStatusJsxBody, illustratorExportProofJsxBody,
+  illustratorTextInventoryJsxBody, illustratorSetLayerStateJsxBody, illustratorUpdateTextLayerJsxBody };
 `)() as BridgeJsxFns;
 
 function composeBridgeJsx(expectedDocumentName: string, body: string): string {
@@ -425,6 +435,58 @@ for (const [label, built] of [
 ] as const) {
   assert.equal(/app\.quit/.test(built.jsx), false, `${label}: never quits Illustrator`);
   assert.ok(built.jsx.includes('document_mismatch'), `${label}: wrong open document fails closed`);
+}
+
+
+// ── LOCKSTEP: the three text-tool scripts, byte-identical both sides ────────
+// Same discipline as status/export above: the bridge executes ONLY what this
+// comparison proves equals the smoke-tested pure module — a one-character
+// drift bridge-side is a silent behavioural fork, and this catches it.
+
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_MAX_TEXT_FRAMES').includes(String(ILLUSTRATOR_MAX_TEXT_FRAMES)),
+  'LOCKSTEP: bridge frame cap matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS').includes(String(ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS)),
+  'LOCKSTEP: bridge update-text cap matches the pure module',
+);
+
+assert.equal(
+  composeBridgeJsx('poster "v2".ai', bridgeFns.illustratorTextInventoryJsxBody()),
+  buildIllustratorTextInventoryJsx({ expectedDocumentName: 'poster "v2".ai' }).jsx,
+  'LOCKSTEP: bridge text-inventory jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.illustratorSetLayerStateJsxBody({ layerName: 'Guides', visible: false, locked: null })),
+  buildIllustratorSetLayerStateJsx({ layerName: 'Guides', visible: false }).jsx,
+  'LOCKSTEP: bridge set-layer-state jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('brand.ai', bridgeFns.illustratorSetLayerStateJsxBody({ layerName: 'Art', visible: true, locked: true })),
+  buildIllustratorSetLayerStateJsx({ expectedDocumentName: 'brand.ai', layerName: 'Art', visible: true, locked: true }).jsx,
+  'LOCKSTEP: set-layer-state with both flags is byte-identical',
+);
+// Copy containing quotes AND the ES3 line separators — the exact payload that
+// motivated jsxLiteral over bare JSON.stringify.
+const trickyCopy = 'Line "one" line two end';
+assert.equal(
+  composeBridgeJsx('', bridgeFns.illustratorUpdateTextLayerJsxBody({ target: 'Headline', text: trickyCopy })),
+  buildIllustratorUpdateTextLayerJsx({ target: 'Headline', text: trickyCopy }).jsx,
+  'LOCKSTEP: bridge update-text jsx is byte-identical with the pure module (incl. U+2028/29 copy)',
+);
+assert.equal(
+  buildIllustratorUpdateTextLayerJsx({ target: 'Headline', text: trickyCopy }).jsx.includes(' '),
+  false,
+  'U+2028 never lands RAW inside the generated script — it must arrive escaped',
+);
+
+for (const [label, jsx] of [
+  ['bridge text_inventory', composeBridgeJsx('', bridgeFns.illustratorTextInventoryJsxBody())],
+  ['bridge set_layer_state', composeBridgeJsx('', bridgeFns.illustratorSetLayerStateJsxBody({ layerName: 'x', visible: true, locked: null }))],
+  ['bridge update_text_layer', composeBridgeJsx('', bridgeFns.illustratorUpdateTextLayerJsxBody({ target: 'x', text: 'y' }))],
+] as const) {
+  assertNeverTouchesSource(jsx, label);
 }
 
 console.log('All Illustrator ExtendScript adapter smoke cases passed.');

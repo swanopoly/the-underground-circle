@@ -46,6 +46,7 @@ const SWANBOT_V2_ADDITIONAL_READ_ONLY_APP_TOOLS = new Set([
   'browser.wp_admin_source_intelligence',
   'desktop.cad_inspect_file',
   'desktop.illustrator_document_status',
+  'desktop.illustrator_text_inventory',
   'desktop.indesign_document_status',
   'desktop.indesign_text_inventory',
   'desktop.photoshop_document_status',

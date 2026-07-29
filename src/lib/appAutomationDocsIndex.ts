@@ -43,7 +43,7 @@ export const APP_AUTOMATION_DOCS: AppAutomationDocEntry[] = [
   // Adobe / creative
   entry('photoshop', 'Adobe Photoshop', 'executable', ['photoshop', '.psd', 'psd file']),
   entry('indesign', 'Adobe InDesign', 'executable', ['indesign', '.indd', 'data merge']),
-  entry('illustrator', 'Adobe Illustrator', 'partial', ['illustrator', '.ai file']),
+  entry('illustrator', 'Adobe Illustrator', 'executable', ['illustrator', '.ai file']),
   entry('after-effects', 'Adobe After Effects', 'buildout_only', ['after effects', 'aftereffects', '.aep']),
   entry('premiere-pro', 'Adobe Premiere Pro', 'buildout_only', ['premiere', '.prproj']),
   entry('lightroom-classic', 'Adobe Lightroom Classic', 'buildout_only', ['lightroom']),

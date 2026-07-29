@@ -168,7 +168,10 @@ async function main(): Promise<void> {
   // ─── (c3) detail: every status renders plain words, bounded, doc-pathed ──
   {
     const statusProbes: Array<[string, string]> = [
-      ['illustrator', 'Partially automated'],
+      // illustrator moved partial → executable on 2026-07-29 (text tools wired
+      // end to end), so the partial-status probe now uses inkscape.
+      ['illustrator', 'Executable'],
+      ['inkscape', 'Partially automated'],
       ['maya', 'Buildout-only'],
       ['figma', 'Web-only'],
       ['onshape', 'Cloud service'],

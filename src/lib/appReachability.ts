@@ -98,7 +98,7 @@ export interface AppReachabilityReport {
 export const REQUIRED_BRIDGE_COMMANDS_BY_DOC_SLUG: Partial<Record<string, string[]>> = {
   photoshop: ['photoshop_document_status', 'photoshop_layer_inventory'],
   indesign: ['indesign_document_status'],
-  illustrator: ['illustrator_document_status'],
+  illustrator: ['illustrator_document_status', 'illustrator_text_inventory'],
   freecad: ['cad_compile'],
   openscad: ['cad_compile'],
   blender: ['cad_compile'],
