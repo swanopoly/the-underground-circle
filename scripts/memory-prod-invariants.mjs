@@ -53,6 +53,13 @@ const rec = (level, name, detail, data) => {
 
 const n = (v) => (v === null || v === undefined ? 0 : Number(v));
 
+/**
+ * When `source_run_id` started being written (commits 461c68a client / b38a3ca
+ * v1 edge, deployed 2026-07-29). Provenance is graded only on rows created
+ * after this instant — earlier rows are unbackfillable, not defective.
+ */
+const PROVENANCE_WIRED_AT = '2026-07-29T11:40:00Z';
+
 async function main() {
   console.log('memory prod invariants — READ ONLY\n');
 
@@ -77,17 +84,38 @@ async function main() {
   }
 
   // ── 2. Provenance: the product's core accountability claim ───────────────
+  // Graded ONLY on rows written after the writer was wired. The 3,471 rows that
+  // predate it can never be backfilled (their runs are gone), so an all-time
+  // ratio is pinned near zero forever and the check degrades into an alarm
+  // everyone learns to ignore — the failure mode auto-test's
+  // confirm-before-alarm exists to prevent. A rolling window has the same
+  // problem in miniature: it would score rows from before the fix and report a
+  // regression for a fix that had just landed. All-time is still REPORTED; it
+  // just does not set the level.
   {
     const [r] = await q(`
       select count(*) as total,
              count(*) filter (where source_run_id is not null) as with_run,
+             count(*) filter (where created_at > '${PROVENANCE_WIRED_AT}') as recent,
+             count(*) filter (where created_at > '${PROVENANCE_WIRED_AT}'
+                              and source_run_id is not null) as recent_with_run,
              count(*) filter (where source_surface = 'feed_task') as stamped_feed_task,
              count(distinct source_surface) as distinct_surfaces
       from memory_entries where is_active = true;`);
     const pct = n(r?.total) ? (100 * n(r?.with_run) / n(r?.total)).toFixed(1) : '0.0';
-    rec(n(r?.with_run) > 0 ? 'PASS' : 'WARN',
-      'memories are traceable to the run that produced them',
-      `source_run_id set on ${n(r?.with_run)}/${n(r?.total)} (${pct}%) — 0 means the accountability claim is unbacked`, r);
+    const recent = n(r?.recent);
+    const recentPct = recent ? (100 * n(r?.recent_with_run) / recent) : 0;
+    // No recent writes at all is not a provenance failure — there is nothing to
+    // judge. Say so rather than scoring an empty window.
+    const level = recent === 0 ? 'PASS' : recentPct >= 50 ? 'PASS' : recentPct > 0 ? 'WARN' : 'FAIL';
+    rec(level,
+      'recent memories are traceable to the run that produced them',
+      recent === 0
+        ? `no memories written since the writer was wired (${PROVENANCE_WIRED_AT}) — nothing to grade yet`
+          + ` | all-time ${n(r?.with_run)}/${n(r?.total)} (${pct}%)`
+        : `since wiring: ${n(r?.recent_with_run)}/${recent} (${recentPct.toFixed(1)}%) carry source_run_id`
+          + ` | all-time ${n(r?.with_run)}/${n(r?.total)} (${pct}%) — pre-2026-07-29 rows cannot be backfilled`,
+      r);
     rec('PASS', 'source_surface distribution',
       `feed_task=${n(r?.stamped_feed_task)}, distinct surfaces=${n(r?.distinct_surfaces)} (a high feed_task share is the known hardcode)`, r);
   }
