@@ -208,8 +208,17 @@ function afterValueContains(diff: A11ySummaryDiff | null | undefined, text: stri
     const after = normalize(c.after);
     if (!after) return false;
     if (after.includes(want)) return true;
-    const looksTruncated = c.after.length >= A11Y_SNAPSHOT_MAX_STRING_LENGTH;
-    return looksTruncated && want.includes(after);
+    // `snapshotA11ySummary` truncates via clampString: (max - 1) characters
+    // plus a literal '…', so a truncated value is EXACTLY max long and ends in
+    // that ellipsis. Both conditions together are the signature — length alone
+    // would misread a value that merely happens to be long, and the ellipsis
+    // alone would misread text the user genuinely typed with one. The ellipsis
+    // itself is not in our sent text, so it must be stripped before comparing.
+    const truncated =
+      c.after.length >= A11Y_SNAPSHOT_MAX_STRING_LENGTH && c.after.endsWith('…');
+    if (!truncated) return false;
+    const body = normalize(c.after.slice(0, -1));
+    return body.length > 0 && want.includes(body);
   });
 }
 

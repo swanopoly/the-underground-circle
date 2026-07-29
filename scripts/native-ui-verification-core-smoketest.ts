@@ -14,7 +14,13 @@ import {
   verifyNativeUiAfterState,
   MAX_REASON_CHARS,
 } from '../src/lib/nativeUiVerificationCore';
-import { A11Y_SNAPSHOT_MAX_STRING_LENGTH, type A11ySummaryDiff } from '../src/lib/a11yTreeDiff';
+import {
+  A11Y_SNAPSHOT_MAX_STRING_LENGTH,
+  diffA11ySummaries,
+  snapshotA11ySummary,
+  type A11yDiffSourceNode,
+  type A11ySummaryDiff,
+} from '../src/lib/a11yTreeDiff';
 
 let passed = 0;
 const failures: string[] = [];
@@ -143,7 +149,12 @@ function main() {
   {
     const long = `Chapter one. ${'lorem ipsum dolor sit amet '.repeat(200)}`;
     const plan = planNativeUiVerification('desktop.paste_text', { text: long });
-    const truncatedAfter = long.slice(0, A11Y_SNAPSHOT_MAX_STRING_LENGTH);
+    // Built the way clampString actually truncates: (max - 1) characters plus a
+    // literal ellipsis. An earlier version of this fixture used a plain
+    // max-length slice with no ellipsis — which the real snapshot never
+    // produces — and it masked the fact that the ellipsis has to be stripped
+    // before comparing. The integration block below is what caught it.
+    const truncatedAfter = `${long.slice(0, A11Y_SNAPSHOT_MAX_STRING_LENGTH - 1)}…`;
     const r = verifyNativeUiAfterState({
       tool: 'desktop.paste_text', plan, snapshotsUsable: true,
       diff: valueChange(truncatedAfter),
@@ -161,9 +172,18 @@ function main() {
     // A truncated value that is NOT ours still fails.
     const otherLong = verifyNativeUiAfterState({
       tool: 'desktop.paste_text', plan, snapshotsUsable: true,
-      diff: valueChange('z'.repeat(A11Y_SNAPSHOT_MAX_STRING_LENGTH)),
+      diff: valueChange(`${'z'.repeat(A11Y_SNAPSHOT_MAX_STRING_LENGTH - 1)}…`),
     });
     assert(otherLong.verdict === 'unknown', 'a truncated value that is not our text does not verify');
+
+    // A long value with NO ellipsis was not truncated by the snapshot — it is
+    // simply a long field value, and must not get the truncation allowance.
+    const longNoEllipsis = verifyNativeUiAfterState({
+      tool: 'desktop.paste_text', plan, snapshotsUsable: true,
+      diff: valueChange(long.slice(0, A11Y_SNAPSHOT_MAX_STRING_LENGTH)),
+    });
+    assert(longNoEllipsis.verdict === 'unknown',
+      'a long value without the ellipsis marker is not treated as truncated');
   }
 
   // ─── menu_click attribution ──────────────────────────────────────
@@ -211,6 +231,63 @@ function main() {
     const r = verifyNativeUiAfterState({ tool: 'desktop.click_at', plan, diff: capped, snapshotsUsable: true });
     assert(r.changeCount === 12, 'changeCount uses *Total, not the capped list length');
     assert(r.verdict === 'unknown', 'clicks stay unknown even when the tree moved');
+  }
+
+  // ─── INTEGRATION: real snapshot → real diff → verdict ────────────
+  // Everything above feeds hand-built diffs, which proves the policy but not
+  // the composition. These drive the ACTUAL snapshotA11ySummary and
+  // diffA11ySummaries over bridge-shaped trees, so a change to node keying or
+  // value truncation upstream breaks this suite instead of silently
+  // downgrading every native action to `unknown` in production.
+  {
+    const tree = (fieldValue: string): A11yDiffSourceNode => ({
+      role: 'AXWindow',
+      label: 'Untitled',
+      children: [
+        { role: 'AXToolbar', label: 'Toolbar', children: [
+          { role: 'AXButton', label: 'Save' },
+        ] },
+        { role: 'AXTextArea', label: 'Body', value: fieldValue },
+      ],
+    });
+
+    const before = snapshotA11ySummary(tree(''));
+    const after = snapshotA11ySummary(tree('Meeting notes for Q3'));
+    assert(before.length > 0 && after.length > 0, 'integration: real snapshots are non-empty');
+
+    const realDiff = diffA11ySummaries(before, after);
+    const plan = planNativeUiVerification('desktop.type_text', { text: 'Meeting notes for Q3' });
+    const v = verifyNativeUiAfterState({
+      tool: 'desktop.type_text', plan, diff: realDiff, snapshotsUsable: true,
+    });
+    assert(v.verdict === 'verified', 'integration: real snapshot pipeline verifies a real text write');
+
+    // Same tree twice = the proven-no-op signal, through the real diff.
+    const same = diffA11ySummaries(snapshotA11ySummary(tree('x')), snapshotA11ySummary(tree('x')));
+    const noop = verifyNativeUiAfterState({
+      tool: 'desktop.type_text',
+      plan: planNativeUiVerification('desktop.type_text', { text: 'x' }),
+      diff: same, snapshotsUsable: true,
+    });
+    assert(noop.verdict === 'no_effect', 'integration: an identical real tree is a proven no-op');
+
+    // A real write of DIFFERENT content must not verify ours.
+    const other = diffA11ySummaries(before, snapshotA11ySummary(tree('unrelated autosave')));
+    const notOurs = verifyNativeUiAfterState({
+      tool: 'desktop.type_text', plan, diff: other, snapshotsUsable: true,
+    });
+    assert(notOurs.verdict === 'unknown', 'integration: a real change to other content stays unknown');
+
+    // Real truncation: a long write through the real snapshot must still verify.
+    const longText = `Report: ${'detail '.repeat(400)}`;
+    const longAfter = snapshotA11ySummary(tree(longText));
+    const longDiff = diffA11ySummaries(before, longAfter);
+    const longPlan = planNativeUiVerification('desktop.paste_text', { text: longText });
+    const longV = verifyNativeUiAfterState({
+      tool: 'desktop.paste_text', plan: longPlan, diff: longDiff, snapshotsUsable: true,
+    });
+    assert(longV.verdict === 'verified',
+      'integration: a long write truncated by the REAL snapshot still verifies');
   }
 
   console.log(`\n${passed} assertions passed, ${failures.length} failed`);
