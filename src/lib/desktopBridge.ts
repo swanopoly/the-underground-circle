@@ -1683,19 +1683,37 @@ export async function mouseDown(args: {
 }
 
 export async function mouseUp(args: {
-  x: number;
-  y: number;
+  /** OPTIONAL on purpose: the bridge skips coordinate validation for mouse_up
+   *  when x/y are absent (`if (isDown || xRaw !== undefined || yRaw !== undefined)`
+   *  in claude-bridge.js), releasing wherever the pointer already is. Typing
+   *  these as required contradicted the server and forced callers to pass
+   *  `number | undefined` into a `number` slot. `mouseDown` is different — the
+   *  server always requires coords there, so it stays required. */
+  x?: number;
+  y?: number;
   button?: 'left' | 'right';
   targetGuard?: DesktopNativeUiTargetGuard;
-}): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
-  const point = validateClickCoords(args.x, args.y);
-  if (!point.ok) return { ok: false, error: point.error, errorCode: 'invalid_input' };
+} = {}): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
+  // Coord-less release ("let go wherever the pointer is") is a real, supported
+  // operation: the bridge only validates x/y for mouse_up when they are present,
+  // and `SwanBotDesktopClientToolBridge` declares this method's whole argument
+  // object as optional. The client used to validate unconditionally, so that
+  // path always failed with invalid_input and the capability never worked.
+  // Coordinates, when supplied, are still validated exactly as before.
+  const wantsPoint = args.x !== undefined || args.y !== undefined;
+  let point: { ok: true; x: number; y: number } | { ok: false; error: string } | null = null;
+  if (wantsPoint) {
+    const validated = validateClickCoords(args.x, args.y);
+    if (!validated.ok) return { ok: false, error: validated.error, errorCode: 'invalid_input' };
+    point = validated;
+  }
   const button = args.button === 'right' ? 'right' : 'left';
   const guarded = guardedDesktopMutationBody(args.targetGuard);
   if (!guarded.ok) return guarded.result;
   const r = await callBridge('POST', '/desktop/mouse_up', {
-    x: point.x,
-    y: point.y,
+    // Omit x/y entirely when absent so the bridge takes its coord-less path
+    // rather than coercing `undefined` into a coordinate.
+    ...(point && point.ok ? { x: point.x, y: point.y } : {}),
     button,
     targetGuard: guarded.targetGuard,
   });
@@ -1704,8 +1722,12 @@ export async function mouseUp(args: {
   return {
     ok: true,
     data: {
-      x: Number(d?.x ?? point.x),
-      y: Number(d?.y ?? point.y),
+      // The bridge echoes the coordinates it actually released at, which is the
+      // only source of truth for a coord-less release. Fall back to the
+      // requested point when one was supplied; otherwise report 0 rather than
+      // NaN, and let the caller read the echoed values.
+      x: Number(d?.x ?? (point && point.ok ? point.x : 0)),
+      y: Number(d?.y ?? (point && point.ok ? point.y : 0)),
       button: String(d?.button || button),
     },
   };

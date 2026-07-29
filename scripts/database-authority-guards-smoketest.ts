@@ -215,10 +215,24 @@ check(
   continuationConsolidatedMarkerIndex >= 0,
   'consolidated SQL has the continuation privacy migration source marker',
 );
+// Slice to the START OF THE NEXT SECTION, not to end-of-file. Comparing to EOF
+// asserts "§29 is the last thing in the file", which is not the property this
+// test cares about and breaks the moment any later section is appended —
+// exactly what happened when §30 landed.
+const continuationBodyStart =
+  continuationConsolidatedMarkerIndex + continuationConsolidatedMarker.length;
+const nextSectionBannerIndex = consolidated.indexOf(
+  '\n-- ═',
+  continuationBodyStart,
+);
+// `nextSectionBannerIndex` points at the '\n' that starts the blank-line
+// separator before the next banner; the migration's own trailing newline is the
+// character before it, so slice UP TO that index (not past it).
+const continuationBody = nextSectionBannerIndex >= 0
+  ? consolidated.slice(continuationBodyStart, nextSectionBannerIndex)
+  : consolidated.slice(continuationBodyStart);
 check(
-  consolidated.slice(
-    continuationConsolidatedMarkerIndex + continuationConsolidatedMarker.length,
-  ) === continuationPrivacyMigration,
+  continuationBody === continuationPrivacyMigration,
   'section 29 is byte-identical to the complete continuation privacy migration',
 );
 check(

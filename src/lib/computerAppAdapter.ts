@@ -5203,12 +5203,16 @@ async function executeLocalDesktopIntent(
       return { ok: true, message: `${observed.note}\nDragged from (${r.data?.fromX}, ${r.data?.fromY}) to (${r.data?.toX}, ${r.data?.toY}).`, warnings: [], data: { kind: 'desktop_mouse_drag', ...r.data } };
     }
 
-    if (intent.kind === 'mouse_scroll') {
-      const points = typeof intent.x === 'number' && typeof intent.y === 'number' ? [{ x: intent.x, y: intent.y }] : [];
-      if (points.length) {
-        const observed = await observeBeforeCoordinateAction(points);
-        if (!observed.ok) return { ok: false, message: observed.message, warnings: ['coordinate preflight failed'], data: { kind: 'desktop_coordinate_preflight_failed' } };
-      }
+    // Scroll REQUIRES coordinates and narrows them in the branch condition, the
+    // same shape as mouse_down above. Coord-less scroll is not a safe no-op: the
+    // bridge defaults a missing x/y to `Number(parsed?.x ?? 0)`, so it would
+    // scroll at (0,0) — the screen's top-left — while the preflight was skipped
+    // precisely because no coordinates were supplied. A mutation at an
+    // unverified location is the exact thing observeBeforeCoordinateAction
+    // exists to prevent, so this fails closed instead.
+    if (intent.kind === 'mouse_scroll' && typeof intent.x === 'number' && typeof intent.y === 'number') {
+      const observed = await observeBeforeCoordinateAction([{ x: intent.x, y: intent.y }]);
+      if (!observed.ok) return { ok: false, message: observed.message, warnings: ['coordinate preflight failed'], data: { kind: 'desktop_coordinate_preflight_failed' } };
       const r = await bridgeMouseScroll({ deltaX: intent.deltaX, deltaY: intent.deltaY, x: intent.x, y: intent.y });
       if (!r.ok) return { ok: false, message: `Mouse scroll failed: ${r.error || r.errorCode || 'unknown bridge error'}.`, warnings: [`desktop_mouse_scroll failed with ${r.errorCode || 'unknown_error'}`], data: { kind: 'desktop_bridge_error', errorCode: r.errorCode } };
       return { ok: true, message: `Scrolled mouse deltaX=${r.data?.deltaX ?? 0}, deltaY=${r.data?.deltaY ?? 0}.`, warnings: [], data: { kind: 'desktop_mouse_scroll', ...r.data } };

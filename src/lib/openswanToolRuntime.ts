@@ -9926,14 +9926,34 @@ async function dispatchGenericNativeUiBridgeMutation(
           : undefined,
       }) as DesktopResult<Record<string, unknown>>;
       break;
-    case 'desktop.mouse_scroll':
+    case 'desktop.mouse_scroll': {
+      // Coordinates are REQUIRED. The bridge coerces a missing x/y to 0
+      // (`Number(parsed?.x ?? 0)`), so omitting them scrolls at the screen's
+      // top-left rather than "wherever the pointer is" — a mutation at a
+      // location nobody observed. Fail closed with an actionable message
+      // instead of silently acting somewhere the model did not intend.
+      const scrollX = typeof args.x === 'number' ? args.x : undefined;
+      const scrollY = typeof args.y === 'number' ? args.y : undefined;
+      if (scrollX === undefined || scrollY === undefined) {
+        result = {
+          ok: false,
+          error: 'desktop.mouse_scroll requires numeric x and y. Observe the app first '
+            + '(desktop.observe_app or desktop.window_state) and pass the exact scroll point.',
+          // Reuse the existing union member rather than widening
+          // DesktopBridgeError for one call site — this IS invalid input.
+          errorCode: 'invalid_input',
+          recoveryHint: 'Re-observe the app and supply the exact x/y to scroll at.',
+        } satisfies DesktopResult<Record<string, unknown>>;
+        break;
+      }
       result = await desktopBridge.mouseScroll({
         deltaY: typeof args.deltaY === 'number' ? args.deltaY : undefined,
         deltaX: typeof args.deltaX === 'number' ? args.deltaX : undefined,
-        x: typeof args.x === 'number' ? args.x : undefined,
-        y: typeof args.y === 'number' ? args.y : undefined,
+        x: scrollX,
+        y: scrollY,
       }) as DesktopResult<Record<string, unknown>>;
       break;
+    }
     case 'desktop.set_element_value':
       result = await desktopBridge.setElementValue({
         appName: String(args.appName || ''),

@@ -97,17 +97,25 @@ async function runDispatchCases() {
       ctx: baseCtx,
     });
     assertEqual(outcome.status, 'failed', 'dispatch: failed when handler throws');
-    // P12 policy alignment (desktop-runtime-wiring E-gate): the VISIBLE
-    // message hides thrown transport internals; diagnostics live in
-    // warnings + data.rawError.
+    // Transport exceptions are treated as UNTRUSTED and fully redacted: a
+    // provider error can carry credentials, file paths, request bodies or typed
+    // values, so only a bounded classification is persisted. This supersedes the
+    // older P12 shape, which retained the raw thrown text in `data.rawError` and
+    // in `warnings` — that retained copy was the leak.
     assert(
-      outcome.message.includes('Technical details were saved for recovery'),
-      'dispatch: visible message hides thrown internals',
+      outcome.message.includes('internal error') && !outcome.message.includes('kaboom'),
+      'dispatch: visible message is bounded and hides thrown internals',
     );
     assert(
-      String((outcome.data as any)?.rawError || '').includes('kaboom')
-        && (outcome.warnings || []).some((w) => w.includes('kaboom')),
-      'dispatch: thrown message retained in rawError + warnings diagnostics',
+      (outcome.data as any)?.errorCode === 'transport_error'
+        && (outcome.data as any)?.redacted === true,
+      'dispatch: failure is classified (transport_error) and marked redacted',
+    );
+    // The strongest form of the assertion: the thrown text must not survive
+    // ANYWHERE in the outcome, not merely be absent from the visible message.
+    assert(
+      !JSON.stringify(outcome).includes('kaboom'),
+      'dispatch: thrown internals appear nowhere in the persisted outcome',
     );
   }
 

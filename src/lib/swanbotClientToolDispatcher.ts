@@ -183,8 +183,13 @@ export interface SwanBotDesktopClientToolBridge {
   mouseDrag: (
     args: { fromX: number; fromY: number; toX: number; toY: number; durationMs?: number },
   ) => Promise<SwanBotClientToolDispatchResult>;
+  /** x/y are REQUIRED: the bridge coerces a missing coordinate to 0, so a
+   *  coord-less scroll acts at the screen's top-left rather than at the
+   *  pointer. Declaring them optional here is what allowed that unsafe call to
+   *  typecheck. (mouseUp is genuinely coord-optional — the bridge skips
+   *  validation there and releases in place.) */
   mouseScroll: (
-    args?: { deltaY?: number; deltaX?: number; x?: number; y?: number },
+    args: { deltaY?: number; deltaX?: number; x: number; y: number },
   ) => Promise<SwanBotClientToolDispatchResult>;
   getScreenSize: () => Promise<SwanBotClientToolDispatchResult>;
   readA11yTree: (
@@ -361,13 +366,21 @@ export async function dispatchSwanBotDesktopClientTool(
         toY: Number(input.toY),
         durationMs: typeof input.durationMs === 'number' ? input.durationMs : undefined,
       });
-    case 'desktop.mouse_scroll':
+    case 'desktop.mouse_scroll': {
+      // Fail closed rather than scrolling at (0,0) — see the interface comment.
+      if (typeof input.x !== 'number' || typeof input.y !== 'number') {
+        return {
+          ok: false,
+          error: 'desktop.mouse_scroll requires numeric x and y. Observe the app first and pass the exact scroll point.',
+        } as SwanBotClientToolDispatchResult;
+      }
       return bridge.mouseScroll({
         deltaY: typeof input.deltaY === 'number' ? input.deltaY : undefined,
         deltaX: typeof input.deltaX === 'number' ? input.deltaX : undefined,
-        x: typeof input.x === 'number' ? input.x : undefined,
-        y: typeof input.y === 'number' ? input.y : undefined,
+        x: input.x,
+        y: input.y,
       });
+    }
     case 'desktop.read_a11y_tree': {
       const result = await bridge.readA11yTree({
         appName: typeof input.appName === 'string' ? input.appName : undefined,

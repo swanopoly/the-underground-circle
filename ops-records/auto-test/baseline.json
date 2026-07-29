@@ -1,18 +1,12 @@
 {
-  "stamp": "2026-07-29T02:57:56.564Z",
+  "stamp": "2026-07-29T03:22:25.002Z",
   "typecheck": {
-    "total": 9,
-    "byFile": {
-      "src/lib/computerAppAdapter.ts": 4,
-      "src/lib/openswanToolRuntime.ts": 4,
-      "src/lib/swanbot.ts": 1
-    }
+    "total": 0,
+    "byFile": {}
   },
   "suites": {
     "total": 487,
     "failing": [
-      "smoke:agent-runtime",
-      "smoke:database-authority-guards",
       "smoke:delegation-wiring",
       "smoke:desktop-action-summary-replay",
       "smoke:swanbot-v2-delegation",
