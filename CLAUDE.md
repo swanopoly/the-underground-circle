@@ -595,9 +595,10 @@ smokes and app typecheck verify this slice; current edge source is not
 deployed/re-verified, §29 is not applied, and pre-deployment plaintext/legacy
 pending continuations do not gain the fail-closed/scrub boundary until those
 steps. No live browser/native-app GUI execution or live Postgres
-contention/race proof was performed. The §26 and §29 migrations are authored
-and mirrored but have not been applied or verified against a live database, so
-cross-process durability and checkpoint cleanup are not operational claims.
+contention/race proof was performed. §26 is applied and live-DB verified as of
+2026-07-29 (table, RLS, grants, and fail-closed unauthenticated claim); its
+concurrent-claim race behavior is still not proven. §29 remains authored and
+mirrored but unapplied, so checkpoint cleanup is not an operational claim.
 
 `src/lib/computerTaskOutcome.ts` is the source of truth for non-browser task
 results. Chat may adapt its richer statuses to the older transport enum, but it
@@ -639,8 +640,10 @@ removed and only an issued digest-safe receipt rides the runtime side channel;
 the approval row itself is the durable source. Other mutations still do not
 emit the complete receipt contract, so the universal gateway, stable desktop
 window/document identity, and automatic observation invalidation remain
-required. The transactional cross-process ledger exists for the four canaries
-in source but remains unavailable until §26 is applied and live-DB verified.
+required. The transactional cross-process ledger is live as of 2026-07-29
+(§26 applied); before that every guarded mutation failed closed at the claim
+with `rpc_error` and was never dispatched. Concurrent-claim races remain
+unproven against a live database.
 
 Local bridge mutation authority stays loopback-bound and is remote-accessible
 only through an explicitly allowlisted tunnel. The Claude, Codex, Cursor, and
@@ -700,9 +703,13 @@ changes must follow the HITL/approval rules in the roadmap.
 - Consolidated agent-runtime helper SQL lives in `docs/RUN_THIS_SQL.sql`.
 - The roadmap SQL checklist owns applied/pending status. Do not treat a local
   migration file as proof that production has it.
-- `20260726_agent_action_calls.sql` is mirrored as §26 but is **not applied or
-  live-DB verified**. Apply and verify its table/RPC contract before relying on
-  cross-process guarded-action replay prevention.
+- `20260726_agent_action_calls.sql` (§26) is **APPLIED and live-DB verified
+  (2026-07-29)**: `agent_action_calls` exists with RLS on, one owner-read
+  policy, `SELECT` to `authenticated`, and the three `claim`/`start`/`finish`
+  RPCs granted to `authenticated`. A live unauthenticated claim probe returns
+  structured `not_authenticated` rather than a row, so the fail-closed identity
+  binding is proven against Postgres. Cross-process CONTENTION (two real
+  workers racing one claim) is still unproven.
 - `20260726_scheduled_action_mutation_guard.sql` is mirrored as §27 but is
   **not applied or live-DB verified**. Apply it before relying on the scheduled
   claim/dispatch/outcome-unknown state machine.
