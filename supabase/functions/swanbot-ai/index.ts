@@ -27,6 +27,10 @@ import {
   shouldAttachContextManagement,
   stripUnsupportedCompactionEdits,
 } from "../../../src/lib/anthropicContextManagement.ts";
+// Shape guard for `memory_entries.source_run_id` — the SAME normalizer the v2
+// writer and the client `saveMemory` use. Import-free by design, so it loads
+// under Deno's whole-graph resolution.
+import { normalizeSourceRunId } from "../../../src/lib/v2SaveMemoryCore.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -222,6 +226,12 @@ async function saveSwanbotMemoryEntry(
   userId: string,
   memory: { key?: unknown; value?: unknown; category?: unknown; importance?: unknown },
   sourceSurface = "swanbot_auto_memory",
+  /** The v1 run that produced this exchange. Stamped so a memory can be traced
+   *  back to the work that produced it — a live check on 2026-07-29 found
+   *  `source_run_id` NULL on all 3,471 active rows. Best-effort: the value is
+   *  shape-checked here and dropped on FK rejection below, because losing the
+   *  memory to gain a provenance column is a bad trade. */
+  sourceRunId?: string | null,
 ): Promise<{ id?: string; error?: string }> {
   const content = String(memory.value || "").trim();
   if (!content) return { error: "memory value is required" };
@@ -256,6 +266,7 @@ async function saveSwanbotMemoryEntry(
     title,
     content: content.slice(0, 4000),
     source_surface: sourceSurface,
+    source_run_id: normalizeSourceRunId(sourceRunId),
     retrieval_mode: importance >= 0.85 ? "startup" : "on_demand",
     importance,
     visibility: scope === "user" ? "private" : "circle_shared",
@@ -279,19 +290,35 @@ async function saveSwanbotMemoryEntry(
     .maybeSingle();
 
   if (existing?.data?.id) {
+    // Never null out provenance we already have. `payload.source_run_id` is
+    // null whenever this particular save has no run to attribute, and blindly
+    // updating with it would erase the run id an earlier save recorded.
+    const { source_run_id: incomingRunId, ...rest } = payload;
+    const updatePayload = incomingRunId ? payload : rest;
     const { error } = await supabase
       .from("memory_entries")
-      .update(payload)
+      .update(updatePayload)
       .eq("id", existing.data.id);
     if (error) return { error: error.message };
     return { id: existing.data.id };
   }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from("memory_entries")
     .insert({ ...payload, created_at: now })
     .select("id")
     .maybeSingle();
+  // The run reference was rejected (run row missing/reaped between the turn and
+  // this fire-and-forget save). Keep the memory, drop the provenance — never
+  // the other way round.
+  if (error?.code === "23503" && /source_run_id/.test(`${error.message || ""} ${error.details || ""}`)) {
+    console.warn("[swanbot-ai] memory source_run_id rejected by FK — retrying without provenance");
+    ({ data, error } = await supabase
+      .from("memory_entries")
+      .insert({ ...payload, source_run_id: null, created_at: now })
+      .select("id")
+      .maybeSingle());
+  }
   if (error) return { error: error.message };
   return { id: data?.id };
 }
@@ -3623,6 +3650,8 @@ async function extractAndStoreMemories(
   userId: string,
   userMessage: string,
   botResponse: string,
+  /** The v1 run this exchange belongs to, for `memory_entries.source_run_id`. */
+  sourceRunId?: string | null,
 ): Promise<void> {
   // Only extract from substantive exchanges
   if (userMessage.length < 20 || botResponse.length < 50) return;
@@ -3706,7 +3735,7 @@ async function extractAndStoreMemories(
   // OpenSwan, semantic retrieval, and UI feedback all read the same facts.
   for (const mem of memories) {
     try {
-      await saveSwanbotMemoryEntry(supabase, circleId, userId, mem, "swanbot_auto_memory");
+      await saveSwanbotMemoryEntry(supabase, circleId, userId, mem, "swanbot_auto_memory", sourceRunId);
     } catch { /* non-critical */ }
   }
 
@@ -4997,7 +5026,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
 
     // Extract and store memories from this exchange (fire-and-forget)
     extractAndStoreMemories(
-      supabase, circleId, userId, message, aiResponse,
+      supabase, circleId, userId, message, aiResponse, swanBotV1RunId,
     ).catch((err) => {
       // If memory extraction silently breaks (RLS, rate limits, provider
       // outage), circle memory stops accumulating and BlackSwan's context

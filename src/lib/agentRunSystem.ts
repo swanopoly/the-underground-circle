@@ -1393,10 +1393,15 @@ export async function saveMemory(opts: {
   };
 
   const updateExistingSessionMemory = async (id: string, fallback: any): Promise<MemoryEntry | null> => {
+    // Never null out provenance we already have. `payload.source_run_id` is
+    // undefined whenever this save has no run to attribute, and sending it
+    // would erase the run id an earlier save recorded for this row.
+    const { source_run_id: _incomingRunId, ...payloadWithoutRun } = payload;
+    const updateBody = sourceRunId ? payload : payloadWithoutRun;
     const { data: updated, error: updateError } = await supabase
       .from('memory_entries')
       .update({
-        ...payload,
+        ...updateBody,
         updated_at: new Date().toISOString(),
       })
       .eq('id', id)
