@@ -459,6 +459,14 @@ export async function autoExtractAndSave(
   circleId: string,
   userId: string,
   messages: Array<{ role: string; text: string }>,
+  /** The agent run this conversation turn came from. Stamped onto every row
+   *  this pass saves so a memory can be traced back to the work that produced
+   *  it — the product's core accountability claim. A live check on 2026-07-29
+   *  found `source_run_id` NULL on all 3,471 active rows: the column, the
+   *  option, and the insert all existed, but no hot-path caller ever passed a
+   *  value. Optional and best-effort — `saveMemory` drops a reference the FK
+   *  rejects rather than lose the memory. */
+  sourceRunId?: string,
 ): Promise<AutoExtractResult> {
   // Load existing memories for dedup (scoped to this user for user memories)
   const existing = await loadMemories({ circleId, userId, scopes: ['circle', 'user'], limit: 100 });
@@ -556,6 +564,7 @@ export async function autoExtractAndSave(
         title: mem.title,
         content: mem.content,
         sourceSurface: 'main_chat',
+        sourceRunId,
         importance,
         retrievalMode: retrievalMode as any,
         visibility: scope === 'user' ? 'private' : 'circle_shared',

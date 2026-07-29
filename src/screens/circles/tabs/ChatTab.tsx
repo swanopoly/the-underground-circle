@@ -5377,7 +5377,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const { autoExtractAndSave } = await import('../../../lib/agentMemory');
           const history = messages.slice(-6).map(m => ({ role: m.isBot ? 'model' : 'user', text: m.content }));
           history.push({ role: 'model', text: content });
-          const { saved } = await autoExtractAndSave(circleId, currentUserId, history);
+          // Stamp the run that produced this turn so the saved memory is
+          // traceable back to it (memory_entries.source_run_id).
+          const { saved } = await autoExtractAndSave(circleId, currentUserId, history, extra?.runId ?? undefined);
           if (saved > 0) {
             // Update the message with memory saved indicator
             setMessages(prev => prev.map(m =>

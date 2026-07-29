@@ -10,6 +10,10 @@
 import { supabase } from './supabase';
 import type { BrowserPlanEvent } from './computerUse';
 import { devLog } from './devLog';
+// Shape guard for `memory_entries.source_run_id`. Deliberately the SAME
+// normalizer the v2 edge writer uses (it is import-free, so it loads anywhere)
+// rather than a second copy of the regex — one definition, one smoke suite.
+import { normalizeSourceRunId } from './v2SaveMemoryCore';
 import { mapLegacyToolEventToLedgerStatus, persistAgentRunToolEvent } from './agentRunLedgerPersistence';
 import { subscribeWithReconnect } from './subscribeWithReconnect';
 import { runMatchesAgent } from './agentRunSubjectSummary';
@@ -1299,6 +1303,15 @@ export async function saveMemory(opts: {
     return null;
   }
 
+  // `source_run_id` is a uuid FK to agent_runs(id), so a caller-supplied value
+  // has two ways to DESTROY the write instead of annotating it: a non-uuid
+  // string is a 22P02, and a well-formed uuid whose run row does not exist (or
+  // was reaped between the turn and this save) is a 23503. Losing the memory to
+  // gain a provenance column is a bad trade, so provenance is strictly
+  // best-effort: shape is validated here, and a reference the FK rejects is
+  // dropped and re-inserted without it below.
+  const sourceRunId = normalizeSourceRunId(opts.sourceRunId) ?? undefined;
+
   const basePayload = {
     scope: opts.scope,
     circle_id: opts.circleId,
@@ -1309,7 +1322,7 @@ export async function saveMemory(opts: {
     memory_kind: opts.memoryKind,
     title: opts.title,
     content: opts.content,
-    source_run_id: opts.sourceRunId,
+    source_run_id: sourceRunId,
     source_surface: opts.sourceSurface,
     importance: opts.importance,
     retrieval_mode: opts.retrievalMode,
@@ -1420,6 +1433,18 @@ export async function saveMemory(opts: {
       devLog.trace('[AgentRunSystem] saveMemory session duplicate ignored:', opts.title?.slice(0, 50));
       return null;
     }
+    // The run reference was rejected (missing/reaped run row). Keep the memory,
+    // drop the provenance — never the other way round.
+    if (error.code === '23503' && /source_run_id/.test(`${error.message || ''} ${error.details || ''}`)) {
+      console.warn('[AgentRunSystem] saveMemory: source_run_id rejected by FK — retrying without provenance');
+      ({ data, error } = await supabase
+        .from('memory_entries')
+        .insert({ ...payload, source_run_id: null })
+        .select()
+        .single());
+    }
+  }
+  if (error) {
     console.error('[AgentRunSystem] saveMemory FAILED:', error.message, '| code:', error.code, '| hint:', error.hint, '| details:', error.details);
     console.error('[AgentRunSystem] saveMemory params: scope=', opts.scope, 'circleId=', opts.circleId, 'userId=', opts.userId, 'kind=', opts.memoryKind);
     return null;

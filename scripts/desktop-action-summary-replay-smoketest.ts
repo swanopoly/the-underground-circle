@@ -174,6 +174,13 @@ const mockRequire = (specifier: string): unknown => {
       memoryWriteScopePolicy: () => ({ strategy: 'none', identityKeys: [], candidateLimit: 0, why: 'stub' }),
     };
   }
+  if (specifier === './v2SaveMemoryCore') {
+    // saveMemory reuses the v2 writer's `source_run_id` shape guard. That module
+    // is import-free by design (the Deno edge imports it), so loading the REAL
+    // one here costs nothing and keeps this harness honest — a stubbed
+    // validator could silently diverge from the one that actually runs.
+    return require('../src/lib/v2SaveMemoryCore');
+  }
   throw new Error(`Unexpected dependency while loading agentRunSystem: ${specifier}`);
 };
 
