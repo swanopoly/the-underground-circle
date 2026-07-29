@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-07-29T11:33:09.700Z",
+  "generatedAt": "2026-07-29T15:30:18.263Z",
   "results": [
     {
       "level": "PASS",
       "name": "no unreachable private rows (private + user_id IS NULL)",
-      "detail": "private_no_owner=0 of 3471 active",
+      "detail": "private_no_owner=0 of 3472 active",
       "data": {
         "agent_no_key": 0,
         "no_circle": 0,
         "private_no_owner": 0,
-        "total": 3471
+        "total": 3472
       }
     },
     {
@@ -20,7 +20,7 @@
         "agent_no_key": 0,
         "no_circle": 0,
         "private_no_owner": 0,
-        "total": 3471
+        "total": 3472
       }
     },
     {
@@ -32,13 +32,14 @@
     {
       "level": "PASS",
       "name": "recent memories are traceable to the run that produced them",
-      "detail": "no memories written since the writer was wired (2026-07-29T11:40:00Z) — nothing to grade yet | all-time 0/3471 (0.0%)",
+      "detail": "no run-attributable memories written since the writer was wired (2026-07-29T11:40:00Z) — nothing to grade yet | all-time 0/3472 (0.0%) | 1 session-scope rollup(s) excluded (no single source run)",
       "data": {
         "distinct_surfaces": 11,
         "recent": 0,
+        "recent_session_scoped": 1,
         "recent_with_run": 0,
         "stamped_feed_task": 6,
-        "total": 3471,
+        "total": 3472,
         "with_run": 0
       }
     },
@@ -49,19 +50,20 @@
       "data": {
         "distinct_surfaces": 11,
         "recent": 0,
+        "recent_session_scoped": 1,
         "recent_with_run": 0,
         "stamped_feed_task": 6,
-        "total": 3471,
+        "total": 3472,
         "with_run": 0
       }
     },
     {
       "level": "PASS",
       "name": "memories are reachable by semantic search",
-      "detail": "embedded 3471/3471 (100.0%) — un-embedded rows are invisible to match_memories",
+      "detail": "embedded 3472/3472 (100.0%) — un-embedded rows are invisible to match_memories",
       "data": {
-        "embedded": 3471,
-        "total": 3471
+        "embedded": 3472,
+        "total": 3472
       }
     },
     {
@@ -89,8 +91,8 @@
       "name": "no exact-content duplicate rows",
       "detail": "0 redundant rows across 0 exact-content groups",
       "data": {
-        "active": 3471,
-        "distinct_content": 3470,
+        "active": 3472,
+        "distinct_content": 3471,
         "exact_dup_groups": 0,
         "redundant_rows": "0"
       }
@@ -98,10 +100,10 @@
     {
       "level": "PASS",
       "name": "content diversity (informational, NOT a defect)",
-      "detail": "3470 distinct contents across 3471 active rows — a shared title with many distinct contents is a category bucket, not duplication",
+      "detail": "3471 distinct contents across 3472 active rows — a shared title with many distinct contents is a category bucket, not duplication",
       "data": {
-        "active": 3471,
-        "distinct_content": 3470,
+        "active": 3472,
+        "distinct_content": 3471,
         "exact_dup_groups": 0,
         "redundant_rows": "0"
       }

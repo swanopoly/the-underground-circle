@@ -1,11 +1,11 @@
 {
-  "stamp": "2026-07-29T11:31:18.816Z",
+  "stamp": "2026-07-29T15:28:25.085Z",
   "typecheck": {
     "total": 0,
     "byFile": {}
   },
   "suites": {
-    "total": 487,
+    "total": 488,
     "failing": []
   },
   "invariants": {
@@ -25,7 +25,9 @@
   },
   "diff": {
     "regressions": [],
-    "improvements": [],
+    "improvements": [
+      "invariant FAIL→PASS: recent memories are traceable to the run that produced them"
+    ],
     "known": []
   }
 }

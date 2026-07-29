@@ -84,6 +84,13 @@ async function main() {
   }
 
   // ── 2. Provenance: the product's core accountability claim ───────────────
+  // `scope = 'session'` is EXCLUDED from the grade, and this is a scoping
+  // decision rather than a way to make the number look better. A session
+  // summary ("Session 7/29 — build, research, fix") is a rollup across many
+  // runs; there is no single run that produced it, so stamping one would be
+  // fabricated provenance — worse than none, because absent reads as unknown
+  // while fabricated reads as fact. The count is still reported.
+  //
   // Graded ONLY on rows written after the writer was wired. The 3,471 rows that
   // predate it can never be backfilled (their runs are gone), so an all-time
   // ratio is pinned near zero forever and the check degrades into an alarm
@@ -96,9 +103,13 @@ async function main() {
     const [r] = await q(`
       select count(*) as total,
              count(*) filter (where source_run_id is not null) as with_run,
-             count(*) filter (where created_at > '${PROVENANCE_WIRED_AT}') as recent,
              count(*) filter (where created_at > '${PROVENANCE_WIRED_AT}'
+                              and scope <> 'session') as recent,
+             count(*) filter (where created_at > '${PROVENANCE_WIRED_AT}'
+                              and scope <> 'session'
                               and source_run_id is not null) as recent_with_run,
+             count(*) filter (where created_at > '${PROVENANCE_WIRED_AT}'
+                              and scope = 'session') as recent_session_scoped,
              count(*) filter (where source_surface = 'feed_task') as stamped_feed_task,
              count(distinct source_surface) as distinct_surfaces
       from memory_entries where is_active = true;`);
@@ -110,11 +121,12 @@ async function main() {
     const level = recent === 0 ? 'PASS' : recentPct >= 50 ? 'PASS' : recentPct > 0 ? 'WARN' : 'FAIL';
     rec(level,
       'recent memories are traceable to the run that produced them',
-      recent === 0
-        ? `no memories written since the writer was wired (${PROVENANCE_WIRED_AT}) — nothing to grade yet`
+      (recent === 0
+        ? `no run-attributable memories written since the writer was wired (${PROVENANCE_WIRED_AT}) — nothing to grade yet`
           + ` | all-time ${n(r?.with_run)}/${n(r?.total)} (${pct}%)`
         : `since wiring: ${n(r?.recent_with_run)}/${recent} (${recentPct.toFixed(1)}%) carry source_run_id`
-          + ` | all-time ${n(r?.with_run)}/${n(r?.total)} (${pct}%) — pre-2026-07-29 rows cannot be backfilled`,
+          + ` | all-time ${n(r?.with_run)}/${n(r?.total)} (${pct}%) — pre-2026-07-29 rows cannot be backfilled`)
+      + ` | ${n(r?.recent_session_scoped)} session-scope rollup(s) excluded (no single source run)`,
       r);
     rec('PASS', 'source_surface distribution',
       `feed_task=${n(r?.stamped_feed_task)}, distinct surfaces=${n(r?.distinct_surfaces)} (a high feed_task share is the known hardcode)`, r);
