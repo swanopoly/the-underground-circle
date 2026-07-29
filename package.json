@@ -250,6 +250,7 @@
     "smoke:swanbot-openswan-readiness": "npx tsx scripts/swanbot-openswan-readiness-smoketest.ts",
     "smoke:run-approvals": "npx tsx scripts/run-approvals-smoketest.ts",
     "smoke:openswan-runtime-approval": "npx tsx scripts/openswan-runtime-approval-smoketest.ts",
+    "drill:unknown-app": "npx tsx scripts/unknown-app-ladder-drill.ts",
     "smoke:native-ui-verification-core": "npx tsx scripts/native-ui-verification-core-smoketest.ts",
     "smoke:openswan-generic-native-ui-runtime": "npx tsx scripts/openswan-generic-native-ui-runtime-smoketest.ts",
     "smoke:chat-approval-single-use": "npx tsx scripts/chat-approval-single-use-smoketest.ts",

@@ -641,6 +641,39 @@ FINDINGS = [
             "live probes: Finder (8 menus/137 items), Blender (3 native menus only), 2026-07-29"
         ),
     },
+    {
+        "id": "unknown-app-ladder-first-live-verified",
+        "q": "Can a generic agent ladder actually complete and PROVE a task in a desktop app it has zero knowledge of?",
+        "a": (
+            "Yes, and the proof shape matters more than the yes. Live drill against TextEdit — no "
+            "profile, no adapter, generic capabilities only:\n\n"
+            "  discover — menu inventory read the app's full command catalog (8 menus, 93 items, "
+            "enabled state, submenus) without clicking or focusing anything\n"
+            "  observe  — accessibility snapshot BEFORE (120 nodes)\n"
+            "  act      — typed a marker string, BRACKETED by frontmost checks on both sides, "
+            "because System Events keystrokes go to whatever is frontmost and a focus drift "
+            "mid-type means your input landed in someone else's window\n"
+            "  verify   — accessibility snapshot AFTER → structural diff → verdict 'verified' "
+            "because the changed field value CONTAINS the exact text sent\n\n"
+            "That last step is the load-bearing one. Earlier the same verifier had only produced "
+            "negative verdicts live (unknown on idle churn, no_effect on unmoved trees); this was its "
+            "first live POSITIVE — and it fired on attribution (sent text present in the changed "
+            "value), not on 'the tree moved'. One verifier, three live-proven verdicts.\n\n"
+            "Safety furniture that made the drill repeatable rather than reckless: a mutation-phase "
+            "allowlist (unknown apps get discovery-only), and teardown that closes documents "
+            "saving-no ONLY when every open document is an untitled scratch — a titled document "
+            "freezes teardown and reports instead.\n\n"
+            "One AppleScript trap took the finish line off the first run: `quit` INSIDE a "
+            "`tell application` block kills the app before it can reply, so the AppleEvent times out "
+            "(-1712) and your otherwise-passed run reports failure. Return your result from the tell "
+            "block first; quit in a separate osascript wrapped in `ignoring application responses`."
+        ),
+        "evidence": (
+            "scripts/unknown-app-ladder-drill.ts (npm run drill:unknown-app), "
+            "12/12 steps passed twice against live TextEdit 2026-07-29, "
+            "src/lib/nativeUiVerificationCore.ts verdict=verified live"
+        ),
+    },
 ]
 
 
