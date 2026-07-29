@@ -386,6 +386,32 @@ FINDINGS = [
         ),
         "evidence": "ops-records/one-shot/memory-embed-backfill.ts; coverage 17.2% -> 100.0% (3,478/3,478)",
     },
+    {
+        "id": "regression-detector-must-confirm-before-alarming",
+        "q": "I set up a nightly test job and its very first run reported a regression. Ship the fix?",
+        "a": (
+            "Reproduce it in isolation first. Mine reported `smoke:tool-result-formatters` as newly "
+            "failing; the suite then passed 3 out of 3 runs on its own.\n\n"
+            "The captured output gave the real story: `ERR_INVALID_RETURN_PROPERTY_VALUE: Expected a "
+            "string... for the \"source\" from the \"load\" hook but got undefined`. That is tsx's module "
+            "loader losing a race when many `npx tsx` processes run concurrently — the suite \"failed\" "
+            "without its code ever executing. Infrastructure, not a code change.\n\n"
+            "The fix belongs in the detector, not the suite: **re-run every newly-failing suite serially "
+            "before calling it a regression.** If it passes, record it as flaky — visible in the report, "
+            "but it does not trip the alarm or get memorialised in the baseline as a known failure.\n\n"
+            "This matters more than it sounds. A detector that cries wolf produces exactly the same "
+            "outcome as no detector: people stop reading it. The same reasoning is why an already-failing "
+            "suite must be reported as *known* rather than re-alarmed every night — the job of the alarm "
+            "is to tell you the hour something broke, not to restate a months-old failure until it is "
+            "background noise.\n\n"
+            "Two related traps worth internalising. Capture the failing suite's OUTPUT, not just its exit "
+            "code — the exit code alone would have sent me hunting through formatter logic that was never "
+            "run. And check your own harness's exit code without a pipe: `node x.mjs | tail` reports "
+            "tail's status, which is the identical masking bug that let a broken `&&` test chain hide 273 "
+            "suites in this repo."
+        ),
+        "evidence": "scripts/auto-test-cycle.mjs confirmFailures(); first scheduled run 2026-07-29",
+    },
 ]
 
 
