@@ -742,6 +742,18 @@ function frameHidden(frame) {
   try { return frame.hidden === true; } catch (_) { return false; }
 }
 
+// Layer-level gates. Illustrator's DOM happily writes a text frame whose LAYER
+// is locked or hidden — layer lock is a UI gate, not a DOM gate — which a live
+// probe proved on 2026-07-29: lock the layer, write the frame, "applied".
+// A designer who locked the layer meant the frame too, so both levels count.
+function frameLayerLocked(frame) {
+  try { return frame.layer.locked === true; } catch (_) { return false; }
+}
+
+function frameLayerHidden(frame) {
+  try { return frame.layer.visible === false; } catch (_) { return false; }
+}
+
 // A frame is addressable by its own name OR by its layer name. Layer-name
 // matching is what makes "update the headline layer" work in files where
 // designers never named the frame itself.
@@ -1060,14 +1072,14 @@ export function illustratorUpdateTextLayerJsxBody(args: { target: string; text: 
   }
   // A locked or hidden frame silently swallows the write, so refuse up front
   // rather than reporting a success the user cannot see.
-  if (frameLocked(found)) {
+  if (frameLocked(found) || frameLayerLocked(found)) {
     out.status = "target_locked";
-    out.error = "The target text frame is locked. Unlock it (illustrator_set_layer_state) and retry.";
+    out.error = "The target text frame or its layer is locked. Unlock it (illustrator_set_layer_state) and retry.";
     return emitUpdate(out);
   }
-  if (frameHidden(found)) {
+  if (frameHidden(found) || frameLayerHidden(found)) {
     out.status = "target_hidden";
-    out.error = "The target text frame is hidden. Show it (illustrator_set_layer_state) and retry.";
+    out.error = "The target text frame or its layer is hidden. Show it (illustrator_set_layer_state) and retry.";
     return emitUpdate(out);
   }
 

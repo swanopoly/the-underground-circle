@@ -6491,7 +6491,7 @@ end tell`;
         exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 12000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
           if (err) {
             res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator document status failed').toString().slice(0, 1000) }));
+            res.end(JSON.stringify({ ok: false, error: describeIllustratorOsascriptError(err, stderr, 'Illustrator document status failed') }));
             return;
           }
           let result = null;
@@ -6606,7 +6606,7 @@ end tell`;
         exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 25000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
           if (err) {
             res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator proof export failed').toString().slice(0, 1000) }));
+            res.end(JSON.stringify({ ok: false, error: describeIllustratorOsascriptError(err, stderr, 'Illustrator proof export failed') }));
             return;
           }
           let result = null;
@@ -6667,7 +6667,7 @@ end tell`;
         exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 12000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
           if (err) {
             res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator text inventory failed').toString().slice(0, 1000) }));
+            res.end(JSON.stringify({ ok: false, error: describeIllustratorOsascriptError(err, stderr, 'Illustrator text inventory failed') }));
             return;
           }
           let result = null;
@@ -6737,7 +6737,7 @@ end tell`;
         exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 15000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
           if (err) {
             res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator layer-state change failed').toString().slice(0, 1000) }));
+            res.end(JSON.stringify({ ok: false, error: describeIllustratorOsascriptError(err, stderr, 'Illustrator layer-state change failed') }));
             return;
           }
           let result = null;
@@ -6798,7 +6798,7 @@ end tell`;
         exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 15000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
           if (err) {
             res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator text update failed').toString().slice(0, 1000) }));
+            res.end(JSON.stringify({ ok: false, error: describeIllustratorOsascriptError(err, stderr, 'Illustrator text update failed') }));
             return;
           }
           let result = null;
@@ -14791,6 +14791,20 @@ function resolveIllustratorMacApp(appName) {
   return value;
 }
 
+// A cold Illustrator fails `do javascript` COMPILATION: `tell application`
+// launches the app to load its scripting dictionary, and mid-launch the
+// dictionary is not loadable, so osascript reports a bare "syntax error:
+// Expected end of line but found identifier" pointing at `javascript`. That
+// message sent a live debugging session down an escaping rabbit hole on
+// 2026-07-29 — the script was fine; the app was booting. Name the real cause.
+function describeIllustratorOsascriptError(err, stderr, fallback) {
+  const raw = (stderr || (err && err.message) || fallback || 'Illustrator script failed').toString();
+  if (/-2741/.test(raw) && /syntax error/i.test(raw)) {
+    return 'Illustrator is still starting (its scripting dictionary was not loadable yet, which osascript mis-reports as a syntax error). Wait for Illustrator to finish launching, then retry the same call.';
+  }
+  return raw.slice(0, 1000);
+}
+
 function resolveIllustratorScriptTarget(appName) {
   const resolved = resolveIllustratorMacApp(appName || 'Illustrator') ||
     resolveInstalledMacApp(appName || 'Illustrator') ||
@@ -14894,6 +14908,18 @@ function frameLocked(frame) {
 
 function frameHidden(frame) {
   try { return frame.hidden === true; } catch (_) { return false; }
+}
+
+// Layer-level gates. Illustrator's DOM happily writes a text frame whose LAYER
+// is locked or hidden — layer lock is a UI gate, not a DOM gate — which a live
+// probe proved on 2026-07-29: lock the layer, write the frame, "applied".
+// A designer who locked the layer meant the frame too, so both levels count.
+function frameLayerLocked(frame) {
+  try { return frame.layer.locked === true; } catch (_) { return false; }
+}
+
+function frameLayerHidden(frame) {
+  try { return frame.layer.visible === false; } catch (_) { return false; }
 }
 
 // A frame is addressable by its own name OR by its layer name. Layer-name
@@ -15104,14 +15130,14 @@ function illustratorUpdateTextLayerJsxBody(args) {
   }
   // A locked or hidden frame silently swallows the write, so refuse up front
   // rather than reporting a success the user cannot see.
-  if (frameLocked(found)) {
+  if (frameLocked(found) || frameLayerLocked(found)) {
     out.status = "target_locked";
-    out.error = "The target text frame is locked. Unlock it (illustrator_set_layer_state) and retry.";
+    out.error = "The target text frame or its layer is locked. Unlock it (illustrator_set_layer_state) and retry.";
     return emitUpdate(out);
   }
-  if (frameHidden(found)) {
+  if (frameHidden(found) || frameLayerHidden(found)) {
     out.status = "target_hidden";
-    out.error = "The target text frame is hidden. Show it (illustrator_set_layer_state) and retry.";
+    out.error = "The target text frame or its layer is hidden. Show it (illustrator_set_layer_state) and retry.";
     return emitUpdate(out);
   }
 

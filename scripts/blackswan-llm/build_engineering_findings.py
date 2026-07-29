@@ -540,6 +540,41 @@ FINDINGS = [
             "live read-only probe against Google Chrome 2026-07-29"
         ),
     },
+    {
+        "id": "illustrator-layer-lock-ui-gate-not-dom-gate",
+        "q": "Our Illustrator automation refuses to edit locked text frames. QA locked the layer and the edit still went through. How?",
+        "a": (
+            "Because you checked the frame's own `locked` property, and locking a LAYER does not set "
+            "it. Illustrator's scripting DOM happily writes `textFrame.contents` while the frame's "
+            "layer is locked — layer lock is a UI gate (it stops the user's cursor), not a DOM gate "
+            "(it does not stop `do javascript`). A live probe proved it: lock \"Layer 1\", write the "
+            "frame, result \"applied\", re-read confirms the new copy.\n\n"
+            "The fix is to model what the USER means by locked, not what the DOM exposes: refuse when "
+            "`frame.locked === true` OR `frame.layer.locked === true` (and the same for hidden: "
+            "`frame.hidden` OR `frame.layer.visible === false`). A designer who locked the layer "
+            "locked everything on it, whatever the object model thinks.\n\n"
+            "Two adjacent traps from the same live session:\n"
+            "  1. COLD-START DICTIONARY RACE — compiling `tell application ... do javascript` "
+            "LAUNCHES the app to load its scripting dictionary. Against a cold app the dictionary is "
+            "not loadable mid-boot, so osascript fails with a bare 'syntax error: Expected end of "
+            "line but found identifier' pointing at the word `javascript`. The script is fine; the "
+            "app is booting. This message sent a debugging session down an escaping rabbit hole — "
+            "map it to an honest 'app is still starting, retry' message at the boundary that sees "
+            "the raw error.\n"
+            "  2. FOLDER NAME ≠ APPLESCRIPT NAME — the install lives in "
+            "'/Applications/Adobe Illustrator 2026/Adobe Illustrator.app'. The AppleScript "
+            "application name is the .app bundle's ('Adobe Illustrator'), not the year folder's. "
+            "`tell application \"Adobe Illustrator 2026\"` fails dictionary lookup with the same "
+            "misleading syntax error as the cold-start race, so the two are easy to conflate.\n\n"
+            "General rule: **a permission model that only reads the object's own flag misses every "
+            "inherited gate.** Check the container chain the user actually operates on."
+        ),
+        "evidence": (
+            "src/lib/illustratorExtendScriptAdapters.ts frameLayerLocked/frameLayerHidden, "
+            "scripts/claude-bridge.js describeIllustratorOsascriptError, "
+            "live scratch-document probe against Illustrator 2026 on 2026-07-29"
+        ),
+    },
 ]
 
 

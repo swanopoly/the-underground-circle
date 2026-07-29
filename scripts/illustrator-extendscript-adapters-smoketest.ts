@@ -423,6 +423,10 @@ assert.ok(
 );
 assert.ok(update.jsx.includes('target_ambiguous'), 'ambiguous targets fail closed');
 assert.ok(update.jsx.includes('target_locked'), 'a locked frame is refused, not silently swallowed');
+assert.ok(
+  update.jsx.includes('frameLayerLocked(found)') && update.jsx.includes('frameLayerHidden(found)'),
+  'LAYER-level lock/hidden also refuse — live probe 2026-07-29: the DOM writes through a layer lock',
+);
 assert.ok(update.jsx.includes('target_hidden'), 'a hidden frame is refused');
 assert.ok(update.jsx.includes('confirmed === nextText'), 'success requires re-reading the same frame');
 assertNeverTouchesSource(update.jsx, 'update_text_layer');

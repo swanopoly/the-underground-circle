@@ -18,11 +18,26 @@ Mutations are approval-gated; nothing auto-saves.
 Wired end to end 2026-07-29: pure smoke-tested JSX builders
 (`illustratorExtendScriptAdapters.ts`), byte-identical LOCKSTEP twins + three
 `POST /desktop/illustrator_*` endpoints in `claude-bridge.js`, typed
-`desktopBridge` clients, and approval-gated runtime tools. The three new lanes
-are source/contract-verified; no live Illustrator run has exercised them yet.
-The `text` embed goes through `jsxLiteral` (U+2028/U+2029-safe), because copy
-is arbitrary user text and bare JSON.stringify would emit those separators raw
-and break the ES3 string literal.
+`desktopBridge` clients, and approval-gated runtime tools. The `text` embed
+goes through `jsxLiteral` (U+2028/U+2029-safe), because copy is arbitrary user
+text and bare JSON.stringify would emit those separators raw and break the ES3
+string literal.
+
+**Live-verified 2026-07-29** against running Illustrator 2026 on a scratch
+document (bridge endpoint → osascript → ExtendScript → same-frame re-read):
+inventory read the named frame; `update_text_layer` applied and the re-read
+returned the exact new copy; `set_layer_state` locked/unlocked with before/
+after booleans; wrong `expectedDocumentName` → `document_mismatch` (three real
+user documents were open the whole time and untouched); missing layer →
+`layer_not_found`. The live run also CAUGHT a gap the source review missed:
+Illustrator's DOM writes a text frame whose LAYER is locked (layer lock is a
+UI gate, not a DOM gate) — the update script now refuses on frame OR layer
+lock/hidden (`target_locked`/`target_hidden`), and that refusal is itself
+live-verified. Known cold-start behaviour: the first `do javascript` against a
+cold Illustrator launches it and fails dictionary compilation; the endpoints
+now name that condition instead of reporting a misleading syntax error. Live
+proof used the raw bridge on a scratch doc; the full runtime approval lane on
+a real user task has not yet been exercised.
 
 Everything else is the generic desktop ladder — `desktop.file_stat`,
 `desktop.window_state`, `desktop.read_a11y_tree`, `desktop.screenshot` for
