@@ -2251,17 +2251,37 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         })) || transcript;
       }
 
-      // The tool loop hit its per-turn step cap before producing a final
-      // answer. Record it so the run transcript shows the result is partial
-      // rather than a clean finish.
+      // The turn ended without a clean finish. Record it so the run transcript
+      // shows the result is partial rather than complete — and say WHY. This
+      // used to hardcode "Tool-step limit reached", which is only true for the
+      // cap branch: an aborted run and a runtime guard stop (no-progress,
+      // oscillation, bad tool-call identity, tool-result boundary) both arrive
+      // here too and were reported as a step-cap hit they never hit.
       if (toolLoopResult.incomplete) {
         const checkpoint = toolLoopResult.checkpoint || null;
+        const reason = toolLoopResult.incompleteReason ?? 'cap';
+        const incompleteTitle = reason === 'cancelled'
+          ? 'Run stopped by user'
+          : reason === 'guard'
+            ? 'Stopped before finishing'
+            : reason === 'edge_failure'
+              ? 'Tool call failed'
+              : 'Tool-step limit reached';
+        const incompleteSummary = reason === 'cancelled'
+          ? 'You stopped this run — the work so far is saved and can be continued.'
+          : reason === 'guard'
+            ? 'The run stopped on a safety/progress guard before finishing; the response explains what blocked it.'
+            : reason === 'edge_failure'
+              ? 'The tool-use call failed before the turn could finish — the response may be partial.'
+              : 'The tool loop hit its per-turn step cap before finishing — the response may be partial and can be continued.';
         transcript = (await appendTranscriptEvent(transcriptKey, {
           kind: 'tool_activity',
-          title: 'Tool-step limit reached',
-          summary: checkpoint
+          title: incompleteTitle,
+          summary: checkpoint && reason === 'cap'
             ? `Hit the per-turn step cap after ${checkpoint.stepCount} step(s); partial and resumable. ${checkpoint.resumeHint}`
-            : 'The tool loop hit its per-turn step cap before finishing — the response may be partial and can be continued.',
+            : checkpoint
+              ? `${incompleteSummary} ${checkpoint.resumeHint}`
+              : incompleteSummary,
           // Machine-readable resume snapshot so a continuation turn (or the UI)
           // can resume with context instead of re-deriving from scratch.
           ...(checkpoint ? { data: { checkpoint } } : {}),

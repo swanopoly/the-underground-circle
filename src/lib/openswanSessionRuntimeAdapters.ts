@@ -101,6 +101,14 @@ export type LegacyToolLoopResult = {
   toolEvents: LegacyToolEvent[];
   routing?: SwanBotRoutingInfo;
   incomplete?: boolean;
+  /**
+   * WHY the result is incomplete, when it is. The transcript event that reports
+   * an incomplete turn hardcoded "Tool-step limit reached", which was only ever
+   * true for the cap branch — an aborted run already rendered that wrong
+   * headline, and the guard-stop branch would have been a third. Absent
+   * whenever `incomplete` is absent.
+   */
+  incompleteReason?: 'cap' | 'guard' | 'cancelled' | 'edge_failure';
   checkpoint?: ToolLoopCheckpoint;
   usage?: {
     input_tokens: number;
@@ -787,6 +795,7 @@ export function buildLegacyToolLoopResult(args: {
       ...base,
       ...incompleteReceipt(),
       incomplete: true,
+      incompleteReason: 'edge_failure',
     };
   }
   // STOP button: a user-cancelled run must read as user-stopped/incomplete —
@@ -801,6 +810,7 @@ export function buildLegacyToolLoopResult(args: {
       ...base,
       ...incompleteReceipt(),
       incomplete: true,
+      incompleteReason: 'cancelled',
       checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
     };
   }
@@ -819,6 +829,7 @@ export function buildLegacyToolLoopResult(args: {
       ...base,
       ...incompleteReceipt(),
       incomplete: true,
+      incompleteReason: 'guard',
       checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
     };
   }
@@ -837,6 +848,7 @@ export function buildLegacyToolLoopResult(args: {
     ...base,
     ...incompleteReceipt(),
     incomplete: true,
+    incompleteReason: 'cap',
     checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
   };
 }

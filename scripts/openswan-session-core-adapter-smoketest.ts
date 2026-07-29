@@ -533,6 +533,10 @@ async function main() {
     'guard stop keeps the loop\'s own explanation');
   assert(guardResult.verificationReceipt?.verdict === 'unverified',
     'guard stop downgrades a ✓ Verified receipt — a non-finish must never read as proven');
+  // The transcript event branches on this to pick its headline. Without it the
+  // event announced "Tool-step limit reached" for a cap the run never hit.
+  assert(guardResult.incompleteReason === 'guard', 'guard stop is labelled, not called a cap hit');
+  assert(edgeFailResult.incompleteReason === 'edge_failure', 'edge failure is labelled');
 
   const capEvents: LegacyToolEvent[] = [
     { tool: 'desktop.read_a11y_tree', input: {}, result: 'tree captured', status: 'passed' },
@@ -546,6 +550,19 @@ async function main() {
     usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
   });
   assert(capResult.incomplete === true, 'max iterations → incomplete');
+  assert(capResult.incompleteReason === 'cap', 'cap exhaustion is the ONLY branch labelled cap');
+
+  // A user STOP is incomplete too, and it also used to render the step-cap
+  // headline. It gets its own label.
+  const abortResult = buildLegacyToolLoopResult({
+    runResult: {
+      text: 'partial work', messages: [], iterations: 2,
+      stopReason: 'tool_use', hitMaxIterations: false, aborted: true,
+    },
+    toolEvents: guardEvents, maxRounds: 4,
+  });
+  assert(abortResult.incomplete === true && abortResult.incompleteReason === 'cancelled',
+    'user abort → incomplete + labelled cancelled, not a cap hit');
   assert(capResult.response.includes('I reached my tool-step limit for this turn (4 steps)'),
     'limit note carries maxRounds (legacy wording)');
   assert(capResult.response.includes('Progress before the step limit:'), 'progress summary appended');
