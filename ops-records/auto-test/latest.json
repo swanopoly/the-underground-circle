@@ -1,5 +1,5 @@
 {
-  "stamp": "2026-07-29T15:28:25.085Z",
+  "stamp": "2026-07-29T17:08:31.028Z",
   "typecheck": {
     "total": 0,
     "byFile": {}
@@ -8,26 +8,10 @@
     "total": 488,
     "failing": []
   },
-  "invariants": {
-    "no unreachable private rows (private + user_id IS NULL)": "PASS",
-    "agent-scope rows carry an agent_id": "PASS",
-    "every active row has a circle": "PASS",
-    "recent memories are traceable to the run that produced them": "PASS",
-    "source_surface distribution": "PASS",
-    "memories are reachable by semantic search": "PASS",
-    "no orphaned satellite rows": "PASS",
-    "memory_access_log is being written": "PASS",
-    "no exact-content duplicate rows": "PASS",
-    "content diversity (informational, NOT a defect)": "PASS",
-    "no SELECT policy exposes private rows without an owner check": "PASS",
-    "hot-path indexes present": "PASS",
-    "match_memories is SECURITY INVOKER": "PASS"
-  },
+  "invariants": null,
   "diff": {
     "regressions": [],
-    "improvements": [
-      "invariant FAIL→PASS: recent memories are traceable to the run that produced them"
-    ],
+    "improvements": [],
     "known": []
   }
 }
