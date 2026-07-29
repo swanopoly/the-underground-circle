@@ -103,6 +103,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Per-app automation profiles | `docs/apps/*.md` + `src/lib/appAutomationDocsIndex.ts` (status lockstep smoke) |
 | App reachability (live ladder) | `src/lib/appReachability.ts`, `src/lib/appReachabilityProbe.ts`, tool `desktop.app_reachability`, `/apps` command |
 | App screen observe/next-step | `src/lib/appScreenNextStep.ts`, tool `desktop.observe_app` (one-round-trip observe + Δ diff + suggestion) |
+| Unknown-app menu discovery | tool `desktop.menu_inventory` (read-only System Events menu-bar catalog: names/enabled/submenus; never clicks/focuses/launches; feeds exact labels to `desktop.menu_click`); apps that draw menus in their own window (Blender-style) come back with only Apple/Window menus, which routes the agent to `observe_app`/a11y instead |
 | Marketplace prompt context | `src/lib/marketplaceIntegrationContext.ts` |
 | Codebase index/search + @mentions + conventions (coding-agent P4) | `src/lib/codebaseIndexRuntime.ts`, `src/lib/projectConventions.ts`, pure cores `codebaseIndexCore/codebaseSymbolCore/codebaseMentionsCore` |
 | Live TODO + tool-result summarization + run-and-fix gate (coding-agent P6) | `src/lib/agentTodoCore.ts` + `agentTodoStore.ts`, `src/lib/toolResultSummaryCore.ts` (in `agentExecutionCore.ts`), `src/lib/runAndFixGateCore.ts` (in `openswanSessionRuntime.ts`) |

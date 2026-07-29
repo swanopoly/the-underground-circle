@@ -5181,6 +5181,73 @@ export async function illustratorUpdateTextLayer(args: {
   };
 }
 
+export type MenuInventoryItem = {
+  name: string;
+  enabled: boolean;
+  hasSubmenu: boolean;
+  submenuItems?: string[];
+};
+
+export type MenuInventory = {
+  appName: string;
+  appRunning: boolean;
+  menuTitle: string | null;
+  menus: Array<{ title: string; items: MenuInventoryItem[] }>;
+  menuCount: number;
+  itemCount: number;
+  truncated: boolean;
+  error: string | null;
+};
+
+/**
+ * READ-ONLY menu-bar catalog of a RUNNING app via System Events. Never clicks,
+ * activates, focuses, or launches. The unknown-app discovery primitive: feeds
+ * exact labels into desktop.menu_click instead of guessing them.
+ */
+export async function menuInventory(args: {
+  appName: string;
+  /** Deep-read one named top-level menu (adds submenu expansion). */
+  menuTitle?: string;
+}): Promise<DesktopResult<MenuInventory>> {
+  const appName = String(args?.appName || '').trim();
+  if (!appName) return { ok: false, error: 'appName is required.', errorCode: 'invalid_input' };
+  const r = await callBridge('POST', '/desktop/menu_inventory', {
+    appName,
+    menuTitle: args?.menuTitle ? String(args.menuTitle).trim() : undefined,
+  });
+  if (!r.ok) return r as DesktopResult<MenuInventory>;
+  const d = r.data as any;
+  const menus = Array.isArray(d?.menus)
+    ? d.menus.slice(0, 16).map((m: any) => ({
+        title: m?.title ? String(m.title) : '',
+        items: Array.isArray(m?.items)
+          ? m.items.map((i: any) => ({
+              name: i?.name ? String(i.name) : '',
+              enabled: i?.enabled === true,
+              hasSubmenu: i?.hasSubmenu === true,
+              ...(Array.isArray(i?.submenuItems)
+                ? { submenuItems: i.submenuItems.map((x: unknown) => String(x)).filter(Boolean).slice(0, 24) }
+                : {}),
+            })).filter((i: MenuInventoryItem) => !!i.name)
+          : [],
+      })).filter((m: { title: string }) => !!m.title)
+    : [];
+  return {
+    ok: d?.ok === true,
+    ...(d?.ok === true ? {} : { error: d?.error ? String(d.error) : 'Menu inventory failed.' }),
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      appRunning: d?.appRunning === true,
+      menuTitle: d?.menuTitle ? String(d.menuTitle) : null,
+      menus,
+      menuCount: Number.isFinite(Number(d?.menuCount)) ? Number(d.menuCount) : menus.length,
+      itemCount: Number.isFinite(Number(d?.itemCount)) ? Number(d.itemCount) : 0,
+      truncated: d?.truncated === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
 // ─── Internals ────────────────────────────────────────────────────────────
 
 async function callBridge(

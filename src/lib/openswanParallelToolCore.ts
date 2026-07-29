@@ -185,6 +185,7 @@ export const DEFAULT_PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set<string>(
   'desktop.photoshop_layer_inventory',
   'desktop.illustrator_document_status',
   'desktop.illustrator_text_inventory',
+  'desktop.menu_inventory',
   'desktop.cad_inspect_file',
   'desktop.observe_app',
   'desktop.app_reachability',

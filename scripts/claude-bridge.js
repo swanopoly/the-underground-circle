@@ -2675,7 +2675,7 @@ const server = http.createServer(async (req, res) => {
         ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'installed_apps', 'app_installed', 'browser_tabs', 'window_state', 'observe_app', 'clipboard', 'clipboard_write', 'clipboard_clear',
            'file_list', 'file_read', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'exec_file', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
            'paste_text', 'notes_create', 'applescript', 'convert_image', 'cad_compile', 'design_export',
-           'menu_click', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
+           'menu_click', 'menu_inventory', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
            'photoshop_apply_adjustment_layer', 'photoshop_apply_selection_or_mask', 'photoshop_resize_canvas_or_image',
            'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode',
@@ -4010,6 +4010,93 @@ end tell`;
           }
           res.writeHead(200, CORS);
           res.end(JSON.stringify({ ok: true, combo }));
+        });
+      });
+      return;
+    }
+
+
+    if (url === '/desktop/menu_inventory' && req.method === 'POST') {
+      readJsonBody(req, 2048, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || '').trim();
+        const menuTitle = String(parsed?.menuTitle || '').trim();
+        if (!appName || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'appName is required (exact app name from window_state / running apps).' }));
+          return;
+        }
+        if (menuTitle.length > 80 || /[\x00-\x1f\u2028\u2029]/.test(menuTitle)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'menuTitle must be <= 80 chars.' }));
+          return;
+        }
+        const built = buildMenuInventoryScript({ appName, menuTitle: menuTitle || undefined });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not build menu inventory script.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            const raw = (stderr || err.message || 'Menu inventory failed').toString();
+            const friendly = /not allowed assistive|assistive access|1002/i.test(raw)
+              ? 'System Events could not read the menu bar (Accessibility permission). Grant the bridge terminal Accessibility access in System Settings.'
+              : raw.slice(0, 500);
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: friendly }));
+            return;
+          }
+          const text = String(stdout || '').replace(/\r/g, '');
+          if (/^NOTRUNNING\s*$/.test(text)) {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: false, appName: built.appName, appRunning: false, menus: [], error: `${built.appName} is not running. Menu inventory never launches an app.` }));
+            return;
+          }
+          if (/^NOMENUBAR\s*$/.test(text)) {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: false, appName: built.appName, appRunning: true, menus: [], error: `${built.appName} exposes no menu bar to System Events.` }));
+            return;
+          }
+          const SEP = String.fromCharCode(31);
+          const menus = [];
+          let current = null;
+          let currentItem = null;
+          let totalItems = 0;
+          for (const line of text.split('\n')) {
+            if (!line) continue;
+            const parts = line.split(SEP);
+            if (parts[0] === 'M' && parts.length >= 2) {
+              current = { title: String(parts[1]).slice(0, 80), items: [] };
+              currentItem = null;
+              menus.push(current);
+            } else if (parts[0] === 'I' && parts.length >= 4 && current) {
+              if (totalItems >= 400) continue;
+              currentItem = {
+                name: String(parts[3]).slice(0, 80),
+                enabled: parts[1] === '1',
+                hasSubmenu: parts[2] === '1',
+              };
+              current.items.push(currentItem);
+              totalItems += 1;
+            } else if (parts[0] === 'S' && parts.length >= 2 && currentItem) {
+              if (!Array.isArray(currentItem.submenuItems)) currentItem.submenuItems = [];
+              if (currentItem.submenuItems.length < 24) {
+                currentItem.submenuItems.push(String(parts[1]).slice(0, 80));
+              }
+            }
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            appRunning: true,
+            menuTitle: menuTitle || null,
+            menus: menus.slice(0, 16),
+            menuCount: menus.length,
+            itemCount: totalItems,
+            truncated: totalItems >= 400,
+          }));
         });
       });
       return;
@@ -9907,6 +9994,89 @@ function menuLabelVariants(label) {
 
 function appleScriptStringList(values) {
   return `{${values.map((value) => `"${escapeAppleScriptString(value)}"`).join(', ')}}`;
+}
+
+// ── Menu inventory (READ-ONLY discovery for apps with no profile) ───────────
+//
+// The menu bar is the complete command catalog of any macOS app, and until
+// this existed the agent could CLICK a menu path (menu_click) but never READ
+// one — an unknown app meant guessing labels blind. This walks System Events
+// menu metadata only: it never clicks, never performs, never activates or
+// focuses the target, and never launches it (a non-running app is an honest
+// appRunning:false, not a launch).
+//
+// Output is a character-id-31 (unit separator) line protocol parsed below —
+// building JSON inside AppleScript is where escaping bugs live.
+function buildMenuInventoryScript({ appName, menuTitle }) {
+  if (!appName || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) return null;
+  const resolved = resolveInstalledMacApp(appName);
+  const targetName = resolved?.name || String(appName).trim();
+  const deepMenu = String(menuTitle || '').trim();
+  if (deepMenu && (deepMenu.length > 80 || /[\x00-\x1f\u2028\u2029]/.test(deepMenu))) return null;
+  const script = `
+set fieldSep to character id 31
+set out to ""
+tell application "System Events"
+  if not (exists application process "${escapeAppleScriptString(targetName)}") then
+    return "NOTRUNNING"
+  end if
+  set targetProc to application process "${escapeAppleScriptString(targetName)}"
+  if not (exists menu bar 1 of targetProc) then
+    return "NOMENUBAR"
+  end if
+  set barItems to menu bar items of menu bar 1 of targetProc
+  set menuCount to count of barItems
+  if menuCount > 16 then set menuCount to 16
+  repeat with m from 1 to menuCount
+    set mbi to item m of barItems
+    set menuName to ""
+    try
+      set menuName to name of mbi
+    end try
+    if menuName is not "" and menuName is not missing value then
+      set out to out & "M" & fieldSep & menuName & linefeed
+      ${deepMenu ? `if menuName is equal to "${escapeAppleScriptString(deepMenu)}" then` : ''}
+      try
+        set theMenu to menu 1 of mbi
+        set itemNames to name of every menu item of theMenu
+        set itemEnabled to enabled of every menu item of theMenu
+        set itemCount to count of itemNames
+        if itemCount > 60 then set itemCount to 60
+        repeat with i from 1 to itemCount
+          set itemName to item i of itemNames
+          if itemName is not missing value and itemName is not "" then
+            set enabledFlag to "0"
+            try
+              if item i of itemEnabled is true then set enabledFlag to "1"
+            end try
+            set submenuFlag to "0"
+            ${deepMenu ? `try
+              if exists menu 1 of menu item i of theMenu then set submenuFlag to "1"
+            end try` : ''}
+            set out to out & "I" & fieldSep & enabledFlag & fieldSep & submenuFlag & fieldSep & itemName & linefeed
+            ${deepMenu ? `if submenuFlag is "1" then
+              try
+                set subNames to name of every menu item of menu 1 of menu item i of theMenu
+                set subCount to count of subNames
+                if subCount > 24 then set subCount to 24
+                repeat with s from 1 to subCount
+                  set subName to item s of subNames
+                  if subName is not missing value and subName is not "" then
+                    set out to out & "S" & fieldSep & subName & linefeed
+                  end if
+                end repeat
+              end try
+            end if` : ''}
+          end if
+        end repeat
+      end try
+      ${deepMenu ? 'end if' : ''}
+    end if
+  end repeat
+end tell
+return out
+`;
+  return { appName: targetName, script };
 }
 
 function buildMenuClickScript({ appName, menuPath }) {

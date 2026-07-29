@@ -2255,6 +2255,23 @@ function main() {
 
 main();
 
+// ── Menu inventory: READ-ONLY discovery stays read-only ────────────────────
+// The unknown-app primitive reads the complete menu catalog via System
+// Events. What must stay true forever: it never clicks, never performs,
+// never activates/focuses, and never launches a non-running app.
+{
+  const src = readFileSync(path.resolve(process.cwd(), 'scripts/claude-bridge.js'), 'utf8');
+  const start = src.indexOf('function buildMenuInventoryScript(');
+  const end = src.indexOf('function buildMenuClickScript(');
+  assert(start >= 0 && end > start, 'menu inventory builder is locatable (and defined before menu_click)');
+  const body = src.slice(start, end);
+  assert(!/\bclick\b/.test(body), 'inventory script never clicks');
+  assert(!/\bperform\b/i.test(body), 'inventory script never performs actions');
+  assert(!/set frontmost/.test(body) && !/\bactivate\b/.test(body), 'inventory never activates or focuses the app');
+  assert(body.includes('return "NOTRUNNING"'), 'a non-running app is refused, never launched');
+  assert(body.includes('if menuCount > 16') && body.includes('if itemCount > 60'), 'menu and item walks are bounded');
+}
+
 // ── Photoshop text-update lock discipline (live-probe class of 2026-07-29) ──
 // Object-model writes go straight through UI locks, so the update walker must
 // carry the InDesign-parity discipline: temporarily unlock/show the matched

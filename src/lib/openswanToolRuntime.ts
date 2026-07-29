@@ -228,6 +228,7 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.convert_image'
   | 'desktop.press_keys'
   | 'desktop.menu_click'
+  | 'desktop.menu_inventory'
   | 'desktop.indesign_document_status'
   | 'desktop.indesign_text_inventory'
   | 'desktop.indesign_set_layer_state'
@@ -829,6 +830,7 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.convert_image':   { source: string; format?: string };
   'desktop.press_keys':      { appName: string; combo: string };
   'desktop.menu_click':      { appName: string; menuPath: string[] };
+  'desktop.menu_inventory': { appName: string; menuTitle?: string };
   'desktop.indesign_document_status': { appName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.indesign_text_inventory': { appName?: string; query?: string; expectedDocumentName?: string; sourceDocumentPath?: string; maxItems?: number };
   'desktop.indesign_set_layer_state': { appName?: string; layerName: string; action: 'show' | 'hide' | 'lock' | 'unlock'; expectedDocumentName?: string; sourceDocumentPath?: string };
@@ -1135,6 +1137,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.convert_image':     { ok: boolean; resultsText: string };
   'desktop.press_keys':        { ok: boolean; resultsText: string };
   'desktop.menu_click':        { ok: boolean; resultsText: string };
+  'desktop.menu_inventory': { ok: boolean; resultsText: string };
   'desktop.indesign_document_status': { ok: boolean; resultsText: string };
   'desktop.indesign_text_inventory': { ok: boolean; resultsText: string };
   'desktop.indesign_set_layer_state': { ok: boolean; resultsText: string };
@@ -3201,6 +3204,21 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.menu_inventory',
+    label: 'Menu Inventory',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      "Read-only menu-bar catalog of a RUNNING app via accessibility: every top-level menu with item names, enabled state, and submenu markers; pass menuTitle to deep-read one menu with submenu expansion. Use FIRST on any app without a dedicated profile — the menu bar is the app's complete command catalog — and use its exact labels for desktop.menu_click instead of guessing. Never clicks, focuses, or launches the app.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Exact running app name from desktop.window_state or desktop.list_running_apps.' },
+        menuTitle: { type: 'string', description: 'Optional: deep-read this one top-level menu (e.g. "File") including submenus.' },
+      },
+      required: ['appName'],
+    },
+  },
+  {
     name: 'desktop.run_applescript',
     label: 'Run AppleScript',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -4635,6 +4653,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       'desktop.photoshop_layer_inventory',
       'desktop.illustrator_document_status',
       'desktop.illustrator_text_inventory',
+      'desktop.menu_inventory',
       'desktop.cad_inspect_file',
       'desktop.observe_app',
       'desktop.app_reachability',
@@ -5218,6 +5237,7 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.convert_image': ['execute'],
   'desktop.press_keys': ['execute'],
   'desktop.menu_click': ['execute'],
+  'desktop.menu_inventory': ['execute'],
   'desktop.indesign_set_layer_state': ['execute'],
   'desktop.indesign_batch_find_change': ['execute'],
   'desktop.indesign_batch_update_text_layers': ['execute'],
@@ -5477,6 +5497,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.illustrator_text_inventory',
   'desktop.illustrator_set_layer_state',
   'desktop.illustrator_update_text_layer',
+  'desktop.menu_inventory',
   'desktop.cad_compile',
   'desktop.cad_inspect_file',
   'desktop.design_export',
@@ -6921,6 +6942,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.illustrator_text_inventory':
     case 'desktop.illustrator_set_layer_state':
     case 'desktop.illustrator_update_text_layer':
+    case 'desktop.menu_inventory':
     case 'desktop.cad_compile':
     case 'desktop.cad_inspect_file':
     case 'desktop.design_export':
@@ -14185,6 +14207,47 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           ...d,
           resultsText: `Exported ${d.documentName || 'document'} as ${String(d.format || '').toUpperCase()} proof → ${d.outputFileName} (${d.sizeBytes} bytes). Source document not saved.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.menu_inventory': {
+      try {
+        const { menuInventory, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await menuInventory({
+          appName: typeof a.appName === 'string' ? a.appName : '',
+          menuTitle: typeof a.menuTitle === 'string' && a.menuTitle.trim() ? a.menuTitle.trim() : undefined,
+        });
+        if (!r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!r.ok) return { ok: false, ...d, resultsText: d.error || 'Menu inventory failed.' } as any;
+        // Deep-read miss: the requested menu is not in the native menu bar.
+        // Say so and list what IS there — some apps (Blender, games, custom-
+        // chrome Electron) draw their real menus inside their own window, and
+        // learning that routes the agent to observe_app/a11y instead.
+        if (d.menuTitle) {
+          const match = d.menus.find((menu) => menu.title.toLowerCase() === d.menuTitle!.toLowerCase());
+          if (!match || match.items.length === 0) {
+            const available = d.menus.map((menu) => menu.title).join(', ');
+            return {
+              ok: false,
+              ...d,
+              resultsText: `${d.appName} has no readable native menu named ${JSON.stringify(d.menuTitle)}${available ? ` — its menu bar exposes only: ${available}` : ''}. Apps that draw menus inside their own window need desktop.observe_app / desktop.read_a11y_tree instead.`,
+            } as any;
+          }
+        }
+        // Menu titles/items are app-controlled observation content — fence them.
+        const lines = d.menus.map((menu) => {
+          const items = menu.items.map((i) =>
+            `${i.name}${i.enabled ? '' : ' [disabled]'}${i.hasSubmenu ? ' ▸' : ''}${i.submenuItems ? ` (${i.submenuItems.join(', ')})` : ''}`);
+          return `${menu.title}: ${items.join(' | ')}`;
+        });
+        const body = fenceUntrustedObservationText(boundListWithBudget(lines, 6000));
+        return {
+          ok: true,
+          ...d,
+          resultsText: `${d.appName} menu bar — ${d.menuCount} menu(s), ${d.itemCount} item(s)${d.truncated ? ' (truncated)' : ''}.${lines.length ? `\n${body}` : ''}\nUse these exact labels with desktop.menu_click (e.g. ["File","Export"]).`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
