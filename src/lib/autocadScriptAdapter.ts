@@ -42,13 +42,15 @@ export type AutoCadOperation =
   | 'export_pdf' //     current drawing → single PDF (EXPORTPDF)
   | 'export_dxf' //     current drawing → DXF (DXFOUT, version + precision bounded)
   | 'purge_and_audit' // headless cleanup: -PURGE all + AUDIT (fix errors)
-  | 'run_commands'; //  a bounded whitelist of safe zero-arg / low-arg commands
+  | 'run_commands' //   a bounded whitelist of safe zero-arg / low-arg commands
+  | 'draft_entities'; // create layers + 2D geometry from a neutral entity model
 
 export const AUTOCAD_OPERATIONS: readonly AutoCadOperation[] = [
   'export_pdf',
   'export_dxf',
   'purge_and_audit',
   'run_commands',
+  'draft_entities',
 ] as const;
 
 /** The engine this script targets (see appScriptRunner.APP_SCRIPT_ENGINE_REGISTRY). */
@@ -114,6 +116,46 @@ function validateAutoCadPath(
  */
 function scrPathToken(validatedPath: string): string {
   return `"${validatedPath}"`;
+}
+
+// ── draft_entities tokenizers ─────────────────────────────────────────────────
+// The .scr injection bar applies to EVERY value, not just paths: a bare space
+// or newline is <Enter>. Coordinates go in as "x,y" single tokens (no internal
+// space); layer names and text are allowlist/stripped exactly like the DXF core.
+
+const AUTOCAD_LAYER_NAME_PATTERN = /^[A-Za-z0-9_$-]{1,31}$/;
+
+function scrNumber(value: number): string | null {
+  if (!Number.isFinite(value)) return null;
+  // AutoCAD reads a plain decimal; bound precision, never emit exponent form.
+  const rounded = Math.round(value * 1e6) / 1e6;
+  const text = rounded.toString();
+  return /e/i.test(text) ? rounded.toFixed(6) : text;
+}
+
+/** "x,y" — one token, comma-separated, no embedded space (space would be Enter). */
+function scrPoint(x: number, y: number): string | null {
+  const sx = scrNumber(x); const sy = scrNumber(y);
+  if (sx === null || sy === null) return null;
+  return `${sx},${sy}`;
+}
+
+function scrLayerName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return AUTOCAD_LAYER_NAME_PATTERN.test(trimmed) ? trimmed : null;
+}
+
+/**
+ * TEXT content for the AutoCAD TEXT command. The TEXT prompt reads to end of
+ * line, so a newline TERMINATES the string (and starts a new command) — strip
+ * every control char, and refuse an empty result. Double quotes are fine in AutoCAD text.
+ */
+function scrText(value: unknown): string | null {
+  const raw = value === undefined || value === null ? '' : String(value);
+  // eslint-disable-next-line no-control-regex
+  const stripped = raw.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').trim();
+  return stripped.length ? stripped.slice(0, 250) : null;
 }
 
 function extensionOf(pathValue: string): string {
@@ -201,7 +243,29 @@ export type AutoCadScriptInput =
   | AutoCadExportPdfInput
   | AutoCadExportDxfInput
   | AutoCadPurgeAndAuditInput
-  | AutoCadRunCommandsInput;
+  | AutoCadRunCommandsInput
+  | AutoCadDraftEntitiesInput;
+
+/**
+ * A 2D drafting request in the SAME neutral entity model engineeringDraftingCore
+ * uses, compiled to AutoCAD command lines. Deliberately a SUBSET: line, circle,
+ * arc, lightweight polyline, and single-line text, each on a named layer.
+ * BLOCK/INSERT are excluded from .scr v1 — block definition via -BLOCK is an
+ * interactive multi-select prompt sequence that does not translate cleanly to a
+ * headless line script; the DXF lane owns blocks. See NOTE on execution gating.
+ */
+export interface AutoCadDraftEntitiesInput {
+  op: 'draft_entities';
+  layers?: Array<{ name: string; color?: number }>;
+  entities: AutoCadDraftEntity[];
+}
+
+export type AutoCadDraftEntity =
+  | { kind: 'line'; layer: string; x1: number; y1: number; x2: number; y2: number }
+  | { kind: 'circle'; layer: string; cx: number; cy: number; r: number }
+  | { kind: 'arc'; layer: string; cx: number; cy: number; r: number; startDeg: number; endDeg: number }
+  | { kind: 'polyline'; layer: string; points: Array<{ x: number; y: number }>; closed?: boolean }
+  | { kind: 'text'; layer: string; x: number; y: number; height: number; text: string };
 
 export interface AutoCadScriptBuild {
   /** Newline-separated AutoCAD command script (the .scr file body). */
@@ -396,9 +460,101 @@ export function validateAutoCadArgs(input: unknown): AutoCadArgsValidation {
       if (!Array.isArray(r.commands)) return { error: 'run_commands requires a commands array' };
       return { ok: true, value: { op: 'run_commands', commands: r.commands.map((c) => String(c)) } };
     }
+    case 'draft_entities': {
+      if (!Array.isArray(r.entities) || r.entities.length === 0) return { error: 'draft_entities requires a non-empty entities array' };
+      if (r.entities.length > 20000) return { error: 'draft_entities exceeds the 20000-entity cap' };
+      const value: AutoCadDraftEntitiesInput = { op: 'draft_entities', entities: r.entities as AutoCadDraftEntity[] };
+      if (Array.isArray(r.layers)) value.layers = r.layers as Array<{ name: string; color?: number }>;
+      return { ok: true, value };
+    }
     default:
       return { error: `unsupported op` };
   }
+}
+
+// ── draft_entities builder ────────────────────────────────────────────────────
+//
+// Compiles the neutral entity model to AutoCAD command lines. Every command is
+// documented; every user value passes a tokenizer that cannot emit a bare
+// space/newline. Emits -LAYER (Make/Color/Set) then one command per entity.
+// // VERIFY on a real install: the exact -LAYER sub-option letters (M/C/S),
+// PLINE close token ("C"), and TEXT prompt order (justify default → insertion
+// point → height → rotation → string) before wiring for execution.
+function buildDraftEntities(input: AutoCadDraftEntitiesInput): AutoCadScriptBuild {
+  const notes: string[] = [];
+  const body: string[] = [];
+  const declared = new Set<string>(['0']);
+
+  // Declare layers first: -LAYER Make <name> [Color <n> <name>] then Set 0.
+  for (const layer of input.layers ?? []) {
+    const name = scrLayerName(layer?.name);
+    if (!name) { notes.push(`layer "${String(layer?.name).slice(0, 24)}" skipped — name must match [A-Za-z0-9_$-], 1-31 chars.`); continue; }
+    body.push('-LAYER', 'M', name);
+    const color = Number.isFinite(layer?.color) ? Math.max(1, Math.min(255, Math.trunc(layer!.color as number))) : null;
+    if (color !== null) body.push('C', String(color), name);
+    body.push('');
+    declared.add(name);
+  }
+
+  let emitted = 0;
+  for (const e of input.entities ?? []) {
+    const layer = scrLayerName((e as any)?.layer);
+    if (!layer) { notes.push('entity skipped — invalid layer name.'); continue; }
+    if (!declared.has(layer)) { notes.push(`entity references undeclared layer "${layer}" — declare it in layers[] first.`); continue; }
+    // Set current layer, then draw. -LAYER Set <name>.
+    const draw: string[] = [];
+    switch (e.kind) {
+      case 'line': {
+        const a = scrPoint(e.x1, e.y1), b = scrPoint(e.x2, e.y2);
+        if (!a || !b) { notes.push('line skipped — non-finite coordinate.'); continue; }
+        draw.push('LINE', a, b, '');
+        break;
+      }
+      case 'circle': {
+        const c = scrPoint(e.cx, e.cy), r = scrNumber(e.r);
+        if (!c || r === null || e.r <= 0) { notes.push('circle skipped — bad center or radius.'); continue; }
+        draw.push('CIRCLE', c, r);
+        break;
+      }
+      case 'arc': {
+        // AutoCAD ARC via Center: ARC, C, center, start-point, end-angle.
+        // Compute start point from center+radius+startDeg so no interactive angle prompt is needed.
+        const sx = e.cx + e.r * Math.cos((e.startDeg * Math.PI) / 180);
+        const sy = e.cy + e.r * Math.sin((e.startDeg * Math.PI) / 180);
+        const c = scrPoint(e.cx, e.cy), sp = scrPoint(sx, sy), ea = scrNumber(e.endDeg);
+        if (!c || !sp || ea === null) { notes.push('arc skipped — bad geometry.'); continue; }
+        draw.push('ARC', 'C', c, sp, 'A', ea);
+        break;
+      }
+      case 'polyline': {
+        const pts = Array.isArray(e.points) ? e.points : [];
+        if (pts.length < 2) { notes.push('polyline skipped — needs >= 2 points.'); continue; }
+        const tokens = pts.map((p) => scrPoint(p.x, p.y));
+        if (tokens.some((t) => t === null)) { notes.push('polyline skipped — non-finite vertex.'); continue; }
+        draw.push('PLINE', ...(tokens as string[]));
+        draw.push(e.closed ? 'C' : '');
+        break;
+      }
+      case 'text': {
+        const p = scrPoint(e.x, e.y), h = scrNumber(e.height), t = scrText(e.text);
+        if (!p || h === null || e.height <= 0 || !t) { notes.push('text skipped — bad position/height/empty string.'); continue; }
+        // TEXT: insertion point, height, rotation(0), string.
+        draw.push('TEXT', p, h, '0', t);
+        break;
+      }
+      default:
+        notes.push('entity skipped — unknown kind.');
+        continue;
+    }
+    body.push('-LAYER', 'S', layer, '', ...draw);
+    emitted += 1;
+  }
+
+  if (emitted === 0) {
+    return { script: '', scriptExtension: 'scr', notes: [...notes, 'draft_entities aborted — no valid entity was produced.'] };
+  }
+  notes.unshift(`draft_entities: ${emitted} entit${emitted === 1 ? 'y' : 'ies'} on ${declared.size - 1} declared layer(s). VERIFY -LAYER/PLINE/TEXT prompt sequences on a real AutoCAD install before enabling execution.`);
+  return { script: assembleScript(body), scriptExtension: 'scr', notes };
 }
 
 // ── Public builder ────────────────────────────────────────────────────────────
@@ -435,6 +591,8 @@ export function buildAutoCadScript(op: unknown, input?: unknown): AutoCadScriptB
       return buildPurgeAndAudit(value);
     case 'run_commands':
       return buildRunCommands(value);
+    case 'draft_entities':
+      return buildDraftEntities(value);
     default:
       return { script: '', scriptExtension: 'scr', notes: ['Unsupported AutoCAD operation.'] };
   }
@@ -454,6 +612,8 @@ export function describeAutoCadOperation(input: unknown): string {
     }
     case 'purge_and_audit':
       return 'Purge unused objects and audit/repair the AutoCAD drawing (accoreconsole, approval-gated, MUTATES the drawing)';
+    case 'draft_entities':
+      return `Create ${value.entities.length} 2D entit${value.entities.length === 1 ? 'y' : 'ies'} on ${(value.layers?.length ?? 0)} layer(s) in AutoCAD via a generated .scr (approval-gated)`;
     case 'run_commands': {
       const keys = value.commands.map((c) => c.trim().toLowerCase()).filter((c) => RUN_COMMAND_WHITELIST[c]);
       const list = keys.length ? keys.join(', ') : 'no valid commands';

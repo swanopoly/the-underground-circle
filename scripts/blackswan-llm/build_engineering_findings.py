@@ -674,6 +674,17 @@ FINDINGS = [
             "src/lib/nativeUiVerificationCore.ts verdict=verified live"
         ),
     },
+    {
+        "id": "engineering-tasks-generate-not-drive-when-no-app",
+        "q": "An engineer wants the chat to do AutoCAD tasks — 2D drafting, layers, schematics, blocks — but there is no AutoCAD install. Dead end?",
+        "a": "No. Separate the CAPABILITY from the APP. Underneath, all five \"AutoCAD core capabilities\" (2D drafting, layer management, specialized symbol toolsets, block/macro automation, and the 2D half of modeling) are structured geometry on named layers. That is exactly what DXF R12 encodes — an ASCII interchange format AutoCAD, FreeCAD, LibreCAD, QCAD, and Illustrator all import. So you GENERATE the drawing as pure computation and hand the engineer a real, dimensioned, layer-organized file, with zero app install and zero UI driving.\n\nThe design that makes this trustworthy rather than a toy:\n  1. ONE neutral entity model (line/circle/arc/polyline/text/block-insert on a validated layer) feeds BOTH a DXF writer AND the AutoCAD .scr command generator. Same intent, two backends: DXF works today, .scr lights up the day a licensed AutoCAD exists — no second model to keep in sync.\n  2. VERIFY by parsing your own output back — layers, per-type/per-layer entity counts, bounding box — and assert the floor plan\'s bbox equals the requested mm. \"It produced some text\" is not proof; \"a 12000\u00d78000 envelope with 2 door blocks on the DOORS layer\" is.\n  3. The security bar is format-specific and easy to miss: DXF is newline-delimited (group code, then value, each on its own line), so a newline in a layer name or text label is ENTITY INJECTION — it terminates the value and the next line becomes a group code. The smoke proves a hostile label containing a fake CIRCLE entity gets flattened and never becomes geometry. Same class as the .scr newline-is-Enter bar; different format, same discipline.\n  4. Do NOT fake what the format cannot do. R12 is 2D-first; a request for true 3D solids routes to the OpenSCAD/FreeCAD/Blender lane instead of emitting degenerate 3DFACE soup.\n\nAnd verify across IMPLEMENTATIONS, not just within yours. A round trip through your own parser proves internal consistency, not objective correctness. A from-scratch reader in a different language (here, a ~60-line Python DXF extractor) agreeing on version/layers/blocks/counts/bbox is real proof the format is right. Reach for a genuine consumer (FreeCAD, OpenSCAD, a CAD import) when one is installed; a language-independent reader is the strong fallback when none is.",
+        "evidence": (
+            "src/lib/engineeringDraftingCore.ts (DXF writer/parser + generators), "
+            "src/lib/autocadScriptAdapter.ts draft_entities (.scr backend), "
+            "engineering.draft_dxf runtime tool, "
+            "scripts/dxf-verify.py + npm run drill:engineering-drafting (cross-implementation live proof)"
+        ),
+    },
 ]
 
 

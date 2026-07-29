@@ -248,6 +248,10 @@ function buildRunbook(task: string, operation: EngineeringCadOperation): Enginee
       approvalBefore: ['creating or editing drawing geometry', 'running CAD script/command sequence', 'saving or exporting deliverables'],
       steps: [
         ...common,
+        step('observe', 'Consider script-first generation', 'Before UI command-entry, prefer engineering.draft_dxf: it generates layer-organized, dimensioned DXF (floor plan / schematic / custom entities) as pure computation with a parsed-back verification summary, then desktop.file_write_text writes it and desktop.cad_compile / AutoCAD opens it. No app UI needed, and every mm is verified.', {
+          tool: 'engineering.draft_dxf',
+          evidence: ['generated DXF summary (layers, entity counts, bbox)'],
+        }),
         approvalStep('Geometry creation changes the drawing; request approval after showing the planned commands, units, layer, and output target.'),
         step('act', 'Execute one precise drafting step', 'Use app-native script/API/command input with explicit coordinates, lengths, angles, or named layer targets. Avoid freehand coordinates.', {
           tool: 'desktop.type_text',

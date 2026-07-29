@@ -5,6 +5,17 @@
 
 ## What chat can do today
 
+- **CAD drawing GENERATION with no app at all (`engineering.draft_dxf`, shipped 2026-07-29):**
+  produces real layer-organized, dimensioned **DXF R12** — floor plans, electrical schematics,
+  or custom line/circle/arc/polyline/text/block geometry — as pure computation, and parses the
+  result back into a verification summary (layers, per-type/per-layer entity counts, bounding
+  box) so the geometry is proven before it is written. `desktop.file_write_text` saves the
+  `.dxf`; AutoCAD, FreeCAD, LibreCAD, and Illustrator all import it. Cross-implementation
+  verified: an independent from-scratch DXF reader agrees with the generator on a live floor
+  plan + schematic (`npm run drill:engineering-drafting`). The SAME neutral entity model also
+  compiles to AutoCAD `.scr` via `autocadScriptAdapter`'s `draft_entities` op — source-built and
+  smoke-covered, but execution stays gated on verifying `.scr` command syntax against a real
+  AutoCAD install (none on this Mac; `accoreconsole` is Windows-only).
 - Read-only DXF inspection with no app open: `desktop.cad_inspect_file` parses layers, entity
   counts by type, `$INSUNITS` units, and `$ACADVER` version. DWG is binary and honestly
   unsupported locally — ask for a DXF export first.

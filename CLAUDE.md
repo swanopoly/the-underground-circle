@@ -98,6 +98,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Design execution pipeline | `src/lib/designAppExecutionPipeline.ts` |
 | Photoshop ExtendScript adapters | `src/lib/photoshopExtendScriptAdapters.ts` (LOCKSTEP: `scripts/claude-bridge.js`) |
 | Local CAD execution | `src/lib/cadCodeExecutor.ts`, `src/lib/cadFileInspector.ts`, `desktop.cad_compile` |
+| Engine-neutral CAD drafting (DXF generation) | `src/lib/engineeringDraftingCore.ts` (pure DXF R12 writer/parser + floor-plan/schematic/grid generators), tool `engineering.draft_dxf` (pure computation, no app); the SAME neutral entity model compiles to AutoCAD `.scr` via `src/lib/autocadScriptAdapter.ts` `draft_entities` (execution gated on real-install verify). Cross-implementation proven by `scripts/dxf-verify.py` + `npm run drill:engineering-drafting` |
 | A11y action verification diff | `src/lib/a11yTreeDiff.ts` |
 | Illustrator ExtendScript adapters | `src/lib/illustratorExtendScriptAdapters.ts` (LOCKSTEP: `scripts/claude-bridge.js`) |
 | Per-app automation profiles | `docs/apps/*.md` + `src/lib/appAutomationDocsIndex.ts` (status lockstep smoke) |

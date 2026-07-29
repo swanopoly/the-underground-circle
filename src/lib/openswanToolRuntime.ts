@@ -304,6 +304,7 @@ export type OpenSwanRuntimeToolName =
   // ── Progressive disclosure (T2) — catalog search that unlocks deferred
   //    tools mid-run instead of advertising all ~157 schemas every turn ──
   | 'tools.search'
+  | 'engineering.draft_dxf'
   // ── Circle context snapshot — pre-built entity-linked index search that
   //    replaces N sequential list calls for what/which/who discovery ──────
   | 'context.search'
@@ -909,6 +910,7 @@ export type OpenSwanToolExecutionArgs = {
   'user_memory.manage': { action: 'append' | 'replace' | 'delete'; scope?: 'global' | 'circle'; content?: string; rationale?: string };
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
+  'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown };
   'context.search':     { query: string; section?: string };
   'codebase.index':     { rootPath: string; maxFiles?: number };
   'codebase.search':    { query: string; limit?: number };
@@ -1209,6 +1211,7 @@ export type OpenSwanToolExecutionResultMap = {
   'user_memory.manage': { ok: boolean; resultsText: string };
   'messages.search':    { ok: boolean; resultsText: string };
   'tools.search':       { ok: boolean; resultsText: string; matches: OpenSwanToolCatalogMatch[] };
+  'engineering.draft_dxf': { ok: boolean; resultsText: string; dxf?: string; summary?: unknown };
   'context.search':     { ok: boolean; resultsText: string };
   'codebase.index':     { ok: boolean; resultsText: string };
   'codebase.search':    { ok: boolean; resultsText: string };
@@ -2935,6 +2938,24 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         family: { type: 'string', description: "Optional family filter — the tool-name prefix, e.g. 'desktop', 'vault', 'github', 'rooms', 'wp', 'browser'." },
       },
       required: ['query'],
+    },
+  },
+  // ─── Engineering CAD drafting (pure computation, no bridge) ──────────────
+  {
+    name: 'engineering.draft_dxf',
+    label: 'Draft CAD Drawing (DXF)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Generates a layer-organized, dimensioned CAD drawing as DXF R12 (AutoCAD/FreeCAD/LibreCAD/Illustrator all import it). Pure computation: returns the DXF plus a parsed-back summary (layers, per-type entity counts, bbox) proving the geometry, then write it with desktop.file_write_text under approval. Use for 2D drafting, floor plans, electrical schematics, layers, and block/grid automation. For 3D solids use desktop.cad_compile instead — this tool routes you there.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        drawing: { type: 'string', enum: ['floorplan', 'schematic', 'custom'], description: 'floorplan: parametric building; schematic: electrical symbols; custom: your own layers + entities.' },
+        spec: { type: 'object', description: 'For floorplan: {width,height,wallThickness?,rooms?,doors?,windows?,dimensions?} in mm. For schematic: {placements:[{symbol,x,y,label?}],wires?}. Symbols: resistor|capacitor|battery|ground|switch|lamp|junction.' },
+        layers: { type: 'array', description: 'For custom: [{name,color?}] — names must match [A-Za-z0-9_$-], 1-31 chars.', items: { type: 'object' } },
+        entities: { type: 'array', description: 'For custom: neutral entities (line/circle/arc/polyline/text/insert), each with a declared layer.', items: { type: 'object' } },
+      },
+      required: ['drawing'],
     },
   },
   // ─── Circle context snapshot — pre-built discovery index ─────────────────
@@ -4692,6 +4713,16 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'engineering.draft_dxf') {
+    return {
+      family: 'knowledge',
+      approvalMode: 'auto',
+      mutatesState: false,
+      externalSideEffect: false,
+      summary: 'Generates a CAD drawing (DXF R12) plus a parsed-back verification summary. Pure computation — writing the file to disk is a separate approval-gated desktop.file_write_text step.',
+    };
+  }
+
   if (tool === 'tools.search') {
     return {
       family: 'knowledge',
@@ -5567,6 +5598,8 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'skills.manage',
   'user_memory.manage',
   'messages.search',
+  // Pure CAD computation — safe to run in the loop; the file write is separate.
+  'engineering.draft_dxf',
   // Progressive disclosure (T2) — the catalog search itself must always be
   // loop-callable so deferred tools stay reachable from a pinned-core turn.
   'tools.search',
@@ -6863,6 +6896,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'skills.manage':
     case 'user_memory.manage':
     case 'messages.search':
+    case 'engineering.draft_dxf':
     case 'tools.search':
     case 'context.search':
     case 'codebase.index':
@@ -11467,6 +11501,52 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `${data.length} transcript match(es) for "${query}":\n${lines.join('\n')}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    // ── Engineering CAD drafting (pure DXF generation + verification) ────
+    case 'engineering.draft_dxf': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['engineering.draft_dxf'];
+        const {
+          writeDxfR12, parseDxfForVerification, buildFloorPlan, buildElectricalSchematic, suggestModelingLane,
+        } = await import('./engineeringDraftingCore');
+        const drawing = String(a.drawing || '').trim();
+
+        let docResult: { ok: true; value: any } | { ok: false; error: string };
+        if (drawing === 'floorplan') {
+          docResult = buildFloorPlan((a.spec ?? {}) as any);
+        } else if (drawing === 'schematic') {
+          docResult = buildElectricalSchematic((a.spec ?? {}) as any);
+        } else if (drawing === 'custom') {
+          const layers = Array.isArray(a.layers) ? a.layers : [];
+          const entities = Array.isArray(a.entities) ? a.entities : [];
+          if (!entities.length) {
+            return { ok: false, resultsText: 'engineering.draft_dxf custom: provide an `entities` array (line/circle/arc/polyline/text/insert), each with a declared `layer`, plus matching `layers`.' } as any;
+          }
+          docResult = { ok: true, value: { layers, blocks: [], entities } };
+        } else {
+          // A 3D-solid ask lands here — route it honestly instead of faking DXF.
+          const lane = suggestModelingLane(String((a.spec as any)?.task || drawing || ''));
+          return { ok: false, resultsText: `engineering.draft_dxf handles 2D DXF (floorplan | schematic | custom). For 3D solids use desktop.cad_compile with engine "${lane.engine}" (${lane.reason}) → ${lane.outputHint}.` } as any;
+        }
+        if (!docResult.ok) return { ok: false, resultsText: `engineering.draft_dxf: ${docResult.error}` } as any;
+
+        const written = writeDxfR12(docResult.value);
+        if (!written.ok) return { ok: false, resultsText: `engineering.draft_dxf: ${written.error}` } as any;
+
+        // Parse the generated DXF back — the drawing's own proof of correctness.
+        const summary = parseDxfForVerification(written.value);
+        const bbox = summary.bbox
+          ? `${Math.round(summary.bbox.minX)},${Math.round(summary.bbox.minY)} → ${Math.round(summary.bbox.maxX)},${Math.round(summary.bbox.maxY)}`
+          : 'empty';
+        const counts = Object.entries(summary.entityCounts).map(([k, v]) => `${v} ${k}`).join(', ');
+        return {
+          ok: true,
+          dxf: written.value,
+          summary,
+          resultsText: `Generated ${drawing} DXF R12 (${written.value.length} bytes): layers [${summary.layers.join(', ')}], ${summary.totalEntities} entities (${counts})${summary.blocks.length ? `, blocks [${summary.blocks.join(', ')}]` : ''}, bbox ${bbox}. Verified by parsing the DXF back. Write it with desktop.file_write_text (.dxf) to open in AutoCAD/FreeCAD, or compile via desktop.cad_compile.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: `engineering.draft_dxf error: ${e.message}` } as any; }
+    }
+
     // ── Progressive disclosure (T2) — pure catalog search ───────────────
     case 'tools.search': {
       const a = args as OpenSwanToolExecutionArgs['tools.search'];

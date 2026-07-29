@@ -44,7 +44,7 @@ function main(): void {
   // ─── (0) constants + engine pairing ───────────────────────────────────────
   assert(AUTOCAD_SCRIPT_ENGINE === 'autocad_core', '(0) targets the autocad_core engine descriptor');
   assert(AUTOCAD_SCRIPT_EXTENSION === 'scr', '(0) script extension is scr');
-  assert(AUTOCAD_OPERATIONS.length === 4, '(0) four operations', JSON.stringify(AUTOCAD_OPERATIONS));
+  assert(AUTOCAD_OPERATIONS.length === 5, '(0) five operations', JSON.stringify(AUTOCAD_OPERATIONS));
 
   // ─── (1) export_pdf happy path + script shape ─────────────────────────────
   {
@@ -228,6 +228,60 @@ function main(): void {
     console.error(`\n${failures} failure(s), ${passes} passed`);
     process.exit(1);
   }
+  // ─── (6) draft_entities: neutral entity model → .scr ──────────────────────
+  {
+    const build = buildAutoCadScript('draft_entities', {
+      layers: [{ name: 'WALLS', color: 7 }, { name: 'DIMS', color: 2 }],
+      entities: [
+        { kind: 'line', layer: 'WALLS', x1: 0, y1: 0, x2: 1000, y2: 0 },
+        { kind: 'circle', layer: 'WALLS', cx: 500, cy: 500, r: 250 },
+        { kind: 'arc', layer: 'WALLS', cx: 0, cy: 0, r: 100, startDeg: 0, endDeg: 90 },
+        { kind: 'polyline', layer: 'WALLS', closed: true, points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }] },
+        { kind: 'text', layer: 'DIMS', x: 5, y: 5, height: 200, text: 'ROOM A' },
+      ],
+    });
+    assert(build.script.length > 0, '(6) draft_entities produced a script');
+    assert(build.scriptExtension === 'scr', '(6) draft_entities extension is scr');
+    const lines = commandLines(build.script);
+    assert(lines.includes('-LAYER') && lines.includes('WALLS') && lines.includes('DIMS'), '(6) declares both layers via -LAYER');
+    assert(lines.includes('LINE') && lines.includes('CIRCLE') && lines.includes('ARC') && lines.includes('PLINE') && lines.includes('TEXT'), '(6) emits all five entity commands');
+    // Coordinates are single comma tokens — never a bare "x y" that would Enter.
+    assert(lines.includes('0,0') && lines.includes('1000,0'), '(6) coordinates are comma tokens');
+    assert(!build.script.split('\n').some((l) => /^-?\d+(\.\d+)?\s+-?\d+/.test(l)), '(6) no line is a space-separated coordinate pair');
+    assert(build.script.includes('ROOM A'), '(6) text content present');
+
+    // Injection: a newline in a text label must never split into a new command.
+    const hostile = buildAutoCadScript('draft_entities', {
+      layers: [{ name: 'L', color: 1 }],
+      entities: [{ kind: 'text', layer: 'L', x: 0, y: 0, height: 10, text: 'A\nLINE\n0,0\n9,9' }],
+    });
+    const hostileLines = commandLines(hostile.script);
+    // Count how many LINE commands exist — the label must NOT have added one.
+    assert(hostileLines.filter((l) => l === 'LINE').length === 0, '(6) newline in a TEXT label did not inject a LINE command');
+
+    // Injection: a bad layer name is skipped with a note, never emitted.
+    const badLayer = buildAutoCadScript('draft_entities', {
+      layers: [{ name: 'bad name', color: 1 }],
+      entities: [{ kind: 'line', layer: 'bad name', x1: 0, y1: 0, x2: 1, y2: 1 }],
+    });
+    assert(badLayer.script === '', '(6) an entity whose only layer is invalid produces no script');
+    assert(badLayer.notes.some((n) => /name must match|no valid entity/.test(n)), '(6) the invalid layer is explained in notes');
+
+    // Undeclared layer reference is refused (declare-first discipline).
+    const undeclared = buildAutoCadScript('draft_entities', {
+      layers: [{ name: 'DECLARED' }],
+      entities: [{ kind: 'line', layer: 'GHOST', x1: 0, y1: 0, x2: 1, y2: 1 }],
+    });
+    assert(undeclared.script === '' && undeclared.notes.some((n) => /undeclared layer/.test(n)), '(6) entity on an undeclared layer is refused');
+
+    // Validation: empty entities array rejected.
+    const empty = validateAutoCadArgs({ op: 'draft_entities', entities: [] });
+    assert(!('ok' in empty), '(6) empty entities array rejected at validation');
+
+    assert(AUTOCAD_OPERATIONS.includes('draft_entities'), '(6) draft_entities is a registered operation');
+    assert(/2D entit/.test(describeAutoCadOperation({ op: 'draft_entities', layers: [{ name: 'L' }], entities: [{ kind: 'line', layer: 'L', x1: 0, y1: 0, x2: 1, y2: 1 }] })), '(6) describe mentions 2D entities');
+  }
+
   console.log(`\nAll autocad-script-adapter smoke cases passed (${passes} passed).`);
 }
 
