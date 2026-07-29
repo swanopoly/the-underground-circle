@@ -603,9 +603,24 @@ before/after accessibility diff of the exact target app
 
 §26 forbids `failed` after dispatch, so a proven `no_effect` still seals
 durable `outcome_unknown` and stays replay-blocked; only the user-facing text
-carries the sharper truth. This slice is source/contract-verified
-(`native-ui-verification-core`, `openswan-generic-native-ui-runtime`) — no live
-native-app GUI run has exercised the snapshot path. Accessibility value-setting requires `appName`
+carries the sharper truth.
+
+The attribution requirement is not theoretical. A read-only live probe against
+Google Chrome on 2026-07-29 read the same window's accessibility tree twice
+back-to-back with no action performed and observed **8 changes** (+4/-4) from
+ordinary background churn — a live feed plus a window title carrying memory
+usage. A "the tree moved, so it worked" rule would have reported verified for
+an action that was never dispatched. Repeat samples on the same idle window
+produced 0 changes, so the churn is intermittent and app-dependent: the naive
+rule passes local testing and then fabricates completions against any app with
+live content. Both regimes produced the correct verdict (`unknown` when the
+tree moved unattributably, `no_effect` when it did not move at all).
+
+The pure policy and its runtime wiring are source/contract-verified
+(`native-ui-verification-core` incl. integration cases over the real
+`snapshotA11ySummary`/`diffA11ySummaries`, plus
+`openswan-generic-native-ui-runtime`). The bridge read path is live-verified
+read-only. No live native-app MUTATION has been executed end to end. Accessibility value-setting requires `appName`
 but fails closed before approval pending exact generation/path sealing. The
 separately vault/origin-gated credential tool retains its own compatibility
 boundary. Submit, upload, browser navigation/close, generalized native

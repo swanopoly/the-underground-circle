@@ -505,6 +505,41 @@ FINDINGS = [
             "scripts/memory-prod-invariants.mjs check 2"
         ),
     },
+    {
+        "id": "a11y-diff-attribution-not-movement",
+        "q": "We verify desktop actions by diffing the accessibility tree before and after. If the tree changed, the action worked, right?",
+        "a": (
+            "No, and this is measurable rather than theoretical. Reading a real Chrome window's "
+            "accessibility tree TWICE IN A ROW, with no action performed in between, produced **8 "
+            "changes** (+4 nodes, -4 nodes) on one run — a feed updating and a window title that "
+            "included live memory usage. A rule of 'the tree moved, therefore my action worked' would "
+            "have reported VERIFIED for an action that was never dispatched.\n\n"
+            "Repeat runs on the same window while it was idle produced 0 changes. So background churn "
+            "is intermittent and app-dependent, which is worse than if it were constant: a naive "
+            "implementation passes your testing and then fabricates completions in production against "
+            "any app with live content.\n\n"
+            "Verification has to require ATTRIBUTION, not movement:\n"
+            "  - text entry verifies only when a changed field value actually CONTAINS the text you "
+            "sent (substring, because typing appends into existing content)\n"
+            "  - a menu action verifies only when a node labelled like the invoked item appears\n"
+            "  - movement that matches no expectation stays UNKNOWN and never promotes\n\n"
+            "The inverse is the underrated half. An UNCHANGED tree, for an action that MUST move it "
+            "(type/paste/set-value/menu), is positive evidence the action MISSED — report that as a "
+            "proven no-op, not as 'unknown'. 'Unknown' tells the caller nothing and invites a blind "
+            "retry; 'this did not take effect' tells it to change approach. Do NOT apply that rule to "
+            "mouse moves, scrolls, drags, or bare clicks: those routinely land without any "
+            "accessibility-visible change, so calling them no-ops manufactures failures.\n\n"
+            "One implementation trap: if your snapshot truncates long values, check HOW. A clamp of "
+            "the form `slice(0, max - 1) + '…'` means the observed value ends in an ellipsis that is "
+            "not in the text you sent, so a naive containment check fails on every long paste — "
+            "exactly the case the truncation branch exists for. Detect truncation by the at-cap length "
+            "AND the marker, and strip the marker before comparing."
+        ),
+        "evidence": (
+            "src/lib/nativeUiVerificationCore.ts, src/lib/a11yTreeDiff.ts (clampString), "
+            "live read-only probe against Google Chrome 2026-07-29"
+        ),
+    },
 ]
 
 
