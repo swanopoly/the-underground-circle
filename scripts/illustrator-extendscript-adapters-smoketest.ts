@@ -22,6 +22,14 @@ import {
   isIllustratorDocumentStatusReceipt,
   isIllustratorExportProofReceipt,
   validateIllustratorExportProofParams,
+  ILLUSTRATOR_MAX_TEXT_FRAMES,
+  ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS,
+  buildIllustratorTextInventoryJsx,
+  buildIllustratorSetLayerStateJsx,
+  buildIllustratorUpdateTextLayerJsx,
+  normalizeIllustratorTargetName,
+  normalizeIllustratorLayerFlag,
+  normalizeIllustratorUpdateText,
 } from '../src/lib/illustratorExtendScriptAdapters';
 
 // The core Illustrator safety contract: NO built script may ever write the
@@ -336,5 +344,87 @@ assert.equal(
 assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorExportProofJsxBody({
   outputPath: '/tmp/x.png', format: 'png', scalePercent: null,
 })), 'bridge-composed export_proof');
+
+
+// ── 3) illustrator_text_inventory (READ-ONLY) ───────────────────────────────
+
+const inventory = buildIllustratorTextInventoryJsx({ expectedDocumentName: 'poster "v2".ai' });
+assert.deepEqual(inventory.errors, [], 'text inventory builds with no errors');
+assert.ok(inventory.jsx.includes('doc.textFrames'), 'inventory reads textFrames');
+assert.ok(
+  inventory.jsx.includes(String(ILLUSTRATOR_MAX_TEXT_FRAMES)),
+  'inventory embeds its frame cap',
+);
+// The document name is user text and must be embedded as a literal, never
+// concatenated — a quote in a filename would otherwise break out of the string.
+assert.ok(inventory.jsx.includes(JSON.stringify('poster "v2".ai')), 'inventory embeds doc name safely');
+assertNeverTouchesSource(inventory.jsx, 'text_inventory');
+// READ-ONLY means read-only: no assignment to contents anywhere.
+assert.equal(/\.contents\s*=/.test(inventory.jsx), false, 'inventory never writes contents');
+
+// ── 4) illustrator_set_layer_state ──────────────────────────────────────────
+
+assert.equal(normalizeIllustratorTargetName('   ').ok, false, 'blank layer name is rejected');
+assert.equal(normalizeIllustratorTargetName('x'.repeat(261)).ok, false, 'over-long name rejected');
+assert.equal(normalizeIllustratorTargetName('Headline').ok, true, 'ordinary layer name accepted');
+assert.equal(normalizeIllustratorLayerFlag(undefined, 'visible').ok, true, 'omitted flag is allowed');
+assert.deepEqual(
+  normalizeIllustratorLayerFlag(undefined, 'visible'),
+  { ok: true, value: null },
+  'omitted flag means "do not change"',
+);
+assert.equal(normalizeIllustratorLayerFlag('true', 'visible').ok, false, 'string flag rejected (fail closed)');
+
+const noOp = buildIllustratorSetLayerStateJsx({ layerName: 'Art' });
+assert.equal(noOp.errors.length, 1, 'a call that changes nothing is rejected, not silently absorbed');
+
+const hide = buildIllustratorSetLayerStateJsx({ layerName: 'Guides', visible: false });
+assert.deepEqual(hide.errors, [], 'set_layer_state builds with no errors');
+assert.ok(hide.jsx.includes('var wantVisible = false'), 'requested visibility is embedded');
+assert.ok(hide.jsx.includes('var wantLocked = null'), 'untouched dimension stays null');
+assert.ok(hide.jsx.includes('layer_ambiguous'), 'duplicate layer names fail closed');
+assert.ok(hide.jsx.includes('layer_not_found'), 'a missing layer fails closed');
+// Proof must come from the re-read after-state, not from "we ran the write".
+assert.ok(hide.jsx.includes('not_applied'), 'a refused write reports not_applied');
+assertNeverTouchesSource(hide.jsx, 'set_layer_state');
+
+// Unlock-before-visibility ordering: Illustrator rejects visibility writes on a
+// locked layer, so a naive order reports success while changing nothing.
+const unlockIdx = hide.jsx.indexOf('wantLocked === false');
+const visibleIdx = hide.jsx.indexOf('wantVisible !== null');
+const lockIdx = hide.jsx.indexOf('wantLocked === true');
+assert.ok(unlockIdx < visibleIdx && visibleIdx < lockIdx, 'unlock -> visibility -> lock ordering is preserved');
+
+// ── 5) illustrator_update_text_layer ────────────────────────────────────────
+
+assert.equal(normalizeIllustratorUpdateText(42 as unknown).ok, false, 'non-string copy rejected');
+assert.equal(
+  normalizeIllustratorUpdateText('x'.repeat(ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS + 1)).ok,
+  false,
+  'over-long copy rejected',
+);
+assert.equal(normalizeIllustratorUpdateText('').ok, true, 'empty copy is allowed (clearing a frame)');
+
+const update = buildIllustratorUpdateTextLayerJsx({ target: 'Headline', text: 'Spring "Sale" — 40% off' });
+assert.deepEqual(update.errors, [], 'update_text_layer builds with no errors');
+assert.ok(
+  update.jsx.includes(JSON.stringify('Spring "Sale" — 40% off')),
+  'copy is embedded as a literal so quotes cannot escape',
+);
+assert.ok(update.jsx.includes('target_ambiguous'), 'ambiguous targets fail closed');
+assert.ok(update.jsx.includes('target_locked'), 'a locked frame is refused, not silently swallowed');
+assert.ok(update.jsx.includes('target_hidden'), 'a hidden frame is refused');
+assert.ok(update.jsx.includes('confirmed === nextText'), 'success requires re-reading the same frame');
+assertNeverTouchesSource(update.jsx, 'update_text_layer');
+
+// The whole point of this lane: it edits copy but never persists the file.
+for (const [label, built] of [
+  ['text_inventory', inventory],
+  ['set_layer_state', hide],
+  ['update_text_layer', update],
+] as const) {
+  assert.equal(/app\.quit/.test(built.jsx), false, `${label}: never quits Illustrator`);
+  assert.ok(built.jsx.includes('document_mismatch'), `${label}: wrong open document fails closed`);
+}
 
 console.log('All Illustrator ExtendScript adapter smoke cases passed.');

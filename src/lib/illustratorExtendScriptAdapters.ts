@@ -667,3 +667,423 @@ export function isIllustratorExportProofReceipt(value: unknown): value is Illust
     && isFiniteNumber(v.sizeBytes)
     && isNullableString(v.error);
 }
+
+// ─── 3) Text inventory (READ-ONLY) ──────────────────────────────────────────
+//
+// The observation half of copy work, and the direct parallel of
+// `indesign_text_inventory`. Recipe 3/4 in docs/apps/illustrator.md were
+// buildout-only because there was no way to even SEE the text frames, let
+// alone address one by name.
+
+/** Text frames reported per call are bounded (parallels the status doc cap). */
+export const ILLUSTRATOR_MAX_TEXT_FRAMES = 60;
+
+/** Per-frame contents are truncated so one poster-sized story cannot flood a result. */
+export const ILLUSTRATOR_MAX_TEXT_FRAME_CHARS = 600;
+
+/** Upper bound on copy accepted by update_text_layer. */
+export const ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS = 20_000;
+
+export type IllustratorTextInventoryParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+};
+
+/**
+ * Named-target resolution shared by set_layer_state and update_text_layer.
+ *
+ * Empty is rejected rather than defaulted: "apply to whichever layer happens
+ * to be first" is precisely the blind-mutation behaviour the app profile
+ * refuses. A caller that cannot name its target must observe first.
+ */
+export function normalizeIllustratorTargetName(value: unknown): IllustratorParamCheck<string> {
+  if (typeof value !== 'string') return { ok: false, error: 'name must be a string' };
+  const trimmed = value.trim();
+  if (!trimmed) return { ok: false, error: 'name is required — observe with illustrator_text_inventory and pass an exact target.' };
+  if (trimmed.length > 260) return { ok: false, error: 'name exceeds 260 chars' };
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: 'name contains control characters' };
+  return { ok: true, value: trimmed };
+}
+
+export function normalizeIllustratorUpdateText(value: unknown): IllustratorParamCheck<string> {
+  if (typeof value !== 'string') return { ok: false, error: 'text must be a string' };
+  if (value.length > ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS) {
+    return { ok: false, error: `text exceeds ${ILLUSTRATOR_MAX_UPDATE_TEXT_CHARS} chars` };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00]/.test(value)) return { ok: false, error: 'text cannot contain NUL' };
+  return { ok: true, value };
+}
+
+function illustratorTextFrameHelpersJsx(): string {
+  return `
+function frameLayerName(frame) {
+  try { return String(frame.layer.name || ""); } catch (_) { return ""; }
+}
+
+function frameOwnName(frame) {
+  try { return String(frame.name || ""); } catch (_) { return ""; }
+}
+
+function frameContents(frame) {
+  try { return String(frame.contents || ""); } catch (_) { return ""; }
+}
+
+function frameLocked(frame) {
+  try { return frame.locked === true; } catch (_) { return false; }
+}
+
+function frameHidden(frame) {
+  try { return frame.hidden === true; } catch (_) { return false; }
+}
+
+// A frame is addressable by its own name OR by its layer name. Layer-name
+// matching is what makes "update the headline layer" work in files where
+// designers never named the frame itself.
+function frameMatchesTarget(frame, target) {
+  var wanted = normalizeDocName(target);
+  if (!wanted) return false;
+  if (normalizeDocName(frameOwnName(frame)) === wanted) return true;
+  return normalizeDocName(frameLayerName(frame)) === wanted;
+}
+`;
+}
+
+export function buildIllustratorTextInventoryJsx(
+  params: IllustratorTextInventoryParams,
+): IllustratorExtendScriptBuild {
+  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
+  if (!appCheck.ok) return { jsx: '', errors: [appCheck.error] };
+  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
+  if (!docCheck.ok) return { jsx: '', errors: [docCheck.error] };
+
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.value })}
+${illustratorTextFrameHelpersJsx()}
+  var out = { status: "unknown", documentName: null, frameCount: 0, truncated: false, frames: [], error: null };
+
+  if (collectionLength(app.documents) < 1) {
+    out.status = "no_document";
+    return emitInventory(out);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    out.error = "Expected Illustrator document is not open.";
+    return emitInventory(out);
+  }
+  out.documentName = String(doc.name || "");
+
+  var frames = null;
+  try { frames = doc.textFrames; } catch (_) { frames = null; }
+  var total = collectionLength(frames);
+  out.frameCount = total;
+  var limit = Math.min(total, ${ILLUSTRATOR_MAX_TEXT_FRAMES});
+  out.truncated = total > limit;
+
+  for (var i = 0; i < limit; i += 1) {
+    var f = null;
+    try { f = frames[i]; } catch (_) { f = null; }
+    if (!f) continue;
+    var body = frameContents(f);
+    out.frames.push({
+      index: i,
+      name: frameOwnName(f),
+      layerName: frameLayerName(f),
+      charCount: body.length,
+      locked: frameLocked(f),
+      hidden: frameHidden(f),
+      contents: body.length > ${ILLUSTRATOR_MAX_TEXT_FRAME_CHARS} ? body.substring(0, ${ILLUSTRATOR_MAX_TEXT_FRAME_CHARS}) : body,
+      contentsTruncated: body.length > ${ILLUSTRATOR_MAX_TEXT_FRAME_CHARS}
+    });
+  }
+  out.status = "ready";
+  return emitInventory(out);
+
+  function emitInventory(value) {
+    var parts = [];
+    for (var j = 0; j < value.frames.length; j += 1) {
+      var fr = value.frames[j];
+      parts.push("{" +
+        "\\"index\\":" + jsonNumber(fr.index) + "," +
+        "\\"name\\":" + jsonNullableString(fr.name) + "," +
+        "\\"layerName\\":" + jsonNullableString(fr.layerName) + "," +
+        "\\"charCount\\":" + jsonNumber(fr.charCount) + "," +
+        "\\"locked\\":" + jsonBoolean(fr.locked) + "," +
+        "\\"hidden\\":" + jsonBoolean(fr.hidden) + "," +
+        "\\"contentsTruncated\\":" + jsonBoolean(fr.contentsTruncated) + "," +
+        "\\"contents\\":" + jsonString(fr.contents) +
+      "}");
+    }
+    return "{" +
+      "\\"ok\\":" + jsonBoolean(value.status === "ready") + "," +
+      "\\"status\\":" + jsonString(value.status) + "," +
+      "\\"documentName\\":" + jsonNullableString(value.documentName) + "," +
+      "\\"frameCount\\":" + jsonNumber(value.frameCount) + "," +
+      "\\"truncated\\":" + jsonBoolean(value.truncated) + "," +
+      "\\"frames\\":" + jsonArray(parts) + "," +
+      "\\"error\\":" + jsonNullableString(value.error) +
+    "}";
+  }
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+
+// ─── 4) Set layer state (visible / locked) ──────────────────────────────────
+//
+// The safest possible vector-app mutation and the natural first one: it is
+// reversible, addresses an exactly-named layer, and its result is two booleans
+// that can be re-read for proof. Parallels `indesign_set_layer_state`.
+
+export type IllustratorSetLayerStateParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  layerName: string;
+  /** Omit to leave that dimension untouched. */
+  visible?: boolean | null;
+  locked?: boolean | null;
+};
+
+/** Optional tri-state flag: undefined/null means "do not change this". */
+export function normalizeIllustratorLayerFlag(
+  value: unknown,
+  field: string,
+): IllustratorParamCheck<boolean | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== 'boolean') return { ok: false, error: `${field} must be a boolean when provided.` };
+  return { ok: true, value };
+}
+
+export function buildIllustratorSetLayerStateJsx(
+  params: IllustratorSetLayerStateParams,
+): IllustratorExtendScriptBuild {
+  const errors: string[] = [];
+  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
+  if (!appCheck.ok) errors.push(appCheck.error);
+  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
+  if (!docCheck.ok) errors.push(docCheck.error);
+  const layerCheck = normalizeIllustratorTargetName(params.layerName);
+  if (!layerCheck.ok) errors.push(layerCheck.error);
+  const visibleCheck = normalizeIllustratorLayerFlag(params.visible, 'visible');
+  if (!visibleCheck.ok) errors.push(visibleCheck.error);
+  const lockedCheck = normalizeIllustratorLayerFlag(params.locked, 'locked');
+  if (!lockedCheck.ok) errors.push(lockedCheck.error);
+  if (errors.length) return { jsx: '', errors };
+
+  const visible = visibleCheck.ok ? visibleCheck.value : null;
+  const locked = lockedCheck.ok ? lockedCheck.value : null;
+  // A call that changes nothing is a caller bug, not a no-op to absorb: it
+  // would consume an approval and produce a "verified" receipt for no work.
+  if (visible === null && locked === null) {
+    return { jsx: '', errors: ['At least one of visible or locked must be supplied.'] };
+  }
+
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.ok ? docCheck.value : '' })}
+  var targetLayerName = ${JSON.stringify(layerCheck.ok ? layerCheck.value : '')};
+  var wantVisible = ${visible === null ? 'null' : String(visible)};
+  var wantLocked = ${locked === null ? 'null' : String(locked)};
+
+  var out = {
+    status: "unknown", documentName: null, layerName: null,
+    beforeVisible: null, beforeLocked: null,
+    afterVisible: null, afterLocked: null,
+    changed: false, error: null
+  };
+
+  if (collectionLength(app.documents) < 1) { out.status = "no_document"; return emitLayerState(out); }
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    out.error = "Expected Illustrator document is not open.";
+    return emitLayerState(out);
+  }
+  out.documentName = String(doc.name || "");
+
+  // Exact, unambiguous match only. Two layers with the same name is a
+  // fail-closed condition — guessing which one the user meant is exactly the
+  // blind mutation this lane refuses.
+  var found = null, matches = 0;
+  try {
+    for (var i = 0; i < doc.layers.length; i += 1) {
+      if (normalizeDocName(String(doc.layers[i].name || "")) === normalizeDocName(targetLayerName)) {
+        matches += 1;
+        if (!found) found = doc.layers[i];
+      }
+    }
+  } catch (_) {}
+
+  if (!found) {
+    out.status = "layer_not_found";
+    out.error = "No layer with that exact name is present in the document.";
+    return emitLayerState(out);
+  }
+  if (matches > 1) {
+    out.status = "layer_ambiguous";
+    out.error = "More than one layer shares that name; rename or address a unique layer.";
+    return emitLayerState(out);
+  }
+
+  out.layerName = String(found.name || "");
+  try { out.beforeVisible = found.visible === true; } catch (_) {}
+  try { out.beforeLocked = found.locked === true; } catch (_) {}
+
+  // Unlock BEFORE changing visibility: Illustrator rejects visibility writes
+  // on a locked layer, which would otherwise report success while doing
+  // nothing. When the caller is locking, do that last for the same reason.
+  try { if (wantLocked === false) found.locked = false; } catch (_) {}
+  try { if (wantVisible !== null) found.visible = wantVisible; } catch (_) {}
+  try { if (wantLocked === true) found.locked = true; } catch (_) {}
+
+  try { out.afterVisible = found.visible === true; } catch (_) {}
+  try { out.afterLocked = found.locked === true; } catch (_) {}
+  out.changed = (out.beforeVisible !== out.afterVisible) || (out.beforeLocked !== out.afterLocked);
+
+  // Proof is the observed after-state, not the fact that we ran. If the DOM
+  // silently refused the write, this reports not_applied rather than success.
+  var visibleOk = wantVisible === null || out.afterVisible === wantVisible;
+  var lockedOk = wantLocked === null || out.afterLocked === wantLocked;
+  out.status = (visibleOk && lockedOk) ? "applied" : "not_applied";
+  if (!visibleOk || !lockedOk) out.error = "Illustrator did not accept the requested layer state.";
+  return emitLayerState(out);
+
+  function emitLayerState(v) {
+    return "{" +
+      "\\"ok\\":" + jsonBoolean(v.status === "applied") + "," +
+      "\\"status\\":" + jsonString(v.status) + "," +
+      "\\"documentName\\":" + jsonNullableString(v.documentName) + "," +
+      "\\"layerName\\":" + jsonNullableString(v.layerName) + "," +
+      "\\"beforeVisible\\":" + (v.beforeVisible === null ? "null" : jsonBoolean(v.beforeVisible)) + "," +
+      "\\"beforeLocked\\":" + (v.beforeLocked === null ? "null" : jsonBoolean(v.beforeLocked)) + "," +
+      "\\"afterVisible\\":" + (v.afterVisible === null ? "null" : jsonBoolean(v.afterVisible)) + "," +
+      "\\"afterLocked\\":" + (v.afterLocked === null ? "null" : jsonBoolean(v.afterLocked)) + "," +
+      "\\"changed\\":" + jsonBoolean(v.changed) + "," +
+      "\\"error\\":" + jsonNullableString(v.error) +
+    "}";
+  }
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 5) Update text layer (replace copy in one named frame) ─────────────────
+//
+// Closes recipe 3/4's "no vector mutation tools exist yet" for the copy case.
+// Parallels `indesign_update_text_layer`. The source document is NEVER saved:
+// the user reviews and saves, exactly like the other Adobe lanes.
+
+export type IllustratorUpdateTextLayerParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  /** Exact text-frame name, or the exact name of the layer holding it. */
+  target: string;
+  text: string;
+};
+
+export function buildIllustratorUpdateTextLayerJsx(
+  params: IllustratorUpdateTextLayerParams,
+): IllustratorExtendScriptBuild {
+  const errors: string[] = [];
+  const appCheck = normalizeIllustratorBridgeAppName(params.appName);
+  if (!appCheck.ok) errors.push(appCheck.error);
+  const docCheck = normalizeIllustratorExpectedDocumentName(params.expectedDocumentName);
+  if (!docCheck.ok) errors.push(docCheck.error);
+  const targetCheck = normalizeIllustratorTargetName(params.target);
+  if (!targetCheck.ok) errors.push(targetCheck.error);
+  const textCheck = normalizeIllustratorUpdateText(params.text);
+  if (!textCheck.ok) errors.push(textCheck.error);
+  if (errors.length) return { jsx: '', errors };
+
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: docCheck.ok ? docCheck.value : '' })}
+${illustratorTextFrameHelpersJsx()}
+  var target = ${JSON.stringify(targetCheck.ok ? targetCheck.value : '')};
+  var nextText = ${JSON.stringify(textCheck.ok ? textCheck.value : '')};
+
+  var out = {
+    status: "unknown", documentName: null, target: null,
+    beforeCharCount: null, afterCharCount: null, changed: false, error: null
+  };
+
+  if (collectionLength(app.documents) < 1) { out.status = "no_document"; return emitUpdate(out); }
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    out.error = "Expected Illustrator document is not open.";
+    return emitUpdate(out);
+  }
+  out.documentName = String(doc.name || "");
+
+  var frames = null;
+  try { frames = doc.textFrames; } catch (_) { frames = null; }
+  var found = null, matches = 0;
+  for (var i = 0; i < collectionLength(frames); i += 1) {
+    var f = null;
+    try { f = frames[i]; } catch (_) { f = null; }
+    if (f && frameMatchesTarget(f, target)) {
+      matches += 1;
+      if (!found) found = f;
+    }
+  }
+
+  if (!found) {
+    out.status = "target_not_found";
+    out.error = "No text frame matches that name or layer name.";
+    return emitUpdate(out);
+  }
+  if (matches > 1) {
+    out.status = "target_ambiguous";
+    out.error = "More than one text frame matches that name; address a unique frame.";
+    return emitUpdate(out);
+  }
+  // A locked or hidden frame silently swallows the write, so refuse up front
+  // rather than reporting a success the user cannot see.
+  if (frameLocked(found)) {
+    out.status = "target_locked";
+    out.error = "The target text frame is locked. Unlock it (illustrator_set_layer_state) and retry.";
+    return emitUpdate(out);
+  }
+  if (frameHidden(found)) {
+    out.status = "target_hidden";
+    out.error = "The target text frame is hidden. Show it (illustrator_set_layer_state) and retry.";
+    return emitUpdate(out);
+  }
+
+  out.target = frameOwnName(found) || frameLayerName(found);
+  out.beforeCharCount = frameContents(found).length;
+  try { found.contents = nextText; } catch (e) {
+    out.status = "write_refused";
+    out.error = "Illustrator refused the text write.";
+    return emitUpdate(out);
+  }
+
+  // Re-read the SAME frame — the write is only proven by the after-state.
+  var confirmed = frameContents(found);
+  out.afterCharCount = confirmed.length;
+  out.changed = out.afterCharCount !== out.beforeCharCount || confirmed === nextText;
+  out.status = confirmed === nextText ? "applied" : "not_applied";
+  if (out.status !== "applied") out.error = "The frame contents do not match the requested copy after the write.";
+  return emitUpdate(out);
+
+  function emitUpdate(v) {
+    return "{" +
+      "\\"ok\\":" + jsonBoolean(v.status === "applied") + "," +
+      "\\"status\\":" + jsonString(v.status) + "," +
+      "\\"documentName\\":" + jsonNullableString(v.documentName) + "," +
+      "\\"target\\":" + jsonNullableString(v.target) + "," +
+      "\\"beforeCharCount\\":" + (v.beforeCharCount === null ? "null" : jsonNumber(v.beforeCharCount)) + "," +
+      "\\"afterCharCount\\":" + (v.afterCharCount === null ? "null" : jsonNumber(v.afterCharCount)) + "," +
+      "\\"changed\\":" + jsonBoolean(v.changed) + "," +
+      "\\"error\\":" + jsonNullableString(v.error) +
+    "}";
+  }
+}());
+`;
+  return { jsx, errors: [] };
+}
