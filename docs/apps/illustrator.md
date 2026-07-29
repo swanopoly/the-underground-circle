@@ -12,8 +12,25 @@ Shipping now (P16):
 
 Everything else is the generic desktop ladder — `desktop.file_stat`,
 `desktop.window_state`, `desktop.read_a11y_tree`, `desktop.screenshot` for
-observation — plus the `agent.build_app_capability` buildout path. No vector
-mutation tools exist yet, and blind canvas editing is refused.
+observation — plus the `agent.build_app_capability` buildout path. Blind canvas
+editing is refused.
+
+### Built but NOT yet callable (2026-07-29)
+
+`src/lib/illustratorExtendScriptAdapters.ts` now also builds three more
+capabilities, mirroring InDesign's shipped set, and they are smoke-tested:
+
+- `buildIllustratorTextInventoryJsx` — read-only text-frame inventory.
+- `buildIllustratorSetLayerStateJsx` — show/hide/lock/unlock an exactly-named layer.
+- `buildIllustratorUpdateTextLayerJsx` — replace copy in one exactly-named frame.
+
+They are the pure source of truth ONLY. They have no bridge endpoint, no
+`desktopBridge` client function, and no runtime tool registration, so no chat
+request can reach them yet. Wiring them means: LOCKSTEP JSX bodies in
+`scripts/claude-bridge.js`, three `POST /desktop/illustrator_*` endpoints,
+client functions, and typed tools with approval policy — after which this
+profile's status can move from `partial` toward `executable`. Until then the
+status line above stays `partial` on purpose.
 
 ## Control surfaces (ranked)
 
