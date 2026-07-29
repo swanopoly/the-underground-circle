@@ -470,6 +470,41 @@ FINDINGS = [
         ),
         "evidence": "scripts/delegation-wiring-smoketest.ts (cap-exhaustion case), src/lib/agentExecutionCore.ts hasInvalidToolUseId guard",
     },
+    {
+        "id": "provenance-column-null-plumbing-complete",
+        "q": "Our memory rows all have source_run_id NULL. Which layer is dropping it?",
+        "a": (
+            "Check whether anything ever SUPPLIES it before you go looking for what drops it. In this "
+            "codebase the answer was: nothing did.\n\n"
+            "The column existed with an FK to `agent_runs(id)`. `saveMemory` declared "
+            "`sourceRunId?: string` and wrote `source_run_id: opts.sourceRunId` straight into the "
+            "insert. Four wrapper layers threaded the option through faithfully. Every layer looked "
+            "correct in review, because every layer WAS correct — the chain simply carried `undefined` "
+            "from end to end, because the outermost callers had no such parameter. One writer "
+            "(`autoExtractAndSave`) accounted for 2,789 of 3,471 rows and did not take a run id at all.\n\n"
+            "The diagnostic move that settles it in one query is to group by writer and look at both "
+            "counts together: `select source_surface, count(*), count(source_run_id) ... group by 1`. "
+            "If the ratio is 0 for EVERY surface, no reader is dropping the value — no writer is "
+            "producing one. A single layer dropping it would show up as 0 on some surfaces and "
+            "non-zero on others.\n\n"
+            "Harden before you wire. `source_run_id` is a uuid FK, so a supplied value has two ways to "
+            "destroy the write rather than annotate it: a non-uuid is a 22P02, and a well-formed uuid "
+            "whose run row is missing or was reaped is a 23503. Both kill the INSERT. Normalize the "
+            "shape, and on FK rejection re-insert without the reference — **provenance must never cost "
+            "you the record it describes.** Turning a missing-annotation bug into a data-loss bug is a "
+            "strictly worse outcome than the one you started with.\n\n"
+            "Where no run genuinely exists (a streaming path that never created an `agent_runs` row), "
+            "leave it NULL. Attributing a memory to a plausible-looking nearby run is fabricated "
+            "provenance, which is worse than absent provenance: absent reads as unknown, fabricated "
+            "reads as fact."
+        ),
+        "evidence": (
+            "src/lib/agentRunSystem.ts saveMemory (insert + FK fallback), "
+            "src/lib/agentMemory.ts autoExtractAndSave, "
+            "src/screens/circles/tabs/ChatTab.tsx (caller), "
+            "scripts/memory-prod-invariants.mjs check 2"
+        ),
+    },
 ]
 
 
