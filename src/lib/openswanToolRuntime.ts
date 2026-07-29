@@ -68,6 +68,10 @@ import {
   type ComputerAppVerificationReceipt,
 } from './computerAppGrounding';
 import {
+  planNativeUiVerification,
+  verifyNativeUiAfterState,
+} from './nativeUiVerificationCore';
+import {
   buildAgentActionCallIdentity,
   createAgentActionCallStore,
   type AgentActionCallFinalState,
@@ -10001,6 +10005,28 @@ async function dispatchGenericNativeUiBridgeMutation(
   }
 }
 
+/**
+ * One bounded accessibility snapshot of the exact target app, for before/after
+ * mutation proof. Never throws: a failed capture returns null, and the caller
+ * degrades to `unknown` (the pre-existing behaviour) rather than blocking a
+ * mutation that is already fully authorized.
+ */
+async function captureNativeUiA11ySnapshot(
+  appName: string,
+): Promise<import('./a11yTreeDiff').A11ySummaryNode[] | null> {
+  try {
+    if (!appName) return null;
+    const { readA11yTree, isDesktopBridgeAvailable } = await import('./desktopBridge');
+    if (!(await isDesktopBridgeAvailable())) return null;
+    const r = await readA11yTree({ appName, slice: 'interactive' });
+    if (!r.ok || !r.data?.tree) return null;
+    const { snapshotA11ySummary } = await import('./a11yTreeDiff');
+    return snapshotA11ySummary(r.data.tree as never);
+  } catch {
+    return null;
+  }
+}
+
 async function executeGuardedGenericNativeUiMutation(
   prepared: PreparedGenericNativeUiMutation,
   approvalReceipt: OpenSwanRuntimeApprovalReceipt,
@@ -10050,6 +10076,20 @@ async function executeGuardedGenericNativeUiMutation(
     };
   }
 
+  // What SHOULD move in the accessibility tree if this action lands. A tool
+  // with no attributable signature returns a null expectation and can never
+  // reach `verified` on tree movement alone.
+  const verificationPlan = planNativeUiVerification(
+    prepared.tool,
+    prepared.dispatchArgs as unknown as Record<string, unknown>,
+  );
+  // The epoch's target.appName is a hashed process identity, so the literal
+  // name for the bridge read comes from the sealed args the guard validated.
+  const verificationAppName = (() => {
+    const raw = (prepared.dispatchArgs as unknown as Record<string, unknown>).appName;
+    return typeof raw === 'string' ? raw : '';
+  })();
+
   const actionId = `${context.runId}:${context.toolUseId}`;
   const action: ComputerAppMutationContract = {
     schemaVersion: 1,
@@ -10063,11 +10103,11 @@ async function executeGuardedGenericNativeUiMutation(
     approvalRequired: true,
     idempotencyKey: `${actionId}:generic-native-ui-v1`,
     verification: {
-      kind: prepared.tool === 'desktop.set_element_value'
-        ? 'accessibility'
-        : 'app_state',
-      predicate: 'The exact approved native input was acknowledged without changing app process or target surface before dispatch.',
-      evidenceTools: [`${prepared.tool}:bridge-acknowledgement`],
+      kind: 'accessibility',
+      predicate: verificationPlan.expectation
+        ? `A fresh before/after accessibility diff of the exact target app attributes the change to this call. ${verificationPlan.rationale}`
+        : `No accessibility signature distinguishes this action from unrelated app activity; an unmoved tree is the only decisive signal. ${verificationPlan.rationale}`,
+      evidenceTools: [`${prepared.tool}:a11y-before-after-diff`],
     },
     outcomeUnknownPolicy: 'verify_before_retry',
   };
@@ -10092,6 +10132,11 @@ async function executeGuardedGenericNativeUiMutation(
         .join(', ') || 'authorization unavailable'}. Re-observe and issue a new tool call. No app action was attempted.`,
     };
   }
+
+  // Bracket the dispatch with accessibility snapshots of the exact target app.
+  // Taken AFTER the one-shot handler-entry recheck so the tree we compare
+  // against is the same surface the guard just re-confirmed.
+  const beforeSnapshot = await captureNativeUiA11ySnapshot(verificationAppName);
 
   const dispatched = await dispatchDurableComputerAppMutation({
     action,
@@ -10123,29 +10168,60 @@ async function executeGuardedGenericNativeUiMutation(
       : result;
   }
 
-  // These legacy bridge endpoints acknowledge dispatch but do not return a
-  // machine-checkable after-state. Seal outcome_unknown (never automatic
-  // replay) while reporting the acknowledged input truthfully.
+  // The bridge endpoint returns only an acknowledgement, so proof comes from
+  // comparing the app's accessibility tree before and after. Three outcomes,
+  // and only the first is completion:
+  //   verified  — the diff is attributable to THIS call
+  //   no_effect — the tree is unchanged where it had to move: proven failure
+  //   unknown   — no usable snapshot, or movement we cannot attribute
+  const afterSnapshot = await captureNativeUiA11ySnapshot(verificationAppName);
+  const snapshotsUsable = Array.isArray(beforeSnapshot) && Array.isArray(afterSnapshot);
+  const { diffA11ySummaries } = await import('./a11yTreeDiff');
+  const a11yDiff = snapshotsUsable
+    ? diffA11ySummaries(beforeSnapshot, afterSnapshot)
+    : null;
+  const verification = verifyNativeUiAfterState({
+    tool: prepared.tool,
+    plan: verificationPlan,
+    diff: a11yDiff,
+    snapshotsUsable,
+  });
+  const completionVerified = verification.verdict === 'verified';
+  // §26 allows `failed` only while a row is still undispatched. This handler
+  // HAS dispatched, so a proven no-op still seals `outcome_unknown` durably —
+  // replay stays blocked either way. The user-facing text carries the sharper
+  // truth, which is the part that was missing.
   const durableStateSealed = await finishDurableAgentAction(
     dispatched.lease,
-    'outcome_unknown',
+    completionVerified ? 'verified' : 'outcome_unknown',
     {
       surface: action.surface,
       risk: action.risk,
       approvalId: approvalReceipt.approvalId,
       observationEpochId: action.observationEpochId,
       verificationKind: action.verification.kind,
-      evidenceCount: 0,
-      completionVerified: false,
-      outcomeUnknown: true,
+      evidenceCount: snapshotsUsable ? 2 : 0,
+      completionVerified,
+      outcomeUnknown: !completionVerified,
       source: 'openswan_tool_runtime',
     },
   );
+  const durableWarning = durableStateSealed
+    ? ''
+    : ' Durable finalization acknowledgement was unavailable, so do not submit it again.';
+  // `no_effect` is a PROVEN no-op, not ignorance — say which one it is.
+  // Reporting "unknown" for a call we can show did nothing is the same
+  // dishonesty as reporting completion for a call we cannot show worked.
+  const resultsText = completionVerified
+    ? `${dispatched.value.resultsText} ${verification.reason}${durableWarning}`
+    : verification.verdict === 'no_effect'
+      ? `${dispatched.value.resultsText} ${verification.reason} This exact call is replay-blocked.${durableWarning}`
+      : `${dispatched.value.resultsText} ${verification.reason} The outcome is unknown and this exact call is replay-blocked.${durableWarning}`;
   const result = {
-    ok: false,
-    resultsText: `${dispatched.value.resultsText} The bridge acknowledged dispatch, but completion is incomplete because no independent after-state proof was returned. The outcome is unknown and this exact call is replay-blocked.${durableStateSealed ? '' : ' Durable finalization acknowledgement was unavailable, so do not submit it again.'}`,
-    completionVerified: false,
-    outcomeUnknown: true,
+    ok: completionVerified,
+    resultsText,
+    completionVerified,
+    outcomeUnknown: !completionVerified,
   } as OpenSwanToolExecutionResultMap[GenericNativeUiMutationTool];
   return attachComputerAppMutationMetadata<GenericNativeUiMutationTool>(
     result,

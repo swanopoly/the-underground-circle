@@ -581,11 +581,31 @@ coordinate/mouse/scroll actions now share observe-before-approval, stable
 args/app/PID/surface binding, one-shot handler-entry recheck, and §26
 claim/start/one-attempt dispatch; coordinates also require live screen bounds
 and a visible target-app window. SwanBot v2 no longer raw-dispatches those
-browser/desktop mutations in its current client catalog. Because the generic
-native endpoints still expose acknowledgement rather than independent
-after-state proof, they explicitly report incomplete/unknown, seal
-`outcome_unknown`, and cannot replay; they are not part of the
-verified-completion canaries. Accessibility value-setting requires `appName`
+browser/desktop mutations in its current client catalog. The bridge endpoints
+still return only an acknowledgement, so completion is now decided by a fresh
+before/after accessibility diff of the exact target app
+(`src/lib/nativeUiVerificationCore.ts`) rather than by the acknowledgement:
+
+- `verified` requires attribution, not movement. Text entry
+  (`type_text`/`paste_text`/`set_element_value`) verifies only when a changed
+  field value contains the exact text sent — or, when the snapshot truncated at
+  `A11Y_SNAPSHOT_MAX_STRING_LENGTH`, when the sent text contains that truncated
+  value. `menu_click` verifies only when a node labelled like the invoked leaf
+  item appears. Unattributable tree movement never promotes to `verified`.
+- `no_effect` is new and is a *proven* no-op: for the four tools that must move
+  the tree, a byte-identical before/after is positive evidence the action
+  missed. This replaces a blanket "unknown" that could never be improved.
+- Everything else — mouse move/down/up, scroll, bare clicks, keypresses —
+  stays `unknown`, because those routinely land without an accessibility-visible
+  change and calling them `no_effect` would manufacture a failure.
+- A missing or failed snapshot is always `unknown`; absence of evidence is never
+  evidence of absence.
+
+§26 forbids `failed` after dispatch, so a proven `no_effect` still seals
+durable `outcome_unknown` and stays replay-blocked; only the user-facing text
+carries the sharper truth. This slice is source/contract-verified
+(`native-ui-verification-core`, `openswan-generic-native-ui-runtime`) — no live
+native-app GUI run has exercised the snapshot path. Accessibility value-setting requires `appName`
 but fails closed before approval pending exact generation/path sealing. The
 separately vault/origin-gated credential tool retains its own compatibility
 boundary. Submit, upload, browser navigation/close, generalized native

@@ -120,15 +120,42 @@ assert(
     && runtimeSource.includes('cannot yet seal a fresh exact accessibility target generation and dotted-path identity'),
   'set_element_value fails closed before approval until exact accessibility-target sealing is available',
 );
+// The bridge still returns only an acknowledgement; proof now comes from a
+// fresh before/after accessibility diff of the exact target app. What must
+// stay true is that completion is derived from that diff and nothing else —
+// an acknowledgement alone can never produce ok:true.
 const acknowledgedDispatchSection = runtimeSource.slice(
-  runtimeSource.indexOf('// These legacy bridge endpoints acknowledge dispatch'),
+  runtimeSource.indexOf('// The bridge endpoint returns only an acknowledgement'),
   runtimeSource.indexOf('export async function executeOpenSwanRuntimeTool'),
 );
 assert(
-  acknowledgedDispatchSection.includes('ok: false')
-    && acknowledgedDispatchSection.includes('completionVerified: false')
-    && acknowledgedDispatchSection.includes('outcomeUnknown: true'),
-  'bridge acknowledgement without after-state proof is explicitly incomplete and outcome-unknown',
+  acknowledgedDispatchSection.length > 0,
+  'the generic-native after-state proof section is present and locatable',
+);
+assert(
+  acknowledgedDispatchSection.includes('captureNativeUiA11ySnapshot(verificationAppName)')
+    && acknowledgedDispatchSection.includes('diffA11ySummaries(beforeSnapshot, afterSnapshot)')
+    && acknowledgedDispatchSection.includes('verifyNativeUiAfterState('),
+  'completion is decided by a fresh before/after accessibility diff, not the acknowledgement',
+);
+assert(
+  acknowledgedDispatchSection.includes("verification.verdict === 'verified'")
+    && acknowledgedDispatchSection.includes('ok: completionVerified')
+    && acknowledgedDispatchSection.includes('outcomeUnknown: !completionVerified'),
+  'ok/outcomeUnknown are derived from the verdict — never hardcoded to success',
+);
+assert(
+  acknowledgedDispatchSection.includes("completionVerified ? 'verified' : 'outcome_unknown'")
+    && !acknowledgedDispatchSection.includes("'failed'"),
+  'a dispatched call seals verified or outcome_unknown only — never failed (§26 forbids failed after dispatch)',
+);
+assert(
+  acknowledgedDispatchSection.includes("verification.verdict === 'no_effect'"),
+  'a proven no-op reports as such instead of hiding behind outcome-unknown',
+);
+assert(
+  runtimeSource.includes('snapshotsUsable = Array.isArray(beforeSnapshot) && Array.isArray(afterSnapshot)'),
+  'a missing before or after snapshot degrades to unusable — absence of evidence is not evidence',
 );
 assert(
   guardedTools.every((tool) => runtimeSource.includes(
