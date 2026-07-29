@@ -124,20 +124,47 @@ async function main() {
     { id: 'tu_19', name: 'desktop.mouse_down', input: { x: 100, y: 200 } },
     { id: 'tu_20', name: 'desktop.mouse_up', input: { x: 120, y: 240 } },
     { id: 'tu_21', name: 'desktop.mouse_drag', input: { fromX: 100, fromY: 200, toX: 300, toY: 400 } },
-    { id: 'tu_22', name: 'desktop.mouse_scroll', input: { deltaY: 500 } },
+    // x/y are REQUIRED for scroll: the bridge coerces a missing coordinate to 0,
+    // so a coord-less scroll would act at the screen's top-left with the
+    // coordinate preflight skipped. The dispatcher now fails closed.
+    { id: 'tu_22', name: 'desktop.mouse_scroll', input: { deltaY: 500, x: 640, y: 400 } },
     { id: 'tu_23', name: 'desktop.screen_size', input: {} },
     { id: 'tu_24', name: 'desktop.read_a11y_tree', input: { appName: 'Safari', maxNodes: 25 } },
     { id: 'tu_25', name: 'desktop.click_element', input: { pid: 456, path: '0.1' } },
     { id: 'tu_26', name: 'desktop.set_element_value', input: { pid: 123, path: '0.2.1', text: 'hello field' } },
   ];
+  // Three native-app mutations are DELIBERATELY refused by this raw dispatcher
+  // and must go through the sealed approval + fresh-proof runtime gateway
+  // instead. They still return a well-formed result — they just decline, with a
+  // reason — so the loop below asserts the refusal rather than treating it as a
+  // routing failure.
+  const GATEWAY_ONLY_TOOLS = new Set([
+    'desktop.launch_app',
+    'desktop.focus_app',
+    'desktop.click_element',
+  ]);
+
   const results = await executeClientToolCalls(stubBridge, calls);
   assert(results.length === 26, 'all 26 desktop tools produce a result');
   for (let i = 0; i < results.length; i++) {
     assert(results[i].tool_use_id === calls[i].id, `result ${i}: tool_use_id matches call id`);
-    assert(!results[i].is_error, `result ${i}: is_error=false for stub success`);
     const parsed = JSON.parse(results[i].content);
+    if (GATEWAY_ONLY_TOOLS.has(calls[i].name)) {
+      assert(parsed.ok === false, `result ${i} (${calls[i].name}): gateway-only tool is refused here`);
+      assert(
+        typeof parsed.error === 'string' && /gateway|runtime/i.test(parsed.error),
+        `result ${i} (${calls[i].name}): refusal explains the required runtime`,
+      );
+      continue;
+    }
+    assert(!results[i].is_error, `result ${i}: is_error=false for stub success`);
     assert(parsed.ok === true, `result ${i}: content.ok=true`);
   }
+  assert(
+    GATEWAY_ONLY_TOOLS.size === 3
+      && calls.filter((c) => GATEWAY_ONLY_TOOLS.has(c.name)).length === 3,
+    'every gateway-only tool is actually exercised by this fixture',
+  );
 
   // ─── Screenshot preview shape — content-cap for large base64 ────
   const shotResult = results.find((r) => r.tool_use_id === 'tu_10')!;
@@ -184,10 +211,21 @@ async function main() {
   assert(a11yParsed.data.nodeCount === 3, 'read_a11y_tree: node count preserved');
   assert(a11yParsed.data.text.includes('[0.1] button "Reload"'), 'read_a11y_tree: rendered text included');
 
+  // click_element no longer reaches the raw bridge at all — it requires the
+  // sealed native semantic-action runtime — so there is no bridge method to
+  // preserve. What must hold instead is that it refuses WITHOUT touching the
+  // bridge and says why.
   const clickElementResult = results.find((r) => r.tool_use_id === 'tu_25')!;
   const clickElementParsed = JSON.parse(clickElementResult.content);
-  assert(clickElementParsed.data.method === 'ax_click', 'click_element: bridge method preserved');
-  assert(clickElementParsed.data.path === '0.1', 'click_element: path preserved');
+  assert(clickElementParsed.ok === false, 'click_element: refused by the raw dispatcher');
+  assert(
+    /semantic-action runtime/i.test(String(clickElementParsed.error ?? '')),
+    'click_element: refusal names the runtime it requires',
+  );
+  assert(
+    clickElementParsed.data === undefined,
+    'click_element: no bridge payload leaks from a refused call',
+  );
 
   // ─── Unknown tool → is_error + explanation ──────────────────────
   const unknown = await executeClientToolCalls(stubBridge, [
@@ -199,12 +237,16 @@ async function main() {
   assert(/unknown/i.test(parsed.error || ''), 'unknown tool: error mentions unknown');
 
   // ─── Bridge throws → graceful is_error path ─────────────────────
+  // Uses a tool that actually REACHES the bridge. `desktop.launch_app` was the
+  // original fixture here, but it is now refused before dispatch (see
+  // GATEWAY_ONLY_TOOLS above) — so the stub could never throw and this test
+  // would pass for the wrong reason.
   const throwingBridge: StubBridge = {
     ...stubBridge,
-    launchApp: async () => { throw new Error('bridge unreachable'); },
+    readA11yTree: async () => { throw new Error('bridge unreachable'); },
   };
   const throwResult = await executeClientToolCalls(throwingBridge, [
-    { id: 'tu_t', name: 'desktop.launch_app', input: { appName: 'Zoom' } },
+    { id: 'tu_t', name: 'desktop.read_a11y_tree', input: { pid: 456 } },
   ]);
   assert(throwResult[0].is_error === true, 'bridge throw: is_error=true');
   const throwParsed = JSON.parse(throwResult[0].content);

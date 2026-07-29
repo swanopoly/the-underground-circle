@@ -21,7 +21,7 @@
  *     · AgentToolDefinition               :67-82  (name/description/input_schema
  *                                                  /input_examples?/handler/interactive?)
  *     · AgentRunResult                    :340-359 (text/messages/iterations/
- *                                                  stopReason/hitMaxIterations/aborted?
+ *                                                  stopReason/hitMaxIterations/aborted?/stoppedEarly?
  *                                                  — NO usage, NO toolCalls fields)
  *     · runAgent tool_result assembly     :1022   (results are one user-role msg)
  *
@@ -375,9 +375,14 @@ export function normalizeV2StopReason(args: {
   stopReason?: unknown;
   hitMaxIterations?: unknown;
   aborted?: unknown;
+  stoppedEarly?: unknown;
 } | null | undefined): 'end_turn' | 'max_tokens' | 'error' {
   const a = isPlainObject(args) ? args : {};
   if (a.aborted === true) return 'error';
+  // A guard stop fabricates `stopReason: 'end_turn'` (it is not cap
+  // exhaustion), so without this it normalized to a clean finish. Same
+  // reasoning as `aborted`: it did not complete, so it is not 'end_turn'.
+  if (a.stoppedEarly === true) return 'error';
   if (a.hitMaxIterations === true) return 'max_tokens';
   const raw = toStringSafe(a.stopReason).trim().toLowerCase();
   if (raw === 'end_turn' || raw === 'stop_sequence') return 'end_turn';
@@ -454,6 +459,7 @@ export function fromAgentCoreResult(
       stopReason: r.stopReason,
       hitMaxIterations: r.hitMaxIterations,
       aborted: r.aborted,
+      stoppedEarly: r.stoppedEarly,
     });
     return { text, toolCalls, usage, stopReason };
   } catch {

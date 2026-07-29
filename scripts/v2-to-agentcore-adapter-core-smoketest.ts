@@ -240,6 +240,14 @@ async function main(): Promise<void> {
     assertEq(normalizeV2StopReason({ hitMaxIterations: true, stopReason: 'tool_use' }), 'max_tokens', 'hitMax precedence over raw reason');
     assertEq(normalizeV2StopReason({ aborted: true, stopReason: 'end_turn' }), 'error', 'aborted → error (not a clean completion)');
     assertEq(normalizeV2StopReason({ aborted: true, hitMaxIterations: true }), 'error', 'aborted wins over hitMax');
+    // A guard stop (bad/reused tool-call identity, no-progress, boundary stop)
+    // fabricates stopReason 'end_turn' because it is NOT cap exhaustion — so
+    // without an explicit check it normalized to a clean finish and the v2
+    // contract reported a run that gave up as completed.
+    assertEq(normalizeV2StopReason({ stoppedEarly: true, stopReason: 'end_turn' }), 'error',
+      'guard stop is not a clean end_turn');
+    assertEq(normalizeV2StopReason({ stoppedEarly: false, stopReason: 'end_turn' }), 'end_turn',
+      'a real end_turn still normalizes cleanly');
     assertEq(normalizeV2StopReason({}), 'error', 'empty → error');
     // No client_pending exists client-side (ADR §2.3) — never emitted.
     assert(normalizeV2StopReason({ stopReason: 'client_pending' }) === 'error', 'client_pending has no client-side meaning → error');

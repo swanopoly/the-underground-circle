@@ -165,6 +165,15 @@ const mockRequire = (specifier: string): unknown => {
       scopesRequestAgentMemory: () => false,
     };
   }
+  if (specifier === './memoryWritePolicyCore') {
+    // Dedupe is irrelevant to replay-summary behaviour, so the stub reports
+    // "not eligible" — saveMemory then skips the candidate lookup entirely,
+    // which is exactly the pre-existing path for non-session scopes.
+    return {
+      evaluateDedupeEligibility: () => ({ eligible: false, strategy: 'none', reason: 'stub' }),
+      memoryWriteScopePolicy: () => ({ strategy: 'none', identityKeys: [], candidateLimit: 0, why: 'stub' }),
+    };
+  }
   throw new Error(`Unexpected dependency while loading agentRunSystem: ${specifier}`);
 };
 

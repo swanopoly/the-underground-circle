@@ -412,8 +412,18 @@ async function assertSwanBotWpApprovalGateSource() {
   assert(source.includes('SWANBOT_CLIENT_WP_MUTATION_TOOLS'), 'approval gate: mutating wp tool set exists');
   for (const tool of ['wp.upload_media', 'wp.create_slide', 'wp.update_post', 'wp.trash_post']) {
     assert(source.includes(`'${tool}'`), `approval gate: ${tool} is classified as mutating`);
+    // Assert the PROPERTY (this tool's dispatch happens inside the approval
+    // wrapper), not one exact spelling of the call. Pinning the literal
+    // argument list broke the moment a `markDirectMutationDispatched` marker
+    // was threaded into the dispatcher — a safety addition, not a regression.
+    const dispatcher = tool === 'wp.upload_media' ? 'WpUploadMedia'
+      : tool === 'wp.create_slide' ? 'WpCreateSlide'
+      : tool === 'wp.update_post' ? 'WpUpdatePost' : 'WpTrashPost';
     assert(
-      source.includes(`withSwanBotClientWordPressApproval(call.name, input, context, call.id, () => dispatch${tool === 'wp.upload_media' ? 'WpUploadMedia' : tool === 'wp.create_slide' ? 'WpCreateSlide' : tool === 'wp.update_post' ? 'WpUpdatePost' : 'WpTrashPost'}(input))`),
+      new RegExp(
+        `withSwanBotClientWordPressApproval\\([^)]*?call\\.id[^)]*?\\(\\)\\s*=>\\s*dispatch${dispatcher}\\(`,
+        's',
+      ).test(source),
       `approval gate: ${tool} dispatch is wrapped`,
     );
   }

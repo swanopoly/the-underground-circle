@@ -509,6 +509,31 @@ async function main() {
   assert(edgeFailResult.incomplete === true && edgeFailResult.checkpoint === undefined,
     'edge failure → incomplete WITHOUT checkpoint (legacy parity)');
 
+  // A runtime guard stop (bad/reused tool-call identity, no-progress /
+  // oscillation, tool-result boundary) reports `hitMaxIterations: false` —
+  // correctly, it is not cap exhaustion — which used to drop it into the
+  // clean-finish branch above. So a run that GAVE UP came back with no
+  // `incomplete` flag, no checkpoint, and a '✓ Verified' receipt that never hit
+  // the downgrade. It must map like an abort instead: honest and resumable.
+  const guardEvents: LegacyToolEvent[] = [
+    { tool: 'desktop.read_a11y_tree', input: {}, result: 'tree captured', status: 'passed' },
+  ];
+  const guardResult = buildLegacyToolLoopResult({
+    runResult: {
+      text: 'stopped: same failing call not retried.',
+      messages: [], iterations: 3, stopReason: 'end_turn',
+      hitMaxIterations: false, stoppedEarly: true,
+    },
+    toolEvents: guardEvents, maxRounds: 4,
+    verificationReceipt: { verdict: 'verified', summary: '✓ Verified' } as any,
+  });
+  assert(guardResult.incomplete === true, 'guard stop → incomplete (NOT a clean finish)');
+  assert(guardResult.checkpoint !== undefined, 'guard stop → resumable checkpoint');
+  assert(guardResult.response.includes('stopped: same failing call not retried.'),
+    'guard stop keeps the loop\'s own explanation');
+  assert(guardResult.verificationReceipt?.verdict === 'unverified',
+    'guard stop downgrades a ✓ Verified receipt — a non-finish must never read as proven');
+
   const capEvents: LegacyToolEvent[] = [
     { tool: 'desktop.read_a11y_tree', input: {}, result: 'tree captured', status: 'passed' },
     { tool: 'desktop.click_element', input: { label: 'Save' }, result: 'Tool error: not found', status: 'failed' },

@@ -1,27 +1,17 @@
 {
-  "generatedAt": "2026-07-29T03:24:15.917Z",
+  "generatedAt": "2026-07-29T08:48:40.925Z",
   "results": [
     {
       "level": "PASS",
       "name": "no unreachable private rows (private + user_id IS NULL)",
-      "detail": "private_no_owner=0 of 3478 active",
-      "data": {
-        "agent_no_key": 0,
-        "no_circle": 0,
-        "private_no_owner": 0,
-        "total": 3478
-      }
+      "detail": "private_no_owner=0 of 0 active",
+      "data": null
     },
     {
       "level": "PASS",
       "name": "agent-scope rows carry an agent_id",
       "detail": "agent rows with no key=0 — these are invisible to the agent that earned them",
-      "data": {
-        "agent_no_key": 0,
-        "no_circle": 0,
-        "private_no_owner": 0,
-        "total": 3478
-      }
+      "data": null
     },
     {
       "level": "PASS",
@@ -32,106 +22,70 @@
     {
       "level": "WARN",
       "name": "memories are traceable to the run that produced them",
-      "detail": "source_run_id set on 0/3478 (0.0%) — 0 means the accountability claim is unbacked",
-      "data": {
-        "distinct_surfaces": 11,
-        "stamped_feed_task": 6,
-        "total": 3478,
-        "with_run": 0
-      }
+      "detail": "source_run_id set on 0/0 (0.0%) — 0 means the accountability claim is unbacked",
+      "data": null
     },
     {
       "level": "PASS",
       "name": "source_surface distribution",
-      "detail": "feed_task=6, distinct surfaces=11 (a high feed_task share is the known hardcode)",
-      "data": {
-        "distinct_surfaces": 11,
-        "stamped_feed_task": 6,
-        "total": 3478,
-        "with_run": 0
-      }
+      "detail": "feed_task=0, distinct surfaces=0 (a high feed_task share is the known hardcode)",
+      "data": null
     },
     {
-      "level": "PASS",
+      "level": "FAIL",
       "name": "memories are reachable by semantic search",
-      "detail": "embedded 3478/3478 (100.0%) — un-embedded rows are invisible to match_memories",
-      "data": {
-        "embedded": 3478,
-        "total": 3478
-      }
+      "detail": "embedded 0/0 (0.0%) — un-embedded rows are invisible to match_memories",
+      "data": null
     },
     {
       "level": "PASS",
       "name": "no orphaned satellite rows",
       "detail": "soul_links=0 sources=0 access=0",
-      "data": {
-        "orphan_access": 0,
-        "orphan_soul_links": 0,
-        "orphan_sources": 0
-      }
+      "data": null
     },
     {
       "level": "PASS",
       "name": "memory_access_log is being written",
-      "detail": "rows=474 null_user=0 newest=2026-07-13 19:37:19.531242+00",
-      "data": {
-        "newest": "2026-07-13 19:37:19.531242+00",
-        "null_user": 0,
-        "total": 474
-      }
+      "detail": "rows=0 null_user=0 newest=never",
+      "data": null
     },
     {
       "level": "PASS",
       "name": "no exact-content duplicate rows",
       "detail": "0 redundant rows across 0 exact-content groups",
-      "data": {
-        "active": 3478,
-        "distinct_content": 3477,
-        "exact_dup_groups": 0,
-        "redundant_rows": "0"
-      }
+      "data": null
     },
     {
       "level": "PASS",
       "name": "content diversity (informational, NOT a defect)",
-      "detail": "3477 distinct contents across 3478 active rows — a shared title with many distinct contents is a category bucket, not duplication",
-      "data": {
-        "active": 3478,
-        "distinct_content": 3477,
-        "exact_dup_groups": 0,
-        "redundant_rows": "0"
-      }
+      "detail": "0 distinct contents across 0 active rows — a shared title with many distinct contents is a category bucket, not duplication",
+      "data": null
     },
     {
       "level": "PASS",
       "name": "no SELECT policy exposes private rows without an owner check",
-      "detail": "2 SELECT policies, all owner-checked where private",
-      "data": [
-        {
-          "policyname": "memory_select_private",
-          "q": "((visibility = 'private'::text) AND (user_id = auth.uid()))"
-        },
-        {
-          "policyname": "memory_select_shared",
-          "q": "((visibility = ANY (ARRAY['room_shared'::text, 'circle_shared'::text, 'org_shared'::text])) AND (circle_id IN ( SELECT circle_members.circle_id\n   FROM circle_members\n  WHERE (circle_members.user_id = auth.uid()))))"
-        }
-      ]
+      "detail": "0 SELECT policies, all owner-checked where private",
+      "data": []
     },
     {
-      "level": "PASS",
+      "level": "FAIL",
       "name": "hot-path indexes present",
-      "detail": "5/5 present",
+      "detail": "missing: idx_memory_entries_title_trgm, idx_memory_entries_content_trgm, idx_memory_entries_circle_rank, idx_memory_entries_pinned, idx_memory_entries_embedding",
       "data": {
-        "missing": []
+        "missing": [
+          "idx_memory_entries_title_trgm",
+          "idx_memory_entries_content_trgm",
+          "idx_memory_entries_circle_rank",
+          "idx_memory_entries_pinned",
+          "idx_memory_entries_embedding"
+        ]
       }
     },
     {
       "level": "PASS",
       "name": "match_memories is SECURITY INVOKER",
       "detail": "INVOKER — semantic search honours RLS",
-      "data": {
-        "prosecdef": false
-      }
+      "data": null
     }
   ]
 }

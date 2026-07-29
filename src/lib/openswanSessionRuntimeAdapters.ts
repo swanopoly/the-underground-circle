@@ -804,6 +804,24 @@ export function buildLegacyToolLoopResult(args: {
       checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
     };
   }
+  // Runtime guard stop: invalid/reused tool-call identity, a no-progress or
+  // oscillation stop, or a tool-result boundary stop. These report
+  // `hitMaxIterations: false` on purpose (they are not cap exhaustion), which
+  // used to drop them straight into the clean-completion branch below — so a
+  // run that gave up came back with no `incomplete` flag, a '✓ Verified'
+  // receipt that skipped the downgrade, and a parent told `completed: true`.
+  // The loop's own stop note is already the honest explanation, so keep it and
+  // attach a checkpoint: once the user unblocks it, "continue" resumes here.
+  if (args.runResult.stoppedEarly) {
+    const progress = summarizeToolLoopProgress(args.toolEvents);
+    return {
+      response: [args.runResult.text || '', progress].filter(Boolean).join('\n\n'),
+      ...base,
+      ...incompleteReceipt(),
+      incomplete: true,
+      checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
+    };
+  }
   if (!args.runResult.hitMaxIterations) {
     return {
       response: args.runResult.text,

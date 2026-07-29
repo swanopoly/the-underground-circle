@@ -277,13 +277,23 @@ async function main() {
   // ─── Cap exhaustion: incomplete child → completed=false ─────────
   {
     toolInvocations.length = 0;
-    const provider = makeScriptedProvider([
-      {
-        stop_reason: 'tool_use',
-        content: [{ type: 'tool_use', id: 'loop', name: 'tasks.list', input: {} }],
-        usage: { input_tokens: 100, output_tokens: 10 },
+    // Every round must carry a FRESH tool_use id. `makeScriptedProvider` clamps
+    // to its last turn and replays it verbatim, so the original fixture reused
+    // `id: 'loop'` on every round — the runtime's reused-identity guard stopped
+    // the loop before dispatch on round 2 and this case never reached the cap
+    // it exists to test. The varying input also keeps the no-progress detector
+    // out of it: the subject here is cap exhaustion, nothing else.
+    let round = 0;
+    const provider: AgentProvider = {
+      turn: async () => {
+        round += 1;
+        return {
+          stop_reason: 'tool_use',
+          content: [{ type: 'tool_use', id: `loop_${round}`, name: 'tasks.list', input: { page: round } }],
+          usage: { input_tokens: 100, output_tokens: 10 },
+        };
       },
-    ]);
+    };
     const outcome = await runSubagentTypedCoreLoop({
       userMessage: 'never finishes',
       tools: [makeTool('tasks.list')],
@@ -302,6 +312,45 @@ async function main() {
     const parent = buildSubagentParentSummary({ payload, status: 'incomplete' });
     assert(parent.status === 'incomplete' && parent.tokens.input === 200,
       'typed cap: status=incomplete + tokens still accounted');
+  }
+
+  // ─── Guard stop is NOT a clean completion ──────────────────────
+  // A run can end on a runtime guard (bad/reused tool-call identity, a
+  // no-progress or oscillation stop, a tool-result boundary stop) rather than
+  // finishing. Those exits report `stopReason:'end_turn'` + `hitMaxIterations:
+  // false` on purpose — they are not cap exhaustion — which is ALSO exactly
+  // what a genuine finish looks like. Before `stoppedEarly` existed, a child
+  // that gave up reported `completed: true` to its parent, so the parent had no
+  // signal to retry and a '✓ Verified' receipt sailed past its downgrade.
+  {
+    toolInvocations.length = 0;
+    // Reused tool_use id on every round → trips the identity guard.
+    const provider = makeScriptedProvider([
+      {
+        stop_reason: 'tool_use',
+        content: [{ type: 'tool_use', id: 'same-id-every-round', name: 'tasks.list', input: {} }],
+        usage: { input_tokens: 100, output_tokens: 10 },
+      },
+    ]);
+    const outcome = await runSubagentTypedCoreLoop({
+      userMessage: 'trips a guard',
+      tools: [makeTool('tasks.list')],
+      provider,
+      maxIterations: 4,
+    });
+    assert(outcome.runResult.stoppedEarly === true, 'guard stop: stoppedEarly flagged');
+    assert(outcome.runResult.hitMaxIterations === false,
+      'guard stop: still NOT mislabeled as cap exhaustion');
+    const payload = buildSubagentLoopSummary({
+      finalText: outcome.runResult.text,
+      toolCalls: outcome.toolCalls,
+      // The real caller derives this from `incomplete`, which
+      // buildLegacyToolLoopResult now sets for stoppedEarly.
+      completedCleanly: !outcome.runResult.hitMaxIterations && !outcome.runResult.stoppedEarly,
+      usage: outcome.usage,
+    });
+    assert(payload.completed === false,
+      'guard stop: parent sees completed=false, so it can retry rather than bank a non-finish');
   }
 
   // ─── Failed tool → ok=false recorded, loop survives ─────────────

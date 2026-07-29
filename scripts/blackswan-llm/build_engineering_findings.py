@@ -412,6 +412,64 @@ FINDINGS = [
         ),
         "evidence": "scripts/auto-test-cycle.mjs confirmFailures(); first scheduled run 2026-07-29",
     },
+    {
+        "id": "guard-stop-reads-as-clean-completion",
+        "q": "Our agent loop stops early when it detects no progress. Downstream says the run completed. Why?",
+        "a": (
+            "Because 'did it finish?' is being asked as `!hitMaxIterations`, and a guard stop answers "
+            "that question the same way a real completion does.\n\n"
+            "`agentExecutionCore` has four exits that end a run WITHOUT finishing the work: an "
+            "invalid/reused tool-call identity, a repeated-failure no-progress stop, an oscillation "
+            "stop, and a tool-result boundary stop. All four return `stopReason: 'end_turn'` and "
+            "`hitMaxIterations: false`. That is deliberate and correct in isolation — they are not cap "
+            "exhaustion, and there are smoke tests pinning exactly that ('boundary stop is not "
+            "mislabeled cap exhaustion'). The problem is that the pair `end_turn` + "
+            "`hitMaxIterations:false` is ALSO the exact signature of a genuine finish, so it cannot "
+            "distinguish the two.\n\n"
+            "Consequences, all silent: `buildLegacyToolLoopResult` fell into its clean-completion "
+            "branch and dropped the `incomplete` flag; the child's parent got `completed: true` and so "
+            "had no reason to retry; the run row recorded `'completed'`; and the '\u2713 Verified' "
+            "receipt skipped the downgrade that exists precisely to stop a partial run from reading as "
+            "proven.\n\n"
+            "Fix: add an explicit `stoppedEarly?: boolean` to the result, set it at the four guard "
+            "exits, and branch on it before the clean-completion check. Do NOT fix it by flipping "
+            "`hitMaxIterations` to true — that would be a second lie (it is not cap exhaustion) and "
+            "would break the tests that pin the distinction.\n\n"
+            "The general rule: **an absent failure flag is not evidence of success.** When several "
+            "distinct terminal states collapse onto one signal, the states that mean 'did not finish' "
+            "need their own flag. The codebase had already learned this once — `aborted?: boolean` was "
+            "added for user-cancel for the identical reason — which is the tell that the pattern "
+            "recurs and should be checked for at every new early-return you add to a loop."
+        ),
+        "evidence": (
+            "src/lib/agentExecutionCore.ts (4 guard exits + AgentRunResult.stoppedEarly), "
+            "src/lib/openswanSessionRuntimeAdapters.ts:807 buildLegacyToolLoopResult, "
+            "src/lib/subagentRegistry.ts:1145 completedCleanly, "
+            "src/lib/v2ToAgentCoreAdapterCore.ts normalizeV2StopReason"
+        ),
+    },
+    {
+        "id": "stale-test-fixture-reused-tool-use-id",
+        "q": "A smoke test that used to exercise the iteration cap now fails. The loop stops after 1 dispatch. Is the cap broken?",
+        "a": (
+            "Check the fixture before the code. A scripted provider that replays one canned turn "
+            "re-emits the SAME `tool_use` id every round. Real providers never do that, and the runtime "
+            "later grew a guard that stops before dispatch on a missing, invalid, or reused tool-call "
+            "identity.\n\n"
+            "So the loop exits on round 2 via the identity guard, having dispatched once — the cap is "
+            "fine, the fixture is invalid. The giveaway is in the result text: 'Stopped before tool "
+            "dispatch because the model returned a missing, invalid, or reused tool-call identity.' "
+            "Read `result.text` before theorising.\n\n"
+            "Fix the provider to mint a fresh id per round (and vary the input, so the no-progress "
+            "detector does not claim the test either). A test whose subject is cap exhaustion should "
+            "reach the cap and nothing else.\n\n"
+            "Worth noting: this stale fixture was doing real damage beyond its own red X — it was the "
+            "only test covering 'incomplete child \u2192 completed=false', so while it was failing for "
+            "the wrong reason, nobody was checking the right one. **A test failing for an uninteresting "
+            "reason still costs you the coverage it was bought for.**"
+        ),
+        "evidence": "scripts/delegation-wiring-smoketest.ts (cap-exhaustion case), src/lib/agentExecutionCore.ts hasInvalidToolUseId guard",
+    },
 ]
 
 

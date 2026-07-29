@@ -1,33 +1,12 @@
 {
-  "stamp": "2026-07-29T03:22:25.002Z",
+  "stamp": "2026-07-29T11:06:22.591Z",
   "typecheck": {
     "total": 0,
     "byFile": {}
   },
   "suites": {
     "total": 487,
-    "failing": [
-      "smoke:delegation-wiring",
-      "smoke:desktop-action-summary-replay",
-      "smoke:swanbot-v2-delegation",
-      "smoke:swanbot-v2-wp",
-      "smoke:swanbot-v2-wp-approval-gate",
-      "smoke:wordpress-admin-source-intelligence"
-    ]
+    "failing": []
   },
-  "invariants": {
-    "no unreachable private rows (private + user_id IS NULL)": "PASS",
-    "agent-scope rows carry an agent_id": "PASS",
-    "every active row has a circle": "PASS",
-    "memories are traceable to the run that produced them": "WARN",
-    "source_surface distribution": "PASS",
-    "memories are reachable by semantic search": "PASS",
-    "no orphaned satellite rows": "PASS",
-    "memory_access_log is being written": "PASS",
-    "no exact-content duplicate rows": "PASS",
-    "content diversity (informational, NOT a defect)": "PASS",
-    "no SELECT policy exposes private rows without an owner check": "PASS",
-    "hot-path indexes present": "PASS",
-    "match_memories is SECURITY INVOKER": "PASS"
-  }
+  "invariants": null
 }

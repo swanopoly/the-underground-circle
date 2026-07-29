@@ -762,11 +762,20 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
 
   const finalize = async (result: AgentRunResult, err?: unknown) => {
     stopHeartbeat();
+    // `stoppedEarly` (guard stop: bad tool-call identity, no-progress /
+    // oscillation, tool-result boundary) reports hitMaxIterations:false because
+    // it is not cap exhaustion — but it did not finish, so it must not record
+    // as 'completed'. `aborted` gets the enum's own 'cancelled'.
+    // NOTE: this handle has no production caller today (the runtimes do their
+    // own terminal writes); fixing it keeps the exported contract honest for
+    // whenever it IS wired.
     const status = err
       ? 'failed'
-      : result.hitMaxIterations
-        ? 'failed'
-        : 'completed';
+      : result.aborted
+        ? 'cancelled'
+        : result.hitMaxIterations || result.stoppedEarly
+          ? 'failed'
+          : 'completed';
 
     try {
       await supabase

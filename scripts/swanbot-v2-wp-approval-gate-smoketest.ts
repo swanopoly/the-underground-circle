@@ -72,7 +72,12 @@ function assertSwanBotContinuationContext(): void {
     'continuation passes persisted run and loop iteration into client tools',
   );
   assert(
-    /dispatchOneClientTool\(bridge,\s*call,\s*context\)/.test(swanbotSource),
+    // Assert `context` IS forwarded, tolerating extra trailing arguments and a
+    // multi-line call. The 3-arg-exactly form broke when a
+    // `directMutationReceipt?.markDispatched` callback was added as a 4th
+    // argument — the approval context is still forwarded, which is the property
+    // this guards.
+    /dispatchOneClientTool\(\s*bridge,\s*call,\s*context\s*[,)]/s.test(swanbotSource),
     'client tool loop forwards approval context into dispatcher',
   );
   assert(

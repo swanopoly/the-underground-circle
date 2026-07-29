@@ -1,51 +1,24 @@
 {
-  "stamp": "2026-07-29T03:22:25.002Z",
+  "stamp": "2026-07-29T11:06:22.591Z",
   "typecheck": {
     "total": 0,
     "byFile": {}
   },
   "suites": {
     "total": 487,
-    "failing": [
-      "smoke:delegation-wiring",
-      "smoke:desktop-action-summary-replay",
-      "smoke:swanbot-v2-delegation",
-      "smoke:swanbot-v2-wp",
-      "smoke:swanbot-v2-wp-approval-gate",
-      "smoke:wordpress-admin-source-intelligence"
-    ]
+    "failing": []
   },
-  "invariants": {
-    "no unreachable private rows (private + user_id IS NULL)": "PASS",
-    "agent-scope rows carry an agent_id": "PASS",
-    "every active row has a circle": "PASS",
-    "memories are traceable to the run that produced them": "WARN",
-    "source_surface distribution": "PASS",
-    "memories are reachable by semantic search": "PASS",
-    "no orphaned satellite rows": "PASS",
-    "memory_access_log is being written": "PASS",
-    "no exact-content duplicate rows": "PASS",
-    "content diversity (informational, NOT a defect)": "PASS",
-    "no SELECT policy exposes private rows without an owner check": "PASS",
-    "hot-path indexes present": "PASS",
-    "match_memories is SECURITY INVOKER": "PASS"
-  },
+  "invariants": null,
   "diff": {
     "regressions": [],
     "improvements": [
-      "suite now passing: smoke:agent-runtime",
-      "suite now passing: smoke:database-authority-guards",
-      "typecheck: src/lib/computerAppAdapter.ts 4 → 0 errors",
-      "typecheck: src/lib/openswanToolRuntime.ts 4 → 0 errors",
-      "typecheck: src/lib/swanbot.ts 1 → 0 errors"
+      "suite now passing: smoke:delegation-wiring",
+      "suite now passing: smoke:desktop-action-summary-replay",
+      "suite now passing: smoke:swanbot-v2-delegation",
+      "suite now passing: smoke:swanbot-v2-wp",
+      "suite now passing: smoke:swanbot-v2-wp-approval-gate",
+      "suite now passing: smoke:wordpress-admin-source-intelligence"
     ],
-    "known": [
-      "suite newly failing: smoke:delegation-wiring",
-      "suite newly failing: smoke:desktop-action-summary-replay",
-      "suite newly failing: smoke:swanbot-v2-delegation",
-      "suite newly failing: smoke:swanbot-v2-wp",
-      "suite newly failing: smoke:swanbot-v2-wp-approval-gate",
-      "suite newly failing: smoke:wordpress-admin-source-intelligence"
-    ]
+    "known": []
   }
 }

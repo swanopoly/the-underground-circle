@@ -197,7 +197,16 @@ const swanbotClient = readRepoFile('src/lib/swanbot.ts');
 const swanbotV2Edge = readRepoFile('supabase/functions/swanbot-v2-ai/index.ts');
 
 assert(browserBridgeServer.includes('async function handlePageSource'), 'browser bridge exposes a page-source handler');
-assert(browserBridgeServer.includes('await launched.page.content()'), 'browser bridge reads page content only inside local bridge');
+// The property that matters is WHERE the read happens: page HTML is pulled
+// inside the local bridge process and only a bounded excerpt crosses the wire.
+// Matching the exact literal `await launched.page.content()` pinned one
+// spelling, and broke when the handler was refactored to hold a single
+// `pageRef` so the identity check observes the SAME page object the content was
+// read from (re-reading `launched.page` could race a navigation).
+assert(
+  /const\s+\w+\s*=\s*await\s+\w+\.content\(\)/.test(browserBridgeServer),
+  'browser bridge reads page content only inside local bridge',
+);
 assert(browserBridgeServer.includes('Math.min(300_000'), 'browser bridge hard-caps page-source retrieval');
 assert(browserBridgeServer.includes('source: truncated ? source.slice(0, maxChars) : source'), 'browser bridge truncates raw source before responding');
 assert(claudeBridge.includes("p === '/browser/page_source'") && claudeBridge.includes('handlePageSource'), 'claude bridge routes token-protected page-source endpoint');

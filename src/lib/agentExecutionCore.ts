@@ -476,6 +476,24 @@ export type AgentRunResult = {
    * for every non-aborted exit, so existing consumers are unaffected.
    */
   aborted?: boolean;
+  /**
+   * True if the run ended EARLY on a runtime guard instead of finishing its
+   * work: an invalid/reused tool-call identity, a repeated-failure or
+   * oscillation no-progress stop, or a tool-result boundary stop.
+   *
+   * Those exits deliberately report `stopReason: 'end_turn'` and
+   * `hitMaxIterations: false`, because they are NOT cap exhaustion (pinned by
+   * agent-core case14a/14b and the stuck-breaker smoke). But that pair is also
+   * exactly what a genuine completion looks like — so every consumer that asks
+   * "did it finish?" as `!hitMaxIterations` read a run that GAVE UP as a clean
+   * success: `buildLegacyToolLoopResult` dropped `incomplete`, the parent's
+   * subagent summary said `completed: true`, and the '✓ Verified' receipt
+   * downgrade meant to catch exactly this never ran.
+   *
+   * Absent (falsy) on every normal exit, so existing consumers are unaffected
+   * — the same contract as `aborted`.
+   */
+  stoppedEarly?: boolean;
 };
 
 // ─── Image side channel + binary hygiene (P21) ──────────────────────────────
@@ -1215,6 +1233,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         iterations: iteration,
         stopReason: 'end_turn',
         hitMaxIterations: false,
+        stoppedEarly: true,
       };
     }
     for (const id of roundToolUseIds) usedToolUseIds.add(id);
@@ -1304,7 +1323,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         });
         lastText = note;
         emit({ kind: 'final_response', iteration, text: lastText });
-        return { text: lastText, messages, iterations: iteration, stopReason: 'end_turn', hitMaxIterations: false };
+        return {
+          text: lastText, messages, iterations: iteration,
+          stopReason: 'end_turn', hitMaxIterations: false, stoppedEarly: true,
+        };
       }
     }
 
@@ -1707,6 +1729,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         iterations: iteration,
         stopReason: 'end_turn',
         hitMaxIterations: false,
+        stoppedEarly: true,
       };
     }
 
@@ -1764,7 +1787,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         emit({ kind: 'loop_stopped_no_progress', iteration, reason: osc.reason });
         lastText = note;
         emit({ kind: 'final_response', iteration, text: lastText });
-        return { text: lastText, messages, iterations: iteration, stopReason: 'end_turn', hitMaxIterations: false };
+        return {
+          text: lastText, messages, iterations: iteration,
+          stopReason: 'end_turn', hitMaxIterations: false, stoppedEarly: true,
+        };
       }
     }
 
