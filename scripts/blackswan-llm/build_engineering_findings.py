@@ -356,6 +356,36 @@ FINDINGS = [
         ),
         "evidence": "ops-records/memory-dedupe-2026-07-28-deactivated-ids.json; scripts/memory-prod-invariants.mjs check 6",
     },
+    {
+        "id": "backfill-without-exporting-the-key",
+        "q": "I need to backfill embeddings but the OpenAI key only exists as a Supabase secret. Do I export it?",
+        "a": (
+            "No. Run the job where the key already is — a short-lived edge function — so the key never "
+            "leaves the platform and the spend stays on the app's own key with its usage tracking.\n\n"
+            "Shape that worked, ~1.4 cents for 2,604 rows:\n\n"
+            "- **Cost first, from real data.** `sum(length(title||content))/4` for the affected rows, times "
+            "the model's price. $0.0158 estimated, $0.0143 actual. Never ask for spend approval without a "
+            "number.\n"
+            "- **`dryRun` defaults to TRUE.** Spending is opt-in, and the dry run reports rows, tokens and "
+            "dollars so the first real call is not the first measurement.\n"
+            "- **A per-invocation spend cap** that refuses rather than truncates, plus a hard `limit`.\n"
+            "- **Keyset paging on `id`** and an `.is('embedding', null)` filter on both the read and the "
+            "UPDATE, so the job is resumable and idempotent — a re-run can never double-charge or "
+            "overwrite an existing vector.\n"
+            "- **One small real batch first** (25 rows), then verify the write actually landed correctly "
+            "before looping. `vector_dims()` confirmed 1536 and uniform — a mixed-dimension column silently "
+            "breaks the pgvector index.\n\n"
+            "Two traps hit on the way. Authenticating on the platform's injected "
+            "`SUPABASE_SERVICE_ROLE_KEY` rejected a legitimate operator because it did not match the "
+            "project's published service_role API key — a purpose-set secret is unambiguous and scopes the "
+            "endpoint to one job. And a 250-row batch blew the 150s idle timeout because the per-row "
+            "UPDATEs are sequential; 100 rows finished in 4s.\n\n"
+            "**Delete the endpoint when the job is done**, and do not leave the source under "
+            "`supabase/functions/` — a bare `supabase functions deploy` deploys every directory there, so a "
+            "retired ops writer would silently re-publish itself."
+        ),
+        "evidence": "ops-records/one-shot/memory-embed-backfill.ts; coverage 17.2% -> 100.0% (3,478/3,478)",
+    },
 ]
 
 
