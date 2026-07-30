@@ -1,13 +1,13 @@
 {
-  "generatedAt": "2026-07-30T21:12:23.094Z",
-  "wallMs": 92586,
+  "generatedAt": "2026-07-30T21:21:27.181Z",
+  "wallMs": 96316,
   "concurrency": 4,
   "timeoutMs": 180000,
   "filters": [],
   "totals": {
-    "selected": 505,
-    "registered": 505,
-    "passed": 505,
+    "selected": 506,
+    "registered": 506,
+    "passed": 506,
     "failed": 0,
     "timedOut": 0,
     "interrupted": 0,
@@ -17,16 +17,25 @@
     {
       "name": "smoke:acrobat-script-adapter",
       "status": "passed",
-      "durationMs": 1418,
+      "durationMs": 863,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1321
     },
     {
+      "name": "smoke:a11y-tree-diff",
+      "status": "passed",
+      "durationMs": 864,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 4240
+    },
+    {
       "name": "smoke:a11y-tree",
       "status": "passed",
-      "durationMs": 1427,
+      "durationMs": 871,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -35,43 +44,34 @@
     {
       "name": "smoke:a11y-target-resolver-core",
       "status": "passed",
-      "durationMs": 1438,
+      "durationMs": 882,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 61
     },
     {
-      "name": "smoke:a11y-tree-diff",
-      "status": "passed",
-      "durationMs": 1515,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 4240
-    },
-    {
-      "name": "smoke:adobe-cloud-service",
-      "status": "passed",
-      "durationMs": 690,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 57
-    },
-    {
       "name": "smoke:after-effects-script-adapter",
       "status": "passed",
-      "durationMs": 702,
+      "durationMs": 711,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 67
     },
     {
+      "name": "smoke:adobe-cloud-service",
+      "status": "passed",
+      "durationMs": 719,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 57
+    },
+    {
       "name": "smoke:agent-action-calls",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 704,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -80,7 +80,7 @@
     {
       "name": "smoke:adobe-creative-cloud-apps",
       "status": "passed",
-      "durationMs": 791,
+      "durationMs": 832,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -89,34 +89,34 @@
     {
       "name": "smoke:agent-action-runtime-wiring",
       "status": "passed",
-      "durationMs": 667,
+      "durationMs": 671,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 56
     },
     {
-      "name": "smoke:agent-app-capability-buildout",
-      "status": "passed",
-      "durationMs": 703,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 4820
-    },
-    {
       "name": "smoke:agent-context-compression",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 684,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 981
     },
     {
+      "name": "smoke:agent-app-capability-buildout",
+      "status": "passed",
+      "durationMs": 715,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 4820
+    },
+    {
       "name": "smoke:agent-coordination-cli",
       "status": "passed",
-      "durationMs": 648,
+      "durationMs": 651,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -125,7 +125,7 @@
     {
       "name": "smoke:agent-core-steering",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 684,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -134,7 +134,7 @@
     {
       "name": "smoke:agent-cost-forecast-core",
       "status": "passed",
-      "durationMs": 705,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -143,7 +143,7 @@
     {
       "name": "smoke:agent-deploy",
       "status": "passed",
-      "durationMs": 736,
+      "durationMs": 734,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -152,34 +152,34 @@
     {
       "name": "smoke:agent-core",
       "status": "passed",
-      "durationMs": 854,
+      "durationMs": 856,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 477
     },
     {
-      "name": "smoke:agent-deploy-orchestrator",
-      "status": "passed",
-      "durationMs": 667,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 2338
-    },
-    {
       "name": "smoke:agent-evals",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 652,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3012
     },
     {
+      "name": "smoke:agent-deploy-orchestrator",
+      "status": "passed",
+      "durationMs": 693,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 2338
+    },
+    {
       "name": "smoke:agent-failure-recovery",
       "status": "passed",
-      "durationMs": 690,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -188,34 +188,34 @@
     {
       "name": "smoke:agent-file-lease-core",
       "status": "passed",
-      "durationMs": 699,
+      "durationMs": 667,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 59
     },
     {
-      "name": "smoke:agent-image-economics",
-      "status": "passed",
-      "durationMs": 659,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1995
-    },
-    {
       "name": "smoke:agent-monitor-state",
       "status": "passed",
-      "durationMs": 653,
+      "durationMs": 2478,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 44
     },
     {
+      "name": "smoke:agent-image-economics",
+      "status": "passed",
+      "durationMs": 2489,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1995
+    },
+    {
       "name": "smoke:agent-pipeline-evals",
       "status": "passed",
-      "durationMs": 891,
+      "durationMs": 2575,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -224,34 +224,34 @@
     {
       "name": "smoke:agent-plan-mode",
       "status": "passed",
-      "durationMs": 875,
+      "durationMs": 2663,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 33
     },
     {
-      "name": "smoke:agent-prompt-builder",
-      "status": "passed",
-      "durationMs": 670,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1084
-    },
-    {
       "name": "smoke:agent-receipt",
       "status": "passed",
-      "durationMs": 668,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3404
     },
     {
+      "name": "smoke:agent-prompt-builder",
+      "status": "passed",
+      "durationMs": 684,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1084
+    },
+    {
       "name": "smoke:agent-run-proof-publisher",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 658,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -260,7 +260,7 @@
     {
       "name": "smoke:agent-run-persistence-receipt",
       "status": "passed",
-      "durationMs": 882,
+      "durationMs": 877,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -269,7 +269,7 @@
     {
       "name": "smoke:agent-run-subject-summary",
       "status": "passed",
-      "durationMs": 652,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -278,7 +278,7 @@
     {
       "name": "smoke:agent-runtime",
       "status": "passed",
-      "durationMs": 707,
+      "durationMs": 721,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -287,7 +287,7 @@
     {
       "name": "smoke:agent-runtime-helpers",
       "status": "passed",
-      "durationMs": 719,
+      "durationMs": 732,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -296,7 +296,7 @@
     {
       "name": "smoke:agent-runtime-subject",
       "status": "passed",
-      "durationMs": 651,
+      "durationMs": 669,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -305,7 +305,7 @@
     {
       "name": "smoke:agent-standards-wiki",
       "status": "passed",
-      "durationMs": 681,
+      "durationMs": 707,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -314,7 +314,7 @@
     {
       "name": "smoke:agent-todo-core",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 669,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -323,7 +323,7 @@
     {
       "name": "smoke:agent-tool-contract-standards",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 666,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -332,7 +332,7 @@
     {
       "name": "smoke:ai-first-chat-policy",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 692,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -341,7 +341,7 @@
     {
       "name": "smoke:anthropic-context-management",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 681,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -350,7 +350,7 @@
     {
       "name": "smoke:anthropic-native-tool-search",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -359,7 +359,7 @@
     {
       "name": "smoke:app-action-verification-gate",
       "status": "passed",
-      "durationMs": 657,
+      "durationMs": 682,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -368,7 +368,7 @@
     {
       "name": "smoke:app-adapter-gap-contract",
       "status": "passed",
-      "durationMs": 706,
+      "durationMs": 695,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -377,7 +377,7 @@
     {
       "name": "smoke:app-automation-docs-index",
       "status": "passed",
-      "durationMs": 651,
+      "durationMs": 669,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -386,7 +386,7 @@
     {
       "name": "smoke:app-automation-control-surfaces",
       "status": "passed",
-      "durationMs": 759,
+      "durationMs": 758,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -395,7 +395,7 @@
     {
       "name": "smoke:app-learned-facts",
       "status": "passed",
-      "durationMs": 680,
+      "durationMs": 673,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -404,7 +404,7 @@
     {
       "name": "smoke:app-reachability",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 640,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -413,7 +413,7 @@
     {
       "name": "smoke:app-screen-next-step",
       "status": "passed",
-      "durationMs": 663,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -422,7 +422,7 @@
     {
       "name": "smoke:app-script-runner",
       "status": "passed",
-      "durationMs": 671,
+      "durationMs": 663,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -431,7 +431,7 @@
     {
       "name": "smoke:app-surface-ladder",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 756,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -440,25 +440,16 @@
     {
       "name": "smoke:app-task-resolver",
       "status": "passed",
-      "durationMs": 660,
+      "durationMs": 837,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 15177
     },
     {
-      "name": "smoke:approval-audit-core",
-      "status": "passed",
-      "durationMs": 669,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 56
-    },
-    {
       "name": "smoke:approval-card-model-core",
       "status": "passed",
-      "durationMs": 659,
+      "durationMs": 2199,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -467,7 +458,7 @@
     {
       "name": "smoke:approval-digest-core",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 1899,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -476,25 +467,25 @@
     {
       "name": "smoke:approval-intent-preview",
       "status": "passed",
-      "durationMs": 655,
+      "durationMs": 1753,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 2803
     },
     {
-      "name": "smoke:approval-payload",
+      "name": "smoke:approval-audit-core",
       "status": "passed",
-      "durationMs": 664,
+      "durationMs": 2351,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 1371
+      "outputBytes": 56
     },
     {
       "name": "smoke:approval-intent-proof-core",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 659,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -503,7 +494,7 @@
     {
       "name": "smoke:approval-preview-core",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -512,34 +503,43 @@
     {
       "name": "smoke:approval-unblock-order-core",
       "status": "passed",
-      "durationMs": 661,
+      "durationMs": 656,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 66
     },
     {
-      "name": "smoke:attachment-preflight-core",
+      "name": "smoke:approval-payload",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 777,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 64
+      "outputBytes": 1371
     },
     {
       "name": "smoke:apps-chat-command",
       "status": "passed",
-      "durationMs": 680,
+      "durationMs": 692,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 6090
     },
     {
+      "name": "smoke:attachment-preflight-core",
+      "status": "passed",
+      "durationMs": 699,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 64
+    },
+    {
       "name": "smoke:attachment-routing-core",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 701,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -548,7 +548,7 @@
     {
       "name": "smoke:auth-session",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 690,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -557,7 +557,7 @@
     {
       "name": "smoke:autocad-script-adapter",
       "status": "passed",
-      "durationMs": 654,
+      "durationMs": 660,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -566,7 +566,7 @@
     {
       "name": "smoke:automation-builder",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 741,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -575,7 +575,7 @@
     {
       "name": "smoke:automation-cadence-format",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 688,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -584,7 +584,7 @@
     {
       "name": "smoke:automation-chat-commands-subject",
       "status": "passed",
-      "durationMs": 659,
+      "durationMs": 682,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -593,16 +593,25 @@
     {
       "name": "smoke:automation-subject-metadata",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 668,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 421
     },
     {
+      "name": "smoke:blackswan-auto-routing",
+      "status": "passed",
+      "durationMs": 671,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1354
+    },
+    {
       "name": "smoke:automation-executor-mutation-guard",
       "status": "passed",
-      "durationMs": 870,
+      "durationMs": 886,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -611,52 +620,43 @@
     {
       "name": "smoke:best-of-n-race",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 778,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 728
     },
     {
-      "name": "smoke:blackswan-auto-routing",
-      "status": "passed",
-      "durationMs": 663,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1354
-    },
-    {
       "name": "smoke:blackswan-failover",
       "status": "passed",
-      "durationMs": 660,
+      "durationMs": 701,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1479
     },
     {
-      "name": "smoke:booking-edge-contract",
-      "status": "passed",
-      "durationMs": 662,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 3249
-    },
-    {
       "name": "smoke:bridge-adapter-manifest",
       "status": "passed",
-      "durationMs": 662,
+      "durationMs": 677,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 53
     },
     {
+      "name": "smoke:booking-edge-contract",
+      "status": "passed",
+      "durationMs": 782,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 3249
+    },
+    {
       "name": "smoke:bridge-health-diag",
       "status": "passed",
-      "durationMs": 708,
+      "durationMs": 704,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -665,7 +665,7 @@
     {
       "name": "smoke:browser-action-verification",
       "status": "passed",
-      "durationMs": 651,
+      "durationMs": 670,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -674,7 +674,7 @@
     {
       "name": "smoke:browser-ai-modal-advisor",
       "status": "passed",
-      "durationMs": 685,
+      "durationMs": 682,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -683,7 +683,7 @@
     {
       "name": "smoke:browser-credential-policy",
       "status": "passed",
-      "durationMs": 660,
+      "durationMs": 680,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -692,25 +692,16 @@
     {
       "name": "smoke:browser-bridge",
       "status": "passed",
-      "durationMs": 880,
+      "durationMs": 879,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 17780
     },
     {
-      "name": "smoke:browser-dom-snapshot-privacy",
-      "status": "passed",
-      "durationMs": 1175,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1735
-    },
-    {
       "name": "smoke:browser-fill-mutation-gateway",
       "status": "passed",
-      "durationMs": 1330,
+      "durationMs": 697,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -719,52 +710,61 @@
     {
       "name": "smoke:browser-locator-resolver",
       "status": "passed",
-      "durationMs": 1001,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3912
     },
     {
+      "name": "smoke:browser-dom-snapshot-privacy",
+      "status": "passed",
+      "durationMs": 1125,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1735
+    },
+    {
       "name": "smoke:browser-locator-actionability",
       "status": "passed",
-      "durationMs": 1430,
+      "durationMs": 1020,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 2608
     },
     {
-      "name": "smoke:browser-primitives",
-      "status": "passed",
-      "durationMs": 812,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 15165
-    },
-    {
       "name": "smoke:browser-select-runtime-gateway",
       "status": "passed",
-      "durationMs": 651,
+      "durationMs": 1810,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 63
     },
     {
-      "name": "smoke:browser-select-mutation-gateway",
+      "name": "smoke:browser-toggle-mutation-gateway",
       "status": "passed",
-      "durationMs": 908,
+      "durationMs": 1817,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 64
     },
     {
-      "name": "smoke:browser-toggle-mutation-gateway",
+      "name": "smoke:browser-primitives",
       "status": "passed",
-      "durationMs": 690,
+      "durationMs": 2262,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 15165
+    },
+    {
+      "name": "smoke:browser-select-mutation-gateway",
+      "status": "passed",
+      "durationMs": 2234,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -773,7 +773,7 @@
     {
       "name": "smoke:browser-toggle-runtime-gateway",
       "status": "passed",
-      "durationMs": 656,
+      "durationMs": 670,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -791,7 +791,7 @@
     {
       "name": "smoke:browserbase-workflows",
       "status": "passed",
-      "durationMs": 719,
+      "durationMs": 736,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -800,7 +800,7 @@
     {
       "name": "smoke:budget-alerts",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 657,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -809,7 +809,7 @@
     {
       "name": "smoke:budget-model-downshift-core",
       "status": "passed",
-      "durationMs": 675,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -818,7 +818,7 @@
     {
       "name": "smoke:business-model-routing",
       "status": "passed",
-      "durationMs": 719,
+      "durationMs": 753,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -827,34 +827,34 @@
     {
       "name": "smoke:cad-code-executor",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 663,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1416
     },
     {
-      "name": "smoke:canonical-skills",
-      "status": "passed",
-      "durationMs": 684,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 565
-    },
-    {
       "name": "smoke:cad-file-inspector",
       "status": "passed",
-      "durationMs": 740,
+      "durationMs": 726,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 681
     },
     {
+      "name": "smoke:canonical-skills",
+      "status": "passed",
+      "durationMs": 687,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 565
+    },
+    {
       "name": "smoke:capability-fallback-core",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -863,7 +863,7 @@
     {
       "name": "smoke:capability-match-gate-core",
       "status": "passed",
-      "durationMs": 671,
+      "durationMs": 683,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -872,25 +872,16 @@
     {
       "name": "smoke:capability-overview-core",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 668,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 63
     },
     {
-      "name": "smoke:chat-agent-context-pack",
-      "status": "passed",
-      "durationMs": 843,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1644
-    },
-    {
       "name": "smoke:chat-agent-targets",
       "status": "passed",
-      "durationMs": 662,
+      "durationMs": 657,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -899,34 +890,34 @@
     {
       "name": "smoke:chat-approval-single-use",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 682,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 57
     },
     {
+      "name": "smoke:chat-agent-context-pack",
+      "status": "passed",
+      "durationMs": 838,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1644
+    },
+    {
       "name": "smoke:chat-attention-queue",
       "status": "passed",
-      "durationMs": 668,
+      "durationMs": 666,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 418
     },
     {
-      "name": "smoke:chat-automation-plan-preview",
-      "status": "passed",
-      "durationMs": 847,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1470
-    },
-    {
       "name": "smoke:chat-automation-suggestions",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 666,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -935,7 +926,7 @@
     {
       "name": "smoke:chat-capability-manifest",
       "status": "passed",
-      "durationMs": 648,
+      "durationMs": 656,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -944,16 +935,25 @@
     {
       "name": "smoke:chat-automation-executor-coverage",
       "status": "passed",
-      "durationMs": 1127,
+      "durationMs": 949,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 5711
     },
     {
+      "name": "smoke:chat-automation-plan-preview",
+      "status": "passed",
+      "durationMs": 974,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1470
+    },
+    {
       "name": "smoke:chat-checkpoints",
       "status": "passed",
-      "durationMs": 700,
+      "durationMs": 662,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -962,7 +962,7 @@
     {
       "name": "smoke:chat-clarify-gate-core",
       "status": "passed",
-      "durationMs": 682,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -971,7 +971,7 @@
     {
       "name": "smoke:chat-command-dispatch",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 675,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -980,34 +980,34 @@
     {
       "name": "smoke:chat-composer-draft",
       "status": "passed",
-      "durationMs": 662,
+      "durationMs": 674,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 66
     },
     {
-      "name": "smoke:chat-computer-outcome-ux",
-      "status": "passed",
-      "durationMs": 682,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 49
-    },
-    {
       "name": "smoke:chat-computer-handoff-context",
       "status": "passed",
-      "durationMs": 852,
+      "durationMs": 834,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 131
     },
     {
+      "name": "smoke:chat-computer-outcome-ux",
+      "status": "passed",
+      "durationMs": 690,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 49
+    },
+    {
       "name": "smoke:chat-computer-request-ux",
       "status": "passed",
-      "durationMs": 910,
+      "durationMs": 915,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1016,7 +1016,7 @@
     {
       "name": "smoke:chat-computer-request-router",
       "status": "passed",
-      "durationMs": 1000,
+      "durationMs": 1012,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1025,7 +1025,7 @@
     {
       "name": "smoke:chat-conversational-cutover-parity",
       "status": "passed",
-      "durationMs": 724,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1034,70 +1034,70 @@
     {
       "name": "smoke:chat-design-task-card",
       "status": "passed",
-      "durationMs": 836,
+      "durationMs": 789,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 46
     },
     {
-      "name": "smoke:chat-desktop-attachment-routing",
-      "status": "passed",
-      "durationMs": 808,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 56
-    },
-    {
       "name": "smoke:chat-entity-linkify-core",
       "status": "passed",
-      "durationMs": 722,
+      "durationMs": 716,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 63
     },
     {
-      "name": "smoke:chat-failure-recovery",
+      "name": "smoke:chat-desktop-attachment-routing",
       "status": "passed",
-      "durationMs": 904,
+      "durationMs": 791,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 10779
+      "outputBytes": 56
     },
     {
       "name": "smoke:chat-lane-health",
       "status": "passed",
-      "durationMs": 876,
+      "durationMs": 702,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3219
     },
     {
-      "name": "smoke:chat-memory-label",
+      "name": "smoke:chat-failure-recovery",
       "status": "passed",
-      "durationMs": 807,
+      "durationMs": 895,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 61
+      "outputBytes": 10779
     },
     {
       "name": "smoke:chat-lane-outcome",
       "status": "passed",
-      "durationMs": 946,
+      "durationMs": 703,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3444
     },
     {
+      "name": "smoke:chat-memory-label",
+      "status": "passed",
+      "durationMs": 692,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 61
+    },
+    {
       "name": "smoke:chat-message-types",
       "status": "passed",
-      "durationMs": 769,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1106,7 +1106,7 @@
     {
       "name": "smoke:chat-model-display",
       "status": "passed",
-      "durationMs": 661,
+      "durationMs": 675,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1115,7 +1115,7 @@
     {
       "name": "smoke:chat-multi-intent-core",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1124,7 +1124,7 @@
     {
       "name": "smoke:chat-outcome-signals",
       "status": "passed",
-      "durationMs": 686,
+      "durationMs": 699,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1133,7 +1133,7 @@
     {
       "name": "smoke:chat-prompt-assembly",
       "status": "passed",
-      "durationMs": 675,
+      "durationMs": 722,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1142,7 +1142,7 @@
     {
       "name": "smoke:chat-proof-receipts",
       "status": "passed",
-      "durationMs": 639,
+      "durationMs": 714,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1151,7 +1151,7 @@
     {
       "name": "smoke:chat-planner",
       "status": "passed",
-      "durationMs": 1008,
+      "durationMs": 1052,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1160,7 +1160,7 @@
     {
       "name": "smoke:chat-recording",
       "status": "passed",
-      "durationMs": 691,
+      "durationMs": 728,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1169,34 +1169,34 @@
     {
       "name": "smoke:chat-recovery-display",
       "status": "passed",
-      "durationMs": 706,
+      "durationMs": 737,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 65
     },
     {
-      "name": "smoke:chat-retrieval-rank",
-      "status": "passed",
-      "durationMs": 679,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 62
-    },
-    {
       "name": "smoke:chat-room-handoff",
       "status": "passed",
-      "durationMs": 655,
+      "durationMs": 708,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 236
     },
     {
+      "name": "smoke:chat-retrieval-rank",
+      "status": "passed",
+      "durationMs": 746,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 62
+    },
+    {
       "name": "smoke:chat-send-guard-core",
       "status": "passed",
-      "durationMs": 679,
+      "durationMs": 704,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1205,7 +1205,7 @@
     {
       "name": "smoke:chat-session-resumption-core",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 701,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1214,7 +1214,7 @@
     {
       "name": "smoke:chat-session-state-persistence",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 696,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1223,7 +1223,7 @@
     {
       "name": "smoke:chat-session-title",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 702,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1232,7 +1232,7 @@
     {
       "name": "smoke:chat-sources-surface",
       "status": "passed",
-      "durationMs": 688,
+      "durationMs": 716,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1241,34 +1241,34 @@
     {
       "name": "smoke:chat-stop-message-core",
       "status": "passed",
-      "durationMs": 722,
+      "durationMs": 662,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 58
     },
     {
-      "name": "smoke:chat-terminal-transport-policy",
-      "status": "passed",
-      "durationMs": 834,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1698
-    },
-    {
       "name": "smoke:chat-turn-continuity-core",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 688,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 64
     },
     {
+      "name": "smoke:chat-terminal-transport-policy",
+      "status": "passed",
+      "durationMs": 843,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1696
+    },
+    {
       "name": "smoke:chat-transport-handlers",
       "status": "passed",
-      "durationMs": 852,
+      "durationMs": 858,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1277,7 +1277,7 @@
     {
       "name": "smoke:chat-user-facing-outcomes",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 693,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1286,7 +1286,7 @@
     {
       "name": "smoke:circle-context-snapshot",
       "status": "passed",
-      "durationMs": 689,
+      "durationMs": 724,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1295,7 +1295,7 @@
     {
       "name": "smoke:circle-memory-digest-core",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 717,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1304,34 +1304,34 @@
     {
       "name": "smoke:circle-memory-write-core",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 758,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1976
     },
     {
-      "name": "smoke:claude-app-capability-result",
-      "status": "passed",
-      "durationMs": 285,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1005
-    },
-    {
       "name": "smoke:citation-extract-core",
       "status": "passed",
-      "durationMs": 664,
+      "durationMs": 655,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 57
     },
     {
+      "name": "smoke:claude-app-capability-result",
+      "status": "passed",
+      "durationMs": 281,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1005
+    },
+    {
       "name": "smoke:claude-retry",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 681,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1340,7 +1340,7 @@
     {
       "name": "smoke:clarify-timeout",
       "status": "passed",
-      "durationMs": 925,
+      "durationMs": 915,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1356,27 +1356,27 @@
       "outputBytes": 61
     },
     {
-      "name": "smoke:codex-session-summary",
-      "status": "passed",
-      "durationMs": 58,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 484
-    },
-    {
       "name": "smoke:codebase-index-core",
       "status": "passed",
-      "durationMs": 705,
+      "durationMs": 665,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 57
     },
     {
+      "name": "smoke:codex-session-summary",
+      "status": "passed",
+      "durationMs": 54,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 484
+    },
+    {
       "name": "smoke:codebase-mentions-core",
       "status": "passed",
-      "durationMs": 2319,
+      "durationMs": 677,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1385,61 +1385,61 @@
     {
       "name": "smoke:codebase-symbol-core",
       "status": "passed",
-      "durationMs": 2205,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 57
     },
     {
-      "name": "smoke:coding-model-split-policy",
-      "status": "passed",
-      "durationMs": 2118,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 214
-    },
-    {
       "name": "smoke:command-frecency-core",
       "status": "passed",
-      "durationMs": 2001,
+      "durationMs": 709,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 60
     },
     {
-      "name": "smoke:computer-app-launch-focus-proof",
+      "name": "smoke:coding-model-split-policy",
       "status": "passed",
-      "durationMs": 728,
+      "durationMs": 730,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 60
-    },
-    {
-      "name": "smoke:computer-app-execution-receipts",
-      "status": "passed",
-      "durationMs": 795,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1461
+      "outputBytes": 212
     },
     {
       "name": "smoke:computer-app-action-contract",
       "status": "passed",
-      "durationMs": 877,
+      "durationMs": 827,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 62
     },
     {
+      "name": "smoke:computer-app-execution-receipts",
+      "status": "passed",
+      "durationMs": 758,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1461
+    },
+    {
+      "name": "smoke:computer-app-launch-focus-proof",
+      "status": "passed",
+      "durationMs": 712,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 60
+    },
+    {
       "name": "smoke:computer-app-grounding",
       "status": "passed",
-      "durationMs": 812,
+      "durationMs": 778,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1448,52 +1448,61 @@
     {
       "name": "smoke:computer-app-open-path-runtime",
       "status": "passed",
-      "durationMs": 705,
+      "durationMs": 707,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 59
     },
     {
-      "name": "smoke:computer-app-semantic-action-runtime",
-      "status": "passed",
-      "durationMs": 675,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 65
-    },
-    {
-      "name": "smoke:computer-app-semantic-action-proof",
-      "status": "passed",
-      "durationMs": 722,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 64
-    },
-    {
       "name": "smoke:computer-app-preflight",
       "status": "passed",
-      "durationMs": 780,
+      "durationMs": 783,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 2322
     },
     {
+      "name": "smoke:computer-app-semantic-action-proof",
+      "status": "passed",
+      "durationMs": 723,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 64
+    },
+    {
+      "name": "smoke:computer-app-semantic-action-runtime",
+      "status": "passed",
+      "durationMs": 699,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 65
+    },
+    {
       "name": "smoke:computer-capability-expansion",
       "status": "passed",
-      "durationMs": 678,
+      "durationMs": 801,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1056
     },
     {
+      "name": "smoke:computer-app-task-strategy",
+      "status": "passed",
+      "durationMs": 913,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 4733
+    },
+    {
       "name": "smoke:computer-grant-gate",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 770,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1502,25 +1511,16 @@
     {
       "name": "smoke:computer-findings-metadata",
       "status": "passed",
-      "durationMs": 689,
+      "durationMs": 863,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1093
     },
     {
-      "name": "smoke:computer-app-task-strategy",
-      "status": "passed",
-      "durationMs": 830,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 4733
-    },
-    {
       "name": "smoke:computer-run-diff",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 695,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1529,16 +1529,16 @@
     {
       "name": "smoke:computer-plan-approval-floor",
       "status": "passed",
-      "durationMs": 831,
+      "durationMs": 852,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 2058
+      "outputBytes": 2056
     },
     {
       "name": "smoke:computer-task-activation",
       "status": "passed",
-      "durationMs": 872,
+      "durationMs": 862,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1547,16 +1547,16 @@
     {
       "name": "smoke:computer-pipeline-e2e",
       "status": "passed",
-      "durationMs": 1028,
+      "durationMs": 1067,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 13753
+      "outputBytes": 13751
     },
     {
       "name": "smoke:computer-task-autostart",
       "status": "passed",
-      "durationMs": 655,
+      "durationMs": 685,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1565,7 +1565,7 @@
     {
       "name": "smoke:computer-task-clarifier",
       "status": "passed",
-      "durationMs": 690,
+      "durationMs": 711,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1574,7 +1574,7 @@
     {
       "name": "smoke:computer-task-complexity",
       "status": "passed",
-      "durationMs": 853,
+      "durationMs": 866,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1583,7 +1583,7 @@
     {
       "name": "smoke:computer-task-evidence-contract",
       "status": "passed",
-      "durationMs": 865,
+      "durationMs": 851,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1592,7 +1592,7 @@
     {
       "name": "smoke:computer-task-evidence-recovery",
       "status": "passed",
-      "durationMs": 860,
+      "durationMs": 856,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1601,7 +1601,7 @@
     {
       "name": "smoke:computer-task-execution-grounding",
       "status": "passed",
-      "durationMs": 822,
+      "durationMs": 829,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1610,7 +1610,7 @@
     {
       "name": "smoke:computer-task-followup",
       "status": "passed",
-      "durationMs": 657,
+      "durationMs": 682,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1619,7 +1619,7 @@
     {
       "name": "smoke:computer-task-runtime",
       "status": "passed",
-      "durationMs": 755,
+      "durationMs": 760,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1628,7 +1628,7 @@
     {
       "name": "smoke:computer-task-runtime-context",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1637,7 +1637,7 @@
     {
       "name": "smoke:computer-task-schedule-model",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 666,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1646,7 +1646,7 @@
     {
       "name": "smoke:computer-task-state-provider",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 649,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1655,7 +1655,7 @@
     {
       "name": "smoke:computer-task-truthful-outcome",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 659,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1664,7 +1664,7 @@
     {
       "name": "smoke:computer-use-backend",
       "status": "passed",
-      "durationMs": 717,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1673,7 +1673,7 @@
     {
       "name": "smoke:computer-use-channel-core",
       "status": "passed",
-      "durationMs": 694,
+      "durationMs": 674,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1682,7 +1682,7 @@
     {
       "name": "smoke:computer-use-mutation-handoff",
       "status": "passed",
-      "durationMs": 681,
+      "durationMs": 683,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1691,7 +1691,7 @@
     {
       "name": "smoke:computer-use-cloud-policy",
       "status": "passed",
-      "durationMs": 895,
+      "durationMs": 878,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1700,7 +1700,7 @@
     {
       "name": "smoke:computer-use-queue",
       "status": "passed",
-      "durationMs": 725,
+      "durationMs": 716,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1709,7 +1709,7 @@
     {
       "name": "smoke:computer-use-select-handoff",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 673,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1718,7 +1718,7 @@
     {
       "name": "smoke:computer-use-steering",
       "status": "passed",
-      "durationMs": 696,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1727,7 +1727,7 @@
     {
       "name": "smoke:connected-app-capability-refresh",
       "status": "passed",
-      "durationMs": 709,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1736,7 +1736,7 @@
     {
       "name": "smoke:connected-resources-digest",
       "status": "passed",
-      "durationMs": 667,
+      "durationMs": 685,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1745,7 +1745,7 @@
     {
       "name": "smoke:connection-status",
       "status": "passed",
-      "durationMs": 690,
+      "durationMs": 691,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1754,7 +1754,7 @@
     {
       "name": "smoke:context-budget-fit-core",
       "status": "passed",
-      "durationMs": 678,
+      "durationMs": 696,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1763,7 +1763,7 @@
     {
       "name": "smoke:context-compaction-tier-core",
       "status": "passed",
-      "durationMs": 708,
+      "durationMs": 741,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1772,16 +1772,16 @@
     {
       "name": "smoke:context-depth-policy",
       "status": "passed",
-      "durationMs": 689,
+      "durationMs": 668,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 208
+      "outputBytes": 207
     },
     {
       "name": "smoke:context-file-priority",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 658,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1790,7 +1790,7 @@
     {
       "name": "smoke:conversation-complexity-floor-core",
       "status": "passed",
-      "durationMs": 668,
+      "durationMs": 671,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1799,7 +1799,7 @@
     {
       "name": "smoke:conversational-router",
       "status": "passed",
-      "durationMs": 678,
+      "durationMs": 672,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1808,7 +1808,7 @@
     {
       "name": "smoke:create-chat-command",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 695,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1817,16 +1817,16 @@
     {
       "name": "smoke:credentials-get-policy",
       "status": "passed",
-      "durationMs": 842,
+      "durationMs": 865,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 997
+      "outputBytes": 996
     },
     {
       "name": "smoke:cross-member-context-core",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 713,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1835,7 +1835,7 @@
     {
       "name": "smoke:cross-provider-router",
       "status": "passed",
-      "durationMs": 664,
+      "durationMs": 680,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1844,7 +1844,7 @@
     {
       "name": "smoke:cross-surface-followup-core",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 910,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1853,7 +1853,7 @@
     {
       "name": "smoke:cross-surface-reference-resolver-core",
       "status": "passed",
-      "durationMs": 705,
+      "durationMs": 922,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1862,7 +1862,7 @@
     {
       "name": "smoke:custom-agent-bridge-dispatch",
       "status": "passed",
-      "durationMs": 704,
+      "durationMs": 834,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1871,7 +1871,7 @@
     {
       "name": "smoke:custom-api-marketplace",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 840,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1880,7 +1880,7 @@
     {
       "name": "smoke:database-authority-guards",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 724,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1889,7 +1889,7 @@
     {
       "name": "smoke:davinci-resolve-script-adapter",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 673,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1898,7 +1898,7 @@
     {
       "name": "smoke:deadline-sla-core",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 671,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1907,7 +1907,7 @@
     {
       "name": "smoke:delegation-brief-core",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 700,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1916,7 +1916,7 @@
     {
       "name": "smoke:delegation-gate",
       "status": "passed",
-      "durationMs": 679,
+      "durationMs": 670,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1925,7 +1925,7 @@
     {
       "name": "smoke:delegation-sizing-core",
       "status": "passed",
-      "durationMs": 671,
+      "durationMs": 693,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1934,7 +1934,7 @@
     {
       "name": "smoke:delegation-wiring",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 709,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1943,7 +1943,7 @@
     {
       "name": "smoke:design-app-adapter-gaps",
       "status": "passed",
-      "durationMs": 703,
+      "durationMs": 731,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1952,7 +1952,7 @@
     {
       "name": "smoke:design-app-automation",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 681,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1961,7 +1961,7 @@
     {
       "name": "smoke:design-app-creative-ai",
       "status": "passed",
-      "durationMs": 725,
+      "durationMs": 760,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1970,7 +1970,7 @@
     {
       "name": "smoke:design-app-execution-pipeline",
       "status": "passed",
-      "durationMs": 717,
+      "durationMs": 770,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1979,7 +1979,7 @@
     {
       "name": "smoke:design-app-manifest-ledger",
       "status": "passed",
-      "durationMs": 664,
+      "durationMs": 733,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1988,7 +1988,7 @@
     {
       "name": "smoke:design-app-object-manifest",
       "status": "passed",
-      "durationMs": 702,
+      "durationMs": 746,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -1997,7 +1997,7 @@
     {
       "name": "smoke:design-app-operation-runbooks",
       "status": "passed",
-      "durationMs": 690,
+      "durationMs": 702,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2006,7 +2006,7 @@
     {
       "name": "smoke:design-app-proof-review",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 708,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2015,7 +2015,7 @@
     {
       "name": "smoke:design-app-runtime-manifest",
       "status": "passed",
-      "durationMs": 691,
+      "durationMs": 709,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2024,7 +2024,7 @@
     {
       "name": "smoke:design-cli-executor",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 747,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2033,7 +2033,7 @@
     {
       "name": "smoke:desktop-action-trace",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 721,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2042,7 +2042,7 @@
     {
       "name": "smoke:desktop-ai-modal-advisor",
       "status": "passed",
-      "durationMs": 668,
+      "durationMs": 707,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2051,7 +2051,7 @@
     {
       "name": "smoke:desktop-action-summary-replay",
       "status": "passed",
-      "durationMs": 894,
+      "durationMs": 957,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2060,7 +2060,7 @@
     {
       "name": "smoke:desktop-automation-safety",
       "status": "passed",
-      "durationMs": 752,
+      "durationMs": 778,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2069,7 +2069,7 @@
     {
       "name": "smoke:desktop-runtime-wiring",
       "status": "passed",
-      "durationMs": 97,
+      "durationMs": 96,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2078,7 +2078,7 @@
     {
       "name": "smoke:desktop-bridge",
       "status": "passed",
-      "durationMs": 717,
+      "durationMs": 730,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2087,7 +2087,7 @@
     {
       "name": "smoke:desktop-bridge-security",
       "status": "passed",
-      "durationMs": 680,
+      "durationMs": 707,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2096,7 +2096,7 @@
     {
       "name": "smoke:desktop-diag",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 694,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2105,34 +2105,34 @@
     {
       "name": "smoke:desktop-task-ai-need",
       "status": "passed",
-      "durationMs": 875,
+      "durationMs": 886,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 45
     },
     {
-      "name": "smoke:deterministic-reobserve",
-      "status": "passed",
-      "durationMs": 673,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 49
-    },
-    {
       "name": "smoke:diff-hunk-select-core",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 695,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 50
     },
     {
+      "name": "smoke:deterministic-reobserve",
+      "status": "passed",
+      "durationMs": 709,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 49
+    },
+    {
       "name": "smoke:direct-image-conversion-runtime",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2141,34 +2141,34 @@
     {
       "name": "smoke:direct-local-file-runtime",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 702,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 50
     },
     {
-      "name": "smoke:edge-invoke-retry",
-      "status": "passed",
-      "durationMs": 675,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 42
-    },
-    {
       "name": "smoke:edge-context-compaction",
       "status": "passed",
-      "durationMs": 724,
+      "durationMs": 772,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 56
     },
     {
+      "name": "smoke:edge-invoke-retry",
+      "status": "passed",
+      "durationMs": 814,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 42
+    },
+    {
       "name": "smoke:edge-tool-result-summary",
       "status": "passed",
-      "durationMs": 720,
+      "durationMs": 753,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2177,16 +2177,34 @@
     {
       "name": "smoke:empty-state-suggestions",
       "status": "passed",
-      "durationMs": 770,
+      "durationMs": 715,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 819
     },
     {
+      "name": "smoke:engineering-cam-core",
+      "status": "passed",
+      "durationMs": 708,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1873
+    },
+    {
+      "name": "smoke:engineering-cad-operation-runbooks",
+      "status": "passed",
+      "durationMs": 870,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 58
+    },
+    {
       "name": "smoke:engineering-calc-core",
       "status": "passed",
-      "durationMs": 719,
+      "durationMs": 837,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2195,25 +2213,16 @@
     {
       "name": "smoke:engineering-dimension-core",
       "status": "passed",
-      "durationMs": 709,
+      "durationMs": 736,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 936
     },
     {
-      "name": "smoke:engineering-cad-operation-runbooks",
-      "status": "passed",
-      "durationMs": 893,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 58
-    },
-    {
       "name": "smoke:engineering-drafting-core",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 736,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2222,7 +2231,7 @@
     {
       "name": "smoke:engineering-fastener-core",
       "status": "passed",
-      "durationMs": 689,
+      "durationMs": 740,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2231,7 +2240,7 @@
     {
       "name": "smoke:engineering-fluid-core",
       "status": "passed",
-      "durationMs": 690,
+      "durationMs": 748,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2240,7 +2249,7 @@
     {
       "name": "smoke:engineering-frame-core",
       "status": "passed",
-      "durationMs": 686,
+      "durationMs": 720,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2249,7 +2258,7 @@
     {
       "name": "smoke:engineering-gear-core",
       "status": "passed",
-      "durationMs": 701,
+      "durationMs": 717,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2258,7 +2267,7 @@
     {
       "name": "smoke:engineering-gear-train-core",
       "status": "passed",
-      "durationMs": 695,
+      "durationMs": 712,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2267,7 +2276,7 @@
     {
       "name": "smoke:engineering-helix-core",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 763,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2276,7 +2285,7 @@
     {
       "name": "smoke:engineering-mesh-inspect-core",
       "status": "passed",
-      "durationMs": 678,
+      "durationMs": 700,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2285,7 +2294,7 @@
     {
       "name": "smoke:engineering-pipe-core",
       "status": "passed",
-      "durationMs": 663,
+      "durationMs": 700,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2294,7 +2303,7 @@
     {
       "name": "smoke:engineering-profile-solid-core",
       "status": "passed",
-      "durationMs": 682,
+      "durationMs": 698,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2303,7 +2312,7 @@
     {
       "name": "smoke:engineering-sheet-metal-core",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 680,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2312,7 +2321,7 @@
     {
       "name": "smoke:engineering-solid-modeling-core",
       "status": "passed",
-      "durationMs": 653,
+      "durationMs": 788,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2321,34 +2330,34 @@
     {
       "name": "smoke:engineering-structural-section-core",
       "status": "passed",
-      "durationMs": 731,
+      "durationMs": 732,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 2125
     },
     {
-      "name": "smoke:engineering-tolerance-core",
-      "status": "passed",
-      "durationMs": 679,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1723
-    },
-    {
       "name": "smoke:engineering-thread-core",
       "status": "passed",
-      "durationMs": 696,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 2484
     },
     {
+      "name": "smoke:engineering-tolerance-core",
+      "status": "passed",
+      "durationMs": 670,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1723
+    },
+    {
       "name": "smoke:entity-handle",
       "status": "passed",
-      "durationMs": 676,
+      "durationMs": 691,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2357,34 +2366,34 @@
     {
       "name": "smoke:env-readiness-core",
       "status": "passed",
-      "durationMs": 689,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 47
     },
     {
-      "name": "smoke:eval-core-corpus",
-      "status": "passed",
-      "durationMs": 714,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 55
-    },
-    {
       "name": "smoke:error-sanitizer",
       "status": "passed",
-      "durationMs": 731,
+      "durationMs": 747,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 844
     },
     {
+      "name": "smoke:eval-core-corpus",
+      "status": "passed",
+      "durationMs": 712,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 55
+    },
+    {
       "name": "smoke:eval-gate-core",
       "status": "passed",
-      "durationMs": 702,
+      "durationMs": 697,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2393,34 +2402,34 @@
     {
       "name": "smoke:event-bound-core",
       "status": "passed",
-      "durationMs": 732,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 101
     },
     {
-      "name": "smoke:export-traces",
-      "status": "passed",
-      "durationMs": 681,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 31
-    },
-    {
       "name": "smoke:failure-recovery-copy-core",
       "status": "passed",
-      "durationMs": 730,
+      "durationMs": 697,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 65
     },
     {
+      "name": "smoke:export-traces",
+      "status": "passed",
+      "durationMs": 808,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 31
+    },
+    {
       "name": "smoke:fallback-chain",
       "status": "passed",
-      "durationMs": 710,
+      "durationMs": 701,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2429,7 +2438,7 @@
     {
       "name": "smoke:feed-loop-in",
       "status": "passed",
-      "durationMs": 764,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2438,7 +2447,7 @@
     {
       "name": "smoke:file-edit-core",
       "status": "passed",
-      "durationMs": 757,
+      "durationMs": 782,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2447,7 +2456,7 @@
     {
       "name": "smoke:folder-watch",
       "status": "passed",
-      "durationMs": 729,
+      "durationMs": 744,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2456,34 +2465,34 @@
     {
       "name": "smoke:fusion360-script-adapter",
       "status": "passed",
-      "durationMs": 714,
+      "durationMs": 734,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1191
     },
     {
-      "name": "smoke:gimp-script-adapter",
-      "status": "passed",
-      "durationMs": 691,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 58
-    },
-    {
       "name": "smoke:generic-app-navigator",
       "status": "passed",
-      "durationMs": 784,
+      "durationMs": 769,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 46
     },
     {
+      "name": "smoke:gimp-script-adapter",
+      "status": "passed",
+      "durationMs": 699,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 58
+    },
+    {
       "name": "smoke:git-command-policy",
       "status": "passed",
-      "durationMs": 751,
+      "durationMs": 705,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2492,7 +2501,7 @@
     {
       "name": "smoke:google-docs-create",
       "status": "passed",
-      "durationMs": 746,
+      "durationMs": 735,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2501,7 +2510,7 @@
     {
       "name": "smoke:google-workspace-ops",
       "status": "passed",
-      "durationMs": 701,
+      "durationMs": 719,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2510,34 +2519,34 @@
     {
       "name": "smoke:google-workspace-token",
       "status": "passed",
-      "durationMs": 700,
+      "durationMs": 690,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 302
     },
     {
-      "name": "smoke:illustrator-extendscript-adapters",
-      "status": "passed",
-      "durationMs": 724,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 57
-    },
-    {
       "name": "smoke:hosted-blackswan-invocation",
       "status": "passed",
-      "durationMs": 732,
+      "durationMs": 717,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 5638
     },
     {
+      "name": "smoke:illustrator-extendscript-adapters",
+      "status": "passed",
+      "durationMs": 695,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 57
+    },
+    {
       "name": "smoke:incremental-reindex-core",
       "status": "passed",
-      "durationMs": 711,
+      "durationMs": 705,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2546,7 +2555,7 @@
     {
       "name": "smoke:integration-action-composer",
       "status": "passed",
-      "durationMs": 685,
+      "durationMs": 712,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2555,7 +2564,7 @@
     {
       "name": "smoke:integration-action-receipt",
       "status": "passed",
-      "durationMs": 679,
+      "durationMs": 698,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2564,7 +2573,7 @@
     {
       "name": "smoke:integration-health-registry",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 670,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2573,7 +2582,7 @@
     {
       "name": "smoke:integration-presets",
       "status": "passed",
-      "durationMs": 703,
+      "durationMs": 666,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -2582,302 +2591,50 @@
     {
       "name": "smoke:integrations-chat-command",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 685,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 2248
     },
     {
-      "name": "smoke:lane-taxonomy",
-      "status": "passed",
-      "durationMs": 678,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 56
-    },
-    {
       "name": "smoke:known-app-shortcuts",
       "status": "passed",
-      "durationMs": 809,
+      "durationMs": 709,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 19465
     },
     {
-      "name": "smoke:live-surface-viability-core",
+      "name": "smoke:lane-taxonomy",
       "status": "passed",
-      "durationMs": 690,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 70
-    },
-    {
-      "name": "smoke:library-skill-gate-core",
-      "status": "passed",
-      "durationMs": 696,
+      "durationMs": 675,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 56
     },
     {
-      "name": "smoke:local-exec-plan-core",
+      "name": "smoke:library-skill-gate-core",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 58
+      "outputBytes": 56
     },
     {
-      "name": "smoke:local-desktop-bridge-intent",
-      "status": "passed",
-      "durationMs": 1149,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 71098
-    },
-    {
-      "name": "smoke:markdown-segment-core",
-      "status": "passed",
-      "durationMs": 698,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 59
-    },
-    {
-      "name": "smoke:machine-capability-manifest",
-      "status": "passed",
-      "durationMs": 702,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 66
-    },
-    {
-      "name": "smoke:marketplace-tool-tier",
-      "status": "passed",
-      "durationMs": 714,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 3820
-    },
-    {
-      "name": "smoke:maya-script-adapter",
-      "status": "passed",
-      "durationMs": 682,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1261
-    },
-    {
-      "name": "smoke:mcp-tool-bridge",
-      "status": "passed",
-      "durationMs": 689,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1179
-    },
-    {
-      "name": "smoke:memory-bank",
-      "status": "passed",
-      "durationMs": 704,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1448
-    },
-    {
-      "name": "smoke:memory-dedupe-core",
-      "status": "passed",
-      "durationMs": 666,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 57
-    },
-    {
-      "name": "smoke:memory-embedding-policy-core",
-      "status": "passed",
-      "durationMs": 674,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 67
-    },
-    {
-      "name": "smoke:memory-extraction-core",
+      "name": "smoke:live-surface-viability-core",
       "status": "passed",
       "durationMs": 691,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 61
+      "outputBytes": 70
     },
     {
-      "name": "smoke:memory-intent-core",
-      "status": "passed",
-      "durationMs": 689,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 57
-    },
-    {
-      "name": "smoke:memory-lookup-key-core",
-      "status": "passed",
-      "durationMs": 719,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 3135
-    },
-    {
-      "name": "smoke:memory-novelty-filter-core",
-      "status": "passed",
-      "durationMs": 725,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 65
-    },
-    {
-      "name": "smoke:memory-provenance",
-      "status": "passed",
-      "durationMs": 672,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 10665
-    },
-    {
-      "name": "smoke:memory-retrieval-policy-core",
-      "status": "passed",
-      "durationMs": 677,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 67
-    },
-    {
-      "name": "smoke:memory-turn-assembly",
-      "status": "passed",
-      "durationMs": 677,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 65
-    },
-    {
-      "name": "smoke:memory-write-policy-core",
-      "status": "passed",
-      "durationMs": 673,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1540
-    },
-    {
-      "name": "smoke:message-metadata",
-      "status": "passed",
-      "durationMs": 672,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 111
-    },
-    {
-      "name": "smoke:messaging-notify",
-      "status": "passed",
-      "durationMs": 681,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 6197
-    },
-    {
-      "name": "smoke:mission-task-completion",
-      "status": "passed",
-      "durationMs": 664,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 48
-    },
-    {
-      "name": "smoke:model-capabilities",
-      "status": "passed",
-      "durationMs": 664,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1161
-    },
-    {
-      "name": "smoke:model-catalog",
-      "status": "passed",
-      "durationMs": 688,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 13139
-    },
-    {
-      "name": "smoke:model-collaboration-policy",
-      "status": "passed",
-      "durationMs": 667,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 2446
-    },
-    {
-      "name": "smoke:model-context-budget-core",
-      "status": "passed",
-      "durationMs": 668,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 64
-    },
-    {
-      "name": "smoke:model-pricing",
-      "status": "passed",
-      "durationMs": 667,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 38
-    },
-    {
-      "name": "smoke:model-route-explain",
-      "status": "passed",
-      "durationMs": 693,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 63
-    },
-    {
-      "name": "smoke:multi-agent-dispatch",
-      "status": "passed",
-      "durationMs": 723,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 2197
-    },
-    {
-      "name": "smoke:multi-file-edit-core",
+      "name": "smoke:local-exec-plan-core",
       "status": "passed",
       "durationMs": 685,
       "exitCode": 0,
@@ -2886,214 +2643,160 @@
       "outputBytes": 58
     },
     {
-      "name": "smoke:native-ui-verification-core",
+      "name": "smoke:local-desktop-bridge-intent",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 1111,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 2818
+      "outputBytes": 71098
     },
     {
-      "name": "smoke:novice-persona",
+      "name": "smoke:machine-capability-manifest",
       "status": "passed",
-      "durationMs": 944,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 583
+      "outputBytes": 66
     },
     {
-      "name": "smoke:office-bridge-readiness",
+      "name": "smoke:markdown-segment-core",
       "status": "passed",
-      "durationMs": 646,
+      "durationMs": 694,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 48
+      "outputBytes": 59
     },
     {
-      "name": "smoke:office-ops-board",
+      "name": "smoke:marketplace-tool-tier",
       "status": "passed",
-      "durationMs": 653,
+      "durationMs": 719,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 6566
+      "outputBytes": 3819
     },
     {
-      "name": "smoke:multi-bridge-pairing",
+      "name": "smoke:maya-script-adapter",
       "status": "passed",
-      "durationMs": 1919,
+      "durationMs": 660,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 3602
+      "outputBytes": 1261
     },
     {
-      "name": "smoke:office-roster-grouping",
+      "name": "smoke:mcp-tool-bridge",
       "status": "passed",
-      "durationMs": 722,
+      "durationMs": 690,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 186
+      "outputBytes": 1179
     },
     {
-      "name": "smoke:office-run-lookup",
+      "name": "smoke:memory-bank",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 658,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 1792
+      "outputBytes": 1448
     },
     {
-      "name": "smoke:office-validation",
+      "name": "smoke:memory-dedupe-core",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 42
+      "outputBytes": 57
     },
     {
-      "name": "smoke:office-terminal-broadcast-authority",
+      "name": "smoke:memory-embedding-policy-core",
       "status": "passed",
-      "durationMs": 866,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 3970
-    },
-    {
-      "name": "smoke:openswan-approval-batch",
-      "status": "passed",
-      "durationMs": 666,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 64
-    },
-    {
-      "name": "smoke:openswan-automation-launch",
-      "status": "passed",
-      "durationMs": 670,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 351
-    },
-    {
-      "name": "smoke:openswan-console-intent",
-      "status": "passed",
-      "durationMs": 659,
+      "durationMs": 682,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 67
     },
     {
-      "name": "smoke:openswan-context-compaction",
+      "name": "smoke:memory-extraction-core",
       "status": "passed",
-      "durationMs": 667,
+      "durationMs": 688,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 71
+      "outputBytes": 61
     },
     {
-      "name": "smoke:openswan-generic-native-ui-runtime",
+      "name": "smoke:memory-intent-core",
       "status": "passed",
-      "durationMs": 702,
+      "durationMs": 659,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 3507
+      "outputBytes": 57
     },
     {
-      "name": "smoke:openswan-lane-report",
+      "name": "smoke:memory-lookup-key-core",
       "status": "passed",
-      "durationMs": 681,
+      "durationMs": 725,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 1119
+      "outputBytes": 3135
     },
     {
-      "name": "smoke:openswan-launch-readiness-core",
-      "status": "passed",
-      "durationMs": 661,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 66
-    },
-    {
-      "name": "smoke:openswan-parallel-tool",
-      "status": "passed",
-      "durationMs": 679,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 66
-    },
-    {
-      "name": "smoke:openswan-quality-aggregate-core",
-      "status": "passed",
-      "durationMs": 668,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 70
-    },
-    {
-      "name": "smoke:openswan-run-proof",
-      "status": "passed",
-      "durationMs": 651,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 62
-    },
-    {
-      "name": "smoke:openswan-runtime-approval",
-      "status": "passed",
-      "durationMs": 704,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 2442
-    },
-    {
-      "name": "smoke:openswan-session-core-adapter",
-      "status": "passed",
-      "durationMs": 740,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 27857
-    },
-    {
-      "name": "smoke:openswan-steering-bus",
+      "name": "smoke:memory-provenance",
       "status": "passed",
       "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 500
+      "outputBytes": 10665
     },
     {
-      "name": "smoke:openswan-step-budget",
+      "name": "smoke:memory-novelty-filter-core",
       "status": "passed",
-      "durationMs": 660,
+      "durationMs": 733,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 64
+      "outputBytes": 65
     },
     {
-      "name": "smoke:openswan-telemetry-defer",
+      "name": "smoke:memory-retrieval-policy-core",
+      "status": "passed",
+      "durationMs": 675,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 67
+    },
+    {
+      "name": "smoke:memory-turn-assembly",
+      "status": "passed",
+      "durationMs": 695,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 65
+    },
+    {
+      "name": "smoke:memory-write-policy-core",
+      "status": "passed",
+      "durationMs": 680,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1540
+    },
+    {
+      "name": "smoke:message-metadata",
       "status": "passed",
       "durationMs": 676,
       "exitCode": 0,
@@ -3102,45 +2805,351 @@
       "outputBytes": 111
     },
     {
-      "name": "smoke:openswan-task-planner",
+      "name": "smoke:messaging-notify",
       "status": "passed",
-      "durationMs": 890,
+      "durationMs": 675,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 7134
+      "outputBytes": 6197
     },
     {
-      "name": "smoke:openswan-verification-runtime",
+      "name": "smoke:mission-task-completion",
       "status": "passed",
-      "durationMs": 682,
+      "durationMs": 694,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 54
+      "outputBytes": 48
     },
     {
-      "name": "smoke:openswan-typed-runtime-invariants",
+      "name": "smoke:model-catalog",
       "status": "passed",
-      "durationMs": 1158,
+      "durationMs": 694,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 3138
+      "outputBytes": 13139
     },
     {
-      "name": "smoke:oscillation-detector-core",
+      "name": "smoke:model-capabilities",
       "status": "passed",
-      "durationMs": 649,
+      "durationMs": 707,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1161
+    },
+    {
+      "name": "smoke:model-collaboration-policy",
+      "status": "passed",
+      "durationMs": 676,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 2446
+    },
+    {
+      "name": "smoke:model-pricing",
+      "status": "passed",
+      "durationMs": 685,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 38
+    },
+    {
+      "name": "smoke:model-context-budget-core",
+      "status": "passed",
+      "durationMs": 698,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 64
     },
     {
-      "name": "smoke:otel-genai-span",
+      "name": "smoke:model-route-explain",
+      "status": "passed",
+      "durationMs": 703,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 63
+    },
+    {
+      "name": "smoke:multi-agent-dispatch",
+      "status": "passed",
+      "durationMs": 730,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 2197
+    },
+    {
+      "name": "smoke:multi-file-edit-core",
+      "status": "passed",
+      "durationMs": 690,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 58
+    },
+    {
+      "name": "smoke:native-ui-verification-core",
+      "status": "passed",
+      "durationMs": 702,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 2818
+    },
+    {
+      "name": "smoke:novice-persona",
+      "status": "passed",
+      "durationMs": 931,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 583
+    },
+    {
+      "name": "smoke:office-bridge-readiness",
+      "status": "passed",
+      "durationMs": 673,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 48
+    },
+    {
+      "name": "smoke:office-ops-board",
+      "status": "passed",
+      "durationMs": 668,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 6566
+    },
+    {
+      "name": "smoke:office-roster-grouping",
+      "status": "passed",
+      "durationMs": 714,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 185
+    },
+    {
+      "name": "smoke:multi-bridge-pairing",
+      "status": "passed",
+      "durationMs": 1819,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 3602
+    },
+    {
+      "name": "smoke:office-run-lookup",
+      "status": "passed",
+      "durationMs": 707,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1792
+    },
+    {
+      "name": "smoke:office-terminal-broadcast-authority",
+      "status": "passed",
+      "durationMs": 882,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 3970
+    },
+    {
+      "name": "smoke:office-validation",
+      "status": "passed",
+      "durationMs": 664,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 42
+    },
+    {
+      "name": "smoke:openswan-approval-batch",
       "status": "passed",
       "durationMs": 667,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 64
+    },
+    {
+      "name": "smoke:openswan-automation-launch",
+      "status": "passed",
+      "durationMs": 651,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 351
+    },
+    {
+      "name": "smoke:openswan-console-intent",
+      "status": "passed",
+      "durationMs": 653,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 67
+    },
+    {
+      "name": "smoke:openswan-context-compaction",
+      "status": "passed",
+      "durationMs": 669,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 71
+    },
+    {
+      "name": "smoke:openswan-generic-native-ui-runtime",
+      "status": "passed",
+      "durationMs": 695,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 3507
+    },
+    {
+      "name": "smoke:openswan-lane-report",
+      "status": "passed",
+      "durationMs": 674,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1119
+    },
+    {
+      "name": "smoke:openswan-launch-readiness-core",
+      "status": "passed",
+      "durationMs": 667,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 66
+    },
+    {
+      "name": "smoke:openswan-parallel-tool",
+      "status": "passed",
+      "durationMs": 675,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 66
+    },
+    {
+      "name": "smoke:openswan-quality-aggregate-core",
+      "status": "passed",
+      "durationMs": 700,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 70
+    },
+    {
+      "name": "smoke:openswan-run-proof",
+      "status": "passed",
+      "durationMs": 687,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 62
+    },
+    {
+      "name": "smoke:openswan-runtime-approval",
+      "status": "passed",
+      "durationMs": 733,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 2442
+    },
+    {
+      "name": "smoke:openswan-session-core-adapter",
+      "status": "passed",
+      "durationMs": 770,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 27857
+    },
+    {
+      "name": "smoke:openswan-steering-bus",
+      "status": "passed",
+      "durationMs": 659,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 500
+    },
+    {
+      "name": "smoke:openswan-step-budget",
+      "status": "passed",
+      "durationMs": 665,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 64
+    },
+    {
+      "name": "smoke:openswan-task-planner",
+      "status": "passed",
+      "durationMs": 894,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 7134
+    },
+    {
+      "name": "smoke:openswan-telemetry-defer",
+      "status": "passed",
+      "durationMs": 695,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 111
+    },
+    {
+      "name": "smoke:openswan-verification-runtime",
+      "status": "passed",
+      "durationMs": 668,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 54
+    },
+    {
+      "name": "smoke:oscillation-detector-core",
+      "status": "passed",
+      "durationMs": 653,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 64
+    },
+    {
+      "name": "smoke:openswan-typed-runtime-invariants",
+      "status": "passed",
+      "durationMs": 1465,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 3138
+    },
+    {
+      "name": "smoke:otel-genai-span",
+      "status": "passed",
+      "durationMs": 688,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3149,7 +3158,7 @@
     {
       "name": "smoke:output-contract-core",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 702,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3158,7 +3167,7 @@
     {
       "name": "smoke:outcome-verifier",
       "status": "passed",
-      "durationMs": 866,
+      "durationMs": 874,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3167,7 +3176,7 @@
     {
       "name": "smoke:parallel-result-consensus-core",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 683,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3176,7 +3185,7 @@
     {
       "name": "smoke:persisted-chat-metadata",
       "status": "passed",
-      "durationMs": 705,
+      "durationMs": 715,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3185,7 +3194,7 @@
     {
       "name": "smoke:openswan-worktree-config",
       "status": "passed",
-      "durationMs": 2126,
+      "durationMs": 2204,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3194,7 +3203,7 @@
     {
       "name": "smoke:photoshop-extendscript-adapters",
       "status": "passed",
-      "durationMs": 708,
+      "durationMs": 724,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3203,34 +3212,34 @@
     {
       "name": "smoke:photoshop-save-dialog",
       "status": "passed",
-      "durationMs": 695,
+      "durationMs": 707,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 46
     },
     {
-      "name": "smoke:plan-diff-core",
-      "status": "passed",
-      "durationMs": 678,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 42
-    },
-    {
       "name": "smoke:plan-mode-core",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 691,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3963
     },
     {
+      "name": "smoke:plan-diff-core",
+      "status": "passed",
+      "durationMs": 708,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 42
+    },
+    {
       "name": "smoke:premiere-pro-script-adapter",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 704,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3239,7 +3248,7 @@
     {
       "name": "smoke:predictive-chat-commands",
       "status": "passed",
-      "durationMs": 784,
+      "durationMs": 813,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3248,7 +3257,7 @@
     {
       "name": "smoke:prewarm-tool-selection-core",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3257,7 +3266,7 @@
     {
       "name": "smoke:proactive-surfacing-core",
       "status": "passed",
-      "durationMs": 668,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3266,7 +3275,7 @@
     {
       "name": "smoke:proactive-surfacing-signals",
       "status": "passed",
-      "durationMs": 657,
+      "durationMs": 671,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3275,16 +3284,16 @@
     {
       "name": "smoke:progressive-tool-disclosure",
       "status": "passed",
-      "durationMs": 867,
+      "durationMs": 872,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 5884
+      "outputBytes": 5883
     },
     {
       "name": "smoke:prompt-build-memo",
       "status": "passed",
-      "durationMs": 667,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3293,7 +3302,7 @@
     {
       "name": "smoke:prompt-cache-split",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 695,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3302,7 +3311,7 @@
     {
       "name": "smoke:prompt-section-priority",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 701,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3311,34 +3320,34 @@
     {
       "name": "smoke:prompt-token-estimate-core",
       "status": "passed",
-      "durationMs": 664,
+      "durationMs": 669,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 54
     },
     {
-      "name": "smoke:proof-coverage",
-      "status": "passed",
-      "durationMs": 669,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 39
-    },
-    {
       "name": "smoke:provider-backoff-core",
       "status": "passed",
-      "durationMs": 671,
+      "durationMs": 696,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 58
     },
     {
+      "name": "smoke:proof-coverage",
+      "status": "passed",
+      "durationMs": 710,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 39
+    },
+    {
       "name": "smoke:provider-error-advance-core",
       "status": "passed",
-      "durationMs": 689,
+      "durationMs": 711,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3347,25 +3356,16 @@
     {
       "name": "smoke:resilient-subscription",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 699,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 64
     },
     {
-      "name": "smoke:response-artifact-extract-core",
-      "status": "passed",
-      "durationMs": 711,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 69
-    },
-    {
       "name": "smoke:response-faithfulness",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 699,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3374,16 +3374,25 @@
     {
       "name": "smoke:response-register-core",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 688,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 211
+      "outputBytes": 210
+    },
+    {
+      "name": "smoke:response-artifact-extract-core",
+      "status": "passed",
+      "durationMs": 816,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 69
     },
     {
       "name": "smoke:response-self-check-core",
       "status": "passed",
-      "durationMs": 693,
+      "durationMs": 691,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3392,7 +3401,7 @@
     {
       "name": "smoke:retrieval-memo-core",
       "status": "passed",
-      "durationMs": 675,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3401,7 +3410,7 @@
     {
       "name": "smoke:review-chat-command",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 709,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3410,7 +3419,7 @@
     {
       "name": "smoke:revit-script-adapter",
       "status": "passed",
-      "durationMs": 662,
+      "durationMs": 698,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3419,7 +3428,7 @@
     {
       "name": "smoke:rhino-script-adapter",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3428,7 +3437,7 @@
     {
       "name": "smoke:room-message-metadata-bounds",
       "status": "passed",
-      "durationMs": 682,
+      "durationMs": 711,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3437,52 +3446,52 @@
     {
       "name": "smoke:route-decision-telemetry",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3016
     },
     {
-      "name": "smoke:route-golden-canary",
-      "status": "passed",
-      "durationMs": 924,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 13429
-    },
-    {
       "name": "smoke:run-and-fix-gate-core",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 669,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 60
     },
     {
-      "name": "smoke:run-checkpoint-resume",
+      "name": "smoke:route-golden-canary",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 918,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 58
+      "outputBytes": 13429
     },
     {
       "name": "smoke:run-approvals",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 690,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 5092
     },
     {
+      "name": "smoke:run-checkpoint-resume",
+      "status": "passed",
+      "durationMs": 660,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 58
+    },
+    {
       "name": "smoke:run-freshness",
       "status": "passed",
-      "durationMs": 781,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3491,7 +3500,7 @@
     {
       "name": "smoke:run-cost-rollup-core",
       "status": "passed",
-      "durationMs": 824,
+      "durationMs": 811,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3500,7 +3509,7 @@
     {
       "name": "smoke:run-outcome-memory-core",
       "status": "passed",
-      "durationMs": 686,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3509,7 +3518,7 @@
     {
       "name": "smoke:run-stall-policy-core",
       "status": "passed",
-      "durationMs": 710,
+      "durationMs": 713,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3518,7 +3527,7 @@
     {
       "name": "smoke:scheduled-action-mutation-guard",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 652,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3527,7 +3536,7 @@
     {
       "name": "smoke:scheduled-integration-action",
       "status": "passed",
-      "durationMs": 662,
+      "durationMs": 666,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3536,7 +3545,7 @@
     {
       "name": "smoke:screen-chat-command",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3545,11 +3554,20 @@
     {
       "name": "smoke:scriptable-mac-apps",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 665,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 44
+    },
+    {
+      "name": "smoke:second-brain",
+      "status": "passed",
+      "durationMs": 681,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 30
     },
     {
       "name": "smoke:secret-op-arg",
@@ -3561,18 +3579,9 @@
       "outputBytes": 1126
     },
     {
-      "name": "smoke:second-brain",
-      "status": "passed",
-      "durationMs": 675,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 30
-    },
-    {
       "name": "smoke:secret-redaction-core",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3581,34 +3590,34 @@
     {
       "name": "smoke:session-capability-budget-core",
       "status": "passed",
-      "durationMs": 659,
+      "durationMs": 693,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 58
     },
     {
-      "name": "smoke:shell-command-policy",
-      "status": "passed",
-      "durationMs": 683,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 59
-    },
-    {
       "name": "smoke:session-capability-ceiling",
       "status": "passed",
-      "durationMs": 799,
+      "durationMs": 689,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 5635
     },
     {
+      "name": "smoke:shell-command-policy",
+      "status": "passed",
+      "durationMs": 698,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 59
+    },
+    {
       "name": "smoke:skill-body-fence",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 655,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3617,7 +3626,7 @@
     {
       "name": "smoke:simple-chat-task-guardrails",
       "status": "passed",
-      "durationMs": 896,
+      "durationMs": 914,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3626,7 +3635,7 @@
     {
       "name": "smoke:skill-induction-core",
       "status": "passed",
-      "durationMs": 678,
+      "durationMs": 666,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3635,7 +3644,7 @@
     {
       "name": "smoke:skill-lifecycle",
       "status": "passed",
-      "durationMs": 671,
+      "durationMs": 662,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3644,7 +3653,7 @@
     {
       "name": "smoke:skill-relevance-core",
       "status": "passed",
-      "durationMs": 655,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3653,7 +3662,7 @@
     {
       "name": "smoke:skill-relpath",
       "status": "passed",
-      "durationMs": 656,
+      "durationMs": 674,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3662,7 +3671,7 @@
     {
       "name": "smoke:skill-standard-compat",
       "status": "passed",
-      "durationMs": 694,
+      "durationMs": 696,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3671,7 +3680,7 @@
     {
       "name": "smoke:skill-subfile",
       "status": "passed",
-      "durationMs": 671,
+      "durationMs": 672,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3680,7 +3689,7 @@
     {
       "name": "smoke:slash-command-correction-core",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 677,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3689,7 +3698,7 @@
     {
       "name": "smoke:solidworks-script-adapter",
       "status": "passed",
-      "durationMs": 656,
+      "durationMs": 674,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3698,7 +3707,7 @@
     {
       "name": "smoke:specialist-selection-core",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 673,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3707,7 +3716,7 @@
     {
       "name": "smoke:steering-note-preservation-core",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 657,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3716,7 +3725,7 @@
     {
       "name": "smoke:stream-degeneracy-core",
       "status": "passed",
-      "durationMs": 640,
+      "durationMs": 674,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3725,7 +3734,7 @@
     {
       "name": "smoke:stream-first-chunk",
       "status": "passed",
-      "durationMs": 654,
+      "durationMs": 674,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3734,7 +3743,7 @@
     {
       "name": "smoke:stream-health-core",
       "status": "passed",
-      "durationMs": 678,
+      "durationMs": 674,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3743,7 +3752,7 @@
     {
       "name": "smoke:swanbot-continuation-budget-core",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3752,7 +3761,7 @@
     {
       "name": "smoke:swanbot-lane-telemetry-core",
       "status": "passed",
-      "durationMs": 655,
+      "durationMs": 673,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3761,7 +3770,7 @@
     {
       "name": "smoke:swanbot-openswan-readiness",
       "status": "passed",
-      "durationMs": 662,
+      "durationMs": 685,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3770,34 +3779,34 @@
     {
       "name": "smoke:swanbot-routing",
       "status": "passed",
-      "durationMs": 682,
+      "durationMs": 662,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3068
     },
     {
-      "name": "smoke:swanbot-tool-error-recovery",
-      "status": "passed",
-      "durationMs": 671,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 71
-    },
-    {
       "name": "smoke:swanbot-stream-resilience",
       "status": "passed",
-      "durationMs": 711,
+      "durationMs": 659,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 2940
     },
     {
+      "name": "smoke:swanbot-tool-error-recovery",
+      "status": "passed",
+      "durationMs": 683,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 71
+    },
+    {
       "name": "smoke:swanbot-turn-dedupe",
       "status": "passed",
-      "durationMs": 694,
+      "durationMs": 715,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3806,7 +3815,7 @@
     {
       "name": "smoke:swanbot-v2-approvals",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 696,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3815,7 +3824,7 @@
     {
       "name": "smoke:swanbot-v2-batch-policy",
       "status": "passed",
-      "durationMs": 699,
+      "durationMs": 732,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3824,7 +3833,7 @@
     {
       "name": "smoke:swanbot-v2-batch-runtime-core",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 694,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3833,7 +3842,7 @@
     {
       "name": "smoke:swanbot-v2-client-loop-flag",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 694,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3842,7 +3851,7 @@
     {
       "name": "smoke:swanbot-v2-client-result-persistence",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 713,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3851,7 +3860,7 @@
     {
       "name": "smoke:swanbot-v2-continuation",
       "status": "passed",
-      "durationMs": 687,
+      "durationMs": 692,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3860,7 +3869,7 @@
     {
       "name": "smoke:swanbot-v2-continuation-crypto",
       "status": "passed",
-      "durationMs": 716,
+      "durationMs": 750,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3869,7 +3878,7 @@
     {
       "name": "smoke:swanbot-v2-delegation",
       "status": "passed",
-      "durationMs": 679,
+      "durationMs": 677,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3878,7 +3887,7 @@
     {
       "name": "smoke:swanbot-v2-dispatcher-parity",
       "status": "passed",
-      "durationMs": 663,
+      "durationMs": 665,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3887,7 +3896,7 @@
     {
       "name": "smoke:swanbot-v2-edge-fill-schema",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 650,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3896,7 +3905,7 @@
     {
       "name": "smoke:swanbot-v2-mode-contract",
       "status": "passed",
-      "durationMs": 657,
+      "durationMs": 665,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3905,7 +3914,7 @@
     {
       "name": "smoke:swanbot-v2-retry",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 698,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3914,16 +3923,25 @@
     {
       "name": "smoke:swanbot-v2-stop-reason",
       "status": "passed",
-      "durationMs": 660,
+      "durationMs": 682,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1413
     },
     {
+      "name": "smoke:swanbot-v2-terminal-integrity",
+      "status": "passed",
+      "durationMs": 920,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 59
+    },
+    {
       "name": "smoke:swanbot-v2-workspace",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 667,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3932,25 +3950,16 @@
     {
       "name": "smoke:swanbot-v2-wp",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 5855
     },
     {
-      "name": "smoke:swanbot-v2-terminal-integrity",
-      "status": "passed",
-      "durationMs": 890,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 59
-    },
-    {
       "name": "smoke:swanbot-v2-wp-approval-gate",
       "status": "passed",
-      "durationMs": 680,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3959,7 +3968,7 @@
     {
       "name": "smoke:swanbot-v2-writers",
       "status": "passed",
-      "durationMs": 644,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3968,7 +3977,7 @@
     {
       "name": "smoke:table-artifact",
       "status": "passed",
-      "durationMs": 681,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3977,7 +3986,7 @@
     {
       "name": "smoke:task-pr-linkage-core",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3986,7 +3995,7 @@
     {
       "name": "smoke:task-priority-score-core",
       "status": "passed",
-      "durationMs": 661,
+      "durationMs": 675,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -3995,7 +4004,7 @@
     {
       "name": "smoke:task-timing-disposition-core",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 672,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4004,7 +4013,7 @@
     {
       "name": "smoke:terminal-agent-launch",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 656,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4013,7 +4022,7 @@
     {
       "name": "smoke:tool-activity-label-core",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 658,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4022,43 +4031,43 @@
     {
       "name": "smoke:tool-auto-pin-core",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 56
     },
     {
-      "name": "smoke:terminal-agent-standards-handoff",
-      "status": "passed",
-      "durationMs": 1377,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 864
-    },
-    {
       "name": "smoke:tool-batch-parallelism",
       "status": "passed",
-      "durationMs": 832,
+      "durationMs": 835,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 234
+      "outputBytes": 233
     },
     {
       "name": "smoke:tool-catalog-manifest",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 681,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 65
     },
     {
+      "name": "smoke:terminal-agent-standards-handoff",
+      "status": "passed",
+      "durationMs": 1398,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 864
+    },
+    {
       "name": "smoke:tool-catalog-perf",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4067,7 +4076,7 @@
     {
       "name": "smoke:tool-connectivity-gate-core",
       "status": "passed",
-      "durationMs": 681,
+      "durationMs": 660,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4076,7 +4085,7 @@
     {
       "name": "smoke:tool-failure-feedback",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4085,16 +4094,16 @@
     {
       "name": "smoke:tool-description-lint",
       "status": "passed",
-      "durationMs": 870,
+      "durationMs": 861,
       "exitCode": 0,
       "signal": null,
       "reason": null,
-      "outputBytes": 277
+      "outputBytes": 276
     },
     {
       "name": "smoke:tool-input-examples",
       "status": "passed",
-      "durationMs": 863,
+      "durationMs": 873,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4103,7 +4112,7 @@
     {
       "name": "smoke:tool-loop-budget",
       "status": "passed",
-      "durationMs": 666,
+      "durationMs": 663,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4112,7 +4121,7 @@
     {
       "name": "smoke:tool-loop-progress",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 699,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4121,7 +4130,7 @@
     {
       "name": "smoke:tool-loop-resume",
       "status": "passed",
-      "durationMs": 670,
+      "durationMs": 675,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4130,7 +4139,7 @@
     {
       "name": "smoke:tool-loop-solver",
       "status": "passed",
-      "durationMs": 729,
+      "durationMs": 727,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4139,7 +4148,7 @@
     {
       "name": "smoke:tool-loop-stuck-breaker",
       "status": "passed",
-      "durationMs": 704,
+      "durationMs": 709,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4148,7 +4157,7 @@
     {
       "name": "smoke:tool-policy-core",
       "status": "passed",
-      "durationMs": 689,
+      "durationMs": 676,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4157,7 +4166,7 @@
     {
       "name": "smoke:tool-replay-safety-core",
       "status": "passed",
-      "durationMs": 683,
+      "durationMs": 696,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4166,7 +4175,7 @@
     {
       "name": "smoke:tool-result-dedup",
       "status": "passed",
-      "durationMs": 715,
+      "durationMs": 777,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4175,7 +4184,7 @@
     {
       "name": "smoke:tool-result-formatters",
       "status": "passed",
-      "durationMs": 897,
+      "durationMs": 936,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4184,7 +4193,7 @@
     {
       "name": "smoke:tool-result-summary-core",
       "status": "passed",
-      "durationMs": 705,
+      "durationMs": 780,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4193,7 +4202,7 @@
     {
       "name": "smoke:tool-search-relevance-core",
       "status": "passed",
-      "durationMs": 682,
+      "durationMs": 741,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4202,25 +4211,16 @@
     {
       "name": "smoke:transport-failover-badge",
       "status": "passed",
-      "durationMs": 667,
+      "durationMs": 707,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 104
     },
     {
-      "name": "smoke:turn-cache-policy-core",
-      "status": "passed",
-      "durationMs": 670,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 61
-    },
-    {
       "name": "smoke:turn-spend-governor-core",
       "status": "passed",
-      "durationMs": 680,
+      "durationMs": 683,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4229,16 +4229,25 @@
     {
       "name": "smoke:ucignore-core",
       "status": "passed",
-      "durationMs": 714,
+      "durationMs": 692,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 41
     },
     {
+      "name": "smoke:turn-cache-policy-core",
+      "status": "passed",
+      "durationMs": 795,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 61
+    },
+    {
       "name": "smoke:unified-approval-policy",
       "status": "passed",
-      "durationMs": 663,
+      "durationMs": 692,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4247,34 +4256,34 @@
     {
       "name": "smoke:untrusted-content",
       "status": "passed",
-      "durationMs": 665,
+      "durationMs": 701,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 42
     },
     {
-      "name": "smoke:untrusted-injection-scan-core",
-      "status": "passed",
-      "durationMs": 680,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 125
-    },
-    {
       "name": "smoke:untrusted-sanitizer",
       "status": "passed",
-      "durationMs": 690,
+      "durationMs": 696,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 44
     },
     {
+      "name": "smoke:untrusted-injection-scan-core",
+      "status": "passed",
+      "durationMs": 718,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 125
+    },
+    {
       "name": "smoke:user-action-receipt-core",
       "status": "passed",
-      "durationMs": 694,
+      "durationMs": 734,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4283,34 +4292,34 @@
     {
       "name": "smoke:user-memory-caps",
       "status": "passed",
-      "durationMs": 713,
+      "durationMs": 732,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 8127
     },
     {
-      "name": "smoke:user-task-pipelines",
-      "status": "passed",
-      "durationMs": 707,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 9054
-    },
-    {
       "name": "smoke:v2-agent-event-activity",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 668,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 710
     },
     {
+      "name": "smoke:user-task-pipelines",
+      "status": "passed",
+      "durationMs": 703,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 9054
+    },
+    {
       "name": "smoke:v2-memory-injection",
       "status": "passed",
-      "durationMs": 674,
+      "durationMs": 681,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4319,7 +4328,7 @@
     {
       "name": "smoke:v2-memory-payload-builder",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4328,7 +4337,7 @@
     {
       "name": "smoke:v2-preflight-abort",
       "status": "passed",
-      "durationMs": 655,
+      "durationMs": 664,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4337,7 +4346,7 @@
     {
       "name": "smoke:v2-memory-search",
       "status": "passed",
-      "durationMs": 667,
+      "durationMs": 695,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4346,7 +4355,7 @@
     {
       "name": "smoke:v2-save-memory-core",
       "status": "passed",
-      "durationMs": 684,
+      "durationMs": 679,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4355,7 +4364,7 @@
     {
       "name": "smoke:v2-to-agentcore-adapter",
       "status": "passed",
-      "durationMs": 673,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4364,7 +4373,7 @@
     {
       "name": "smoke:v2-tool-selection-core",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4373,7 +4382,7 @@
     {
       "name": "smoke:verification-coverage-core",
       "status": "passed",
-      "durationMs": 692,
+      "durationMs": 686,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4382,7 +4391,7 @@
     {
       "name": "smoke:verification-depth-policy-core",
       "status": "passed",
-      "durationMs": 712,
+      "durationMs": 681,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4391,34 +4400,34 @@
     {
       "name": "smoke:verification-depth-wiring",
       "status": "passed",
-      "durationMs": 677,
+      "durationMs": 708,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 291
     },
     {
-      "name": "smoke:verification-receipt-core",
-      "status": "passed",
-      "durationMs": 667,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 64
-    },
-    {
       "name": "smoke:verification-diagnostics-core",
       "status": "passed",
-      "durationMs": 721,
+      "durationMs": 752,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 68
     },
     {
+      "name": "smoke:verification-receipt-core",
+      "status": "passed",
+      "durationMs": 791,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 64
+    },
+    {
       "name": "smoke:watch-chat-commands",
       "status": "passed",
-      "durationMs": 678,
+      "durationMs": 695,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4427,34 +4436,34 @@
     {
       "name": "smoke:web-search-auto-detect",
       "status": "passed",
-      "durationMs": 693,
+      "durationMs": 706,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 1838
     },
     {
-      "name": "smoke:wordpress-content-metadata",
-      "status": "passed",
-      "durationMs": 657,
-      "exitCode": 0,
-      "signal": null,
-      "reason": null,
-      "outputBytes": 1726
-    },
-    {
       "name": "smoke:wordpress-admin-source-intelligence",
       "status": "passed",
-      "durationMs": 713,
+      "durationMs": 722,
       "exitCode": 0,
       "signal": null,
       "reason": null,
       "outputBytes": 3378
     },
     {
+      "name": "smoke:wordpress-content-metadata",
+      "status": "passed",
+      "durationMs": 680,
+      "exitCode": 0,
+      "signal": null,
+      "reason": null,
+      "outputBytes": 1726
+    },
+    {
       "name": "smoke:wordpress-list-pagination",
       "status": "passed",
-      "durationMs": 664,
+      "durationMs": 662,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4463,7 +4472,7 @@
     {
       "name": "smoke:wordpress-media-upload",
       "status": "passed",
-      "durationMs": 668,
+      "durationMs": 680,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4472,7 +4481,7 @@
     {
       "name": "smoke:wordpress-rest-error",
       "status": "passed",
-      "durationMs": 669,
+      "durationMs": 684,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4481,7 +4490,7 @@
     {
       "name": "smoke:wordpress-post-type-resolver",
       "status": "passed",
-      "durationMs": 679,
+      "durationMs": 703,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4490,7 +4499,7 @@
     {
       "name": "smoke:wordpress-rest-payload",
       "status": "passed",
-      "durationMs": 668,
+      "durationMs": 690,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4499,7 +4508,7 @@
     {
       "name": "smoke:wordpress-schedule-date",
       "status": "passed",
-      "durationMs": 664,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4508,7 +4517,7 @@
     {
       "name": "smoke:wordpress-seo-preview",
       "status": "passed",
-      "durationMs": 658,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4517,7 +4526,7 @@
     {
       "name": "smoke:wordpress-slug",
       "status": "passed",
-      "durationMs": 652,
+      "durationMs": 681,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4526,7 +4535,7 @@
     {
       "name": "smoke:wordpress-vault-policy",
       "status": "passed",
-      "durationMs": 680,
+      "durationMs": 690,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4535,7 +4544,7 @@
     {
       "name": "smoke:worktree-isolation-plan-core",
       "status": "passed",
-      "durationMs": 672,
+      "durationMs": 671,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4544,7 +4553,7 @@
     {
       "name": "smoke:wp-command-risk",
       "status": "passed",
-      "durationMs": 706,
+      "durationMs": 678,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4553,7 +4562,7 @@
     {
       "name": "smoke:wp-image-post-flow",
       "status": "passed",
-      "durationMs": 705,
+      "durationMs": 687,
       "exitCode": 0,
       "signal": null,
       "reason": null,
@@ -4561,12 +4570,13 @@
     }
   ],
   "drift": {
-    "onDiskCount": 504,
-    "registeredFileCount": 506,
+    "onDiskCount": 505,
+    "registeredFileCount": 507,
     "unregistered": [],
     "missingFiles": [],
     "notInSmokeAll": [
       "smoke:engineering-calc-core",
+      "smoke:engineering-cam-core",
       "smoke:engineering-dimension-core",
       "smoke:engineering-drafting-core",
       "smoke:engineering-fastener-core",
