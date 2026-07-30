@@ -70,6 +70,8 @@ export type MaterialProps = {
   name: string;
   /** Young's modulus, MPa. */
   E: number;
+  /** Shear modulus, MPa (for torsion/spring calcs). */
+  G: number;
   /** Yield strength, MPa. */
   yield: number;
   /** Density, kg/mm³ (so mass = density · volume_mm3 gives kg). */
@@ -77,13 +79,13 @@ export type MaterialProps = {
 };
 
 export const MATERIALS: Record<string, MaterialProps> = {
-  steel: { name: 'Steel (mild, A36-ish)', E: 200_000, yield: 250, density: 7.85e-6 },
-  stainless: { name: 'Stainless 304', E: 193_000, yield: 215, density: 8.0e-6 },
-  aluminum: { name: 'Aluminum 6061-T6', E: 69_000, yield: 276, density: 2.70e-6 },
-  titanium: { name: 'Titanium Ti-6Al-4V', E: 114_000, yield: 880, density: 4.43e-6 },
-  brass: { name: 'Brass C360', E: 97_000, yield: 124, density: 8.5e-6 },
-  abs: { name: 'ABS plastic', E: 2_300, yield: 40, density: 1.05e-6 },
-  pla: { name: 'PLA plastic', E: 3_500, yield: 50, density: 1.24e-6 },
+  steel: { name: 'Steel (mild, A36-ish)', E: 200_000, G: 79_300, yield: 250, density: 7.85e-6 },
+  stainless: { name: 'Stainless 304', E: 193_000, G: 77_200, yield: 215, density: 8.0e-6 },
+  aluminum: { name: 'Aluminum 6061-T6', E: 69_000, G: 26_000, yield: 276, density: 2.70e-6 },
+  titanium: { name: 'Titanium Ti-6Al-4V', E: 114_000, G: 44_000, yield: 880, density: 4.43e-6 },
+  brass: { name: 'Brass C360', E: 97_000, G: 37_000, yield: 124, density: 8.5e-6 },
+  abs: { name: 'ABS plastic', E: 2_300, G: 800, yield: 40, density: 1.05e-6 },
+  pla: { name: 'PLA plastic', E: 3_500, G: 1_300, yield: 50, density: 1.24e-6 },
 };
 
 export function materialProps(name: string): CalcResult {
@@ -93,8 +95,8 @@ export function materialProps(name: string): CalcResult {
   return {
     ok: true, quantity: `material: ${m.name}`, value: m.E, unit: 'MPa (E)',
     formula: 'lookup', inputs: { material: key },
-    extra: { E_MPa: m.E, yield_MPa: m.yield, density_kg_per_mm3: m.density },
-    notes: [`E=${m.E} MPa, yield=${m.yield} MPa, density=${m.density} kg/mm³`],
+    extra: { E_MPa: m.E, G_MPa: m.G, yield_MPa: m.yield, density_kg_per_mm3: m.density },
+    notes: [`E=${m.E} MPa, G=${m.G} MPa, yield=${m.yield} MPa, density=${m.density} kg/mm³`],
   };
 }
 
@@ -341,6 +343,38 @@ export function rcTimeConstant(args: { resistance: number; capacitance: number }
     ok: true, quantity: 'RC time constant', value: round(tau, 9), unit: 's',
     formula: 'τ = R·C (63.2% at 1τ, ~99% at 5τ)', inputs: { resistance_ohm: R, capacitance_F: C },
     extra: { tau_s: round(tau, 9), settle_5tau_s: round(5 * tau, 9) },
+  };
+}
+
+// ─── Springs (helical compression — composes materials via shear modulus) ────
+
+/**
+ * Helical compression spring rate k = G·d⁴/(8·D³·n), where d = wire diameter,
+ * D = mean coil diameter, n = active coils, G = shear modulus. Composes the
+ * materials table (each material carries G) so an engineer can size a spring in
+ * any material, then generate its geometry with engineering.model_3d 'spring'.
+ */
+export function springRate(args: {
+  wireDiameter: number;
+  meanDiameter: number;
+  activeCoils: number;
+  /** Material name (looks up G) OR an explicit shearModulus in MPa. */
+  material?: string;
+  shearModulus?: number;
+}): CalcResult {
+  const d = pos(args.wireDiameter), D = pos(args.meanDiameter), n = pos(args.activeCoils);
+  if (d === null || D === null || n === null) return bad('spring needs positive wire diameter, mean diameter, and active coils');
+  if (D <= d) return bad('mean diameter must exceed the wire diameter');
+  let G: number | null = args.shearModulus !== undefined ? pos(args.shearModulus) : null;
+  if (G === null && args.material) { const m = MATERIALS[String(args.material).trim().toLowerCase()]; if (m) G = m.G; }
+  if (G === null) return bad('supply a material (for G) or an explicit shearModulus (MPa)');
+  const k = (G * d ** 4) / (8 * D ** 3 * n);
+  const index = D / d;
+  return {
+    ok: true, quantity: 'spring rate', value: round(k, 4), unit: 'N/mm',
+    formula: 'k = G·d⁴/(8·D³·n)', inputs: { wire_dia_mm: d, mean_dia_mm: D, active_coils: n, G_MPa: G },
+    extra: { rate_N_per_mm: round(k, 4), spring_index_D_over_d: round(index, 2), solid_height_est_mm: round((n + 2) * d) },
+    notes: [`Spring index D/d = ${round(index, 1)} (4–12 is a practical range). Force at deflection x: F = k·x.`],
   };
 }
 

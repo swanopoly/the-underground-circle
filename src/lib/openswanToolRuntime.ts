@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: any 2D profile → prism; revolve: any profile (x≥0) → solid of revolution; pulley: V-groove pulley; custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11657,8 +11657,9 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           case 'convert': r = c.convertUnit(Number(x.value), String(x.from ?? ''), String(x.to ?? '')); break;
           case 'material': r = c.materialProps(String(x.material ?? x.name ?? '')); break;
           case 'gear_pair': r = c.gearPairTransmission(x); break;
+          case 'spring_rate': r = c.springRate(x); break;
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
@@ -11712,6 +11713,22 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             script: pbpy.value,
             summary: v,
             resultsText: `Generated meshing gear pair${v ? `: Z${v.teeth1}:Z${v.teeth2} module ${v.module}, ratio ${Math.round(v.ratio * 1000) / 1000}:1, center distance ${v.centerDistance} mm (pitch circles tangent), ${Math.round(v.tipClearance * 100) / 100} mm clearance` : ''}. Write the Blender bpy (${pbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → one assembly STL. Measured span should equal ra₁ + C + ra₂.`,
+          } as any;
+        }
+
+        // A helical spring — a beveled helix curve, its own bpy path.
+        if (part === 'spring') {
+          const { buildSpringBlenderScript, springGeometry } = await import('./engineeringHelixCore');
+          const sspec = (a.spec ?? {}) as any;
+          const sbpy = buildSpringBlenderScript(sspec, stlOut);
+          if (!sbpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${sbpy.error}` } as any;
+          const sg = springGeometry(sspec);
+          const v = sg.ok ? sg.value : null;
+          return {
+            ok: true,
+            script: sbpy.value,
+            summary: v,
+            resultsText: `Generated compression spring${v ? `: wire Ø${v.wireDiameter}, mean Ø${v.meanDiameter} (OD ${v.outerDiameter}), ${v.totalCoils} coils, free length ${v.freeLength} mm, index ${v.springIndex}` : ''}. Write the Blender bpy (${sbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Wire volume ≈ ${v ? v.wireVolume : '?'} mm³ (developed-length); size the rate with engineering.calc spring_rate.`,
           } as any;
         }
 

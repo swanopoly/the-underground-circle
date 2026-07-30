@@ -12,7 +12,7 @@ import {
   sectionRectangle, sectionCircle, sectionTube,
   beam, safetyFactor, boltPreload, tapDrill,
   ohmsLaw, ledResistor, combineResistors, voltageDivider, rcTimeConstant,
-  convertUnit, materialProps, MATERIALS, gearPairTransmission,
+  convertUnit, materialProps, MATERIALS, gearPairTransmission, springRate,
 } from '../src/lib/engineeringCalcCore';
 
 let passed = 0;
@@ -148,6 +148,21 @@ function main() {
     near(ok(convertUnit(20, 'Nm', 'Nmm'), 'Nm→Nmm').value, 20000, 'Nm to Nmm');
     assert(!convertUnit(1, 'mm', 'N').ok, 'cross-dimension conversion rejected');
     assert(!convertUnit(1, 'furlong', 'mm').ok, 'unknown unit rejected');
+  }
+
+  // ─── Spring rate (composes materials via shear modulus G) ────────
+  {
+    // d=2, D=20, n=10, steel G=79300 → k = 79300·16/(8·8000·10) = 1.9825 N/mm.
+    const r = ok(springRate({ wireDiameter: 2, meanDiameter: 20, activeCoils: 10, material: 'steel' }), 'spring rate');
+    near(r.value, 1.9825, 'k = G·d⁴/(8·D³·n) = 1.9825 N/mm');
+    near(r.extra!.spring_index_D_over_d, 10, 'spring index D/d = 10');
+    // Explicit G overrides material.
+    const r2 = ok(springRate({ wireDiameter: 2, meanDiameter: 20, activeCoils: 10, shearModulus: 79300 }), 'explicit G');
+    near(r2.value, 1.9825, 'explicit shear modulus gives the same rate');
+    assert(!springRate({ wireDiameter: 20, meanDiameter: 10, activeCoils: 5, material: 'steel' }).ok, 'mean ≤ wire diameter rejected');
+    assert(!springRate({ wireDiameter: 2, meanDiameter: 20, activeCoils: 10 }).ok, 'no material and no G rejected');
+    // Every material now carries a shear modulus.
+    assert(Object.values(MATERIALS).every((m) => m.G > 0), 'every material has a positive shear modulus G');
   }
 
   // ─── Gear pair transmission (composes the geometry lane) ─────────
