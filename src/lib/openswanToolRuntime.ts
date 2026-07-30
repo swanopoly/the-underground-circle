@@ -2997,7 +2997,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11772,8 +11772,20 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: `power screw (${p.threadForm})`, value: p.raiseTorque_Nm, unit: 'N·m (raise torque)', formula: 'T = (F·dm/2)(l+πf·dm)/(πdm−f·l), η = Fl/2πT', inputs: { load_N: p.load_N, mean_diameter_mm: p.meanDiameter_mm, lead_mm: p.lead_mm }, extra, notes: [`Lead angle ${p.leadAngle_deg}°, efficiency ${(p.efficiency * 100).toFixed(1)}%, ${p.selfLocking ? 'SELF-LOCKING (holds the load without a brake)' : 'NOT self-locking (will back-drive — needs a brake)'}.`] };
             break;
           }
+          case 'belt_drive': {
+            const t = await import('./engineeringBeltDriveCore');
+            const br = t.beltDrive(x);
+            if (!br.ok) return { ok: false, resultsText: `engineering.calc: ${br.error}` } as any;
+            const b = br.value;
+            const extra: Record<string, number> = { speed_ratio: b.speedRatio, belt_length_mm: b.beltLength, wrap_small_deg: b.wrapAngleSmall_deg, wrap_large_deg: b.wrapAngleLarge_deg };
+            if (b.drivenSpeed_rpm !== undefined) { extra.driven_speed_rpm = b.drivenSpeed_rpm; extra.belt_speed_m_s = b.beltSpeed_m_s!; }
+            if (b.tensionRatio !== undefined) extra.tension_ratio = b.tensionRatio;
+            if (b.maxPower_kW !== undefined) extra.max_power_kW = b.maxPower_kW;
+            r = { ok: true, quantity: 'belt drive', value: b.beltLength, unit: 'mm (belt length)', formula: 'ratio = D₁/D₂; L = 2C + (π/2)(D+d) + (D−d)²/4C; T1/T2 = e^(μθ)', inputs: { driver_mm: b.driverDiameter, driven_mm: b.drivenDiameter, centre_mm: b.centreDistance }, extra, notes: [`Speed ratio ${b.speedRatio}${b.drivenSpeed_rpm !== undefined ? ` (driven ${b.drivenSpeed_rpm} rpm)` : ''}, small-pulley wrap ${b.wrapAngleSmall_deg}°${b.maxPower_kW !== undefined ? `, ≤ ${b.maxPower_kW} kW before slip` : ''}.`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
