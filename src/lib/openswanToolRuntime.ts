@@ -306,6 +306,7 @@ export type OpenSwanRuntimeToolName =
   | 'tools.search'
   | 'engineering.draft_dxf'
   | 'engineering.model_3d'
+  | 'engineering.calc'
   // ── Circle context snapshot — pre-built entity-linked index search that
   //    replaces N sequential list calls for what/which/who discovery ──────
   | 'context.search'
@@ -913,6 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown };
   'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
+  'engineering.calc': { kind: string; args?: unknown };
   'context.search':     { query: string; section?: string };
   'codebase.index':     { rootPath: string; maxFiles?: number };
   'codebase.search':    { query: string; limit?: number };
@@ -1215,6 +1217,7 @@ export type OpenSwanToolExecutionResultMap = {
   'tools.search':       { ok: boolean; resultsText: string; matches: OpenSwanToolCatalogMatch[] };
   'engineering.draft_dxf': { ok: boolean; resultsText: string; dxf?: string; summary?: unknown };
   'engineering.model_3d': { ok: boolean; resultsText: string; script?: string; openscad?: string; summary?: unknown };
+  'engineering.calc': { ok: boolean; resultsText: string; result?: unknown };
   'context.search':     { ok: boolean; resultsText: string };
   'codebase.index':     { ok: boolean; resultsText: string };
   'codebase.search':    { ok: boolean; resultsText: string };
@@ -2979,6 +2982,22 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       required: ['part'],
     },
   },
+  // ─── Engineering calculations (pure, textbook-exact analysis) ───────────
+  {
+    name: 'engineering.calc',
+    label: 'Engineering Calculator',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Closed-form engineering analysis with exact answers, showing formula + inputs. Mechanical: beam deflection/stress (simply-supported/cantilever, point/UDL), section properties (rectangle/circle/tube I,S,A), bolt preload from torque, metric tap-drill/clearance sizes, safety factor, material properties. Electrical: Ohm\'s law, LED series resistor, series/parallel resistance, voltage divider, RC time constant. Plus unit conversion (length/force/pressure/torque/mass). Use to SIZE a part before drawing it with engineering.draft_dxf or engineering.model_3d.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; tap_drill {thread:"M8"}; led_resistor {supply,forwardVoltage,current}; convert {value,from,to}.' },
+      },
+      required: ['kind'],
+    },
+  },
   // ─── Circle context snapshot — pre-built discovery index ─────────────────
   {
     name: 'context.search',
@@ -4734,6 +4753,16 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'engineering.calc') {
+    return {
+      family: 'knowledge',
+      approvalMode: 'auto',
+      mutatesState: false,
+      externalSideEffect: false,
+      summary: 'Closed-form engineering analysis (beams, sections, bolts, threads, Ohm/LED/RC, unit conversion). Pure computation with textbook-exact answers; no side effects.',
+    };
+  }
+
   if (tool === 'engineering.draft_dxf' || tool === 'engineering.model_3d') {
     return {
       family: 'knowledge',
@@ -5624,6 +5653,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   // Pure CAD computation — safe to run in the loop; the file write is separate.
   'engineering.draft_dxf',
   'engineering.model_3d',
+  'engineering.calc',
   // Progressive disclosure (T2) — the catalog search itself must always be
   // loop-callable so deferred tools stay reachable from a pinned-core turn.
   'tools.search',
@@ -6922,6 +6952,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'messages.search':
     case 'engineering.draft_dxf':
     case 'engineering.model_3d':
+    case 'engineering.calc':
     case 'tools.search':
     case 'context.search':
     case 'codebase.index':
@@ -11526,6 +11557,43 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `${data.length} transcript match(es) for "${query}":\n${lines.join('\n')}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    // ── Engineering calculations (pure, textbook-exact) ────────────────
+    case 'engineering.calc': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['engineering.calc'];
+        const c = await import('./engineeringCalcCore');
+        const kind = String(a.kind || '').trim();
+        const x = (a.args ?? {}) as any;
+        let r: import('./engineeringCalcCore').CalcResult;
+        switch (kind) {
+          case 'section_rectangle': r = c.sectionRectangle(Number(x.b), Number(x.h)); break;
+          case 'section_circle': r = c.sectionCircle(Number(x.d)); break;
+          case 'section_tube': r = c.sectionTube(Number(x.od), Number(x.id)); break;
+          case 'beam': r = c.beam(x); break;
+          case 'safety_factor': r = c.safetyFactor(Number(x.strength), Number(x.appliedStress ?? x.applied)); break;
+          case 'bolt_preload': r = c.boltPreload(x); break;
+          case 'tap_drill': r = c.tapDrill(String(x.thread ?? x.designation ?? '')); break;
+          case 'ohms_law': r = c.ohmsLaw(x); break;
+          case 'led_resistor': r = c.ledResistor(x); break;
+          case 'combine_resistors': r = c.combineResistors(Array.isArray(x.values) ? x.values.map(Number) : [], x.mode === 'parallel' ? 'parallel' : 'series'); break;
+          case 'voltage_divider': r = c.voltageDivider(x); break;
+          case 'rc': r = c.rcTimeConstant(x); break;
+          case 'convert': r = c.convertUnit(Number(x.value), String(x.from ?? ''), String(x.to ?? '')); break;
+          case 'material': r = c.materialProps(String(x.material ?? x.name ?? '')); break;
+          default:
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material.` } as any;
+        }
+        if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
+        const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
+        const notesStr = r.notes && r.notes.length ? `\n${r.notes.join('\n')}` : '';
+        return {
+          ok: true,
+          result: r,
+          resultsText: `${r.quantity} = ${r.value} ${r.unit}  [${r.formula}]${extraStr}${notesStr}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: `engineering.calc error: ${e.message}` } as any; }
+    }
+
     // ── Engineering 3D solid modeling (pure bpy/OpenSCAD generation) ────
     case 'engineering.model_3d': {
       try {

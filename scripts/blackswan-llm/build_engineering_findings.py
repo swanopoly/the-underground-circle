@@ -696,6 +696,16 @@ FINDINGS = [
             "engineering.model_3d runtime tool"
         ),
     },
+    {
+        "id": "engineering-analysis-textbook-verified-and-unit-consistent",
+        "q": "We built CAD generation. Engineers also need calculations — beam sizing, resistor values, tap drills. How do you make those trustworthy?",
+        "a": "This is the one core where the verification is the STRONGEST, because the answers are closed-form and textbook-exact. There is no round-trip, no engine to run, no ambiguity: every formula is asserted against a hand-computed reference value in the smoke, and the smoke IS the proof. A simply-supported beam with a central point load has δ = PL³/(48EI) — so P=1000N, L=1000mm, steel (E=200000 MPa), a 20×40 rectangular section (I=106667 mm⁴) MUST give 0.9766 mm, Mmax=250000 N·mm, σ=46.875 MPa. An M8×1.25 thread has a 6.8mm tap drill. An LED on 5V with 2V forward drop at 20mA needs (5−2)/0.02 = 150Ω. Write those exact numbers into the test; if the code ever drifts, the reference catches it.\n\nThe design decision that removes a whole class of bugs is a SINGLE self-consistent unit system. Work in millimetre / newton / megapascal (MPa = N/mm²): then E is in MPa, I in mm⁴, and δ = PL³/(48EI) comes out directly in mm with NO conversion factor. Mixing SI-base (metres, pascals) with millimetre geometry is where hand-and-code calculations silently disagree by 10⁹. Pick the consistent set, state it once, and every formula stays factor-free. Unit CONVERSION is then a separate, explicit tool — and it must refuse cross-dimension requests (mm→N is not a conversion, it is a bug) rather than silently multiplying by a factor.\n\nReturn structure, not a bare number. Each result carries the quantity, value, UNIT, the FORMULA used, and the inputs echoed back — so the agent shows its work and a human can audit it. \"δmax = 0.977 mm [δ=PL³/(48EI)] | Mmax=250000 N·mm, stress=46.875 MPa\" is a checkable answer; \"0.977\" is a number to be mistrusted.\n\nAnd this composes: calculate the required section or hole size, THEN feed it to engineering.draft_dxf / engineering.model_3d. analyze → draw is the real engineering workflow, and the two halves now share one library.",
+        "evidence": (
+            "src/lib/engineeringCalcCore.ts (mm/N/MPa system, structured CalcResult), "
+            "scripts/engineering-calc-core-smoketest.ts (44 textbook-reference assertions), "
+            "engineering.calc runtime tool"
+        ),
+    },
 ]
 
 

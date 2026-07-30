@@ -131,6 +131,7 @@ export const DEFAULT_PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set<string>(
   'approvals.list',
   'engineering.draft_dxf',
   'engineering.model_3d',
+  'engineering.calc',
   'tools.search',
   'context.search',
   'codebase.search',

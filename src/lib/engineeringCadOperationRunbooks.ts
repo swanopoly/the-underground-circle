@@ -217,6 +217,10 @@ function buildRunbook(task: string, operation: EngineeringCadOperation): Enginee
       approvalBefore: [],
       steps: [
         ...common,
+        step('observe', 'Run closed-form engineering calculations when the question is analytical', 'For "size/what-if/spec" questions — beam deflection or stress, section properties, bolt torque/preload, tap-drill sizes, Ohm/LED/RC electrical, unit conversion, material properties — engineering.calc gives an exact answer with the formula and inputs shown, no app needed. Use it to SIZE a part before drafting or modeling it.', {
+          tool: 'engineering.calc',
+          evidence: ['formula + inputs + computed value'],
+        }),
         step('act', 'Inspect the CAD file directly first', 'For STL/DXF/STEP/SCAD files, read structure without opening any app (P15): triangle counts, bounding box, layers, entities, units, STEP schema/products. Falls back to app-native commands when the file needs a live document.', {
           tool: 'desktop.cad_inspect_file',
           evidence: ['parsed format summary', 'units and measurement values or an explicit units-unknown note'],
