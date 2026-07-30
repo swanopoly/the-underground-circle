@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'bolt' | 'nut' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'bolt' | 'nut' | 'elbow' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'frame', 'bolt', 'nut', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section extruded to length; frame: welded box-member frame; bolt/nut: hex fastener sized from the across-flats standard; custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'frame', 'bolt', 'nut', 'elbow', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section extruded to length; frame: welded box-member frame; bolt/nut: hex fastener from the across-flats standard; elbow: bent hollow pipe fitting; custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11841,6 +11841,22 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           return {
             ok: true, script: bpy.value, summary: v,
             resultsText: `Generated hex nut${v ? `: M${v.nominalDiameter}, ${v.acrossFlats} mm across-flats, ${v.height} mm high, Ø${v.boreDiameter} bore, volume ${v.volume} mm³` : ''}. Write the Blender bpy (${bpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured volume should equal hex − bore; the bore is the tapped-hole envelope.`,
+          } as any;
+        }
+
+        // A pipe elbow — a hollow pipe swept along a bent centreline.
+        if (part === 'elbow') {
+          const { buildElbowBlenderScript, elbowGeometry } = await import('./engineeringPipeCore');
+          const espec = (a.spec ?? {}) as any;
+          const ebpy = buildElbowBlenderScript(espec, stlOut);
+          if (!ebpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${ebpy.error}` } as any;
+          const eg = elbowGeometry(espec);
+          const v = eg.ok ? eg.value : null;
+          return {
+            ok: true,
+            script: ebpy.value,
+            summary: v,
+            resultsText: `Generated pipe elbow${v ? `: ${v.angleDeg}° bend, Ø${v.outerRadius * 2} OD, ${v.wallThickness} mm wall, bend radius ${v.bendRadius} mm — wall volume ${v.volume} mm³, holds ${v.boreVolume} mm³` : ''}. Write the Blender bpy (${ebpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured wall volume should equal θ·Rb·π(ro²−ri²) (partial-revolve Pappus).`,
           } as any;
         }
 
