@@ -2997,7 +2997,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11762,8 +11762,18 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: 'composite wall', value: c.heatRate_W, unit: 'W (through the wall)', formula: 'series R: Q = ΔT/ΣR, U = 1/(R·A)', inputs: { area_m2: c.area_m2, deltaT_K: c.deltaT_K }, extra: { heat_rate_W: c.heatRate_W, total_resistance_K_per_W: c.totalResistance_K_per_W, u_value_W_per_m2K: c.uValue_W_per_m2K }, notes: [`${c.layers.length} resistors in series; interface temps ${c.interfaceTemperatures_C.join(' → ')} °C.`] };
             break;
           }
+          case 'power_screw': {
+            const t = await import('./engineeringPowerScrewCore');
+            const pr = t.powerScrew(x);
+            if (!pr.ok) return { ok: false, resultsText: `engineering.calc: ${pr.error}` } as any;
+            const p = pr.value;
+            const extra: Record<string, number> = { raise_torque_Nm: p.raiseTorque_Nm, lower_torque_Nmm: p.lowerTorque_Nmm, efficiency: p.efficiency, lead_angle_deg: p.leadAngle_deg, mean_diameter_mm: p.meanDiameter_mm, lead_mm: p.lead_mm };
+            if (p.collarTorque_Nmm > 0) extra.total_raise_torque_Nm = p.totalRaiseTorque_Nm;
+            r = { ok: true, quantity: `power screw (${p.threadForm})`, value: p.raiseTorque_Nm, unit: 'N·m (raise torque)', formula: 'T = (F·dm/2)(l+πf·dm)/(πdm−f·l), η = Fl/2πT', inputs: { load_N: p.load_N, mean_diameter_mm: p.meanDiameter_mm, lead_mm: p.lead_mm }, extra, notes: [`Lead angle ${p.leadAngle_deg}°, efficiency ${(p.efficiency * 100).toFixed(1)}%, ${p.selfLocking ? 'SELF-LOCKING (holds the load without a brake)' : 'NOT self-locking (will back-drive — needs a brake)'}.`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
