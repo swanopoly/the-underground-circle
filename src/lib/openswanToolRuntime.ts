@@ -2997,7 +2997,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11738,8 +11738,32 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: 'slider-crank piston', value: c.pistonPosition, unit: 'mm (from crank centre)', formula: 'x = r·cosθ + √(l² − r²sin²θ)', inputs: { crank_angle_deg: c.crankAngleDeg }, extra, notes: [`Stroke ${c.stroke} mm (TDC ${c.topDeadCentre}, BDC ${c.bottomDeadCentre}).`] };
             break;
           }
+          case 'conduction': {
+            const t = await import('./engineeringThermalCore');
+            const cr = t.conduction(x);
+            if (!cr.ok) return { ok: false, resultsText: `engineering.calc: ${cr.error}` } as any;
+            const c = cr.value;
+            r = { ok: true, quantity: 'conduction heat rate', value: c.heatRate_W, unit: 'W', formula: 'Q = k·A·ΔT/L, R = L/(k·A)', inputs: { k_W_per_mK: c.conductivity_W_per_mK, area_m2: c.area_m2, thickness_mm: c.thickness_mm, deltaT_K: c.deltaT_K }, extra: { heat_rate_W: c.heatRate_W, resistance_K_per_W: c.thermalResistance_K_per_W, flux_W_per_m2: c.fluxDensity_W_per_m2 }, notes: [`Thermal resistance ${c.thermalResistance_K_per_W} K/W.`] };
+            break;
+          }
+          case 'convection': {
+            const t = await import('./engineeringThermalCore');
+            const cr = t.convection(x);
+            if (!cr.ok) return { ok: false, resultsText: `engineering.calc: ${cr.error}` } as any;
+            const c = cr.value;
+            r = { ok: true, quantity: 'convection heat rate', value: c.heatRate_W, unit: 'W', formula: 'Q = h·A·ΔT, R = 1/(h·A)', inputs: { h_W_per_m2K: c.filmCoefficient_W_per_m2K, area_m2: c.area_m2, deltaT_K: c.deltaT_K }, extra: { heat_rate_W: c.heatRate_W, resistance_K_per_W: c.thermalResistance_K_per_W }, notes: [`Film resistance ${c.thermalResistance_K_per_W} K/W.`] };
+            break;
+          }
+          case 'composite_wall': {
+            const t = await import('./engineeringThermalCore');
+            const cr = t.compositeWall(x);
+            if (!cr.ok) return { ok: false, resultsText: `engineering.calc: ${cr.error}` } as any;
+            const c = cr.value;
+            r = { ok: true, quantity: 'composite wall', value: c.heatRate_W, unit: 'W (through the wall)', formula: 'series R: Q = ΔT/ΣR, U = 1/(R·A)', inputs: { area_m2: c.area_m2, deltaT_K: c.deltaT_K }, extra: { heat_rate_W: c.heatRate_W, total_resistance_K_per_W: c.totalResistance_K_per_W, u_value_W_per_m2K: c.uValue_W_per_m2K }, notes: [`${c.layers.length} resistors in series; interface temps ${c.interfaceTemperatures_C.join(' → ')} °C.`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';

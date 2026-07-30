@@ -268,6 +268,7 @@
     "drill:unknown-app": "npx tsx scripts/unknown-app-ladder-drill.ts",
     "smoke:engineering-rack-core": "npx tsx scripts/engineering-rack-core-smoketest.ts",
     "smoke:engineering-cam-core": "npx tsx scripts/engineering-cam-core-smoketest.ts",
+    "smoke:engineering-thermal-core": "npx tsx scripts/engineering-thermal-core-smoketest.ts",
     "smoke:engineering-kinematics-core": "npx tsx scripts/engineering-kinematics-core-smoketest.ts",
     "smoke:engineering-vibration-core": "npx tsx scripts/engineering-vibration-core-smoketest.ts",
     "smoke:engineering-fluid-core": "npx tsx scripts/engineering-fluid-core-smoketest.ts",

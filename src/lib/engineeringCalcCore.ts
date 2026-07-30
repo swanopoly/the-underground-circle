@@ -78,16 +78,18 @@ export type MaterialProps = {
   density: number;
   /** Coefficient of thermal expansion, per °C (for thermal calcs). */
   alpha: number;
+  /** Thermal conductivity, W/(m·K) (for heat-transfer calcs). */
+  k: number;
 };
 
 export const MATERIALS: Record<string, MaterialProps> = {
-  steel: { name: 'Steel (mild, A36-ish)', E: 200_000, G: 79_300, yield: 250, density: 7.85e-6, alpha: 12.0e-6 },
-  stainless: { name: 'Stainless 304', E: 193_000, G: 77_200, yield: 215, density: 8.0e-6, alpha: 17.3e-6 },
-  aluminum: { name: 'Aluminum 6061-T6', E: 69_000, G: 26_000, yield: 276, density: 2.70e-6, alpha: 23.6e-6 },
-  titanium: { name: 'Titanium Ti-6Al-4V', E: 114_000, G: 44_000, yield: 880, density: 4.43e-6, alpha: 8.6e-6 },
-  brass: { name: 'Brass C360', E: 97_000, G: 37_000, yield: 124, density: 8.5e-6, alpha: 20.5e-6 },
-  abs: { name: 'ABS plastic', E: 2_300, G: 800, yield: 40, density: 1.05e-6, alpha: 90.0e-6 },
-  pla: { name: 'PLA plastic', E: 3_500, G: 1_300, yield: 50, density: 1.24e-6, alpha: 68.0e-6 },
+  steel: { name: 'Steel (mild, A36-ish)', E: 200_000, G: 79_300, yield: 250, density: 7.85e-6, alpha: 12.0e-6, k: 50 },
+  stainless: { name: 'Stainless 304', E: 193_000, G: 77_200, yield: 215, density: 8.0e-6, alpha: 17.3e-6, k: 16.2 },
+  aluminum: { name: 'Aluminum 6061-T6', E: 69_000, G: 26_000, yield: 276, density: 2.70e-6, alpha: 23.6e-6, k: 167 },
+  titanium: { name: 'Titanium Ti-6Al-4V', E: 114_000, G: 44_000, yield: 880, density: 4.43e-6, alpha: 8.6e-6, k: 6.7 },
+  brass: { name: 'Brass C360', E: 97_000, G: 37_000, yield: 124, density: 8.5e-6, alpha: 20.5e-6, k: 115 },
+  abs: { name: 'ABS plastic', E: 2_300, G: 800, yield: 40, density: 1.05e-6, alpha: 90.0e-6, k: 0.17 },
+  pla: { name: 'PLA plastic', E: 3_500, G: 1_300, yield: 50, density: 1.24e-6, alpha: 68.0e-6, k: 0.13 },
 };
 
 export function materialProps(name: string): CalcResult {
@@ -97,8 +99,8 @@ export function materialProps(name: string): CalcResult {
   return {
     ok: true, quantity: `material: ${m.name}`, value: m.E, unit: 'MPa (E)',
     formula: 'lookup', inputs: { material: key },
-    extra: { E_MPa: m.E, G_MPa: m.G, yield_MPa: m.yield, density_kg_per_mm3: m.density, alpha_per_C: m.alpha },
-    notes: [`E=${m.E} MPa, G=${m.G} MPa, yield=${m.yield} MPa, density=${m.density} kg/mm³, α=${m.alpha}/°C`],
+    extra: { E_MPa: m.E, G_MPa: m.G, yield_MPa: m.yield, density_kg_per_mm3: m.density, alpha_per_C: m.alpha, k_W_per_mK: m.k },
+    notes: [`E=${m.E} MPa, G=${m.G} MPa, yield=${m.yield} MPa, density=${m.density} kg/mm³, α=${m.alpha}/°C, k=${m.k} W/m·K`],
   };
 }
 
