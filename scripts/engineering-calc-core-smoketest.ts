@@ -13,6 +13,7 @@ import {
   beam, safetyFactor, boltPreload, tapDrill,
   ohmsLaw, ledResistor, combineResistors, voltageDivider, rcTimeConstant,
   convertUnit, materialProps, MATERIALS, gearPairTransmission, springRate,
+  columnBuckling, shaftTorsion, thermalExpansion, pressureVessel,
 } from '../src/lib/engineeringCalcCore';
 
 let passed = 0;
@@ -176,10 +177,56 @@ function main() {
     assert(!gearPairTransmission({ pinionTeeth: 2, gearTeeth: 36, module: 2 }).ok, 'too-few pinion teeth rejected');
   }
 
+  // ─── Column buckling (composes the structural-section lane) ──────
+  {
+    // I=1e6 mm⁴, L=2000 mm, pinned (K=1), steel E=200000 → Pcr = π²·200000·1e6/2000² = π²·50000.
+    const b = ok(columnBuckling({ momentOfInertia: 1e6, length: 2000, endCondition: 'pinned_pinned', material: 'steel', area: 1000 }), 'column buckling');
+    near(b.value, Math.PI ** 2 * 50000, 'Pcr = π²·E·I/(K·L)²');
+    near(b.extra!.critical_stress_MPa, (Math.PI ** 2 * 50000) / 1000, 'critical stress = Pcr/A');
+    // fixed-free (K=2) buckles at a quarter of the pinned load.
+    const cant = ok(columnBuckling({ momentOfInertia: 1e6, length: 2000, endCondition: 'fixed_free', E: 200000 }), 'cantilever column');
+    near(cant.value, (Math.PI ** 2 * 50000) / 4, 'fixed-free Pcr = pinned/4 (K=2)');
+    assert(!columnBuckling({ momentOfInertia: 1e6, length: 2000, endCondition: 'welded' }).ok, 'unknown end condition rejected');
+    assert(!columnBuckling({ momentOfInertia: 1e6, length: 2000 } as any).ok, 'no E / material rejected');
+  }
+
+  // ─── Shaft torsion (composes materials shear modulus G) ──────────
+  {
+    // T=100000 N·mm, D=20 mm solid → J=π·20⁴/32=15707.96, τ=T·(D/2)/J=63.662 MPa = 16T/(πD³).
+    const s = ok(shaftTorsion({ torque: 100000, diameter: 20, length: 500, material: 'steel' }), 'shaft torsion');
+    near(s.value, 63.662, 'τ_max = 16T/(πD³) = 63.662 MPa');
+    near(s.extra!.polar_moment_J_mm4, Math.PI * 20 ** 4 / 32, 'J = π·d⁴/32');
+    // θ = TL/(GJ), steel G=79300 → 0.04014 rad = 2.300°.
+    near(s.extra!.angle_of_twist_deg, ((100000 * 500) / (79300 * (Math.PI * 20 ** 4 / 32))) * 180 / Math.PI, 'angle of twist = TL/(GJ)');
+    assert(!shaftTorsion({ torque: 100000, diameter: 20, innerDiameter: 25 }).ok, 'id ≥ od rejected');
+  }
+
+  // ─── Thermal expansion (composes materials α) ────────────────────
+  {
+    // steel α=12e-6, L=1000, ΔT=50 → ΔL=0.6 mm; constrained stress E·α·ΔT=120 MPa.
+    const th = ok(thermalExpansion({ length: 1000, deltaT: 50, material: 'steel' }), 'thermal');
+    near(th.value, 0.6, 'ΔL = α·L·ΔT = 0.6 mm');
+    near(th.extra!.constrained_stress_MPa, 120, 'constrained stress = E·α·ΔT = 120 MPa');
+    // cooling gives negative ΔL.
+    near(ok(thermalExpansion({ length: 1000, deltaT: -50, material: 'steel' }), 'cool').value, -0.6, 'cooling → ΔL negative');
+    assert(Object.values(MATERIALS).every((m) => m.alpha > 0), 'every material has a positive thermal expansion α');
+  }
+
+  // ─── Thin-wall pressure vessel ───────────────────────────────────
+  {
+    // p=2 MPa, r=500, t=10 → hoop=pr/t=100, long=pr/2t=50.
+    const pv = ok(pressureVessel({ pressure: 2, innerRadius: 500, wallThickness: 10 }), 'pressure vessel');
+    near(pv.value, 100, 'hoop stress = p·r/t = 100 MPa');
+    near(pv.extra!.longitudinal_stress_MPa, 50, 'longitudinal = p·r/(2t) = 50 MPa (half of hoop)');
+    // diameter form matches radius form.
+    near(ok(pressureVessel({ pressure: 2, innerDiameter: 1000, wallThickness: 10 }), 'pv by dia').value, 100, 'innerDiameter form = innerRadius form');
+  }
+
   // ─── Materials ───────────────────────────────────────────────────
   {
     const m = ok(materialProps('aluminum'), 'alu');
     assert(m.extra!.E_MPa === 69000, 'aluminum E = 69000 MPa');
+    assert(m.extra!.alpha_per_C === 23.6e-6, 'aluminum α = 23.6e-6 /°C');
     assert(Object.keys(MATERIALS).length >= 5, 'material table has the common set');
     assert(!materialProps('unobtanium').ok, 'unknown material rejected');
   }

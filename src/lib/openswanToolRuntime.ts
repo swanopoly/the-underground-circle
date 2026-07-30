@@ -2993,12 +2993,12 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Engineering Calculator',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      'Closed-form engineering analysis with exact answers, showing formula + inputs. Mechanical: beam deflection/stress (simply-supported/cantilever, point/UDL), section properties (rectangle/circle/tube I,S,A), bolt preload from torque, metric tap-drill/clearance sizes, safety factor, material properties. Electrical: Ohm\'s law, LED series resistor, series/parallel resistance, voltage divider, RC time constant. Plus unit conversion (length/force/pressure/torque/mass). Use to SIZE a part before drawing it with engineering.draft_dxf or engineering.model_3d.',
+      'Closed-form engineering analysis with exact answers (formula + inputs). Mechanical: beam deflection/stress, section properties (I,S,A), column buckling (Euler), shaft torsion, thermal expansion/stress, thin-wall pressure vessel, spring rate, gear-pair transmission, bolt preload, metric tap-drill, safety factor, materials (E,G,α,yield,density). Electrical: Ohm\'s law, LED resistor, series/parallel resistance, voltage divider, RC. Plus unit conversion. Use to SIZE a part before drawing it with engineering.draft_dxf or engineering.model_3d.',
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
-        args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; tap_drill {thread:"M8"}; led_resistor {supply,forwardVoltage,current}; convert {value,from,to}.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; column_buckling {momentOfInertia,length,endCondition,material}; shaft_torsion {torque,diameter,length,material}; tap_drill {thread:"M8"}; convert {value,from,to}.' },
       },
       required: ['kind'],
     },
@@ -11658,8 +11658,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           case 'material': r = c.materialProps(String(x.material ?? x.name ?? '')); break;
           case 'gear_pair': r = c.gearPairTransmission(x); break;
           case 'spring_rate': r = c.springRate(x); break;
+          case 'column_buckling': r = c.columnBuckling(x); break;
+          case 'shaft_torsion': r = c.shaftTorsion(x); break;
+          case 'thermal_expansion': r = c.thermalExpansion(x); break;
+          case 'pressure_vessel': r = c.pressureVessel(x); break;
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';

@@ -76,16 +76,18 @@ export type MaterialProps = {
   yield: number;
   /** Density, kg/mm³ (so mass = density · volume_mm3 gives kg). */
   density: number;
+  /** Coefficient of thermal expansion, per °C (for thermal calcs). */
+  alpha: number;
 };
 
 export const MATERIALS: Record<string, MaterialProps> = {
-  steel: { name: 'Steel (mild, A36-ish)', E: 200_000, G: 79_300, yield: 250, density: 7.85e-6 },
-  stainless: { name: 'Stainless 304', E: 193_000, G: 77_200, yield: 215, density: 8.0e-6 },
-  aluminum: { name: 'Aluminum 6061-T6', E: 69_000, G: 26_000, yield: 276, density: 2.70e-6 },
-  titanium: { name: 'Titanium Ti-6Al-4V', E: 114_000, G: 44_000, yield: 880, density: 4.43e-6 },
-  brass: { name: 'Brass C360', E: 97_000, G: 37_000, yield: 124, density: 8.5e-6 },
-  abs: { name: 'ABS plastic', E: 2_300, G: 800, yield: 40, density: 1.05e-6 },
-  pla: { name: 'PLA plastic', E: 3_500, G: 1_300, yield: 50, density: 1.24e-6 },
+  steel: { name: 'Steel (mild, A36-ish)', E: 200_000, G: 79_300, yield: 250, density: 7.85e-6, alpha: 12.0e-6 },
+  stainless: { name: 'Stainless 304', E: 193_000, G: 77_200, yield: 215, density: 8.0e-6, alpha: 17.3e-6 },
+  aluminum: { name: 'Aluminum 6061-T6', E: 69_000, G: 26_000, yield: 276, density: 2.70e-6, alpha: 23.6e-6 },
+  titanium: { name: 'Titanium Ti-6Al-4V', E: 114_000, G: 44_000, yield: 880, density: 4.43e-6, alpha: 8.6e-6 },
+  brass: { name: 'Brass C360', E: 97_000, G: 37_000, yield: 124, density: 8.5e-6, alpha: 20.5e-6 },
+  abs: { name: 'ABS plastic', E: 2_300, G: 800, yield: 40, density: 1.05e-6, alpha: 90.0e-6 },
+  pla: { name: 'PLA plastic', E: 3_500, G: 1_300, yield: 50, density: 1.24e-6, alpha: 68.0e-6 },
 };
 
 export function materialProps(name: string): CalcResult {
@@ -95,8 +97,8 @@ export function materialProps(name: string): CalcResult {
   return {
     ok: true, quantity: `material: ${m.name}`, value: m.E, unit: 'MPa (E)',
     formula: 'lookup', inputs: { material: key },
-    extra: { E_MPa: m.E, G_MPa: m.G, yield_MPa: m.yield, density_kg_per_mm3: m.density },
-    notes: [`E=${m.E} MPa, G=${m.G} MPa, yield=${m.yield} MPa, density=${m.density} kg/mm³`],
+    extra: { E_MPa: m.E, G_MPa: m.G, yield_MPa: m.yield, density_kg_per_mm3: m.density, alpha_per_C: m.alpha },
+    notes: [`E=${m.E} MPa, G=${m.G} MPa, yield=${m.yield} MPa, density=${m.density} kg/mm³, α=${m.alpha}/°C`],
   };
 }
 
@@ -375,6 +377,154 @@ export function springRate(args: {
     formula: 'k = G·d⁴/(8·D³·n)', inputs: { wire_dia_mm: d, mean_dia_mm: D, active_coils: n, G_MPa: G },
     extra: { rate_N_per_mm: round(k, 4), spring_index_D_over_d: round(index, 2), solid_height_est_mm: round((n + 2) * d) },
     notes: [`Spring index D/d = ${round(index, 1)} (4–12 is a practical range). Force at deflection x: F = k·x.`],
+  };
+}
+
+// ─── Column buckling (composes the structural-section lane) ──────────────────
+
+/** End-condition effective-length factors K (theoretical). */
+const COLUMN_END_K: Record<string, number> = {
+  pinned_pinned: 1.0, pinned: 1.0,
+  fixed_free: 2.0, cantilever: 2.0,
+  fixed_fixed: 0.5, fixed: 0.5,
+  fixed_pinned: 0.699, propped: 0.699,
+};
+
+/**
+ * Euler critical buckling load of a slender column: Pcr = π²·E·I / (K·L)². Feed
+ * the second moment of area I from engineering.model_3d 'beam' (a section's Iₓ)
+ * and the end condition; get the axial load at which it buckles, plus the
+ * critical stress and slenderness when the area / radius of gyration are given.
+ */
+export function columnBuckling(args: {
+  momentOfInertia: number; // I, mm⁴ (use the section's smaller I — buckling picks the weak axis)
+  length: number; // unbraced length, mm
+  endCondition?: string;
+  material?: string; E?: number;
+  area?: number; // mm² → critical stress
+  radiusOfGyration?: number; // mm → slenderness KL/r
+}): CalcResult {
+  const I = pos(args.momentOfInertia), L = pos(args.length);
+  if (I === null || L === null) return bad('column needs positive momentOfInertia (mm⁴) and length (mm)');
+  let E: number | null = args.E !== undefined ? pos(args.E) : null;
+  if (E === null && args.material) { const m = MATERIALS[String(args.material).trim().toLowerCase()]; if (m) E = m.E; }
+  if (E === null) return bad('supply a material (for E) or an explicit E (MPa)');
+  const endKey = String(args.endCondition || 'pinned_pinned').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const K = COLUMN_END_K[endKey];
+  if (K === undefined) return bad(`unknown endCondition — use ${Object.keys(COLUMN_END_K).join(', ')}`);
+  const Le = K * L;
+  const Pcr = (Math.PI ** 2 * E * I) / (Le ** 2);
+  const extra: Record<string, number> = { Pcr_N: round(Pcr), Pcr_kN: round(Pcr / 1000, 4), effective_length_mm: round(Le), K };
+  const notes = [`End condition "${endKey}" → K=${K}. Euler is valid only for slender columns (elastic buckling); check the slenderness against the material's yield.`];
+  const A = args.area !== undefined ? pos(args.area) : null;
+  if (A !== null) { const sigma = Pcr / A; extra.critical_stress_MPa = round(sigma, 4); }
+  const r = args.radiusOfGyration !== undefined ? pos(args.radiusOfGyration) : null;
+  if (r !== null) { extra.slenderness_KL_over_r = round(Le / r, 2); }
+  return {
+    ok: true, quantity: 'column buckling (Euler)', value: round(Pcr), unit: 'N (Pcr)',
+    formula: 'Pcr = π²·E·I / (K·L)²', inputs: { I_mm4: I, length_mm: L, K, E_MPa: E },
+    extra, notes,
+  };
+}
+
+// ─── Shaft torsion (composes the materials shear modulus G) ──────────────────
+
+/**
+ * Circular shaft in torsion: max shear stress τ = T·r/J and angle of twist
+ * θ = T·L/(G·J), with polar moment J = π·d⁴/32 (solid) or π·(D⁴−d⁴)/32 (hollow).
+ * Uses the same G as the spring calc, so one material drives both.
+ */
+export function shaftTorsion(args: {
+  torque: number; // N·mm
+  diameter: number; // outer, mm
+  innerDiameter?: number; // hollow shaft
+  length?: number; // mm → angle of twist
+  material?: string; shearModulus?: number;
+}): CalcResult {
+  const T = pos(args.torque), D = pos(args.diameter);
+  if (T === null || D === null) return bad('shaft needs positive torque (N·mm) and diameter (mm)');
+  const di = args.innerDiameter !== undefined ? fin(args.innerDiameter) : 0;
+  if (di === null || di < 0 || di >= D) return bad('innerDiameter must be 0 ≤ id < od');
+  const J = (Math.PI * (D ** 4 - di ** 4)) / 32;
+  const tau = (T * (D / 2)) / J;
+  const extra: Record<string, number> = { max_shear_stress_MPa: round(tau, 4), polar_moment_J_mm4: round(J), outer_radius_mm: round(D / 2) };
+  const notes = [`τ_max at the outer surface. Compare with the material's shear yield (~0.577·σ_yield, von Mises).`];
+  const L = args.length !== undefined ? pos(args.length) : null;
+  if (L !== null) {
+    let G: number | null = args.shearModulus !== undefined ? pos(args.shearModulus) : null;
+    if (G === null && args.material) { const m = MATERIALS[String(args.material).trim().toLowerCase()]; if (m) G = m.G; }
+    if (G !== null) {
+      const thetaRad = (T * L) / (G * J);
+      extra.angle_of_twist_deg = round((thetaRad * 180) / Math.PI, 4);
+      extra.angle_of_twist_rad = round(thetaRad, 6);
+    } else {
+      notes.push('Provide a material or shearModulus (MPa) for the angle of twist.');
+    }
+  }
+  return {
+    ok: true, quantity: 'shaft torsion', value: round(tau, 4), unit: 'MPa (τ_max)',
+    formula: 'τ = T·(D/2)/J, θ = T·L/(G·J), J = π·(D⁴−d⁴)/32', inputs: { torque_Nmm: T, od_mm: D, id_mm: di },
+    extra, notes,
+  };
+}
+
+// ─── Thermal expansion (composes the materials α) ────────────────────────────
+
+/**
+ * Free thermal growth ΔL = α·L·ΔT, and — if the part is fully restrained — the
+ * thermal stress σ = E·α·ΔT it develops (compressive on heating). α and E come
+ * from the material table.
+ */
+export function thermalExpansion(args: {
+  length: number; // mm
+  deltaT: number; // °C (signed)
+  material?: string; alpha?: number; E?: number;
+}): CalcResult {
+  const L = pos(args.length), dT = fin(args.deltaT);
+  if (L === null || dT === null) return bad('thermal needs positive length (mm) and a deltaT (°C)');
+  const m = args.material ? MATERIALS[String(args.material).trim().toLowerCase()] : undefined;
+  let alpha: number | null = args.alpha !== undefined ? fin(args.alpha) : null;
+  if (alpha === null && m) alpha = m.alpha;
+  if (alpha === null || !(alpha > 0)) return bad('supply a material (for α) or an explicit alpha (per °C)');
+  const dL = alpha * L * dT;
+  const extra: Record<string, number> = { delta_length_mm: round(dL, 6), alpha_per_C: alpha, strain: round(alpha * dT, 8) };
+  const notes = [`Free expansion (unrestrained). ΔL is signed with ΔT.`];
+  let E: number | null = args.E !== undefined ? pos(args.E) : null;
+  if (E === null && m) E = m.E;
+  if (E !== null) { const sigma = E * alpha * dT; extra.constrained_stress_MPa = round(sigma, 4); notes.push('constrained_stress assumes FULL restraint (no movement); compressive on heating.'); }
+  return {
+    ok: true, quantity: 'thermal expansion', value: round(dL, 6), unit: 'mm (ΔL)',
+    formula: 'ΔL = α·L·ΔT, σ = E·α·ΔT (restrained)', inputs: { length_mm: L, deltaT_C: dT, alpha_per_C: alpha },
+    extra, notes,
+  };
+}
+
+// ─── Thin-wall pressure vessel ───────────────────────────────────────────────
+
+/**
+ * Thin-wall cylinder under internal pressure: hoop (circumferential) stress
+ * σ_h = p·r/t and longitudinal σ_l = p·r/(2t). Hoop is twice longitudinal, so it
+ * governs. Thin-wall theory assumes r/t ≥ 10.
+ */
+export function pressureVessel(args: {
+  pressure: number; // MPa
+  innerRadius?: number; // mm
+  innerDiameter?: number;
+  wallThickness: number; // mm
+}): CalcResult {
+  const p = pos(args.pressure), t = pos(args.wallThickness);
+  let r: number | null = args.innerRadius !== undefined ? pos(args.innerRadius) : null;
+  if (r === null && args.innerDiameter !== undefined) { const d = pos(args.innerDiameter); if (d !== null) r = d / 2; }
+  if (p === null || t === null || r === null) return bad('pressure vessel needs positive pressure (MPa), wallThickness (mm), and innerRadius or innerDiameter (mm)');
+  const hoop = (p * r) / t;
+  const long = (p * r) / (2 * t);
+  const ratio = r / t;
+  const notes = [`Hoop stress governs (2× longitudinal). Thin-wall theory assumes r/t ≥ 10${ratio < 10 ? ` — here r/t = ${round(ratio, 1)}, so treat as APPROXIMATE (a thick-wall/Lamé analysis is more accurate)` : ''}.`];
+  return {
+    ok: true, quantity: 'thin-wall pressure vessel', value: round(hoop, 4), unit: 'MPa (hoop)',
+    formula: 'σ_hoop = p·r/t, σ_long = p·r/(2t)', inputs: { pressure_MPa: p, inner_radius_mm: r, wall_mm: t },
+    extra: { hoop_stress_MPa: round(hoop, 4), longitudinal_stress_MPa: round(long, 4), radius_to_thickness: round(ratio, 2) },
+    notes,
   };
 }
 
