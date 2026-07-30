@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11729,6 +11729,22 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             script: sbpy.value,
             summary: v,
             resultsText: `Generated compression spring${v ? `: wire Ø${v.wireDiameter}, mean Ø${v.meanDiameter} (OD ${v.outerDiameter}), ${v.totalCoils} coils, free length ${v.freeLength} mm, index ${v.springIndex}` : ''}. Write the Blender bpy (${sbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Wire volume ≈ ${v ? v.wireVolume : '?'} mm³ (developed-length); size the rate with engineering.calc spring_rate.`,
+          } as any;
+        }
+
+        // An ISO metric threaded rod — a helical thread as a radial heightfield.
+        if (part === 'thread') {
+          const { buildThreadedRodBlenderScript, threadedRodGeometry } = await import('./engineeringThreadCore');
+          const tspec = (a.spec ?? {}) as any;
+          const tbpy = buildThreadedRodBlenderScript(tspec, stlOut);
+          if (!tbpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${tbpy.error}` } as any;
+          const tg = threadedRodGeometry(tspec);
+          const v = tg.ok ? tg.value : null;
+          return {
+            ok: true,
+            script: tbpy.value,
+            summary: v,
+            resultsText: `Generated ISO metric threaded rod${v ? `: M${v.nominalDiameter}×${v.pitch}, length ${v.length} mm — pitch Ø${v.pitchDiameter}, minor Ø${v.minorDiameter}, ${Math.round(v.turns * 100) / 100} turns` : ''}. Write the Blender bpy (${tbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured OD should equal ${v ? v.majorDiameter : 'd'} mm (thread crests) and the volume falls between the minor and major cylinders; size the fastener with engineering.calc bolt.`,
           } as any;
         }
 
