@@ -2997,7 +2997,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | pipe_flow | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | pipe_flow | natural_frequency | damped_vibration | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11692,8 +11692,28 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: `pipe flow (${f.fluid}, Ø${f.diameter_mm} mm)`, value: f.pressureDrop_kPa ?? f.reynolds, unit: f.pressureDrop_kPa !== null ? 'kPa (Δp)' : '(Reynolds)', formula: 'Re=ρVD/μ; f=64/Re | Swamee–Jain; Δp=f(L/D)ρV²/2', inputs: { diameter_mm: f.diameter_mm, velocity_m_s: f.velocity_m_s }, extra, notes: [`${f.regime} flow.${f.length_m !== null ? ` Over ${f.length_m} m: Δp ${f.pressureDrop_kPa} kPa, head loss ${f.headLoss_m} m of fluid.` : ' Pass a length for the pressure drop.'}`] };
             break;
           }
+          case 'natural_frequency': {
+            const t = await import('./engineeringVibrationCore');
+            const nr = t.naturalFrequency(x);
+            if (!nr.ok) return { ok: false, resultsText: `engineering.calc: ${nr.error}` } as any;
+            const n = nr.value;
+            const extra: Record<string, number> = { natural_frequency_Hz: n.frequency_Hz, omega_n_rad_s: n.omega_n_rad_s, period_s: n.period_s };
+            if (n.staticDeflection_mm !== null) extra.static_deflection_mm = n.staticDeflection_mm;
+            r = { ok: true, quantity: 'natural frequency (SDOF)', value: n.frequency_Hz, unit: 'Hz', formula: n.method, inputs: { ...(n.stiffness_N_per_m !== null ? { stiffness_N_per_m: n.stiffness_N_per_m } : {}), ...(n.mass_kg !== null ? { mass_kg: n.mass_kg } : {}) }, extra, notes: [`ωn ${n.omega_n_rad_s} rad/s, period ${n.period_s} s.`] };
+            break;
+          }
+          case 'damped_vibration': {
+            const t = await import('./engineeringVibrationCore');
+            const dr = t.dampedVibration(x);
+            if (!dr.ok) return { ok: false, resultsText: `engineering.calc: ${dr.error}` } as any;
+            const d = dr.value;
+            const extra: Record<string, number> = { damping_ratio: d.dampingRatio, critical_damping_Ns_per_m: d.criticalDamping_Ns_per_m, natural_frequency_Hz: d.frequency_Hz };
+            if (d.dampedFrequency_Hz !== null) { extra.damped_frequency_Hz = d.dampedFrequency_Hz; extra.log_decrement = d.logDecrement!; }
+            r = { ok: true, quantity: `damped vibration (${d.classification})`, value: d.dampingRatio, unit: 'ζ (damping ratio)', formula: 'ζ = c/(2√(km)); ωd = ωn√(1−ζ²)', inputs: { damping_Ns_per_m: d.dampingCoefficient_Ns_per_m }, extra, notes: [`${d.classification}${d.dampedFrequency_Hz !== null ? `; damped frequency ${d.dampedFrequency_Hz} Hz (natural ${d.frequency_Hz} Hz)` : ' — no oscillation'}.`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';

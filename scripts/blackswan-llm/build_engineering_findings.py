@@ -900,6 +900,16 @@ FINDINGS = [
             "engineering.model_3d 'rack' completes rack-and-pinion with the spur gear"
         ),
     },
+    {
+        "id": "the-same-quantity-through-two-inputs-natural-frequency",
+        "q": "You added vibration analysis. The natural frequency of a mass on a spring is √(k/m) — but you insist it can also be found from how far the thing sags, with no k or m at all. How, and why does that matter for a composing tool?",
+        "a": "Because at rest the spring already tells you the ratio you need. A single-degree-of-freedom system's natural angular frequency is ωn = √(k/m), which seems to demand both the stiffness and the mass. But when the weight hangs in equilibrium the spring force balances gravity, k·δ = m·g, so k/m = g/δ — the ratio of stiffness to mass is just gravity over the static deflection. Therefore ωn = √(g/δ), and you can get the natural frequency knowing ONLY how far the system sags under its own weight, never needing k or m separately. The same physical quantity has two input paths, and which one you use depends on what the previous calculation handed you: if you sized a spring you have k and the mass, so use √(k/m); if you analysed a beam you have its deflection under load, so use √(g/δ) directly. The smoke pins both and asserts they give the same number for the same system — the honest check that they are two faces of one fact, not two different formulas that happen to look alike.\n\nThat dual input is exactly what makes an analysis useful in a SUITE rather than in isolation, and it is the deeper lesson. The value of these tools is not each formula alone but how they COMPOSE, and a function that can accept its input in whatever form the neighbouring tool produces composes with more of the suite. Natural frequency reached from stiffness composes with the spring-rate calc (k = G·d⁴/8D³n, which the spring wave added); the very same natural frequency reached from static deflection composes with the beam calc (δ = PL³/48EI). One function, two doors, twice the reach — an engineer who sized a spring and an engineer who analysed a beam both arrive at the vibration answer without converting anything by hand. The damping half then layers on cleanly: the damping ratio ζ = c/(2√(km)) measured against critical damping c_c = 2√(km) says whether the system rings (underdamped, ζ<1, oscillating at the slightly lower ωd = ωn√(1−ζ²)) or just creeps back, which is the property that decides whether a suspension is comfortable or a structure shakes itself apart. The general lesson: when the same quantity can be computed from different starting data, accept ALL of those forms — it is not redundancy, it is what lets one calculation hand off to the next across the whole toolset.",
+        "evidence": (
+            "src/lib/engineeringVibrationCore.ts (naturalFrequency from k,m OR static deflection √(g/δ); dampedVibration ζ, critical damping, damped frequency, classification, log decrement; SI-internal unit conversion of springRate N/mm), "
+            "scripts/engineering-vibration-core-smoketest.ts (fn(k,m)=5.033Hz, fn(δ=1mm)=15.76Hz, the two faces agree, ζ=0.158 underdamped, critical + over damped), "
+            "engineering.calc kinds natural_frequency + damped_vibration — compose the spring-rate k and the beam deflection δ"
+        ),
+    },
 ]
 
 
