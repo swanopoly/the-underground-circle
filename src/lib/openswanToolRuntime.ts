@@ -2997,7 +2997,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | pipe_flow | natural_frequency | damped_vibration | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11712,8 +11712,34 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: `damped vibration (${d.classification})`, value: d.dampingRatio, unit: 'ζ (damping ratio)', formula: 'ζ = c/(2√(km)); ωd = ωn√(1−ζ²)', inputs: { damping_Ns_per_m: d.dampingCoefficient_Ns_per_m }, extra, notes: [`${d.classification}${d.dampedFrequency_Hz !== null ? `; damped frequency ${d.dampedFrequency_Hz} Hz (natural ${d.frequency_Hz} Hz)` : ' — no oscillation'}.`] };
             break;
           }
+          case 'grashof': {
+            const t = await import('./engineeringKinematicsCore');
+            const gr = t.grashof(Number(x.ground), Number(x.input), Number(x.coupler), Number(x.output));
+            if (!gr.ok) return { ok: false, resultsText: `engineering.calc: ${gr.error}` } as any;
+            const g = gr.value;
+            r = { ok: true, quantity: 'Grashof classification', value: g.grashof ? 1 : 0, unit: g.grashof ? '(Grashof)' : '(non-Grashof)', formula: 's + l ≤ p + q', inputs: g.lengths, extra: { shortest_plus_longest: g.shortestPlusLongest, other_two_sum: g.otherTwoSum }, notes: [g.classification] };
+            break;
+          }
+          case 'four_bar': {
+            const t = await import('./engineeringKinematicsCore');
+            const fr = t.fourBarPosition(x);
+            if (!fr.ok) return { ok: false, resultsText: `engineering.calc: ${fr.error}` } as any;
+            const f = fr.value;
+            r = { ok: true, quantity: `four-bar position (${f.circuit} circuit)`, value: f.outputAngleDeg, unit: '° (output angle)', formula: 'Freudenstein loop closure', inputs: { input_angle_deg: f.inputAngleDeg }, extra: { output_angle_deg: f.outputAngleDeg, coupler_angle_deg: f.couplerAngleDeg, transmission_angle_deg: f.transmissionAngleDeg, loop_residual: f.loopClosureResidual }, notes: [`Transmission angle ${f.transmissionAngleDeg}° (best near 90°, avoid <40°). Loop-closure residual ${f.loopClosureResidual} (≈0 confirms the solution).`] };
+            break;
+          }
+          case 'crank_slider': {
+            const t = await import('./engineeringKinematicsCore');
+            const cr = t.crankSlider(x);
+            if (!cr.ok) return { ok: false, resultsText: `engineering.calc: ${cr.error}` } as any;
+            const c = cr.value;
+            const extra: Record<string, number> = { piston_position: c.pistonPosition, stroke: c.stroke, top_dead_centre: c.topDeadCentre, bottom_dead_centre: c.bottomDeadCentre, r_over_l: c.ratio_r_over_l };
+            if (c.pistonVelocity !== undefined) extra.piston_velocity = c.pistonVelocity;
+            r = { ok: true, quantity: 'slider-crank piston', value: c.pistonPosition, unit: 'mm (from crank centre)', formula: 'x = r·cosθ + √(l² − r²sin²θ)', inputs: { crank_angle_deg: c.crankAngleDeg }, extra, notes: [`Stroke ${c.stroke} mm (TDC ${c.topDeadCentre}, BDC ${c.bottomDeadCentre}).`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
