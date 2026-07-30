@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'bolt' | 'nut' | 'elbow' | 'cam' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'bolt' | 'nut' | 'elbow' | 'cam' | 'rack' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'frame', 'bolt', 'nut', 'elbow', 'cam', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section extruded to length; frame: welded box-member frame; bolt/nut: hex fastener; elbow: bent hollow pipe fitting; cam: disc cam from a dwell/rise/fall program; custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'frame', 'bolt', 'nut', 'elbow', 'cam', 'rack', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section extruded to length; frame: welded box-member frame; bolt/nut: hex fastener; elbow: bent hollow pipe fitting; cam: disc cam from a dwell/rise/fall program; rack: involute gear rack (mates a pinion); custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11883,6 +11883,22 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             script: cbpy.value,
             summary: v,
             resultsText: `Generated disc cam${v ? `: base radius ${v.baseRadius} mm, max lift ${v.maxLift} mm (peak radius ${v.maxRadius}), ${v.thickness} mm thick, Ø${v.boreDiameter} bore — volume ${v.volume} mm³` : ''}. Write the Blender bpy (${cbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured volume should equal (profileArea − bore)·thickness; use harmonic/cycloidal motion for smooth follower acceleration.`,
+          } as any;
+        }
+
+        // An involute gear rack — a toothed profile extruded by the face width.
+        if (part === 'rack') {
+          const { buildRackBlenderScript, rackGeometry } = await import('./engineeringRackCore');
+          const rspec = (a.spec ?? {}) as any;
+          const rbpy = buildRackBlenderScript(rspec, stlOut);
+          if (!rbpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${rbpy.error}` } as any;
+          const rg = rackGeometry(rspec);
+          const v = rg.ok ? rg.value : null;
+          return {
+            ok: true,
+            script: rbpy.value,
+            summary: v,
+            resultsText: `Generated gear rack${v ? `: module ${v.module}, ${v.teeth} teeth, ${v.pressureAngleDeg}° PA — length ${v.length} mm, circular pitch ${v.circularPitch} mm, ${v.faceWidth} mm face, volume ${v.volume} mm³` : ''}. Write the Blender bpy (${rbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured volume should equal profileArea·faceWidth; mates a pinion of the same module (engineering.model_3d 'gear').`,
           } as any;
         }
 

@@ -889,6 +889,17 @@ FINDINGS = [
             "engineering.model_3d 'cam' opens the motion domain atop the profile-solid extruder"
         ),
     },
+    {
+        "id": "a-rack-is-a-gear-of-infinite-radius-so-its-teeth-go-straight",
+        "q": "The gears in the suite have curved involute teeth. A gear RACK meshes with them but is a straight bar — do you need the involute machinery for the rack teeth, and what verifies the rack?",
+        "a": "No — and the reason is a lovely limiting case. A rack is a gear whose radius has gone to infinity, so its pitch 'circle' is a straight line. The involute is the curve traced by unwinding a string from the base circle; as the base circle's radius goes to infinity that curve straightens into a LINE. So a rack tooth is not an approximated involute, it is the exact involute of a straight line, which is a straight flank inclined at the pressure angle — the rack tooth is a clean TRAPEZOID with no curve at all. That is why the rack, despite meshing with curved gear teeth, needs none of the involute-angle machinery the spur gear did: with module m the circular pitch is π·m, the tooth is m tall above the pitch line and 1.25·m below, and each flank leans at the pressure angle so the tooth is wider at its root (p/2 + 2·dedendum·tanφ) than at its tip (p/2 − 2·addendum·tanφ). Recognising a component as the limiting case of one you already have collapses its apparent complexity — the rack looked like new gear-cutting geometry and turned out to be trapezoids.\n\nThe verification is the strongest kind this suite has: the same area computed two ways that share no code. The rack profile is a solid base strip with N teeth on it, so its cross-section area is on one hand the shoelace of the generated outline polygon, and on the other hand the closed form base-rectangle + N·(trapezoid), where each tooth trapezoid is (w_root + w_tip)/2 · toothHeight. Those two derivations touch none of each other's arithmetic — one walks the boundary, the other sums decomposed pieces — so their agreement (asserted in the smoke, and it matched to the rounding) is real evidence the tooth layout is geometrically correct, exactly as the structural section cross-checked its outline shoelace against its rectangle-sum. Then the live drill extrudes the profile and the mesh inspector measures volume = area·faceWidth to 0.000%, a third route to the same number, and confirms the envelope is length × height × faceWidth and that the teeth really are wider at the root. And it composes: the rack mates a pinion of the same module, so the rotary gear and the linear rack — one curved, one straight, the same tooth system — come from the same parameters. The general lesson: check a new profile by decomposing its area independently of how you drew its boundary, and look for the limiting case that turns a hard curve into a simple straight line.",
+        "evidence": (
+            "src/lib/engineeringRackCore.ts (trapezoidal involute-rack teeth from module + pressure angle, rackGeometry computing area two ways — shoelace vs base-rect + N tooth-trapezoids, buildRackBlenderScript = extrude the profile), "
+            "scripts/engineering-rack-core-smoketest.ts (circular pitch π·m, tip < root width, shoelace area = trapezoid-sum area = independent re-derivation), "
+            "npm run drill:engineering-rack (m2×6 & m3×4 racks → Blender → volume = area·faceWidth to 0.000%, watertight, envelope exact), "
+            "engineering.model_3d 'rack' completes rack-and-pinion with the spur gear"
+        ),
+    },
 ]
 
 
