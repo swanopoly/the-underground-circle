@@ -2997,7 +2997,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11657,6 +11657,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           case 'convert': r = c.convertUnit(Number(x.value), String(x.from ?? ''), String(x.to ?? '')); break;
           case 'material': r = c.materialProps(String(x.material ?? x.name ?? '')); break;
           case 'gear_pair': r = c.gearPairTransmission(x); break;
+          case 'gear_train': r = c.gearTrain(x); break;
           case 'spring_rate': r = c.springRate(x); break;
           case 'column_buckling': r = c.columnBuckling(x); break;
           case 'shaft_torsion': r = c.shaftTorsion(x); break;
@@ -11785,7 +11786,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             break;
           }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';

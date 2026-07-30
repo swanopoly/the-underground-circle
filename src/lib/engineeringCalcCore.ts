@@ -571,6 +571,42 @@ export function gearPairTransmission(args: {
   };
 }
 
+/**
+ * Compound gear TRAIN: the train value is the product of each mesh's tooth ratio,
+ * TV = Π(driven/driver). Output speed = input/TV, output torque = input·TV. An
+ * idler (a gear that both meshes drive through) appears as a stage whose ratio
+ * cancels — its size changes only the rotation direction, not the overall ratio.
+ * Extends the single gear pair to any number of stages.
+ */
+export function gearTrain(args: {
+  stages: Array<{ driver: number; driven: number }>;
+  inputSpeed_rpm?: number;
+  inputTorque_Nm?: number;
+}): CalcResult {
+  if (!Array.isArray(args.stages) || args.stages.length === 0) return bad('gear train needs at least one stage {driver, driven}');
+  let tv = 1;
+  const stageRatios: number[] = [];
+  for (let i = 0; i < args.stages.length; i += 1) {
+    const dr = Math.trunc(Number(args.stages[i]?.driver));
+    const dn = Math.trunc(Number(args.stages[i]?.driven));
+    if (!Number.isFinite(dr) || dr < 4 || !Number.isFinite(dn) || dn < 4) return bad(`stage ${i} needs driver and driven tooth counts ≥ 4`);
+    const rr = dn / dr;
+    stageRatios.push(round(rr, 4));
+    tv *= rr;
+  }
+  const extra: Record<string, number> = { train_value: round(tv, 5), stages: args.stages.length };
+  stageRatios.forEach((rr, i) => { extra[`stage${i + 1}_ratio`] = rr; });
+  const notes: string[] = [`Train value = Π(driven/driver) = ${round(tv, 4)}:1 over ${args.stages.length} stage(s). ${tv >= 1 ? 'A reduction (torque up, speed down).' : 'An overdrive (speed up, torque down).'}`];
+  if (args.inputSpeed_rpm !== undefined) { const rpm = fin(args.inputSpeed_rpm); if (rpm !== null) { extra.output_speed_rpm = round(rpm / tv); notes.push(`Output speed = input / TV = ${round(rpm / tv)} rpm.`); } }
+  if (args.inputTorque_Nm !== undefined) { const t = fin(args.inputTorque_Nm); if (t !== null) { extra.output_torque_Nm = round(t * tv); notes.push(`Output torque = input · TV = ${round(t * tv)} N·m.`); } }
+  return {
+    ok: true, quantity: 'gear train', value: round(tv, 4), unit: ':1 (train value)',
+    formula: 'TV = Π(N_driven/N_driver), ωout = ωin/TV, Tout = Tin·TV',
+    inputs: { stages: args.stages.length },
+    extra, notes,
+  };
+}
+
 // ─── Unit conversion ─────────────────────────────────────────────────────────
 
 /** Conversion factors to a canonical base unit per dimension. */

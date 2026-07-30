@@ -951,6 +951,16 @@ FINDINGS = [
             "engineering.calc kind belt_drive — composes the V-groove pulley geometry"
         ),
     },
+    {
+        "id": "a-train-value-is-a-product-and-an-idler-cancels",
+        "q": "You already had a single gear pair. Completing the gear lane meant a whole gear TRAIN — many meshes in a row, sometimes with idlers. What is the one rule that covers all of it, and why do idlers not change the ratio?",
+        "a": "The one rule is that a train's speed change is the PRODUCT of its meshes' individual ratios: the train value TV = Π(N_driven/N_driver) over every mesh in the chain. A single pair was one factor in that product; a train is just more factors. Because it multiplies, a two-stage 3:1-then-3:1 reduction is 9:1, not 6:1 — compounding, not adding — which is exactly how a small gearbox achieves a large reduction: stack a few modest stages and the ratios multiply into a big one, with the output speed dividing by the train value and the output torque multiplying by it. Modelling it as a list of {driver, driven} meshes and taking the product handles the general COMPOUND train (gears keyed to shared shafts so each shaft's speed carries to the next mesh) with no special cases.\n\nThe idler is the elegant consequence that tells you the model is right. An idler is a gear that sits between two others and meshes with both, so it appears in the product as TWO factors: the first mesh drives INTO it (a factor N_idler/N_prev) and it drives OUT of the next (a factor N_next/N_idler). Those two factors have the idler's tooth count once on top and once on the bottom, so it CANCELS — the idler's size has no effect on the overall ratio at all. It changes only the direction of rotation (each mesh reverses it), which is precisely why idlers exist: to reverse a driven gear or to bridge a gap between two shafts too far apart to mesh directly, without disturbing the ratio. The smoke pins exactly this: a 20→40→60 train through a 40-tooth idler gives the same 3:1 as a 20→60 direct mesh, because the 40 cancels. That cancellation is a self-check on the product formula — if the model treated the ratio as anything but a product of driven-over-driver, the idler would wrongly alter the answer. And a single-stage train reduces to the gear pair already in the suite, so the general tool contains the specific one as its one-factor case. The general lesson: when a system chains stages that each scale a quantity, the whole is the PRODUCT of the stages, and the elements that appear once in a numerator and once in a denominator (idlers, and their analogues in any multiplicative chain) drop out — recognising that turns a bewildering gear train into one multiplication and explains the parts that seem to do nothing.",
+        "evidence": (
+            "src/lib/engineeringCalcCore.ts gearTrain (train value = Π(driven/driver) over stages, output speed = input/TV, output torque = input·TV, compound + idler support), "
+            "scripts/engineering-calc-core-smoketest.ts (two-stage 20:60×20:60 → TV=9 / 200rpm / 90N·m, idler 20→40→60 = 3:1 unchanged, single stage = gear pair), "
+            "engineering.calc kind gear_train — completes single gear → gear pair → gear train"
+        ),
+    },
 ]
 
 

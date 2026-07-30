@@ -12,7 +12,7 @@ import {
   sectionRectangle, sectionCircle, sectionTube,
   beam, safetyFactor, boltPreload, tapDrill,
   ohmsLaw, ledResistor, combineResistors, voltageDivider, rcTimeConstant,
-  convertUnit, materialProps, MATERIALS, gearPairTransmission, springRate,
+  convertUnit, materialProps, MATERIALS, gearPairTransmission, gearTrain, springRate,
   columnBuckling, shaftTorsion, thermalExpansion, pressureVessel,
 } from '../src/lib/engineeringCalcCore';
 
@@ -175,6 +175,22 @@ function main() {
     near(g.extra!.output_torque_Nm, 15, 'output torque = input · ratio = 15 N·m');
     near(g.extra!.output_speed_rpm, 500, 'output speed = input / ratio = 500 rpm');
     assert(!gearPairTransmission({ pinionTeeth: 2, gearTeeth: 36, module: 2 }).ok, 'too-few pinion teeth rejected');
+  }
+
+  // ─── Gear train (compound, completes the gear lane) ──────────────
+  {
+    // two-stage 20:60 × 20:60 → train value 9; 1800 rpm in → 200 out.
+    const t = ok(gearTrain({ stages: [{ driver: 20, driven: 60 }, { driver: 20, driven: 60 }], inputSpeed_rpm: 1800, inputTorque_Nm: 10 }), 'gear train');
+    near(t.value, 9, 'train value = Π(driven/driver) = 3·3 = 9');
+    near(t.extra!.output_speed_rpm, 200, 'output speed = input / TV = 200 rpm');
+    near(t.extra!.output_torque_Nm, 90, 'output torque = input · TV = 90 N·m');
+    // an idler cancels: 20→40→60 gives the same 3:1 as 20→60 direct.
+    const idler = ok(gearTrain({ stages: [{ driver: 20, driven: 40 }, { driver: 40, driven: 60 }] }), 'idler train');
+    near(idler.value, 3, 'idler cancels — overall ratio 60/20 = 3');
+    // single stage matches the gear pair.
+    near(ok(gearTrain({ stages: [{ driver: 20, driven: 60 }] }), 'single').value, gearPairTransmission({ pinionTeeth: 20, gearTeeth: 60, module: 2 }).ok ? 3 : -1, 'single-stage train = gear pair ratio');
+    assert(!gearTrain({ stages: [] }).ok, 'empty train rejected');
+    assert(!gearTrain({ stages: [{ driver: 2, driven: 60 }] }).ok, 'too-few teeth rejected');
   }
 
   // ─── Column buckling (composes the structural-section lane) ──────
