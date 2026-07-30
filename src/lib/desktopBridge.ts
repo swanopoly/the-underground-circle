@@ -1207,6 +1207,33 @@ export async function readFile(rawPath: string, maxBytes?: number): Promise<Desk
   };
 }
 
+/**
+ * Binary-safe file read (base64 → bytes) for genuinely binary files (STL
+ * meshes) that `readFile` refuses. Grant-gated read scope, bounded 8 MB.
+ * Returns the raw bytes for a pure inspector to parse.
+ */
+export async function readFileBinary(rawPath: string, maxBytes?: number): Promise<DesktopResult<{ path: string; bytes: Uint8Array; size: number }>> {
+  const v = validateDesktopPath(rawPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `Read local binary file ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; bytes: Uint8Array; size: number }>(grantHeaders);
+  const params = new URLSearchParams({ path: v.path });
+  if (typeof maxBytes === 'number') params.set('maxBytes', String(maxBytes));
+  const r = await callBridge('GET', `/desktop/file_read_binary?${params.toString()}`, undefined, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ path: string; bytes: Uint8Array; size: number }>;
+  const d = r.data as any;
+  const b64 = String(d?.base64 || '');
+  let bytes: Uint8Array;
+  try {
+    bytes = typeof Buffer !== 'undefined'
+      ? new Uint8Array(Buffer.from(b64, 'base64'))
+      : Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  } catch {
+    return { ok: false, error: 'could not decode binary file payload', errorCode: 'invalid_input' };
+  }
+  return { ok: true, data: { path: String(d?.path || v.path), bytes, size: Number(d?.size || bytes.length) } };
+}
+
 export type DesktopFileSearchMatch = {
   path: string;
   name: string;

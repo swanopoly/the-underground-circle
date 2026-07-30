@@ -716,6 +716,17 @@ FINDINGS = [
             "npm run drill:engineering-solid (flange → 2088 triangles at 120×120×12mm live)"
         ),
     },
+    {
+        "id": "mutual-verification-generator-and-inspector-prove-each-other",
+        "q": "We generate 3D parts and we can now inspect STL parts. How do you verify the inspector without just trusting it?",
+        "a": "Make the two halves check each other on a quantity they must agree on: VOLUME. The generator and the inspector are entirely independent code paths, so if a part\'s volume comes out the same computed three different ways, both are almost certainly right. Compute it (1) ANALYTICALLY in closed form from the spec — a plate is w·d·t minus, per through-hole, π·(d/2)²·t; (2) by GENERATING that exact part, running it through real Blender to a mesh; and (3) by MEASURING the mesh back with the divergence theorem, V = (1/6)|Σ v0·(v1×v2)| over every triangle, which is EXACT for a closed mesh regardless of shape. Live results: a 120×80×10 plate with four Ø9 holes — analytical 93455.3 mm³, measured 93459.4 mm³, a 0.00% difference; a flange, 0.16%. The generator built the right solid AND the inspector measures volume correctly, and neither claim rests on trusting the other.\n\nThis is a general and underused technique: when you build a producer and a consumer of the same artifact, wire them into a loop and assert the round trip. It is far stronger than testing each in isolation, because a shared misconception would have to occur identically in two independent implementations to escape — and the closed-form analytical value is a third, human-checkable anchor that shares no code with either.\n\nTwo correctness details. First, the volume integral is winding-independent only if you take the absolute value — an inward-facing normal flips the sign, and a real mesh may have inconsistent winding. Second, PAIR volume with a watertightness verdict: the divergence-theorem volume is only meaningful for a CLOSED mesh, so check that every edge is shared by exactly two triangles (a 2-manifold) and mark the volume unreliable when it is not. An open mesh silently returns a plausible-looking wrong number otherwise. STL does not weld vertices, so match shared edges by quantizing coordinates to a micron before keying — coincident points from the exporter are bit-identical or within rounding, and quantization collapses them.\n\nThe bonus: once you can measure enclosed volume, mass = volume × material density composes the calc core\'s materials table for free — the same Ø100 flange weighs 0.585 kg in steel or 0.201 kg in aluminum.",
+        "evidence": (
+            "src/lib/engineeringMeshInspectCore.ts (parse/volume/area/watertight/mass), "
+            "scripts/engineering-mesh-inspect-core-smoketest.ts (unit-cube known-truth), "
+            "npm run drill:engineering-mesh-inspect (analytical↔generated↔measured, live), "
+            "engineering.inspect_mesh + desktop.file_read_binary"
+        ),
+    },
 ]
 
 

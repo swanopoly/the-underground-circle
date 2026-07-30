@@ -2673,7 +2673,7 @@ const server = http.createServer(async (req, res) => {
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
         ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'installed_apps', 'app_installed', 'browser_tabs', 'window_state', 'observe_app', 'clipboard', 'clipboard_write', 'clipboard_clear',
-           'file_list', 'file_read', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'exec_file', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
+           'file_list', 'file_read', 'file_read_binary', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'exec_file', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
            'paste_text', 'notes_create', 'applescript', 'convert_image', 'cad_compile', 'design_export',
            'menu_click', 'menu_inventory', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
@@ -3312,6 +3312,40 @@ end tell`;
         if (content.includes('\u0000')) throw new Error('binary file preview refused');
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ ok: true, path: filePath, content, size: stat.size, truncated: stat.size > maxBytes }));
+      } catch (err) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+      }
+      return;
+    }
+
+    // Binary-safe read for genuinely binary files (STL meshes, etc.) that the
+    // text file_read refuses. Grant-gated (read scope) exactly like file_read;
+    // returns base64 and is bounded to 8 MB raw so a huge file cannot balloon
+    // memory. The caller decodes to bytes and runs a pure inspector on them.
+    if (url === '/desktop/file_read_binary' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const validated = validateDesktopPathServer(parsed.searchParams.get('path') || '');
+      if (!validated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: validated.error })); return; }
+      try {
+        const filePath = expandDesktopPath(validated.path);
+        const grant = requireLocalFileAccessGrant(req, parsed, filePath);
+        if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) throw new Error('path is not a file');
+        const cap = 8 * 1024 * 1024;
+        const maxBytes = Math.max(1024, Math.min(cap, Number(parsed.searchParams.get('maxBytes') || cap)));
+        if (stat.size > maxBytes) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `file is ${stat.size} bytes, over the ${maxBytes}-byte binary-read cap` }));
+          return;
+        }
+        const fd = fs.openSync(filePath, 'r');
+        const buffer = Buffer.alloc(stat.size);
+        fs.readSync(fd, buffer, 0, stat.size, 0);
+        fs.closeSync(fd);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, path: filePath, base64: buffer.toString('base64'), size: stat.size }));
       } catch (err) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));

@@ -307,6 +307,7 @@ export type OpenSwanRuntimeToolName =
   | 'engineering.draft_dxf'
   | 'engineering.model_3d'
   | 'engineering.calc'
+  | 'engineering.inspect_mesh'
   // ── Circle context snapshot — pre-built entity-linked index search that
   //    replaces N sequential list calls for what/which/who discovery ──────
   | 'context.search'
@@ -915,6 +916,7 @@ export type OpenSwanToolExecutionArgs = {
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown };
   'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
   'engineering.calc': { kind: string; args?: unknown };
+  'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
   'codebase.index':     { rootPath: string; maxFiles?: number };
   'codebase.search':    { query: string; limit?: number };
@@ -1218,6 +1220,7 @@ export type OpenSwanToolExecutionResultMap = {
   'engineering.draft_dxf': { ok: boolean; resultsText: string; dxf?: string; summary?: unknown };
   'engineering.model_3d': { ok: boolean; resultsText: string; script?: string; openscad?: string; summary?: unknown };
   'engineering.calc': { ok: boolean; resultsText: string; result?: unknown };
+  'engineering.inspect_mesh': { ok: boolean; resultsText: string; inspection?: unknown };
   'context.search':     { ok: boolean; resultsText: string };
   'codebase.index':     { ok: boolean; resultsText: string };
   'codebase.search':    { ok: boolean; resultsText: string };
@@ -2998,6 +3001,22 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       required: ['kind'],
     },
   },
+  // ─── Engineering mesh inspection (measure a real STL part) ──────────────
+  {
+    name: 'engineering.inspect_mesh',
+    label: 'Inspect 3D Part (STL)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Measures a binary STL mesh: exact bounding-box dimensions, enclosed volume (divergence-theorem integration), surface area, triangle count, and whether it is a watertight (printable/valid) closed solid. Give a material to also get mass. Use when an engineer sends or references a .stl part and asks its size, volume, weight, or printability; the measure-a-part counterpart to engineering.model_3d (which builds one). Reads the file locally via the desktop bridge (a scoped read grant is required).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to a binary .stl file.' },
+        material: { type: 'string', description: 'Optional material for mass: steel | stainless | aluminum | titanium | brass | abs | pla.' },
+      },
+      required: ['path'],
+    },
+  },
   // ─── Circle context snapshot — pre-built discovery index ─────────────────
   {
     name: 'context.search',
@@ -4753,6 +4772,16 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'engineering.inspect_mesh') {
+    return {
+      family: 'knowledge',
+      approvalMode: 'auto',
+      mutatesState: false,
+      externalSideEffect: false,
+      summary: 'Measures a local binary STL (dimensions, volume, surface area, watertightness, mass). Read-only; a scoped file-read grant is enforced at the read layer.',
+    };
+  }
+
   if (tool === 'engineering.calc') {
     return {
       family: 'knowledge',
@@ -5654,6 +5683,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'engineering.draft_dxf',
   'engineering.model_3d',
   'engineering.calc',
+  'engineering.inspect_mesh',
   // Progressive disclosure (T2) — the catalog search itself must always be
   // loop-callable so deferred tools stay reachable from a pinned-core turn.
   'tools.search',
@@ -6953,6 +6983,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'engineering.draft_dxf':
     case 'engineering.model_3d':
     case 'engineering.calc':
+    case 'engineering.inspect_mesh':
     case 'tools.search':
     case 'context.search':
     case 'codebase.index':
@@ -11557,6 +11588,49 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `${data.length} transcript match(es) for "${query}":\n${lines.join('\n')}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    // ── Engineering mesh inspection (measure a real STL part) ──────────
+    case 'engineering.inspect_mesh': {
+      try {
+        const { readFileBinary, statFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as OpenSwanToolExecutionArgs['engineering.inspect_mesh'];
+        const path = typeof a.path === 'string' ? a.path.trim() : '';
+        if (!path) return { ok: false, resultsText: 'path is required (absolute path to a binary .stl).' } as any;
+        if (!/\.stl$/i.test(path)) return { ok: false, resultsText: 'engineering.inspect_mesh expects a .stl file.' } as any;
+        const stat = await statFile(path);
+        if (!stat.ok || !stat.data) return { ok: false, resultsText: describeDesktopFailure(stat.error, stat.errorCode) } as any;
+        if (!stat.data.exists) return { ok: false, resultsText: `File not found: ${path.split('/').pop() || path}` } as any;
+        const read = await readFileBinary(path);
+        if (!read.ok || !read.data) return { ok: false, resultsText: describeDesktopFailure(read.error, read.errorCode) } as any;
+
+        const { inspectMesh, massFromVolume } = await import('./engineeringMeshInspectCore');
+        const insp = inspectMesh(read.data.bytes);
+        if (!insp.ok) return { ok: false, resultsText: `engineering.inspect_mesh: ${insp.error}` } as any;
+        const m = insp.value;
+
+        let massStr = '';
+        const material = typeof a.material === 'string' ? a.material.trim().toLowerCase() : '';
+        if (material && m.volumeReliable) {
+          const { MATERIALS } = await import('./engineeringCalcCore');
+          const mat = (MATERIALS as any)[material];
+          if (mat) {
+            const mass = massFromVolume(m.volume_mm3, mat.density);
+            if (mass.ok) massStr = ` | mass in ${material} = ${mass.value.mass_kg} kg`;
+          } else {
+            massStr = ` | unknown material "${material}" (known: ${Object.keys(MATERIALS).join(', ')})`;
+          }
+        }
+        const wtStr = m.watertight
+          ? 'watertight (closed solid — valid to print/machine)'
+          : `NOT watertight (${m.openEdges} open + ${m.nonManifoldEdges} non-manifold edges) — volume is unreliable`;
+        return {
+          ok: true,
+          inspection: m,
+          resultsText: `STL: ${m.bbox.dims.w}×${m.bbox.dims.d}×${m.bbox.dims.h} mm, ${m.triangles} triangles, ${wtStr}. Volume ${m.volume_mm3} mm³, surface area ${m.surfaceArea_mm2} mm²${massStr}.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: `engineering.inspect_mesh error: ${e.message}` } as any; }
+    }
+
     // ── Engineering calculations (pure, textbook-exact) ────────────────
     case 'engineering.calc': {
       try {
