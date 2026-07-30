@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'bolt' | 'nut' | 'elbow' | 'cam' | 'rack' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'helical_gear' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'bolt' | 'nut' | 'elbow' | 'cam' | 'rack' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'frame', 'bolt', 'nut', 'elbow', 'cam', 'rack', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section extruded to length; frame: welded box-member frame; bolt/nut: hex fastener; elbow: bent hollow pipe fitting; cam: disc cam from a dwell/rise/fall program; rack: involute gear rack (mates a pinion); custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'helical_gear', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'frame', 'bolt', 'nut', 'elbow', 'cam', 'rack', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; helical_gear: spur profile twisted at a helix angle; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section extruded to length; frame: welded box-member frame; bolt/nut: hex fastener; elbow: bent hollow pipe fitting; cam: disc cam from a dwell/rise/fall program; rack: involute gear rack; custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11866,6 +11866,22 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             script: sbpy.value,
             summary: v,
             resultsText: `Generated compression spring${v ? `: wire Ø${v.wireDiameter}, mean Ø${v.meanDiameter} (OD ${v.outerDiameter}), ${v.totalCoils} coils, free length ${v.freeLength} mm, index ${v.springIndex}` : ''}. Write the Blender bpy (${sbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Wire volume ≈ ${v ? v.wireVolume : '?'} mm³ (developed-length); size the rate with engineering.calc spring_rate.`,
+          } as any;
+        }
+
+        // A helical gear — the spur profile twisted at a helix angle across the face.
+        if (part === 'helical_gear') {
+          const { buildHelicalGearBlenderScript, helicalGearGeometry } = await import('./engineeringHelicalGearCore');
+          const hspec = (a.spec ?? {}) as any;
+          const hbpy = buildHelicalGearBlenderScript(hspec, stlOut);
+          if (!hbpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${hbpy.error}` } as any;
+          const hg = helicalGearGeometry(hspec);
+          const v = hg.ok ? hg.value : null;
+          return {
+            ok: true,
+            script: hbpy.value,
+            summary: v,
+            resultsText: `Generated helical gear${v ? `: Z${v.gear.teeth} module ${v.gear.module}, β${v.helixAngleDeg}° ${v.handedness}-hand — outside Ø${v.gear.outsideDiameter}, ${v.faceWidth} mm face, ${v.twistAngleDeg}° twist, volume ${v.volume} mm³` : ''}. Write the Blender bpy (${hbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured volume equals the spur gear's (profileArea−bore)·face by Cavalieri (twist-independent); mate with an opposite-hand gear of the same module + helix angle.`,
           } as any;
         }
 
