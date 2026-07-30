@@ -760,6 +760,17 @@ FINDINGS = [
             "engineeringCalcCore.gearPairTransmission (analysis composes the geometry)"
         ),
     },
+    {
+        "id": "pappus-revolve-a-third-independent-volume-anchor",
+        "q": "You keep verifying generated solids by measuring their volume. For a revolved part — a pulley, a shaft — what is the analytical anchor?",
+        "a": "Pappus\'s (second) theorem, and it is the most elegant anchor in the whole suite. The volume of a solid of revolution is exactly V = 2π·R̄·A: the area A of the 2D cross-section times the circumference 2π·R̄ traced by its centroid at radial distance R̄. Both quantities are closed-form polygon measures — A by the shoelace formula, R̄ by the polygon centroid formula — so you can PREDICT a revolved part\'s volume from its profile with no engine at all, then cross-check that prediction against the mesh inspector\'s divergence-theorem measurement of the actual revolved STL.\n\nWhat makes this powerful is that it is a THIRD, fully independent way to compute a solid\'s volume, joining CSG-analytical (a plate is w·d·t minus Σπr²t) and prism-analytical (area·height). Three different closed-form methods, each sharing no code with the mesh integrator, all landing on the same number is about as strong as verification gets short of a formal proof. Live: a rectangle-at-radius revolved into a tube measured 12563 mm³ against a Pappus prediction of 12566 (0.03%); and — the decisive case — a V-GROOVE PULLEY, whose cross-section is a 7-vertex notched polygon, measured 85228 against the Pappus prediction of 85250 (0.03%). The pulley matters because its shape is non-trivial: if the revolve, the Screw seam-merge, or the notch geometry were wrong, the measured volume would not match the Pappus value of that exact polygon. One number validates the whole part.\n\nTwo build lessons. First, generalize the fundamental operations, don\'t bury them: extrude was trapped inside the gear generator; promoting extrude and revolve to first-class operations (alongside the CSG lane) completed the modeling triad and unlocked every custom cross-section and every axisymmetric part from the same two functions. Second, a revolved part\'s bore is free — a cross-section offset from the axis (min radius > 0) revolves into a hollow part with no boolean needed, because the hole is just the region the profile never sweeps. And the Blender Screw modifier with use_merge_vertices was the integration risk (an unmerged 360° seam leaves an open, non-watertight surface), so it got a live test the moment the core compiled — it sealed cleanly on the first try.",
+        "evidence": (
+            "src/lib/engineeringProfileSolidCore.ts (polygon centroid/area, extrude/revolve volume, Screw-revolve bpy, pulley), "
+            "scripts/engineering-profile-solid-core-smoketest.ts (Pappus == tube-formula), "
+            "npm run drill:engineering-profile-solid (extrude 0.00%, revolve 0.03%, pulley 0.03% vs analytical, live), "
+            "engineering.model_3d 'extrude' / 'revolve' / 'pulley'"
+        ),
+    },
 ]
 
 

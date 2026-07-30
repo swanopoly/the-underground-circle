@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'custom'], description: 'plate: block+holes; bracket: L-shape; tube: cylinder+bore; flange: disc+bore+bolt circle; gear: involute spur gear; gear_pair: two meshing gears (a reduction stage); custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: any 2D profile → prism; revolve: any profile (x≥0) → solid of revolution; pulley: V-groove pulley; custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11712,6 +11712,37 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             script: pbpy.value,
             summary: v,
             resultsText: `Generated meshing gear pair${v ? `: Z${v.teeth1}:Z${v.teeth2} module ${v.module}, ratio ${Math.round(v.ratio * 1000) / 1000}:1, center distance ${v.centerDistance} mm (pitch circles tangent), ${Math.round(v.tipClearance * 100) / 100} mm clearance` : ''}. Write the Blender bpy (${pbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → one assembly STL. Measured span should equal ra₁ + C + ra₂.`,
+          } as any;
+        }
+
+        // Extrude / revolve / pulley — profile-based solids with their own bpy.
+        if (part === 'extrude' || part === 'revolve' || part === 'pulley') {
+          const psc = await import('./engineeringProfileSolidCore');
+          const spc = (a.spec ?? {}) as any;
+          let built: { ok: true; value: string } | { ok: false; error: string };
+          let vol: number | null = null;
+          if (part === 'extrude') {
+            const profile = a.profile ?? spc.profile;
+            const height = Number(a.height ?? spc.height);
+            built = psc.buildExtrudeBlenderScript(profile, height, stlOut, { boreDiameter: Number(spc.boreDiameter) });
+            const pv = psc.validateExtrudeProfile(profile);
+            if (pv.ok && Number.isFinite(height)) vol = psc.extrudeVolume(pv.value, height);
+          } else if (part === 'revolve') {
+            const profile = a.profile ?? spc.profile;
+            built = psc.buildRevolveBlenderScript(profile, stlOut, { segments: Number(spc.segments) });
+            const pv = psc.validateRevolveProfile(profile);
+            if (pv.ok) vol = psc.revolveVolume(pv.value);
+          } else {
+            built = psc.buildPulleyBlenderScript(spc, stlOut);
+            const pp = psc.pulleyProfile(spc);
+            if (pp.ok) vol = psc.revolveVolume(pp.value);
+          }
+          if (!built.ok) return { ok: false, resultsText: `engineering.model_3d: ${built.error}` } as any;
+          return {
+            ok: true,
+            script: built.value,
+            summary: vol !== null ? { analyticalVolume_mm3: Math.round(vol * 100) / 100, method: part === 'extrude' ? 'area×height' : "Pappus 2π·R̄·A" } : null,
+            resultsText: `Generated ${part} solid (${built.value.length}-byte bpy)${vol !== null ? `. Analytical volume ${Math.round(vol * 100) / 100} mm³ (${part === 'extrude' ? 'area×height' : "Pappus 2π·R̄·A"}) — the measured STL volume should match it` : ''}. Write it with desktop.file_write_text (.py), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL.`,
           } as any;
         }
 
