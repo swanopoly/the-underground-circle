@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section (i_beam/channel/angle) extruded to length; custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'extrude', 'revolve', 'pulley', 'spring', 'thread', 'sheet_metal', 'beam', 'frame', 'custom'], description: 'plate/bracket/tube/flange/gear/gear_pair; extrude: 2D profile → prism; revolve: profile → solid of revolution; pulley: V-groove pulley; spring: helical compression spring; thread: ISO metric threaded rod; sheet_metal: folded sheet-metal part; beam: structural section extruded to length; frame: welded frame of box members (portal/rectangular preset or members:[...]); custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11781,6 +11781,24 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             script: bbpy.value,
             summary: v,
             resultsText: `Generated structural beam${v ? `: ${v.label}, length ${v.length} mm — area ${v.area} mm², Iₓ ${v.Ix} mm⁴, Sₓ ${v.Sx} mm³, volume ${v.volume} mm³` : ''}. Write the Blender bpy (${bbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured volume should equal area·length; feed Iₓ/Sₓ to engineering.calc beam for deflection/stress under load.`,
+          } as any;
+        }
+
+        // A welded structural frame — box members unioned through the CSG lane.
+        if (part === 'frame') {
+          const { resolveFrameMembers, buildFrameBlenderScript, frameGeometry } = await import('./engineeringFrameCore');
+          const fspec = (a.spec ?? {}) as any;
+          const members = resolveFrameMembers(fspec);
+          if (!members.ok) return { ok: false, resultsText: `engineering.model_3d: ${members.error}` } as any;
+          const fbpy = buildFrameBlenderScript(members.value, stlOut);
+          if (!fbpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${fbpy.error}` } as any;
+          const fg = frameGeometry(members.value, typeof fspec.material === 'string' ? fspec.material : undefined);
+          const v = fg.ok ? fg.value : null;
+          return {
+            ok: true,
+            script: fbpy.value,
+            summary: v,
+            resultsText: `Generated welded frame${v ? `: ${v.memberCount} members, total length ${v.totalMemberLength} mm, envelope ${v.bbox.w}×${v.bbox.d}×${v.bbox.h} mm, union volume ${v.unionVolume} mm³${v.mass_kg ? `, ${v.mass_kg} kg ${v.material}` : ''}` : ''}. Write the Blender bpy (${fbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL (watertight). Measured volume should equal the inclusion-exclusion union ${v ? v.unionVolume : '?'} mm³ (members minus joint overlaps).`,
           } as any;
         }
 
