@@ -913,7 +913,7 @@ export type OpenSwanToolExecutionArgs = {
   'user_memory.manage': { action: 'append' | 'replace' | 'delete'; scope?: 'global' | 'circle'; content?: string; rationale?: string };
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
-  'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown };
+  'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
   'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
@@ -2963,6 +2963,8 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         spec: { type: 'object', description: 'For floorplan: {width,height,wallThickness?,rooms?,doors?,windows?,dimensions?} in mm. For schematic: {placements:[{symbol,x,y,label?}],wires?}. Symbols: resistor|capacitor|battery|ground|switch|lamp|junction.' },
         layers: { type: 'array', description: 'For custom: [{name,color?}] — names must match [A-Za-z0-9_$-], 1-31 chars.', items: { type: 'object' } },
         entities: { type: 'array', description: 'For custom: neutral entities (line/circle/arc/polyline/text/insert), each with a declared layer.', items: { type: 'object' } },
+        autoDimension: { type: 'boolean', description: 'Add overall width/height dimensions (turns geometry into a manufacturable drawing).' },
+        titleBlock: { type: 'object', description: 'Add a title block: {name,drawnBy,date,material,scale,tolerance}. Pass {} for defaults.' },
       },
       required: ['drawing'],
     },
@@ -11737,7 +11739,18 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         }
         if (!docResult.ok) return { ok: false, resultsText: `engineering.draft_dxf: ${docResult.error}` } as any;
 
-        const written = writeDxfR12(docResult.value);
+        // Turn geometry into a manufacturable drawing: overall dimensions +
+        // title block, when requested. Composes onto ANY drawing type.
+        let finalDoc = docResult.value;
+        if (a.autoDimension || a.titleBlock) {
+          const { annotateDrawing } = await import('./engineeringDimensionCore');
+          finalDoc = annotateDrawing(finalDoc, {
+            autoDimension: a.autoDimension === true,
+            titleBlock: (a.titleBlock && typeof a.titleBlock === 'object') ? a.titleBlock as any : (a.titleBlock ? {} : undefined),
+          });
+        }
+
+        const written = writeDxfR12(finalDoc);
         if (!written.ok) return { ok: false, resultsText: `engineering.draft_dxf: ${written.error}` } as any;
 
         // Parse the generated DXF back — the drawing's own proof of correctness.

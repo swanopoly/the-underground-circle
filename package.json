@@ -254,6 +254,7 @@
     "drill:engineering-solid": "npx tsx scripts/engineering-solid-modeling-live-drill.ts",
     "drill:engineering-drafting": "npx tsx scripts/engineering-drafting-live-drill.ts",
     "drill:unknown-app": "npx tsx scripts/unknown-app-ladder-drill.ts",
+    "smoke:engineering-dimension-core": "npx tsx scripts/engineering-dimension-core-smoketest.ts",
     "smoke:engineering-mesh-inspect-core": "npx tsx scripts/engineering-mesh-inspect-core-smoketest.ts",
     "smoke:engineering-calc-core": "npx tsx scripts/engineering-calc-core-smoketest.ts",
     "smoke:engineering-solid-modeling-core": "npx tsx scripts/engineering-solid-modeling-core-smoketest.ts",

@@ -22,6 +22,7 @@ import {
   ELECTRICAL_SYMBOLS,
   type DraftDocument,
 } from '../src/lib/engineeringDraftingCore';
+import { annotateDrawing, documentBoundingBox } from '../src/lib/engineeringDimensionCore';
 
 let passed = 0;
 const failures: string[] = [];
@@ -185,6 +186,30 @@ function main() {
 
     // Fail-closed: holes past the OD.
     assert(!buildBoltCircle({ outerDiameter: 100, centerBore: 0, count: 4, pcd: 95, holeDiameter: 12 }).ok, 'holes past OD rejected');
+  }
+
+  // ─── annotateDrawing: dimensions carry the MEASURED size ─────────
+  {
+    // A bolt-circle flange, OD 200. The overall-width dimension must read 200.
+    const bc = unwrap(buildBoltCircle({ outerDiameter: 200, centerBore: 80, count: 6, pcd: 150, holeDiameter: 14 }), 'bc for annotate');
+    const bbox = documentBoundingBox(bc)!;
+    assert(Math.round(bbox.maxX - bbox.minX) === 200, 'documentBoundingBox spans the OD (200)');
+
+    const annotated = annotateDrawing(bc, { autoDimension: true, titleBlock: { name: 'FLANGE-6H', material: 'Steel', scale: '1:2' } });
+    assert(annotated.layers.some((l) => l.name === 'DIMS'), 'DIMS layer declared by annotate');
+    assert(annotated.layers.some((l) => l.name === 'TITLE'), 'TITLE layer declared by annotate');
+    const dxf = unwrap(writeDxfR12(annotated), 'annotated → DXF');
+    // The overall-width dimension text is 200 = the OD — the geometry was
+    // measured, not passed in. A dimension that lies is a cut-the-wrong-part bug.
+    assert(dxf.includes('\n200\n'), 'overall-width dimension text "200" = the measured OD');
+    assert(dxf.includes('FLANGE-6H') && dxf.includes('Steel'), 'title block fields written');
+    const p = parseDxfForVerification(dxf);
+    assert(p.layers.includes('DIMS') && p.layers.includes('TITLE'), 'annotated DXF declares the new layers');
+    assert(p.totalEntities > bc.entities.length, 'annotation added entities (dims + title block)');
+
+    // Empty-doc annotate is a no-op, not a crash.
+    const empty = annotateDrawing({ layers: [], blocks: [], entities: [] }, { autoDimension: true });
+    assert(empty.entities.length === 0, 'annotating an empty drawing is a safe no-op');
   }
 
   // ─── The written DXF never contains a raw injected newline value ─

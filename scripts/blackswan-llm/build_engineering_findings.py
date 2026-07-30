@@ -727,6 +727,17 @@ FINDINGS = [
             "engineering.inspect_mesh + desktop.file_read_binary"
         ),
     },
+    {
+        "id": "a-dimension-must-equal-the-geometry-it-spans",
+        "q": "We generate CAD drawings. Adding dimensions seems cosmetic — why treat it as a correctness problem?",
+        "a": "Because a dimension is not a label, it is an INSTRUCTION. A drawing that shows a 90 mm feature annotated \"100\" tells the machinist to cut 100 — the part comes back wrong and the drawing, not the machinist, was lying. So the one property a dimensioning system must guarantee is that a dimension\'s text equals the actual geometric distance it spans, and the way to guarantee it is to never accept the value from the caller: MEASURE the geometry (horizontal → |Δx|, vertical → |Δy|, aligned → the true distance) and DERIVE the text from that measurement. The smoke then asserts text === formatDim(measuredDistance) for each orientation — a (0,0)-(30,40) aligned dimension must read \"50\", and reversing the points must still read \"50\" (absolute). If the value were an input, a copy-paste bug could silently ship a wrong dimension; because it is always computed from the points, that class of bug cannot occur.\n\nTwo implementation notes that keep it robust and portable. First, use EXPLODED (drawn) dimensions — extension lines, a dimension line with arrowheads, and the text as plain LINE + TEXT entities — rather than a real associative DXF DIMENSION entity. The associative entity needs a dimension-style table and an anonymous geometry block, and not every reader honors the style; the drawn form always renders and, crucially, the text is a value you computed and can therefore verify. Second, annotations must SCALE to the drawing: 2.5 mm text is right on a 120 mm bracket and invisible on a 12 000 mm floor plan, so derive text height / offset / arrow size from the drawing\'s bounding box (~3% of the smaller dimension) so the same code annotates both legibly.\n\nThe title block is the other half of manufacturability — name, material, scale, drawn-by, and a default-tolerance note are the metadata a shop needs — and its free-text fields go through the same newline-stripping bar as every other DXF text value, because a newline in a field would break out of the text tag exactly like an injected entity.\n\nThe general point: when a generated artifact will be ACTED ON by someone downstream (cut, drilled, ordered), correctness is not \"the entity is present\" — it is \"the value the human will act on is the true value.\" Verify the number, not just its existence.",
+        "evidence": (
+            "src/lib/engineeringDimensionCore.ts (linearDimension measures, never accepts, the value), "
+            "scripts/engineering-dimension-core-smoketest.ts (text===measured for h/v/aligned), "
+            "annotateDrawing + engineering.draft_dxf titleBlock/autoDimension, "
+            "live: annotated OD-200 flange → dimension text '200' present, dxf-verify.py agrees"
+        ),
+    },
 ]
 
 
