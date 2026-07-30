@@ -311,6 +311,10 @@ function buildRunbook(task: string, operation: EngineeringCadOperation): Enginee
       steps: [
         ...common,
         approvalStep('Model and BIM edits can affect production, manufacturing, or permit deliverables.'),
+        step('observe', 'Prefer engineering.model_3d for common parametric parts', 'For plate/block+holes, L-bracket, or tube/washer/spacer asks, engineering.model_3d generates a Blender bpy + OpenSCAD from a neutral CSG model with a nominal dimension summary — no hand-written CAD code. Write the .py, then desktop.cad_compile { engine: "blender" } → STL (live dimensionally verified). Fall through to hand-written OpenSCAD below for shapes outside the generator set.', {
+          tool: 'engineering.model_3d',
+          evidence: ['nominal W\u00d7D\u00d7H summary + generated script'],
+        }),
         step('act', 'Create NEW parts via local code-CAD when no existing document is the target', 'For "design/model a new part from description" asks (P15): generate OpenSCAD source (src/lib/cadCodeExecutor buildOpenScadCompilePlan), write it with desktop.file_write_text, compile to STL plus a PNG render proof, and iterate on compiler errors. Deterministic, headless, no CAD app required. Editing EXISTING app documents still needs the app-native route below.', {
           tool: 'desktop.cad_compile',
           approvalRequired: true,

@@ -685,6 +685,17 @@ FINDINGS = [
             "scripts/dxf-verify.py + npm run drill:engineering-drafting (cross-implementation live proof)"
         ),
     },
+    {
+        "id": "3d-modeling-generate-and-dimensionally-verify",
+        "q": "The 2D CAD generation worked. How do you do 3D solid modeling with the same rigor when the format is a mesh, not tagged data?",
+        "a": "Same architecture, different proof. A neutral CSG model (union of positive primitives minus a set of negatives) covers the vast majority of real mechanical parts — plates with mounting holes, brackets, tubes/washers/spacers — and compiles to two backends from one definition: a Blender bpy script (STL, runs on an already-live-proven cad_compile lane) and OpenSCAD .scad (for when that engine is installed). One model, two emitters, exactly like the DXF/.scr split.\n\nThe verification is where 2D and 3D genuinely differ. A DXF is tagged DATA, so you round-trip it through a parser. A bpy script is CODE — round-tripping the text proves nothing about whether it BUILDS. So the proof has two layers:\n  1. Pre-run (smoke): structural sanity of the generated script — balanced delimiters, no bare nan/inf tokens (a NaN coordinate emits `nan` and the whole script becomes a runtime error), the output path embedded as an injection-safe literal, and the NOMINAL bounding box computed from the model (a 120\u00d780\u00d710 plate must claim exactly that envelope; holes are negatives and must NOT change it).\n  2. Run (live drill): actually run Blender on the generated bpy, then read the resulting binary STL with an INDEPENDENT from-scratch parser (80-byte header + uint32 triangle count + 50 bytes/triangle) and assert two things — triangles > 0, and the STL's MEASURED bounding box matches the nominal dimensions within tolerance. A 120\u00d780\u00d710 plate came back as 1054 triangles measuring 120\u00d780\u00d710mm; a 30-OD tube as 512 triangles measuring 30\u00d730\u00d725mm.\n\nTwo details that carry correctness: use the EXACT boolean solver for CSG (the fast solver produces non-manifold garbage on coincident faces, which a hole through a plate always has), and set a dimensional TOLERANCE — a cylinder\u2019s faceting shrinks a bore\u2019s measured chord slightly, so the OUTER box dims are exact but a bore is a hair under nominal. Zero tolerance would false-fail every part with a hole.\n\nThe general lesson: when your generator emits a SCRIPT rather than DATA, structural validation is necessary but never sufficient — you have to RUN it against the real engine and measure the artifact. Text that parses is not a part that builds.",
+        "evidence": (
+            "src/lib/engineeringSolidModelingCore.ts (CSG model, bpy+scad emitters, nominal bbox), "
+            "scripts/stl-verify.py (independent binary-STL reader), "
+            "npm run drill:engineering-solid (real Blender → STL dimensional check), "
+            "engineering.model_3d runtime tool"
+        ),
+    },
 ]
 
 

@@ -305,6 +305,7 @@ export type OpenSwanRuntimeToolName =
   //    tools mid-run instead of advertising all ~157 schemas every turn ──
   | 'tools.search'
   | 'engineering.draft_dxf'
+  | 'engineering.model_3d'
   // ── Circle context snapshot — pre-built entity-linked index search that
   //    replaces N sequential list calls for what/which/who discovery ──────
   | 'context.search'
@@ -911,6 +912,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
   'context.search':     { query: string; section?: string };
   'codebase.index':     { rootPath: string; maxFiles?: number };
   'codebase.search':    { query: string; limit?: number };
@@ -1212,6 +1214,7 @@ export type OpenSwanToolExecutionResultMap = {
   'messages.search':    { ok: boolean; resultsText: string };
   'tools.search':       { ok: boolean; resultsText: string; matches: OpenSwanToolCatalogMatch[] };
   'engineering.draft_dxf': { ok: boolean; resultsText: string; dxf?: string; summary?: unknown };
+  'engineering.model_3d': { ok: boolean; resultsText: string; script?: string; openscad?: string; summary?: unknown };
   'context.search':     { ok: boolean; resultsText: string };
   'codebase.index':     { ok: boolean; resultsText: string };
   'codebase.search':    { ok: boolean; resultsText: string };
@@ -2956,6 +2959,24 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         entities: { type: 'array', description: 'For custom: neutral entities (line/circle/arc/polyline/text/insert), each with a declared layer.', items: { type: 'object' } },
       },
       required: ['drawing'],
+    },
+  },
+  // ─── Engineering 3D solid modeling (pure computation → Blender/OpenSCAD) ─
+  {
+    name: 'engineering.model_3d',
+    label: 'Model 3D Part (STL/OpenSCAD)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Generates a parametric 3D solid — plate/block with mounting holes, L-bracket, or tube/washer/spacer — as a Blender bpy script (runs on desktop.cad_compile engine "blender" → STL, live-proven) and an OpenSCAD .scad. Pure computation: returns both scripts plus a nominal dimension summary (W×D×H, bbox) so you can confirm the size before writing the .py with desktop.file_write_text and compiling. Use for 3D modeling, mounting plates, brackets, spacers, and bores. For 2D drawings use engineering.draft_dxf instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'custom'], description: 'plate: block+holes; bracket: L-shape; tube: cylinder+bore; custom: your own positives/negatives.' },
+        spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
+        model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
+        format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
+      },
+      required: ['part'],
     },
   },
   // ─── Circle context snapshot — pre-built discovery index ─────────────────
@@ -4713,13 +4734,15 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
-  if (tool === 'engineering.draft_dxf') {
+  if (tool === 'engineering.draft_dxf' || tool === 'engineering.model_3d') {
     return {
       family: 'knowledge',
       approvalMode: 'auto',
       mutatesState: false,
       externalSideEffect: false,
-      summary: 'Generates a CAD drawing (DXF R12) plus a parsed-back verification summary. Pure computation — writing the file to disk is a separate approval-gated desktop.file_write_text step.',
+      summary: tool === 'engineering.model_3d'
+        ? 'Generates a parametric 3D solid as a Blender bpy + OpenSCAD script plus a nominal dimension summary. Pure computation — writing the script and compiling to STL are separate approval-gated steps.'
+        : 'Generates a CAD drawing (DXF R12) plus a parsed-back verification summary. Pure computation — writing the file to disk is a separate approval-gated desktop.file_write_text step.',
     };
   }
 
@@ -5600,6 +5623,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'messages.search',
   // Pure CAD computation — safe to run in the loop; the file write is separate.
   'engineering.draft_dxf',
+  'engineering.model_3d',
   // Progressive disclosure (T2) — the catalog search itself must always be
   // loop-callable so deferred tools stay reachable from a pinned-core turn.
   'tools.search',
@@ -6897,6 +6921,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'user_memory.manage':
     case 'messages.search':
     case 'engineering.draft_dxf':
+    case 'engineering.model_3d':
     case 'tools.search':
     case 'context.search':
     case 'codebase.index':
@@ -11501,6 +11526,43 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, resultsText: `${data.length} transcript match(es) for "${query}":\n${lines.join('\n')}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    // ── Engineering 3D solid modeling (pure bpy/OpenSCAD generation) ────
+    case 'engineering.model_3d': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['engineering.model_3d'];
+        const {
+          writeBlenderSolidScript, writeOpenScadSolid, summarizeSolidModel, validateSolidModel,
+          buildPlateWithHoles, buildBracket, buildTube,
+        } = await import('./engineeringSolidModelingCore');
+        const part = String(a.part || '').trim();
+
+        let modelResult: { ok: true; value: any } | { ok: false; error: string };
+        if (part === 'plate') modelResult = buildPlateWithHoles((a.spec ?? {}) as any);
+        else if (part === 'bracket') modelResult = buildBracket((a.spec ?? {}) as any);
+        else if (part === 'tube') modelResult = buildTube((a.spec ?? {}) as any);
+        else if (part === 'custom') modelResult = validateSolidModel((a.model ?? {}) as any);
+        else return { ok: false, resultsText: 'engineering.model_3d part must be plate | bracket | tube | custom.' } as any;
+
+        if (!modelResult.ok) return { ok: false, resultsText: `engineering.model_3d: ${modelResult.error}` } as any;
+
+        // The output STL path the bpy embeds. The agent writes the .py, then
+        // cad_compile { engine:'blender' } with a matching outputPath.
+        const stlPath = typeof a.outputPath === 'string' && a.outputPath.trim() ? a.outputPath.trim() : '/tmp/uc-model.stl';
+        const bpy = writeBlenderSolidScript(modelResult.value, stlPath);
+        if (!bpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${bpy.error}` } as any;
+        const scad = writeOpenScadSolid(modelResult.value);
+        const sum = summarizeSolidModel(modelResult.value);
+        const dims = sum.dimensions ? `${sum.dimensions.w}×${sum.dimensions.d}×${sum.dimensions.h}` : 'unknown';
+        return {
+          ok: true,
+          script: bpy.value,
+          openscad: scad.ok ? scad.value : undefined,
+          summary: sum,
+          resultsText: `Generated ${part} 3D model: nominal ${dims} (${(modelResult.value.units ?? 'mm')}), ${sum.positiveCount} positive − ${sum.negativeCount} negative primitive(s). Write the Blender bpy (${bpy.value.length} bytes) with desktop.file_write_text (.py), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlPath)} } to build the verified STL. An OpenSCAD .scad is also provided for the openscad engine.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: `engineering.model_3d error: ${e.message}` } as any; }
+    }
+
     // ── Engineering CAD drafting (pure DXF generation + verification) ────
     case 'engineering.draft_dxf': {
       try {
