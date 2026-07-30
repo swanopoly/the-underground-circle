@@ -914,7 +914,7 @@ export type OpenSwanToolExecutionArgs = {
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
   'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -11679,6 +11679,24 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           buildPlateWithHoles, buildBracket, buildTube, buildFlange,
         } = await import('./engineeringSolidModelingCore');
         const part = String(a.part || '').trim();
+        const stlOut = typeof a.outputPath === 'string' && a.outputPath.trim() ? a.outputPath.trim() : '/tmp/uc-model.stl';
+
+        // A gear is an EXTRUDED involute profile, not a CSG of box/cylinder
+        // primitives, so it has its own bpy path and returns here.
+        if (part === 'gear') {
+          const { buildSpurGearBlenderScript, gearGeometry } = await import('./engineeringGearCore');
+          const gspec = (a.spec ?? {}) as any;
+          const gbpy = buildSpurGearBlenderScript(gspec, stlOut);
+          if (!gbpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${gbpy.error}` } as any;
+          const geo = gearGeometry(gspec.teeth, gspec.module, gspec.pressureAngleDeg ?? 20);
+          const g = geo.ok ? geo.value : null;
+          return {
+            ok: true,
+            script: gbpy.value,
+            summary: g,
+            resultsText: `Generated spur gear: ${g ? `Z${g.teeth} module ${g.module} PA${g.pressureAngleDeg}° — pitch Ø${g.pitchDiameter}, outside Ø${g.outsideDiameter}, root Ø${Math.round(g.rootDiameter * 100) / 100} mm${g.undercut ? ' (undercut)' : ''}` : ''}. Write the Blender bpy (${gbpy.value.length} bytes) with desktop.file_write_text (.py), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL. Measured OD should equal (N+2)·module.`,
+          } as any;
+        }
 
         let modelResult: { ok: true; value: any } | { ok: false; error: string };
         if (part === 'plate') modelResult = buildPlateWithHoles((a.spec ?? {}) as any);
@@ -11686,13 +11704,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         else if (part === 'tube') modelResult = buildTube((a.spec ?? {}) as any);
         else if (part === 'flange') modelResult = buildFlange((a.spec ?? {}) as any);
         else if (part === 'custom') modelResult = validateSolidModel((a.model ?? {}) as any);
-        else return { ok: false, resultsText: 'engineering.model_3d part must be plate | bracket | tube | custom.' } as any;
+        else return { ok: false, resultsText: 'engineering.model_3d part must be plate | bracket | tube | flange | gear | custom.' } as any;
 
         if (!modelResult.ok) return { ok: false, resultsText: `engineering.model_3d: ${modelResult.error}` } as any;
 
-        // The output STL path the bpy embeds. The agent writes the .py, then
-        // cad_compile { engine:'blender' } with a matching outputPath.
-        const stlPath = typeof a.outputPath === 'string' && a.outputPath.trim() ? a.outputPath.trim() : '/tmp/uc-model.stl';
+        // The output STL path the bpy embeds (same value the gear path used).
+        const stlPath = stlOut;
         const bpy = writeBlenderSolidScript(modelResult.value, stlPath);
         if (!bpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${bpy.error}` } as any;
         const scad = writeOpenScadSolid(modelResult.value);

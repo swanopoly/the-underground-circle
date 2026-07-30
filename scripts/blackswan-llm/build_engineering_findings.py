@@ -738,6 +738,17 @@ FINDINGS = [
             "live: annotated OD-200 flange → dimension text '200' present, dxf-verify.py agrees"
         ),
     },
+    {
+        "id": "involute-gears-exact-invariants-plus-a-de-risking-live-test",
+        "q": "An involute gear tooth is genuinely hard geometry. How do you build it and be sure it is right?",
+        "a": "Anchor on the exact closed-form invariants, then let a live measurement close the loop. An involute spur gear has properties that depend ONLY on the module m and tooth count N: pitch diameter m·N, outside/tip diameter m·(N+2), root m·(N−2.5), base circle (m·N)·cos(φ), circular pitch π·m. Every one is a hard number the smoke pins against textbook truth. The tooth flank itself is the involute of the base circle: a point at radius r sits at polar angle ψ(r) = π/(2N) + inv(φ) − inv(acos(rb/r)) from the tooth center, where inv(a) = tan(a) − a. At the pitch radius α = φ so ψ = π/(2N) — a half-tooth — which is the defining property (tooth thickness = space at the pitch circle), and the smoke checks the generated profile actually crosses the pitch circle at that angle.\n\nBut invariants prove the NUMBERS, not that the profile becomes a valid solid. Two things carry that. First, count teeth structurally — walk the generated outline and count clusters of near-tip-radius points; it must equal N. Second, and decisively, close the loop with the mesh inspector already built: extrude the 2D profile into a 3D solid, run it through real Blender, measure the result\'s bounding box, and assert the measured outside diameter equals m·(N+2). If the involute angle, the tooth spacing, the extrude, or the bore boolean were wrong, that one measured number would not land. Live across an undercut gear (Z12), a standard one (Z24), and a fine larger one (Z40), the measured ODs hit m·(N+2) to within 0.02%, all watertight.\n\nThe process lesson matters as much as the gear: the involute-profile-as-a-concave-polygon extruded in Blender was the single most likely thing to fail (a concave n-gon face, a bmesh op that behaves differently across versions), so it got a LIVE test the moment the core compiled — before wiring any tool, docs, or smoke. It passed on the first try, but the point is that de-risking the riskiest integration first is what keeps a big build from collapsing at the end. Two real gotchas confirmed along the way: undercut (root below base) is not a small-gear curiosity — it occurs for N < 2·dedendum/(m(1−cosφ)) ≈ 41.5 teeth at 20°, so a 40-tooth gear undercuts and a test that assumed otherwise was wrong (the code was right); and the extrude needs the EXACT boolean solver for the bore, same as every other CSG hole, because the fast solver makes non-manifold garbage on the coincident bore faces.",
+        "evidence": (
+            "src/lib/engineeringGearCore.ts (geometry + involute profile + bmesh-extrude bpy), "
+            "scripts/engineering-gear-core-smoketest.ts (exact invariants + tooth count + pitch-crossing), "
+            "npm run drill:engineering-gear (Z12/Z24/Z40 → Blender → measured OD = m·(N+2), live), "
+            "engineering.draft_dxf 'gear' + engineering.model_3d 'gear'"
+        ),
+    },
 ]
 
 
