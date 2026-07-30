@@ -264,6 +264,7 @@
     "drill:engineering-solid": "npx tsx scripts/engineering-solid-modeling-live-drill.ts",
     "drill:engineering-drafting": "npx tsx scripts/engineering-drafting-live-drill.ts",
     "drill:unknown-app": "npx tsx scripts/unknown-app-ladder-drill.ts",
+    "smoke:engineering-fluid-core": "npx tsx scripts/engineering-fluid-core-smoketest.ts",
     "smoke:engineering-pipe-core": "npx tsx scripts/engineering-pipe-core-smoketest.ts",
     "smoke:engineering-fastener-core": "npx tsx scripts/engineering-fastener-core-smoketest.ts",
     "smoke:engineering-tolerance-core": "npx tsx scripts/engineering-tolerance-core-smoketest.ts",

@@ -2997,7 +2997,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | pipe_flow | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11682,8 +11682,18 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: 'tolerance stack-up', value: s.nominal, unit: 'mm nominal', formula: 'worst-case = Σ|tol|; RSS = √Σtol²', inputs: { dimensions: s.contributorCount }, extra: { nominal_mm: s.nominal, min_mm: s.min, max_mm: s.max, worst_case_tol: s.worstCaseTolerance, rss_tol: s.rssTolerance }, notes: [`Worst-case ±${s.worstCaseTolerance} (guaranteed), RSS ±${s.rssTolerance} (statistical)${s.largestContributor ? `; largest contributor: ${s.largestContributor.label} ±${s.largestContributor.halfTol}` : ''}.`] };
             break;
           }
+          case 'pipe_flow': {
+            const t = await import('./engineeringFluidCore');
+            const fr = t.pipeFlow(x);
+            if (!fr.ok) return { ok: false, resultsText: `engineering.calc: ${fr.error}` } as any;
+            const f = fr.value;
+            const extra: Record<string, number> = { reynolds: f.reynolds, friction_factor: f.frictionFactor, velocity_m_s: f.velocity_m_s, flow_L_min: f.flowRate_L_min };
+            if (f.headLoss_m !== null) { extra.head_loss_m = f.headLoss_m; extra.pressure_drop_kPa = f.pressureDrop_kPa!; extra.pressure_drop_Pa = f.pressureDrop_Pa!; }
+            r = { ok: true, quantity: `pipe flow (${f.fluid}, Ø${f.diameter_mm} mm)`, value: f.pressureDrop_kPa ?? f.reynolds, unit: f.pressureDrop_kPa !== null ? 'kPa (Δp)' : '(Reynolds)', formula: 'Re=ρVD/μ; f=64/Re | Swamee–Jain; Δp=f(L/D)ρV²/2', inputs: { diameter_mm: f.diameter_mm, velocity_m_s: f.velocity_m_s }, extra, notes: [`${f.regime} flow.${f.length_m !== null ? ` Over ${f.length_m} m: Δp ${f.pressureDrop_kPa} kPa, head loss ${f.headLoss_m} m of fluid.` : ' Pass a length for the pressure drop.'}`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
