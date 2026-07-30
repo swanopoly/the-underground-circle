@@ -2997,8 +2997,8 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
-        args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; column_buckling {momentOfInertia,length,endCondition,material}; shaft_torsion {torque,diameter,length,material}; tap_drill {thread:"M8"}; convert {value,from,to}.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | iso_fit | tolerance_stack | spring_rate | gear_pair | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
     },
@@ -11662,8 +11662,28 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           case 'shaft_torsion': r = c.shaftTorsion(x); break;
           case 'thermal_expansion': r = c.thermalExpansion(x); break;
           case 'pressure_vessel': r = c.pressureVessel(x); break;
+          case 'iso_fit': {
+            const t = await import('./engineeringToleranceCore');
+            const nominal = Number(x.nominal ?? x.diameter);
+            const fr = (typeof x.hole === 'string' && typeof x.shaft === 'string')
+              ? t.isoFit(nominal, String(x.hole), String(x.shaft))
+              : t.fitClearanceExplicit(nominal, x.holeDeviations ?? {}, x.shaftDeviations ?? {});
+            if (!fr.ok) return { ok: false, resultsText: `engineering.calc: ${fr.error}` } as any;
+            const f = fr.value;
+            r = { ok: true, quantity: `fit ${f.hole.spec}/${f.shaft.spec} @ Ø${f.nominal}`, value: f.minClearance_um, unit: 'µm min clearance (− = interference)', formula: 'clearance = hole − shaft', inputs: { nominal_mm: f.nominal }, extra: { min_clearance_um: f.minClearance_um, max_clearance_um: f.maxClearance_um, hole_upper_mm: f.hole.upper_mm, hole_lower_mm: f.hole.lower_mm, shaft_upper_mm: f.shaft.upper_mm, shaft_lower_mm: f.shaft.lower_mm }, notes: [`${f.fitType} fit.`] };
+            break;
+          }
+          case 'tolerance_stack': {
+            const t = await import('./engineeringToleranceCore');
+            const dims = Array.isArray(x.dims) ? x.dims : (Array.isArray(x) ? x : []);
+            const sr = t.toleranceStackup(dims);
+            if (!sr.ok) return { ok: false, resultsText: `engineering.calc: ${sr.error}` } as any;
+            const s = sr.value;
+            r = { ok: true, quantity: 'tolerance stack-up', value: s.nominal, unit: 'mm nominal', formula: 'worst-case = Σ|tol|; RSS = √Σtol²', inputs: { dimensions: s.contributorCount }, extra: { nominal_mm: s.nominal, min_mm: s.min, max_mm: s.max, worst_case_tol: s.worstCaseTolerance, rss_tol: s.rssTolerance }, notes: [`Worst-case ±${s.worstCaseTolerance} (guaranteed), RSS ±${s.rssTolerance} (statistical)${s.largestContributor ? `; largest contributor: ${s.largestContributor.label} ±${s.largestContributor.halfTol}` : ''}.`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
