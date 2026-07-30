@@ -344,6 +344,47 @@ export function rcTimeConstant(args: { resistance: number; capacitance: number }
   };
 }
 
+// ─── Gear pair (power transmission — composes the geometry lane) ─────────────
+
+/**
+ * Spur gear-pair transmission: ratio, center distance, and how it transforms
+ * torque and speed. Torque multiplies by the ratio, speed divides by it (an
+ * ideal, loss-free stage). Shares the exact geometry the gear-train generator
+ * draws, so an engineer sizes the reduction here then draws/models it.
+ */
+export function gearPairTransmission(args: {
+  pinionTeeth: number;
+  gearTeeth: number;
+  module: number;
+  /** Optional input side for the torque/speed transform. */
+  inputTorque_Nm?: number;
+  inputSpeed_rpm?: number;
+}): CalcResult {
+  const N1 = Math.trunc(Number(args.pinionTeeth));
+  const N2 = Math.trunc(Number(args.gearTeeth));
+  const m = pos(args.module);
+  if (!Number.isFinite(N1) || N1 < 4 || !Number.isFinite(N2) || N2 < 4) return bad('gear pair needs both tooth counts ≥ 4');
+  if (m === null) return bad('module must be positive (mm)');
+  const ratio = N2 / N1;
+  const C = (m * (N1 + N2)) / 2;
+  const extra: Record<string, number> = { ratio: round(ratio, 4), center_distance_mm: round(C), pinion_pitch_dia_mm: m * N1, gear_pitch_dia_mm: m * N2 };
+  const notes: string[] = [`Ratio ${round(ratio, 3)}:1, center distance ${round(C)} mm (pitch circles tangent).`];
+  if (args.inputTorque_Nm !== undefined) {
+    const t = fin(args.inputTorque_Nm);
+    if (t !== null) { extra.output_torque_Nm = round(t * ratio); notes.push(`Output torque = input · ratio = ${round(t * ratio)} N·m.`); }
+  }
+  if (args.inputSpeed_rpm !== undefined) {
+    const rpm = fin(args.inputSpeed_rpm);
+    if (rpm !== null) { extra.output_speed_rpm = round(rpm / ratio); notes.push(`Output speed = input / ratio = ${round(rpm / ratio)} rpm.`); }
+  }
+  return {
+    ok: true, quantity: 'gear pair transmission', value: round(ratio, 4), unit: ':1 (ratio)',
+    formula: 'i = N₂/N₁, C = m·(N₁+N₂)/2, Tout = Tin·i, ωout = ωin/i',
+    inputs: { pinion_teeth: N1, gear_teeth: N2, module_mm: m },
+    extra, notes,
+  };
+}
+
 // ─── Unit conversion ─────────────────────────────────────────────────────────
 
 /** Conversion factors to a canonical base unit per dimension. */

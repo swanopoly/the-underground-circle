@@ -913,8 +913,8 @@ export type OpenSwanToolExecutionArgs = {
   'user_memory.manage': { action: 'append' | 'replace' | 'delete'; scope?: 'global' | 'circle'; content?: string; rationale?: string };
   'messages.search':    { query: string; threadId?: string; limit?: number; response_format?: ToolResponseFormat };
   'tools.search':       { query: string; family?: string };
-  'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
-  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
+  'engineering.draft_dxf': { drawing: 'floorplan' | 'schematic' | 'boltcircle' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; entities?: unknown; layers?: unknown; autoDimension?: boolean; titleBlock?: unknown };
+  'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
   'context.search':     { query: string; section?: string };
@@ -2959,7 +2959,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        drawing: { type: 'string', enum: ['floorplan', 'schematic', 'boltcircle', 'custom'], description: 'floorplan: parametric building; schematic: electrical symbols; boltcircle: flange/hole pattern; custom: your own layers + entities.' },
+        drawing: { type: 'string', enum: ['floorplan', 'schematic', 'boltcircle', 'gear', 'gear_pair', 'custom'], description: 'floorplan: parametric building; schematic: electrical symbols; boltcircle: flange/hole pattern; gear: involute spur gear; gear_pair: two meshing gears; custom: your own layers + entities.' },
         spec: { type: 'object', description: 'For floorplan: {width,height,wallThickness?,rooms?,doors?,windows?,dimensions?} in mm. For schematic: {placements:[{symbol,x,y,label?}],wires?}. Symbols: resistor|capacitor|battery|ground|switch|lamp|junction.' },
         layers: { type: 'array', description: 'For custom: [{name,color?}] — names must match [A-Za-z0-9_$-], 1-31 chars.', items: { type: 'object' } },
         entities: { type: 'array', description: 'For custom: neutral entities (line/circle/arc/polyline/text/insert), each with a declared layer.', items: { type: 'object' } },
@@ -2979,7 +2979,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'custom'], description: 'plate: block+holes; bracket: L-shape; tube: cylinder+bore; flange: disc+bore+bolt circle; custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'gear', 'gear_pair', 'custom'], description: 'plate: block+holes; bracket: L-shape; tube: cylinder+bore; flange: disc+bore+bolt circle; gear: involute spur gear; gear_pair: two meshing gears (a reduction stage); custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11656,8 +11656,9 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           case 'rc': r = c.rcTimeConstant(x); break;
           case 'convert': r = c.convertUnit(Number(x.value), String(x.from ?? ''), String(x.to ?? '')); break;
           case 'material': r = c.materialProps(String(x.material ?? x.name ?? '')); break;
+          case 'gear_pair': r = c.gearPairTransmission(x); break;
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
@@ -11695,6 +11696,22 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             script: gbpy.value,
             summary: g,
             resultsText: `Generated spur gear: ${g ? `Z${g.teeth} module ${g.module} PA${g.pressureAngleDeg}° — pitch Ø${g.pitchDiameter}, outside Ø${g.outsideDiameter}, root Ø${Math.round(g.rootDiameter * 100) / 100} mm${g.undercut ? ' (undercut)' : ''}` : ''}. Write the Blender bpy (${gbpy.value.length} bytes) with desktop.file_write_text (.py), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → STL. Measured OD should equal (N+2)·module.`,
+          } as any;
+        }
+
+        // A gear PAIR is an assembly of two positioned gears — its own bpy path.
+        if (part === 'gear_pair') {
+          const { buildGearPairBlenderScript, gearPairGeometry } = await import('./engineeringGearTrainCore');
+          const pspec = (a.spec ?? {}) as any;
+          const pbpy = buildGearPairBlenderScript(pspec, stlOut);
+          if (!pbpy.ok) return { ok: false, resultsText: `engineering.model_3d: ${pbpy.error}` } as any;
+          const pg = gearPairGeometry(pspec);
+          const v = pg.ok ? pg.value : null;
+          return {
+            ok: true,
+            script: pbpy.value,
+            summary: v,
+            resultsText: `Generated meshing gear pair${v ? `: Z${v.teeth1}:Z${v.teeth2} module ${v.module}, ratio ${Math.round(v.ratio * 1000) / 1000}:1, center distance ${v.centerDistance} mm (pitch circles tangent), ${Math.round(v.tipClearance * 100) / 100} mm clearance` : ''}. Write the Blender bpy (${pbpy.value.length} bytes), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(stlOut)} } → one assembly STL. Measured span should equal ra₁ + C + ra₂.`,
           } as any;
         }
 
@@ -11742,6 +11759,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           docResult = buildElectricalSchematic((a.spec ?? {}) as any);
         } else if (drawing === 'boltcircle') {
           docResult = buildBoltCircle((a.spec ?? {}) as any);
+        } else if (drawing === 'gear') {
+          const { buildSpurGearDrawing } = await import('./engineeringGearCore');
+          docResult = buildSpurGearDrawing((a.spec ?? {}) as any);
+        } else if (drawing === 'gear_pair') {
+          const { buildGearPairDrawing } = await import('./engineeringGearTrainCore');
+          docResult = buildGearPairDrawing((a.spec ?? {}) as any);
         } else if (drawing === 'custom') {
           const layers = Array.isArray(a.layers) ? a.layers : [];
           const entities = Array.isArray(a.entities) ? a.entities : [];

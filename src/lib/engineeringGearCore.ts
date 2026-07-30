@@ -188,6 +188,71 @@ export function buildSpurGearDrawing(spec: GearSpec): GearResult<DraftDocument> 
 
 // ─── 3D extruded gear (Blender bpy: profile → extrude → bore → STL) ──────────
 
+/** The fixed bpy prelude shared by single-gear and gear-assembly scripts. */
+export function gearBpyPrelude(): string[] {
+  return ['import bpy', 'import bmesh', 'import math', '', 'bpy.ops.wm.read_factory_settings(use_empty=True)', ''];
+}
+
+/**
+ * bpy lines that build ONE extruded, bored gear object from an already-
+ * positioned 2D profile (points are in world XY — a gear meant to sit at a
+ * center other than the origin has its profile pre-transformed). `suffix`
+ * makes the variable names unique so several gears can coexist in one script;
+ * `boreCx/boreCy` place the bore cylinder at that gear's center.
+ *
+ * This is the reusable unit: buildSpurGearBlenderScript wraps ONE of these, the
+ * gear-train builder composes SEVERAL, and every one uses the identical
+ * proven bmesh-extrude + EXACT-boolean-bore path.
+ */
+export function gearObjectBpyLines(
+  profilePoints: readonly DraftPoint[],
+  width: number,
+  boreR: number,
+  boreCx: number,
+  boreCy: number,
+  suffix: string,
+): string[] {
+  const profileLiteral = `[${profilePoints.map((p) => `(${fmt(p.x)}, ${fmt(p.y)})`).join(', ')}]`;
+  const v = (name: string) => `${name}${suffix}`;
+  return [
+    `PROFILE${suffix} = ${profileLiteral}`,
+    `WIDTH${suffix} = ${fmt(width)}`,
+    `BORE_R${suffix} = ${fmt(boreR)}`,
+    `BORE_C${suffix} = (${fmt(boreCx)}, ${fmt(boreCy)})`,
+    '',
+    `${v('mesh')} = bpy.data.meshes.new('gear${suffix}')`,
+    `${v('obj')} = bpy.data.objects.new('gear${suffix}', ${v('mesh')})`,
+    `bpy.context.collection.objects.link(${v('obj')})`,
+    `${v('bm')} = bmesh.new()`,
+    `${v('vs')} = [${v('bm')}.verts.new((p[0], p[1], 0.0)) for p in PROFILE${suffix}]`,
+    `${v('face')} = None`,
+    'try:',
+    `    ${v('face')} = ${v('bm')}.faces.new(${v('vs')})`,
+    'except ValueError:',
+    `    ${v('face')} = None`,
+    `if ${v('face')} is not None:`,
+    `    ${v('res')} = bmesh.ops.extrude_face_region(${v('bm')}, geom=[${v('face')}])`,
+    `    ${v('ext')} = [e for e in ${v('res')}['geom'] if isinstance(e, bmesh.types.BMVert)]`,
+    `    bmesh.ops.translate(${v('bm')}, verts=${v('ext')}, vec=(0.0, 0.0, WIDTH${suffix}))`,
+    `    bmesh.ops.recalc_face_normals(${v('bm')}, faces=${v('bm')}.faces)`,
+    `${v('bm')}.to_mesh(${v('mesh')})`,
+    `${v('bm')}.free()`,
+    `bpy.context.view_layer.objects.active = ${v('obj')}`,
+    '',
+    `if BORE_R${suffix} > 0.0:`,
+    `    bpy.ops.mesh.primitive_cylinder_add(radius=BORE_R${suffix}, depth=WIDTH${suffix} * 2.0 + 2.0, location=(BORE_C${suffix}[0], BORE_C${suffix}[1], WIDTH${suffix} / 2.0), vertices=64)`,
+    `    ${v('cut')} = bpy.context.active_object`,
+    `    ${v('mod')} = ${v('obj')}.modifiers.new(name='ucbore${suffix}', type='BOOLEAN')`,
+    `    ${v('mod')}.operation = 'DIFFERENCE'`,
+    `    ${v('mod')}.solver = 'EXACT'`,
+    `    ${v('mod')}.object = ${v('cut')}`,
+    `    bpy.context.view_layer.objects.active = ${v('obj')}`,
+    `    bpy.ops.object.modifier_apply(modifier=${v('mod')}.name)`,
+    `    bpy.data.objects.remove(${v('cut')}, do_unlink=True)`,
+    '',
+  ];
+}
+
 /**
  * A self-contained bpy script that builds the gear as an extruded prism of the
  * involute profile, optionally bores a center hole, and exports STL. Uses
@@ -204,45 +269,9 @@ export function buildSpurGearBlenderScript(spec: GearSpec, outputStlPath: string
   const bore = Number(spec.boreDiameter);
   const boreR = Number.isFinite(bore) && bore > 0 && bore < g.rootDiameter ? bore / 2 : 0;
 
-  const profileLiteral = `[${prof.value.points.map((p) => `(${fmt(p.x)}, ${fmt(p.y)})`).join(', ')}]`;
-
   const lines = [
-    'import bpy', 'import bmesh', 'import math', '',
-    'bpy.ops.wm.read_factory_settings(use_empty=True)', '',
-    `PROFILE = ${profileLiteral}`,
-    `WIDTH = ${fmt(width)}`,
-    `BORE_R = ${fmt(boreR)}`,
-    '',
-    "mesh = bpy.data.meshes.new('gear')",
-    "obj = bpy.data.objects.new('gear', mesh)",
-    'bpy.context.collection.objects.link(obj)',
-    'bm = bmesh.new()',
-    'vs = [bm.verts.new((p[0], p[1], 0.0)) for p in PROFILE]',
-    'face = None',
-    'try:',
-    '    face = bm.faces.new(vs)',
-    'except ValueError:',
-    '    face = None',
-    'if face is not None:',
-    '    res = bmesh.ops.extrude_face_region(bm, geom=[face])',
-    "    ext_verts = [e for e in res['geom'] if isinstance(e, bmesh.types.BMVert)]",
-    '    bmesh.ops.translate(bm, verts=ext_verts, vec=(0.0, 0.0, WIDTH))',
-    '    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)',
-    'bm.to_mesh(mesh)',
-    'bm.free()',
-    'bpy.context.view_layer.objects.active = obj',
-    '',
-    'if BORE_R > 0.0:',
-    '    bpy.ops.mesh.primitive_cylinder_add(radius=BORE_R, depth=WIDTH * 2.0 + 2.0, location=(0.0, 0.0, WIDTH / 2.0), vertices=64)',
-    '    cutter = bpy.context.active_object',
-    "    m = obj.modifiers.new(name='ucbore', type='BOOLEAN')",
-    "    m.operation = 'DIFFERENCE'",
-    "    m.solver = 'EXACT'",
-    '    m.object = cutter',
-    '    bpy.context.view_layer.objects.active = obj',
-    '    bpy.ops.object.modifier_apply(modifier=m.name)',
-    '    bpy.data.objects.remove(cutter, do_unlink=True)',
-    '',
+    ...gearBpyPrelude(),
+    ...gearObjectBpyLines(prof.value.points, width, boreR, 0, 0, ''),
     `OUT = ${pyStringLiteral(outputStlPath)}`,
     'bpy.ops.wm.stl_export(filepath=OUT)',
     '',

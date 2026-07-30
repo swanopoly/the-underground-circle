@@ -12,7 +12,7 @@ import {
   sectionRectangle, sectionCircle, sectionTube,
   beam, safetyFactor, boltPreload, tapDrill,
   ohmsLaw, ledResistor, combineResistors, voltageDivider, rcTimeConstant,
-  convertUnit, materialProps, MATERIALS,
+  convertUnit, materialProps, MATERIALS, gearPairTransmission,
 } from '../src/lib/engineeringCalcCore';
 
 let passed = 0;
@@ -148,6 +148,17 @@ function main() {
     near(ok(convertUnit(20, 'Nm', 'Nmm'), 'Nm→Nmm').value, 20000, 'Nm to Nmm');
     assert(!convertUnit(1, 'mm', 'N').ok, 'cross-dimension conversion rejected');
     assert(!convertUnit(1, 'furlong', 'mm').ok, 'unknown unit rejected');
+  }
+
+  // ─── Gear pair transmission (composes the geometry lane) ─────────
+  {
+    // Z12:Z36 m2 → ratio 3, C = 2·48/2 = 48. 5 N·m @ 1500 rpm in → 15 N·m @ 500 rpm out.
+    const g = ok(gearPairTransmission({ pinionTeeth: 12, gearTeeth: 36, module: 2, inputTorque_Nm: 5, inputSpeed_rpm: 1500 }), 'gear pair');
+    near(g.value, 3, 'ratio = N₂/N₁ = 3');
+    near(g.extra!.center_distance_mm, 48, 'center distance = m·(N₁+N₂)/2 = 48');
+    near(g.extra!.output_torque_Nm, 15, 'output torque = input · ratio = 15 N·m');
+    near(g.extra!.output_speed_rpm, 500, 'output speed = input / ratio = 500 rpm');
+    assert(!gearPairTransmission({ pinionTeeth: 2, gearTeeth: 36, module: 2 }).ok, 'too-few pinion teeth rejected');
   }
 
   // ─── Materials ───────────────────────────────────────────────────

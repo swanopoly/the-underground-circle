@@ -749,6 +749,17 @@ FINDINGS = [
             "engineering.draft_dxf 'gear' + engineering.model_3d 'gear'"
         ),
     },
+    {
+        "id": "assemblies-verify-on-the-constraint-that-makes-parts-fit",
+        "q": "We can generate single parts. How do you take the leap to ASSEMBLIES — multiple parts that fit together — and verify one?",
+        "a": "Assemblies are a different kind of correctness than parts. A single part is right if its own dimensions are right; an assembly is right if the RELATIONSHIP between its parts is right. So you verify on the geometric CONSTRAINT that makes them fit. For a meshing gear pair the constraint is exact and beautiful: the pitch circles must be tangent, which means the center distance is exactly C = m·(N₁+N₂)/2 and r₁ + r₂ = C. That single relation is what makes two gears actually mesh, and it is a hard number the smoke pins directly (r₁ + r₂ === C).\n\nThe live cross-check then measures the constraint through the assembled solid. A meshing pair\'s span along the line of centers is ra₁ + C + ra₂ — gear 1\'s far tip to gear 2\'s far tip. So building both gears in their meshed positions, exporting one assembly STL, and measuring its bounding box validates the center distance AND both gear sizes AND the placement in one number. Live: a 3:1 pair measured 99.91 mm against an expected 100, a 1:1 pair 62.87 against 63 — the relationship holds. And watertightness confirms both gears remain valid closed solids after positioning: two disjoint closed manifolds still have every edge shared by exactly two triangles, so watertight=true, which also proves the mesh-phase clearance kept them from overlapping into a single tangled shell.\n\nThe engineering detail that makes a STATIC assembly look and be right is the mesh PHASE. Two gears naively placed at the center distance would collide tip-to-tip along the line of centers. The driven gear must be rotated so a tooth SPACE faces the driver — 180° plus a half-tooth (180°/N₂) — after which the standard 0.25·m bottom clearance guarantees no material overlap. Get the phase wrong and the gears interpenetrate; the geometry is only an assembly if the parts don\'t occupy the same space.\n\nAnd the assembly composes the ANALYSIS lane: the same pair is a power-transmission stage where torque multiplies by the ratio and speed divides by it. So an engineer sizes a 3:1 reduction (ratio, center distance, output torque/speed) in the calc tool and draws/models the exact same pair — one geometry, analyzed and manufactured. The general lesson: to add assemblies, find the constraint that couples the parts, make it exact, and verify THAT — not the parts in isolation, which you already trusted.",
+        "evidence": (
+            "src/lib/engineeringGearTrainCore.ts (pair geometry + 2D assembly + positioned 3D pair), "
+            "scripts/engineering-gear-train-core-smoketest.ts (C, ratio, tangent pitch, clearance, phase), "
+            "npm run drill:engineering-gear-train (3:1 & 1:1 → Blender → span = ra₁+C+ra₂, live), "
+            "engineeringCalcCore.gearPairTransmission (analysis composes the geometry)"
+        ),
+    },
 ]
 
 

@@ -118,7 +118,7 @@ function main() {
     for (const ch of s) { if (ch === '(') round++; else if (ch === ')') round--; else if (ch === '[') sq++; else if (ch === ']') sq--; }
     assert(round === 0 && sq === 0, 'bpy balanced parens/brackets');
     assert(s.includes('bmesh.ops.extrude_face_region'), 'bpy extrudes the profile face');
-    assert(s.includes("m.solver = 'EXACT'"), 'bpy bore uses the EXACT solver');
+    assert(s.includes(".solver = 'EXACT'"), 'bpy bore uses the EXACT solver');
     assert(s.includes('bpy.ops.wm.stl_export(filepath=OUT)'), 'bpy exports STL');
     assert(s.includes('OUT = "/tmp/uc-gear-smoke.stl"'), 'output path embedded as a safe literal');
     assert(!/\b(nan|inf)\b/i.test(s), 'no nan/inf tokens in the profile');
