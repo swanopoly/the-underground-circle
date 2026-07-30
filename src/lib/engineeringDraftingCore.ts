@@ -333,15 +333,23 @@ export function parseDxfForVerification(dxf: string): DxfParseSummary {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const seenX = (x: number) => { if (Number.isFinite(x)) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); } };
   const seenY = (y: number) => { if (Number.isFinite(y)) { minY = Math.min(minY, y); maxY = Math.max(maxY, y); } };
+  // A CIRCLE/ARC extends its center by ±radius; the raw center point alone
+  // understates the drawing's true extent (a Ø200 circle at the origin would
+  // otherwise measure as a zero-size point). Capture center + radius per entity
+  // and expand the bbox on flush.
+  let curCx: number | null = null, curCy: number | null = null, curR: number | null = null;
 
   const flushEntity = () => {
-    if (!curType || section !== 'ENTITIES') { curType = null; curBlock = null; return; }
+    if (!curType || section !== 'ENTITIES') { curType = null; curBlock = null; curCx = curCy = curR = null; return; }
     if (curType === 'VERTEX' || curType === 'SEQEND') { curType = null; return; } // counted within POLYLINE
     summary.entityCounts[curType] = (summary.entityCounts[curType] || 0) + 1;
     summary.entitiesByLayer[curLayer] = (summary.entitiesByLayer[curLayer] || 0) + 1;
     summary.totalEntities += 1;
     if (curType === 'INSERT' && curBlock) summary.insertsByBlock[curBlock] = (summary.insertsByBlock[curBlock] || 0) + 1;
-    curType = null; curBlock = null;
+    if ((curType === 'CIRCLE' || curType === 'ARC') && curCx !== null && curCy !== null && curR !== null) {
+      seenX(curCx - curR); seenX(curCx + curR); seenY(curCy - curR); seenY(curCy + curR);
+    }
+    curType = null; curBlock = null; curCx = curCy = curR = null;
   };
 
   for (let i = 0; i < pairs.length; i += 1) {
@@ -374,10 +382,12 @@ export function parseDxfForVerification(dxf: string): DxfParseSummary {
     if (section === 'ENTITIES' && curType) {
       if (code === 8) curLayer = v || '0';
       if (curType === 'INSERT' && code === 2) curBlock = v;
-      if (code === 10) seenX(num(v));
-      if (code === 20) seenY(num(v));
+      if (code === 10) { seenX(num(v)); curCx = num(v); }
+      if (code === 20) { seenY(num(v)); curCy = num(v); }
       if (code === 11) seenX(num(v));
       if (code === 21) seenY(num(v));
+      // Radius (CIRCLE/ARC). Expanded into the bbox on flush, once center is known.
+      if ((curType === 'CIRCLE' || curType === 'ARC') && code === 40) curR = Math.abs(num(v));
     }
   }
   flushEntity();
@@ -608,6 +618,74 @@ export function buildElectricalSchematic(spec: SchematicSpec): DraftResult<Draft
 
   return { ok: true, value: { layers: ELECTRICAL_LAYERS, blocks, entities } };
 }
+
+// ─── Bolt circle (mechanical drawing: the most common feature) ───────────────
+
+export const MECHANICAL_LAYERS: DraftLayer[] = [
+  { name: 'OUTLINE', color: 7, linetype: 'CONTINUOUS' },
+  { name: 'HOLES', color: 1, linetype: 'CONTINUOUS' },
+  { name: 'CONSTRUCTION', color: 8, linetype: 'CENTER' },
+  { name: 'DIMS', color: 2, linetype: 'CONTINUOUS' },
+];
+
+export type BoltCircleSpec = {
+  outerDiameter: number;
+  /** Optional center bore. */
+  centerBore?: number;
+  count: number;
+  /** Pitch-circle diameter the holes sit on. */
+  pcd: number;
+  holeDiameter: number;
+  startAngleDeg?: number;
+};
+
+/** Even bolt-circle positions (2D mirror of the solid core's helper). */
+export function boltCirclePoints2d(count: number, pcd: number, startAngleDeg = 0): DraftPoint[] {
+  const n = Math.max(0, Math.trunc(Number(count)));
+  const r = Math.abs(Number(pcd)) / 2;
+  const start = Number(startAngleDeg) || 0;
+  const pts: DraftPoint[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const a = ((start + (i * 360) / n) * Math.PI) / 180;
+    pts.push({ x: Math.round(r * Math.cos(a) * 1e6) / 1e6, y: Math.round(r * Math.sin(a) * 1e6) / 1e6 });
+  }
+  return pts;
+}
+
+/**
+ * A bolt-circle mechanical drawing: outer circle, optional center bore, a
+ * DASHED pitch-circle reference on the CONSTRUCTION layer, `count` hole circles
+ * on the PCD each with a small center-mark cross, and a PCD dimension label.
+ */
+export function buildBoltCircle(spec: BoltCircleSpec): DraftResult<DraftDocument> {
+  const od = num(spec.outerDiameter), pcd = num(spec.pcd), hd = num(spec.holeDiameter);
+  const count = Math.trunc(num(spec.count));
+  if (od <= 0 || pcd <= 0 || hd <= 0) return { ok: false, error: 'boltCircle needs positive outerDiameter, pcd, and holeDiameter' };
+  if (count < 1) return { ok: false, error: 'boltCircle needs at least one hole' };
+  if (pcd + hd > od) return { ok: false, error: 'holes fall outside the outer diameter (pcd + holeDiameter > OD)' };
+
+  const entities: DraftEntity[] = [];
+  // Outer boundary + optional center bore.
+  entities.push({ kind: 'circle', layer: 'OUTLINE', cx: 0, cy: 0, r: od / 2 });
+  const bore = num(spec.centerBore);
+  if (bore > 0 && bore < od) entities.push({ kind: 'circle', layer: 'HOLES', cx: 0, cy: 0, r: bore / 2 });
+  // Pitch-circle reference (dashed/center linetype) on the construction layer.
+  entities.push({ kind: 'circle', layer: 'CONSTRUCTION', cx: 0, cy: 0, r: pcd / 2 });
+
+  const mark = hd; // center-mark half-length ~ hole diameter
+  for (const p of boltCirclePoints2d(count, pcd, spec.startAngleDeg ?? 0)) {
+    entities.push({ kind: 'circle', layer: 'HOLES', cx: p.x, cy: p.y, r: hd / 2 });
+    // Center-mark cross so the hole center reads on a print.
+    entities.push({ kind: 'line', layer: 'CONSTRUCTION', x1: p.x - mark, y1: p.y, x2: p.x + mark, y2: p.y });
+    entities.push({ kind: 'line', layer: 'CONSTRUCTION', x1: p.x, y1: p.y - mark, x2: p.x, y2: p.y + mark });
+  }
+  // PCD callout on the DIMS layer.
+  entities.push({ kind: 'text', layer: 'DIMS', x: 0, y: -(od / 2) - 300, height: 250, text: `${count}x \u00d8${round2(hd)} on \u00d8${round2(pcd)} PCD` });
+
+  return { ok: true, value: { layers: MECHANICAL_LAYERS, blocks: [], entities } };
+}
+
+function round2(v: number): number { return Math.round(Number(v) * 100) / 100; }
 
 // ─── Automation: repeat-placement of a block on a grid ───────────────────────
 

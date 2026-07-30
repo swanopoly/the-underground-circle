@@ -20,6 +20,8 @@ import {
   buildPlateWithHoles,
   buildBracket,
   buildTube,
+  buildFlange,
+  boltCirclePoints,
   type SolidModel,
 } from '../src/lib/engineeringSolidModelingCore';
 
@@ -140,6 +142,32 @@ function main() {
     // A solid rod (id=0) has no bore.
     const rod = unwrap(buildTube({ outerDiameter: 30, innerDiameter: 0, height: 25 }), 'rod');
     assert(summarizeSolidModel(rod).negativeCount === 0, 'solid rod has no negative');
+  }
+
+  // ─── Bolt circle + flange ────────────────────────────────────────
+  {
+    // 4 holes on Ø100 PCD starting at 0°: exact positions at 0/90/180/270°.
+    const pts = boltCirclePoints(4, 100, 0);
+    assert(pts.length === 4, 'bolt circle: 4 points');
+    assert(Math.round(pts[0].x) === 50 && Math.round(pts[0].y) === 0, 'hole 0 at (+50, 0)');
+    assert(Math.round(pts[1].x) === 0 && Math.round(pts[1].y) === 50, 'hole 1 at (0, +50)');
+    assert(Math.round(pts[2].x) === -50 && Math.round(pts[2].y) === 0, 'hole 2 at (-50, 0)');
+    assert(Math.round(pts[3].x) === 0 && Math.round(pts[3].y) === -50, 'hole 3 at (0, -50)');
+
+    // A DN80-ish flange: OD 200, thickness 20, center bore 89, 8 holes Ø18 on Ø160.
+    const flange = unwrap(buildFlange({ outerDiameter: 200, thickness: 20, centerBore: 89, boltCircle: { count: 8, pcd: 160, holeDiameter: 18 } }), 'flange');
+    const fb = nominalBoundingBox(flange)!;
+    assert(Math.round(fb.maxX - fb.minX) === 200 && Math.round(fb.maxY - fb.minY) === 200, 'flange OD span = 200');
+    assert(Math.round(fb.maxZ - fb.minZ) === 20, 'flange thickness = 20');
+    const fsum = summarizeSolidModel(flange);
+    assert(fsum.positiveCount === 1, 'flange is one positive disc');
+    assert(fsum.negativeCount === 9, 'flange has 1 bore + 8 bolt holes = 9 negatives');
+
+    // Holes outside the OD fail closed.
+    assert(!buildFlange({ outerDiameter: 100, thickness: 10, boltCircle: { count: 6, pcd: 95, holeDiameter: 10 } }).ok, 'bolt holes past the OD rejected');
+    // A plain disc (no bore, no bolts) is valid.
+    const disc = unwrap(buildFlange({ outerDiameter: 80, thickness: 8 }), 'disc');
+    assert(summarizeSolidModel(disc).negativeCount === 0, 'plain disc has no negatives');
   }
 
   // ─── Fail-closed validation ──────────────────────────────────────

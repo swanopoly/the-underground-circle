@@ -2956,7 +2956,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        drawing: { type: 'string', enum: ['floorplan', 'schematic', 'custom'], description: 'floorplan: parametric building; schematic: electrical symbols; custom: your own layers + entities.' },
+        drawing: { type: 'string', enum: ['floorplan', 'schematic', 'boltcircle', 'custom'], description: 'floorplan: parametric building; schematic: electrical symbols; boltcircle: flange/hole pattern; custom: your own layers + entities.' },
         spec: { type: 'object', description: 'For floorplan: {width,height,wallThickness?,rooms?,doors?,windows?,dimensions?} in mm. For schematic: {placements:[{symbol,x,y,label?}],wires?}. Symbols: resistor|capacitor|battery|ground|switch|lamp|junction.' },
         layers: { type: 'array', description: 'For custom: [{name,color?}] — names must match [A-Za-z0-9_$-], 1-31 chars.', items: { type: 'object' } },
         entities: { type: 'array', description: 'For custom: neutral entities (line/circle/arc/polyline/text/insert), each with a declared layer.', items: { type: 'object' } },
@@ -2974,7 +2974,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'custom'], description: 'plate: block+holes; bracket: L-shape; tube: cylinder+bore; custom: your own positives/negatives.' },
+        part: { type: 'string', enum: ['plate', 'bracket', 'tube', 'flange', 'custom'], description: 'plate: block+holes; bracket: L-shape; tube: cylinder+bore; flange: disc+bore+bolt circle; custom: your own positives/negatives.' },
         spec: { type: 'object', description: 'plate {width,depth,thickness,holes?[{x,y,diameter}]}; bracket {legX,legZ,width,thickness,holes?}; tube {outerDiameter,innerDiameter,height,axis?}. Units mm.' },
         model: { type: 'object', description: 'For custom: {positives:[{kind,...}], negatives?:[...]} — kind box{w,d,h,cx,cy,cz}|cylinder{r,h,axis,...}|sphere{r,...}. Body = union(positives) − negatives.' },
         format: { type: 'string', enum: ['blender', 'openscad'], description: 'Which script to feature (both are returned). Default blender (STL-proven here).' },
@@ -11600,7 +11600,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const a = args as OpenSwanToolExecutionArgs['engineering.model_3d'];
         const {
           writeBlenderSolidScript, writeOpenScadSolid, summarizeSolidModel, validateSolidModel,
-          buildPlateWithHoles, buildBracket, buildTube,
+          buildPlateWithHoles, buildBracket, buildTube, buildFlange,
         } = await import('./engineeringSolidModelingCore');
         const part = String(a.part || '').trim();
 
@@ -11608,6 +11608,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (part === 'plate') modelResult = buildPlateWithHoles((a.spec ?? {}) as any);
         else if (part === 'bracket') modelResult = buildBracket((a.spec ?? {}) as any);
         else if (part === 'tube') modelResult = buildTube((a.spec ?? {}) as any);
+        else if (part === 'flange') modelResult = buildFlange((a.spec ?? {}) as any);
         else if (part === 'custom') modelResult = validateSolidModel((a.model ?? {}) as any);
         else return { ok: false, resultsText: 'engineering.model_3d part must be plate | bracket | tube | custom.' } as any;
 
@@ -11637,6 +11638,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const a = args as OpenSwanToolExecutionArgs['engineering.draft_dxf'];
         const {
           writeDxfR12, parseDxfForVerification, buildFloorPlan, buildElectricalSchematic, suggestModelingLane,
+          buildBoltCircle,
         } = await import('./engineeringDraftingCore');
         const drawing = String(a.drawing || '').trim();
 
@@ -11645,6 +11647,8 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           docResult = buildFloorPlan((a.spec ?? {}) as any);
         } else if (drawing === 'schematic') {
           docResult = buildElectricalSchematic((a.spec ?? {}) as any);
+        } else if (drawing === 'boltcircle') {
+          docResult = buildBoltCircle((a.spec ?? {}) as any);
         } else if (drawing === 'custom') {
           const layers = Array.isArray(a.layers) ? a.layers : [];
           const entities = Array.isArray(a.entities) ? a.entities : [];

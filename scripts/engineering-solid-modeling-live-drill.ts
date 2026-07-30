@@ -28,6 +28,7 @@ import {
   readBinaryStlTriangleCount,
   buildPlateWithHoles,
   buildTube,
+  buildFlange,
   type SolidModel,
 } from '../src/lib/engineeringSolidModelingCore';
 
@@ -104,6 +105,11 @@ async function main() {
   // A tube / spacer: OD 30, ID 18, 25 tall.
   const tube = buildTube({ outerDiameter: 30, innerDiameter: 18, height: 25 });
   if (tube.ok) await proveModel('tube', tube.value, '/tmp/uc-tube.stl', '/tmp/uc-tube.py');
+
+  // A flange: OD 120, thickness 12, Ø50 center bore, 6 × Ø11 bolts on Ø95 PCD —
+  // the single most common mechanical part, exercising a full bolt circle.
+  const flange = buildFlange({ outerDiameter: 120, thickness: 12, centerBore: 50, boltCircle: { count: 6, pcd: 95, holeDiameter: 11 } });
+  if (flange.ok) await proveModel('flange', flange.value, '/tmp/uc-flange.stl', '/tmp/uc-flange.py');
 
   const passed = steps.filter((s) => s.ok).length;
   console.log(`\n${passed}/${steps.length} steps passed — drill ${passed === steps.length ? 'PASSED' : 'FAILED'}`);

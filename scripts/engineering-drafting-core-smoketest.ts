@@ -17,6 +17,8 @@ import {
   buildElectricalSchematic,
   insertGrid,
   suggestModelingLane,
+  buildBoltCircle,
+  boltCirclePoints2d,
   ELECTRICAL_SYMBOLS,
   type DraftDocument,
 } from '../src/lib/engineeringDraftingCore';
@@ -157,6 +159,32 @@ function main() {
     assert(suggestModelingLane('extrude this profile into a solid').engine === 'openscad', 'generic 3D → openscad');
     assert(suggestModelingLane('import the STEP assembly and fillet the edges').engine === 'freecadcmd', 'STEP/fillet → freecad');
     assert(suggestModelingLane('photoreal render with studio lighting').engine === 'blender', 'render → blender');
+  }
+
+  // ─── Bolt circle: exact trig + parse-back count ──────────────────
+  {
+    // 6 holes on Ø120 PCD from 0°: first at (60,0), positions every 60°.
+    const pts = boltCirclePoints2d(6, 120, 0);
+    assert(pts.length === 6, 'bolt circle: 6 points');
+    assert(Math.round(pts[0].x) === 60 && Math.round(pts[0].y) === 0, 'hole 0 at (+60, 0)');
+    assert(Math.round(pts[3].x) === -60 && Math.round(pts[3].y) === 0, 'hole 3 diametrically opposite at (-60, 0)');
+    // 60° hole: (60·cos60, 60·sin60) = (30, 51.96)
+    assert(Math.round(pts[1].x) === 30 && Math.round(pts[1].y) === 52, 'hole 1 at (30, 51.96)');
+
+    // A flange face plate: OD 200, bore 80, 8 holes Ø14 on Ø160.
+    const doc = unwrap(buildBoltCircle({ outerDiameter: 200, centerBore: 80, count: 8, pcd: 160, holeDiameter: 14 }), 'boltcircle');
+    const dxf = unwrap(writeDxfR12(doc), 'boltcircle → DXF');
+    const p = parseDxfForVerification(dxf);
+    // Circles: 1 outer + 1 bore + 1 PCD reference + 8 holes = 11.
+    assert(p.entityCounts.CIRCLE === 11, `11 circles (outer+bore+PCD+8 holes), got ${p.entityCounts.CIRCLE}`);
+    assert(p.entitiesByLayer.HOLES === 9, '8 holes + bore on HOLES layer');
+    assert(p.layers.includes('CONSTRUCTION') && p.layers.includes('OUTLINE'), 'mechanical layers declared');
+    // The outer circle sets the bbox: Ø200 spans -100..100.
+    assert(Math.round(p.bbox!.maxX) === 100 && Math.round(p.bbox!.minX) === -100, 'bbox spans the OD (±100)');
+    assert((p.entityCounts.TEXT ?? 0) >= 1, 'PCD callout present');
+
+    // Fail-closed: holes past the OD.
+    assert(!buildBoltCircle({ outerDiameter: 100, centerBore: 0, count: 4, pcd: 95, holeDiameter: 12 }).ok, 'holes past OD rejected');
   }
 
   // ─── The written DXF never contains a raw injected newline value ─

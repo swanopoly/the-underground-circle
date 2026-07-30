@@ -397,6 +397,67 @@ export function buildTube(spec: TubeSpec): SolidResult<SolidModel> {
   return validateSolidModel({ positives, negatives, units: spec.units });
 }
 
+// ─── Bolt circle / flange (the most common mechanical feature) ───────────────
+
+/**
+ * Positions of `count` holes evenly spaced on a bolt circle of pitch diameter
+ * `pcd`, centered on origin, first hole at `startAngleDeg` (default 0 = +X).
+ * The single most common mechanical pattern: flanges, motor mounts, hubs.
+ * Pure trig, so the smoke asserts exact coordinates.
+ */
+export function boltCirclePoints(count: number, pcd: number, startAngleDeg = 0): Array<{ x: number; y: number }> {
+  const n = Math.max(0, Math.trunc(finite(count)));
+  const r = Math.abs(finite(pcd)) / 2;
+  const start = finite(startAngleDeg);
+  const pts: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i < n; i += 1) {
+    const a = ((start + (i * 360) / n) * Math.PI) / 180;
+    // Round tiny FP dust so a hole meant for (40, 0) is exactly that.
+    pts.push({ x: Math.round(r * Math.cos(a) * 1e6) / 1e6, y: Math.round(r * Math.sin(a) * 1e6) / 1e6 });
+  }
+  return pts;
+}
+
+export type FlangeSpec = {
+  outerDiameter: number;
+  thickness: number;
+  /** Center bore diameter (0 = solid disc). */
+  centerBore?: number;
+  boltCircle?: {
+    count: number;
+    /** Pitch-circle diameter the bolt holes sit on. */
+    pcd: number;
+    holeDiameter: number;
+    startAngleDeg?: number;
+  };
+  units?: 'mm' | 'cm' | 'in';
+};
+
+/** A round flange: outer disc − center bore − a bolt circle of through-holes. */
+export function buildFlange(spec: FlangeSpec): SolidResult<SolidModel> {
+  const od = finite(spec.outerDiameter), t = finite(spec.thickness);
+  if (od <= 0 || t <= 0) return { ok: false, error: 'flange outerDiameter and thickness must be positive' };
+  const positives: SolidPrimitive[] = [{ kind: 'cylinder', r: od / 2, h: t, cz: t / 2, axis: 'z' }];
+  const negatives: SolidPrimitive[] = [];
+
+  const bore = finite(spec.centerBore);
+  if (bore > 0) {
+    if (bore >= od) return { ok: false, error: 'centerBore must be smaller than outerDiameter' };
+    negatives.push({ kind: 'cylinder', r: bore / 2, h: t * 2 + 2, cz: t / 2, axis: 'z' });
+  }
+
+  const bc = spec.boltCircle;
+  if (bc && finite(bc.count) > 0) {
+    const pcd = finite(bc.pcd), hd = finite(bc.holeDiameter);
+    if (pcd <= 0 || hd <= 0) return { ok: false, error: 'boltCircle pcd and holeDiameter must be positive' };
+    if (pcd + hd > od) return { ok: false, error: 'bolt holes fall outside the flange OD (pcd + holeDiameter > OD)' };
+    for (const p of boltCirclePoints(bc.count, pcd, bc.startAngleDeg ?? 0)) {
+      negatives.push({ kind: 'cylinder', r: hd / 2, h: t * 2 + 2, cx: p.x, cy: p.y, cz: t / 2, axis: 'z' });
+    }
+  }
+  return validateSolidModel({ positives, negatives, units: spec.units });
+}
+
 // ─── STL header parse (used by the live drill's verifier bridge) ─────────────
 
 /**

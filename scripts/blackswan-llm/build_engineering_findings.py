@@ -706,6 +706,16 @@ FINDINGS = [
             "engineering.calc runtime tool"
         ),
     },
+    {
+        "id": "bolt-circle-one-pattern-both-generators-and-a-verifier-gap",
+        "q": "We want a flange with a bolt circle. It's the most common mechanical feature. What's the clean way to add it across a 2D and a 3D generator?",
+        "a": "The pattern math is trivial and identical in both dimensions — hole i sits at angle θ0 + i·360/N on a circle of radius PCD/2 — so the win is sharing that ONE computation and letting each generator consume the points. In 3D a flange is a disc (outer cylinder) minus a center bore minus N bolt-hole cylinders placed at those points; in 2D it is an outer circle, a dashed pitch-circle reference on a construction layer, and N hole circles with center-mark crosses at the same points. Same trig, two artifacts. Because it is pure trig, the smoke asserts EXACT coordinates: 4 holes on a Ø100 PCD from 0° land at exactly (50,0), (0,50), (−50,0), (0,−50) — floating-point dust rounded off so a hole meant for (40,0) IS (40,0).\n\nThe interesting bug this surfaced was in the VERIFIER, not the generator. The DXF verification parser built its bounding box from entity POSITION points only — line endpoints, circle CENTERS, text anchors. That is correct for lines and polylines but silently WRONG for circles: a Ø200 circle centered at the origin has a center point of (0,0), so the parser measured the whole flange outline as a zero-size point and the 'bbox spans the OD' check failed. The circle's extent is center ± radius, and the parser was throwing the radius (group code 40) away. The fix — expand the bbox by ±radius for CIRCLE/ARC entities — is a real correctness improvement that had been latent because every prior drawing (floor plans, schematics) was dominated by lines and polylines where center-point-only happens to be right.\n\nGeneral lesson: when you add a new PRIMITIVE to a system, re-audit the code that MEASURES it. A verifier tuned on the shapes you had can be quietly wrong about the shape you just introduced, and it fails in the safe direction (understating extent) so nothing crashes — it just measures the wrong number until a test that actually depends on the extent catches it.",
+        "evidence": (
+            "src/lib/engineeringSolidModelingCore.ts buildFlange + boltCirclePoints, "
+            "src/lib/engineeringDraftingCore.ts buildBoltCircle + CIRCLE/ARC bbox expansion, "
+            "npm run drill:engineering-solid (flange → 2088 triangles at 120×120×12mm live)"
+        ),
+    },
 ]
 
 
