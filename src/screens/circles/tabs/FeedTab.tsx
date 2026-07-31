@@ -48,6 +48,9 @@ import { useMissions, useMissionDetail, missionProgress, isOverdue, type Mission
 import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
 import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 import { classifyRunFreshness, runEmptyStateModel, freshnessRank } from '../../../lib/runFreshnessCore';
+import NeedsAttentionPanel from '../../../components/feed/NeedsAttentionPanel';
+import { buildNeedsAttention } from '../../../lib/accountabilityNagCore';
+import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -269,17 +272,19 @@ function HuggingSwanPanel({ circleId }: { circleId: string }) {
           </View>
           {/* Actionable next steps. These map to real chat commands
               (/create, /watch, /review, /imagine) that all live in the Chat
-              surface, so picking one navigates there via the existing
-              uc:switch-tab event. Visual guidance only — there is no
-              cross-surface composer-seed plumbing to pre-fill the command,
-              so we land the user in Chat rather than inventing it. */}
+              surface: seed the composer with the command, then navigate
+              there via the existing uc:switch-tab event. */}
           <View style={{ marginTop: 14, width: '100%' }}>
             <SuggestedTaskChips
               suggestions={getEmptyStateSuggestions('feed')}
               onPick={(action: EmptyStateSuggestionAction) => {
-                // Every feed suggestion is a chat command; open Chat.
+                // Every feed suggestion is a chat command; seed the composer, then open Chat.
                 if (Platform.OS === 'web' && typeof window !== 'undefined') {
-                  try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } })); } catch {}
+                  const seed = action.kind === 'seed_command' ? buildComposerSeedDetail(action.value) : null;
+                  try {
+                    if (seed) window.dispatchEvent(new CustomEvent(SEED_EVENT_NAME, { detail: seed }));
+                    window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } }));
+                  } catch {}
                 }
               }}
               accentColor="#a5b4fc"
@@ -1045,6 +1050,19 @@ export default function FeedTab({
     return { total: allTasks.length, completed, inProgress, overdue, dueToday, completedThisWeek };
   }, [kanban.tasksByColumn]);
 
+  // Needs-attention ranking (overdue/breached/stalled/blocked) composed from
+  // the SLA + priority cores; renders under the Orchestra panel.
+  const needsAttention = useMemo(() => {
+    const allTasks = Object.values(kanban.tasksByColumn).flat();
+    return buildNeedsAttention({ nowMs: Date.now(), tasks: allTasks, missions: allMissions });
+  }, [kanban.tasksByColumn, allMissions]);
+
+  const handleNeedsAttentionAction = useCallback((item: { taskId?: string }) => {
+    if (!item.taskId) return;
+    const t = Object.values(kanban.tasksByColumn).flat().find(x => x.id === item.taskId);
+    if (t) setDetailTask(t);
+  }, [kanban.tasksByColumn]);
+
   const goalFilteredTasksByColumn = useMemo(() => {
     if (!filteredGoalId) return kanban.tasksByColumn;
     const filtered = {} as TasksByColumn;
@@ -1129,6 +1147,7 @@ export default function FeedTab({
         <AgentTopBar agents={orchestraAgents} />
         {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
         <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
+        <NeedsAttentionPanel items={needsAttention} onAction={handleNeedsAttentionAction} />
         <TaskSearchBar
           searchText={searchText}
           onSearchChange={setSearchText}
@@ -1330,6 +1349,7 @@ export default function FeedTab({
       <AgentTopBar agents={orchestraAgents} />
       {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
       <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
+      <NeedsAttentionPanel items={needsAttention} onAction={handleNeedsAttentionAction} />
 
       {/* Collapsible search bar — click to expand, / key also opens */}
       {searchExpanded ? (

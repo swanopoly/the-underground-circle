@@ -72,7 +72,7 @@ function frozenGroup(group: CapabilityGroup): CapabilityGroup {
 }
 
 // ── The catalog ─────────────────────────────────────────────────────────────────
-// 8 groups, each 2-3 example prompts. Deep-frozen so no consumer can drift it
+// 9 groups, each 2-3 example prompts. Deep-frozen so no consumer can drift it
 // at runtime; renderers below are the only sanctioned views.
 
 export const CAPABILITY_CATALOG: CapabilityGroup[] = Object.freeze(
@@ -159,6 +159,17 @@ export const CAPABILITY_CATALOG: CapabilityGroup[] = Object.freeze(
         '/integrations',
         '/bestof sonnet,gpt summarize this thread',
         '/vault status',
+      ],
+    },
+    {
+      id: 'engineering',
+      title: 'Engineering & CAD',
+      blurb:
+        'Design real parts with no CAD install — ~75 engineering calcs (beams, gears, shafts, springs, fits), DXF drawings, 3D STL models built in headless Blender, and measured-back proof.',
+      examples: [
+        'Design a bracket to hold 50 kg at 100 mm',
+        'Size a gearbox: 5 kW, 1500→500 rpm',
+        'Draw a 100×60 mounting plate with 4 bolt holes',
       ],
     },
   ] as CapabilityGroup[]).map(frozenGroup)

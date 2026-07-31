@@ -11,6 +11,11 @@ import { supabase } from '../../../lib/supabase';
 import { safeGetUser } from '../../../lib/authSession';
 import Card from '../../../components/Card';
 import { generateNudge, getProgressInsight, getOnThisDay } from '../../../lib/coach';
+import AccountabilityDigestCard from '../../../components/feed/AccountabilityDigestCard';
+import {
+  buildAccountabilityDigest,
+  type AccountabilityDigest,
+} from '../../../lib/accountabilityDigestCore';
 
 const formatNumber = (n: number) => n.toLocaleString();
 
@@ -31,13 +36,59 @@ export default function DigestTab({ circleId }: DigestTabProps) {
   const [nudge, setNudge] = useState<string | null>(null);
   const [insight, setInsight] = useState<string>('');
   const [onThisDay, setOnThisDay] = useState<{ weekAgo: any[]; monthAgo: any[] }>({ weekAgo: [], monthAgo: [] });
+  const [agentDigest, setAgentDigest] = useState<AccountabilityDigest | null>(null);
 
   const today = new Date().toISOString().split('T')[0];
   const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
 
+  const fetchAgentDigest = useCallback(async () => {
+    // Agent-work accountability digest (runs / proof / verification / PRs).
+    // Query errors are silent — the card simply stays hidden.
+    try {
+      const [powRes, actRes, taskRes] = await Promise.all([
+        supabase
+          .from('proof_of_work')
+          .select('id, pow_type, title, agent_name, created_at, detail')
+          .eq('circle_id', circleId)
+          .order('created_at', { ascending: false })
+          .limit(100),
+        supabase
+          .from('agent_activity')
+          .select('id, agent_name, activity_type, title, metadata, created_at')
+          .eq('circle_id', circleId)
+          .order('created_at', { ascending: false })
+          .limit(100),
+        supabase
+          .from('tasks')
+          .select('id, status, due_date, completed_at')
+          .eq('circle_id', circleId)
+          .order('created_at', { ascending: false })
+          .limit(100),
+      ]);
+      if (powRes.error && actRes.error) {
+        // No agent-work signal available at all — hide the card.
+        setAgentDigest(null);
+        return;
+      }
+      setAgentDigest(
+        buildAccountabilityDigest({
+          nowMs: Date.now(),
+          proofRows: powRes.error ? [] : powRes.data || [],
+          activityRows: actRes.error ? [] : actRes.data || [],
+          taskRows: taskRes.error ? [] : taskRes.data || [],
+        }),
+      );
+    } catch {
+      setAgentDigest(null);
+    }
+  }, [circleId]);
+
   const fetchData = useCallback(async () => {
     const { value: user } = await safeGetUser();
     if (!user) return;
+
+    // Agent digest loads in parallel; never blocks the check-in content.
+    fetchAgentDigest();
 
     // Today's check-ins
     const { data: checkIns } = await supabase
@@ -119,7 +170,7 @@ export default function DigestTab({ circleId }: DigestTabProps) {
     setOnThisDay(otd);
 
     setLoading(false);
-  }, [circleId, today, yesterday]);
+  }, [circleId, today, yesterday, fetchAgentDigest]);
 
   useEffect(() => {
     fetchData();
@@ -151,6 +202,9 @@ export default function DigestTab({ circleId }: DigestTabProps) {
           <Text style={styles.title}>TODAY'S GRIND REPORT</Text>
           <Text style={styles.date}>{dateStr}</Text>
         </View>
+
+        {/* Agent-work accountability digest — above all check-in content */}
+        <AccountabilityDigestCard digest={agentDigest} />
 
         {/* Nudge */}
         {nudge && (

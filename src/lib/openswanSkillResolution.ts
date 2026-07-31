@@ -79,6 +79,17 @@ const QUERY_SKILL_HINTS: Array<{ names: string[]; patterns: RegExp[]; rationale:
     patterns: [/\b(summarize|summary|recap|what happened|thread)\b/i],
     rationale: 'The request asks for summarization or thread condensation.',
   },
+  {
+    names: ['engineering-design'],
+    patterns: [
+      /\b(design|size|model|draft|analy[sz]e)\b.{0,80}\b(bracket|shaft|gear(box)?|beam|spring|bolt|vessel|plate|bearing|flange|pulley|cam|truss|frame)s?\b/i,
+      /\b(stress|deflection|buckling|torsion|fatigue|bending moment|section modulus|safety factor)\b/i,
+      /\b(dxf|stl|cad model)\b/i,
+      /\b(tolerance stack|iso fit|press fit|interference fit|bolt circle|tap drill)\b/i,
+      /\b(torque|stiffness)\b.{0,40}\b(shaft|spring|beam|column)s?\b/i,
+    ],
+    rationale: 'The request is an engineering design/analysis task and benefits from the size → draw → model → measure → tolerance pipeline.',
+  },
 ];
 
 function inferTaskKindFromQuery(query: string): OpenSwanTaskKind | null {

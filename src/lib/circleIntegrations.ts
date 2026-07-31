@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { buildIntegrationSaveHealthState } from './integrationHealthBadgeCore';
 
 export type CircleIntegrationProvider =
   | 'browserbase'
@@ -2027,6 +2028,16 @@ export async function connectGenericCircleIntegration(opts: {
     }
   }
 
+  // A successful (re-)save must explicitly write the healthy state:
+  // `upsertCircleIntegration` MERGES metadata with the existing row, so simply
+  // omitting `last_validation_error` would preserve a stale error forever
+  // while status silently reset to 'connected'. The pure helper returns
+  // `{ last_validation_error: null }` on success (clearing the stale error
+  // through the merge) and a sanitized bounded error + 'degraded' on failure.
+  const saveHealth = buildIntegrationSaveHealthState({
+    status: initialStatus,
+    validationMessage,
+  });
   const integration = await upsertCircleIntegration({
     circleId: opts.circleId,
     provider: opts.provider,
@@ -2034,10 +2045,10 @@ export async function connectGenericCircleIntegration(opts: {
     description: opts.description || definition?.description || null || undefined,
     metadata: {
       ...(opts.metadata || {}),
-      ...(validationMessage ? { last_validation_error: validationMessage } : {}),
+      ...saveHealth.metadataPatch,
     },
     capabilityFlags: definition?.capabilityFlags || [],
-    status: initialStatus,
+    status: saveHealth.status,
   });
 
   if (!integration) return null;

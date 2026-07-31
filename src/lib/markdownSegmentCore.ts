@@ -37,7 +37,10 @@
  * ChatInlineRichText usage.
  */
 
-export type MarkdownSegmentKind = 'text' | 'code' | 'heading' | 'bullet' | 'quote';
+export type MarkdownSegmentKind = 'text' | 'code' | 'heading' | 'bullet' | 'quote' | 'table';
+
+/** Per-column alignment from a GFM divider cell (`:--` / `:-:` / `--:` / `---`). */
+export type MarkdownTableAlign = 'left' | 'center' | 'right' | null;
 
 export interface MarkdownSegment {
   kind: MarkdownSegmentKind;
@@ -46,6 +49,12 @@ export interface MarkdownSegment {
   lang?: string;
   /** ATX heading depth 1..6. Heading only. */
   level?: number;
+  /** Table header cells (raw inline text, marker-free). Table only. */
+  headerCells?: string[];
+  /** Table body rows, each normalized to headerCells.length cells. Table only. */
+  rows?: string[][];
+  /** Per-column alignment, same length as headerCells. Table only. */
+  align?: MarkdownTableAlign[];
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +70,13 @@ export const MARKDOWN_SEGMENT_CONTENT_MAX = 8000;
 const INPUT_SCAN_MAX = 100_000;
 /** Cap on a fenced-code info string / language token. */
 const LANG_MAX = 24;
+
+/** Hard cap on table columns; extra columns are dropped. */
+export const MARKDOWN_TABLE_MAX_COLUMNS = 12;
+/** Hard cap on table BODY rows; extra rows collapse to a '+N more rows' marker. */
+export const MARKDOWN_TABLE_MAX_ROWS = 100;
+/** Hard cap on each table cell's length (chars); marked with a single '…'. */
+export const MARKDOWN_TABLE_CELL_MAX = 300;
 
 // ---------------------------------------------------------------------------
 // Small total helpers
@@ -143,6 +159,130 @@ function matchQuote(line: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// GFM pipe tables
+// ---------------------------------------------------------------------------
+//
+// A table = ≥2 consecutive lines that each start AND end with '|' (after trim),
+// where line 2 is a divider row (cells of only '-' and ':' after trimming
+// spaces) whose cell count EXACTLY matches the header's (GFM rule — also our
+// main false-positive veto: `| a | b |` over `| --- |` is NOT a table).
+// Lines inside code fences never reach this parser (the fence branch consumes
+// them first). Escaped pipes `\|` stay literal inside a cell.
+
+/** A trimmed line that starts and ends with '|' (at least the two pipes). */
+function isPipeRow(line: string): boolean {
+  const t = line.trim();
+  return t.length >= 2 && t.startsWith('|') && t.endsWith('|');
+}
+
+/** Split a pipe row into trimmed cells; `\|` escapes a literal pipe. */
+function splitTableRow(line: string): string[] {
+  const t = line.trim();
+  const inner = t.slice(1, t.length - 1); // strip the outer pipes
+  const cells: string[] = [];
+  let cur = '';
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === '\\' && inner[i + 1] === '|') {
+      cur += '|';
+      i++;
+    } else if (ch === '|') {
+      cells.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+/** Divider cell: optional ':' fringe around at least one '-' (spaces trimmed). */
+const TABLE_DIVIDER_CELL_RE = /^:?-+:?$/;
+
+/** Divider row → per-column alignment array, or null when not a divider. */
+function parseDividerAlign(line: string): MarkdownTableAlign[] | null {
+  if (!isPipeRow(line)) return null;
+  const cells = splitTableRow(line);
+  if (cells.length === 0) return null;
+  const align: MarkdownTableAlign[] = [];
+  for (const cell of cells) {
+    if (!TABLE_DIVIDER_CELL_RE.test(cell)) return null;
+    const left = cell.startsWith(':');
+    const right = cell.endsWith(':');
+    align.push(left && right ? 'center' : right ? 'right' : left ? 'left' : null);
+  }
+  return align;
+}
+
+/** Cap one cell to MARKDOWN_TABLE_CELL_MAX chars, marking truncation with '…'. */
+function capCell(s: string): string {
+  const max = MARKDOWN_TABLE_CELL_MAX;
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)) + '…';
+}
+
+interface ParsedTable {
+  headerCells: string[];
+  rows: string[][];
+  align: MarkdownTableAlign[];
+  raw: string;
+  consumed: number;
+}
+
+/**
+ * Try to parse a pipe table starting at lines[start]. Returns the bounded
+ * table (≤ MARKDOWN_TABLE_MAX_COLUMNS columns, ≤ MARKDOWN_TABLE_MAX_ROWS body
+ * rows + one '+N more rows' marker row when truncated) plus how many source
+ * lines it consumed, or null when this is not a table start.
+ */
+function parseTableAt(lines: string[], start: number): ParsedTable | null {
+  const headerLine = lines[start];
+  if (typeof headerLine !== 'string' || !isPipeRow(headerLine)) return null;
+  const dividerLine = lines[start + 1];
+  if (typeof dividerLine !== 'string') return null;
+  const dividerAlign = parseDividerAlign(dividerLine);
+  if (!dividerAlign) return null;
+  const rawHeader = splitTableRow(headerLine);
+  // GFM: the divider's cell count must match the header's. This veto keeps
+  // ASCII art and stray pipe rows from becoming a mangled table.
+  if (rawHeader.length !== dividerAlign.length) return null;
+
+  const colCount = Math.min(rawHeader.length, MARKDOWN_TABLE_MAX_COLUMNS);
+  const headerCells = rawHeader.slice(0, colCount).map(capCell);
+  const align = dividerAlign.slice(0, colCount);
+
+  const normalizeRow = (cells: string[]): string[] => {
+    const row: string[] = [];
+    for (let c = 0; c < colCount; c++) row.push(capCell(cells[c] ?? ''));
+    return row;
+  };
+
+  const rows: string[][] = [];
+  let totalBodyRows = 0;
+  let i = start + 2;
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    if (!isPipeRow(line)) break;
+    totalBodyRows++;
+    if (rows.length < MARKDOWN_TABLE_MAX_ROWS) rows.push(normalizeRow(splitTableRow(line)));
+  }
+  if (totalBodyRows > MARKDOWN_TABLE_MAX_ROWS) {
+    const marker: string[] = ['+' + (totalBodyRows - MARKDOWN_TABLE_MAX_ROWS) + ' more rows'];
+    for (let c = 1; c < colCount; c++) marker.push('');
+    rows.push(marker);
+  }
+
+  return {
+    headerCells,
+    rows,
+    align,
+    raw: lines.slice(start, i).join('\n'),
+    consumed: i - start,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -151,7 +291,9 @@ function matchQuote(line: string): string | null {
  * code blocks (```lang … ``` → {kind:'code', lang, content=inner}), ATX
  * headings (#..###### → {kind:'heading', level, content}), bullet lines
  * (-,*,+ or `N.`/`N)` → one {kind:'bullet', content} per line), blockquotes
- * (consecutive `>` lines → one {kind:'quote', content}), and everything else
+ * (consecutive `>` lines → one {kind:'quote', content}), GFM pipe tables
+ * (header + divider + body rows → {kind:'table', headerCells, rows, align},
+ * bounded by MARKDOWN_TABLE_MAX_COLUMNS/ROWS/CELL_MAX), and everything else
  * coalesced into {kind:'text'} segments. An unclosed fence treats the rest of
  * the input as code. Order is preserved. Non-strings and empty/whitespace-only
  * input yield []. Output is bounded (≤ MARKDOWN_SEGMENT_MAX segments, each
@@ -226,6 +368,21 @@ export function segmentMarkdown(text: unknown): MarkdownSegment[] {
       continue;
     }
 
+    const table = parseTableAt(lines, i);
+    if (table) {
+      flushText();
+      flushQuote();
+      pushSegment({
+        kind: 'table',
+        content: table.raw,
+        headerCells: table.headerCells,
+        rows: table.rows,
+        align: table.align,
+      });
+      i += table.consumed - 1;
+      continue;
+    }
+
     const heading = matchHeading(line);
     if (heading) {
       flushText();
@@ -276,12 +433,18 @@ const HAS_HEADING_RE = /(?:^|[\r\n])[ \t]{0,3}#{1,6}[ \t]+\S/;
 const HAS_BULLET_RE = /(?:^|[\r\n])[ \t]{0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+\S/;
 const HAS_QUOTE_RE = /(?:^|[\r\n])[ \t]{0,3}>[ \t]*\S/;
 const HAS_BOLD_RE = /\*\*[^*\r\n]+\*\*/;
+// Table cue: a pipe row directly above a divider row (|---|:--:|…). Slightly
+// MORE permissive than parseTableAt (a regex cannot count cells), which is the
+// safe direction: over-detection only routes to the segmenter, which then
+// falls back to text; under-detection would leave a real table raw.
+const HAS_TABLE_RE =
+  /(?:^|[\r\n])[ \t]*\|[^\r\n]*\|[ \t]*(?:\r\n?|\n)[ \t]*\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*(?=$|[\r\n])/;
 
 /**
  * Cheap pre-check for the caller: true when `text` contains any renderable
  * block/inline markdown worth segmenting — a code fence, an ATX heading, a
- * bullet/ordered-list line, a blockquote, or `**bold**`. Non-strings and empty
- * strings are false. Bounded scan window. Never throws.
+ * bullet/ordered-list line, a blockquote, a GFM pipe table, or `**bold**`.
+ * Non-strings and empty strings are false. Bounded scan window. Never throws.
  */
 export function hasRenderableMarkdown(text: unknown): boolean {
   if (typeof text !== 'string' || text.length === 0) return false;
@@ -291,6 +454,7 @@ export function hasRenderableMarkdown(text: unknown): boolean {
     HAS_HEADING_RE.test(scan) ||
     HAS_BULLET_RE.test(scan) ||
     HAS_QUOTE_RE.test(scan) ||
+    HAS_TABLE_RE.test(scan) ||
     HAS_BOLD_RE.test(scan)
   );
 }

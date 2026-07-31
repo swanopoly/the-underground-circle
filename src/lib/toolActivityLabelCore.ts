@@ -87,6 +87,14 @@ export const TOOL_ACTIVITY_LABELS: Readonly<Record<string, string>> = Object.fre
   'desktop.click_element': 'Clicking…',
   'desktop.type_text': 'Typing…',
 
+  // ── Engineering / CAD ─────────────────────────────────────────────────────
+  'engineering.calc': 'Running the calculation…',
+  'engineering.design_part': 'Sizing the part…',
+  'engineering.draft_dxf': 'Drafting the drawing…',
+  'engineering.model_3d': 'Building the 3D model…',
+  'engineering.inspect_mesh': 'Measuring the mesh…',
+  'desktop.cad_compile': 'Compiling the CAD model…',
+
   // ── Browser computer use ──────────────────────────────────────────────────
   'browser.open_url': 'Opening the page…',
   'browser.dom_snapshot': 'Reading the page…',

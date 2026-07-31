@@ -28,6 +28,8 @@ export interface AgentRunLike {
   started_at?: string | null;
   created_at?: string | null;
   completed_at?: string | null;
+  /** Heartbeat column (bumped by the tool loop) — feeds board stall badges. */
+  updated_at?: string | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
   cached_tokens?: number | null;
@@ -96,6 +98,8 @@ export interface OfficeRunNode {
   /** metadata.delegationDepth when present, else tree depth (orphans ≥ 1). */
   depth: number;
   startedAt?: string;
+  /** Heartbeat (agent_runs.updated_at) — consumed by officeBoardStallCore. */
+  updatedAt?: string;
   /** Computed from the caller-supplied nowMs (finished runs use completed_at). */
   durationMs: number;
   /** Latest step/tool hint from metadata.runtimeToolActions or provided hints. */
@@ -472,6 +476,7 @@ export function buildOfficeBuildingBoard(
       parentRunId: run.parent_run_id || undefined,
       depth,
       startedAt: startedAt || undefined,
+      updatedAt: (typeof run.updated_at === 'string' && run.updated_at) || undefined,
       durationMs,
       stepHint: deriveStepHint(run, opts?.stepHints),
       tokens: input + output + cached > 0 ? { input, output, cached } : undefined,

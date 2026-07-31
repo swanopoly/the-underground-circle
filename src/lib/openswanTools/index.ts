@@ -20,6 +20,7 @@ import {
   buildDesignAppRuntimeToolCaptureMetadata,
   withDesignAppRuntimeCaptureMetadata,
 } from '../designAppRuntimeManifest';
+import { buildEngineeringToolCaptureMetadata } from '../engineeringRuntimeCaptureCore';
 
 export const MAX_TOOL_ROUNDS = 5;
 
@@ -95,11 +96,15 @@ export async function dispatchToolDetailed(
     const policy = getOpenSwanToolPolicy(name as OpenSwanRuntimeToolName, ctx.activePluginIds);
     const approvalRequest = (result as any).approvalRequest || null;
     const capture = buildDesignAppRuntimeToolCaptureMetadata(name, result, input);
-    const metadata = withDesignAppRuntimeCaptureMetadata({
-      ...(name === 'browser.plan_task' ? { browserPlan: (result as any).plan || null } : {}),
-      toolPolicy: policy,
-      approvalRequest,
-    }, capture);
+    const engineeringCapture = buildEngineeringToolCaptureMetadata(name, result, input);
+    const metadata = {
+      ...withDesignAppRuntimeCaptureMetadata({
+        ...(name === 'browser.plan_task' ? { browserPlan: (result as any).plan || null } : {}),
+        toolPolicy: policy,
+        approvalRequest,
+      }, capture),
+      ...(engineeringCapture || {}),
+    };
     const status: OpenSwanExecutionStatus = approvalRequest
       ? 'manual_required'
       : name.startsWith('verification.') && (result as any).executed === false

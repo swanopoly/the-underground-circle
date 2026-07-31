@@ -42,6 +42,12 @@ import GitHubTab from './GitHubTab';
 import HeliusTab from './HeliusTab';
 import SlackTab from './SlackTab';
 import TeamsTab from './TeamsTab';
+import { buildIntegrationHealthBadge, type IntegrationHealthBadge } from '../../../lib/integrationHealthBadgeCore';
+import { getIntegrationHealthHintNow } from '../../../lib/integrationHealthRegistry';
+import IntegrationHealthChip from '../../../components/marketplace/IntegrationHealthChip';
+import ConnectedResourcesPanel from '../../../components/ConnectedResourcesPanel';
+import { loadConnectedResourcesSnapshot } from '../../../lib/connectedResourcesRuntime';
+import type { ConnectedResourcesInput } from '../../../lib/connectedResourcesDigest';
 
 type PlatformKey = 'none' | CircleIntegrationPlatformKey;
 type MarketplaceFilter = 'all' | 'installed' | 'ready' | 'native';
@@ -57,6 +63,10 @@ interface PlatformStatus {
   integrationId?: string;
   secretKeys?: string[];
   metadata?: Record<string, unknown>;
+  /** Raw circle_integrations.status — 'connected' | 'degraded' | 'disabled' | 'planned'. */
+  status?: string;
+  /** Computed honest badge (tone/label/detail/showRetest). */
+  health?: IntegrationHealthBadge;
   validation?: {
     ok: boolean;
     missingSecretKeys: string[];
@@ -313,7 +323,9 @@ function PlatformCard({
               <Text style={styles.newBadgeText}>New</Text>
             </View>
           ) : null}
-          {connected ? (
+          {status?.health && status.health.tone !== 'ok' ? (
+            <IntegrationHealthChip badge={status.health} />
+          ) : connected ? (
             <View style={[
               styles.statusBadge,
               { backgroundColor: '#22c55e15', borderColor: '#22c55e30' },
@@ -656,7 +668,15 @@ function GenericIntegrationManager({
             modelKeyMessage = ' Add the API key above to save it for chat, agents, and automations.';
           }
         }
-        setMessage(`${definition.label} connected for this circle.${modelKeyMessage}`);
+        if (integration.status === 'degraded') {
+          const reason = String(
+            (integration.metadata as Record<string, unknown> | undefined)?.last_validation_error
+            || 'the provider rejected the key',
+          );
+          setMessage(`${definition.label} saved, but the key check failed: ${reason}. Fix the key and save again.${modelKeyMessage}`);
+        } else {
+          setMessage(`${definition.label} connected for this circle.${modelKeyMessage}`);
+        }
         onRefresh();
       } else {
         setMessage(`Failed to save ${definition.label} integration.`);
@@ -714,6 +734,13 @@ function GenericIntegrationManager({
       <View style={styles.detailSummaryCard}>
         <Text style={styles.detailSummaryLabel}>CONNECTION</Text>
         <Text style={[styles.detailSummaryValue, { color: accentColor }]}>{status?.connected ? 'Active' : 'Not connected'}</Text>
+        {status?.health ? (
+          <IntegrationHealthChip
+            badge={status.health}
+            onRetest={status.health.showRetest ? handleSave : undefined}
+            initiallyExpanded={status.health.tone !== 'ok'}
+          />
+        ) : null}
         {status?.hint ? <Text style={styles.detailSummaryText}>{status.hint}</Text> : null}
         {status?.secretKeys && status.secretKeys.length > 0 ? (
           <Text style={styles.detailSummaryText}>Saved secrets: {status.secretKeys.join(', ')}</Text>
@@ -973,6 +1000,14 @@ export default function MarketplaceTab({
   const [activePlatform, setActivePlatform] = useState<PlatformKey>('none');
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [connectedSnapshot, setConnectedSnapshot] = useState<ConnectedResourcesInput | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadConnectedResourcesSnapshot({ circleId })
+      .then((snap) => { if (alive) setConnectedSnapshot(snap); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [circleId]);
   const [activeGroupFilter, setActiveGroupFilter] = useState<CircleIntegrationGroupKey | 'all' | 'models'>('all');
   // Sort: 'popular' uses curated `popularityRank` (set on the catalog
   // entries — anthropic / openai first, replicate pinned to bottom).
@@ -1065,10 +1100,21 @@ export default function MarketplaceTab({
             ...(validation?.providerWarnings || []),
           ];
 
+          const integrationMetadata = (integration.metadata as Record<string, unknown>) || {};
+          const health = buildIntegrationHealthBadge({
+            status: integration.status,
+            lastValidationError: integrationMetadata['last_validation_error'],
+            // Setup-completeness is only a NEGATIVE signal here; never pass
+            // `true` — in the core validationOk:true means "a fresh key probe
+            // just passed" and would override a stored degraded key status.
+            validationOk: validation && !validation.ok ? false : null,
+            healthHint: getIntegrationHealthHintNow(integration.id),
+          });
+
           return [
             provider,
             {
-              connected: true,
+              connected: integration.status === 'connected',
               name: integration.display_name || definitionLabel,
               hint: validation?.ok
                 ? hasUserModelKey
@@ -1077,7 +1123,9 @@ export default function MarketplaceTab({
                 : `Setup incomplete: ${missing.join(', ')}`,
               integrationId: integration.id,
               secretKeys,
-              metadata: (integration.metadata as Record<string, unknown>) || {},
+              metadata: integrationMetadata,
+              status: integration.status,
+              health,
               validation: validation || undefined,
             } satisfies PlatformStatus,
           ] as const;
@@ -1358,6 +1406,19 @@ export default function MarketplaceTab({
             </View>
           </View>
 
+          {/* What's connected — the user-facing mirror of the agent's
+              connected-resources prompt block (names only, secret-safe). */}
+          <View style={{ marginBottom: 12 }}>
+            <ConnectedResourcesPanel
+              input={connectedSnapshot}
+              onConnect={(row) => {
+                if (row.connectAction.targetTab && typeof window !== 'undefined') {
+                  try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: row.connectAction.targetTab } })); } catch {}
+                }
+              }}
+            />
+          </View>
+
           {/* Model providers live in the marketplace card grid below.
               Select a Models card, open Setup & connect, and save the
               provider key there. Model keys are also synced to
@@ -1459,7 +1520,13 @@ export default function MarketplaceTab({
                   key={key}
                   style={[
                     styles.statusPip,
-                    { backgroundColor: status.connected ? CIRCLE_INTEGRATION_CATALOG.find(item => item.platformKey === key)?.color || '#22c55e' : '#333' },
+                    {
+                      backgroundColor: status.health && status.health.tone !== 'ok'
+                        ? (status.health.tone === 'danger' ? '#ef4444' : '#f59e0b')
+                        : status.connected
+                          ? CIRCLE_INTEGRATION_CATALOG.find(item => item.platformKey === key)?.color || '#22c55e'
+                          : '#333',
+                    },
                   ]}
                 />
               ))}

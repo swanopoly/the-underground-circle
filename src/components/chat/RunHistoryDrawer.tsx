@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   getRunArtifacts,
@@ -23,6 +23,8 @@ import {
   readRunExecutionStream,
 } from '../../lib/runMetadataSummary';
 import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard } from '../../lib/openswanObservedEvals';
+import { filterAndStatRuns, type RunStatusFilter } from '../../lib/runHistoryFilterCore';
+import RunHistoryFilterBar from './RunHistoryFilterBar';
 import OpenSwanQualityAggregate from './OpenSwanQualityAggregate';
 import OpenSwanQualityDashboard from './OpenSwanQualityDashboard';
 import RunMetadataSummary from './RunMetadataSummary';
@@ -34,6 +36,13 @@ type Props = {
   title?: string;
   chatSessionId?: string | null;
   roomId?: string | null;
+  /**
+   * Deep-link focus: when provided and the run is present in the loaded first
+   * page, select it once on load. Never fights later user selection (applied
+   * at most once per distinct id), and when the run is NOT in the first page
+   * the drawer keeps its existing default (first run) selection.
+   */
+  initialRunId?: string | null;
   onClose: () => void;
 };
 
@@ -115,11 +124,17 @@ export default function RunHistoryDrawer({
   title = 'Run History',
   chatSessionId = null,
   roomId = null,
+  initialRunId = null,
   onClose,
 }: Props) {
   const [qualityWindow, setQualityWindow] = useState<'all' | 'recent'>('all');
   const [runs, setRuns] = useState<AgentRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [filterQuery, setFilterQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<RunStatusFilter>('all');
+  // Deep-link focus is applied at most once per distinct initialRunId so a
+  // later user selection is never overridden by a reload.
+  const appliedInitialRunIdRef = useRef<string | null>(null);
   const [steps, setSteps] = useState<RunStep[]>([]);
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
   const [childRuns, setChildRuns] = useState<AgentRun[]>([]);
@@ -134,11 +149,21 @@ export default function RunHistoryDrawer({
         : await listRuns(circleId, { roomId: roomId || undefined, limit: 40 });
       if (cancelled) return;
       setRuns(nextRuns);
-      setSelectedRunId((current) => current || nextRuns[0]?.id || null);
+      // Deep-link focus: honored only when the run is present in this first
+      // page; otherwise fall back to the existing default-selection behavior.
+      const wantInitial = !!initialRunId
+        && appliedInitialRunIdRef.current !== initialRunId
+        && nextRuns.some((run) => run.id === initialRunId);
+      if (wantInitial) {
+        appliedInitialRunIdRef.current = initialRunId;
+        setSelectedRunId(initialRunId);
+      } else {
+        setSelectedRunId((current) => current || nextRuns[0]?.id || null);
+      }
     };
     void load();
     return () => { cancelled = true; };
-  }, [visible, circleId, chatSessionId, roomId]);
+  }, [visible, circleId, chatSessionId, roomId, initialRunId]);
 
   useEffect(() => {
     if (!visible || !selectedRunId) {
@@ -231,6 +256,14 @@ export default function RunHistoryDrawer({
     () => readRunBrowserPlanEvents(selectedRun?.metadata) as BrowserPlanEvent[],
     [selectedRun],
   );
+  // Sidebar search/status filter + rollup-header stats (pure core). With the
+  // default query/'all' filter, `visible` is exactly `runs` in order, so the
+  // no-props render is unchanged apart from the new bar itself.
+  const runFilterResult = useMemo(
+    () => filterAndStatRuns(runs, { query: filterQuery, statusFilter, nowMs: Date.now() }),
+    [runs, filterQuery, statusFilter],
+  );
+  const visibleRuns = runFilterResult.visible as unknown as AgentRun[];
 
   const handlePromote = async (ref: PromptMemoryReference) => {
     const ok = await promoteMemory(ref.id);
@@ -306,10 +339,19 @@ export default function RunHistoryDrawer({
           <View style={styles.body}>
             <View style={styles.sidebar}>
               <Text style={styles.sectionTitle}>RUNS</Text>
+              <RunHistoryFilterBar
+                query={filterQuery}
+                onQueryChange={setFilterQuery}
+                statusFilter={statusFilter}
+                onStatusFilterChange={setStatusFilter}
+                stats={runFilterResult.stats}
+              />
               <ScrollView>
                 {runs.length === 0 ? (
                   <Text style={styles.empty}>No runs yet.</Text>
-                ) : runs.map((run) => {
+                ) : visibleRuns.length === 0 ? (
+                  <Text style={styles.empty}>No runs match the filter.</Text>
+                ) : visibleRuns.map((run) => {
                   const active = run.id === selectedRunId;
                   return (
                     <Pressable

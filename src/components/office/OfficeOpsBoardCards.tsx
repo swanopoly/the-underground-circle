@@ -17,6 +17,8 @@ import type {
   OfficeTokenTrackerCard,
 } from '../../lib/officeOpsBoard';
 import { formatRelativeTime, formatTokenCount } from '../../lib/officeOpsBoard';
+import { formatRunRowTelemetry } from '../../lib/officeRunRowTelemetryCore';
+import { classifyRunNodeStall, OFFICE_BOARD_STALL_LABEL } from '../../lib/officeBoardStallCore';
 
 // ── Visibility helpers (parents use these to skip empty layout rows) ────────
 
@@ -79,6 +81,9 @@ function RunRow({
   const tint = statusTint(node.status);
   const waiting = node.status === 'waiting_approval';
   const marker = indent > 0 ? '└ ' : '';
+  // Read-only per-row telemetry + stall verdict (no reap writes from the board).
+  const telemetrySuffix = formatRunRowTelemetry({ tokens: node.tokens, costUsd: node.costUsd });
+  const stall = classifyRunNodeStall(node, Date.now());
 
   const body = (
     <View style={[s.runRowWrap, waiting && s.runRowWaiting, indent > 0 && { paddingLeft: 12 * Math.min(indent, 3) }]}>
@@ -86,7 +91,12 @@ function RunRow({
         <Text style={[s.runGlyph, { color: tint }]}>{marker}{statusGlyph(node.status)}</Text>
         <Text style={s.runAgent} numberOfLines={1}>{node.agentName}</Text>
         <Text style={s.runTitle} numberOfLines={1}>{node.title}</Text>
-        <Text style={s.runTime}>{formatRelativeTime(node.durationMs)}</Text>
+        {stall.stalled ? (
+          <View style={s.stallBadge}>
+            <Text style={s.stallBadgeText}>{OFFICE_BOARD_STALL_LABEL}</Text>
+          </View>
+        ) : null}
+        <Text style={s.runTime}>{formatRelativeTime(node.durationMs)}{telemetrySuffix}</Text>
       </View>
       {node.stepHint ? (
         <Text style={s.runStepHint} numberOfLines={1}>{node.stepHint}</Text>
@@ -465,6 +475,22 @@ const s = StyleSheet.create({
     fontSize: 11,
     color: '#e8b339',
     fontFamily: 'monospace',
+  },
+  // Run-row stall badge (amber needs-you family, buildingBadge sizing)
+  stallBadge: {
+    backgroundColor: '#e8b33922',
+    borderWidth: 1,
+    borderColor: '#e8b33966',
+    borderRadius: 4,
+    paddingHorizontal: 3,
+    paddingVertical: 1,
+  },
+  stallBadgeText: {
+    color: '#e8b339',
+    fontSize: 8,
+    fontFamily: 'monospace',
+    fontWeight: '900',
+    letterSpacing: 0.5,
   },
   // Desktop badge
   buildingBadge: {

@@ -50,7 +50,7 @@ function assertEq(a: unknown, b: unknown, m: string): void {
   assert(a === b, m, 'got ' + JSON.stringify(a) + ' want ' + JSON.stringify(b));
 }
 
-const VALID_KINDS: MarkdownSegmentKind[] = ['text', 'code', 'heading', 'bullet', 'quote'];
+const VALID_KINDS: MarkdownSegmentKind[] = ['text', 'code', 'heading', 'bullet', 'quote', 'table'];
 
 function noThrow(label: string, fn: () => unknown): void {
   try {
@@ -343,6 +343,7 @@ function main(): void {
     '1) ordered',
     '```\ncode\n```',
     '~~~\ncode\n~~~',
+    '| a | b |\n| --- | --- |\n| 1 | 2 |', // GFM pipe table (deep coverage: markdown-table-segment-smoketest)
   ];
   for (const p of blockProbes) {
     const segs = segmentMarkdown(p);

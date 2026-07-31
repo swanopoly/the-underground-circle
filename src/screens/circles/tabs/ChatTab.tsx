@@ -287,6 +287,10 @@ import {
 } from '../../../lib/chatSessionStatePersistence';
 import type { ComputerTaskEvidenceContract } from '../../../lib/computerTaskEvidenceContract';
 import { buildChatDesignTaskCardModel } from '../../../lib/chatDesignTaskCard';
+import { SEED_EVENT_NAME, parseComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
+import EngineeringDesignCard from '../../../components/chat/EngineeringDesignCard';
+import { extractEngineeringCapturesFromToolEvents } from '../../../lib/engineeringRuntimeCaptureCore';
+import { buildEngineeringCardModels } from '../../../lib/engineeringDesignCardCore';
 import {
   buildAgentPlanDraft,
   formatAgentPlanForChat,
@@ -1803,6 +1807,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       window.removeEventListener('uc:open-openswan-control-panel', openFromSiteReadiness as EventListener);
     };
   }, [input]);
+
+  // Cross-surface composer seed — empty-state chips on Feed/Office/Rooms
+  // dispatch uc:seed-composer before uc:switch-tab so the user lands in Chat
+  // with the command pre-filled instead of an empty composer. The parser is
+  // total over hostile event detail; a bad payload is simply ignored.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const onSeedComposer = (event: Event) => {
+      const seed = parseComposerSeedDetail((event as CustomEvent).detail);
+      if (seed) setInput(seed.text);
+    };
+    window.addEventListener(SEED_EVENT_NAME, onSeedComposer as EventListener);
+    return () => {
+      window.removeEventListener(SEED_EVENT_NAME, onSeedComposer as EventListener);
+    };
+  }, []);
 
   const persistComputerTaskState = useCallback(async (args: {
     task: string;
@@ -8249,23 +8269,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }));
 
       // Second pass: pull older matches from the DB. Skip any whose
-      // dbId is already in the in-memory set.
+      // dbId is already in the in-memory set. Scope to the active thread
+      // when one is selected so results don't leak across threads.
       try {
-        const { data: dbResults } = await supabase
+        let dbQuery = supabase
           .from('messages')
-          .select('id, content, created_at, user:profiles!user_id(display_name)')
+          .select('id, content, created_at, is_bot, user:profiles!user_id(display_name)')
           .eq('circle_id', circleId)
           .ilike('content', `%${query}%`)
           .order('created_at', { ascending: false })
           .limit(15);
+        if (activeThreadId) dbQuery = dbQuery.eq('thread_id', activeThreadId);
+        const { data: dbResults } = await dbQuery;
         if (dbResults) {
           for (const r of dbResults as any[]) {
             if (inMemoryIds.has(r.id)) continue;
             // No id → archived → no JUMP button (id field stays
             // undefined so the card hides the button automatically).
+            const rowIsBot = r.is_bot === true;
             rows.push({
-              authorName: r.user?.display_name || 'Member',
-              isBot: false,
+              authorName: rowIsBot ? (agentName || 'Bot') : (r.user?.display_name || 'Member'),
+              isBot: rowIsBot,
               snippet: r.content.length > 160 ? r.content.slice(0, 157) + '…' : r.content,
               timestamp: new Date(r.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
             });
@@ -10304,6 +10328,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 : evt.status === 'blocked' ? 'blocked'
                 : 'failed',
               summary: evt.summary || evt.result || evt.tool,
+              metadata: evt.metadata && typeof evt.metadata === 'object' ? evt.metadata : undefined,
             }));
             // When Claude ran tools but didn't type a natural-language
             // reply, synthesize a friendly confirmation from the tool
@@ -11067,6 +11092,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const handoffMetadata = item.computerHandoff || null;
     const appChoiceCard = buildChatAppChoiceCard(handoffMetadata);
     const designTaskCard = buildChatDesignTaskCardModel(handoffMetadata);
+    // Engineering design/calc cards — structured tool captures ride the
+    // transient event metadata channel (same lane as browserPlan).
+    const engineeringCardModels = buildEngineeringCardModels(
+      extractEngineeringCapturesFromToolEvents((item.toolEvents as any) || []),
+    );
     const recoveryReliabilityCard = buildRecoveryReliabilityCard(item.recoveryReliability);
     const visibleContent = item.recoveryOptions && item.recoveryOptions.length > 0
       ? stripChatFailureRecoveryOptionsText(item.content)
@@ -11444,6 +11474,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             does NOT duplicate the P22 Details disclosure (which shows the
             verbose per-card breakdown) — this is the one-glance verdict. */}
         {receiptBlock}
+        {engineeringCardModels.length > 0 && engineeringCardModels.map((model, index) => (
+          <EngineeringDesignCard
+            key={`eng-card-${item.id}-${index}`}
+            model={model}
+            accentColor={accentColor}
+            onSeedCommand={(text: string) => setInput(text)}
+          />
+        ))}
         <ChatArtifacts
           artifacts={item.artifacts}
           accentColor={accentColor}

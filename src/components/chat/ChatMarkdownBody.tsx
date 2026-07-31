@@ -1,7 +1,7 @@
 /**
  * ChatMarkdownBody — renders a bot message's BLOCK structure (fenced code,
- * headings, bullets, blockquotes) instead of showing raw `\`\`\`` fences, `#`,
- * `-`, and `>` markers. Block segmentation is done by the pure, smoke-pinned
+ * headings, bullets, blockquotes, GFM pipe tables) instead of showing raw
+ * `\`\`\`` fences, `#`, `-`, `>`, and `| a | b |` markers. Block segmentation is done by the pure, smoke-pinned
  * markdownSegmentCore; each plain-text segment is delegated to the existing
  * ChatInlineRichText so inline @mentions and **bold** keep their styling.
  *
@@ -12,6 +12,7 @@
 import React from 'react';
 import { Platform, StyleSheet, Text, View } from 'react-native';
 import ChatInlineRichText from './ChatInlineRichText';
+import ChatMarkdownTable from './ChatMarkdownTable';
 import { segmentMarkdown } from '../../lib/markdownSegmentCore';
 
 type ChatMarkdownBodyProps = {
@@ -64,6 +65,16 @@ export default function ChatMarkdownBody({
                   <ChatInlineRichText content={seg.content} accentColor={accentColor} textColor={textColor} />
                 </View>
               </View>
+            );
+          case 'table':
+            return (
+              <ChatMarkdownTable
+                key={`table-${index}`}
+                headerCells={seg.headerCells ?? []}
+                rows={seg.rows ?? []}
+                align={seg.align ?? []}
+                accentColor={accentColor}
+              />
             );
           case 'quote':
             return (

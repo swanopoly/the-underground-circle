@@ -32,6 +32,8 @@ import { fetchBridgeAuthenticated } from '../../../lib/bridgeAuth';
 import ConnectAllBridgesPanel, { isConnectPanelDismissed } from '../../../components/office/ConnectAllBridgesPanel';
 import OfficeBridgeReadinessStrip from '../../../components/office/OfficeBridgeReadinessStrip';
 import OfficeLaneHealthStrip from '../../../components/office/OfficeLaneHealthStrip';
+import OfficeBridgeDiagPanel from '../../../components/office/OfficeBridgeDiagPanel';
+import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
 import type { OfficeBridgeReadinessSnapshot as OfficeBridgeReadinessSnapshotModel } from '../../../lib/officeBridgeReadiness';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
@@ -356,6 +358,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // open_run deep-link (plan §6b): blocked-run attention items open the same
   // run drawer chat uses instead of pointing at the board with an alert.
   const [showOfficeRunDetail, setShowOfficeRunDetail] = useState(false);
+  const [officeRunDetailRefId, setOfficeRunDetailRefId] = useState<string | null>(null);
   useEffect(() => {
     if (!circleId) return;
     let cancelled = false;
@@ -401,6 +404,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       return;
     }
     if (action.kind === 'open_run') {
+      // Attention items carry the exact run id — deep-link the drawer to it
+      // instead of landing on the newest run.
+      setOfficeRunDetailRefId(item.refId ?? null);
       setShowOfficeRunDetail(true);
     }
   };
@@ -4077,6 +4083,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         circleId={circleId}
         currentUserId={currentUserId}
         title="Circle Runs"
+        initialRunId={officeRunDetailRefId}
         onClose={() => setShowOfficeRunDetail(false)}
       />
 
@@ -4139,6 +4146,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {/* X7 tail (P53): per-lane chat quality — warn/danger-only, silent when
           healthy; self-polls the session lane-health registry (P48). */}
       <OfficeLaneHealthStrip />
+      {/* Passive bridge/pairing status — always-on collapsed strip, expandable
+          to per-bridge rows; self-polls, no OfficeTab state. */}
+      <OfficeBridgeDiagPanel />
       <OfficeConnectBridgesSection circleId={circleId} />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
@@ -4354,9 +4364,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                               setShowSetupWizard(true);
                               return;
                             }
-                            // /apps + /screen live in Chat — land the user there.
+                            // /apps + /screen live in Chat — seed the composer, then land the user there.
                             if (Platform.OS === 'web' && typeof window !== 'undefined') {
-                              try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } })); } catch {}
+                              const seed = action.kind === 'seed_command' ? buildComposerSeedDetail(action.value) : null;
+                              try {
+                                if (seed) window.dispatchEvent(new CustomEvent(SEED_EVENT_NAME, { detail: seed }));
+                                window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } }));
+                              } catch {}
                             }
                           }}
                           accentColor={accentColor}

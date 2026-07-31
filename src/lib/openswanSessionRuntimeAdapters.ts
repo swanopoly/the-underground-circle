@@ -61,6 +61,7 @@ import {
   buildDesignAppRuntimeToolCaptureMetadata,
   withDesignAppRuntimeCaptureMetadata,
 } from './designAppRuntimeManifest';
+import { buildEngineeringToolCaptureMetadata } from './engineeringRuntimeCaptureCore';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import { formatVerificationReceipt } from './verificationReceiptCore';
 import type { VerificationReceipt } from './verificationReceiptCore';
@@ -294,8 +295,12 @@ export function shapeLegacyToolHandlerResult(args: {
   const capture = inner.ok
     ? buildDesignAppRuntimeToolCaptureMetadata(toolName, raw, args.input)
     : null;
+  const engineeringCapture = inner.ok
+    ? buildEngineeringToolCaptureMetadata(toolName, raw, args.input)
+    : null;
   const metadata = withDesignAppRuntimeCaptureMetadata(
     {
+      ...(engineeringCapture || {}),
       // Preserve runtime-owned hidden receipts/identity from the bridge. These
       // remain on AgentToolResult.metadata and therefore ride typed events,
       // never the model-visible `data.text` below. Canonical adapter fields

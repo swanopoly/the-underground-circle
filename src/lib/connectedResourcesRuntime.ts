@@ -112,6 +112,40 @@ async function loadGoogleWorkspace(): Promise<GoogleWorkspaceSummary | null> {
 }
 
 /**
+ * Load the structured, already-sanitized ConnectedResourcesInput snapshot —
+ * the SAME structure the prompt-block builder consumes — for user-facing
+ * surfaces (e.g. the "What's connected" panel). Uncached: callers that need
+ * freshness control layer their own; the prompt path below keeps its own
+ * block-level TTL cache. Fails soft per source exactly like the block path
+ * (an erroring source yields its empty section).
+ */
+export async function loadConnectedResourcesSnapshot(args: {
+  circleId?: string | null;
+  connectedProviders?: Iterable<string> | null;
+}): Promise<ConnectedResourcesInput> {
+  const circleId = args.circleId || '';
+  const providerKeys: ProviderKeySummary[] = Array.from(args.connectedProviders || [])
+    .filter((p): p is string => typeof p === 'string' && p.length > 0)
+    .map((provider) => ({ provider }));
+
+  const [vaultCredentials, integrations, googleWorkspace] = await Promise.all([
+    circleId ? loadVaultSummaries(circleId) : Promise.resolve([]),
+    circleId ? loadIntegrationSummaries(circleId) : Promise.resolve([]),
+    loadGoogleWorkspace(),
+  ]);
+
+  return {
+    integrations,
+    vaultCredentials,
+    googleWorkspace,
+    providerKeys,
+    vaultDashboardHint: vaultCredentials.length
+      ? 'Manage these logins in the Vault dashboard (Circle → Vault) or with /vault; run vault.grant (approval-gated) to let automation use a login.'
+      : 'No site logins are saved yet — the user can add them in the Vault dashboard (Circle → Vault) so agents can sign in on their behalf.',
+  };
+}
+
+/**
  * Build the per-turn Connected Resources block for a circle/user, or null when
  * nothing is connected (so the caller skips an empty section). `connectedProviders`
  * is passed in from the chat context (already resolved for model routing) so we
@@ -122,29 +156,14 @@ export async function buildConnectedResourcesContextBlock(args: {
   connectedProviders?: Iterable<string> | null;
 }): Promise<string | null> {
   const circleId = args.circleId || '';
-  const providerKeys: ProviderKeySummary[] = Array.from(args.connectedProviders || [])
-    .filter((p): p is string => typeof p === 'string' && p.length > 0)
-    .map((provider) => ({ provider }));
+  const providerKeyNames = Array.from(args.connectedProviders || [])
+    .filter((p): p is string => typeof p === 'string' && p.length > 0);
 
-  const cacheKey = `${circleId}::${providerKeys.map((p) => p.provider).sort().join(',')}`;
+  const cacheKey = `${circleId}::${[...providerKeyNames].sort().join(',')}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.block || null;
 
-  const [vaultCredentials, integrations, googleWorkspace] = await Promise.all([
-    circleId ? loadVaultSummaries(circleId) : Promise.resolve([]),
-    circleId ? loadIntegrationSummaries(circleId) : Promise.resolve([]),
-    loadGoogleWorkspace(),
-  ]);
-
-  const input: ConnectedResourcesInput = {
-    integrations,
-    vaultCredentials,
-    googleWorkspace,
-    providerKeys,
-    vaultDashboardHint: vaultCredentials.length
-      ? 'Manage these logins in the Vault dashboard (Circle → Vault) or with /vault; run vault.grant (approval-gated) to let automation use a login.'
-      : 'No site logins are saved yet — the user can add them in the Vault dashboard (Circle → Vault) so agents can sign in on their behalf.',
-  };
+  const input = await loadConnectedResourcesSnapshot(args);
 
   const block = buildConnectedResourcesBlock(input);
   cache.set(cacheKey, { block: block || '', at: Date.now() });

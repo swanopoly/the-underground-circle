@@ -27,6 +27,7 @@ import TaskRunTimeline from './TaskRunTimeline';
 import TaskArtifactsPanel from './TaskArtifactsPanel';
 import TaskChecksPanel from './TaskChecksPanel';
 import TaskApprovalsPanel from './TaskApprovalsPanel';
+import TaskProofPanel from '../../../../components/feed/TaskProofPanel';
 import { useProjectRooms } from '../../../../services/projectRooms';
 import { listCircleIntegrations } from '../../../../lib/circleIntegrations';
 import { getInstalledProviderSet, recommendMarketplaceItemsForWork } from '../../../../lib/marketplaceRecommendations';
@@ -1641,6 +1642,10 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 </>
               );
             })()}
+
+            {/* ── Proof of Work — agent-run proof rows back-linked to this task
+                   via detail.task_id (renders null when none) ── */}
+            <TaskProofPanel circleId={task.circle_id} taskId={task.id} />
 
             {/* Comments section */}
             <View style={s.commentSection}>

@@ -143,6 +143,21 @@ export const APP_CAPABILITIES: readonly AppCapability[] = [
     approval: 'auto',
   },
   {
+    family: 'engineering',
+    title: 'Engineering & CAD design',
+    whenToUse:
+      'Design, size, or analyze a mechanical/structural part — stress, deflection, gears, shafts, springs, fits/tolerances — then draft a DXF, build a 3D STL solid, and measure it back. Pure computation plus headless Blender compile; no GUI CAD app needed.',
+    exampleTools: [
+      'engineering.calc',
+      'engineering.design_part',
+      'engineering.draft_dxf',
+      'engineering.model_3d',
+      'engineering.inspect_mesh',
+      'desktop.cad_compile',
+    ],
+    approval: 'auto',
+  },
+  {
     family: 'github',
     title: 'GitHub repos & activity',
     whenToUse:
@@ -359,6 +374,17 @@ const FAMILY_MATCHERS: readonly FamilyMatcher[] = [
   {
     family: 'team.deploy_agents',
     patterns: [/\bdeploy\b.*\bagents?\b/i, /\bswarm\b/i, /\bfan[- ]?out\b/i, /\b(parallel|in parallel)\b.*\bagents?\b/i],
+  },
+  {
+    family: 'engineering',
+    patterns: [
+      /\b(design|size|model|draft|analy[sz]e)\b.{0,80}\b(bracket|shaft|gear(box)?|beam|spring|bolt|vessel|plate|bearing|flange|pulley|cam|truss|frame|part)s?\b/i,
+      /\b(stress|deflection|buckling|torsion|fatigue|bending moment|section modulus|safety factor)\b/i,
+      /\b(dxf|stl|cad model)\b/i,
+      /\b(tolerance stack|iso fit|press fit|interference fit|bolt circle|tap drill)\b/i,
+      /\bgear (ratio|train|pair|teeth)\b/i,
+      /\b(torque|deflection|stiffness)\b.{0,40}\b(shaft|spring|beam|column)s?\b/i,
+    ],
   },
   {
     family: 'browser',

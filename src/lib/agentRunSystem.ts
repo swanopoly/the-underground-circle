@@ -1034,7 +1034,7 @@ export async function getActiveRuns(circleId: string): Promise<AgentRun[]> {
  * first. Selects only the columns the board model (officeOpsBoard.ts) needs.
  */
 const LIVE_RUN_BOARD_FIELDS =
-  'id,circle_id,title,status,surface,parent_run_id,delegated_to,started_at,created_at,completed_at,input_tokens,output_tokens,cached_tokens,estimated_cost,metadata';
+  'id,circle_id,title,status,surface,parent_run_id,delegated_to,started_at,created_at,completed_at,updated_at,input_tokens,output_tokens,cached_tokens,estimated_cost,metadata';
 
 export async function listCircleLiveRuns(
   circleId: string,
