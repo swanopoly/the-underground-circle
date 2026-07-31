@@ -66,6 +66,15 @@ function main() {
     assert(designPart({ type: 'bracket', load: 500, arm: 100 }).ok, "designPart routes 'bracket'");
     assert(designPart({ type: 'shaft', torque: 100 }).ok, "designPart routes 'shaft'");
     assert(designPart({ type: 'beam', load: 5000, span: 800 }).ok, "designPart routes 'beam'");
+    // wave-7 packaged designers (each has its own deep smoke; here we prove ROUTING).
+    assert(designPart({ type: 'gearbox', power_kW: 5, inputSpeed_rpm: 1500, ratio: 3 }).ok, "designPart routes 'gearbox'");
+    assert(designPart({ type: 'isolator', mass_kg: 250, speed_rpm: 1500, isolationPercent: 90 }).ok, "designPart routes 'isolator'");
+    assert(designPart({ type: 'pressure_cover', pressure_MPa: 2, boreDiameter_mm: 400 }).ok, "designPart routes 'pressure_cover'");
+    assert(designPart({ type: 'conveyor_drive', power_kW: 3, inputSpeed_rpm: 960, ratio: 3 }).ok, "designPart routes 'conveyor_drive'");
+    assert(designPart({ type: 'brake', torque_Nm: 30, speed_rpm: 600, h_W_m2K: 100, dutyCycle: 0.05 }).ok, "designPart routes 'brake' (forced air, light duty)");
+    // free-air defaults CANNOT shed real brake heat — the honest guard proves routing too.
+    const brakeHot = designPart({ type: 'brake', torque_Nm: 30, speed_rpm: 600 });
+    assert(!brakeHot.ok && !brakeHot.ok && (brakeHot as any).error.includes('cooling shortfall'), "designPart routes 'brake' fail-closed cooling guard");
     assert(!designPart({ type: 'spaceship' }).ok, 'unknown design type rejected');
     assert(!designBracket({ load: -1, arm: 100 } as any).ok, 'negative load rejected');
     assert(!designShaft({} as any).ok, 'shaft without torque rejected');

@@ -196,13 +196,27 @@ export function designBeam(spec: {
 }
 
 // ─── Dispatcher ──────────────────────────────────────────────────────────────
+// The wave-7 packaged designers each live in their own core (they compose many
+// analysis lanes); they import ONLY types from this file, so the runtime
+// imports below cannot cycle.
+
+import { designGearbox } from './engineeringDesignGearboxCore';
+import { designIsolator } from './engineeringDesignIsolatorCore';
+import { designPressureCover } from './engineeringDesignPressureCoverCore';
+import { designConveyorDrive } from './engineeringDesignConveyorDriveCore';
+import { designBrake } from './engineeringDesignBrakeCore';
 
 export function designPart(intent: any): DesignResult<DesignedPart> {
   const type = String(intent?.type ?? '').trim().toLowerCase();
   if (type === 'bracket') return designBracket(intent);
   if (type === 'shaft') return designShaft(intent);
   if (type === 'beam') return designBeam(intent);
-  return { ok: false, error: `unknown design type "${type}" — use bracket, shaft, or beam` };
+  if (type === 'gearbox') return designGearbox(intent);
+  if (type === 'isolator') return designIsolator(intent);
+  if (type === 'pressure_cover') return designPressureCover(intent);
+  if (type === 'conveyor_drive') return designConveyorDrive(intent);
+  if (type === 'brake') return designBrake(intent);
+  return { ok: false, error: `unknown design type "${type}" — use bracket, shaft, beam, gearbox, isolator, pressure_cover, conveyor_drive, or brake` };
 }
 
 /** Confirm a designed part's model matches its stated dimensions (self-check). */

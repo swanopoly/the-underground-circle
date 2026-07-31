@@ -112,6 +112,33 @@ The seams: the two gear tools agree on the ratio; the output torque the reductio
 produces is what the shaft is sized for; the shaft diameter (20) is the gear bore
 and the bearing bore; the gear's tooth force is the bearing's radial load.
 
+## One-call packaged designers (`engineering.design_part`)
+
+The chains above — and the five wave-6 composition drills — are packaged as
+one-call designers: state the DUTY, get back a sized, stock-rounded,
+re-checked part. Every designer rounds a required dimension UP to a standard
+size and re-checks the realised stress/life/isolation at that size, so the
+returned part meets the duty, not just the raw requirement. Honest refusal is
+a first-class output (uncoolable brake, un-isolatable low-frequency duty).
+
+| `type` | duty inputs | what comes back |
+|---|---|---|
+| `bracket` | load, arm | plate t by bending, bolt holes, H7/g6 bore fit |
+| `shaft` | torque | Ø by τ=16T/πd³ |
+| `beam` | load, span, section | I/channel section sized by M/Sx |
+| `gearbox` | power_kW, inputSpeed_rpm, ratio | module/teeth by Lewis, shaft by combined-load capstone (static+fatigue), key, required bearing C, gear-pair bpy |
+| `isolator` | mass_kg, speed_rpm (or disturbanceFrequency_Hz), isolationPercent | spring set d/D/n via transmissibility; realised isolation never undershoots (rounding errs soft) |
+| `pressure_cover` | pressure_MPa, boreDiameter_mm | wall (thin-wall sizes, Lamé re-checks/governs), cover by plate bending, flange bolt count/size with separation margin |
+| `conveyor_drive` | power_kW, inputSpeed_rpm, ratio | ANSI chain pitch (table step asserted), exact integer ratio, head shaft, key, bearing C |
+| `brake` | torque_Nm, speed_rpm, dutyCycle | disc by uniform-wear, clamp force vs lining pressure, fin count to shed T·ω (or ok:false with the shortfall) |
+
+Designer smokes verify by ROUND-TRIP (returned dims fed back into the source
+lanes must clear their targets) and by drill regression (the gearbox designer
+configured with the drill's inputs reproduces the drill's numbers exactly):
+`smoke:engineering-design-core` (routing, all 8 types) plus one deep smoke per
+designer — `-gearbox` (71), `-isolator` (72), `-pressure-cover` (72),
+`-conveyor-drive` (69), `-brake` (65).
+
 ## Proofs
 
 - `npm run smoke:engineering-workflow-integration` — the bracket, chaining the
