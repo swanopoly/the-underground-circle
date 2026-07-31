@@ -2676,7 +2676,7 @@ const server = http.createServer(async (req, res) => {
            'file_list', 'file_read', 'file_read_binary', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'exec_file', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
            'paste_text', 'notes_create', 'applescript', 'convert_image', 'cad_compile', 'design_export',
            'menu_click', 'menu_inventory', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
-           'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
+           'photoshop_create_document', 'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
            'photoshop_apply_adjustment_layer', 'photoshop_apply_selection_or_mask', 'photoshop_resize_canvas_or_image',
            'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode',
            'illustrator_document_status', 'illustrator_export_proof', 'illustrator_text_inventory', 'illustrator_set_layer_state', 'illustrator_update_text_layer',
@@ -5109,6 +5109,104 @@ end tell`;
             docModified: result?.docModified === true,
             docSaved: result?.docSaved === true,
             error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    // ── POST /desktop/photoshop_create_document — new blank document ──────
+    // The one Photoshop mutation with NO existing-document precondition: it
+    // CREATES the active document the rest of the photoshop_* family then
+    // observes/mutates. Enum-token-only jsx (mode/fill resolved server-side),
+    // bounded name, verified by the returned active-document summary.
+    if (url === '/desktop/photoshop_create_document' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        const validDimension = (value) => typeof value === 'number' && Number.isFinite(value)
+          && Number.isInteger(value) && value >= 1 && value <= PHOTOSHOP_MAX_PIXEL_DIMENSION;
+        if (!validDimension(parsed?.widthPx) || !validDimension(parsed?.heightPx)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `widthPx and heightPx are required finite integers between 1 and ${PHOTOSHOP_MAX_PIXEL_DIMENSION}.` }));
+          return;
+        }
+        const rawResolution = parsed?.resolution;
+        if (rawResolution !== undefined && rawResolution !== null
+          && !(typeof rawResolution === 'number' && Number.isFinite(rawResolution) && rawResolution >= 36 && rawResolution <= 1200)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'resolution must be a number between 36 and 1200 when provided.' }));
+          return;
+        }
+        const name = parsed?.name == null ? '' : String(parsed.name).trim();
+        if (name.length > 120 || /[\x00-\x1f\x7f]/.test(name)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'name must be <= 120 printable chars.' }));
+          return;
+        }
+        const mode = parsed?.mode == null ? 'rgb' : String(parsed.mode).trim().toLowerCase();
+        if (!Object.prototype.hasOwnProperty.call(PHOTOSHOP_NEW_DOC_MODES, mode)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'mode must be rgb, grayscale, or cmyk.' }));
+          return;
+        }
+        const background = parsed?.background == null ? 'white' : String(parsed.background).trim().toLowerCase();
+        if (!Object.prototype.hasOwnProperty.call(PHOTOSHOP_NEW_DOC_FILLS, background)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'background must be white, transparent, or background.' }));
+          return;
+        }
+        const built = buildPhotoshopCreateDocumentScript({
+          appName,
+          widthPx: parsed.widthPx,
+          heightPx: parsed.heightPx,
+          resolution: rawResolution == null ? 72 : rawResolution,
+          name,
+          mode,
+          background,
+        });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 30000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop create document failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          if (!result || result.ok !== true || result.created !== true) {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({
+              ok: false,
+              appName: built.appName,
+              appRunning: result?.appRunning !== false,
+              created: false,
+              error: result?.error ? String(result.error).slice(0, 500)
+                : result?.status === 'not_running' ? 'Photoshop is not running.'
+                  : 'Photoshop did not confirm document creation.',
+            }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            created: true,
+            documentName: result.documentName ? String(result.documentName).slice(0, 260) : null,
+            widthPx: Number.isFinite(Number(result.widthPx)) ? Number(result.widthPx) : 0,
+            heightPx: Number.isFinite(Number(result.heightPx)) ? Number(result.heightPx) : 0,
+            resolution: Number.isFinite(Number(result.resolution)) ? Number(result.resolution) : 0,
+            mode: result.mode ? String(result.mode).slice(0, 40) : null,
+            documentCount: Number.isFinite(Number(result.documentCount)) ? Number(result.documentCount) : 0,
           }));
         });
       });
@@ -14464,6 +14562,58 @@ ${foot}`;
     result.error = String(err && err.message ? err.message : err);
   }
 ${foot}`;
+}
+
+// Allowed enums for photoshop_create_document — resolved to ExtendScript enum
+// tokens at BUILD time so no user string reaches the jsx as code.
+const PHOTOSHOP_NEW_DOC_MODES = { rgb: 'NewDocumentMode.RGB', grayscale: 'NewDocumentMode.GRAYSCALE', cmyk: 'NewDocumentMode.CMYK' };
+const PHOTOSHOP_NEW_DOC_FILLS = { white: 'DocumentFill.WHITE', transparent: 'DocumentFill.TRANSPARENT', background: 'DocumentFill.BACKGROUNDCOLOR' };
+
+function buildPhotoshopCreateDocumentScript({ appName, widthPx, heightPx, resolution, name, mode, background }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const modeToken = PHOTOSHOP_NEW_DOC_MODES[mode] || PHOTOSHOP_NEW_DOC_MODES.rgb;
+  const fillToken = PHOTOSHOP_NEW_DOC_FILLS[background] || PHOTOSHOP_NEW_DOC_FILLS.white;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: '', sourceDocumentPath: '' })}
+
+  var out = { ok: false, created: false, documentName: null, widthPx: 0, heightPx: 0, resolution: 0, mode: null, documentCount: 0, error: null };
+  try {
+    var docName = ${jsxLiteral(String(name || ''))};
+    var doc = app.documents.add(
+      UnitValue(${Number(widthPx)}, "px"),
+      UnitValue(${Number(heightPx)}, "px"),
+      ${Number(resolution)},
+      docName || undefined,
+      ${modeToken},
+      ${fillToken}
+    );
+    out.ok = true;
+    out.created = true;
+    out.documentName = String(doc.name || "");
+    out.widthPx = unitPx(doc.width);
+    out.heightPx = unitPx(doc.height);
+    out.resolution = (function () { try { return Math.round(Number(doc.resolution)); } catch (_) { return 0; } }());
+    out.mode = (function () { try { return String(doc.mode); } catch (_) { return null; } }());
+    out.documentCount = collectionLength(app.documents);
+  } catch (e) {
+    out.error = String(e && e.message ? e.message : e);
+  }
+  return "{" + [
+    "\\"ok\\":" + jsonBoolean(out.ok),
+    "\\"created\\":" + jsonBoolean(out.created),
+    "\\"documentName\\":" + jsonNullableString(out.documentName),
+    "\\"widthPx\\":" + jsonNumber(out.widthPx),
+    "\\"heightPx\\":" + jsonNumber(out.heightPx),
+    "\\"resolution\\":" + jsonNumber(out.resolution),
+    "\\"mode\\":" + jsonNullableString(out.mode),
+    "\\"documentCount\\":" + jsonNumber(out.documentCount),
+    "\\"error\\":" + jsonNullableString(out.error)
+  ].join(",") + "}";
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'create_document'));
 }
 
 function buildPhotoshopResizeCanvasOrImageScript({ appName, targetDocumentName, op, widthPx, heightPx, anchor }) {

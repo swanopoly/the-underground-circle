@@ -854,7 +854,17 @@ async function fetchKeywordMemoryCandidates(opts: {
   limit: number;
 }): Promise<any[]> {
   if (!opts.circleId || !Array.isArray(opts.terms) || opts.terms.length === 0) return [];
-  const orFilter = opts.terms
+  // Hard sanitize: terms reach a PostgREST or() filter, where `,`/`(`/`)`
+  // rewrite the filter itself and `%`/`\`/control chars distort the ILIKE
+  // pattern or inflate the URL. Callers pre-clean, but untrusted quoted
+  // content has reached this boundary before — enforce here, fail-safe.
+  const safeTerms = Array.from(new Set(
+    opts.terms
+      .map(term => String(term || '').replace(/[(),%\\]/g, ' ').replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, 48).trim())
+      .filter(term => term.length >= 3),
+  )).slice(0, KEYWORD_FALLBACK_MAX_TERMS);
+  if (safeTerms.length === 0) return [];
+  const orFilter = safeTerms
     .map(term => `title.ilike.%${term}%,content.ilike.%${term}%`)
     .join(',');
   try {
@@ -3502,7 +3512,11 @@ function extractSearchTerms(query: string): string[] {
     'which', 'why', 'i', 'me', 'my', 'we', 'you', 'your', 'our', 'their', 'they', 'them',
   ]);
 
-  const quoted = Array.from(query.matchAll(/"([^"]+)"/g))
+  // Quoted phrases are search terms only when they LOOK like search terms.
+  // Computer-task turns carry multi-KB dispatch context with quoted blobs;
+  // an uncapped quoted span became a single monster ILIKE term that blew the
+  // request URL past the transport limit (net::ERR_FAILED) — cap hard.
+  const quoted = Array.from(query.matchAll(/"([^"\n]{1,64})"/g))
     .map(match => match[1].trim())
     .filter(Boolean);
 

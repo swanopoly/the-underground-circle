@@ -240,6 +240,7 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.indesign_export_proof'
   | 'desktop.photoshop_document_status'
   | 'desktop.photoshop_layer_inventory'
+  | 'desktop.photoshop_create_document'
   | 'desktop.photoshop_set_layer_state'
   | 'desktop.photoshop_update_text_layer'
   | 'desktop.photoshop_place_asset'
@@ -847,6 +848,7 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.indesign_export_proof': { appName?: string; outputPath: string; format?: 'pdf'; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.photoshop_document_status': { appName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.photoshop_layer_inventory': { appName?: string; query?: string; expectedDocumentName?: string; sourceDocumentPath?: string; maxItems?: number };
+  'desktop.photoshop_create_document': { appName?: string; widthPx: number; heightPx: number; resolution?: number; name?: string; mode?: 'rgb' | 'grayscale' | 'cmyk'; background?: 'white' | 'transparent' | 'background' };
   'desktop.photoshop_set_layer_state': { appName?: string; layerName: string; action: 'show' | 'hide' | 'lock' | 'unlock'; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.photoshop_update_text_layer': { appName?: string; layerName: string; replacementText: string; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.photoshop_place_asset': { appName?: string; assetPath: string; layerName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
@@ -1159,6 +1161,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.indesign_export_proof': { ok: boolean; resultsText: string };
   'desktop.photoshop_document_status': { ok: boolean; resultsText: string };
   'desktop.photoshop_layer_inventory': { ok: boolean; resultsText: string };
+  'desktop.photoshop_create_document': { ok: boolean; resultsText: string };
   'desktop.photoshop_set_layer_state': { ok: boolean; resultsText: string };
   'desktop.photoshop_update_text_layer': { ok: boolean; resultsText: string };
   'desktop.photoshop_place_asset': { ok: boolean; resultsText: string };
@@ -3593,6 +3596,26 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.photoshop_create_document',
+    label: 'Create Photoshop Document',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop NEW blank document at exact pixel dimensions — the one Photoshop mutation with no existing-document precondition. Use for "open Photoshop and start a new project/document W x H"; returns the created document name/size as verification. Approval-gated app mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        widthPx: { type: 'number', description: 'Document width in pixels (1-30000).' },
+        heightPx: { type: 'number', description: 'Document height in pixels (1-30000).' },
+        resolution: { type: 'number', description: 'Resolution in ppi (36-1200). Defaults to 72.' },
+        name: { type: 'string', description: 'Optional document name (<=120 chars).' },
+        mode: { type: 'string', enum: ['rgb', 'grayscale', 'cmyk'], description: 'Color mode. Defaults to rgb.' },
+        background: { type: 'string', enum: ['white', 'transparent', 'background'], description: 'Initial fill. Defaults to white.' },
+      },
+      required: ['widthPx', 'heightPx'],
+    },
+  },
+  {
     name: 'desktop.photoshop_set_layer_state',
     label: 'Set Photoshop Layer State',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -5400,6 +5423,7 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.indesign_relink_asset': ['execute'],
   'desktop.indesign_package_document': ['execute'],
   'desktop.indesign_export_proof': ['execute'],
+  'desktop.photoshop_create_document': ['execute'],
   'desktop.photoshop_set_layer_state': ['execute'],
   'desktop.photoshop_update_text_layer': ['execute'],
   'desktop.photoshop_place_asset': ['execute'],
@@ -5637,6 +5661,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.indesign_export_proof',
   'desktop.photoshop_document_status',
   'desktop.photoshop_layer_inventory',
+  'desktop.photoshop_create_document',
   'desktop.photoshop_set_layer_state',
   'desktop.photoshop_update_text_layer',
   'desktop.photoshop_place_asset',
@@ -7093,6 +7118,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.indesign_export_proof':
     case 'desktop.photoshop_document_status':
     case 'desktop.photoshop_layer_inventory':
+    case 'desktop.photoshop_create_document':
     case 'desktop.photoshop_set_layer_state':
     case 'desktop.photoshop_update_text_layer':
     case 'desktop.photoshop_place_asset':
@@ -15932,6 +15958,38 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         return { ok: true, ...inspection, resultsText: describeCadInspectionForChat(inspection) } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'desktop.photoshop_create_document': {
+      try {
+        const { photoshopCreateDocument, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const widthPx = Number(a.widthPx);
+        const heightPx = Number(a.heightPx);
+        if (!Number.isInteger(widthPx) || !Number.isInteger(heightPx) || widthPx < 1 || heightPx < 1 || widthPx > 30000 || heightPx > 30000) {
+          return { ok: false, resultsText: 'widthPx and heightPx must be integers between 1 and 30000.' } as any;
+        }
+        const r = await photoshopCreateDocument({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          widthPx,
+          heightPx,
+          resolution: Number.isFinite(Number(a.resolution)) ? Number(a.resolution) : undefined,
+          name: typeof a.name === 'string' ? a.name : undefined,
+          mode: typeof a.mode === 'string' ? a.mode as any : undefined,
+          background: typeof a.background === 'string' ? a.background as any : undefined,
+        });
+        if (!r.ok || !r.data?.created) {
+          const detail = r.data?.error || r.error || 'Photoshop did not confirm document creation.';
+          return { ok: false, resultsText: `Photoshop create document failed: ${detail}${r.data?.appRunning === false ? ' Launch Photoshop first (desktop.launch_app), wait for it to finish starting, then retry.' : ''}` } as any;
+        }
+        const d = r.data;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Created Photoshop document ${d.documentName || '(unnamed)'} at ${d.widthPx}x${d.heightPx}px @${d.resolution}ppi (${d.mode || 'rgb'}); ${d.documentCount} document(s) now open. Verified by the app-reported document summary.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+
     case 'desktop.photoshop_set_layer_state': {
       try {
         const { photoshopSetLayerState, isDesktopBridgeAvailable } = await import('./desktopBridge');

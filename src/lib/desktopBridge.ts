@@ -4159,6 +4159,61 @@ function validatePhotoshopDocumentGuards(args: {
   return { ok: true, data: { appName, expectedDocumentName, sourceDocumentPath } };
 }
 
+export interface PhotoshopCreateDocumentResult {
+  appName: string;
+  appRunning: boolean;
+  created: boolean;
+  documentName: string | null;
+  widthPx: number;
+  heightPx: number;
+  resolution: number;
+  mode: string | null;
+  documentCount: number;
+  error: string | null;
+}
+
+/** Create a new blank Photoshop document — the one Photoshop mutation with no
+ *  existing-document precondition (it creates the active document the rest of
+ *  the photoshop_* family observes/mutates). */
+export async function photoshopCreateDocument(args: {
+  appName?: string;
+  widthPx: number;
+  heightPx: number;
+  resolution?: number;
+  name?: string;
+  mode?: 'rgb' | 'grayscale' | 'cmyk';
+  background?: 'white' | 'transparent' | 'background';
+}): Promise<DesktopResult<PhotoshopCreateDocumentResult>> {
+  const r = await callBridge('POST', '/desktop/photoshop_create_document', {
+    appName: args.appName || 'Photoshop',
+    widthPx: args.widthPx,
+    heightPx: args.heightPx,
+    resolution: args.resolution,
+    name: args.name || undefined,
+    mode: args.mode || undefined,
+    background: args.background || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopCreateDocumentResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: d?.ok === true && d?.created === true,
+    data: {
+      appName: d?.appName ? String(d.appName) : (args.appName || 'Photoshop'),
+      appRunning: d?.appRunning !== false,
+      created: d?.created === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      widthPx: toNumber(d?.widthPx),
+      heightPx: toNumber(d?.heightPx),
+      resolution: toNumber(d?.resolution),
+      mode: d?.mode ? String(d.mode) : null,
+      documentCount: toNumber(d?.documentCount),
+      error: d?.error ? String(d.error) : null,
+    },
+    ...(d?.ok === true && d?.created === true ? {} : { error: d?.error ? String(d.error) : 'Photoshop did not confirm document creation.' }),
+  } as DesktopResult<PhotoshopCreateDocumentResult>;
+}
+
 export async function photoshopDocumentStatus(args: {
   appName?: string;
   expectedDocumentName?: string | null;
