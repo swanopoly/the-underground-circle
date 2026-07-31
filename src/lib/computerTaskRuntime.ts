@@ -75,6 +75,7 @@ import {
 } from './computerTaskOutcome';
 import type { ChatAgentContextPack } from './chatAgentContextPack';
 import { sanitizeUntrustedForModel } from './untrustedContent';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 type ComputerTaskAgentLoopContext = Pick<
   AgentRunRequest,
   | 'threadId'
@@ -1504,7 +1505,15 @@ export async function executeComputerTaskWithAgent(args: {
         appAdapterMessage: null,
         dispatchPrefix: execution.dispatchPrefix,
       })}`
-    : `${execution.dispatchPrefix}\n${observeBeforeActBlock}${followUpPreamble}${attachmentStagingPreamble}${desktopTraceExampleBlock}USER COMPUTER TASK\n${args.task}`;
+    : (() => {
+        // Deterministic-first: when the ask compiles to a literal 1:1 tool
+        // program (computerSequenceProgramCore), it leads the prompt — the
+        // model sequences the pre-approved calls instead of re-planning
+        // against the advisory contract prose. Null → unchanged prompt.
+        const sequenceProgram = compileComputerSequenceProgram(args.task);
+        const programBlock = sequenceProgram ? `${sequenceProgram.promptBlock}\n\n` : '';
+        return `${programBlock}${execution.dispatchPrefix}\n${observeBeforeActBlock}${followUpPreamble}${attachmentStagingPreamble}${desktopTraceExampleBlock}USER COMPUTER TASK\n${args.task}`;
+      })();
 
   // Belt-and-suspenders: if executeAgentRun throws (provider outage,
   // v2 continuation cap, model returns null), we still need to surface
