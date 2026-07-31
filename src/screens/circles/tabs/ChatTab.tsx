@@ -16187,7 +16187,7 @@ function EnhancedInput({
           <Text style={[styles.dropdownItemIconText, { color: sectionColor }]}>{model.icon}</Text>
         </View>
         <View style={styles.dropdownItemText}>
-          <Text style={[styles.dropdownItemLabel, { color: sectionColor }]}>
+          <Text style={[styles.dropdownItemLabel, { color: sectionColor }]} numberOfLines={1} ellipsizeMode="tail">
             {model.label}
             {autoResolvedShortLabel ? (
               <Text style={{ color: '#94a3b8', fontWeight: '500', fontSize: 11 }}>{`  ->  ${autoResolvedShortLabel}`}</Text>
@@ -16490,7 +16490,7 @@ function EnhancedInput({
             <View style={[styles.modelIconBox, { backgroundColor: currentModel.color + '20' }]}>
               <Text style={[styles.modelIconText, { color: currentModel.color }]}>{currentModel.icon}</Text>
             </View>
-            <Text style={[styles.modelButtonLabel, { color: currentModel.color }]}>
+            <Text style={[styles.modelButtonLabel, { color: currentModel.color }]} numberOfLines={1} ellipsizeMode="tail">
               {currentModel.label}
               {selectedModel === 'auto' && autoResolvedShortLabel ? (
                 <Text style={{ color: '#94a3b8', fontWeight: '500' }}>{` → ${autoResolvedShortLabel}`}</Text>
@@ -18851,7 +18851,9 @@ const styles = StyleSheet.create({
   modelButtonLabel: {
     fontSize: 14,
     fontWeight: '600',
-    maxWidth: 160,
+    // Wide enough that the everyday "Auto → Claude Sonnet 4.6" renders whole;
+    // longer custom model ids ellipsize on one line instead of wrapping.
+    maxWidth: 210,
     flexShrink: 1,
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
     letterSpacing: 0,
