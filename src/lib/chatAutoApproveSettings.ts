@@ -71,6 +71,17 @@ export function planCategory(plan: ChatAutomationPlan): AutoApproveCategory | nu
     return 'memory_read';
   }
 
+  // Computer tasks carry a typed route decision; desktop_app/local_file/
+  // hybrid lanes run through the LOCAL bridge, not the browser — classify
+  // them as desktop_action so the desktop auto-approve category actually
+  // applies. (The execution routeId is hardcoded 'browser' as a transport
+  // tag for these plans, which previously miscategorized a "open Photoshop"
+  // sequence as browser_click — a category the user never opted into.)
+  const computerKind = plan.computerRequestRoute?.kind;
+  if (computerKind === 'desktop_app' || computerKind === 'local_file' || computerKind === 'hybrid') {
+    return 'desktop_action';
+  }
+
   if (route === 'browser') return 'browser_click';
   if (route === 'wordpress') return 'external_publish';
   if (route === 'governance') return 'external_publish';

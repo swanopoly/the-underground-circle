@@ -359,6 +359,11 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
           intentKind: plan.intent.kind,
           executionKind: plan.execution.kind,
           risk: plan.risk,
+          // Bounded structural label (enum, no user values) so the approval
+          // banner can offer the matching "remember: auto-approve <category>"
+          // opt-in — without it, gate-filed rows carry no plan and the banner
+          // could never derive a category for chat-plan deferrals.
+          autoApproveCategory: category ?? null,
           userId: ctx.userId,
           roomId: ctx.roomId ?? null,
           threadId: ctx.threadId ?? null,

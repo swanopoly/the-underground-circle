@@ -105,6 +105,12 @@ function CountdownTimer({
 }
 
 function deriveCategory(ap: AgentApproval): AutoApproveCategory | null {
+  // Gate-filed rows carry a bounded category label directly (value-free
+  // schema-v2 payloads have no plan object to re-classify).
+  const labeled = (ap.payload as any)?.autoApproveCategory;
+  if (typeof labeled === 'string' && labeled in AUTO_APPROVE_CATEGORY_LABELS) {
+    return labeled as AutoApproveCategory;
+  }
   const plan = (ap.payload as any)?.plan;
   if (!plan) return null;
   const fake: any = {
