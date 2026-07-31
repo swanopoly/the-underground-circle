@@ -3000,7 +3000,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | safety_factor | bolt_preload | tap_drill | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | hydraulic_cylinder | cylinder_speed | rod_buckling | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11824,8 +11824,142 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: 'belt drive', value: b.beltLength, unit: 'mm (belt length)', formula: 'ratio = D₁/D₂; L = 2C + (π/2)(D+d) + (D−d)²/4C; T1/T2 = e^(μθ)', inputs: { driver_mm: b.driverDiameter, driven_mm: b.drivenDiameter, centre_mm: b.centreDistance }, extra, notes: [`Speed ratio ${b.speedRatio}${b.drivenSpeed_rpm !== undefined ? ` (driven ${b.drivenSpeed_rpm} rpm)` : ''}, small-pulley wrap ${b.wrapAngleSmall_deg}°${b.maxPower_kW !== undefined ? `, ≤ ${b.maxPower_kW} kW before slip` : ''}.`] };
             break;
           }
+          case 'endurance_limit': {
+            const t = await import('./engineeringFatigueCore');
+            const er = t.enduranceLimit(x);
+            if (!er.ok) return { ok: false, resultsText: `engineering.calc: ${er.error}` } as any;
+            const e = er.value;
+            r = { ok: true, quantity: `endurance limit (${e.loadType}, ${e.surfaceFinish})`, value: e.Se_MPa, unit: 'MPa (Se)', formula: "Se = ka·kb·kc·Se', Se' = 0.5·Su (cap 700)", inputs: { Su_MPa: e.Su_MPa }, extra: { Se_MPa: e.Se_MPa, Se_prime_MPa: e.SePrime_MPa, ka_surface: e.ka_surface, kb_size: e.kb_size, kc_load: e.kc_load }, notes: [`ka=${e.ka_surface} (${e.surfaceFinish}), kb=${e.kb_size}, kc=${e.kc_load}.${e.capped ? " Se' capped at 700 MPa." : ''}${e.suEstimated ? ' Su estimated as 1.7·yield.' : ''}`] };
+            break;
+          }
+          case 'fatigue_goodman': {
+            const t = await import('./engineeringFatigueCore');
+            const gr = t.goodmanSafetyFactor(x);
+            if (!gr.ok) return { ok: false, resultsText: `engineering.calc: ${gr.error}` } as any;
+            const g = gr.value;
+            const extra: Record<string, number> = { n_goodman: g.n_goodman, governing_n: g.governing_n, alternating_MPa: g.alternating_MPa, mean_MPa: g.mean_MPa, Se_MPa: g.Se_MPa, Su_MPa: g.Su_MPa };
+            if (g.n_soderberg !== null) extra.n_soderberg = g.n_soderberg;
+            if (g.n_gerber !== null) extra.n_gerber = g.n_gerber;
+            if (g.n_yield !== null) extra.n_yield = g.n_yield;
+            r = { ok: true, quantity: `fatigue safety factor (Goodman${g.fullyReversed ? ', fully reversed' : ''})`, value: g.n_goodman, unit: 'n (safety factor)', formula: '1/n = σa/Se + σm/Su (Soderberg uses Sy; Gerber parabola)', inputs: { alternating_MPa: g.alternating_MPa, mean_MPa: g.mean_MPa }, extra, notes: g.notes };
+            break;
+          }
+          case 'fatigue_life': {
+            const t = await import('./engineeringFatigueCore');
+            const lr = t.fullyReversedLife(x);
+            if (!lr.ok) return { ok: false, resultsText: `engineering.calc: ${lr.error}` } as any;
+            const l = lr.value;
+            const extra: Record<string, number> = { sn_a: l.sn_a, sn_b: l.sn_b, Se_MPa: l.Se_MPa, Su_MPa: l.Su_MPa };
+            if (l.cycles !== null) extra.life_cycles = l.cycles;
+            r = { ok: true, quantity: `fully-reversed life (${l.classification})`, value: l.cycles ?? 1e9, unit: 'cycles (N)', formula: 'S = a·N^b, a=(f·Su)²/Se, b=−⅓·log(f·Su/Se)', inputs: { alternating_MPa: l.alternating_MPa }, extra, notes: [l.classification === 'infinite' ? 'σa ≤ Se → infinite life (runout, > 1e6 cycles).' : l.classification === 'low_cycle' ? 'σa ≥ f·Su → low-cycle; the elastic S-N line no longer applies.' : `Finite life ≈ ${l.cycles} cycles.`] };
+            break;
+          }
+          case 'fillet_weld': {
+            const t = await import('./engineeringConnectionCore');
+            const wr = t.filletWeld(x);
+            if (!wr.ok) return { ok: false, resultsText: `engineering.calc: ${wr.error}` } as any;
+            const v = wr.value;
+            const extra: Record<string, number> = { throat_mm: v.throat_mm, length_mm: v.length_mm, throatArea_mm2: v.throatArea_mm2, allowableShear_MPa: v.allowableShear_MPa };
+            const notes: string[] = [`throat 0.707·leg = ${v.throat_mm} mm carries the load, not the leg`];
+            if (v.adequate != null) notes.push(`${v.adequate ? 'adequate' : 'OVERSTRESSED'} at ${v.load_N} N (util ${v.utilisation})`);
+            r = { ok: true, quantity: 'fillet weld shear capacity', value: v.capacity_N, unit: 'N', formula: 'V = 0.7071·leg·L·τ_allow (throat a = leg/√2)', inputs: { leg_mm: Number(x.leg) || 0 }, extra, notes };
+            break;
+          }
+          case 'bolt_group': {
+            const t = await import('./engineeringConnectionCore');
+            const br = t.boltGroupShear(x);
+            if (!br.ok) return { ok: false, resultsText: `engineering.calc: ${br.error}` } as any;
+            const v = br.value;
+            r = { ok: true, quantity: 'bolt group shear safety factor', value: v.safetyFactor, unit: 'n (safety factor)', formula: 'SF = n·planes·τ_allow·As / V, As = π/4·(d−0.9382p)²', inputs: { bolt_count: Number(x.boltCount) || 0 }, extra: { boltArea_mm2: v.boltArea_mm2, shearPerBolt_N: v.shearPerBolt_N, shearStress_MPa: v.shearStress_MPa, totalCapacity_N: v.totalCapacity_N }, notes: [`As via ${v.areaBasis}`, `${v.planes === 2 ? 'double' : 'single'} shear; ${v.adequate ? 'adequate' : 'UNDER-CAPACITY'}`] };
+            break;
+          }
+          case 'bolt_bearing': {
+            const t = await import('./engineeringConnectionCore');
+            const brg = t.bearingStress(x);
+            if (!brg.ok) return { ok: false, resultsText: `engineering.calc: ${brg.error}` } as any;
+            const v = brg.value;
+            const extra: Record<string, number> = { bearingArea_mm2: v.bearingArea_mm2 };
+            if (v.safetyFactor != null) extra.safety_factor = v.safetyFactor;
+            r = { ok: true, quantity: 'bolt bearing stress', value: v.bearingStress_MPa, unit: 'MPa', formula: 'σ_bearing = P/(d·t·n) (projected area)', inputs: {}, extra, notes: [`projected area d·t·n = ${v.bearingArea_mm2} mm²`] };
+            break;
+          }
+          case 'bolt_group_eccentric': {
+            const t = await import('./engineeringConnectionCore');
+            const er2 = t.boltGroupEccentric(x);
+            if (!er2.ok) return { ok: false, resultsText: `engineering.calc: ${er2.error}` } as any;
+            const v = er2.value;
+            r = { ok: true, quantity: 'eccentric bolt group critical force', value: v.criticalForce_N, unit: 'N', formula: 'F = P/n (direct) ⊕ M·r/J (torsional), J = Σ(x²+y²)', inputs: {}, extra: { polarMoment_mm2: v.polarMoment_mm2, moment_Nmm: v.moment_Nmm, directShearPerBolt_N: v.directShearPerBolt_N }, notes: [`critical bolt at (${v.criticalBolt.x}, ${v.criticalBolt.y}) — where direct + torsional align`] };
+            break;
+          }
+          case 'hydraulic_cylinder': {
+            const t = await import('./engineeringCylinderCore');
+            const cr = t.cylinderForce(x);
+            if (!cr.ok) return { ok: false, resultsText: `engineering.calc: ${cr.error}` } as any;
+            const v = cr.value;
+            const extra: Record<string, number> = { piston_area_mm2: v.pistonArea_mm2, extend_force_N: v.extendForce_N };
+            if (v.annulusArea_mm2 !== null) extra.annulus_area_mm2 = v.annulusArea_mm2;
+            if (v.retractForce_N !== null) extra.retract_force_N = v.retractForce_N;
+            if (v.areaRatio !== null) extra.area_ratio = v.areaRatio;
+            r = { ok: true, quantity: 'hydraulic cylinder force', value: v.extendForce_N, unit: 'N (extend)', formula: 'F = p·A; A_piston = π(bore/2)², A_annulus = π(bore²−rod²)/4', inputs: { bore_mm: v.bore_mm, pressure_MPa: v.pressure_MPa }, extra, notes: [`Extend > retract (annulus loses the rod area); regeneration ratio φ = ${v.areaRatio ?? '—'}.`] };
+            break;
+          }
+          case 'cylinder_speed': {
+            const t = await import('./engineeringCylinderCore');
+            const cr = t.cylinderSpeed(x);
+            if (!cr.ok) return { ok: false, resultsText: `engineering.calc: ${cr.error}` } as any;
+            const v = cr.value;
+            const extra: Record<string, number> = { extend_speed_mm_s: v.extendSpeed_mm_s, flow_mm3_s: v.flowRate_mm3_s };
+            if (v.retractSpeed_mm_s !== null) extra.retract_speed_mm_s = v.retractSpeed_mm_s;
+            if (v.extendTime_s !== null) extra.extend_time_s = v.extendTime_s;
+            if (v.retractTime_s !== null) extra.retract_time_s = v.retractTime_s;
+            r = { ok: true, quantity: 'cylinder rod speed', value: v.extendSpeed_mm_s, unit: 'mm/s (extend)', formula: 'v = Q/A; retract uses the annulus so v_ret > v_ext', inputs: { bore_mm: v.bore_mm, flow_L_min: v.flowRate_L_min }, extra, notes: [] };
+            break;
+          }
+          case 'rod_buckling': {
+            const t = await import('./engineeringCylinderCore');
+            const cr = t.rodBuckling(x);
+            if (!cr.ok) return { ok: false, resultsText: `engineering.calc: ${cr.error}` } as any;
+            const v = cr.value;
+            r = { ok: true, quantity: 'cylinder rod buckling (Euler)', value: v.criticalLoad_N, unit: 'N (Pcr)', formula: 'Pcr = π²·E·I/(K·L)², I = π·d⁴/64', inputs: { rod_dia_mm: v.rodDiameter_mm, length_mm: v.length_mm, K: v.K, E_MPa: v.E_MPa }, extra: { Pcr_N: v.criticalLoad_N, Pcr_kN: v.criticalLoad_kN, I_mm4: v.momentOfInertia_mm4, safety_factor: v.safetyFactor }, notes: [v.safetyFactor < 1 ? 'SF < 1 — the extended rod is predicted to BUCKLE.' : `SF = ${v.safetyFactor} vs the applied load.`] };
+            break;
+          }
+          case 'gear_strength': {
+            const t = await import('./engineeringGearStrengthCore');
+            const mode = String(x.mode || 'stress');
+            const gr = mode === 'tangential_load' ? t.tangentialLoad(x) : mode === 'size_face_width' ? t.sizeFaceWidth(x) : t.lewisBendingStress(x);
+            if (!gr.ok) return { ok: false, resultsText: `engineering.calc: ${gr.error}` } as any;
+            r = gr as unknown as import('./engineeringCalcCore').CalcResult;
+            break;
+          }
+          case 'principal_stress': {
+            const t = await import('./engineeringStressCore');
+            const pr = t.principalStresses(x);
+            if (!pr.ok) return { ok: false, resultsText: `engineering.calc: ${pr.error}` } as any;
+            const p = pr.value;
+            r = { ok: true, quantity: 'principal stresses (Mohr)', value: p.sigma1, unit: 'MPa (σ1)', formula: 'σ1,2 = (σx+σy)/2 ± √(((σx−σy)/2)²+τxy²)', inputs: { sigmaX: Number(x.sigmaX), sigmaY: Number(x.sigmaY), tauXY: Number(x.tauXY) }, extra: { sigma1_MPa: p.sigma1, sigma2_MPa: p.sigma2, tau_max_in_plane_MPa: p.tauMaxInPlane, principal_angle_deg: p.principalAngleDeg, center_MPa: p.center, radius_MPa: p.radius }, notes: [`θp = ${p.principalAngleDeg}° to σ1; in-plane τmax = ${p.tauMaxInPlane} MPa.`] };
+            break;
+          }
+          case 'von_mises': {
+            const t = await import('./engineeringStressCore');
+            const vr = t.vonMises(x);
+            if (!vr.ok) return { ok: false, resultsText: `engineering.calc: ${vr.error}` } as any;
+            const v = vr.value;
+            const extra: Record<string, number> = { von_mises_MPa: v.vonMises };
+            if (v.yieldStrength !== null) extra.yield_MPa = v.yieldStrength;
+            if (v.safetyFactor !== null) extra.safety_factor = v.safetyFactor;
+            r = { ok: true, quantity: `von Mises stress (${v.method})`, value: v.vonMises, unit: 'MPa (σ_vm)', formula: 'σ_vm = √(σx²−σxσy+σy²+3τxy²) = √(σ1²−σ1σ2+σ2²)', inputs: {}, extra, notes: [v.safetyFactor !== null ? `Safety factor n = yield/σ_vm = ${v.safetyFactor}${v.safetyFactor < 1 ? ' — predicted to YIELD.' : '.'}` : 'Pass a material or yield for the safety factor.'] };
+            break;
+          }
+          case 'max_shear': {
+            const t = await import('./engineeringStressCore');
+            const mr = t.maxShearStress(x);
+            if (!mr.ok) return { ok: false, resultsText: `engineering.calc: ${mr.error}` } as any;
+            const v = mr.value;
+            r = { ok: true, quantity: 'maximum shear stress', value: v.tauMaxAbsolute, unit: 'MPa (τmax absolute)', formula: 'τmax(abs) = (σmax−σmin)/2 over {σ1,σ2,σ3=0}', inputs: { sigma1: v.sigma1, sigma2: v.sigma2, sigma3: v.sigma3 }, extra: { tau_max_absolute_MPa: v.tauMaxAbsolute, tau_max_in_plane_MPa: v.tauMaxInPlane }, notes: [v.governedByOutOfPlane ? `Out-of-plane σ3=0 GOVERNS: absolute ${v.tauMaxAbsolute} > in-plane ${v.tauMaxInPlane} (σ1,σ2 same sign).` : `In-plane shear governs (${v.tauMaxInPlane} MPa).`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
