@@ -373,7 +373,8 @@ function buildPhotoshopPlan(text: string): DesignAppAutomationPlan {
       ...(creativeAiPlan ? ['AI generation, expansion, or variation outputs have receipts plus before/after layer/proof evidence'] : []),
     ],
     recoveryRules: [
-      'If the expected document is not active/open, stop and open the exact staged file instead of editing another image.',
+      'If the expected document is not active/open, open the exact staged file instead of editing another image.',
+      'If NO document is open at all, create one with desktop.photoshop_create_document (use the requested pixel dimensions; a blank document is the expected starting state for from-scratch work) instead of stopping.',
       'If no selection/mask exists for a localized edit, ask for target-area clarification before using generative/content-aware fill.',
       'If the requested change is destructive, duplicate the layer or create a history snapshot before mutation.',
       'If linked assets or fonts are missing, resolve package sidecars before visual edits or exports.',
@@ -387,6 +388,7 @@ function buildPhotoshopPlan(text: string): DesignAppAutomationPlan {
       'desktop.open_path',
       'desktop.launch_app',
       'desktop.focus_app',
+      'desktop.photoshop_create_document',
       'desktop.photoshop_document_status',
       'desktop.photoshop_layer_inventory',
       'desktop.photoshop_set_layer_state',

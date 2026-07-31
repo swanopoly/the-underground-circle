@@ -573,7 +573,7 @@ function photoshopRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAut
         }),
       ],
       successCriteria: ['active document matches staged source', 'document and layer/mask/selection state is known before mutation'],
-      failClosedConditions: ['active document mismatch', 'no active document', 'missing source file/package'],
+      failClosedConditions: ['active document mismatch', 'no active document for edit-existing work (from-scratch tasks create one via desktop.photoshop_create_document instead of stopping)', 'missing source file/package'],
       fallbackBuildoutTrigger: 'If document status or layer inventory cannot run, build a read-only Photoshop inventory adapter before any edit.',
       userVisibleSummary: 'Document and layer inventory is ready, or the exact Photoshop blocker is known.',
       sourceRefs: source,

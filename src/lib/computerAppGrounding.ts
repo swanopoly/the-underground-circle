@@ -597,6 +597,7 @@ function strategyGrounding(strategy: ComputerAppTaskStrategy, message = ''): Omi
           ],
           actionDiscipline: [
             'Treat Photoshop as a structured image document first: file/package, document status, layer/mask/selection inventory, then mutation.',
+            'If document status reports NO open document, create one with desktop.photoshop_create_document (requested pixel dimensions, else ask) instead of stopping — a blank document is the expected starting state for new-project/from-scratch tasks.',
             'Prefer script-backed Photoshop tools for layer state, text layers, placed assets, exports, and document state before accessibility clicks, keyboard shortcuts, or coordinates.',
             'Confirm selection or mask state before localized generative/content-aware edits.',
             'Use one layer/selection/asset/export operation per verification checkpoint, then re-run status/inventory.',
@@ -606,6 +607,7 @@ function strategyGrounding(strategy: ComputerAppTaskStrategy, message = ''): Omi
             'file_stat/search for source package',
             'open_path or launch/focus Photoshop',
             'photoshop_document_status',
+            'photoshop_create_document when no document is open (new-project/from-scratch tasks)',
             'photoshop_layer_inventory',
             'photoshop_set_layer_state/update_text_layer/place_asset/export_proof when available',
             'a11y/menu workflow for known Photoshop command gaps',
