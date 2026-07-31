@@ -2996,11 +2996,11 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Engineering Calculator',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
-      'Closed-form engineering analysis with exact answers (formula + inputs). Mechanical: beam deflection/stress, section properties (I,S,A), column buckling (Euler), shaft torsion, thermal expansion/stress, thin-wall pressure vessel, spring rate, gear-pair transmission, bolt preload, metric tap-drill, safety factor, materials (E,G,α,yield,density). Electrical: Ohm\'s law, LED resistor, series/parallel resistance, voltage divider, RC. Plus unit conversion. Use to SIZE a part before drawing it with engineering.draft_dxf or engineering.model_3d.',
+      'Closed-form engineering analysis with exact answers (formula + inputs). Mechanical: beam, section properties, column buckling, shaft torsion, thermal, pressure vessel/thick-wall, fits/tolerance, spring rate, gears (pair/train/tooth-strength), vibration, pipe flow, materials (E,G,α,k,yield,density). Failure & machine elements: fatigue (endurance/Goodman/S-N), weld/bolt/keyed joints, Mohr/von-Mises, stress concentration (Kt/Kf), Hertzian contact, press-fit, hydraulic cylinders, clutches/brakes. Electrical: Ohm/LED/resistors/divider/RC. Plus unit conversion. Use to SIZE a part before drawing it.',
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | hydraulic_cylinder | cylinder_speed | rod_buckling | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | stress_concentration | notch_fatigue | hydraulic_cylinder | cylinder_speed | rod_buckling | thick_cylinder | press_fit | contact_stress | key_sizing | friction_clutch | band_brake | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -11958,8 +11958,217 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             r = { ok: true, quantity: 'maximum shear stress', value: v.tauMaxAbsolute, unit: 'MPa (τmax absolute)', formula: 'τmax(abs) = (σmax−σmin)/2 over {σ1,σ2,σ3=0}', inputs: { sigma1: v.sigma1, sigma2: v.sigma2, sigma3: v.sigma3 }, extra: { tau_max_absolute_MPa: v.tauMaxAbsolute, tau_max_in_plane_MPa: v.tauMaxInPlane }, notes: [v.governedByOutOfPlane ? `Out-of-plane σ3=0 GOVERNS: absolute ${v.tauMaxAbsolute} > in-plane ${v.tauMaxInPlane} (σ1,σ2 same sign).` : `In-plane shear governs (${v.tauMaxInPlane} MPa).`] };
             break;
           }
+          case 'stress_concentration': {
+            const t = await import('./engineeringStressConcentrationCore');
+            const rr = t.stressConcentration(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: `stress-concentration factor Kt (${v.geometry})`,
+              value: v.Kt,
+              unit: '(dimensionless)',
+              formula: v.geometry === 'elliptical_hole' ? 'Inglis Kt = 1 + 2(a/b), ρ = b²/a'
+                : v.geometry === 'hole_in_plate' ? 'Kirsch Kt=3; finite-width Kt = 3 − 3.14(d/w) + 3.667(d/w)² − 1.527(d/w)³ (net)'
+                : 'Peterson/Shigley A-15 chart table, bilinear interpolation',
+              inputs: { ...(x.nominalStress !== undefined ? { nominalStress: Number(x.nominalStress) } : {}) },
+              extra: {
+                Kt: v.Kt,
+                ...(v.ratio !== null ? { ratio: v.ratio } : {}),
+                ...(v.DdRatio !== null ? { DdRatio: v.DdRatio } : {}),
+                ...(v.tipRadius_mm !== null ? { tipRadius_mm: v.tipRadius_mm } : {}),
+                ...(v.KtFromRadius !== null ? { KtFromRadius: v.KtFromRadius } : {}),
+                ...(v.peakStress_MPa !== null ? { peakStress_MPa: v.peakStress_MPa } : {}),
+              },
+              notes: v.notes,
+            };
+            break;
+          }
+          case 'notch_fatigue': {
+            const t = await import('./engineeringStressConcentrationCore');
+            const rr = t.notchFatigue(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'fatigue notch factor Kf',
+              value: v.Kf,
+              unit: '(dimensionless)',
+              formula: 'q = 1/(1 + a/r) [Peterson]; Kf = 1 + q(Kt − 1); Se_corrected = Se/Kf',
+              inputs: { Kt: v.Kt, notchRadius_mm: v.notchRadius_mm },
+              extra: {
+                q: v.q,
+                Kf: v.Kf,
+                Kt: v.Kt,
+                petersonConstant_mm: v.petersonConstant_mm,
+                ...(v.Su_MPa !== null ? { Su_MPa: v.Su_MPa } : {}),
+                ...(v.Se_MPa !== null ? { Se_MPa: v.Se_MPa } : {}),
+                ...(v.Se_corrected_MPa !== null ? { Se_corrected_MPa: v.Se_corrected_MPa } : {}),
+              },
+              notes: v.notes,
+            };
+            break;
+          }
+          case 'thick_cylinder': {
+            const t = await import('./engineeringThickCylinderCore');
+            const rr = t.thickCylinder(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'thick-walled cylinder (Lamé): max hoop stress at the bore',
+              value: v.hoopStressBore,
+              unit: 'MPa (σθ,bore)',
+              formula: 'Lamé σθ=A+B/r², σr=A−B/r²; A=(pi·ri²−po·ro²)/(ro²−ri²), B=(pi−po)·ri²·ro²/(ro²−ri²)',
+              inputs: {},
+              extra: {
+                lameA: v.lameA, lameB: v.lameB,
+                hoop_bore_MPa: v.hoopStressBore, radial_bore_MPa: v.radialStressBore,
+                hoop_outer_MPa: v.hoopStressOuter, radial_outer_MPa: v.radialStressOuter,
+                max_shear_bore_MPa: v.maxShearBore, invariant_sum_2A_MPa: v.invariantSum2A,
+                axial_stress_MPa: v.axialStress, von_mises_bore_MPa: v.vonMisesBore,
+                thin_wall_hoop_ref_MPa: v.thinWallHoopApprox, radius_ratio_ro_ri: v.radiusRatioRoRi,
+              },
+              notes: [
+                'σr = −pi at the bore and −po at the outer surface (exact BCs); σθ+σr = 2A is constant across the wall.',
+                v.closedEnds ? 'Capped ends: axial σz = A.' : 'Open ends: axial σz = 0.',
+              ],
+            };
+            break;
+          }
+          case 'press_fit': {
+            const t = await import('./engineeringThickCylinderCore');
+            const rr = t.pressFit(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = {
+              contact_pressure_MPa: v.contactPressure,
+              radial_interference_mm: v.radialInterference,
+              diametral_interference_mm: v.diametralInterference,
+              interface_diameter_mm: v.interfaceDiameter,
+              hub_bore_hoop_MPa: v.hubBoreHoop, hub_outer_hoop_MPa: v.hubOuterHoop,
+              shaft_interface_hoop_MPa: v.shaftInterfaceHoop, shaft_bore_hoop_MPa: v.shaftBoreHoop,
+              hub_radial_growth_mm: v.hubRadialExpansion, shaft_radial_shrink_mm: v.shaftRadialContraction,
+              E_hub_MPa: v.E_hub, nu_hub: v.nu_hub, E_shaft_MPa: v.E_shaft, nu_shaft: v.nu_shaft,
+            };
+            if (v.holdingTorque_Nmm !== null) extra.holding_torque_Nmm = v.holdingTorque_Nmm;
+            if (v.holdingTorque_Nm !== null) extra.holding_torque_Nm = v.holdingTorque_Nm;
+            if (v.axialHoldingForce_N !== null) extra.axial_holding_force_N = v.axialHoldingForce_N;
+            if (v.frictionCoefficient !== null) extra.friction_coefficient = v.frictionCoefficient;
+            if (v.engagementLength !== null) extra.engagement_length_mm = v.engagementLength;
+            r = {
+              ok: true,
+              quantity: 'interference (press/shrink) fit: contact pressure',
+              value: v.contactPressure,
+              unit: 'MPa (contact p)',
+              formula: 'δr = p·rc·[(1/Eo)((ro²+rc²)/(ro²−rc²)+νo) + (1/Ei)((rc²+ri²)/(rc²−ri²)−νi)]; T = µ·p·2π·rc²·L',
+              inputs: {},
+              extra,
+              notes: [
+                'Hub bore hoop is tensile (can split the hub); shaft surface is compressive. Interference splits: hub grows + shaft shrinks = δr.',
+                'Holding torque/axial force appear only when an engagement length (and µ) are given.',
+              ],
+            };
+            break;
+          }
+          case 'contact_stress': {
+            const t = await import('./engineeringContactCore');
+            const rr = t.contactStress(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: `Hertzian contact (${v.mode}): max contact pressure`,
+              value: v.pMax,
+              unit: 'MPa',
+              formula: v.formula,
+              inputs: {},
+              extra: {
+                p_max_MPa: v.pMax,
+                p_mean_MPa: v.pMean,
+                p_max_over_p_mean: v.pMaxOverPMean,
+                [v.contactDimKind === 'a_radius' ? 'contact_radius_a_mm' : 'contact_half_width_b_mm']: v.contactDim,
+                contact_area_mm2: v.contactArea,
+                effective_modulus_MPa: v.eStar,
+                effective_radius_mm: v.rEff,
+                ...(v.approach !== null ? { approach_delta_mm: v.approach } : {}),
+                ...(v.pMaxOverYield !== null ? { p_max_over_yield: v.pMaxOverYield } : {}),
+              },
+              notes: v.notes,
+            };
+            break;
+          }
+          case 'key_sizing': {
+            const t = await import('./engineeringKeyCore');
+            const rr = t.keySizing(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: `key length (required, ${v.governingMode} governs)`,
+              value: v.requiredLength_mm,
+              unit: 'mm',
+              formula: 'L = max(F/(w·τ_allow), F/((h/2)·σ_bear_allow)), F = 2T/d',
+              inputs: {
+                shaftDiameter_mm: v.shaftDiameter_mm,
+                torque_Nm: v.torque_Nm,
+                width_mm: v.width_mm,
+                height_mm: v.height_mm,
+              },
+              extra: {
+                force_N: v.force_N,
+                requiredLengthShear_mm: v.requiredLengthShear_mm,
+                requiredLengthBearing_mm: v.requiredLengthBearing_mm,
+                allowableShear_MPa: v.allowableShear_MPa,
+                allowableBearing_MPa: v.allowableBearing_MPa,
+                shearStress_MPa: v.shearStress_MPa,
+                bearingStress_MPa: v.bearingStress_MPa,
+                shearSafetyFactor: v.shearSafetyFactor,
+                bearingSafetyFactor: v.bearingSafetyFactor,
+                safetyFactor: v.safetyFactor,
+                torqueCapacity_Nm: v.torqueCapacity_Nm,
+              },
+              notes: v.notes,
+            };
+            break;
+          }
+          case 'friction_clutch': {
+            const t = await import('./engineeringClutchBrakeCore');
+            if (x.type === 'cone') {
+              const rr = t.coneClutch(x as any);
+              if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+              const v = rr.value;
+              r = { ok: true, quantity: 'cone clutch torque (uniform wear)', value: v.uniformWearTorque_Nm, unit: 'N·m',
+                formula: 'T = (1/2)·μ·F·n·(ro+ri)/sin(α)',
+                inputs: { outerRadius: v.outerRadius_mm, innerRadius: v.innerRadius_mm, axialForce: v.axialForce_N, frictionCoeff: v.frictionCoeff, surfaces: v.surfaces, halfAngle_deg: v.halfAngle_deg },
+                extra: { uniformWearTorque_Nm: v.uniformWearTorque_Nm, uniformPressureTorque_Nm: v.uniformPressureTorque_Nm, amplificationFactor: v.amplificationFactor, flatClutchTorque_Nm: v.flatClutchTorque_Nm, normalForce_N: v.normalForce_N, faceWidth_mm: v.faceWidth_mm, meanRadius_mm: v.meanRadius_mm },
+                notes: [`cone α=${v.halfAngle_deg}° wedge-amplifies a flat clutch by 1/sinα = ${v.amplificationFactor}×`] };
+            } else {
+              const rr = t.discClutch(x as any);
+              if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+              const v = rr.value;
+              r = { ok: true, quantity: 'disc clutch torque (design = uniform wear)', value: v.designTorque_Nm, unit: 'N·m',
+                formula: 'T_wear = (1/2)·μ·F·n·(ro+ri);  T_pressure = (2/3)·μ·F·n·(ro³−ri³)/(ro²−ri²)',
+                inputs: { outerRadius: v.outerRadius_mm, innerRadius: v.innerRadius_mm, axialForce: v.axialForce_N, frictionCoeff: v.frictionCoeff, surfaces: v.surfaces },
+                extra: { uniformWearTorque_Nm: v.uniformWearTorque_Nm, uniformPressureTorque_Nm: v.uniformPressureTorque_Nm, uniformWearMeanRadius_mm: v.uniformWearMeanRadius_mm, uniformPressureMeanRadius_mm: v.uniformPressureMeanRadius_mm, wearToPressureRatio: v.wearToPressureRatio },
+                notes: ['designed on the lower uniform-wear torque'] };
+            }
+            break;
+          }
+          case 'band_brake': {
+            const t = await import('./engineeringClutchBrakeCore');
+            const rr = t.bandBrake(x as any);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = { ok: true, quantity: 'band brake torque', value: v.brakingTorque_Nm, unit: 'N·m',
+              formula: 'T1/T2 = e^(μθ);  T = (T1−T2)·rd',
+              inputs: { drumRadius: v.drumRadius_mm, frictionCoeff: v.frictionCoeff, wrapAngle_deg: v.wrapAngle_deg },
+              extra: { brakingTorque_Nm: v.brakingTorque_Nm, tensionRatio: v.tensionRatio, tightSideTension_N: v.tightSideTension_N, slackSideTension_N: v.slackSideTension_N },
+              notes: [`capstan tension ratio T1/T2 = e^(μθ) = ${v.tensionRatio}`] };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear, stress_concentration, notch_fatigue, thick_cylinder, press_fit, contact_stress, key_sizing, friction_clutch, band_brake.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
