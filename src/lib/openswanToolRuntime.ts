@@ -3000,7 +3000,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | stress_concentration | notch_fatigue | hydraulic_cylinder | cylinder_speed | rod_buckling | thick_cylinder | press_fit | contact_stress | key_sizing | friction_clutch | band_brake | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | stress_concentration | notch_fatigue | hydraulic_cylinder | cylinder_speed | rod_buckling | thick_cylinder | press_fit | contact_stress | key_sizing | friction_clutch | band_brake | column_johnson | eccentric_column | forced_vibration | vibration_isolation | joint_stiffness | bolt_fatigue | flywheel | torsion_spring | extension_spring | belleville | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -12167,8 +12167,216 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
               notes: [`capstan tension ratio T1/T2 = e^(μθ) = ${v.tensionRatio}`] };
             break;
           }
+          case 'column_johnson': {
+            const t = await import('./engineeringColumnCore');
+            const rr = t.columnCritical(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: `column critical load (${v.regime})`,
+              value: v.criticalLoad,
+              unit: 'N (Pcr)',
+              formula: v.regime === 'euler'
+                ? 'σcr = π²E/λ², Pcr = σcr·A (Euler, slender)'
+                : 'σcr = Sy·[1 − Sy·λ²/(4π²E)], Pcr = σcr·A (J.B. Johnson, intermediate)',
+              inputs: { E_MPa: v.E, yield_MPa: v.yieldStrength, effective_length_mm: v.effectiveLength, K: v.K, radius_of_gyration_mm: v.radiusOfGyration, area_mm2: v.area },
+              extra: { critical_stress_MPa: v.criticalStress, slenderness_lambda: v.slendernessRatio, transition_Cc: v.transitionCc, euler_stress_at_lambda_MPa: v.eulerStressAtLambda, Pcr_kN: v.criticalLoad / 1000, moment_of_inertia_mm4: v.momentOfInertia },
+              notes: [
+                `Slenderness λ=${v.slendernessRatio} vs transition Cc=${v.transitionCc} → ${v.regime.toUpperCase()} regime.`,
+                v.regime === 'johnson'
+                  ? `Euler alone would predict σcr=${v.eulerStressAtLambda} MPa here — an over-prediction for this stocky column; Johnson gives ${v.criticalStress} MPa.`
+                  : `Slender column: elastic (Euler) buckling at σcr=${v.criticalStress} MPa, below yield ${v.yieldStrength} MPa.`,
+              ],
+            };
+            break;
+          }
+          case 'eccentric_column': {
+            const t = await import('./engineeringColumnCore');
+            const rr = t.eccentricColumn(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'eccentric column max stress (secant formula)',
+              value: v.sigmaMax,
+              unit: 'MPa (σmax)',
+              formula: 'σmax = (P/A)·[1 + (ec/k²)·sec((KL/2k)·√(P/AE))]',
+              inputs: { load_N: v.load, area_mm2: v.area, eccentricity_mm: v.eccentricity, extreme_fibre_mm: v.extremeFibre, radius_of_gyration_mm: v.radiusOfGyration, effective_length_mm: v.effectiveLength, E_MPa: v.E },
+              extra: { axial_stress_MPa: v.axialStress, eccentricity_ratio_ec_over_k2: v.eccentricityRatio, amplification: v.amplification, secant: v.secant, sec_argument_rad: v.secArgument, euler_Pcr_N: v.criticalLoad, load_ratio_P_over_Pcr: v.loadRatio },
+              notes: [
+                `Eccentricity ratio ec/k²=${v.eccentricityRatio}; bending amplifies the mean stress ${v.axialStress} MPa by ×${v.amplification} to σmax=${v.sigmaMax} MPa.`,
+                `Load is ${(v.loadRatio * 100).toFixed(1)}% of the Euler Pcr (${v.criticalLoad} N); σmax → ∞ as P → Pcr.`,
+              ],
+            };
+            break;
+          }
+          case 'forced_vibration': {
+            const t = await import('./engineeringForcedVibrationCore');
+            const rr = t.forcedResponse(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = { frequency_ratio: v.ratio, damping_ratio: v.dampingRatio, phase_lag_deg: v.phaseLagDeg };
+            if (Number.isFinite(v.resonantMagnification)) extra.resonant_magnification = v.resonantMagnification;
+            if (v.amplitude_mm !== null) extra.amplitude_mm = v.amplitude_mm;
+            if (v.staticDeflection_mm !== null) extra.static_deflection_mm = v.staticDeflection_mm;
+            if (v.peakRatio !== null) extra.peak_ratio = v.peakRatio;
+            if (v.peakMagnification !== null && Number.isFinite(v.peakMagnification)) extra.peak_magnification = v.peakMagnification;
+            if (v.omega_n_rad_s !== null) extra.omega_n_rad_s = v.omega_n_rad_s;
+            r = { ok: true, quantity: `forced response (${v.magnificationType}, ${v.regime})`, value: v.magnification, unit: v.magnificationType === 'unbalance' ? 'M_r (magnification)' : 'M (magnification)', formula: 'M = 1/√((1−r²)²+(2ζr)²); X = (F0/k)·M; φ = atan2(2ζr, 1−r²)', inputs: { frequency_ratio: v.ratio, damping_ratio: v.dampingRatio }, extra, notes: v.notes };
+            break;
+          }
+          case 'vibration_isolation': {
+            const t = await import('./engineeringForcedVibrationCore');
+            const rr = t.transmissibility(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = { frequency_ratio: v.ratio, damping_ratio: v.dampingRatio };
+            if (v.isolationEfficiency !== null) extra.isolation_efficiency = v.isolationEfficiency;
+            if (v.targetTR !== null) extra.target_transmissibility = v.targetTR;
+            if (v.omega_n_required_rad_s !== null) extra.omega_n_required_rad_s = v.omega_n_required_rad_s;
+            if (v.requiredStaticDeflection_mm !== null) extra.required_static_deflection_mm = v.requiredStaticDeflection_mm;
+            if (v.forcingFrequency_Hz !== null) extra.forcing_frequency_Hz = v.forcingFrequency_Hz;
+            r = { ok: true, quantity: `vibration isolation (${v.regime}, ${v.mode})`, value: v.transmissibility, unit: 'TR (transmissibility)', formula: 'TR = √(1+(2ζr)²)/√((1−r²)²+(2ζr)²); TR=1 at r=√2 ∀ζ; isolate when r>√2', inputs: { frequency_ratio: v.ratio, damping_ratio: v.dampingRatio }, extra, notes: v.notes };
+            break;
+          }
+          case 'joint_stiffness': {
+            const t = await import('./engineeringBoltedJointCore');
+            const rr = t.jointStiffness(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'bolted joint stiffness constant C',
+              value: v.stiffnessConstant_C,
+              unit: '(ratio)',
+              formula: 'C = kb/(kb+km); frustum km = π·E·d·tan30°/(2·ln[5(L·tan30°+0.5d)/(L·tan30°+2.5d)]); bolt sees only C·P of an external load',
+              inputs: {},
+              extra: {
+                boltStiffness_N_per_mm: v.boltStiffness_N_per_mm,
+                memberStiffness_N_per_mm: v.memberStiffness_N_per_mm,
+                memberLoadFraction: v.memberLoadFraction,
+                ...(v.boltForce_N != null ? { boltForce_N: v.boltForce_N } : {}),
+                ...(v.memberForce_N != null ? { memberForce_N: v.memberForce_N } : {}),
+                ...(v.boltLoadIncrease_N != null ? { boltLoadIncrease_N: v.boltLoadIncrease_N } : {}),
+              },
+              notes: [`Members are far stiffer than the bolt (km≫kb) so C≈${v.stiffnessConstant_C} is small: the bolt feels only C·P of an external load while members shed (1−C)·P — this is why preload protects the bolt.`],
+            };
+            break;
+          }
+          case 'bolt_fatigue': {
+            const t = await import('./engineeringBoltedJointCore');
+            const rr = t.boltFatigue(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'bolt fatigue factor (Goodman, preload-referenced)',
+              value: v.nf_preload ?? v.nf_goodman,
+              unit: '(ratio)',
+              formula: 'σa=C·(Pmax−Pmin)/(2·At), σm=[Fi+C·(Pmax+Pmin)/2]/At; nf=Se(Su−σi)/(Su·σa+Se(σm−σi)), σi=Fi/At',
+              inputs: {},
+              extra: {
+                alternating_MPa: v.alternating_MPa,
+                mean_MPa: v.mean_MPa,
+                preloadStress_MPa: v.preloadStress_MPa,
+                nf_goodman: v.nf_goodman,
+                governing_n: v.governing_n,
+                ...(v.nf_preload != null ? { nf_preload: v.nf_preload } : {}),
+                ...(v.nf_yield != null ? { nf_yield: v.nf_yield } : {}),
+              },
+              notes: v.notes,
+            };
+            break;
+          }
+          case 'flywheel': {
+            const t = await import('./engineeringFlywheelCore');
+            const mode = String((x as any).mode || '').trim().toLowerCase();
+            if (mode === 'inertia') {
+              const rr = t.flywheelInertia(x);
+              if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+              const v = rr.value;
+              r = { ok: true, quantity: `flywheel inertia (${v.shape})`, value: v.inertia_kg_m2, unit: 'kg·m²', formula: v.formula, inputs: {}, extra: { inertia_kg_m2: v.inertia_kg_m2, ...(v.mass_kg !== null ? { mass_kg: v.mass_kg } : {}), ...(v.radiusOfGyration_m !== null ? { radiusOfGyration_m: v.radiusOfGyration_m } : {}) }, notes: [] };
+              break;
+            }
+            if (mode === 'stress' || mode === 'burst') {
+              const rr = t.flywheelStress(x);
+              if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+              const v = rr.value;
+              r = { ok: true, quantity: 'flywheel rim hoop stress', value: v.hoopStress_MPa, unit: 'MPa', formula: 'σ = ρ·v² (v = ω·r); v_burst = √(σ_allow/ρ)', inputs: {}, extra: { hoopStress_MPa: v.hoopStress_MPa, rimVelocity_m_s: v.rimVelocity_m_s, density_kg_m3: v.density_kg_m3, ...(v.burstVelocity_m_s !== null ? { burstVelocity_m_s: v.burstVelocity_m_s } : {}), ...(v.safetyFactor !== null ? { safetyFactor: v.safetyFactor } : {}) }, notes: [] };
+              break;
+            }
+            const rr = t.flywheelEnergy(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = { ok: true,
+              quantity: v.mode === 'sizing' ? 'required flywheel inertia' : v.mode === 'regulation' ? 'coefficient of fluctuation Cs' : 'flywheel energy fluctuation ΔE',
+              value: v.mode === 'sizing' ? v.inertia_kg_m2 : v.mode === 'regulation' ? v.coefficientOfFluctuation : v.energyFluctuation_J,
+              unit: v.mode === 'sizing' ? 'kg·m²' : v.mode === 'regulation' ? '' : 'J',
+              formula: 'ΔE = I·ωavg²·Cs ; KE = ½·I·ωavg²',
+              inputs: {},
+              extra: { inertia_kg_m2: v.inertia_kg_m2, energyFluctuation_J: v.energyFluctuation_J, coefficientOfFluctuation: v.coefficientOfFluctuation, meanSpeed_rad_s: v.meanSpeed_rad_s, meanRpm: v.meanRpm, kineticEnergy_J: v.kineticEnergy_J, maxSpeed_rad_s: v.maxSpeed_rad_s, minSpeed_rad_s: v.minSpeed_rad_s },
+              notes: [] };
+            break;
+          }
+          case 'torsion_spring': {
+            const t = await import('./engineeringSpringTypesCore');
+            const rr = t.torsionSpring(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = {
+              rate_per_turn_Nmm: v.ratePerTurn, rate_per_rad_Nmm: v.ratePerRad, rate_per_deg_Nmm: v.ratePerDeg,
+              spring_index: v.springIndex, curvature_factor_Ki: v.curvatureFactorKi, E_MPa: v.youngsModulus,
+            };
+            if (v.moment !== null) extra.moment_Nmm = v.moment;
+            if (v.bendingStress !== null) extra.bending_stress_MPa = v.bendingStress;
+            if (v.deflectionDeg !== null) extra.deflection_deg = v.deflectionDeg;
+            r = {
+              ok: true, quantity: 'torsion spring rate', value: v.ratePerTurn, unit: 'N·mm/turn',
+              formula: "k' = E·d⁴/(10.8·D·N), σ = Ki·32M/(π·d³)",
+              inputs: { wire_dia_mm: Number(x.wireDiameter), mean_dia_mm: Number(x.meanDiameter), active_coils: Number(x.activeCoils) },
+              extra, notes: ["A torsion spring works in wire BENDING, so it uses Young's modulus E (a helical compression spring twists its wire and uses the shear modulus G)."],
+            };
+            break;
+          }
+          case 'extension_spring': {
+            const t = await import('./engineeringSpringTypesCore');
+            const rr = t.extensionSpring(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = {
+              rate_N_per_mm: v.rate, spring_index: v.springIndex, initial_tension_N: v.initialTension, G_MPa: v.shearModulus,
+            };
+            if (v.forceAtDeflection !== null) extra.force_at_deflection_N = v.forceAtDeflection;
+            if (v.deflectionForForce !== null) extra.deflection_for_force_mm = v.deflectionForForce;
+            r = {
+              ok: true, quantity: 'extension spring rate', value: v.rate, unit: 'N/mm',
+              formula: 'k = G·d⁴/(8·D³·n), F = Fi + k·x',
+              inputs: { wire_dia_mm: Number(x.wireDiameter), mean_dia_mm: Number(x.meanDiameter), active_coils: Number(x.activeCoils), initial_tension_N: v.initialTension },
+              extra, notes: ['Initial tension Fi means the force is Fi (not zero) at zero deflection; F = Fi + k·x thereafter.' + (v.deflectionClampedAtInitial ? ' Target force ≤ Fi, so the spring has not begun to extend (x=0).' : '')],
+            };
+            break;
+          }
+          case 'belleville': {
+            const t = await import('./engineeringSpringTypesCore');
+            const rr = t.belleville(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = {
+              load_N: v.load, tangent_stiffness_N_per_mm: v.tangentStiffness, geometry_factor_K1: v.geometryFactorK1,
+              diameter_ratio: v.diameterRatio, height_to_thickness: v.heightToThickness, E_MPa: v.youngsModulus, poisson: v.poisson,
+              stack_load_N: v.stackLoad, stack_deflection_mm: v.stackDeflection, stack_parallel: v.stackParallel, stack_series: v.stackSeries,
+            };
+            r = {
+              ok: true, quantity: 'Belleville disc load', value: v.load, unit: 'N',
+              formula: 'P = [4E/(K1·(1−ν²)·Do²)]·δ·[(h−δ/2)(h−δ)t + t³]',
+              inputs: { outer_dia_mm: Number(x.outerDiameter), inner_dia_mm: Number(x.innerDiameter), thickness_mm: v.thickness, cone_height_mm: v.coneHeight, deflection_mm: v.deflection },
+              extra, notes: ['NONLINEAR (load is cubic in δ). h/t controls the curve: h/t=√2 gives a near-constant-force plateau; h/t>√2 snaps through (negative rate).' + (v.flatRegion ? ' This disc is at the √2 plateau.' : '') + (v.negativeRate ? ' At this deflection the tangent rate is negative (snap-through).' : '')],
+            };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear, stress_concentration, notch_fatigue, thick_cylinder, press_fit, contact_stress, key_sizing, friction_clutch, band_brake.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear, stress_concentration, notch_fatigue, thick_cylinder, press_fit, contact_stress, key_sizing, friction_clutch, band_brake, column_johnson, eccentric_column, forced_vibration, vibration_isolation, joint_stiffness, bolt_fatigue, flywheel, torsion_spring, extension_spring, belleville.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
