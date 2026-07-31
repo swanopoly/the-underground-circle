@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-07-29T15:30:18.263Z",
+  "generatedAt": "2026-07-31T16:48:22.291Z",
   "results": [
     {
       "level": "PASS",
       "name": "no unreachable private rows (private + user_id IS NULL)",
-      "detail": "private_no_owner=0 of 3472 active",
+      "detail": "private_no_owner=0 of 3551 active",
       "data": {
         "agent_no_key": 0,
         "no_circle": 0,
         "private_no_owner": 0,
-        "total": 3472
+        "total": 3551
       }
     },
     {
@@ -20,7 +20,7 @@
         "agent_no_key": 0,
         "no_circle": 0,
         "private_no_owner": 0,
-        "total": 3472
+        "total": 3551
       }
     },
     {
@@ -30,40 +30,40 @@
       "data": null
     },
     {
-      "level": "PASS",
+      "level": "FAIL",
       "name": "recent memories are traceable to the run that produced them",
-      "detail": "no run-attributable memories written since the writer was wired (2026-07-29T11:40:00Z) — nothing to grade yet | all-time 0/3472 (0.0%) | 1 session-scope rollup(s) excluded (no single source run)",
+      "detail": "since wiring: 0/238 (0.0%) carry source_run_id | all-time 0/3551 (0.0%) — pre-2026-07-29 rows cannot be backfilled | 2 session-scope rollup(s) excluded (no single source run)",
       "data": {
-        "distinct_surfaces": 11,
-        "recent": 0,
-        "recent_session_scoped": 1,
+        "distinct_surfaces": 10,
+        "recent": 238,
+        "recent_session_scoped": 2,
         "recent_with_run": 0,
         "stamped_feed_task": 6,
-        "total": 3472,
+        "total": 3551,
         "with_run": 0
       }
     },
     {
       "level": "PASS",
       "name": "source_surface distribution",
-      "detail": "feed_task=6, distinct surfaces=11 (a high feed_task share is the known hardcode)",
+      "detail": "feed_task=6, distinct surfaces=10 (a high feed_task share is the known hardcode)",
       "data": {
-        "distinct_surfaces": 11,
-        "recent": 0,
-        "recent_session_scoped": 1,
+        "distinct_surfaces": 10,
+        "recent": 238,
+        "recent_session_scoped": 2,
         "recent_with_run": 0,
         "stamped_feed_task": 6,
-        "total": 3472,
+        "total": 3551,
         "with_run": 0
       }
     },
     {
       "level": "PASS",
       "name": "memories are reachable by semantic search",
-      "detail": "embedded 3472/3472 (100.0%) — un-embedded rows are invisible to match_memories",
+      "detail": "embedded 3551/3551 (100.0%) — un-embedded rows are invisible to match_memories",
       "data": {
-        "embedded": 3472,
-        "total": 3472
+        "embedded": 3551,
+        "total": 3551
       }
     },
     {
@@ -91,8 +91,8 @@
       "name": "no exact-content duplicate rows",
       "detail": "0 redundant rows across 0 exact-content groups",
       "data": {
-        "active": 3472,
-        "distinct_content": 3471,
+        "active": 3551,
+        "distinct_content": 3551,
         "exact_dup_groups": 0,
         "redundant_rows": "0"
       }
@@ -100,10 +100,10 @@
     {
       "level": "PASS",
       "name": "content diversity (informational, NOT a defect)",
-      "detail": "3471 distinct contents across 3472 active rows — a shared title with many distinct contents is a category bucket, not duplication",
+      "detail": "3551 distinct contents across 3551 active rows — a shared title with many distinct contents is a category bucket, not duplication",
       "data": {
-        "active": 3472,
-        "distinct_content": 3471,
+        "active": 3551,
+        "distinct_content": 3551,
         "exact_dup_groups": 0,
         "redundant_rows": "0"
       }
