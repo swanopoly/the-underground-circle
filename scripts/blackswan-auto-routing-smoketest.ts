@@ -14,6 +14,7 @@ import {
   getModelFailoverChain,
   resolveModelForProfile,
   resolveModelForSoul,
+  suggestAutoModelAlternative,
 } from '../src/lib/serviceProfileSouls';
 import {
   BLACKSWAN_ENDPOINT_MODEL_ID,
@@ -63,17 +64,26 @@ const WITHOUT_BLACKSWAN = new Set(['anthropic']);
   pass('lane requires the connected integration');
 }
 
-// ── App-grounded light questions route to BlackSwan; general/heavy never ────
+// ── Chat wrapper: Auto DEFAULTS to Sonnet; the ladder becomes a visible ─────
+// RECOMMENDATION (user directive 2026-07-31 — recommend, never auto-switch).
+// The BlackSwan grounded-light lane is preserved through the suggestion path.
 {
   const grounded = resolveModelForProfile('auto', null, 'question', WITH_BLACKSWAN, 'simple', { appGroundedHint: true });
-  expect(grounded === BLACKSWAN_ENDPOINT_MODEL_ID, `app-grounded light question → BlackSwan (got ${grounded})`);
+  expect(grounded === 'claude-sonnet-4-6', `chat Auto defaults to Sonnet (got ${grounded})`);
 
-  const general = resolveModelForProfile('auto', null, 'question', WITH_BLACKSWAN, 'simple', { appGroundedHint: false });
-  expect(general !== BLACKSWAN_ENDPOINT_MODEL_ID, 'general question never routes to the app specialist');
+  const groundedTip = suggestAutoModelAlternative('auto', 'question', WITH_BLACKSWAN, 'simple', { appGroundedHint: true });
+  expect(groundedTip?.model === BLACKSWAN_ENDPOINT_MODEL_ID, `app-grounded light question RECOMMENDS BlackSwan (got ${groundedTip?.model})`);
 
-  const heavy = resolveModelForProfile('auto', null, 'question', WITH_BLACKSWAN, 'complex', { appGroundedHint: true });
-  expect(heavy === 'claude-sonnet-4-6', `heavy question stays on Sonnet even when app-grounded (got ${heavy})`);
-  pass('question lane: grounded-light only');
+  const generalTip = suggestAutoModelAlternative('auto', 'question', WITH_BLACKSWAN, 'simple', { appGroundedHint: false });
+  expect(generalTip?.model !== BLACKSWAN_ENDPOINT_MODEL_ID, 'general question never recommends the app specialist');
+
+  const heavyTip = suggestAutoModelAlternative('auto', 'question', WITH_BLACKSWAN, 'complex', { appGroundedHint: true });
+  expect(heavyTip === null, `heavy question agrees with the Sonnet default — no tip (got ${heavyTip?.model ?? 'null'})`);
+
+  // Explicit picks still pass verbatim through the wrapper.
+  const explicit = resolveModelForProfile('auto', 'openai/gpt-5.5', 'question', WITH_BLACKSWAN, 'simple', {});
+  expect(explicit === 'openai/gpt-5.5', `explicit pick passes verbatim (got ${explicit})`);
+  pass('chat Auto: Sonnet default + ladder-as-recommendation');
 }
 
 // ── Work intents never route to BlackSwan ───────────────────────────────────

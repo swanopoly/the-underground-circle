@@ -47,17 +47,82 @@ export function resolveModelForProfile(
    *  grounded lane. Omit it to keep the pre-guard behaviour unchanged. */
   message?: string | null,
 ): string {
-  return resolveModelForSoul(
+  // USER DIRECTIVE (2026-07-31): the chat Auto picker DEFAULTS to Claude
+  // Sonnet. The routing ladder (resolveModelForSoul) no longer decides the
+  // chat turn — it powers suggestAutoModelAlternative, which RECOMMENDS a
+  // cheaper/specialist model to the user instead of silently switching.
+  // Explicit picks still pass verbatim (including the BlackSwan endpoint
+  // normalization inside resolveModelForSoul).
+  if (userModelPick && userModelPick !== 'auto') {
+    return resolveModelForSoul(
+      spiritIdForProfile(profile),
+      userModelPick,
+      intent,
+      complexity,
+      undefined,
+      undefined,
+      connectedProviders,
+      opts,
+      message,
+    );
+  }
+  // Sonnet-first: bill to the user's OpenRouter key when that is the only
+  // Sonnet route they have connected; otherwise the direct Anthropic model.
+  const anthropicConnected = hasProvider(connectedProviders, 'anthropic');
+  const orConnected = hasProvider(connectedProviders, 'openrouter');
+  if (!anthropicConnected && orConnected) return 'openrouter/anthropic/claude-sonnet-4-6';
+  return 'claude-sonnet-4-6';
+}
+
+/** What Auto WOULD have routed to under the cost/speciality ladder. Returned
+ *  as a user-facing recommendation ("Haiku would be cheaper for this") —
+ *  never applied automatically. Null when the ladder agrees with the Sonnet
+ *  default (or lands on any Sonnet variant). */
+export function suggestAutoModelAlternative(
+  profile: SessionCodingProfile,
+  intent?: import('./agenticCodingProfile').MessageIntent,
+  connectedProviders?: ConnectedProviderSet,
+  complexity?: import('./agenticCodingProfile').MessageComplexity,
+  opts?: { appGroundedHint?: boolean },
+  message?: string | null,
+): { model: string; reason: string } | null {
+  const ladderPick = resolveModelForSoul(
     spiritIdForProfile(profile),
-    userModelPick,
+    'auto',
     intent,
     complexity,
-    /* buildConverging */ undefined,
-    /* buildExploring */ undefined,
+    undefined,
+    undefined,
     connectedProviders,
     opts,
     message,
   );
+  if (!ladderPick || /claude-sonnet|anthropic\/claude-sonnet/i.test(ladderPick)) return null;
+  const reason = /blackswan/i.test(ladderPick)
+    ? 'BlackSwan is trained on this app’s own data and handles grounded status/memory turns well.'
+    : /haiku|nano|mini|flash|lite|llama3\.2|small/i.test(ladderPick)
+      ? 'A lighter model would answer this kind of turn faster and cheaper.'
+      : /sonar|perplexity/i.test(ladderPick)
+        ? 'A search-grounded model fits this research request.'
+        : 'A specialist model fits this request.';
+  return { model: ladderPick, reason };
+}
+
+/** Recommendation for an EXPLICIT weak-tier pick on action/tool work — the
+ *  gpt-5.4-nano-drives-a-desktop-sequence failure mode. Advisory only. */
+export function suggestModelForManualPick(
+  userModelPick: string | null | undefined,
+  draft: string | null | undefined,
+): { model: string; reason: string } | null {
+  const pick = String(userModelPick || '').trim();
+  if (!pick || pick === 'auto') return null;
+  if (!/nano|mini|lite|flash|3\.2|small/i.test(pick)) return null;
+  const text = String(draft || '');
+  if (!/\b(open|launch|create|click|type|run|build|fix|edit|automate|photoshop|browser|desktop|file|project|document)\b/i.test(text)) return null;
+  return {
+    model: 'claude-sonnet-4-6',
+    reason: `${pick} is a light model and often fails multi-step tool work — Claude Sonnet is recommended for this task.`,
+  };
 }
 
 // Per-SOUL model preferences. User's explicit model pick always wins;

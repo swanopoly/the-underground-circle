@@ -98,7 +98,7 @@ import ChatSourcesRow from './chat/ChatSourcesRow';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
 import { createStagedFile, getSignedUrl, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
-import { soulKeyForProfile, resolveModelForProfile, explainAutoModelChoice, spiritIdForProfile } from '../../../lib/serviceProfileSouls';
+import { soulKeyForProfile, resolveModelForProfile, explainAutoModelChoice, spiritIdForProfile, suggestAutoModelAlternative, suggestModelForManualPick } from '../../../lib/serviceProfileSouls';
 import BestOfNResultCard from '../../../components/BestOfNResultCard';
 import type { PersistedBestOfNRace } from '../../../lib/persistedChatMetadata';
 import { canUseAnthropicChatStream } from '../../../lib/blackswanRouting';
@@ -16091,30 +16091,40 @@ function EnhancedInput({
     if (!autoResolvedModel) return null;
     return autoModelDisplayName(autoResolvedModel);
   }, [autoResolvedModel]);
-  const autoModelReason = useMemo(() => {
-    if (selectedModel !== 'auto') return null;
+  // Auto defaults to Claude Sonnet; the routing ladder now RECOMMENDS an
+  // alternative (cheaper/specialist) instead of silently switching. Manual
+  // weak-tier picks get a Sonnet recommendation for action-shaped drafts.
+  const modelRecommendation = useMemo(() => {
     try {
       const draft = (input || '').trim();
+      if (selectedModel !== 'auto') {
+        return suggestModelForManualPick(selectedModel, draft);
+      }
       const route = draft.length > 0
         ? analyzeMessageRouting(draft, 'main_chat').route
         : null;
       const providerSetForTurn = looksLikeActionRequest(draft)
         ? new Set(Array.from(connectedProviderSet).filter((provider) => provider !== 'blackswan'))
         : connectedProviderSet;
-      return explainAutoModelChoice(
-        spiritIdForProfile((sessionProfile as any) || 'senior'),
-        null,
+      return suggestAutoModelAlternative(
+        (sessionProfile as any) || 'senior',
         route?.intent,
-        route?.complexity,
-        undefined,
-        undefined,
         providerSetForTurn,
+        route?.complexity,
         { appGroundedHint: looksLikeAppGroundedMessage(draft) },
-      ).reason;
+        draft,
+      );
     } catch {
       return null;
     }
   }, [selectedModel, input, sessionProfile, connectedProviderSet]);
+  const autoModelReason = useMemo(() => {
+    if (selectedModel !== 'auto') return null;
+    if (modelRecommendation) {
+      return `Tip: ${autoModelDisplayName(modelRecommendation.model)} — ${modelRecommendation.reason} Tap to use it.`;
+    }
+    return 'Sonnet is the Auto default; lighter or specialist models are suggested here when they fit better.';
+  }, [selectedModel, modelRecommendation]);
   const activeModeConfig = CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk')) || CHAT_MODE_CONFIG[0];
   const controlAccent = selectedChatAgentTarget?.color || activeModeConfig?.color || accentColor;
   const draftText = String(input || '').trim();
@@ -16815,8 +16825,32 @@ function EnhancedInput({
                     Auto{autoResolvedShortLabel ? ` -> ${autoResolvedShortLabel}` : ''}
                   </Text>
                   {autoModelReason ? (
-                    <Text style={styles.controlAutoRouteReason} numberOfLines={2}>{autoModelReason}</Text>
+                    <Pressable
+                      disabled={!modelRecommendation}
+                      onPress={() => { if (modelRecommendation) onModelChange(modelRecommendation.model); }}
+                      accessibilityRole="button"
+                      accessibilityLabel={modelRecommendation ? `Switch to ${modelRecommendation.model}` : 'Auto route detail'}
+                    >
+                      <Text style={styles.controlAutoRouteReason} numberOfLines={2}>{autoModelReason}</Text>
+                    </Pressable>
                   ) : null}
+                </View>
+              ) : null}
+              {selectedModel !== 'auto' && modelRecommendation ? (
+                <View style={styles.controlAutoRouteBand}>
+                  <View style={styles.controlCenterStatusHeader}>
+                    <View style={[styles.liveMiniDot, { backgroundColor: '#f59e0b' }]} />
+                    <Text style={styles.controlCenterStatusLabel}>MODEL TIP</Text>
+                  </View>
+                  <Pressable
+                    onPress={() => onModelChange(modelRecommendation.model)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Switch to ${modelRecommendation.model}`}
+                  >
+                    <Text style={styles.controlAutoRouteReason} numberOfLines={3}>
+                      {modelRecommendation.reason} Tap to switch.
+                    </Text>
+                  </Pressable>
                 </View>
               ) : null}
               <Pressable
