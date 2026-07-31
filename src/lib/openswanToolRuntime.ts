@@ -308,6 +308,7 @@ export type OpenSwanRuntimeToolName =
   | 'engineering.model_3d'
   | 'engineering.calc'
   | 'engineering.inspect_mesh'
+  | 'engineering.design_part'
   // ── Circle context snapshot — pre-built entity-linked index search that
   //    replaces N sequential list calls for what/which/who discovery ──────
   | 'context.search'
@@ -917,6 +918,7 @@ export type OpenSwanToolExecutionArgs = {
   'engineering.model_3d': { part: 'plate' | 'bracket' | 'tube' | 'flange' | 'gear' | 'gear_pair' | 'helical_gear' | 'extrude' | 'revolve' | 'pulley' | 'spring' | 'thread' | 'sheet_metal' | 'beam' | 'frame' | 'bolt' | 'nut' | 'elbow' | 'cam' | 'rack' | 'custom'; spec?: unknown; model?: unknown; format?: 'blender' | 'openscad'; outputPath?: string; profile?: unknown; height?: number };
   'engineering.calc': { kind: string; args?: unknown };
   'engineering.inspect_mesh': { path: string; material?: string };
+  'engineering.design_part': { type: string; load?: number; arm?: number; torque?: number; span?: number; material?: string; safetyFactor?: number; width?: number; boreDiameter?: number; section?: string; outputPath?: string; [k: string]: unknown };
   'context.search':     { query: string; section?: string };
   'codebase.index':     { rootPath: string; maxFiles?: number };
   'codebase.search':    { query: string; limit?: number };
@@ -1221,6 +1223,7 @@ export type OpenSwanToolExecutionResultMap = {
   'engineering.model_3d': { ok: boolean; resultsText: string; script?: string; openscad?: string; summary?: unknown };
   'engineering.calc': { ok: boolean; resultsText: string; result?: unknown };
   'engineering.inspect_mesh': { ok: boolean; resultsText: string; inspection?: unknown };
+  'engineering.design_part': { ok: boolean; resultsText: string; script?: string; design?: unknown };
   'context.search':     { ok: boolean; resultsText: string };
   'codebase.index':     { ok: boolean; resultsText: string };
   'codebase.search':    { ok: boolean; resultsText: string };
@@ -3019,6 +3022,30 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       required: ['path'],
     },
   },
+  {
+    name: 'engineering.design_part',
+    label: 'Design a Part (one call)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'One-call part design: state a DUTY, get a finished sized part — dimensions, a ready-to-compile Blender model, mass, the realised safety factor, and the bore fit. Runs size → model → tolerance: derives allowable stress from yield ÷ safety factor, sizes the member, ROUNDS up to a standard size and re-checks the stress, builds the geometry, computes the ISO fit. Types: bracket (load, arm), shaft (torque), beam (load, span, section). Use for "design a bracket/shaft/beam to carry/transmit X"; compile the returned script with desktop.cad_compile, then engineering.inspect_mesh to verify.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', description: 'bracket | shaft | beam.' },
+        load: { type: 'number', description: 'Applied load in N (bracket/beam).' },
+        arm: { type: 'number', description: 'Bracket cantilever arm in mm.' },
+        span: { type: 'number', description: 'Beam span in mm.' },
+        torque: { type: 'number', description: 'Shaft torque in N·m.' },
+        material: { type: 'string', description: 'steel | stainless | aluminum | titanium | brass | abs | pla (default steel).' },
+        safetyFactor: { type: 'number', description: 'Target safety factor (default 2).' },
+        width: { type: 'number', description: 'Bracket plate width in mm (default 40).' },
+        boreDiameter: { type: 'number', description: 'Bracket shaft-bore diameter in mm (adds an H7/g6 fit).' },
+        section: { type: 'string', description: 'Beam section: i_beam | channel (default i_beam).' },
+        outputPath: { type: 'string', description: 'Optional STL output path baked into the returned script.' },
+      },
+      required: ['type'],
+    },
+  },
   // ─── Circle context snapshot — pre-built discovery index ─────────────────
   {
     name: 'context.search',
@@ -4794,7 +4821,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
-  if (tool === 'engineering.draft_dxf' || tool === 'engineering.model_3d') {
+  if (tool === 'engineering.draft_dxf' || tool === 'engineering.model_3d' || tool === 'engineering.design_part') {
     return {
       family: 'knowledge',
       approvalMode: 'auto',
@@ -5686,6 +5713,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'engineering.model_3d',
   'engineering.calc',
   'engineering.inspect_mesh',
+  'engineering.design_part',
   // Progressive disclosure (T2) — the catalog search itself must always be
   // loop-callable so deferred tools stay reachable from a pinned-core turn.
   'tools.search',
@@ -6986,6 +7014,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'engineering.model_3d':
     case 'engineering.calc':
     case 'engineering.inspect_mesh':
+    case 'engineering.design_part':
     case 'tools.search':
     case 'context.search':
     case 'codebase.index':
@@ -11807,6 +11836,26 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           resultsText: `${r.quantity} = ${r.value} ${r.unit}  [${r.formula}]${extraStr}${notesStr}`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: `engineering.calc error: ${e.message}` } as any; }
+    }
+
+    // ── One-call part design (size → model → tolerance pipeline) ────────
+    case 'engineering.design_part': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['engineering.design_part'];
+        const d = await import('./engineeringDesignCore');
+        const outputPath = typeof a.outputPath === 'string' && a.outputPath.trim() ? a.outputPath : '/tmp/uc-design.stl';
+        const res = d.designPart({ ...a, outputPath });
+        if (!res.ok) return { ok: false, resultsText: `engineering.design_part: ${res.error}` } as any;
+        const p = res.value;
+        const dims = Object.entries(p.dimensions).map(([k, v]) => `${k}=${v}`).join(', ');
+        const fitStr = p.fit ? ` | fit ${p.fit.spec} ${p.fit.type} ${p.fit.minClearance_um}–${p.fit.maxClearance_um} µm` : '';
+        return {
+          ok: true,
+          script: p.bpy,
+          design: { type: p.type, dimensions: p.dimensions, safety: p.safety, mass_kg: p.mass_kg, fit: p.fit ?? null },
+          resultsText: `Designed ${p.summary}. Dimensions: ${dims}. Safety: σ ${p.safety.realisedStress_MPa} MPa vs ${p.safety.allowableStress_MPa} allowable → factor ${p.safety.realisedSafetyFactor} (${p.safety.note})${fitStr}. Mass ${p.mass_kg} kg.${p.bpy ? ` Write the Blender bpy (${p.bpy.length} bytes) with desktop.file_write_text (.py), then desktop.cad_compile { engine: "blender", sourcePath: <.py>, outputPath: ${JSON.stringify(outputPath)} } → STL, then engineering.inspect_mesh to verify.` : ''}\n${p.notes.join('\n')}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: `engineering.design_part error: ${e.message}` } as any; }
     }
 
     // ── Engineering 3D solid modeling (pure bpy/OpenSCAD generation) ────
