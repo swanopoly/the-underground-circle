@@ -3000,7 +3000,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | stress_concentration | notch_fatigue | hydraulic_cylinder | cylinder_speed | rod_buckling | thick_cylinder | press_fit | contact_stress | key_sizing | friction_clutch | band_brake | column_johnson | eccentric_column | forced_vibration | vibration_isolation | joint_stiffness | bolt_fatigue | flywheel | torsion_spring | extension_spring | belleville | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | stress_concentration | notch_fatigue | hydraulic_cylinder | cylinder_speed | rod_buckling | thick_cylinder | press_fit | contact_stress | key_sizing | friction_clutch | band_brake | column_johnson | eccentric_column | forced_vibration | vibration_isolation | joint_stiffness | bolt_fatigue | flywheel | torsion_spring | extension_spring | belleville | shaft_diameter | shaft_fatigue | truss | worm_gear | vibration_absorber | journal_bearing | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -12375,8 +12375,133 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             };
             break;
           }
+          case 'shaft_diameter': {
+            const t = await import('./engineeringShaftDesignCore');
+            const rr = t.shaftDiameter(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'shaft diameter (combined bending + torsion, static)',
+              value: v.recommendedDiameter,
+              unit: 'mm',
+              formula: 'MSST: d³=(32n/πSy)·√(M²+T²); DE: d³=(32n/πSy)·√(M²+¾T²)',
+              inputs: { bendingMoment_Nmm: v.bendingMoment, torque_Nmm: v.torque, yield_MPa: v.yieldStrength, safetyFactor: v.safetyFactor },
+              extra: {
+                diameter_MSST_mm: v.diameterMSST,
+                diameter_DE_mm: v.diameterDE,
+                equivalent_moment_Nmm: v.equivalentMoment,
+                bending_stress_MPa: v.bendingStress,
+                torsional_shear_MPa: v.torsionalShear,
+                max_shear_stress_MPa: v.maxShearStress,
+                von_mises_stress_MPa: v.vonMisesStress,
+                allowable_normal_MPa: v.allowableNormal,
+                allowable_shear_MPa: v.allowableShear,
+                realized_SF_MSST: v.realizedSafetyFactorMSST,
+                realized_SF_DE: v.realizedSafetyFactorDE,
+              },
+              notes: [`Governing theory: ${v.governing} (conservative).`, ...v.notes],
+            };
+            break;
+          }
+          case 'shaft_fatigue': {
+            const t = await import('./engineeringShaftDesignCore');
+            const rr = t.shaftFatigue(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'shaft diameter (fatigue, Shigley DE-Goodman Eq. 7-8)',
+              value: v.requiredDiameter,
+              unit: 'mm',
+              formula: 'd=((16n/π)·[√(4(Kf·Ma)²+3(Kfs·Ta)²)/Se + √(4(Kf·Mm)²+3(Kfs·Tm)²)/Sut])^(1/3)',
+              inputs: { alternatingMoment_Nmm: v.alternatingMoment, meanTorque_Nmm: v.meanTorque, Se_MPa: v.Se, Sut_MPa: v.Sut, Kf: v.Kf, Kfs: v.Kfs, safetyFactor: v.targetSafetyFactor },
+              extra: {
+                required_diameter_mm: v.requiredDiameter,
+                realized_safety_factor: v.realizedSafetyFactor,
+                alternating_term_Nmm: v.alternatingTerm,
+                mean_term_Nmm: v.meanTerm,
+              },
+              notes: v.notes,
+            };
+            break;
+          }
+          case 'truss': {
+            const t = await import('./engineeringTrussCore');
+            const rr = t.solveTruss(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = {
+              max_force: v.maxForce, max_tension: v.maxTension, max_compression: v.maxCompression,
+              joints: v.determinacy.joints, members: v.determinacy.members,
+              reaction_components: v.determinacy.reactions, max_joint_residual: v.maxResidual,
+            };
+            for (const m of v.members) extra[`force_${m.from}_${m.to}`] = Math.round(m.force * 1e6) / 1e6;
+            for (const rx of v.reactions) {
+              extra[`reaction_${rx.joint}_x`] = Math.round(rx.fx * 1e6) / 1e6;
+              extra[`reaction_${rx.joint}_y`] = Math.round(rx.fy * 1e6) / 1e6;
+            }
+            const notes = v.members.map((m) => m.type === 'zero'
+              ? `${m.from}-${m.to}: zero-force`
+              : `${m.from}-${m.to}: ${Math.round(Math.abs(m.force))} N ${m.type}`);
+            if (v.zeroForceMembers.length) notes.push(`Zero-force members: ${v.zeroForceMembers.join(', ')}.`);
+            notes.push(`Verified: max joint equilibrium residual ${v.maxResidual.toExponential(2)} (≈0 confirms the solve).`);
+            r = { ok: true, quantity: 'truss member forces (method of joints)', value: v.maxForce, unit: 'N', formula: 'method of joints: ΣFx=ΣFy=0 at every joint', inputs: {}, extra, notes };
+            break;
+          }
+          case 'worm_gear': {
+            const t = await import('./engineeringWormGearCore');
+            const rr = t.wormGear(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'worm gear velocity ratio',
+              value: v.velocityRatio,
+              unit: ':1',
+              formula: 'VR = Zg/Zw; η = tanλ/tan(λ+φ); self-locking ⇔ λ<φ (the power-screw condition)',
+              inputs: { starts: v.starts, wheelTeeth: v.wheelTeeth, wormPitchDiameter_mm: v.wormPitchDiameter_mm, module_mm: v.module_mm },
+              extra: {
+                velocityRatio: v.velocityRatio,
+                efficiency: v.efficiency,
+                reverseEfficiency: v.reverseEfficiency,
+                selfLocking: v.selfLocking ? 1 : 0,
+                leadAngle_deg: v.leadAngle_deg,
+                frictionAngle_deg: v.frictionAngle_deg,
+                centerDistance_mm: v.centerDistance_mm,
+                wheelPitchDiameter_mm: v.wheelPitchDiameter_mm,
+                lead_mm: v.lead_mm,
+              },
+              notes: [
+                `VR = Zg/Zw = ${v.velocityRatio}:1 from a single mesh`,
+                `η = ${(v.efficiency * 100).toFixed(1)}% (worm driving)`,
+                v.selfLocking ? 'self-locking: holds its load without a brake (λ<φ, η<½)' : 'not self-locking: back-drives (λ>φ)',
+              ],
+            };
+            break;
+          }
+          case 'vibration_absorber': {
+            const t = await import('./engineeringVibrationAbsorberCore');
+            const rr = t.dynamicAbsorber(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = { ok: true, quantity: 'primary mass amplitude X₁/δst (0 at tuning)', value: v.X1_over_deltaSt, unit: 'ratio (X₁/δst)', formula: 'X₁ = F₀(k₂−m₂Ω²)/D, D=(k₁+k₂−m₁Ω²)(k₂−m₂Ω²)−k₂²; X₁=0 when ω_a=√(k₂/m₂)=Ω, then k₂·X₂=−F₀', inputs: {}, extra: { X2_over_deltaSt: v.X2_over_deltaSt, absorberForceOverF0: v.absorberForceOverF0, massRatio: v.massRatio, tuningRatio: v.tuningRatio, forcingRatio: v.forcingRatio, omega_n_rad_s: v.omega_n_rad_s, omega_a_rad_s: v.omega_a_rad_s, resonanceSeparationRatio: v.resonanceSeparationRatio ?? 0 }, notes: v.notes };
+            break;
+          }
+          case 'journal_bearing': {
+            const t = await import('./engineeringJournalBearingCore');
+            const rr = t.journalBearing(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = { ok: true, quantity: 'journal bearing: Sommerfeld number', value: v.sommerfeld, unit: '(dimensionless)',
+              formula: 'S = (r/c)²·μN/P; Petroff f = 2π²·(μN/P)·(r/c); h0 = c(1−ε)',
+              inputs: { radius_mm: v.radius_mm, clearance_mm: v.clearance_mm, length_mm: v.length_mm, viscosity_Pa_s: v.viscosity_Pa_s, speed_rev_s: v.speed_rev_s, load_N: v.load_N },
+              extra: { unitLoad_MPa: v.unitLoad_MPa, friction: v.friction, petroffFriction: v.petroffFriction, frictionTorque_Nm: v.frictionTorque_Nm, powerLoss_W: v.powerLoss_W, minFilmThickness_um: v.minFilmThickness_um, eccentricity: v.eccentricity, radiusClearanceRatio: v.radiusClearanceRatio },
+              notes: v.notes };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear, stress_concentration, notch_fatigue, thick_cylinder, press_fit, contact_stress, key_sizing, friction_clutch, band_brake, column_johnson, eccentric_column, forced_vibration, vibration_isolation, joint_stiffness, bolt_fatigue, flywheel, torsion_spring, extension_spring, belleville.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear, stress_concentration, notch_fatigue, thick_cylinder, press_fit, contact_stress, key_sizing, friction_clutch, band_brake, column_johnson, eccentric_column, forced_vibration, vibration_isolation, joint_stiffness, bolt_fatigue, flywheel, torsion_spring, extension_spring, belleville, shaft_diameter, shaft_fatigue, truss, worm_gear, vibration_absorber, journal_bearing.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
