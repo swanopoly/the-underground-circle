@@ -51,6 +51,14 @@ const PROBES: Record<string, RegExp[]> = {
     /approvals\.request/,
     /scoped|approved root/i,
   ],
+  'engineering-design': [
+    /engineering\.calc/,
+    /engineering\.model_3d/,
+    /engineering\.inspect_mesh/,
+    /desktop\.cad_compile/,
+    /size .*model.*measure|compose at the seams/i,
+    /watertight/i,
+  ],
 };
 
 const REAL_TOOL_RE = /\b(?:desktop|browser|approvals|agent|research)\.[a-z_]+/g;
