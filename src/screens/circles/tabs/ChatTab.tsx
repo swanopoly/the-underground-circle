@@ -2679,6 +2679,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // two-axis signal rides the recovery archive tags. Telemetry only —
       // the evidence-recovery flow stays authoritative.
       let laneTags: string[] = [];
+      // Local-console diagnostic: the compact user-facing copy deliberately
+      // hides the raw failure, which makes "why did this block?" undebuggable
+      // from the browser. One bounded line with the real terminal detail.
+      try {
+        console.warn('[ChatTab] computer-task failure detail:', JSON.stringify({
+          status: details.outcomeStatus || null,
+          message: String(details.failureMessage || '').slice(0, 600),
+          grounding: String(details.groundingSummary || '').slice(0, 200),
+          preflight: String(details.preflightSummary || '').slice(0, 200),
+          routeStatus: (details.appRouteDecision as any)?.status || null,
+        }));
+      } catch {}
       try {
         const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
           await import('../../../lib/chatLaneOutcome');
