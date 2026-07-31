@@ -3000,7 +3000,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | stress_concentration | notch_fatigue | hydraulic_cylinder | cylinder_speed | rod_buckling | thick_cylinder | press_fit | contact_stress | key_sizing | friction_clutch | band_brake | column_johnson | eccentric_column | forced_vibration | vibration_isolation | joint_stiffness | bolt_fatigue | flywheel | torsion_spring | extension_spring | belleville | shaft_diameter | shaft_fatigue | truss | worm_gear | vibration_absorber | journal_bearing | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
+        kind: { type: 'string', description: 'section_rectangle | section_circle | section_tube | beam | column_buckling | shaft_torsion | thermal_expansion | pressure_vessel | conduction | convection | composite_wall | pipe_flow | natural_frequency | damped_vibration | four_bar | crank_slider | grashof | power_screw | belt_drive | bearing_life | iso_fit | tolerance_stack | spring_rate | gear_pair | gear_train | gear_strength | safety_factor | bolt_preload | tap_drill | endurance_limit | fatigue_goodman | fatigue_life | fillet_weld | bolt_group | bolt_bearing | bolt_group_eccentric | principal_stress | von_mises | max_shear | stress_concentration | notch_fatigue | hydraulic_cylinder | cylinder_speed | rod_buckling | thick_cylinder | press_fit | contact_stress | key_sizing | friction_clutch | band_brake | column_johnson | eccentric_column | forced_vibration | vibration_isolation | joint_stiffness | bolt_fatigue | flywheel | torsion_spring | extension_spring | belleville | shaft_diameter | shaft_fatigue | truss | worm_gear | vibration_absorber | journal_bearing | bevel_gear | chain_drive | plate_bending | fin_heat | riveted_joint | ohms_law | led_resistor | combine_resistors | voltage_divider | rc | convert | material.' },
         args: { type: 'object', description: 'Kind-specific inputs, e.g. beam {support,load,magnitude,length,E,I,S?}; iso_fit {nominal,hole:"H7",shaft:"g6"}; tolerance_stack {dims:[{nominal,tol,direction?}]}; shaft_torsion {torque,diameter,length,material}; convert {value,from,to}.' },
       },
       required: ['kind'],
@@ -12500,8 +12500,129 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
               notes: v.notes };
             break;
           }
+          case 'bevel_gear': {
+            const t = await import('./engineeringBevelGearCore');
+            const rr = t.bevelGearPair(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = {
+              ratio: v.ratio,
+              pinion_cone_angle_deg: v.pinionConeAngleDeg,
+              gear_cone_angle_deg: v.gearConeAngleDeg,
+              cone_distance_mm: v.coneDistance,
+              equivalent_spur_teeth_pinion: v.equivalentSpurTeethPinion,
+              equivalent_spur_teeth_gear: v.equivalentSpurTeethGear,
+              pinion_pitch_radius_mm: v.pinionPitchRadius,
+              gear_pitch_radius_mm: v.gearPitchRadius,
+              pinion_mean_radius_mm: v.pinionMeanRadius,
+              gear_mean_radius_mm: v.gearMeanRadius,
+            };
+            if (v.forces) {
+              extra.pinion_torque_Nm = v.forces.pinionTorque_Nm;
+              extra.tangential_load_N = v.forces.tangential_N;
+              extra.pinion_radial_N = v.forces.pinionRadial_N;
+              extra.pinion_axial_N = v.forces.pinionAxial_N;
+              extra.gear_radial_N = v.forces.gearRadial_N;
+              extra.gear_axial_N = v.forces.gearAxial_N;
+            }
+            r = {
+              ok: true,
+              quantity: 'bevel gear pair',
+              value: v.ratio,
+              unit: ':1',
+              formula: 'tan(gamma_p)=sin(Sigma)/(Ng/Np+cos(Sigma)), gamma_p+gamma_g=Sigma; Ne=N/cos(gamma) (Tredgold); Wr=Ft*tan(phi)*cos(gamma), Wa=Ft*tan(phi)*sin(gamma)',
+              inputs: { module_mm: v.module, pinion_teeth: v.pinionTeeth, gear_teeth: v.gearTeeth, shaft_angle_deg: v.shaftAngleDeg, pressure_angle_deg: v.pressureAngleDeg },
+              extra,
+              notes: [],
+            };
+            break;
+          }
+          case 'chain_drive': {
+            const t = await import('./engineeringChainDriveCore');
+            const rr = t.chainDrive(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            const extra: Record<string, number> = {
+              pitchDiameterDriver: v.pitchDiameterDriver,
+              pitchDiameterDriven: v.pitchDiameterDriven,
+              chainLength_pitches: v.chainLength_pitches,
+              chainLength_pitches_exact: v.chainLength_pitches_exact,
+              adjustedCentreDistance: v.adjustedCentreDistance,
+              centreDistance_pitches: v.centreDistance_pitches,
+              chordalSpeedVariationDriver_pct: v.chordalSpeedVariationDriver_pct,
+              chordalSpeedVariationDriven_pct: v.chordalSpeedVariationDriven_pct,
+            };
+            if (v.drivenSpeed_rpm !== undefined) extra.drivenSpeed_rpm = v.drivenSpeed_rpm;
+            if (v.chainSpeed_m_s !== undefined) extra.chainSpeed_m_s = v.chainSpeed_m_s;
+            if (v.tangentialForce_N !== undefined) extra.tangentialForce_N = v.tangentialForce_N;
+            r = {
+              ok: true,
+              quantity: 'chain drive ratio (N2/N1)',
+              value: v.ratio,
+              unit: ':1',
+              formula: 'PD = p/sin(180 deg/N); ratio = N2/N1 (exact, no slip); L = 2*Cp + (N1+N2)/2 + ((N2-N1)/(2*pi))^2/Cp rounded up to even pitches',
+              inputs: { pitch: v.pitch, driverTeeth: v.driverTeeth, drivenTeeth: v.drivenTeeth, centreDistance: v.centreDistance },
+              extra,
+              notes: [
+                'chain is positive-engagement: the ratio is EXACT (a belt slips)',
+                'sprocket pitch circle is a polygon of N sides, so PD = p/sin(180/N)',
+                'chain length rounded UP to an even number of pitches to avoid a weak offset link',
+                'chordal (polygon) action ripples the speed by 1-cos(180/N), worse on the fewer-tooth sprocket',
+              ],
+            };
+            break;
+          }
+          case 'plate_bending': {
+            const t = await import('./engineeringPlateBendingCore');
+            const rr = t.platePressure(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = { ok: true, quantity: v.quantityLabel, value: v.sigmaMax_MPa, unit: 'MPa', formula: v.formula_sigma, inputs: v.inputs, extra: v.extra, notes: v.notes };
+            break;
+          }
+          case 'fin_heat': {
+            const t = await import('./engineeringFinCore');
+            const rr = t.finAnalysis(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = { ok: true, quantity: `fin heat rate (${v.shape}, ${v.tip} tip)`, value: v.heatRate_W, unit: 'W', formula: 'Q = √(hPkAc)·θb·tanh(mL); η = tanh(mL)/mL; ε = Q/(h·Ac·θb)', inputs: { k_W_per_mK: v.conductivity_W_per_mK, h_W_per_m2K: v.filmCoefficient_W_per_m2K, length_m: v.length_m, thetaBase_K: v.baseExcess_K }, extra: { fin_parameter_per_m: v.finParameter_per_m, mL: v.mL, efficiency: v.efficiency, effectiveness: v.effectiveness, heat_rate_W: v.heatRate_W, M_W: v.M_W, tip_excess_K: v.tipExcess_K, cross_section_area_m2: v.crossSectionArea_m2, perimeter_m: v.perimeter_m }, notes: [`m = √(hP/kAc) = ${v.finParameter_per_m} /m, mL = ${v.mL}.`, `η = tanh(mL)/mL = ${v.efficiency} (→1 short/fat/high-k, →0 long — tip past mL≈2.3 is dead weight).`, `ε = ${v.effectiveness} (>2 justifies the fin; falls as h rises — a fin helps only when convection is the bottleneck).`] };
+            break;
+          }
+          case 'riveted_joint': {
+            const t = await import('./engineeringRivetJointCore');
+            const rr = t.rivetedJoint(x);
+            if (!rr.ok) return { ok: false, resultsText: `engineering.calc: ${rr.error}` } as any;
+            const v = rr.value;
+            r = {
+              ok: true,
+              quantity: 'riveted joint efficiency',
+              value: v.efficiency,
+              unit: 'ratio (0-1)',
+              formula: 'η = min(Pt=σt(p-d)t, Ps=τ(π/4·d²)·n·planes, Pc=σc·d·t·n) / (σt·p·t)',
+              inputs: {
+                plateThickness_mm: v.plateThickness_mm,
+                rivetDiameter_mm: v.rivetDiameter_mm,
+                pitch_mm: v.pitch_mm,
+                rivetsPerPitch: v.rivetsPerPitch,
+                shearPlanes: v.shearPlanes,
+                tensileStress_MPa: v.tensileStress_MPa,
+                shearStress_MPa: v.shearStress_MPa,
+                crushingStress_MPa: v.crushingStress_MPa,
+              },
+              extra: {
+                tearing_N: v.tearing_N,
+                shearing_N: v.shearing_N,
+                crushing_N: v.crushing_N,
+                strength_N: v.strength_N,
+                solidPlate_N: v.solidPlate_N,
+                efficiency: v.efficiency,
+              },
+              notes: [`governing mode: ${v.governingMode} (weakest of tearing/shearing/crushing)`, `joint type: ${v.jointType}`],
+            };
+            break;
+          }
           default:
-            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear, stress_concentration, notch_fatigue, thick_cylinder, press_fit, contact_stress, key_sizing, friction_clutch, band_brake, column_johnson, eccentric_column, forced_vibration, vibration_isolation, joint_stiffness, bolt_fatigue, flywheel, torsion_spring, extension_spring, belleville, shaft_diameter, shaft_fatigue, truss, worm_gear, vibration_absorber, journal_bearing.` } as any;
+            return { ok: false, resultsText: `engineering.calc: unknown kind "${kind}". Options: section_rectangle, section_circle, section_tube, beam, safety_factor, bolt_preload, tap_drill, ohms_law, led_resistor, combine_resistors, voltage_divider, rc, convert, material, gear_pair, gear_train, spring_rate, column_buckling, shaft_torsion, thermal_expansion, pressure_vessel, iso_fit, tolerance_stack, pipe_flow, natural_frequency, damped_vibration, grashof, four_bar, crank_slider, conduction, convection, composite_wall, power_screw, belt_drive, bearing_life, endurance_limit, fatigue_goodman, fatigue_life, fillet_weld, bolt_group, bolt_bearing, bolt_group_eccentric, hydraulic_cylinder, cylinder_speed, rod_buckling, gear_strength, principal_stress, von_mises, max_shear, stress_concentration, notch_fatigue, thick_cylinder, press_fit, contact_stress, key_sizing, friction_clutch, band_brake, column_johnson, eccentric_column, forced_vibration, vibration_isolation, joint_stiffness, bolt_fatigue, flywheel, torsion_spring, extension_spring, belleville, shaft_diameter, shaft_fatigue, truss, worm_gear, vibration_absorber, journal_bearing, bevel_gear, chain_drive, plate_bending, fin_heat, riveted_joint.` } as any;
         }
         if (!r.ok) return { ok: false, resultsText: `engineering.calc: ${r.error}` } as any;
         const extraStr = r.extra ? ' | ' + Object.entries(r.extra).map(([k, v]) => `${k}=${v}`).join(', ') : '';
