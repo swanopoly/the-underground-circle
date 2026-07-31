@@ -95,13 +95,33 @@ engineering.calc { kind: "iso_fit", args: { nominal: 25, hole: "H7", shaft: "g6"
 model is built with, the model's measured volume and mass match the design, and
 the bore the model cut is the one the fit sizes.
 
+## Second example — a single-stage gear reducer (transmission tools compose)
+
+The bracket proves the STATICS lane composes; a gear reducer proves the
+POWER-TRANSMISSION lane does too. A 3 kW motor at 1500 rpm through a 3:1 stage:
+
+```jsonc
+engineering.calc { kind: "gear_train",  args: { stages: [{ driver: 20, driven: 60 }], inputSpeed_rpm: 1500, inputTorque_Nm: 19.1 } }
+// → train value 3, output 500 rpm, output torque 57.3 N·m  (agrees with gear_pair)
+engineering.calc { kind: "shaft_torsion", args: { torque: 57296, diameter: 20 } }   // → τ 36.5 MPa (< 40 allowable)
+engineering.model_3d { part: "helical_gear", spec: { teeth: 60, module: 3, faceWidth: 30, boreDiameter: 20, helixAngleDeg: 15 } }
+engineering.calc { kind: "bearing_life",  args: { dynamicLoadRating: 20000, equivalentLoad: 677, bearingType: "ball", speed_rpm: 500 } }
+```
+
+The seams: the two gear tools agree on the ratio; the output torque the reduction
+produces is what the shaft is sized for; the shaft diameter (20) is the gear bore
+and the bearing bore; the gear's tooth force is the bearing's radial load.
+
 ## Proofs
 
-- `npm run smoke:engineering-workflow-integration` — chains the pure cores and
-  asserts every number flows consistently across them (20 cross-core assertions).
+- `npm run smoke:engineering-workflow-integration` — the bracket, chaining the
+  pure cores with 20 cross-core assertions (statics: load → thickness → model →
+  measure → fit).
+- `npm run smoke:engineering-gearbox-integration` — the gear reducer, 16
+  cross-core assertions (transmission: torque → reduction → shaft → gear → bearing).
 - `npm run drill:engineering-workflow-e2e` — designs → models → **builds in real
   Blender** → measures the bracket, confirming the manufactured volume, mass, and
-  bounding box match the design (5 live steps).
+  bounding box match the design (5 live steps, 577 g designed = 577 g measured).
 
 ## Tool inventory (quick reference)
 
