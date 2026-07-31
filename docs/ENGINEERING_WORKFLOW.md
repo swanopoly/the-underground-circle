@@ -123,6 +123,25 @@ and the bearing bore; the gear's tooth force is the bearing's radial load.
   cross-core assertions (thermal + fluid: dissipation → composite_wall resistance
   network → junction temp within budget → pipe_flow coolant loop → thermal_expansion
   → plate mass). One aluminium supplies both the conduction k and the growth α.
+- `npm run smoke:engineering-gearbox-design-integration` — a single-reduction gearbox,
+  **48 cross-core seams**: the gear force sizes the shaft (combined bending+torsion
+  capstone), the torque sizes the key, the reaction sizes the bearing — one force read
+  many ways. Shows the shaft-design lane is the confluence (T=0 → pure bending Sy/n).
+- `npm run smoke:engineering-pressure-cover-integration` — a bolted pressure-vessel end,
+  ~22 seams: one pressure p splits the wall (thick_cylinder Lamé), bends the cover
+  (plate_bending), and its end load p·π·a² is the tension the flange bolts clamp
+  (bolted-joint diagram — separation + fatigue). Flange bolts carry tension, not shear.
+- `npm run smoke:engineering-vibration-isolation-integration` — a machine mount,
+  ~17 seams: target transmissibility → required ωn → mount stiffness k → spring geometry,
+  the loop closing back through √(k/m); static deflection δ=g/ωn² agrees three ways. The
+  tuned absorber is shown as the single-frequency alternative (X1→0 at tuning).
+- `npm run smoke:engineering-conveyor-drive-integration` — a chain conveyor drive,
+  ~15 seams: the chain's exact ratio hits the target speed a slipping belt misses; the
+  one chain tension both bends the shaft and loads the bearing → chain → shaft → key → L10.
+- `npm run smoke:engineering-brake-cooling-integration` — a finned brake, 29 seams across
+  the mechanical→thermal boundary: the brake torque becomes heat, P_heat=T·ω, and the fin
+  array must shed exactly that (N·Q ≥ P_heat); fins pay off only because bare-drum
+  convection is the bottleneck (effectiveness > 1).
 - `npm run drill:engineering-workflow-e2e` — designs → models → **builds in real
   Blender** → measures the bracket, confirming the manufactured volume, mass, and
   bounding box match the design (5 live steps, 577 g designed = 577 g measured).
@@ -131,7 +150,7 @@ and the bearing bore; the gear's tooth force is the bearing's radial load.
 
 | Tool | What |
 |---|---|
-| `engineering.calc` | ~35 kinds: statics (beam, sections, buckling, torsion, thermal, pressure), dynamics (natural/damped vibration), kinematics (four_bar, crank_slider, grashof), fluids (pipe_flow), heat (conduction, convection, composite_wall), machine elements (spring_rate, gear_pair, gear_train, power_screw, belt_drive, bearing_life, bolt_preload, tap_drill), manufacturing (iso_fit, tolerance_stack), electrical (ohms_law, led_resistor, rc, …), materials, unit convert |
+| `engineering.calc` | ~75 kinds: statics (beam, sections, buckling [Euler+Johnson], eccentric_column, torsion, thermal, pressure [thin + thick_cylinder Lamé], plate_bending), combined stress (principal_stress, von_mises, max_shear, stress_concentration), failure (fatigue endurance/goodman/life, notch_fatigue), dynamics (natural/damped/forced vibration, vibration_isolation, vibration_absorber), kinematics (four_bar, crank_slider, grashof), fluids (pipe_flow, journal_bearing), heat (conduction, convection, composite_wall, fin_heat), machine elements (spring_rate, spring types, gear_pair/train/strength, worm_gear, bevel_gear, power_screw, belt_drive, chain_drive, bearing_life, shaft_diameter/fatigue, key_sizing, friction_clutch, band_brake, flywheel, hydraulic_cylinder), joints (bolt_preload, fillet_weld, bolt_group[_eccentric], bolt_bearing, joint_stiffness, bolt_fatigue, riveted_joint), structures (truss), manufacturing (iso_fit, tolerance_stack, tap_drill), contact (contact_stress, press_fit), electrical (ohms_law, led_resistor, rc, …), materials, unit convert |
 | `engineering.model_3d` | ~20 parts: plate/bracket/tube/flange, gear/gear_pair/helical_gear/rack, extrude/revolve/pulley, spring/thread/bolt/nut, beam/frame, elbow, cam, sheet_metal, custom |
 | `engineering.draft_dxf` | floorplan / schematic / boltcircle / gear / gear_pair / custom |
 | `engineering.inspect_mesh` | measure a part: bbox, volume, watertight, mass |
