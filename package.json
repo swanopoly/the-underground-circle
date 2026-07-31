@@ -270,6 +270,7 @@
     "drill:unknown-app": "npx tsx scripts/unknown-app-ladder-drill.ts",
     "smoke:engineering-workflow-integration": "npx tsx scripts/engineering-workflow-integration-smoketest.ts",
     "smoke:engineering-gearbox-integration": "npx tsx scripts/engineering-gearbox-integration-smoketest.ts",
+    "smoke:engineering-cooling-integration": "npx tsx scripts/engineering-cooling-integration-smoketest.ts",
     "smoke:engineering-helical-gear-core": "npx tsx scripts/engineering-helical-gear-core-smoketest.ts",
     "smoke:engineering-rack-core": "npx tsx scripts/engineering-rack-core-smoketest.ts",
     "smoke:engineering-cam-core": "npx tsx scripts/engineering-cam-core-smoketest.ts",

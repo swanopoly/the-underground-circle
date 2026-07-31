@@ -119,6 +119,10 @@ and the bearing bore; the gear's tooth force is the bearing's radial load.
   measure → fit).
 - `npm run smoke:engineering-gearbox-integration` — the gear reducer, 16
   cross-core assertions (transmission: torque → reduction → shaft → gear → bearing).
+- `npm run smoke:engineering-cooling-integration` — a liquid-cooled cold plate, 14
+  cross-core assertions (thermal + fluid: dissipation → composite_wall resistance
+  network → junction temp within budget → pipe_flow coolant loop → thermal_expansion
+  → plate mass). One aluminium supplies both the conduction k and the growth α.
 - `npm run drill:engineering-workflow-e2e` — designs → models → **builds in real
   Blender** → measures the bracket, confirming the manufactured volume, mass, and
   bounding box match the design (5 live steps, 577 g designed = 577 g measured).

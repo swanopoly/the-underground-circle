@@ -70,6 +70,7 @@ export type PipeFlowSpec = {
   flowRate?: number; // L/min
   flowRate_m3s?: number; // m³/s (alternative)
   length?: number; // m (for pressure drop)
+  length_mm?: number; // alternative: pipe length in mm (converted to m)
   fluid?: string;
   density?: number; // kg/m³ override
   viscosity?: number; // Pa·s override
@@ -131,7 +132,9 @@ export function pipeFlow(spec: PipeFlowSpec): FluidResult<PipeFlowResult> {
   const regime = flowRegime(Re);
   const f = frictionFactor(Re, relRough);
 
-  const L = spec.length !== undefined ? pos(spec.length) : null;
+  // length in metres (SI); `length_mm` is a convenience for the mm-based caller.
+  let L = spec.length !== undefined ? pos(spec.length) : null;
+  if (L === null && spec.length_mm !== undefined) { const lmm = pos(spec.length_mm); if (lmm !== null) L = lmm / 1000; }
   let headLoss: number | null = null, dP: number | null = null;
   if (L !== null) {
     headLoss = f * (L / D) * (V * V) / (2 * G);
