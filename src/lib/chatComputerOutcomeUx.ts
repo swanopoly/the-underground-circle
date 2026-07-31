@@ -390,7 +390,10 @@ export function buildChatComputerOutcomePresentation(
     compactGenericBrowserAutomationFailure ? BROWSER_AUTOMATION_BLOCKER : null,
     ...(compactTechnicalFailure ? [] : input.visibleWarnings),
     ...(compactTechnicalFailure ? [] : input.preflightBlockers),
-    ...(compactTechnicalFailure || completedWithoutActionableIssues ? [] : input.preflightWarnings),
+    // Preflight WARNINGS are standing advisory guidance (control-surface
+    // order, inventory-before-edit) — they fire on every app task and are
+    // not actionable by the user, so they never render under "Blockers".
+    // They stay in metadata and the model prompt.
     ...(compactTechnicalFailure ? [] : input.groundingBlockers),
     ...(compactTechnicalFailure ? [] : capabilityBlockers),
   ], 8);

@@ -254,7 +254,11 @@ const failedWithPreflightDiagnostics = buildChatComputerOutcomePresentation({
 
 assert.equal(failedWithPreflightDiagnostics.shouldRecoverOutcome, true, 'failed task still launches recovery');
 assert.equal(failedWithPreflightDiagnostics.hideRecoveryDetails, false, 'failed task keeps recovery details visible');
-assert(failedWithPreflightDiagnostics.blockerList.some((blocker) => /Fresh app evidence/i.test(blocker)), 'failed task keeps preflight diagnostics actionable');
+// Preflight WARNINGS are standing advisory guidance that fires on every app
+// task ("control surface order required", "inventory before edit") — the
+// user cannot act on them, so they never render under "Blockers:". They stay
+// in metadata and the model prompt (2026-07-31, user-output honesty).
+assert(!failedWithPreflightDiagnostics.blockerList.some((blocker) => /Fresh app evidence/i.test(blocker)), 'failed task keeps advisory preflight warnings OUT of the user blocker list');
 
 const failedWordPressAutomation = buildChatComputerOutcomePresentation({
   task: 'Update the Dealer Inspire DI Slides Promaster expiration in wp-admin',
