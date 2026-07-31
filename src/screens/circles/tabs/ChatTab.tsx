@@ -8256,6 +8256,31 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
+    // /v2loop — per-device canary flip for the client-side agent tool loop
+    // (swanbotV2ClientLoopFlag). ON = desktop/app tools execute locally
+    // instead of the swanbot-v2-ai edge round-trip; the designed lane for
+    // local desktop automation, and the no-deploy escape hatch when the
+    // deployed edge is failing.
+    if (lowerContent === '/v2loop' || lowerContent.startsWith('/v2loop ')) {
+      const arg = content.slice('/v2loop'.length).trim().toLowerCase();
+      const { isSwanbotV2ClientLoopEnabled: readLoop, enableSwanbotV2ClientLoop, disableSwanbotV2ClientLoop } =
+        await import('../../../lib/swanbotV2ClientLoopFlag');
+      let line: string;
+      if (arg === 'on' || arg === 'enable' || arg === 'true') {
+        enableSwanbotV2ClientLoop();
+        line = '**Local agent loop: ON** (this device). Tool turns — including desktop/app automation — now run in this browser against the local bridge instead of the edge. `/v2loop off` to revert.';
+      } else if (arg === 'off' || arg === 'disable' || arg === 'false') {
+        disableSwanbotV2ClientLoop();
+        line = '**Local agent loop: OFF** (this device). Tool turns route through the swanbot-v2-ai edge again.';
+      } else {
+        line = readLoop()
+          ? 'Local agent loop is **ON** for this device (tool turns run locally). `/v2loop off` to revert.'
+          : 'Local agent loop is **OFF** for this device (tool turns use the edge). `/v2loop on` to run desktop/app tool turns locally.';
+      }
+      addBotMessage(line, undefined, { localOnly: true });
+      return;
+    }
+
     // /search query — search both in-memory and DB messages, render
     // results as clickable rows that jump to the message in chat.
     if (lowerContent.startsWith('/search ')) {
