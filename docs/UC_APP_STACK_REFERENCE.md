@@ -353,6 +353,30 @@ integration provider registry aligned.
   `Can/Could/Would you ...` and `I need you to ...` wording without widening the
   exact Photoshop action whitelist. This 600x600 document compiler remains
   separate from the router-owned lifecycle-only dispatcher.
+  A separate Chrome-free terminal drill is available through
+  `npm run drill:photoshop-exact`. Its default mode is a non-mutating dry run;
+  explicit `--live` plus the current dry-run confirmation fingerprint is
+  required before it can use the fixed loopback desktop bridge. The drill
+  derives the exact program manifest from the production compiler, requires
+  strict Photoshop identity and positive foreground evidence, and permits
+  exactly one create dispatch. `smoke:photoshop-exact-drill` checks the drill;
+  the separately required `smoke:computer-task-runtime-context` independently
+  pins production retry, STOP, identity, and exact-proof source behavior. They
+  do not share an execution helper or constitute end-to-end production parity. After
+  a positive named create receipt, both the production executor and drill make
+  no more than three fresh, read-only app-native status checks at 250 ms
+  intervals; that invocation's proof loop never re-enters creation. Success
+  requires the exact created document name and requested dimensions. Durable
+  deduplication across a separate concurrent or restarted invocation is not
+  claimed. Its smoke owner is
+  `smoke:photoshop-exact-drill`. On 2026-08-05 one live invocation made one
+  create call and zero browser calls. Its original strict immediate proof was
+  stale and the drill exited `verification_incomplete`; a separate fresh
+  read-only status then proved Photoshop frontmost with `Untitled-1` active at
+  600x600. The status-only retry was added from that result and has not been
+  exercised by another live create. This scope does not include the
+  authenticated Chat UI, approval filing/consumption or persistence,
+  message/Realtime continuity, or browser focus/event wiring.
   Live Chat validation on 2026-07-31 started from Photoshop
   `appRunning:false`, submitted the exact 600x600 request through the refreshed
   authenticated UI, created no approval row, persisted one completion, and
@@ -1123,6 +1147,18 @@ canonical readiness. Exact approval, direct-handoff, open-path, automation,
 scheduled-action, Office broadcast, and database-authority guards share that
 same exactly-once gate contract. This does not prove a deployed edge, live
 Browserbase/confirmation-database integration, or live native-app execution.
+`smoke:photoshop-exact-drill` also runs exactly once in the Chat daily/release
+commands through their matching npm `precheck:*` lifecycle hooks, and once in
+`smoke:all`; the canonical `check:*` bodies do not invoke those hooks again. It
+verifies the compiler manifest, drill safety, and
+drill source contracts; `smoke:computer-task-runtime-context` independently
+pins the related production source contract, not shared execution parity. The
+separate manual command stays dry
+unless `--live` and the dry-run fingerprint are explicit. The one 2026-08-05
+live invocation made one create call and no browser calls; its successful
+600x600 result required a separate fresh read-only status after the immediate
+proof was stale. It does not cover authenticated Chat, approval persistence,
+browser events, or a post-retry live create.
 It also does not prove §26/§27/§28/§29 application or live two-client Realtime/RLS behavior,
 encrypted resume/key rotation or cron expiry, concurrent claims, external
 provider dispatch, or automation/scheduler edge deployment.
