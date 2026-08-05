@@ -9,6 +9,7 @@ import {
   deriveSwanbotV2ToolParityFromSource,
   formatSwanBotOpenSwanReadinessPromptBlock,
   loadSwanBotOpenSwanAgentRunTelemetry,
+  type SwanBotOpenSwanProductionContractCheck,
   type SwanBotOpenSwanSmokeCheck,
 } from '../src/lib/swanbotOpenSwanReadiness';
 
@@ -213,6 +214,18 @@ const readinessReportSource = readFileSync(
   join(process.cwd(), 'scripts/swanbot-openswan-readiness-report.ts'),
   'utf8',
 );
+const productionContractMigration = readFileSync(
+  join(process.cwd(), 'supabase/migrations/20260805_openswan_production_readiness_contract.sql'),
+  'utf8',
+).trim();
+const consolidatedAgentSql = readFileSync(
+  join(process.cwd(), 'docs/RUN_THIS_SQL.sql'),
+  'utf8',
+);
+const supabaseConfig = readFileSync(
+  join(process.cwd(), 'supabase/config.toml'),
+  'utf8',
+);
 const nextPlan = readFileSync(
   join(process.cwd(), 'docs/SWANBOT_OPENSWAN_CHAT_NEXT_PLAN_2026-06-08.md'),
   'utf8',
@@ -250,6 +263,33 @@ assert(
 assert(
   readinessReportSource.includes('information_schema type check unavailable'),
   'production readiness report should disclose degraded schema type checks',
+);
+for (const requiredProductionMarker of [
+  "client.rpc('openswan_production_readiness_contract')",
+  'buildManagementProductionChecks',
+  'buildNetworkProductionChecks',
+  'productionContract: {',
+  'required: true',
+  'values were not read or printed',
+  'resolveServiceRoleKey',
+  "'--reveal'",
+]) {
+  assert(
+    readinessReportSource.includes(requiredProductionMarker),
+    `production readiness report should include ${requiredProductionMarker}`,
+  );
+}
+assert(
+  !/console\.(?:log|error|warn)\([^\n]*(?:serviceKey|api_key)/u.test(readinessReportSource),
+  'production readiness report must never print a retrieved service-role key',
+);
+assert(
+  consolidatedAgentSql.includes(productionContractMigration),
+  'RUN_THIS_SQL.sql section 32 should contain the byte-identical production readiness migration',
+);
+assert(
+  /\[functions\.swanbot-v2-ai\][\s\S]*?verify_jwt\s*=\s*true[\s\S]*?entrypoint\s*=\s*"\.\/functions\/swanbot-v2-ai\/index\.ts"/u.test(supabaseConfig),
+  'supabase/config.toml should explicitly pin the SwanBot v2 hosted JWT mode',
 );
 for (const stalePhrase of [
   'All 11 desktop tools',
@@ -320,6 +360,88 @@ assert(ready.status === 'ready', 'clean parity, smokes, and telemetry should be 
 assert(ready.canFlipDefault, 'ready snapshot should allow default flip');
 assert(ready.score === 100, 'ready snapshot should score 100');
 assert(ready.nextActions.some(action => action.includes('Flip the v2 default')), 'ready snapshot should name flip action');
+assert(!ready.productionContract.required, 'source-only snapshot should not require live production checks');
+assert(!ready.productionContract.checked, 'source-only snapshot should disclose that production was not checked');
+
+const passingProductionChecks: SwanBotOpenSwanProductionContractCheck[] = [
+  { id: 'database.contract', label: 'database contract', status: 'pass' },
+  { id: 'function.swanbot-ai', label: 'SwanBot v1 deployment', status: 'pass' },
+  { id: 'cors.swanbot-ai', label: 'SwanBot v1 CORS', status: 'pass' },
+  { id: 'secret.continuation', label: 'continuation secret names', status: 'pass' },
+];
+const productionReady = buildSwanBotOpenSwanReadinessSnapshot({
+  v2ToolCatalogCount: SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL,
+  serverToolCount: EXPECTED_SERVER,
+  clientDelegatedToolCount: SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS,
+  requiredSmokes: passingSmokes(),
+  telemetry: {
+    v1RunCount: 120,
+    v2RunCount: 90,
+    minRuns: 50,
+    v1EndTurnRate: 0.91,
+    v2EndTurnRate: 0.94,
+  },
+  productionContract: { required: true, checks: passingProductionChecks },
+});
+assert(productionReady.status === 'ready', 'passing live production contract should preserve readiness');
+assert(productionReady.productionContract.ok, 'passing live production contract should report ok');
+assert(productionReady.productionContract.passed === 4, 'production contract should count passed checks');
+
+const productionUnknown = buildSwanBotOpenSwanReadinessSnapshot({
+  v2ToolCatalogCount: SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL,
+  serverToolCount: EXPECTED_SERVER,
+  clientDelegatedToolCount: SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS,
+  requiredSmokes: passingSmokes(),
+  telemetry: {
+    v1RunCount: 120,
+    v2RunCount: 90,
+    minRuns: 50,
+    v1EndTurnRate: 0.91,
+    v2EndTurnRate: 0.94,
+  },
+  productionContract: {
+    required: true,
+    checks: [
+      ...passingProductionChecks,
+      {
+        id: 'function.swanbot-v2-ai',
+        label: 'SwanBot v2 deployment',
+        status: 'unknown',
+        recovery: 'Authenticate Supabase CLI and retry.',
+      },
+    ],
+  },
+});
+assert(productionUnknown.status === 'blocked', 'unknown required production evidence should fail closed');
+assert(!productionUnknown.canFlipDefault, 'unknown required production evidence should block default flip');
+assert(
+  productionUnknown.blockers.some(blocker => blocker.includes('SwanBot v2 deployment') && blocker.includes('no fresh evidence')),
+  'unknown production evidence should name the missing live check',
+);
+assert(
+  productionUnknown.nextActions.includes('Authenticate Supabase CLI and retry.'),
+  'production blocker should surface its bounded recovery action',
+);
+
+const productionNotSupplied = buildSwanBotOpenSwanReadinessSnapshot({
+  v2ToolCatalogCount: SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL,
+  serverToolCount: EXPECTED_SERVER,
+  clientDelegatedToolCount: SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS,
+  requiredSmokes: passingSmokes(),
+  telemetry: {
+    v1RunCount: 120,
+    v2RunCount: 90,
+    minRuns: 50,
+    v1EndTurnRate: 0.91,
+    v2EndTurnRate: 0.94,
+  },
+  productionContract: { required: true },
+});
+assert(productionNotSupplied.status === 'blocked', 'required production contract without checks should block');
+assert(
+  productionNotSupplied.nextActions.some(action => action.includes('authenticated Supabase database and management access')),
+  'missing production contract should name the exact evidence recovery',
+);
 
 const watch = buildSwanBotOpenSwanReadinessSnapshot({
   v2ToolCatalogCount: SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL,

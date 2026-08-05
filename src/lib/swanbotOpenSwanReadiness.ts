@@ -2,6 +2,7 @@ export type SwanBotOpenSwanReadinessStatus = 'ready' | 'watch' | 'blocked';
 export type SwanBotOpenSwanSmokeStatus = 'pass' | 'fail' | 'missing' | 'unknown';
 export type SwanBotOpenSwanAgentRunVersion = 'swanbot-ai' | 'swanbot-v2-ai';
 export type SwanBotOpenSwanTelemetrySide = 'v1' | 'v2';
+export type SwanBotOpenSwanProductionCheckStatus = 'pass' | 'fail' | 'unknown';
 
 export interface SwanBotOpenSwanSmokeCheck {
   id: string;
@@ -72,7 +73,33 @@ export interface SwanBotOpenSwanReadinessInput {
   requiredSmokes?: SwanBotOpenSwanSmokeCheck[];
   telemetry?: SwanBotOpenSwanTelemetryInput;
   telemetryCompleteness?: Partial<Record<SwanBotOpenSwanTelemetrySide, Partial<SwanBotOpenSwanTelemetryCompleteness>>>;
+  productionContract?: SwanBotOpenSwanProductionContractInput;
   blockers?: string[];
+}
+
+export interface SwanBotOpenSwanProductionContractCheck {
+  id: string;
+  label: string;
+  status: SwanBotOpenSwanProductionCheckStatus;
+  required?: boolean;
+  detail?: string;
+  recovery?: string;
+}
+
+export interface SwanBotOpenSwanProductionContractInput {
+  required?: boolean;
+  checks?: SwanBotOpenSwanProductionContractCheck[];
+}
+
+export interface SwanBotOpenSwanProductionContractSnapshot {
+  required: boolean;
+  checked: boolean;
+  ok: boolean;
+  passed: number;
+  failed: number;
+  unknown: number;
+  checks: SwanBotOpenSwanProductionContractCheck[];
+  summary: string;
 }
 
 export interface SwanBotOpenSwanToolParity {
@@ -136,6 +163,7 @@ export interface SwanBotOpenSwanReadinessSnapshot {
   requiredSmokes: SwanBotOpenSwanSmokeCheck[];
   toolParity: SwanBotOpenSwanToolParity;
   telemetry: SwanBotOpenSwanTelemetrySnapshot;
+  productionContract: SwanBotOpenSwanProductionContractSnapshot;
 }
 
 // Expected counts are pinned against the live `swanbot-v2-ai` TOOLS array by
@@ -450,6 +478,7 @@ export function buildSwanBotOpenSwanReadinessSnapshot(
   const requiredSmokes = mergeRequiredSmokes(input.requiredSmokes);
   const toolParity = buildToolParity(input);
   const telemetry = buildTelemetrySnapshot(input.telemetry);
+  const productionContract = buildProductionContractSnapshot(input.productionContract);
   const blockers = normalizeMessages(input.blockers);
   const warnings: string[] = [];
   const nextActions: string[] = [];
@@ -472,6 +501,16 @@ export function buildSwanBotOpenSwanReadinessSnapshot(
   blockers.push(...completeness.blockers);
   warnings.push(...completeness.warnings);
 
+  if (productionContract.required && !productionContract.checked) {
+    blockers.push('The live OpenSwan production contract is required but no production checks were supplied.');
+  }
+  for (const check of productionContract.checks) {
+    if (check.status === 'pass') continue;
+    const message = formatProductionCheckProblem(check);
+    if (check.required === false) warnings.push(message);
+    else blockers.push(message);
+  }
+
   if (!telemetry.enoughSamples) {
     warnings.push(telemetry.summary);
   } else if (!telemetry.rateComparable) {
@@ -488,6 +527,18 @@ export function buildSwanBotOpenSwanReadinessSnapshot(
 
   if (!toolParity.ok) {
     nextActions.push('Reconcile the v2 tool catalog with the OpenSwan runtime catalog before changing defaults.');
+  }
+
+  const firstProductionProblem = productionContract.checks.find(
+    check => check.status !== 'pass' && check.required !== false,
+  );
+  if (productionContract.required && !productionContract.checked) {
+    nextActions.push('Run the production readiness report with authenticated Supabase database and management access.');
+  } else if (firstProductionProblem) {
+    nextActions.push(
+      firstProductionProblem.recovery
+        || `Repair ${firstProductionProblem.label}, collect fresh production evidence, and rerun the report.`,
+    );
   }
 
   const failedOrMissingSmoke = requiredSmokes.find(smoke => smoke.status === 'fail' || smoke.status === 'missing');
@@ -538,6 +589,7 @@ export function buildSwanBotOpenSwanReadinessSnapshot(
     requiredSmokes,
     toolParity,
     telemetry,
+    productionContract,
   };
 }
 
@@ -560,12 +612,88 @@ export function formatSwanBotOpenSwanReadinessPromptBlock(
     `default_already_enabled: ${snapshot.defaultAlreadyEnabled ? 'yes' : 'no'}`,
     `tool_parity: ${snapshot.toolParity.summary}`,
     `telemetry: ${snapshot.telemetry.summary}`,
+    `production_contract: ${snapshot.productionContract.summary}`,
     `stop_reasons: ${formatStopReasonPromptLine(snapshot.telemetry.v2StopReasons)}`,
     `smokes: ${smokeSummary}`,
     `blockers: ${blockers}`,
     `warnings: ${warnings}`,
     `next_actions: ${actions}`,
   ].join('\n');
+}
+
+function buildProductionContractSnapshot(
+  input: SwanBotOpenSwanProductionContractInput | undefined,
+): SwanBotOpenSwanProductionContractSnapshot {
+  const required = input?.required === true;
+  const checks = normalizeProductionChecks(input?.checks);
+  const passed = checks.filter(check => check.status === 'pass').length;
+  const failed = checks.filter(check => check.status === 'fail').length;
+  const unknown = checks.filter(check => check.status === 'unknown').length;
+  const checked = checks.length > 0;
+  const requiredChecks = checks.filter(check => check.required !== false);
+  const ok = (!required || checked)
+    && requiredChecks.every(check => check.status === 'pass');
+  const summary = !checked
+    ? required
+      ? 'Production contract required but not checked.'
+      : 'Production contract not requested for this source-only snapshot.'
+    : ok
+      ? `${passed}/${checks.length} production checks passed${checks.length === requiredChecks.length ? '' : ` (${checks.length - requiredChecks.length} optional)`}.`
+      : `Production contract blocked: ${failed} failed and ${unknown} unknown across ${checks.length} checks.`;
+
+  return {
+    required,
+    checked,
+    ok,
+    passed,
+    failed,
+    unknown,
+    checks,
+    summary,
+  };
+}
+
+function normalizeProductionChecks(
+  input: SwanBotOpenSwanProductionContractCheck[] | undefined,
+): SwanBotOpenSwanProductionContractCheck[] {
+  const byId = new Map<string, SwanBotOpenSwanProductionContractCheck>();
+  const severity: Record<SwanBotOpenSwanProductionCheckStatus, number> = {
+    pass: 0,
+    unknown: 1,
+    fail: 2,
+  };
+
+  for (const raw of input || []) {
+    const id = normalizeBoundedText(raw.id, 120);
+    const label = normalizeBoundedText(raw.label, 200);
+    if (!id || !label) continue;
+    const next: SwanBotOpenSwanProductionContractCheck = {
+      id,
+      label,
+      status: raw.status,
+      required: raw.required !== false,
+      detail: normalizeBoundedText(raw.detail, 500) || undefined,
+      recovery: normalizeBoundedText(raw.recovery, 500) || undefined,
+    };
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, next);
+      continue;
+    }
+    const worse = severity[next.status] > severity[existing.status] ? next : existing;
+    byId.set(id, {
+      ...worse,
+      required: existing.required !== false || next.required !== false,
+    });
+  }
+
+  return Array.from(byId.values());
+}
+
+function formatProductionCheckProblem(check: SwanBotOpenSwanProductionContractCheck): string {
+  const state = check.status === 'unknown' ? 'has no fresh evidence' : 'failed';
+  const detail = check.detail?.replace(/[.!?]+$/u, '') || '';
+  return `Production check ${check.label} ${state}${detail ? `: ${detail}` : ''}.`;
 }
 
 function mergeRequiredSmokes(overrides: SwanBotOpenSwanSmokeCheck[] | undefined): SwanBotOpenSwanSmokeCheck[] {
@@ -846,6 +974,11 @@ function normalizeRate(value: number | null | undefined): number | null {
 
 function normalizeMessages(messages: string[] | undefined): string[] {
   return uniqueMessages((messages || []).map(message => message.trim()).filter(Boolean));
+}
+
+function normalizeBoundedText(value: unknown, maxLength: number): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, maxLength);
 }
 
 function uniqueMessages(messages: string[]): string[] {
