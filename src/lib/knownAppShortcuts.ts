@@ -420,6 +420,7 @@ export const KNOWN_APPS: KnownApp[] = [
   {
     id: 'chrome',
     displayName: 'Chrome',
+    macLaunchName: 'Google Chrome',
     category: 'other',
     taskCategories: ['web_browsing'],
     aliases: ['chrome', 'google chrome'],
@@ -582,6 +583,7 @@ export const KNOWN_APPS: KnownApp[] = [
   { id: 'migration',        displayName: 'Migration Assistant', category: 'dev', aliases: ['migration assistant', 'migrate mac', 'transfer data'], webUrl: 'https://support.apple.com/en-us/HT204350', keyboardHint: { mac: 'Cmd+Space → "Migration Assistant" → Enter' } },
   { id: 'voiceover',        displayName: 'VoiceOver Utility', category: 'other', aliases: ['voiceover', 'voice over', 'screen reader'], webUrl: 'https://support.apple.com/voiceover/', keyboardHint: { mac: 'Cmd+F5 to toggle VoiceOver' } },
   { id: 'screen-sharing',   displayName: 'Screen Sharing',   category: 'other', aliases: ['screen sharing', 'screen share', 'remote desktop', 'vnc'], webUrl: 'https://support.apple.com/guide/mac-help/share-screens/', keyboardHint: { mac: 'Cmd+Space → "Screen Sharing" → Enter' } },
+  { id: 'microsoft-remote-desktop', displayName: 'Microsoft Remote Desktop', macLaunchName: 'Microsoft Remote Desktop', category: 'other', aliases: ['microsoft remote desktop', 'ms remote desktop'], webUrl: 'https://learn.microsoft.com/windows-server/remote/remote-desktop-services/clients/remote-desktop-mac', keyboardHint: { mac: 'Cmd+Space → "Microsoft Remote Desktop" → Enter' } },
   { id: 'print-center',     displayName: 'Print Center',     category: 'other', aliases: ['print center', 'printer', 'printers'], webUrl: 'https://support.apple.com/guide/mac-help/print-center/', keyboardHint: { mac: 'Cmd+Space → "Print Center" → Enter' } },
 
   // ─── Productivity (iWork + Microsoft + Google) ────────────────────
@@ -608,7 +610,7 @@ export const KNOWN_APPS: KnownApp[] = [
   { id: 'codex-bar',  displayName: 'CodexBar',   category: 'dev',  aliases: ['codexbar', 'codex bar', 'codex'], webUrl: 'https://github.com/openai/codex', keyboardHint: { mac: 'Cmd+Space → "CodexBar" → Enter' } },
   { id: 'deepagent',  displayName: 'DeepAgent',  category: 'dev',  aliases: ['deepagent', 'deep agent'], webUrl: 'https://deepagent.abacus.ai', keyboardHint: { mac: 'Cmd+Space → "DeepAgent" → Enter' } },
   { id: 'ollama',     displayName: 'Ollama',     category: 'dev',  aliases: ['ollama', 'local llm'], webUrl: 'https://ollama.com', keyboardHint: { mac: 'Cmd+Space → "Ollama" → Enter' } },
-  { id: 'docker',     displayName: 'Docker',     category: 'dev',  aliases: ['docker', 'docker desktop', 'containers'], osUrlByPlatform: { mac: 'docker-desktop:' }, webUrl: 'https://www.docker.com', keyboardHint: { mac: 'Cmd+Space → "Docker" → Enter' } },
+  { id: 'docker',     displayName: 'Docker Desktop', macLaunchName: 'Docker', category: 'dev',  aliases: ['docker', 'docker desktop', 'containers'], osUrlByPlatform: { mac: 'docker-desktop:' }, webUrl: 'https://www.docker.com', keyboardHint: { mac: 'Cmd+Space → "Docker" → Enter' } },
   { id: 'unity-hub',  displayName: 'Unity Hub',  category: 'dev',  aliases: ['unity hub', 'unity', 'unity3d'], webUrl: 'https://unity.com', keyboardHint: { mac: 'Cmd+Space → "Unity Hub" → Enter' } },
 
   // ─── Gaming ──────────────────────────────────────────────────────

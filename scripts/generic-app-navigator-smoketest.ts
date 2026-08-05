@@ -19,6 +19,8 @@ import {
   formatGenericAppNavigatorPromptBlock,
   formatProfessionalAppAutonomyPromptBlock,
   inferGenericAppName,
+  parseStrictNamedAppLifecycleIntent,
+  setStrictNamedAppLifecycleObservedNames,
   shouldUseProfessionalAppAutonomy,
   shouldUseGenericAppNavigator,
 } from '../src/lib/genericAppNavigator';
@@ -30,6 +32,84 @@ import {
   buildComputerAppTaskStrategy,
   buildComputerAppTaskStrategyPromptBlock,
 } from '../src/lib/computerAppTaskStrategy';
+
+assert.equal(inferGenericAppName('Open Docker Desktop'), 'Docker Desktop');
+assert.equal(inferGenericAppName('Open Microsoft Remote Desktop'), 'Microsoft Remote Desktop');
+assert.equal(inferGenericAppName('Open Image Capture'), 'Image Capture');
+assert.equal(classifyGenericAppTaskFamily('Open Image Capture'), 'launch_or_read');
+assert.equal(
+  buildGenericAppNavigatorRouteContext('Disconnect the current session', { targetAppName: 'Microsoft Remote Desktop' }).targetAppName,
+  'Microsoft Remote Desktop',
+  'trusted parsed app identity may contain Desktop',
+);
+assert.equal(classifyGenericAppTaskFamily('Open Docker Desktop'), 'launch_or_read');
+for (const request of [
+  'Can you open Photoshop?',
+  'Could you launch Photoshop?',
+  'Would you open Photoshop?',
+  'Can you please open Photoshop?',
+  'Open Photoshop please',
+  'Open up Photoshop',
+  'Switch over to Slack',
+  'Bring Slack forward',
+  'Bring forward Slack',
+]) {
+  assert(parseStrictNamedAppLifecycleIntent(request), `${request} is one strict lifecycle intent`);
+  assert.equal(classifyGenericAppTaskFamily(request), 'launch_or_read', `${request} has preflight lifecycle parity`);
+}
+for (const request of [
+  'Should I open Photoshop?',
+  'Can you open Photoshop and create a document?',
+  'Could you launch Photoshop, then tell me which document is open?',
+  'Open the door',
+  'Open my file',
+  'Open task manager',
+]) {
+  assert.equal(parseStrictNamedAppLifecycleIntent(request), null, `${request} is not a strict app lifecycle command`);
+}
+assert.equal(
+  parseStrictNamedAppLifecycleIntent('open houdini'),
+  null,
+  'an unavailable lowercase long-tail noun is not trusted as an app',
+);
+setStrictNamedAppLifecycleObservedNames(['Houdini.app', 'Acme Studio']);
+assert.deepEqual(
+  parseStrictNamedAppLifecycleIntent('open houdini'),
+  { operation: 'open_or_launch', appName: 'houdini', observedAppName: 'Houdini' },
+  'an exact refreshed installed-app match admits a lowercase long-tail lifecycle request',
+);
+assert.equal(
+  inferGenericAppName('open acme studio'),
+  'Acme Studio',
+  'preflight inference reuses the exact observed lowercase app identity',
+);
+assert.equal(
+  classifyGenericAppTaskFamily('open acme studio'),
+  'launch_or_read',
+  'installed lowercase app matching has lifecycle/preflight parity',
+);
+assert.equal(
+  parseStrictNamedAppLifecycleIntent('open task manager', { observedAppNames: ['Task Manager'] }),
+  null,
+  'the existing ambiguous task-manager guard outranks observed process names',
+);
+setStrictNamedAppLifecycleObservedNames([]);
+for (const request of [
+  'Disconnect Microsoft Remote Desktop',
+  'Maximize Docker Desktop',
+  'Minimize Docker Desktop',
+  'Pause Music',
+  'Play Music',
+  'Resume Music',
+  'Stop VLC',
+  'Unmute Zoom',
+]) {
+  assert.notEqual(
+    classifyGenericAppTaskFamily(request),
+    'launch_or_read',
+    `${request} is a mutation, never a launch/read`,
+  );
+}
 
 const abletonTask = 'Use Ableton Live to create a four-bar drum loop and export it after approval';
 const abletonPlan = buildGenericAppNavigatorPlan(abletonTask);

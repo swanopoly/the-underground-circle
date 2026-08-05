@@ -3433,10 +3433,88 @@ function agentRunTokenUsageFields(usage: UsageBreakdown): {
   cached_tokens: number;
 } {
   return {
-    input_tokens: Math.max(0, Math.floor(usage.uncachedIn || 0)),
-    output_tokens: Math.max(0, Math.floor(usage.output || 0)),
-    cached_tokens: Math.max(0, Math.floor((usage.cacheCreate || 0) + (usage.cacheRead || 0))),
+    input_tokens: normalizeAgentRunInteger(usage.uncachedIn),
+    output_tokens: normalizeAgentRunInteger(usage.output),
+    cached_tokens: normalizeAgentRunInteger(
+      normalizeAgentRunInteger(usage.cacheCreate) + normalizeAgentRunInteger(usage.cacheRead),
+    ),
   };
+}
+
+type AgentRunSummaryFields = {
+  tool_calls: unknown[];
+  iteration_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+};
+
+function normalizeAgentRunInteger(value: unknown): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.max(0, Math.floor(numeric));
+}
+
+function agentRunSummaryFields(args: {
+  toolCalls: unknown;
+  iterations: unknown;
+  usage: UsageBreakdown;
+}): AgentRunSummaryFields {
+  return {
+    tool_calls: Array.isArray(args.toolCalls) ? args.toolCalls : [],
+    iteration_count: Math.max(1, normalizeAgentRunInteger(args.iterations)),
+    ...agentRunTokenUsageFields(args.usage),
+  };
+}
+
+function agentRunSummaryFieldsFromRow(
+  row: Record<string, unknown>,
+): AgentRunSummaryFields {
+  return {
+    tool_calls: Array.isArray(row.tool_calls) ? row.tool_calls : [],
+    iteration_count: Math.max(1, normalizeAgentRunInteger(row.iteration_count)),
+    input_tokens: normalizeAgentRunInteger(row.input_tokens),
+    output_tokens: normalizeAgentRunInteger(row.output_tokens),
+    cached_tokens: normalizeAgentRunInteger(row.cached_tokens),
+  };
+}
+
+function safeAgentRunTelemetryErrorCode(error: unknown): string {
+  if (!error || typeof error !== "object") return "unknown";
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== "string") return "unknown";
+  const normalized = code.trim();
+  return /^[A-Za-z0-9_.:-]{1,64}$/.test(normalized) ? normalized : "unknown";
+}
+
+function warnAgentRunTelemetryWriteFailure(
+  operation: string,
+  error: unknown,
+): void {
+  // Supabase errors may contain SQL values or request details. Emit only a
+  // bounded operation label and machine code so telemetry failures are visible
+  // without copying user/tool payloads into edge logs.
+  console.warn("[swanbot-v2-ai] agent_runs telemetry write failed", {
+    operation,
+    code: safeAgentRunTelemetryErrorCode(error),
+  });
+}
+
+async function observeAgentRunTelemetryWrite(
+  operation: string,
+  write: PromiseLike<{ error?: unknown } | null>,
+): Promise<boolean> {
+  try {
+    const result = await write;
+    if (result?.error) {
+      warnAgentRunTelemetryWriteFailure(operation, result.error);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    warnAgentRunTelemetryWriteFailure(operation, error);
+    return false;
+  }
 }
 
 const SENSITIVE_TOOL_NAMES = new Set(["credentials.get"]);
@@ -4076,8 +4154,11 @@ async function persistClientContinuationToolResults(args: {
   let claimQuery = supabase
     .from("agent_runs")
     .update({
-      tool_calls: toolCalls,
-      iteration_count: Math.max(1, Math.floor(continuation.iter || 1)),
+      ...agentRunSummaryFields({
+        toolCalls,
+        iterations: continuation.iter,
+        usage: continuation.usage,
+      }),
       // Atomically rotate the exact dispatch claim into a results/model-resume
       // claim. Only this winner may enter runLoop; concurrent result submits
       // stop matching in this same write.
@@ -4181,6 +4262,7 @@ async function closeUnreadableContinuation(args: {
     .update({
       status: "failed",
       final_stop_reason: "error",
+      ...agentRunSummaryFieldsFromRow(args.runRow),
       completed_at: new Date().toISOString(),
       metadata: {
         ...continuationMetadataWithoutSnapshot(args.runRow),
@@ -4203,8 +4285,13 @@ async function closeUnreadableContinuation(args: {
   query = applyContinuationIdentityFilters(query, identity.identity);
   try {
     const result = await query.select("id").maybeSingle();
-    return Boolean(result?.data) && !result?.error;
-  } catch {
+    if (result?.error) {
+      warnAgentRunTelemetryWriteFailure("close_unreadable_continuation", result.error);
+      return false;
+    }
+    return Boolean(result?.data);
+  } catch (error) {
+    warnAgentRunTelemetryWriteFailure("close_unreadable_continuation", error);
     return false;
   }
 }
@@ -4221,6 +4308,11 @@ async function closeStalePendingContinuation(args: {
     .update({
       status: "failed",
       final_stop_reason: "error",
+      ...agentRunSummaryFields({
+        toolCalls: continuation.toolCalls,
+        iterations: continuation.iter,
+        usage: continuation.usage,
+      }),
       completed_at: new Date().toISOString(),
       metadata: {
         ...continuationMetadataWithoutSnapshot(runRow),
@@ -4244,11 +4336,11 @@ async function closeStalePendingContinuation(args: {
   try {
     result = await closeQuery.select("id").maybeSingle();
   } catch (error) {
-    console.warn("[swanbot-v2-ai] stale continuation close threw", error);
+    warnAgentRunTelemetryWriteFailure("close_stale_pending_continuation", error);
     return false;
   }
   if (result?.error) {
-    console.warn("[swanbot-v2-ai] stale continuation close outcome unknown", result.error);
+    warnAgentRunTelemetryWriteFailure("close_stale_pending_continuation", result.error);
     return false;
   }
   return Boolean(result?.data);
@@ -4268,6 +4360,11 @@ async function sealDispatchClaimedContinuationOutcomeUnknown(args: {
     .update({
       status: "failed",
       final_stop_reason: "error",
+      ...agentRunSummaryFields({
+        toolCalls: continuation.toolCalls,
+        iterations: continuation.iter,
+        usage: continuation.usage,
+      }),
       completed_at: sealedAt,
       metadata: {
         ...continuationMetadataWithoutSnapshot(runRow),
@@ -4294,11 +4391,11 @@ async function sealDispatchClaimedContinuationOutcomeUnknown(args: {
   try {
     result = await sealQuery.select("id").maybeSingle();
   } catch (error) {
-    console.warn("[swanbot-v2-ai] dispatch claim outcome-unknown seal threw", error);
+    warnAgentRunTelemetryWriteFailure("seal_dispatch_claimed_continuation", error);
     return false;
   }
   if (result?.error) {
-    console.warn("[swanbot-v2-ai] dispatch claim outcome-unknown seal failed", result.error);
+    warnAgentRunTelemetryWriteFailure("seal_dispatch_claimed_continuation", result.error);
     return false;
   }
   return Boolean(result?.data);
@@ -4322,6 +4419,7 @@ async function sealClaimedContinuationOutcomeUnknown(args: {
     .update({
       status: "failed",
       final_stop_reason: "error",
+      ...agentRunSummaryFieldsFromRow(runRow),
       completed_at: sealedAt,
       metadata: {
         ...continuationMetadataWithoutSnapshot(runRow),
@@ -4350,11 +4448,11 @@ async function sealClaimedContinuationOutcomeUnknown(args: {
   try {
     result = await sealQuery.select("id").maybeSingle();
   } catch (error) {
-    console.warn("[swanbot-v2-ai] continuation outcome-unknown seal threw", error);
+    warnAgentRunTelemetryWriteFailure("seal_claimed_continuation", error);
     return false;
   }
   if (result?.error) {
-    console.warn("[swanbot-v2-ai] continuation outcome-unknown seal failed", result.error);
+    warnAgentRunTelemetryWriteFailure("seal_claimed_continuation", result.error);
     return false;
   }
   return Boolean(result?.data);
@@ -5071,7 +5169,7 @@ Deno.serve(async (req: Request) => {
     // before either phase. The later CAS repeats these owner predicates.
     const { data: runRow, error: runErr } = await supabase
       .from("agent_runs")
-      .select("id, user_id, circle_id, metadata, status, final_stop_reason")
+      .select("id, user_id, circle_id, metadata, status, final_stop_reason, tool_calls, iteration_count, input_tokens, output_tokens, cached_tokens")
       .eq("id", body.continuationRunId)
       .maybeSingle();
     if (runErr || !runRow) {
@@ -5391,6 +5489,11 @@ Deno.serve(async (req: Request) => {
     continuationRunRow = {
       ...runRow,
       final_stop_reason: SWANBOT_CONTINUATION_RESUMING_REASON,
+      ...agentRunSummaryFields({
+        toolCalls: persisted.continuation.toolCalls,
+        iterations: persisted.continuation.iter,
+        usage: persisted.continuation.usage,
+      }),
       metadata: {
         ...(runRow.metadata as Record<string, unknown> || {}),
         continuation: persisted.storedContinuation,
@@ -5597,6 +5700,21 @@ Deno.serve(async (req: Request) => {
       connectivity,
     });
 
+    // A resumed loop can accrue another model round and additional server-tool
+    // calls before its next pending/terminal compare-and-set. Keep the in-memory
+    // claim authority aligned with those newest totals so any fail-closed seal
+    // records the latest available summary instead of the pre-resume snapshot.
+    if (continuationClaim && continuationRunRow) {
+      continuationRunRow = {
+        ...continuationRunRow,
+        ...agentRunSummaryFields({
+          toolCalls: result.toolCalls,
+          iterations: result.iterations,
+          usage: result.usage,
+        }),
+      };
+    }
+
     // ── M2 pending response ────────────────────────────────────────────
     if (result.kind === "pending") {
       const finalStopReason = classifySwanBotV2FinalStopReason({
@@ -5607,24 +5725,32 @@ Deno.serve(async (req: Request) => {
       // Persist continuation snapshot so the resume request can pick up.
       if (runId) {
         if (!continuationCryptoOptions) {
-          await supabase.from("agent_runs").update({
-            status: "failed",
-            final_stop_reason: "error",
-            completed_at: new Date().toISOString(),
-            metadata: {
-              version: "swanbot-v2-ai",
-              ...targetAgentMetadata,
-              ...projectSwanBotImmutableTurnIdentityMetadata(
-                turnRequestId,
-                continuationRunRow?.metadata,
-              ),
-              continuationResumeOutcome: {
-                status: "failed_before_dispatch",
-                reason: "continuation_encryption_unavailable",
-                replayAllowed: false,
+          await observeAgentRunTelemetryWrite(
+            "continuation_encryption_unavailable",
+            supabase.from("agent_runs").update({
+              status: "failed",
+              final_stop_reason: "error",
+              ...agentRunSummaryFields({
+                toolCalls: result.toolCalls,
+                iterations: result.iterations,
+                usage: result.usage,
+              }),
+              completed_at: new Date().toISOString(),
+              metadata: {
+                version: "swanbot-v2-ai",
+                ...targetAgentMetadata,
+                ...projectSwanBotImmutableTurnIdentityMetadata(
+                  turnRequestId,
+                  continuationRunRow?.metadata,
+                ),
+                continuationResumeOutcome: {
+                  status: "failed_before_dispatch",
+                  reason: "continuation_encryption_unavailable",
+                  replayAllowed: false,
+                },
               },
-            },
-          }).eq("id", runId).eq("status", "running");
+            }).eq("id", runId).eq("status", "running"),
+          );
           return errResponse(
             503,
             "continuation_encryption_unavailable",
@@ -5639,24 +5765,32 @@ Deno.serve(async (req: Request) => {
             continuationCryptoOptions,
           );
         } catch {
-          await supabase.from("agent_runs").update({
-            status: "failed",
-            final_stop_reason: "error",
-            completed_at: new Date().toISOString(),
-            metadata: {
-              version: "swanbot-v2-ai",
-              ...targetAgentMetadata,
-              ...projectSwanBotImmutableTurnIdentityMetadata(
-                turnRequestId,
-                continuationRunRow?.metadata,
-              ),
-              continuationResumeOutcome: {
-                status: "failed_before_dispatch",
-                reason: "continuation_checkpoint_seal_failed",
-                replayAllowed: false,
+          await observeAgentRunTelemetryWrite(
+            "continuation_checkpoint_seal_failed",
+            supabase.from("agent_runs").update({
+              status: "failed",
+              final_stop_reason: "error",
+              ...agentRunSummaryFields({
+                toolCalls: result.toolCalls,
+                iterations: result.iterations,
+                usage: result.usage,
+              }),
+              completed_at: new Date().toISOString(),
+              metadata: {
+                version: "swanbot-v2-ai",
+                ...targetAgentMetadata,
+                ...projectSwanBotImmutableTurnIdentityMetadata(
+                  turnRequestId,
+                  continuationRunRow?.metadata,
+                ),
+                continuationResumeOutcome: {
+                  status: "failed_before_dispatch",
+                  reason: "continuation_checkpoint_seal_failed",
+                  replayAllowed: false,
+                },
               },
-            },
-          }).eq("id", runId).eq("status", "running");
+            }).eq("id", runId).eq("status", "running"),
+          );
           return errResponse(
             503,
             "continuation_checkpoint_seal_failed",
@@ -5669,7 +5803,11 @@ Deno.serve(async (req: Request) => {
           // does not silently inflate the apparent end_turn rate. Status stays
           // as-is (still "running"); only the reason field is added.
           final_stop_reason: finalStopReason,
-          ...agentRunTokenUsageFields(result.usage),
+          ...agentRunSummaryFields({
+            toolCalls: result.toolCalls,
+            iterations: result.iterations,
+            usage: result.usage,
+          }),
           metadata: {
             version: "swanbot-v2-ai",
             ...targetAgentMetadata,
@@ -5693,9 +5831,9 @@ Deno.serve(async (req: Request) => {
         }
         const pendingPersisted = await pendingUpdate.select("id").maybeSingle();
         if (pendingPersisted?.error || !pendingPersisted?.data) {
-          console.warn(
-            "[swanbot-v2-ai] next continuation persistence was not confirmed",
-            pendingPersisted?.error || "claim no longer active",
+          warnAgentRunTelemetryWriteFailure(
+            "persist_next_pending_continuation",
+            pendingPersisted?.error || { code: "no_matching_row" },
           );
           if (continuationClaim && continuationRunRow) {
             await sealClaimedContinuationOutcomeUnknown({
@@ -5813,16 +5951,21 @@ Deno.serve(async (req: Request) => {
             mergedMetadata = { ...safeExisting, ...mergedMetadata };
           }
         } catch { /* merge is best-effort; fall back to the cancel-safe defaults */ }
-        await supabase.from("agent_runs").update({
-          tool_calls: result.toolCalls,
-          iteration_count: result.iterations,
-          final_stop_reason: finalStopReason,
-          ...agentRunTokenUsageFields(result.usage),
-          estimated_cost: computeCostUsd(model, result.usage),
-          status: "cancelled",
-          completed_at: new Date().toISOString(),
-          metadata: mergedMetadata,
-        }).eq("id", runId);
+        await observeAgentRunTelemetryWrite(
+          "finalize_cancelled_run",
+          supabase.from("agent_runs").update({
+            ...agentRunSummaryFields({
+              toolCalls: result.toolCalls,
+              iterations: result.iterations,
+              usage: result.usage,
+            }),
+            final_stop_reason: finalStopReason,
+            estimated_cost: computeCostUsd(model, result.usage),
+            status: "cancelled",
+            completed_at: new Date().toISOString(),
+            metadata: mergedMetadata,
+          }).eq("id", runId),
+        );
       };
 
       if (cancelled) {
@@ -5845,10 +5988,12 @@ Deno.serve(async (req: Request) => {
             : {}),
         };
         let terminalUpdate = supabase.from("agent_runs").update({
-          tool_calls: result.toolCalls,
-          iteration_count: result.iterations,
+          ...agentRunSummaryFields({
+            toolCalls: result.toolCalls,
+            iterations: result.iterations,
+            usage: result.usage,
+          }),
           final_stop_reason: persistedFinalStopReason,
-          ...agentRunTokenUsageFields(result.usage),
           // Cost attribution: write the long-dead estimated_cost column so this
           // terminal run reports real spend (office ops board / recent-runs /
           // circleCostTelemetry) instead of $0. Deno-side pricing via the shared
@@ -5873,6 +6018,12 @@ Deno.serve(async (req: Request) => {
         }
         const terminalPersisted = await terminalUpdate.select("id").maybeSingle();
         if (terminalPersisted?.error || !terminalPersisted?.data) {
+          warnAgentRunTelemetryWriteFailure(
+            continuationClaim
+              ? "persist_resumed_terminal"
+              : "persist_fresh_terminal",
+            terminalPersisted?.error || { code: "no_matching_row" },
+          );
           if (continuationClaim) {
             // A console STOP can win after the late read but before this exact
             // claim-bound CAS. Re-read once and recognize only the durable
@@ -5901,10 +6052,6 @@ Deno.serve(async (req: Request) => {
               terminalStatus = "cancelled";
               await finalizeCancelledRun();
             } else {
-              console.warn(
-                "[swanbot-v2-ai] resumed terminal result lost its exact continuation claim",
-                terminalPersisted?.error || "claim no longer active",
-              );
               if (continuationRunRow) {
                 await sealClaimedContinuationOutcomeUnknown({
                   supabase,
@@ -6134,41 +6281,44 @@ Deno.serve(async (req: Request) => {
       } catch { /* fail-open: never fabricate a cancel from a read error */ }
     }
     if (runId) {
-      await supabase.from("agent_runs").update({
-        // Only fresh, unclaimed runs reach this branch. A transient upstream
-        // blip can remain retryable; claimed continuation resumes returned
-        // earlier after being sealed outcome-unknown.
-        status: retryableTransient ? "running" : "failed",
-        input_tokens: 0,
-        output_tokens: 0,
-        cached_tokens: 0,
-        tool_calls: [],
-        iteration_count: 1,
-        final_stop_reason: "error",
-        ...(retryableTransient ? {} : { completed_at: new Date().toISOString() }),
-        metadata: {
-          error: publicFailureText,
-          errorCode: publicFailureCode,
-          errorRedacted: true,
-          version: "swanbot-v2-ai",
-          transient: retryableTransient,
-          ...(serverMutationDispatched
-            ? {
-                serverMutationOutcome: {
-                  status: "outcome_unknown",
-                  replayAllowed: false,
-                  verifyBeforeNewAction: true,
-                },
-              }
-            : {}),
-          ...targetAgentMetadata,
-          ...projectSwanBotImmutableTurnIdentityMetadata(turnRequestId),
-        },
-        // Resurrection guard (parity with the happy-path terminal write): a
-        // raced console STOP set status='cancelled', which matches 0 rows here
-        // — the cancelled run is NEVER flipped to 'failed'/'running' or stripped
-        // of its cancel provenance by this error finalize.
-      }).eq("id", runId).neq("status", "cancelled");
+      await observeAgentRunTelemetryWrite(
+        "fresh_run_failure",
+        supabase.from("agent_runs").update({
+          // Only fresh, unclaimed runs reach this branch. A transient upstream
+          // blip can remain retryable; claimed continuation resumes returned
+          // earlier after being sealed outcome-unknown.
+          status: retryableTransient ? "running" : "failed",
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          tool_calls: [],
+          iteration_count: 1,
+          final_stop_reason: "error",
+          ...(retryableTransient ? {} : { completed_at: new Date().toISOString() }),
+          metadata: {
+            error: publicFailureText,
+            errorCode: publicFailureCode,
+            errorRedacted: true,
+            version: "swanbot-v2-ai",
+            transient: retryableTransient,
+            ...(serverMutationDispatched
+              ? {
+                  serverMutationOutcome: {
+                    status: "outcome_unknown",
+                    replayAllowed: false,
+                    verifyBeforeNewAction: true,
+                  },
+                }
+              : {}),
+            ...targetAgentMetadata,
+            ...projectSwanBotImmutableTurnIdentityMetadata(turnRequestId),
+          },
+          // Resurrection guard (parity with the happy-path terminal write): a
+          // raced console STOP set status='cancelled', which matches 0 rows here
+          // — the cancelled run is NEVER flipped to 'failed'/'running' or stripped
+          // of its cancel provenance by this error finalize.
+        }).eq("id", runId).neq("status", "cancelled"),
+      );
       await supabase.from("agent_run_events").insert({
         run_id: runId,
         kind: "error",

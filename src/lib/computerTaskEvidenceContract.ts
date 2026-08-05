@@ -5,7 +5,10 @@ import {
   type AppAutomationResearchRef,
 } from './appAutomationControlSurfaces';
 import type { ChatComputerRequestRoute } from './chatComputerRequestRouter';
-import { formatGenericAppTaskFamilyForUser } from './genericAppNavigator';
+import {
+  classifyGenericAppTaskFamily,
+  formatGenericAppTaskFamilyForUser,
+} from './genericAppNavigator';
 import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 import {
   shouldVerifyOutcome,
@@ -92,6 +95,9 @@ function baseSourceRefs(route: ChatComputerRequestRoute): AppAutomationResearchR
   const plan = buildAppAutomationControlSurfacePlan(route.bestPath || route.computerPreview.detail || target, {
     targetId,
     targetName: target,
+    taskFamily: route.appAutomationRouteDecision?.taskFamily === 'app launch/read observation'
+      ? 'app launch/read observation'
+      : undefined,
   });
   return plan.sourceRefs;
 }
@@ -104,6 +110,74 @@ function taskFamily(route: ChatComputerRequestRoute): string {
   if (route.appAutomationRouteDecision?.taskFamily) return formatGenericAppTaskFamilyForUser(route.appAutomationRouteDecision.taskFamily);
   if (route.appStrategy?.id === 'universal_app_control') return 'unfamiliar app workflow';
   return route.appStrategy?.label || route.computerPreview.label || 'computer task';
+}
+
+function isPureDesktopReadRoute(route: ChatComputerRequestRoute): boolean {
+  return route.kind === 'desktop_app'
+    && route.risk === 'safe'
+    && route.approvalRequired === false
+    && (route.alwaysConfirmFloor?.length || 0) === 0
+    && (
+      route.appAutomationRouteDecision?.taskFamily === 'app launch/read observation'
+      || /\bLaunch And Read$/i.test(route.selectedPipeline?.title || '')
+      || classifyGenericAppTaskFamily(route.sourceMessage || '') === 'launch_or_read'
+    );
+}
+
+function desktopRouteHasFileWork(route: ChatComputerRequestRoute): boolean {
+  if (route.kind === 'hybrid') return true;
+  const request = String(route.sourceMessage || '');
+  if (classifyGenericAppTaskFamily(request) === 'file_open_save_export') return true;
+  return /(?:~\/|\/Users\/|\b(?:attachment|downloads?|documents?|file|folder|path|package|save|export|render|upload|import)\b|\.(?:avif|bmp|csv|docx?|gif|heic|jpe?g|json|md|mov|mp3|mp4|pdf|png|psd|svg|tiff?|txt|wav|xlsx?)\b)/i.test(request);
+}
+
+function readOnlyDesktopContract(
+  route: ChatComputerRequestRoute,
+  options: { target: string; isPhotoshop: boolean; isInDesign: boolean },
+): ComputerTaskEvidenceContract {
+  const { target, isPhotoshop, isInDesign } = options;
+  return {
+    schemaVersion: 1,
+    kind: 'desktop_app',
+    targetName: target,
+    taskFamily: formatGenericAppTaskFamilyForUser('launch_or_read'),
+    observeBefore: uniqueCompact([
+      'confirm the exact target app/process/window identity before reading visible state',
+      isPhotoshop ? 'capture Photoshop app/document status only when the requested read depends on active-document state' : null,
+      isInDesign ? 'capture InDesign app/document status only when the requested read depends on active-document state' : null,
+      !isPhotoshop && !isInDesign ? 'capture the smallest app-native or accessibility observation needed to answer the request' : null,
+    ], 6),
+    actionabilityChecks: [
+      'the exact target app is running and, when focus was requested, is frontmost',
+      'the observation belongs to the same app/window or active document named by the request',
+      'the requested result can be returned without changing app, document, file, account, or browser state',
+    ],
+    approvalBefore: [],
+    mutationGuardrails: [
+      'execute only launch, focus, wait, and read-only observation actions authorized by this contract',
+      'do not search, stat, open, save, export, overwrite, or otherwise touch local files when the request names no local artifact',
+      'do not substitute or foreground a browser for this desktop-app request',
+      'if a mutation or broader task is discovered, stop and rebuild the route and evidence contract before dispatch',
+    ],
+    proofAfter: [
+      'fresh exact app/window identity proves the requested app is running and frontmost when focus was requested',
+      'fresh app-native or accessibility state answers every requested read-only clause',
+    ],
+    failClosedRules: [
+      'app install, license, login, permission, or missing bridge observation tool blocks the read',
+      'app/window/document identity mismatch blocks completion',
+      'an unexpected mutation, file operation, browser operation, or ambiguous target requires a new route instead of execution',
+      'two failed fresh observations stop with the exact blocker',
+    ],
+    freshEvidenceRequired: uniqueCompact([
+      'fresh desktop.window_state for the exact target app before a bounded retry',
+      isPhotoshop ? 'fresh desktop.photoshop_document_status when document state is part of the requested read' : null,
+      isInDesign ? 'fresh desktop.indesign_document_status when document state is part of the requested read' : null,
+      !isPhotoshop && !isInDesign ? 'fresh app-native or accessibility observation for the requested visible state' : null,
+    ], 5),
+    sourceRefs: uniqueRefs(baseSourceRefs(route)),
+    userSummary: `Launch or inspect ${target} without mutation, local-file work, browser fallback, or an approval prompt, then return fresh same-app proof.`,
+  };
 }
 
 function browserContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceContract {
@@ -165,6 +239,13 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
   const isPhotoshop = /photoshop/i.test(context);
   const isInDesign = /indesign/i.test(context);
   const isCad = /\b(auto\s*cad|autocad|civil\s*3d|fusion\s*360|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup|cad|dwg|dxf|rvt|rfa|sldprt|sldasm|slddrw|mlx|slx|f3d|f3z|3dm|engineering drawing|technical drawing|floor plan|site plan|shop drawing|bim)\b/i.test(context);
+  if (isPureDesktopReadRoute(route)) {
+    return readOnlyDesktopContract(route, { target, isPhotoshop, isInDesign });
+  }
+  const hasFileWork = desktopRouteHasFileWork(route);
+  const routeCompletionProof = hasFileWork
+    ? route.completionProof
+    : route.completionProof.filter((item) => !/(?:desktop\.file_|file_stat|exported proof|deliverable output|output file|output path|package output)/i.test(item));
   return {
     schemaVersion: 1,
     kind: route.kind === 'hybrid' ? 'hybrid' : 'desktop_app',
@@ -176,14 +257,16 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
       isInDesign ? 'capture InDesign document status plus layer/text/link/font or preflight inventory' : null,
       isCad ? 'capture engineering document/model/project state, units/toolboxes, scale/layers/configuration, command prompt/menu state, and drawing/model/MATLAB proof before mutation' : null,
       !isPhotoshop && !isInDesign ? 'capture app/window state, accessibility tree, menu inventory, and screenshot before mutation' : null,
-      'resolve exact staged source file/package and output destination',
+      hasFileWork ? 'resolve exact staged source file/package and output destination' : null,
       'record chosen control surface and why stronger deterministic routes were unavailable',
     ], 8),
     actionabilityChecks: uniqueCompact([
       isPhotoshop ? 'Photoshop mutation runs through UXP/app API or batchPlay inside modal execution scope' : null,
       isInDesign ? 'InDesign mutation runs through UXP script/plugin DOM or documented app API when available' : null,
       isCad ? 'CAD mutation uses the researched app API/script/add-in/command surface before accessibility or coordinates' : null,
-      'active document matches the staged file or user-selected target',
+      hasFileWork
+        ? 'active document matches the staged file or user-selected target'
+        : 'active document or workspace matches the user-selected target',
       'target layer/frame/link/object/control is named or otherwise uniquely identified',
       'accessibility or coordinate fallback has fresh tree/screenshot and a bounded one-step retry guard',
     ], 8),
@@ -191,8 +274,10 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
       route.approvalReason,
       'document mutation',
       'running new scripts, plugins, actions, or connected-agent adapter code',
-      'relinking/placing local assets',
-      'save, export, package, render, overwrite, delete, flatten, rasterize, or destructive edit',
+      hasFileWork ? 'relinking/placing local assets' : null,
+      hasFileWork
+        ? 'save, export, package, render, overwrite, delete, flatten, rasterize, or destructive edit'
+        : 'delete, flatten, rasterize, or destructive edit',
     ], 10),
     mutationGuardrails: [
       'app-native DOM/API/scripted tools run before accessibility, menu, screenshot, or coordinate fallback',
@@ -205,9 +290,9 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
       isInDesign ? 'refreshed InDesign document status plus text/link/layer or preflight inventory' : null,
       isCad ? 'refreshed CAD units/dimensions/layers/object or feature state plus command/result evidence' : null,
       'before/after object manifest or changed-entity summary when available',
-      'proof screenshot or exported proof artifact',
-      'output file_stat, basename/hash, page/image dimensions, or package summary when files change',
-      ...route.completionProof,
+      hasFileWork ? 'proof screenshot or exported proof artifact' : 'proof screenshot or refreshed semantic state',
+      hasFileWork ? 'output file_stat, basename/hash, page/image dimensions, or package summary when files change' : null,
+      ...routeCompletionProof,
     ], 10),
     failClosedRules: uniqueCompact([
       'app install, license, login, permission, modal dialog, or missing bridge tool blocks execution',
@@ -217,15 +302,27 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
       'missing before/after inventory or proof blocks completion',
     ], 8),
     freshEvidenceRequired: uniqueCompact([
-      'fresh app-native document status before retry',
+      isPhotoshop || isInDesign || isCad
+        ? 'fresh app-native document status before retry'
+        : 'fresh app/window state before retry',
       isCad ? 'fresh CAD units/layers/dimensions/object state before geometry/model mutation retry' : null,
-      'fresh layer/text/link/a11y inventory before mutation retry',
+      isPhotoshop || isInDesign
+        ? 'fresh layer/text/link/a11y inventory before mutation retry'
+        : 'fresh accessibility/control state before mutation retry',
       'fresh screenshot after visual fallback',
-      'fresh file_stat after output writes',
+      hasFileWork ? 'fresh file_stat after output writes' : null,
     ], 8),
     sourceRefs: uniqueRefs(baseSourceRefs(route)),
-    userSummary: `Use app-native ${target} automation first, require approval for mutation/output work, and verify with refreshed inventory plus proof artifacts.`,
+    userSummary: hasFileWork
+      ? `Use app-native ${target} automation first, require approval for mutation/output work, and verify with refreshed inventory plus proof artifacts.`
+      : `Use app-native ${target} automation first, require approval for mutation work, and verify with refreshed same-app state.`,
   };
+}
+
+export function isReadOnlyDesktopEvidenceContract(contract: ComputerTaskEvidenceContract): boolean {
+  return contract.kind === 'desktop_app'
+    && contract.approvalBefore.length === 0
+    && contract.taskFamily === formatGenericAppTaskFamilyForUser('launch_or_read');
 }
 
 function exactComputerSequenceContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceContract | null {

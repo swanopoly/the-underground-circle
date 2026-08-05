@@ -16,6 +16,7 @@ import type {
   ComputerCapabilityStatus,
 } from '../src/lib/computerCapabilityRegistry';
 import { isAgentBridgeCapabilityReady } from '../src/lib/computerCapabilityReadiness';
+import { setAppResolutionContext } from '../src/lib/chatComputerRequestRouter';
 
 const CAPABILITY_IDS: ComputerCapabilityId[] = [
   'browser_automation',
@@ -290,6 +291,120 @@ assertPreflight('Have the attached Codex agent download whatever assets it needs
 });
 
 assertMissingCapability('Have the attached Codex agent download whatever assets it needs to finish the website task', 'agent_bridges');
+
+for (const [request, expectedTarget] of [
+  ['Open Photoshop', 'Adobe Photoshop'],
+  ['Open Image Capture', 'Image Capture'],
+  ['Open Docker Desktop', 'Docker Desktop'],
+  ['Open Microsoft Remote Desktop', 'Microsoft Remote Desktop'],
+] as const) {
+  const readPreflight = buildComputerAppPreflight({
+    task: request,
+    audit: audit({ desktop_control: 'ready' }),
+  });
+  const noisyText = [
+    ...readPreflight.warnings.map((item) => `${item.label} ${item.detail} ${item.fix}`),
+    ...readPreflight.blockers.map((item) => `${item.label} ${item.detail} ${item.fix}`),
+  ].join(' | ');
+  if (
+    readPreflight.status !== 'ready'
+    || readPreflight.requiredCapabilities.join(',') !== 'desktop_control'
+    || readPreflight.capabilityExpansionPlan
+    || readPreflight.appCapabilityBuildout
+    || readPreflight.routeDecision?.targetName !== expectedTarget
+    || readPreflight.routeDecision?.taskFamily !== 'app launch/read observation'
+    || /file|mutation|research|buildout/i.test(noisyText)
+  ) {
+    fail(`${request} should preflight as a clean launch/read route (${JSON.stringify({ status: readPreflight.status, capabilities: readPreflight.requiredCapabilities, target: readPreflight.routeDecision?.targetName, taskFamily: readPreflight.routeDecision?.taskFamily, warnings: readPreflight.warnings.map((item) => item.id), blockers: readPreflight.blockers.map((item) => item.id) })})`);
+  } else {
+    pass(`clean approval-free launch/read preflight: ${request}`);
+  }
+}
+
+for (const request of [
+  'Open Photoshop',
+  'Launch Photoshop',
+  'Start Photoshop',
+  'Focus Photoshop',
+  'Activate Photoshop',
+  'Switch to Photoshop',
+  'Switch over to Photoshop',
+  'Bring Photoshop to the front',
+  'Bring Photoshop forward',
+  'Bring forward Photoshop',
+  'Can you open Photoshop?',
+  'Could you launch Photoshop?',
+  'Would you open Photoshop?',
+  'Can you please open Photoshop?',
+  'Open Photoshop please',
+  'Open up Photoshop',
+  'Open settings',
+  'Open Chrome',
+  'Launch Firefox',
+]) {
+  const lifecyclePreflight = buildComputerAppPreflight({
+    task: request,
+    audit: audit({ desktop_control: 'ready', app_tools: 'missing' }),
+  });
+  if (
+    lifecyclePreflight.status !== 'ready'
+    || lifecyclePreflight.requiredCapabilities.join(',') !== 'desktop_control'
+    || lifecyclePreflight.blockers.some((item) => item.id === 'missing:app_tools')
+  ) {
+    fail(`strict lifecycle grammar/preflight drifted for ${request}: ${JSON.stringify({
+      status: lifecyclePreflight.status,
+      capabilities: lifecyclePreflight.requiredCapabilities,
+      blockers: lifecyclePreflight.blockers.map((item) => item.id),
+    })}`);
+  } else {
+    pass(`strict lifecycle preflight needs desktop_control only: ${request}`);
+  }
+}
+
+setAppResolutionContext({
+  bridgeOnline: true,
+  installedApps: ['Houdini.app'],
+  runningApps: ['Acme Studio'],
+});
+for (const [request, expectedTarget] of [
+  ['open houdini', 'Houdini'],
+  ['open acme studio', 'Acme Studio'],
+] as const) {
+  const observedLowercasePreflight = buildComputerAppPreflight({
+    task: request,
+    audit: audit({ desktop_control: 'ready', app_tools: 'missing' }),
+  });
+  if (
+    observedLowercasePreflight.status !== 'ready'
+    || observedLowercasePreflight.requiredCapabilities.join(',') !== 'desktop_control'
+    || observedLowercasePreflight.routeDecision?.targetName !== expectedTarget
+    || observedLowercasePreflight.routeDecision?.taskFamily !== 'app launch/read observation'
+  ) {
+    fail(`observed lowercase lifecycle/preflight parity drifted for ${request}: ${JSON.stringify({
+      strategy: observedLowercasePreflight.strategy?.id,
+      status: observedLowercasePreflight.status,
+      capabilities: observedLowercasePreflight.requiredCapabilities,
+      routeDecision: observedLowercasePreflight.routeDecision,
+    })}`);
+  } else pass(`observed lowercase lifecycle preflight needs desktop_control only: ${request}`);
+}
+setAppResolutionContext({ bridgeOnline: true, installedApps: ['Maya'] });
+const unavailableLowercasePreflight = buildComputerAppPreflight({
+  task: 'open houdini',
+  audit: audit({ desktop_control: 'ready' }),
+});
+if (
+  unavailableLowercasePreflight.status === 'ready'
+  || unavailableLowercasePreflight.requiredCapabilities.join(',') === 'desktop_control'
+  || !unavailableLowercasePreflight.requiredCapabilities.includes('app_tools')
+) {
+  fail(`unavailable lowercase app must not acquire approval-free lifecycle preflight authority (${JSON.stringify({
+    strategy: unavailableLowercasePreflight.strategy?.id,
+    status: unavailableLowercasePreflight.status,
+    capabilities: unavailableLowercasePreflight.requiredCapabilities,
+  })})`);
+} else pass('unavailable lowercase app stays out of approval-free lifecycle preflight');
+setAppResolutionContext({ bridgeOnline: false });
 
 const photoshopPreflight = buildComputerAppPreflight({
   task: 'Open Photoshop and save the desktop screenshot as lmao.png',

@@ -241,6 +241,18 @@ async function main() {
     'ask_every_time read-only step returns a resumable pendingApproval',
   );
   assert(
+    computerUse.deriveComputerUseResultOutcomeStatus(readOnlyPause) === 'waiting_approval',
+    'read-only pendingApproval projects to typed waiting_approval, never failed',
+  );
+  const waitingRecord = computerUse.toBrowserSessionRecord(
+    { ...makeSession(readOnlyPause.actions, 'ask_every_time'), status: 'awaiting_approval' },
+    readOnlyPause,
+  );
+  assert(
+    waitingRecord.status === 'awaiting_approval' && waitingRecord.completedAt === undefined,
+    'pendingApproval persists as a resumable awaiting_approval browser session',
+  );
+  assert(
     readOnlyPause.actions[0]?.status === 'pending'
       && readOnlyPause.actions[0]?.runtimeHandoff === undefined,
     'read-only permission pause stays pending and carries no mutation handoff',
@@ -253,6 +265,193 @@ async function main() {
     completions.join(',') === 'a-fill,a-fill,a-click',
     'callbacks report exactly three mutation handoffs; no read-only action or backend ran',
   );
+
+  // An explicit rejection is a prerequisite stop, never a skippable step.
+  // Later actions remain untouched and the result projects as blocked rather
+  // than a successful partial plan.
+  const rejectedCompletions: string[] = [];
+  const rejectedObserve = makeAction({
+    id: 'a-rejected-observe',
+    type: 'observe',
+    description: 'Observe account details',
+    status: 'rejected',
+  });
+  const afterRejected = makeAction({
+    id: 'a-after-rejection',
+    type: 'extract',
+    description: 'Extract account details',
+  });
+  const rejectedSession = makeSession([rejectedObserve, afterRejected], 'trusted');
+  const rejectedResult = await computerUse.executePlan(
+    rejectedSession,
+    (action) => { rejectedCompletions.push(action.id); },
+  );
+  assert(
+    rejectedResult.success === false
+      && rejectedResult.blocked?.reason === 'action_rejected'
+      && rejectedResult.blocked?.actionId === 'a-rejected-observe'
+      && computerUse.deriveComputerUseResultOutcomeStatus(rejectedResult) === 'blocked',
+    'rejected prerequisite halts with a typed blocked outcome',
+  );
+  assert(
+    rejectedCompletions.length === 0
+      && rejectedResult.actions[1]?.id === 'a-after-rejection'
+      && rejectedResult.actions[1]?.status === 'pending'
+      && !rejectedResult.actions[1]?.executedAt,
+    'rejected prerequisite leaves every later action untouched',
+  );
+  assert(
+    /Stopped at step 1/.test(rejectedResult.message)
+      && /Later steps were not executed/.test(rejectedResult.message),
+    'rejected prerequisite explains the fail-closed review/replan requirement',
+  );
+  const blockedRecord = computerUse.toBrowserSessionRecord(rejectedSession, rejectedResult);
+  assert(
+    blockedRecord.status === 'blocked' && !!blockedRecord.completedAt,
+    'rejected prerequisite persists as blocked, never completed or failed',
+  );
+
+  const laterRejectedCompletions: string[] = [];
+  const laterRejectedResult = await computerUse.executePlan(
+    makeSession([
+      makeAction({ id: 'a-pending-before-reject', type: 'observe', description: 'Observe first' }),
+      makeAction({ id: 'a-rejected-second', type: 'extract', description: 'Rejected second step', status: 'rejected' }),
+    ], 'trusted'),
+    (action) => { laterRejectedCompletions.push(action.id); },
+  );
+  assert(
+    laterRejectedResult.blocked?.actionId === 'a-rejected-second'
+      && laterRejectedResult.blocked?.index === 1
+      && laterRejectedCompletions.length === 0,
+    'later rejected step preflights the whole plan before an earlier action can run',
+  );
+  assert(
+    laterRejectedResult.actions[0]?.status === 'pending'
+      && !laterRejectedResult.actions[0]?.executedAt,
+    'earlier pending action stays untouched when a later prerequisite was rejected',
+  );
+
+  const rejectedMutationCompletions: string[] = [];
+  const rejectedMutation = makeAction({
+    id: 'a-rejected-fill',
+    type: 'fill',
+    target: '#secret',
+    value: 'must-not-survive',
+    description: 'Fill a declined field',
+    status: 'rejected',
+  });
+  const rejectedMutationResult = await computerUse.executePlan(
+    makeSession([
+      rejectedMutation,
+      makeAction({ id: 'a-after-rejected-fill', type: 'observe', description: 'Observe later' }),
+    ], 'trusted'),
+    (action) => { rejectedMutationCompletions.push(action.id); },
+  );
+  assert(
+    rejectedMutationResult.blocked?.actionId === 'a-rejected-fill'
+      && rejectedMutationCompletions.length === 0,
+    'rejected mutation halts before executeAction or its completion callback',
+  );
+  assert(
+    rejectedMutationResult.actions[0]?.status === 'rejected'
+      && rejectedMutationResult.actions[0]?.runtimeHandoff === undefined
+      && rejectedMutationResult.actions[0]?.value === undefined
+      && !JSON.stringify(rejectedMutationResult).includes('must-not-survive'),
+    'rejected mutation is redacted without preparing a runtime handoff',
+  );
+
+  const contradictoryCompleted = makeAction({
+    id: 'a-completed-with-blocker',
+    type: 'observe',
+    description: 'Observe a guarded resource',
+    status: 'completed',
+    blockedReason: 'Required evidence was never collected.',
+  });
+  const contradictoryCompletions: string[] = [];
+  const contradictoryResult = await computerUse.executePlan(
+    makeSession([
+      contradictoryCompleted,
+      makeAction({ id: 'a-after-contradiction', type: 'extract', description: 'Extract later' }),
+    ], 'trusted'),
+    (action) => { contradictoryCompletions.push(action.id); },
+  );
+  assert(
+    contradictoryResult.blocked?.actionId === 'a-completed-with-blocker'
+      && contradictoryResult.actions[0]?.status === 'rejected'
+      && contradictoryCompletions.length === 0,
+    'completed plus blockedReason fails closed as a rejected prerequisite',
+  );
+  assert(
+    contradictoryResult.actions[1]?.status === 'pending'
+      && !contradictoryResult.actions[1]?.executedAt,
+    'contradictory completed blocker leaves later actions untouched',
+  );
+
+  // Cancellation is a neutral typed outcome. A pre-aborted run must not
+  // enter an action or invoke its completion callback, and its projection
+  // must never turn into failed.
+  const preAbortController = new AbortController();
+  preAbortController.abort();
+  const preAbortCompletions: string[] = [];
+  const preAbortedSession = makeSession([
+    makeAction({ id: 'a-never-entered', type: 'wait', value: '5000', description: 'Wait' }),
+  ], 'trusted');
+  const preAborted = await computerUse.executePlan(
+    preAbortedSession,
+    (action) => { preAbortCompletions.push(action.id); },
+    { signal: preAbortController.signal },
+  );
+  assert(
+    preAborted.cancelled === true
+      && computerUse.deriveComputerUseResultOutcomeStatus(preAborted) === 'cancelled',
+    'pre-aborted local plan returns a typed cancelled result',
+  );
+  assert(
+    preAbortCompletions.length === 0
+      && preAborted.actions[0]?.id === 'a-never-entered'
+      && preAborted.actions[0]?.status === 'pending'
+      && !preAborted.actions[0]?.executedAt,
+    'pre-aborted plan invokes no callback and leaves the action untouched',
+  );
+  const cancelledRecord = computerUse.toBrowserSessionRecord(preAbortedSession, preAborted);
+  assert(
+    cancelledRecord.status === 'cancelled' && !!cancelledRecord.completedAt,
+    'cancelled result persists as cancelled, never failed',
+  );
+
+  // Mid-step cancellation must interrupt the abort-aware wait promptly and
+  // must not let this or a later action report completion.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{}', { status: 503 });
+  try {
+    const midAbortController = new AbortController();
+    const midAbortCompletions: string[] = [];
+    const midAbortSession = makeSession([
+      makeAction({ id: 'a-long-wait', type: 'wait', value: '5000', description: 'Wait five seconds' }),
+      makeAction({ id: 'a-after-wait', type: 'observe', description: 'Observe after wait' }),
+    ], 'trusted');
+    const startedAt = Date.now();
+    const pendingRun = computerUse.executePlan(
+      midAbortSession,
+      (action) => { midAbortCompletions.push(action.id); },
+      { signal: midAbortController.signal },
+    );
+    setTimeout(() => midAbortController.abort(), 10);
+    const midAborted = await pendingRun;
+    assert(
+      midAborted.cancelled === true && Date.now() - startedAt < 1000,
+      'mid-wait abort returns cancelled promptly instead of waiting five seconds',
+    );
+    assert(
+      midAbortCompletions.length === 0
+        && midAborted.actions[1]?.id === 'a-after-wait'
+        && midAborted.actions[1]?.status === 'pending'
+        && !midAborted.actions[1]?.executedAt,
+      'mid-wait abort publishes no late completion and leaves later steps untouched',
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 
   // ── chatApprovalGate: 'auto' cannot waive the destructive floor ────────────
   const payPlan = makePlan({

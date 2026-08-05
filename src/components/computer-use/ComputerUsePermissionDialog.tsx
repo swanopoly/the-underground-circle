@@ -5,7 +5,7 @@
  * planned actions, and lets the user choose a permission level.
  */
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -27,7 +27,7 @@ interface ComputerUsePermissionDialogProps {
   recommendedPermission?: ComputerUsePermission;
   grantSummary?: string | null;
   approvalSummary?: string | null;
-  onAllow: (permission: ComputerUsePermission) => void;
+  onAllow: (permission: ComputerUsePermission) => void | Promise<void>;
   onDeny: () => void;
 }
 
@@ -81,6 +81,23 @@ export default function ComputerUsePermissionDialog({
   onDeny,
 }: ComputerUsePermissionDialogProps) {
   const [selectedPermission, setSelectedPermission] = useState<ComputerUsePermission>(recommendedPermission || 'ask_every_time');
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+
+  const submitAllow = async () => {
+    // React may not unmount the dialog until the async owner finishes its first
+    // persistence step. Reserve the click synchronously so a double click can
+    // never dispatch the same approved plan twice in that window.
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onAllow(selectedPermission);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  };
 
   return (
     <View style={styles.overlay} nativeID="section-computer-use-permission">
@@ -139,6 +156,7 @@ export default function ComputerUsePermissionDialog({
               <Pressable
                 key={opt.value}
                 onPress={() => setSelectedPermission(opt.value)}
+                disabled={submitting}
                 accessibilityRole="radio"
                 accessibilityState={{ selected: isSelected }}
                 accessibilityLabel={opt.label}
@@ -186,7 +204,8 @@ export default function ComputerUsePermissionDialog({
         {/* ── Buttons ── */}
         <View style={styles.buttonRow}>
           <Pressable
-            onPress={onDeny}
+            onPress={() => { if (!submittingRef.current) onDeny(); }}
+            disabled={submitting}
             accessibilityRole="button"
             accessibilityLabel="Deny computer access"
             style={styles.denyButton}
@@ -194,12 +213,13 @@ export default function ComputerUsePermissionDialog({
             <Text style={styles.denyButtonText}>DENY</Text>
           </Pressable>
           <Pressable
-            onPress={() => onAllow(selectedPermission)}
+            onPress={() => { void submitAllow(); }}
+            disabled={submitting}
             accessibilityRole="button"
             accessibilityLabel="Allow computer access"
             style={styles.allowButton}
           >
-            <Text style={styles.allowButtonText}>ALLOW</Text>
+            <Text style={styles.allowButtonText}>{submitting ? 'ALLOWING…' : 'ALLOW'}</Text>
           </Pressable>
         </View>
       </View>

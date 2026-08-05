@@ -1,4 +1,7 @@
-import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
+import {
+  isReadOnlyDesktopEvidenceContract,
+  type ComputerTaskEvidenceContract,
+} from './computerTaskEvidenceContract';
 import type { ComputerTaskReplayPolicy } from './computerTaskOutcome';
 import type { AppAdapterGapContract } from './appAdapterGapContract';
 import type {
@@ -235,6 +238,34 @@ function summarizeAppRouteDecision(
   };
 }
 
+const READ_ONLY_CONFIRMATION_RE = /\b(?:app.*(?:installed|licensed|running)|desktop bridge|accessibility permission|screen recording permission|target (?:app|process|window)|app\/window|frontmost|app-native|document status|observation tool|control pattern)\b/i;
+const MUTATION_OR_FILE_REQUIREMENT_RE = /\b(?:mutat|edit|write|save|export|render|package|upload|import|delete|overwrite|relink|asset|file|folder|path|output|coordinate|click|type|macro|plugin|script|modal execution)\b/i;
+
+function alignAppRouteDecisionToContract(
+  routeDecision: ComputerTaskEvidenceRecoveryAppRouteDecision | null,
+  contract: ComputerTaskEvidenceContract,
+): ComputerTaskEvidenceRecoveryAppRouteDecision | null {
+  if (!routeDecision || !isReadOnlyDesktopEvidenceContract(contract)) return routeDecision;
+  const status = routeDecision.status === 'needs_approval'
+    ? 'needs_observation'
+    : routeDecision.status;
+  const missingConfirmations = routeDecision.missingConfirmations.filter((item) => (
+    READ_ONLY_CONFIRMATION_RE.test(item) && !MUTATION_OR_FILE_REQUIREMENT_RE.test(item)
+  ));
+  return {
+    ...routeDecision,
+    status,
+    taskFamily: contract.taskFamily,
+    missingConfirmations,
+    missingApprovals: [],
+    nextSteps: status === 'needs_observation'
+      ? [`Collect fresh exact app/window and requested read-only state for ${contract.targetName}.`]
+      : routeDecision.nextSteps.filter((item) => !MUTATION_OR_FILE_REQUIREMENT_RE.test(item)),
+    failSafeRules: contract.failClosedRules.slice(0, 5),
+    verification: routeDecision.verification.filter((item) => !MUTATION_OR_FILE_REQUIREMENT_RE.test(item)),
+  };
+}
+
 function routeDecisionFailureArea(
   routeDecision?: ComputerTaskEvidenceRecoveryAppRouteDecision | null,
 ): ComputerTaskEvidenceFailureArea | null {
@@ -277,7 +308,10 @@ function resolveFailureArea(args: {
  * results, tool outcome text, and captured observation summaries are evidence.
  */
 function failureEvidenceTextFromInput(input: ComputerTaskEvidenceRecoveryInput): string {
-  const routeDecision = summarizeAppRouteDecision(input.appRouteDecision);
+  const summarizedRouteDecision = summarizeAppRouteDecision(input.appRouteDecision);
+  const routeDecision = input.contract
+    ? alignAppRouteDecisionToContract(summarizedRouteDecision, input.contract)
+    : summarizedRouteDecision;
   return [
     input.failureMessage,
     input.outcomeStatus,
@@ -523,6 +557,16 @@ function toolRequirementsForContract(area: ComputerTaskEvidenceFailureArea, cont
   const desktopRequirements = [
     requirement('desktop-window', 'desktop.window_state', 'Confirm focused app, active window, and active document identity.'),
   ];
+  if (isReadOnlyDesktopEvidenceContract(contract)) {
+    if (isPhotoshop) {
+      desktopRequirements.push(requirement('photoshop-status', 'desktop.photoshop_document_status', 'Read Photoshop app/document status only when it is needed for the requested observation.'));
+    } else if (isInDesign) {
+      desktopRequirements.push(requirement('indesign-status', 'desktop.indesign_document_status', 'Read InDesign app/document status only when it is needed for the requested observation.'));
+    } else {
+      desktopRequirements.push(requirement('desktop-a11y', 'desktop.read_a11y_tree', 'Read the smallest accessibility state needed to answer the request.'));
+    }
+    return desktopRequirements;
+  }
   if (isPhotoshop) {
     desktopRequirements.push(
       requirement('photoshop-status', 'desktop.photoshop_document_status', 'Refresh Photoshop active document status before retry.'),
@@ -539,7 +583,13 @@ function toolRequirementsForContract(area: ComputerTaskEvidenceFailureArea, cont
       requirement('desktop-screenshot', 'desktop.screenshot', 'Refresh screenshot before visual, coordinate, or canvas retry.', 5_000),
     );
   }
-  if (area === 'proof_after') {
+  const requiresFileEvidence = [
+    ...contract.observeBefore,
+    ...contract.actionabilityChecks,
+    ...contract.proofAfter,
+    ...contract.freshEvidenceRequired,
+  ].some((item) => /\b(?:desktop\.file_|file_stat|source file|output artifact|output destination|exported proof|package summary)\b/i.test(item));
+  if (area === 'proof_after' && requiresFileEvidence) {
     desktopRequirements.push(requirement('output-file-stat', 'desktop.file_stat', 'Refresh output artifact file stat, basename, hash, dimensions, or package summary.', 30_000));
   }
   return desktopRequirements;
@@ -612,7 +662,10 @@ export function diagnoseComputerTaskEvidenceFailure(
 ): ComputerTaskEvidenceRecoveryContext | null {
   const contract = input.contract || null;
   if (!contract) return null;
-  const appRouteDecision = summarizeAppRouteDecision(input.appRouteDecision);
+  const appRouteDecision = alignAppRouteDecisionToContract(
+    summarizeAppRouteDecision(input.appRouteDecision),
+    contract,
+  );
   const manualVerificationOnly = input.replayPolicy === 'manual_verify_only'
     && input.mutationDispatched === true;
   if (manualVerificationOnly) {

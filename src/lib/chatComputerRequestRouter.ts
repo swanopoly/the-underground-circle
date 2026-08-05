@@ -57,7 +57,9 @@ import {
   buildAppOpenPlan,
   detectTaskAppCategory,
   findKnownAppInText,
+  matchKnownApp,
   pickRecoveryAppFallback,
+  resolveMacLaunchName,
   resolveBestAppForTask,
   type AppTaskResolution,
   type ResolveBestAppContext,
@@ -68,6 +70,12 @@ import {
   compileComputerSequenceProgram,
   type ComputerSequenceProgram,
 } from './computerSequenceProgramCore';
+import {
+  classifyGenericAppTaskFamily,
+  hasStrictNamedAppLifecycleCommandShape,
+  parseStrictNamedAppLifecycleIntent,
+  setStrictNamedAppLifecycleObservedNames,
+} from './genericAppNavigator';
 
 export type ChatComputerRequestRouteKind =
   | 'browser'
@@ -125,11 +133,20 @@ export interface ChatComputerUserConstraints {
  */
 let appResolutionContextRegistry: ResolveBestAppContext = { bridgeOnline: false };
 
+function observedLifecycleAppNames(ctx: ResolveBestAppContext | null | undefined): string[] {
+  if (!ctx?.bridgeOnline) return [];
+  return [
+    ...(Array.isArray(ctx.runningApps) ? ctx.runningApps : []),
+    ...(Array.isArray(ctx.installedApps) ? ctx.installedApps : []),
+  ].filter((name): name is string => typeof name === 'string' && Boolean(name.trim()));
+}
+
 export function setAppResolutionContext(ctx: ResolveBestAppContext): void {
   appResolutionContextRegistry = {
     ...ctx,
     bridgeOnline: Boolean(ctx?.bridgeOnline),
   };
+  setStrictNamedAppLifecycleObservedNames(observedLifecycleAppNames(appResolutionContextRegistry));
 }
 
 export function getAppResolutionContext(): ResolveBestAppContext {
@@ -344,6 +361,12 @@ export interface ChatComputerRequestRoute {
   completionProof: string[];
   aiNeed?: DesktopTaskAiNeedClassification;
   /**
+   * Immutable local lifecycle program for a strict named-app
+   * open/launch/focus command. Chat dispatches this through the existing
+   * observe-first native activation adapter, without calling an AI relay.
+   */
+  deterministicLifecycleReadProgram?: ChatComputerDeterministicLifecycleReadProgram | null;
+  /**
    * How the selected chat model should coordinate with SwanBot/OpenSwan,
    * desktop/browser tools, and optional multi-agent fan-out. This prevents
    * "selected model" from becoming a raw-chat bypass around the runtime.
@@ -394,6 +417,26 @@ export interface ChatComputerModelOrchestration {
   activationPath: string[];
   modelSelectionHint: string;
   multiAgentHint?: string;
+}
+
+export interface ChatComputerDeterministicLifecycleReadStep {
+  tool: 'desktop.observe_app' | 'desktop.launch_app' | 'desktop.wait_for_app' | 'desktop.focus_app';
+  args: Record<string, unknown>;
+  when: 'always' | 'if_not_running' | 'if_launched' | 'if_not_frontmost';
+  note: string;
+}
+
+export interface ChatComputerDeterministicLifecycleReadProgram {
+  id: 'named_app_lifecycle_read';
+  operation: 'open_or_launch' | 'focus';
+  targetAppName: string;
+  /** Exact local bundle/process name handed to the typed desktop bridge. */
+  dispatchAppName: string;
+  authorization: {
+    mode: 'direct_user_request';
+    reason: string;
+  };
+  steps: ChatComputerDeterministicLifecycleReadStep[];
 }
 
 function narrowStrategyForExactComputerSequence(
@@ -468,6 +511,7 @@ function buildChatComputerModelOrchestration(input: {
   recommendedTools: string[];
   aiNeed: DesktopTaskAiNeedClassification;
   exactProgramAuthorization?: ComputerSequenceProgram['authorization'] | null;
+  deterministicLifecycleReadProgram?: ChatComputerDeterministicLifecycleReadProgram | null;
 }): ChatComputerModelOrchestration {
   if (input.exactProgramAuthorization) {
     const directRequest = input.exactProgramAuthorization.mode === 'direct_user_request';
@@ -484,6 +528,22 @@ function buildChatComputerModelOrchestration(input: {
         'verify fresh app-native document status',
       ],
       modelSelectionHint: 'Do not call the AI relay for this exact task; return only verified proof or the exact local blocker.',
+    };
+  }
+  if (input.deterministicLifecycleReadProgram) {
+    const program = input.deterministicLifecycleReadProgram;
+    return {
+      mode: 'deterministic_local_program',
+      coordinator: 'chat_plan_then_local_program',
+      selectedModelRole: 'No execution model is needed; the strict named-app lifecycle program runs through the local observe-first activation adapter.',
+      activationPath: [
+        `compile strict ${program.operation === 'focus' ? 'focus' : 'open/launch'} program for ${program.targetAppName}`,
+        'dispatch through the paired local desktop bridge',
+        program.operation === 'open_or_launch' ? 'launch only when not running' : 'require the app to already be running',
+        'focus when not frontmost',
+        'verify fresh exact process and foreground proof',
+      ],
+      modelSelectionHint: 'Do not call the selected-model or SwanBot AI relay; return only verified lifecycle proof, cancellation, or the exact local blocker.',
     };
   }
   const multiAgent = wantsMaximumAgentFanout(input.message);
@@ -1020,31 +1080,29 @@ function hasExplicitWebsiteOperation(message: string): boolean {
  */
 interface ExplicitNamedAppAction {
   appName: string;
+  /** Bridge-observed exact identity for long-tail lowercase dispatch. */
+  dispatchAppName?: string;
   surface: 'desktop_app' | 'browser' | 'local_file';
   intent: 'launch_or_read' | 'mutation';
 }
 
-const NAMED_APP_ACTION_VERB = '(?:accept|add|adjust|animate|apply|authenticate|authorize|browse|build|cancel|change|charge|check|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|find|focus|generate|go|grant|import|inspect|insert|invite|launch|link|list|load|log\\s*in|login|look(?:\\s+at)?|make|model|move|mute|navigate|open|overwrite|package|paint|paste|post|press|print|publish|put|read|record|remove|rename|render|replace|report|resize|retouch|run|save|search|select|send|set|show|sign\\s*in|split|start|submit|summari[sz]e|sync|tell|toggle|trim|turn|type|update|upload|verify|view|visit|wipe|write)';
-const NAMED_APP_COMMAND_LEAD = '(?:please\\s+)?(?:(?:(?:can|could|would|will)\\s+you|i\\s+(?:want|need|would\\s+like)\\s+you)\\s+to\\s+)?';
+const NAMED_APP_ACTION_VERB = '(?:accept|activate|add|adjust|animate|apply|authenticate|authorize|bring|browse|build|cancel|change|charge|check|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|disconnect|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|find|focus|generate|go|grant|import|inspect|insert|invite|launch|link|list|load|log\\s*in|login|look(?:\\s+at)?|make|maximize|minimize|model|move|mute|navigate|open|overwrite|package|paint|paste|pause|play|post|press|print|publish|put|read|record|remove|rename|render|replace|report|resize|resume|retouch|run|save|search|select|send|set|show|sign\\s*in|split|start|stop|submit|summari[sz]e|switch|sync|tell|toggle|trim|turn|type|unmute|update|upload|verify|view|visit|wipe|write)';
+const NAMED_APP_COMMAND_LEAD = '(?:please\\s+)?(?:(?:(?:can|could|would|will)\\s+you(?:\\s+please)?(?:\\s+to)?|i\\s+(?:want|need|would\\s+like)\\s+you\\s+to)\\s+)?';
 const NAMED_APP_PREFIX_RE = new RegExp(
-  `^${NAMED_APP_COMMAND_LEAD}(?:use|open|launch|start|focus|switch\\s+to)\\s+(?:the\\s+)?(.{1,72}?)(?:\\s+(?:app|application|program))?(?:\\s*[,;:]\\s*|\\s+(?:and|to)\\s+)${NAMED_APP_ACTION_VERB}\\b`,
+  `^${NAMED_APP_COMMAND_LEAD}(?:use|open(?:\\s+up)?|launch|start|focus|switch(?:\\s+over)?\\s+to)\\s+(?:the\\s+)?(.{1,72}?)(?:\\s+(?:app|application|program))?(?:\\s*[,;:]\\s*|\\s+(?:and|to)\\s+)${NAMED_APP_ACTION_VERB}\\b`,
   'i',
 );
 const NAMED_APP_CONTEXT_RE = new RegExp(
   `^${NAMED_APP_COMMAND_LEAD}(?:in|inside|using|with)\\s+(?:the\\s+)?(.{1,72}?)(?:\\s+(?:app|application|program))?(?:\\s*[,;:]\\s*|\\s+to\\s+)${NAMED_APP_ACTION_VERB}\\b`,
   'i',
 );
-const NAMED_APP_OPEN_ONLY_RE = new RegExp(
-  `^${NAMED_APP_COMMAND_LEAD}(?:open|launch|start|focus)\\s+(?:the\\s+)?(.{1,72}?)(?:\\s+(?:app|application|program))?[.!]?$`,
-  'i',
-);
 const IMPERATIVE_APP_ACTION_RE = new RegExp(`^${NAMED_APP_COMMAND_LEAD}${NAMED_APP_ACTION_VERB}\\b`, 'i');
 
 function hasExplicitNamedAppFraming(message: string): boolean {
   const text = String(message || '').trim();
-  return NAMED_APP_PREFIX_RE.test(text)
-    || NAMED_APP_CONTEXT_RE.test(text)
-    || NAMED_APP_OPEN_ONLY_RE.test(text);
+  return Boolean(parseStrictNamedAppLifecycleIntent(text))
+    || NAMED_APP_PREFIX_RE.test(text)
+    || NAMED_APP_CONTEXT_RE.test(text);
 }
 
 const GENERIC_NON_APP_TARGETS = new Set([
@@ -1068,7 +1126,7 @@ const BROWSER_PLATFORM_NAMES = new Set([
 const SHORT_NATIVE_APP_NAMES = new Set(['mpv', 'obs', 'r', 'vlc', 'zed']);
 const EXPLICIT_WEB_TARGET_RE = /\b(?:https?:\/\/|www\.)\S+|(?<!@)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.(?:com|org|net|io|app|dev|ai|co|us|gov|edu)(?:\/\S*)?/i;
 const BROWSERBASE_DATA_SIDE_EFFECT_RE = /\b(?:authenticate|authorize|buy|checkout|delete|download|edit|export|fill|grant|log\s*in|login|order|pay|post|publish|purchase|remove|save|send|sign\s*in|submit|update|upload)\b/i;
-const NAMED_APP_MUTATION_RE = /\b(?:accept|add|adjust|animate|apply|authenticate|authorize|build|cancel|change|charge|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|generate|grant|import|insert|invite|link|log\s*in|login|make|model|move|mute|overwrite|package|paint|paste|post|press|print|publish|put|record|remove|rename|render|replace|resize|retouch|run|save|select|send|set|sign\s*in|split|submit|sync|toggle|trim|turn|type|update|upload|wipe|write)\b/i;
+const NAMED_APP_MUTATION_RE = /\b(?:accept|add|adjust|animate|apply|authenticate|authorize|build|cancel|change|charge|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|disconnect|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|generate|grant|import|insert|invite|link|log\s*in|login|make|maximize|minimize|model|move|mute|overwrite|package|paint|paste|pause|play|post|press|print|publish|put|record|remove|rename|render|replace|resize|resume|retouch|run|save|select|send|set|sign\s*in|split|stop|submit|sync|toggle|trim|turn|type|unmute|update|upload|wipe|write)\b/i;
 
 function cleanNamedAppCandidate(value: string): string {
   return String(value || '')
@@ -1106,15 +1164,20 @@ function isAppGuidanceOrChoiceQuestion(message: string): boolean {
     || /^(?:is|are|does|do)\s+(?:the\s+)?[A-Za-z0-9][\s\S]{0,70}\?$/i.test(text);
 }
 
-function detectExplicitNamedAppAction(message: string): ExplicitNamedAppAction | null {
+function detectExplicitNamedAppAction(
+  message: string,
+  observedAppNames?: readonly string[],
+): ExplicitNamedAppAction | null {
   const text = String(message || '').trim();
   if (!text || isAppGuidanceOrChoiceQuestion(text)) return null;
 
+  const strictLifecycle = parseStrictNamedAppLifecycleIntent(text, { observedAppNames });
   const knownInMessage = findKnownAppInText(text);
-  const framed = text.match(NAMED_APP_PREFIX_RE)
-    || text.match(NAMED_APP_CONTEXT_RE)
-    || text.match(NAMED_APP_OPEN_ONLY_RE);
-  const framedCandidate = cleanNamedAppCandidate(framed?.[1] || '');
+  const framed = strictLifecycle
+    ? null
+    : text.match(NAMED_APP_PREFIX_RE)
+      || text.match(NAMED_APP_CONTEXT_RE);
+  const framedCandidate = strictLifecycle?.appName || cleanNamedAppCandidate(framed?.[1] || '');
   let candidate = framedCandidate;
 
   // A leading task verb plus a catalogued app also proves action intent:
@@ -1126,7 +1189,7 @@ function detectExplicitNamedAppAction(message: string): ExplicitNamedAppAction |
   }
   if (!isLikelyNamedAppCandidate(candidate)) return null;
 
-  const knownCandidate = findKnownAppInText(candidate);
+  const knownCandidate = findKnownAppInText(candidate)?.app || matchKnownApp(candidate);
   const normalizedCandidate = candidate.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const localFileEvidenceText = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, ' ');
   const framedCandidateIndex = framedCandidate
@@ -1135,26 +1198,117 @@ function detectExplicitNamedAppAction(message: string): ExplicitNamedAppAction |
   const actionScope = framedCandidateIndex >= 0
     ? text.slice(framedCandidateIndex + framedCandidate.length)
     : text;
-  const intent = NAMED_APP_MUTATION_RE.test(actionScope) ? 'mutation' : 'launch_or_read';
+  const intent = strictLifecycle
+    ? 'launch_or_read'
+    : NAMED_APP_MUTATION_RE.test(actionScope) ? 'mutation' : 'launch_or_read';
+  // A strict launch-only request names the installed native product even when
+  // that product is a browser. URL/navigation/follow-up work still routes to
+  // browser automation; web-only products can never enter native lifecycle.
+  const strictNativeLifecycle = Boolean(strictLifecycle) && !knownCandidate?.webOnly;
   const browserSurface = Boolean(
-    knownCandidate?.app.webOnly
-    || (knownCandidate && BROWSER_APP_IDS.has(knownCandidate.app.id))
-    || BROWSER_APP_NAMES.has(normalizedCandidate)
-    || BROWSER_PLATFORM_NAMES.has(normalizedCandidate)
-    || /^(?:browser|web)\s+(?:computer\s+use\s+)?task\b/i.test(normalizedCandidate)
-    || (!knownCandidate && EXPLICIT_WEB_TARGET_RE.test(text) && /\b(?:browse|go\s+to|navigate|open|visit)\b/i.test(text)),
+    !strictNativeLifecycle
+    && (
+      knownCandidate?.webOnly
+      || (knownCandidate && BROWSER_APP_IDS.has(knownCandidate.id))
+      || BROWSER_APP_NAMES.has(normalizedCandidate)
+      || BROWSER_PLATFORM_NAMES.has(normalizedCandidate)
+      || /^(?:browser|web)\s+(?:computer\s+use\s+)?task\b/i.test(normalizedCandidate)
+      || (!knownCandidate && EXPLICIT_WEB_TARGET_RE.test(text) && /\b(?:browse|go\s+to|navigate|open|visit)\b/i.test(text))
+    ),
   );
   const localFileSurface = Boolean(
-    (knownCandidate && LOCAL_FILE_APP_IDS.has(knownCandidate.app.id) || LOCAL_FILE_APP_NAMES.has(normalizedCandidate))
+    (knownCandidate && LOCAL_FILE_APP_IDS.has(knownCandidate.id) || LOCAL_FILE_APP_NAMES.has(normalizedCandidate))
     && (
       /(?:~\/|\/Users\/|\b(?:desktop|downloads?|documents?|file|folder|directory)\b|\.[a-z0-9]{1,12}\b)/i.test(localFileEvidenceText)
       || (/\bpreview\b/i.test(normalizedCandidate) && /\b(?:document|page|pdf)\b/i.test(localFileEvidenceText))
     ),
   );
   return {
-    appName: knownCandidate?.app.displayName || candidate,
+    appName: strictLifecycle?.appName || knownCandidate?.displayName || candidate,
+    ...(strictLifecycle?.observedAppName ? { dispatchAppName: strictLifecycle.observedAppName } : {}),
     surface: browserSurface ? 'browser' : localFileSurface ? 'local_file' : 'desktop_app',
     intent,
+  };
+}
+
+/**
+ * Compile only the strict, single-intent named-app lifecycle grammar into a
+ * local program. Requests that append inspection, interpretation, or any
+ * mutation remain outside this compiler and keep their normal model/tool
+ * route. This whitelist prevents an `aiNeed:none` route from accidentally
+ * falling through to the SwanBot AI relay.
+ */
+export function buildDeterministicNamedAppLifecycleReadProgram(
+  message: string,
+  action: ExplicitNamedAppAction | null,
+  observedAppNames?: readonly string[],
+): ChatComputerDeterministicLifecycleReadProgram | null {
+  const text = String(message || '').trim();
+  const lifecycleIntent = parseStrictNamedAppLifecycleIntent(text, { observedAppNames });
+  if (
+    action?.surface !== 'desktop_app'
+    || action.intent !== 'launch_or_read'
+    || !lifecycleIntent
+  ) return null;
+
+  const exactNamedPhrase = lifecycleIntent.appName;
+  const knownApp = matchKnownApp(exactNamedPhrase)
+    || findKnownAppInText(action.appName)?.app
+    || null;
+  const dispatchAppName = String(
+    knownApp ? resolveMacLaunchName(knownApp) : action.dispatchAppName || lifecycleIntent.observedAppName || action.appName,
+  ).trim();
+  if (
+    !dispatchAppName
+    || dispatchAppName.length > 120
+    || !/^[A-Za-z0-9 .\-_()]+$/.test(dispatchAppName)
+  ) return null;
+
+  const operation = lifecycleIntent.operation;
+  const observeStep = (note: string): ChatComputerDeterministicLifecycleReadStep => ({
+    tool: 'desktop.observe_app',
+    args: { appName: dispatchAppName, maxDepth: 1, maxNodes: 1 },
+    when: 'always',
+    note,
+  });
+  const steps: ChatComputerDeterministicLifecycleReadStep[] = [
+    observeStep(`Observe ${exactNamedPhrase} process and foreground state before lifecycle dispatch.`),
+    ...(operation === 'open_or_launch'
+      ? [
+          {
+            tool: 'desktop.launch_app' as const,
+            args: { appName: dispatchAppName },
+            when: 'if_not_running' as const,
+            note: `Launch ${exactNamedPhrase} only when the fresh observation reports it is not running.`,
+          },
+          {
+            tool: 'desktop.wait_for_app' as const,
+            args: { appName: dispatchAppName, timeoutMs: 8_000 },
+            when: 'if_launched' as const,
+            note: `Wait a bounded interval for ${exactNamedPhrase} only after launch.`,
+          },
+        ]
+      : []),
+    {
+      tool: 'desktop.focus_app',
+      args: { appName: dispatchAppName },
+      when: 'if_not_frontmost',
+      note: `Focus ${exactNamedPhrase} when it is running but not frontmost.`,
+    },
+    observeStep(`Verify ${exactNamedPhrase} is running and frontmost; otherwise return the exact local blocker.`),
+  ];
+  return {
+    id: 'named_app_lifecycle_read',
+    operation,
+    // User-visible identity stays exactly as phrased. Catalog/bundle
+    // canonicalization is confined to dispatchAppName below.
+    targetAppName: exactNamedPhrase,
+    dispatchAppName,
+    authorization: {
+      mode: 'direct_user_request',
+      reason: 'The exact command authorizes only a reversible local app launch/focus plus read-only process and foreground verification.',
+    },
+    steps,
   };
 }
 
@@ -1324,9 +1478,35 @@ const NAMED_DESKTOP_BASE_TOOLS = [
   'agent.build_app_capability',
 ];
 
+const NAMED_DESKTOP_READ_TOOLS = [
+  'desktop.app_reachability',
+  'desktop.observe_app',
+  'desktop.list_running_apps',
+  'desktop.launch_app',
+  'desktop.focus_app',
+  'desktop.wait_for_app',
+  'desktop.window_state',
+  'desktop.read_a11y_tree',
+  'desktop.menu_inventory',
+  'desktop.screenshot',
+  'desktop.screen_size',
+];
+
+function namedDesktopReadToolsFor(appName: string): string[] {
+  return uniqueStrings([
+    ...NAMED_DESKTOP_READ_TOOLS,
+    /photoshop/i.test(appName) ? 'desktop.photoshop_document_status' : null,
+    /indesign/i.test(appName) ? 'desktop.indesign_document_status' : null,
+  ]);
+}
+
 function isBrowserExecutionTool(tool: string): boolean {
   return /^(?:browser|browserbase)\./i.test(String(tool || ''))
     || /^capability\.browser(?:_|\b)/i.test(String(tool || ''));
+}
+
+function requestHasExplicitLocalArtifact(message: string): boolean {
+  return /(?:^|\s)(?:~\/|\/Users\/|\/[A-Za-z0-9._-]+\/)|\b(?:downloads?|documents?|files?|folders?|directory|path|local computer|hard drive|finder|desktop folder)\b|\.(?:avif|bmp|csv|docx?|gif|heic|jpe?g|json|md|mov|mp3|mp4|pdf|png|psd|psb|svg|tiff?|txt|wav|webp|xlsx?)\b/i.test(String(message || ''));
 }
 
 /**
@@ -1341,7 +1521,34 @@ function buildNamedDesktopPipelineSummary(input: {
   base: UserTaskPipelineSummary;
   risk: UserTaskPipelineRisk;
   confidence: number;
+  intent: ExplicitNamedAppAction['intent'];
 }): UserTaskPipelineSummary {
+  if (input.intent === 'launch_or_read') {
+    return {
+      id: 'desktop_app_control',
+      title: `${input.appName} Launch And Read`,
+      category: 'desktop',
+      routeId: null,
+      executionKind: 'run_computer_task',
+      risk: input.risk,
+      confidence: Number(Math.max(input.base.confidence, input.confidence).toFixed(2)),
+      recommendedTools: namedDesktopReadToolsFor(input.appName),
+      executionRequirements: [
+        `local desktop bridge able to launch, focus, wait for, and observe ${input.appName}`,
+        `exact ${input.appName} process/window identity before returning state`,
+      ],
+      solutionSteps: [
+        `Observe whether ${input.appName} is running and identify its window.`,
+        `Launch ${input.appName} only when it is not already running, then wait until it is ready.`,
+        'Return only the requested app-native, window, accessibility, menu, or visible state.',
+      ],
+      completionCriteria: [
+        `${input.appName} is running/focused as requested and the requested read-only state is returned, or an exact blocker is reported`,
+      ],
+      approvalTriggers: [],
+      persistenceTargets: ['computer_task_state', 'run_ledger', 'chat_message'],
+    };
+  }
   const keepNativeProfile = DESKTOP_NATIVE_PIPELINE_IDS.has(input.base.id);
   const recommendedTools = uniqueStrings([
     ...NAMED_DESKTOP_BASE_TOOLS,
@@ -1725,6 +1932,13 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
   const proof = route.completionProof || [];
   const items: ChatComputerRequestActionItem[] = [];
   const exactProgram = compileComputerSequenceProgram(route.sourceMessage);
+  const readOnlyDesktopRoute = route.kind === 'desktop_app'
+    && !route.approvalRequired
+    && (
+      route.appAutomationRouteDecision?.taskFamily === 'app launch/read observation'
+      || /\bLaunch And Read$/i.test(route.selectedPipeline?.title || '')
+      || classifyGenericAppTaskFamily(route.sourceMessage || '') === 'launch_or_read'
+    );
 
   if (exactProgram?.id === 'photoshop_new_document') {
     return exactProgram.steps.map((step, index) => {
@@ -1740,6 +1954,23 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
           : step.tool === 'desktop.photoshop_create_document'
             ? 'App-native receipt for the directly requested unsaved blank document.'
             : 'App-native Photoshop status/launch receipt.',
+      });
+    });
+  }
+
+  if (route.deterministicLifecycleReadProgram) {
+    const program = route.deterministicLifecycleReadProgram;
+    return program.steps.map((step, index) => {
+      const isFinalObservation = step.tool === 'desktop.observe_app'
+        && index === program.steps.length - 1;
+      return buildActionItem({
+        id: `lifecycle-${index + 1}-${step.tool.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`,
+        surface: isFinalObservation ? 'verification' : 'desktop_app',
+        tool: step.tool,
+        label: step.note,
+        proof: isFinalObservation
+          ? route.evidenceContract?.proofAfter?.[0] || `Fresh ${program.targetAppName} process and foreground proof.`
+          : `Bounded ${program.targetAppName} lifecycle receipt (${step.when}).`,
       });
     });
   }
@@ -1837,7 +2068,9 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
         id: 'observe-app-state',
         surface: 'desktop_app',
         tool: observeTool,
-        label: 'Observe the app/document/window state with the strongest available desktop tool before mutation.',
+        label: readOnlyDesktopRoute
+          ? 'Read the requested app/window state with the smallest available observation tool.'
+          : 'Observe the app/document/window state with the strongest available desktop tool before mutation.',
         proof: route.evidenceContract?.observeBefore?.[0] || 'Fresh app/window state.',
       }));
     }
@@ -1853,7 +2086,7 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
       }));
     }
 
-    const actionTool = firstTool(tools, [
+    const actionTool = readOnlyDesktopRoute ? null : firstTool(tools, [
       'desktop.run_applescript',
       'desktop.photoshop_update_text_layer',
       'desktop.photoshop_set_layer_state',
@@ -1888,6 +2121,10 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
       'desktop.indesign_text_inventory',
       'desktop.photoshop_document_status',
       'desktop.indesign_document_status',
+      'desktop.observe_app',
+      'desktop.window_state',
+      'desktop.read_a11y_tree',
+      'desktop.menu_inventory',
       'desktop.screenshot',
       'desktop.file_stat',
     ]);
@@ -1896,7 +2133,9 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
         id: 'verify-desktop-result',
         surface: 'verification',
         tool: verifyTool,
-        label: 'Verify the requested desktop-app state immediately after the action.',
+        label: readOnlyDesktopRoute
+          ? 'Confirm the requested read-only desktop-app state after launch or focus.'
+          : 'Verify the requested desktop-app state immediately after the action.',
         proof: proof[0] || route.evidenceContract?.proofAfter?.[0] || 'Fresh verification state.',
       }));
     }
@@ -2080,7 +2319,14 @@ export function buildChatComputerRequestRoute(
   if (isAutomationMetaQuestion(normalized)) return null;
   if (isAppGuidanceOrChoiceQuestion(normalized)) return null;
 
-  let namedAppAction = detectExplicitNamedAppAction(normalized);
+  const appResolutionContext = opts.appResolutionContext ?? getAppResolutionContext();
+  const lifecycleObservedNames = observedLifecycleAppNames(appResolutionContext);
+  const exactProgram = compileComputerSequenceProgram(normalized);
+  let namedAppAction = detectExplicitNamedAppAction(normalized, lifecycleObservedNames);
+  // A lifecycle-shaped phrase whose target failed the shared named-app guard
+  // is not permission to invent an app identity through generic strategy
+  // inference (for example, "Open the door" or "Open task manager").
+  if (!namedAppAction && !exactProgram && hasStrictNamedAppLifecycleCommandShape(normalized)) return null;
 
   const bestMatch = getBestUserTaskPipeline(normalized, { includeFallback: false });
   const initialPipeline = bestMatch ? summarizeUserTaskPipelineMatch(bestMatch) : null;
@@ -2103,7 +2349,6 @@ export function buildChatComputerRequestRoute(
 
   const pipelineDecision = opts.pipelineDecision ?? buildUserTaskPipelineDecision(normalized, { includeFallback: false });
   const preview = planComputerTaskPreview(normalized);
-  const exactProgram = compileComputerSequenceProgram(normalized);
   // "Export as PNG" is a direct file conversion only when the user did not
   // explicitly choose an app. In "Open Pixelmator Pro and export…", app
   // identity is a hard surface constraint, not a hint to bypass the app.
@@ -2148,7 +2393,6 @@ export function buildChatComputerRequestRoute(
   // Wave-2 task→best-app resolution. URL-bearing and generic web-browsing
   // intents keep today's direct browser routing untouched — stamping
   // "Browser" as an app choice adds noise without changing behavior.
-  const appResolutionContext = opts.appResolutionContext ?? getAppResolutionContext();
   const rawAppResolution = resolveBestAppForTask(normalized, appResolutionContext);
   let appResolution = rawAppResolution && rawAppResolution.category !== 'web_browsing'
     ? summarizeAppResolution(rawAppResolution)
@@ -2269,11 +2513,12 @@ export function buildChatComputerRequestRoute(
   const selectedPipelineBase: UserTaskPipelineSummary = !exactProgram
     && namedAppAction?.surface === 'desktop_app'
     && kind === 'desktop_app'
-    ? buildNamedDesktopPipelineSummary({
+      ? buildNamedDesktopPipelineSummary({
         appName: namedAppAction.appName,
         base: selectedPipelineCandidate,
         risk,
         confidence,
+        intent: namedAppAction.intent,
       })
     : !exactProgram && namedAppAction?.surface === 'local_file' && kind === 'local_file'
       ? synthesizePipelineSummary('local_file', strategy, preview, risk, confidence)
@@ -2348,7 +2593,16 @@ export function buildChatComputerRequestRoute(
   });
   const appAutomationRouteDecision = exactProgram || kind === 'local_file' || kind === 'agent_buildout' || strategy?.id === 'agent_asset_acquisition'
     ? null
-    : buildAppAutomationRouteDecision(normalized);
+    : buildAppAutomationRouteDecision(normalized, {
+        preferred: namedAppAction?.surface === 'desktop_app'
+          ? {
+              targetName: namedAppAction.appName,
+              taskFamily: namedAppAction.intent === 'launch_or_read'
+                ? 'app launch/read observation'
+                : undefined,
+            }
+          : undefined,
+      });
   const userConstraints = parseChatComputerUserConstraints(normalized);
   const alwaysConfirmFloor = detectAlwaysConfirmFloorCategories(normalized);
   const stickyScopes = opts.stickyScopes ?? getActiveStickyScopes();
@@ -2369,6 +2623,17 @@ export function buildChatComputerRequestRoute(
     requestedCategories: categoriesInText(normalized),
     directUserAuthorizedLocalDraft: exactProgram?.authorization.mode === 'direct_user_request',
   });
+  const approvalFreeDesktopRead = !exactProgram
+    && kind === 'desktop_app'
+    && namedAppAction?.surface === 'desktop_app'
+    && namedAppAction.intent === 'launch_or_read'
+    && !approval.required;
+  const deterministicLifecycleReadProgram = approvalFreeDesktopRead
+    ? buildDeterministicNamedAppLifecycleReadProgram(normalized, namedAppAction, lifecycleObservedNames)
+    : null;
+  const desktopProductWithoutFileWork = kind === 'desktop_app'
+    && /\bdesktop$/i.test(namedAppAction?.appName || '')
+    && !requestHasExplicitLocalArtifact(normalized);
   const recommendedToolCandidates = exactProgram
     ? uniqueStrings(exactProgram.steps.map((step) => step.tool))
     : uniqueStrings([
@@ -2384,12 +2649,17 @@ export function buildChatComputerRequestRoute(
         ...(selectedPipeline.recommendedTools || []),
         ...(approval.required ? ['approvals.request'] : []),
       ]);
-  const recommendedTools = (!exactProgram && namedAppAction?.surface === 'desktop_app' && kind === 'desktop_app'
+  const recommendedTools = deterministicLifecycleReadProgram
+    ? uniqueStrings(deterministicLifecycleReadProgram.steps.map((step) => step.tool))
+    : approvalFreeDesktopRead
+      ? namedDesktopReadToolsFor(namedAppAction?.appName || '').slice(0, 28)
+    : (!exactProgram && namedAppAction?.surface === 'desktop_app' && kind === 'desktop_app'
     ? uniqueStrings([
         ...NAMED_DESKTOP_BASE_TOOLS,
         ...recommendedToolCandidates.filter((tool) => (
           !isBrowserExecutionTool(tool)
           && (tool !== 'approvals.request' || approval.required)
+          && (!desktopProductWithoutFileWork || (!tool.startsWith('desktop.file_') && tool !== 'desktop.open_path'))
         )),
       ])
     : kind === 'local_file'
@@ -2400,14 +2670,19 @@ export function buildChatComputerRequestRoute(
         `final desktop.photoshop_document_status reports the requested active document dimensions`,
         'created Photoshop document name and dimensions from app-native status',
       ]
-    : uniqueStrings([
+    : approvalFreeDesktopRead
+      ? [
+          `exact ${namedAppAction?.appName || 'desktop app'} process/window identity after launch or focus`,
+          'requested app-native status, accessibility value, menu state, or visible window observation',
+        ]
+      : uniqueStrings([
         ...(directImageConversion ? ['converted output file_stat', 'output basename and byte size'] : []),
         ...(stagedBrowserTransferIntoDesktopApp ? ['downloaded artifact file_stat', 'target app/window state after import'] : []),
         ...(surfacePlan?.completionProof || []),
         ...(strategy?.verificationOrder || []),
         ...(designPipeline ? ['design document inventory', 'proof screenshot or exported proof', 'output file stats'] : []),
-      ]).slice(0, 12);
-  const fallbackPipelineIds = exactProgram
+        ]).slice(0, 12);
+  const fallbackPipelineIds = exactProgram || deterministicLifecycleReadProgram
     ? []
     : uniqueStrings([
         ...(pipelineDecision?.supporting.map((item) => item.id) || []),
@@ -2420,7 +2695,7 @@ export function buildChatComputerRequestRoute(
     : namedAppAction && kind !== 'hybrid'
       ? `${kind.replace(/_/g, ' ')}: ${namedAppAction.appName}${selectedPipeline.title !== namedAppAction.appName ? ` via ${selectedPipeline.title}` : ''}`
     : buildBestPath({ kind, preview, strategy, designPipeline, pipeline: selectedPipeline });
-  const aiNeed = classifyDesktopTaskAiNeed({
+  const classifiedAiNeed = classifyDesktopTaskAiNeed({
     message: normalized,
     kind,
     strategyId: strategy?.id || null,
@@ -2428,16 +2703,41 @@ export function buildChatComputerRequestRoute(
     hasDesignPipeline: Boolean(designPipeline),
     recommendedTools,
   });
+  // Only the strict single-intent open/launch/focus grammar is safe to run as
+  // a no-model local program. A request that also asks Chat to interpret app
+  // state keeps the read-only tool surface but must not claim `aiNeed:none`
+  // and then fall through to an unavailable relay by accident.
+  const aiNeed: DesktopTaskAiNeedClassification = deterministicLifecycleReadProgram
+    ? {
+        level: 'none',
+        label: 'No AI needed',
+        reason: 'The strict named-app lifecycle request compiles to an immutable local observe, launch/focus, and verification program.',
+        deterministicTools: recommendedTools,
+        aiSurfaces: [],
+      }
+    : approvalFreeDesktopRead && classifiedAiNeed.level === 'none'
+      ? {
+          level: 'assistive',
+          label: 'AI assisted',
+          reason: 'The app lifecycle is deterministic, but interpreting the requested app state requires the selected semantic read loop.',
+          deterministicTools: classifiedAiNeed.deterministicTools,
+          aiSurfaces: ['read-only app state interpretation'],
+        }
+      : classifiedAiNeed;
   const modelOrchestration = buildChatComputerModelOrchestration({
     message: normalized,
     kind,
     recommendedTools,
     aiNeed,
     exactProgramAuthorization: exactProgram?.authorization || null,
+    deterministicLifecycleReadProgram,
   });
   const notes = uniqueStrings([
     `Computer request route: ${bestPath}.`,
     exactProgram ? `Exact program owns execution: ${exactProgram.steps.map((step) => step.tool).join(' -> ')}.` : null,
+    deterministicLifecycleReadProgram
+      ? `Deterministic lifecycle program owns execution: ${deterministicLifecycleReadProgram.steps.map((step) => step.tool).join(' -> ')}.`
+      : null,
     `Preview kind: ${preview.kind}.`,
     `AI need: ${aiNeed.label} — ${aiNeed.reason}`,
     `Model orchestration: ${modelOrchestration.mode}; ${modelOrchestration.modelSelectionHint}`,
@@ -2487,12 +2787,13 @@ export function buildChatComputerRequestRoute(
     completionProof,
     aiNeed,
     modelOrchestration,
+    deterministicLifecycleReadProgram,
     actionItems: [],
     evidenceContract: null,
     userConstraints,
     alwaysConfirmFloor,
     stickyScopeApplied: approval.stickyApplied,
-    appResolution: exactProgram ? null : appResolution,
+    appResolution: exactProgram || deterministicLifecycleReadProgram ? null : appResolution,
     notes,
   };
   route.evidenceContract = buildComputerTaskEvidenceContract(route);
@@ -2535,6 +2836,18 @@ export function buildChatComputerRequestRoutePromptBlock(message: string): strin
       `Completion proof: ${route.completionProof.join(' | ') || 'exact blocker or final answer'}`,
       'Execution rule: execute this one compiled program in order. No file/source/layer/export/buildout planning and no generic fallback pipeline applies.',
     ].filter(Boolean).join('\n');
+  }
+  if (route.deterministicLifecycleReadProgram) {
+    const program = route.deterministicLifecycleReadProgram;
+    return [
+      '## Chat Computer Request Route — Deterministic Local Lifecycle',
+      `Target app: ${program.targetAppName}`,
+      `Dispatch app identity: ${program.dispatchAppName}`,
+      `Operation: ${program.operation}; approval=not required`,
+      `Program: ${program.steps.map((step, index) => `${index + 1}. ${step.tool} (${step.when})`).join(' -> ')}`,
+      `Completion proof: ${route.completionProof.join(' | ')}`,
+      'Execution rule: dispatch through the local observe-first native activation adapter. Do not call a selected-model, SwanBot, or text-only AI relay.',
+    ].join('\n');
   }
   return [
     '## Chat Computer Request Route',

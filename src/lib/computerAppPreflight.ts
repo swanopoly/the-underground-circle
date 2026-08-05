@@ -22,6 +22,7 @@ import {
   type AppAutomationRouteDecision,
 } from './appAutomationControlSurfaces';
 import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
+import { classifyGenericAppTaskFamily, inferGenericAppName } from './genericAppNavigator';
 
 export type ComputerAppPreflightSeverity = 'info' | 'warning' | 'blocker';
 
@@ -174,7 +175,10 @@ function shouldBuildRouteDecision(strategy: ComputerAppTaskStrategy | null): str
   return Boolean(strategy && ROUTE_DECISION_STRATEGIES.has(strategy.id));
 }
 
-function buildRouteDecisionItem(decision: AppAutomationRouteDecision): ComputerAppPreflightItem | null {
+function buildRouteDecisionItem(
+  decision: AppAutomationRouteDecision,
+  options: { readOnly?: boolean } = {},
+): ComputerAppPreflightItem | null {
   if (decision.status === 'ready_to_execute') {
     return {
       id: 'route-decision:ready',
@@ -185,6 +189,15 @@ function buildRouteDecisionItem(decision: AppAutomationRouteDecision): ComputerA
     };
   }
   if (decision.status === 'needs_observation') {
+    if (options.readOnly) {
+      return {
+        id: 'route-decision:read-observation',
+        severity: 'info',
+        label: 'Read-only app observation queued',
+        detail: `${decision.targetName} needs a fresh app/window observation before returning the requested state.`,
+        fix: decision.nextSteps[0] || 'Collect the smallest read-only app/window observation, then return it.',
+      };
+    }
     return {
       id: 'route-decision:needs-observation',
       severity: 'warning',
@@ -435,6 +448,10 @@ export function buildComputerAppPreflight(args: {
   const exactProgram = compileComputerSequenceProgram(args.task);
   const ownsPhotoshopBlankDocument = exactProgram?.id === 'photoshop_new_document';
   const directRequestAuthorized = exactProgram?.authorization.mode === 'direct_user_request';
+  const parsedAppName = inferGenericAppName(args.task);
+  const approvalFreeAppRead = !ownsPhotoshopBlankDocument
+    && Boolean(parsedAppName)
+    && classifyGenericAppTaskFamily(args.task, { targetAppName: parsedAppName }) === 'launch_or_read';
   // The compiled blank-document path has no source file, asset package,
   // output file, layer edit, coordinate fallback, or connected-agent gap.
   // Its entire capability footprint is the desktop bridge plus Photoshop
@@ -443,21 +460,28 @@ export function buildComputerAppPreflight(args: {
   // per-tool stop.
   const requiredCapabilities: ComputerCapabilityId[] = ownsPhotoshopBlankDocument
     ? ['desktop_control', 'app_tools']
-    : STRATEGY_CAPABILITIES[strategy.id] || [];
+    : approvalFreeAppRead
+      ? ['desktop_control']
+      : STRATEGY_CAPABILITIES[strategy.id] || [];
   const capabilityItems = requiredCapabilities.map((capability) => buildCapabilityItem(capability, statusFor(args.audit, capability)));
   const routeDecision = !ownsPhotoshopBlankDocument && shouldBuildRouteDecision(strategy)
     // Feed the capability audit in as observed evidence so the decision reflects
     // what's actually connected (bridge, file grants) instead of reporting
     // needs_observation for infrastructure we already know is present.
-    ? buildAppAutomationRouteDecision(args.task, { observedEvidence: deriveAuditObservedEvidence(args.audit) })
+    ? buildAppAutomationRouteDecision(args.task, {
+        observedEvidence: deriveAuditObservedEvidence(args.audit),
+        preferred: approvalFreeAppRead && parsedAppName
+          ? { targetName: parsedAppName, taskFamily: 'app launch/read observation' }
+          : undefined,
+      })
     : null;
-  const capabilityExpansionPlan = ownsPhotoshopBlankDocument
+  const capabilityExpansionPlan = ownsPhotoshopBlankDocument || approvalFreeAppRead
     ? null
     : buildComputerCapabilityExpansionPlan(args.task, args.audit);
   // Research-first buildout detail for an unfamiliar (non-Adobe) app, attached
   // up front when a connected-agent buildout is already indicated. Adobe keeps
   // its richer design path; self-gates to null otherwise.
-  const appAdapterGapContract = (ownsPhotoshopBlankDocument || buildDesignAppAutomationPlan(args.task))
+  const appAdapterGapContract = (ownsPhotoshopBlankDocument || approvalFreeAppRead || buildDesignAppAutomationPlan(args.task))
     ? null
     : buildAppAdapterGapPlan(args.task)?.contract || null;
   const buildoutIndicated = !!appAdapterGapContract && (
@@ -478,7 +502,9 @@ export function buildComputerAppPreflight(args: {
         retryPrompt: appAdapterGapContract.retryPrompt,
       }
     : null;
-  const routeDecisionItem = routeDecision ? buildRouteDecisionItem(routeDecision) : null;
+  const routeDecisionItem = routeDecision
+    ? buildRouteDecisionItem(routeDecision, { readOnly: approvalFreeAppRead })
+    : null;
   const strategyItems = ownsPhotoshopBlankDocument
     ? [{
         id: 'photoshop:exact-blank-document-program',
@@ -489,7 +515,15 @@ export function buildComputerAppPreflight(args: {
           ? 'Execute the directly requested unsaved blank-document program without a redundant approval stop.'
           : 'After the enclosing Chat plan approval, execute the oversized blank-document program without a second per-tool stop.',
       }]
-    : buildStrategySpecificItems(strategy, args.task);
+    : approvalFreeAppRead
+      ? [{
+          id: 'desktop-app:approval-free-launch-read',
+          severity: 'info' as const,
+          label: 'Approval-free app launch/read route selected',
+          detail: 'This route may launch, focus, wait for, and observe the exact app, but cannot click, type, mutate app state, access local files, or build capabilities.',
+          fix: 'Run the smallest lifecycle/read observation sequence and return the requested app state.',
+        }]
+      : buildStrategySpecificItems(strategy, args.task);
   const allItems = [...capabilityItems, ...strategyItems, routeDecisionItem].filter(Boolean) as ComputerAppPreflightItem[];
   const blockers = allItems.filter((item) => item.severity === 'blocker');
   const warnings = allItems.filter((item) => item.severity === 'warning');

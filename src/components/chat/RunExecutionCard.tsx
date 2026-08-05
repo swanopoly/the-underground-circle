@@ -406,7 +406,15 @@ export default function RunExecutionCard({
                         backendDetails: session.backendDetails,
                         requiresApproval: false,
                         recommendedPermission: session.recommendedPermission,
-                        status: session.status === 'completed' ? 'completed' : session.status === 'failed' ? 'failed' : 'launched',
+                        status: session.status === 'completed'
+                          ? 'completed'
+                          : session.status === 'failed'
+                            ? 'failed'
+                            : session.status === 'blocked'
+                              ? 'blocked'
+                              : session.status === 'cancelled'
+                                ? 'cancelled'
+                                : 'launched',
                         launchedAt: session.startedAt,
                         completedAt: session.completedAt,
                         backendSessionId: session.backendSessionId,

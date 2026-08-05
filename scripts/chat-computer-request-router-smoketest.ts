@@ -208,6 +208,26 @@ if (!exactPhotoshopRoute) {
   }
 }
 
+for (const task of [
+  'Can you open Photoshop and start a new project 600 x 600?',
+  'Could you open Photoshop and start a new project 600 x 600?',
+  'Would you open Photoshop and start a new project 600 x 600?',
+  'I need you to open Photoshop and start a new project 600 x 600',
+  'Can you open Photoshop and create a 600 x 600 document?',
+  'I need you to open Photoshop and create a 600 by 600 document',
+]) {
+  const route = buildChatComputerRequestRoute(task);
+  if (
+    route?.modelOrchestration?.mode !== 'deterministic_local_program'
+    || route.approvalRequired
+    || !route.actionItems.some((item) => item.tool === 'desktop.photoshop_create_document')
+  ) {
+    fail(`polite exact Photoshop request must retain the direct local compiler path: ${task}`);
+  } else {
+    pass(`polite exact Photoshop request retains the direct local compiler path: ${task}`);
+  }
+}
+
 const oversizedPhotoshopRoute = buildChatComputerRequestRoute('Open Photoshop and create a new document 5000 x 5000');
 if (!oversizedPhotoshopRoute?.approvalRequired || !/allocation|approval/i.test(oversizedPhotoshopRoute.approvalReason || '')) {
   fail(`oversized exact Photoshop allocation must retain approval, got ${oversizedPhotoshopRoute?.approvalReason || 'none'}`);
@@ -836,6 +856,9 @@ for (const universalDesktopCase of [
   'Use AdminNest and authenticate with stored credentials',
   'Use CRMBridge and connect the account',
   'Use VLC to turn on subtitles',
+  'Open Docker Desktop and stop the running container',
+  'Open Microsoft Remote Desktop and disconnect the current session',
+  'Open Music and pause the current track',
 ]) {
   const route = buildChatComputerRequestRoute(universalDesktopCase);
   const browserToolLeak = route?.recommendedTools.some((tool) => /^browser\.|^capability\.browser/.test(tool));
@@ -877,18 +900,116 @@ for (const readOnlyDesktopCase of [
   'Open Music and tell me what is playing',
   'Open Mail and tell me the unread count',
   'Open Calculator and tell me the current result',
+  'Open Image Capture',
+  'Open Photoshop',
+  'Open Docker Desktop',
+  'Open Microsoft Remote Desktop',
 ]) {
   const route = buildChatComputerRequestRoute(readOnlyDesktopCase);
+  const forbiddenReadTools = route?.recommendedTools.filter((tool) => (
+    tool.startsWith('desktop.file_')
+    || /^(?:desktop\.(?:run_applescript|click_element|set_element_value|menu_click|press_keys|type_text|paste_text|mouse_click|mouse_drag)|research\.|agent\.build_app_capability|fetch_url|tools\.search)/.test(tool)
+  )) || [];
   if (
     route?.kind !== 'desktop_app'
     || route.routeId !== null
     || route.risk !== 'safe'
     || route.approvalRequired
-    || route.actionItems.some((item) => item.surface === 'approval' || item.tool.startsWith('browser.'))
+    || forbiddenReadTools.length > 0
+    || route.actionItems.some((item) => item.id === 'execute-desktop-action' || item.surface === 'approval' || item.tool.startsWith('browser.'))
   ) {
-    fail(`read-only desktop request should run without mutation approval: ${readOnlyDesktopCase}`);
+    fail(`read-only desktop request should expose only lifecycle/read tools: ${readOnlyDesktopCase} (${forbiddenReadTools.join(', ')})`);
   } else {
     pass(`read-only desktop request has no approval: ${readOnlyDesktopCase}`);
+  }
+}
+
+for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
+  ['Open Photoshop', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Launch Image Capture', 'Image Capture', 'Image Capture', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Open Docker Desktop', 'Docker Desktop', 'Docker', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Open Microsoft Remote Desktop', 'Microsoft Remote Desktop', 'Microsoft Remote Desktop', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Focus Photoshop', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Focus Visual Studio Code', 'Visual Studio Code', 'Visual Studio Code', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Start TextEdit', 'TextEdit', 'TextEdit', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Switch to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring Slack to the front', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Activate Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Can you open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Could you launch Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Would you open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Can you please open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Open Photoshop please', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Open up Photoshop', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Switch over to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring Slack forward', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring forward Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Open settings', 'settings', 'System Settings', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Open Chrome', 'Chrome', 'Google Chrome', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Launch Firefox', 'Firefox', 'Firefox', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+] as const) {
+  const route = buildChatComputerRequestRoute(task);
+  const program = route?.deterministicLifecycleReadProgram;
+  const actionTools = route?.actionItems.map((item) => item.tool) || [];
+  const prompt = buildChatComputerRequestRoutePromptBlock(task) || '';
+  if (
+    route?.aiNeed?.level !== 'none'
+    || route.risk !== 'safe'
+    || route.approvalRequired
+    || route.modelOrchestration?.mode !== 'deterministic_local_program'
+    || route.modelOrchestration.coordinator !== 'chat_plan_then_local_program'
+    || program?.id !== 'named_app_lifecycle_read'
+    || program.targetAppName !== expectedTarget
+    || program.dispatchAppName !== expectedDispatch
+    || JSON.stringify(actionTools) !== JSON.stringify(expectedTools)
+    || route.recommendedTools.some((tool) => !expectedTools.includes(tool as any))
+    || /selected_chat_model_then_openswan|model_guided_tools/.test(prompt)
+  ) {
+    fail(`strict lifecycle request must compile to deterministic local dispatch without a model relay: ${task} (${JSON.stringify({
+      aiNeed: route?.aiNeed?.level,
+      orchestration: route?.modelOrchestration,
+      program,
+      actionTools,
+    })})`);
+  } else {
+    pass(`strict lifecycle request bypasses the model relay: ${task}`);
+  }
+}
+
+for (const task of [
+  'Should I open Photoshop?',
+  'Can you open Photoshop and create a document?',
+  'Could you launch Photoshop, then tell me which document is open?',
+  'Open the door',
+  'Open my file',
+  'Open task manager',
+]) {
+  const route = buildChatComputerRequestRoute(task);
+  const mustStayOutOfComputerRouting = /^(?:Open the door|Open my file|Open task manager)$/i.test(task);
+  if (
+    route?.deterministicLifecycleReadProgram
+    || route?.modelOrchestration?.mode === 'deterministic_local_program'
+    || (mustStayOutOfComputerRouting && route)
+  ) {
+    fail(`non-lifecycle or follow-up request must not enter deterministic local dispatch: ${task}`);
+  } else {
+    pass(`non-lifecycle or follow-up request stays out of deterministic local dispatch: ${task}`);
+  }
+}
+
+for (const semanticReadTask of [
+  'Use Houdini and inspect the project',
+  'Open Music and tell me what is playing',
+]) {
+  const route = buildChatComputerRequestRoute(semanticReadTask);
+  if (
+    route?.deterministicLifecycleReadProgram
+    || route?.aiNeed?.level !== 'assistive'
+    || route.modelOrchestration?.mode !== 'model_guided_tools'
+  ) {
+    fail(`semantic app-state interpretation must remain read-only but model assisted: ${semanticReadTask}`);
+  } else {
+    pass(`semantic app-state interpretation does not masquerade as a deterministic lifecycle program: ${semanticReadTask}`);
   }
 }
 
@@ -941,6 +1062,9 @@ for (const mutationDesktopCase of [
   'In Excel, set A1 to Hello',
   'In Word, make the title bold',
   'Use Figma to toggle the grid',
+  'Open Docker Desktop and stop the running container',
+  'Open Microsoft Remote Desktop and disconnect the current session',
+  'Open Music and pause the current track',
 ]) {
   const route = buildChatComputerRequestRoute(mutationDesktopCase);
   if (
@@ -952,6 +1076,34 @@ for (const mutationDesktopCase of [
     fail(`named desktop mutation must retain the review/native profile: ${mutationDesktopCase}`);
   } else {
     pass(`named desktop mutation retains review/native profile: ${mutationDesktopCase}`);
+  }
+}
+
+for (const desktopNamedProductCase of [
+  'Open Docker Desktop and stop the running container',
+  'Open Microsoft Remote Desktop and disconnect the current session',
+]) {
+  const route = buildChatComputerRequestRoute(desktopNamedProductCase);
+  const evidenceText = route?.evidenceContract
+    ? [
+        ...route.evidenceContract.observeBefore,
+        ...route.evidenceContract.proofAfter,
+        ...route.evidenceContract.freshEvidenceRequired,
+      ].join(' | ')
+    : '';
+  const expectedTarget = /microsoft/i.test(desktopNamedProductCase)
+    ? 'Microsoft Remote Desktop'
+    : 'Docker Desktop';
+  if (
+    route?.kind !== 'desktop_app'
+    || route.appAutomationRouteDecision?.targetName !== expectedTarget
+    || route.evidenceContract?.targetName !== expectedTarget
+    || route.recommendedTools.some((tool) => tool.startsWith('desktop.file_'))
+    || /file_stat|source file|output destination|output file|exported proof artifact/i.test(evidenceText)
+  ) {
+    fail('desktop-named product must not become a local-file workflow: ' + desktopNamedProductCase);
+  } else {
+    pass('desktop-named product stays app-native without file evidence: ' + desktopNamedProductCase);
   }
 }
 
@@ -1467,6 +1619,49 @@ for (const precisionCase of [
   // Unhydrated registry fails honest: bridge offline → known-good web app
   // wins, and the route is CREATED for the app-workbench task.
   setAppResolutionContext({ bridgeOnline: false });
+
+  const installedLowercaseRoute = buildChatComputerRequestRoute('open houdini', {
+    appResolutionContext: { bridgeOnline: true, installedApps: ['Houdini.app'] },
+  });
+  if (
+    installedLowercaseRoute?.kind !== 'desktop_app'
+    || installedLowercaseRoute.aiNeed?.level !== 'none'
+    || installedLowercaseRoute.modelOrchestration?.mode !== 'deterministic_local_program'
+    || installedLowercaseRoute.deterministicLifecycleReadProgram?.targetAppName !== 'houdini'
+    || installedLowercaseRoute.deterministicLifecycleReadProgram?.dispatchAppName !== 'Houdini'
+  ) {
+    fail(`exact installed lowercase app must enter deterministic native lifecycle (${JSON.stringify({
+      kind: installedLowercaseRoute?.kind,
+      aiNeed: installedLowercaseRoute?.aiNeed?.level,
+      orchestration: installedLowercaseRoute?.modelOrchestration,
+      program: installedLowercaseRoute?.deterministicLifecycleReadProgram,
+    })})`);
+  } else pass('installed lowercase long-tail app routes through deterministic native lifecycle');
+
+  const runningLowercaseRoute = buildChatComputerRequestRoute('open acme studio', {
+    appResolutionContext: { bridgeOnline: true, runningApps: ['Acme Studio'] },
+  });
+  if (
+    runningLowercaseRoute?.deterministicLifecycleReadProgram?.dispatchAppName !== 'Acme Studio'
+    || runningLowercaseRoute.aiNeed?.level !== 'none'
+  ) {
+    fail(`exact running lowercase app must enter deterministic native lifecycle (${JSON.stringify(runningLowercaseRoute?.deterministicLifecycleReadProgram)})`);
+  } else pass('running lowercase long-tail app routes through deterministic native lifecycle');
+
+  for (const [label, context] of [
+    ['unavailable', { bridgeOnline: true, installedApps: ['Maya'] }],
+    ['offline stale inventory', { bridgeOnline: false, installedApps: ['Houdini'] }],
+  ] as const) {
+    if (buildChatComputerRequestRoute('open houdini', { appResolutionContext: context })) {
+      fail(`${label} lowercase long-tail app must stay out of computer routing`);
+    } else pass(`${label} lowercase long-tail app is rejected`);
+  }
+  if (buildChatComputerRequestRoute('open task manager', {
+    appResolutionContext: { bridgeOnline: true, installedApps: ['Task Manager'] },
+  })) {
+    fail('ambiguous task-manager noun must remain rejected despite a noisy observed-name match');
+  } else pass('false-noun guard outranks observed lowercase app names');
+
   const webRoute = buildChatComputerRequestRoute('edit this photo');
   if (!webRoute || !webRoute.appResolution) {
     fail('resolution: "edit this photo" should create a route with an app resolution');

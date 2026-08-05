@@ -44,6 +44,12 @@ function assert(cond: boolean, label: string) {
     ['make a new 1920 by 1080 canvas in Photoshop', 1920, 1080],
     ['photoshop: new blank document 300×250', 300, 250],
     ['Start a new Photoshop project 512 x 512 px', 512, 512],
+    ['Can you open Photoshop and start a new project 600 x 600?', 600, 600],
+    ['Could you open Photoshop and start a new project 640 x 480?', 640, 480],
+    ['Would you open Photoshop and start a new project 800 x 600?', 800, 600],
+    ['I need you to open Photoshop and start a new project 1024 x 768', 1024, 768],
+    ['Can you open Photoshop and create a 600 x 600 document?', 600, 600],
+    ['I need you to open Photoshop and create a 600 by 600 document', 600, 600],
   ] as const) {
     const program = compileComputerSequenceProgram(task);
     const create = program?.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
