@@ -18,9 +18,9 @@
  * threshold, and the corroborated duplicate predicate are the ones proven in
  * `src/lib/memoryDedupeCore.ts`. They are restated here only because this
  * module is imported by a DENO edge function, and Deno resolves the whole
- * module graph: `memoryDedupeCore.ts` carries an extensionless
- * `import type { MemoryKind } from './agentRunSystem'`, which makes
- * `deno check supabase/functions/swanbot-v2-ai/index.ts` fail (TS2307). Every
+ * module graph: `memoryDedupeCore.ts` carries a type-only dependency on the
+ * extensionless `./agentRunSystem` module, which makes `deno check
+ * supabase/functions/swanbot-v2-ai/index.ts` fail (TS2307). Every
  * other core the edge already imports (v2ToolSelectionCore, userMemoryCaps,
  * toolConnectivityGateCore, …) is likewise import-free — that is the house
  * rule for edge-importable modules, not an accident.

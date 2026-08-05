@@ -40,6 +40,14 @@ const corsHeaders = {
 // the same function works in both environments.
 const APP_URL = Deno.env.get("APP_URL") || "https://app.chrisswanson.xyz";
 
+// New deployments use the explicit GOOGLE_OAUTH_* names. Keep the legacy
+// GOOGLE_* aliases as a read-only fallback so projects can deploy this
+// function before rotating their existing OAuth secrets.
+const getGoogleClientId = () =>
+  Deno.env.get("GOOGLE_OAUTH_CLIENT_ID") || Deno.env.get("GOOGLE_CLIENT_ID");
+const getGoogleClientSecret = () =>
+  Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET") || Deno.env.get("GOOGLE_CLIENT_SECRET");
+
 // Scope sets — matches Hermes's `--services` shorthand so the UI can
 // offer checkboxes that map directly to granular consent.
 const SCOPE_SETS: Record<string, string[]> = {
@@ -92,7 +100,7 @@ async function handleAuthorize(req: Request, url: URL): Promise<Response> {
   const userId = await getAuthedUser(req);
   if (!userId) return jsonResponse({ error: "Unauthenticated" }, 401);
 
-  const clientId = Deno.env.get("GOOGLE_OAUTH_CLIENT_ID");
+  const clientId = getGoogleClientId();
   if (!clientId) return jsonResponse({ error: "GOOGLE_OAUTH_CLIENT_ID not configured" }, 500);
 
   // Parse requested services. Default to the full set if none specified.
@@ -180,8 +188,8 @@ async function handleCallback(url: URL): Promise<Response> {
   // in-flight can't succeed twice.
   await supabase.from("google_oauth_states").delete().eq("state", state);
 
-  const clientId = Deno.env.get("GOOGLE_OAUTH_CLIENT_ID")!;
-  const clientSecret = Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET")!;
+  const clientId = getGoogleClientId()!;
+  const clientSecret = getGoogleClientSecret()!;
   const callbackUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/google-oauth?action=callback`;
 
   // Exchange the code.
@@ -293,8 +301,8 @@ async function handleToken(req: Request): Promise<Response> {
     return jsonResponse({ error: "reconnect_required" }, 401);
   }
 
-  const clientId = Deno.env.get("GOOGLE_OAUTH_CLIENT_ID");
-  const clientSecret = Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET");
+  const clientId = getGoogleClientId();
+  const clientSecret = getGoogleClientSecret();
   if (!clientId || !clientSecret) {
     return jsonResponse({ error: "Google OAuth not configured" }, 500);
   }

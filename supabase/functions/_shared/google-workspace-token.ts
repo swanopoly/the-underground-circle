@@ -89,8 +89,10 @@ export async function resolveGoogleWorkspaceAccessToken(
       return { ok: false, code: 'reconnect_required' };
     }
 
-    const clientId = Deno.env.get('GOOGLE_OAUTH_CLIENT_ID');
-    const clientSecret = Deno.env.get('GOOGLE_OAUTH_CLIENT_SECRET');
+    const clientId = Deno.env.get('GOOGLE_OAUTH_CLIENT_ID')
+      || Deno.env.get('GOOGLE_CLIENT_ID');
+    const clientSecret = Deno.env.get('GOOGLE_OAUTH_CLIENT_SECRET')
+      || Deno.env.get('GOOGLE_CLIENT_SECRET');
     if (!clientId || !clientSecret) {
       return { ok: false, code: 'not_configured' };
     }
