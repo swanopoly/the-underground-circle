@@ -295,15 +295,147 @@ function exactSequenceManualVerificationResult(
 
 type ExactPhotoshopForegroundResult =
   | { ok: true; refocused: boolean }
-  | { ok: false; error: string };
+  | {
+    ok: false;
+    error: string;
+    aborted: boolean;
+    focusDispatched: boolean;
+  };
+
+const EXACT_PHOTOSHOP_FINAL_STATUS_MAX_ATTEMPTS = 3;
+const EXACT_PHOTOSHOP_FINAL_STATUS_RETRY_DELAY_MS = 250;
+
+type ExactPhotoshopFinalStatusProof =
+  | { ok: true; actualName: string }
+  | { ok: false; actualName: string; aborted: boolean; error: string };
+
+const EXACT_PHOTOSHOP_APP_IDENTITY_PATTERN = /^(?:adobe )?photoshop(?: (?:cc(?: \d{4})?|\d{4}(?:\.\d+)?|beta|\(beta\)))?(?:\.app)?$/i;
+const EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_MAX_CHARS = 260;
+const EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_UNSAFE_PATTERN = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/u;
 
 function isPhotoshopAppIdentity(value: unknown): boolean {
-  return String(value || '').trim().toLowerCase().includes('photoshop');
+  const normalized = String(value || '').trim().replace(/\s+/g, ' ');
+  return EXACT_PHOTOSHOP_APP_IDENTITY_PATTERN.test(normalized);
+}
+
+/**
+ * Preserve the bridge receipt/status name as the proof identity itself. The
+ * validator rejects values that would require trimming, normalization, or
+ * invisible-directional interpretation; callers compare the returned raw
+ * string exactly and never display an invalid receipt value.
+ */
+function exactPhotoshopDocumentProofIdentity(value: unknown): string | null {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_MAX_CHARS
+    || value.trim() !== value
+    || EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_UNSAFE_PATTERN.test(value)
+  ) return null;
+  return value;
 }
 
 function compactExactForegroundError(value: unknown, fallback: string): string {
   const message = String(value || '').replace(/\s+/g, ' ').trim();
   return (message || fallback).slice(0, 240);
+}
+
+async function waitForExactPhotoshopFinalStatusRetry(
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) return false;
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const settle = (completedWait: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(completedWait);
+    };
+    const onAbort = () => settle(false);
+    timer = setTimeout(
+      () => settle(true),
+      EXACT_PHOTOSHOP_FINAL_STATUS_RETRY_DELAY_MS,
+    );
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) settle(false);
+  });
+}
+
+/**
+ * Photoshop can acknowledge creation before its document-status surface has
+ * caught up. Re-read only that app-native status surface for a short bounded
+ * window; never replay or substitute the already-dispatched create mutation.
+ */
+async function observeExactPhotoshopFinalStatus(input: {
+  desktop: typeof import('./desktopBridge');
+  expectedName: string;
+  widthPx: number;
+  heightPx: number;
+  signal?: AbortSignal;
+}): Promise<ExactPhotoshopFinalStatusProof> {
+  const {
+    desktop,
+    expectedName,
+    widthPx,
+    heightPx,
+    signal,
+  } = input;
+  let actualName = '';
+  let lastError = 'Photoshop final document status was unavailable';
+
+  for (let attempt = 0; attempt < EXACT_PHOTOSHOP_FINAL_STATUS_MAX_ATTEMPTS; attempt += 1) {
+    if (signal?.aborted) {
+      return { ok: false, actualName, aborted: true, error: lastError };
+    }
+    if (attempt > 0 && !(await waitForExactPhotoshopFinalStatusRetry(signal))) {
+      return { ok: false, actualName, aborted: true, error: lastError };
+    }
+
+    try {
+      const status = await desktop.photoshopDocumentStatus({
+        appName: 'Photoshop',
+        expectedDocumentName: expectedName,
+      });
+      if (signal?.aborted) {
+        return { ok: false, actualName, aborted: true, error: lastError };
+      }
+      const observedName = exactPhotoshopDocumentProofIdentity(
+        status.data?.activeDocumentName,
+      );
+      actualName = observedName ?? '';
+      if (
+        status.ok
+        && status.data?.appRunning
+        && observedName === expectedName
+        && status.data.widthPx === widthPx
+        && status.data.heightPx === heightPx
+      ) {
+        return { ok: true, actualName };
+      }
+      lastError = compactExactForegroundError(
+        status.error || status.data?.error,
+        'Photoshop final document status did not match the creation receipt',
+      );
+    } catch (error: any) {
+      if (signal?.aborted) {
+        return { ok: false, actualName, aborted: true, error: lastError };
+      }
+      lastError = compactExactForegroundError(
+        error?.message,
+        'Photoshop final document status could not be read',
+      );
+    }
+  }
+
+  return {
+    ok: false,
+    actualName,
+    aborted: signal?.aborted === true,
+    error: lastError,
+  };
 }
 
 /**
@@ -315,12 +447,29 @@ function compactExactForegroundError(value: unknown, fallback: string): string {
  */
 async function ensureExactPhotoshopForeground(
   desktop: typeof import('./desktopBridge'),
+  signal?: AbortSignal,
 ): Promise<ExactPhotoshopForegroundResult> {
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was cancelled',
+      aborted: true,
+      focusDispatched: false,
+    };
+  }
   let observed: Awaited<ReturnType<typeof desktop.getWindowState>> | null = null;
   try {
     observed = await desktop.getWindowState();
   } catch {
     observed = null;
+  }
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was cancelled',
+      aborted: true,
+      focusDispatched: false,
+    };
   }
 
   const frontmostApp = observed?.ok
@@ -328,6 +477,14 @@ async function ensureExactPhotoshopForeground(
     : '';
   if (isPhotoshopAppIdentity(frontmostApp)) {
     return { ok: true, refocused: false };
+  }
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was cancelled',
+      aborted: true,
+      focusDispatched: false,
+    };
   }
 
   let focused: Awaited<ReturnType<typeof desktop.focusApp>>;
@@ -337,6 +494,16 @@ async function ensureExactPhotoshopForeground(
     return {
       ok: false,
       error: compactExactForegroundError(error?.message, 'Photoshop focus failed'),
+      aborted: signal?.aborted === true,
+      focusDispatched: true,
+    };
+  }
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was cancelled after focus dispatch',
+      aborted: true,
+      focusDispatched: true,
     };
   }
   if (
@@ -348,6 +515,16 @@ async function ensureExactPhotoshopForeground(
     return {
       ok: false,
       error: compactExactForegroundError(focused.error, 'Photoshop focus was not confirmed'),
+      aborted: false,
+      focusDispatched: true,
+    };
+  }
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was cancelled after focus dispatch',
+      aborted: true,
+      focusDispatched: true,
     };
   }
 
@@ -355,16 +532,39 @@ async function ensureExactPhotoshopForeground(
   try {
     verified = await desktop.getWindowState();
   } catch {
-    return { ok: false, error: 'Photoshop foreground verification was unavailable after focus' };
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was unavailable after focus',
+      aborted: signal?.aborted === true,
+      focusDispatched: true,
+    };
+  }
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was cancelled after focus dispatch',
+      aborted: true,
+      focusDispatched: true,
+    };
   }
   const verifiedFrontmostApp = verified.ok
     ? String(verified.data?.frontmostApp || '').trim()
     : '';
   if (!verifiedFrontmostApp) {
-    return { ok: false, error: 'Photoshop foreground verification was unavailable after focus' };
+    return {
+      ok: false,
+      error: 'Photoshop foreground verification was unavailable after focus',
+      aborted: false,
+      focusDispatched: true,
+    };
   }
   if (!isPhotoshopAppIdentity(verifiedFrontmostApp)) {
-    return { ok: false, error: 'Photoshop did not remain the foreground application after focus' };
+    return {
+      ok: false,
+      error: 'Photoshop did not remain the foreground application after focus',
+      aborted: false,
+      focusDispatched: true,
+    };
   }
   return { ok: true, refocused: true };
 }
@@ -429,6 +629,9 @@ async function executeAuthorizedExactSequenceProgram(input: {
   }
 
   const before = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });
+  if (stopped()) {
+    return deterministicLocalCancelledResult(execution, 'The Photoshop task was cancelled before any app action.');
+  }
   if (!before.ok || !before.data) {
     return exactSequenceBlockedResult(
       execution,
@@ -436,10 +639,6 @@ async function executeAuthorizedExactSequenceProgram(input: {
       ['fresh Photoshop status unavailable before exact sequence'],
     );
   }
-  if (stopped()) {
-    return deterministicLocalCancelledResult(execution, 'The Photoshop task was cancelled before launch or document creation.');
-  }
-
   let launched = false;
   if (!before.data.appRunning) {
     const launch = await desktop.launchApp('Photoshop');
@@ -450,9 +649,9 @@ async function executeAuthorizedExactSequenceProgram(input: {
         ['desktop.launch_app failed for Photoshop'],
       );
     }
-    const requested = String(launch.data.requestedAppName || '').toLowerCase();
-    const resolved = String(launch.data.resolvedAppName || '').toLowerCase();
-    if (!requested.includes('photoshop') || !resolved.includes('photoshop')) {
+    const requested = String(launch.data.requestedAppName || '').trim();
+    const resolved = String(launch.data.resolvedAppName || '').trim();
+    if (!isPhotoshopAppIdentity(requested) || !isPhotoshopAppIdentity(resolved)) {
       return exactSequenceBlockedResult(
         execution,
         'The launch bridge resolved a different application, so document creation was stopped.',
@@ -477,7 +676,21 @@ async function executeAuthorizedExactSequenceProgram(input: {
         );
       }
       await desktop.waitForApp('Photoshop', 12_000).catch(() => null);
+      if (stopped()) {
+        return deterministicLocalCancelledResult(
+          execution,
+          'The Photoshop task was cancelled while waiting for the app to become ready; no document was created.',
+          launched,
+        );
+      }
       ready = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });
+      if (stopped()) {
+        return deterministicLocalCancelledResult(
+          execution,
+          'The Photoshop task was cancelled while waiting for the app to become ready; no document was created.',
+          launched,
+        );
+      }
       if (ready.ok && ready.data?.appRunning) break;
     }
   }
@@ -496,8 +709,15 @@ async function executeAuthorizedExactSequenceProgram(input: {
     );
   }
 
-  const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop);
+  const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop, signal);
   if (!foregroundBeforeCreate.ok) {
+    if (foregroundBeforeCreate.aborted) {
+      return deterministicLocalCancelledResult(
+        execution,
+        'The Photoshop task was cancelled before document creation.',
+        launched || foregroundBeforeCreate.focusDispatched,
+      );
+    }
     return exactSequenceBlockedResult(
       execution,
       `Photoshop was running, but it could not be confirmed as the foreground app, so no document was created: ${foregroundBeforeCreate.error}.`,
@@ -529,7 +749,8 @@ async function executeAuthorizedExactSequenceProgram(input: {
       ['Photoshop document creation outcome is unknown after dispatch; automatic replay is disabled'],
     );
   }
-  if (!created.ok || !created.data?.created) {
+  const expectedName = exactPhotoshopDocumentProofIdentity(created.data?.documentName);
+  if (!created.ok || !created.data?.created || expectedName === null) {
     return exactSequenceManualVerificationResult(
       execution,
       `Photoshop did not confirm the ${widthPx}x${heightPx} document after the create request: ${created.data?.error || created.error || 'creation was not confirmed'}. The action will not be replayed automatically.`,
@@ -537,30 +758,42 @@ async function executeAuthorizedExactSequenceProgram(input: {
     );
   }
 
-  const after = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });
-  const expectedName = String(created.data.documentName || '').trim();
-  const actualName = String(after.data?.activeDocumentName || '').trim();
-  const dimensionsVerified = Boolean(
-    after.ok
-    && after.data?.appRunning
-    && after.data.widthPx === widthPx
-    && after.data.heightPx === heightPx,
-  );
-  const identityVerified = !expectedName || expectedName === actualName;
-  if (!dimensionsVerified || !identityVerified) {
+  const finalStatus = await observeExactPhotoshopFinalStatus({
+    desktop,
+    expectedName,
+    widthPx,
+    heightPx,
+    signal,
+  });
+  if (!finalStatus.ok) {
     return exactSequenceManualVerificationResult(
       execution,
-      `Photoshop reported creating ${expectedName || 'a new document'}, but the fresh final status did not prove the expected ${widthPx}x${heightPx} active document. The action will not be replayed automatically.`,
+      `Photoshop reported creating ${expectedName}, but the bounded fresh final status checks did not prove that exact active document at ${widthPx}x${heightPx}${finalStatus.aborted ? ' before verification was cancelled' : ''}: ${finalStatus.error}. The action will not be replayed automatically.`,
       ['Photoshop document creation outcome needs manual verification; automatic replay is disabled'],
     );
   }
+  const actualName = finalStatus.actualName;
 
-  const foregroundAfterCreate = await ensureExactPhotoshopForeground(desktop);
+  if (stopped()) {
+    return exactSequenceManualVerificationResult(
+      execution,
+      `Photoshop created and verified **${actualName || expectedName}** at **${widthPx} × ${heightPx}px**, but final foreground verification was cancelled. The document action will not be replayed automatically.`,
+      ['Photoshop document was created, but final foreground verification was cancelled; automatic replay is disabled'],
+    );
+  }
+  const foregroundAfterCreate = await ensureExactPhotoshopForeground(desktop, signal);
   if (!foregroundAfterCreate.ok) {
     return exactSequenceManualVerificationResult(
       execution,
       `Photoshop created and verified **${actualName || expectedName || 'a new document'}** at **${widthPx} × ${heightPx}px**, but it could not be confirmed as the foreground app: ${foregroundAfterCreate.error}. The document action will not be replayed automatically.`,
       ['Photoshop document was created, but final foreground focus could not be verified; automatic replay is disabled'],
+    );
+  }
+  if (stopped()) {
+    return exactSequenceManualVerificationResult(
+      execution,
+      `Photoshop created and verified **${actualName || expectedName}** at **${widthPx} × ${heightPx}px**, but completion was cancelled after foreground verification. The document action will not be replayed automatically.`,
+      ['Photoshop document was created, but completion was cancelled after final verification; automatic replay is disabled'],
     );
   }
 

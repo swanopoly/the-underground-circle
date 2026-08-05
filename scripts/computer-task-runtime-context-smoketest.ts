@@ -120,8 +120,227 @@ assert(
 );
 assert.match(
   computerRuntimeSource,
-  /async function executeAuthorizedExactSequenceProgram[\s\S]*?photoshopDocumentStatus\(\{ appName: 'Photoshop' \}\)[\s\S]*?photoshopCreateDocument\(\{[\s\S]*?photoshopDocumentStatus\(\{ appName: 'Photoshop' \}\)/,
-  'the exact Photoshop handler observes, creates once, then reads fresh final proof',
+  /async function executeAuthorizedExactSequenceProgram[\s\S]*?photoshopDocumentStatus\(\{ appName: 'Photoshop' \}\)[\s\S]*?photoshopCreateDocument\(\{[\s\S]*?observeExactPhotoshopFinalStatus\(\{/,
+  'the exact Photoshop handler observes, creates once, then requests bounded fresh final proof',
+);
+assert.match(
+  computerRuntimeSource,
+  /const EXACT_PHOTOSHOP_FINAL_STATUS_MAX_ATTEMPTS = 3;/,
+  'post-create Photoshop status proof is capped at three read-only observations',
+);
+const exactFinalStatusDelayMatch = computerRuntimeSource.match(
+  /const EXACT_PHOTOSHOP_FINAL_STATUS_RETRY_DELAY_MS = (\d+);/,
+);
+assert(exactFinalStatusDelayMatch, 'the post-create proof retry delay is named');
+assert(
+  Number(exactFinalStatusDelayMatch[1]) > 0
+    && Number(exactFinalStatusDelayMatch[1]) <= 400,
+  'post-create proof retries use a short positive client delay no longer than 400ms',
+);
+const exactFinalStatusHelperStart = computerRuntimeSource.indexOf(
+  'async function observeExactPhotoshopFinalStatus(',
+);
+const exactFinalStatusHelperEnd = computerRuntimeSource.indexOf(
+  '\n/**\n * Keep the exact Photoshop program',
+  exactFinalStatusHelperStart,
+);
+assert(
+  exactFinalStatusHelperStart >= 0 && exactFinalStatusHelperEnd > exactFinalStatusHelperStart,
+  'the bounded exact Photoshop final-status helper is present',
+);
+const exactFinalStatusHelperSource = computerRuntimeSource.slice(
+  exactFinalStatusHelperStart,
+  exactFinalStatusHelperEnd,
+);
+assert.match(
+  exactFinalStatusHelperSource,
+  /attempt < EXACT_PHOTOSHOP_FINAL_STATUS_MAX_ATTEMPTS/,
+  'the final-status observation loop uses the named hard attempt cap',
+);
+assert.equal(
+  (exactFinalStatusHelperSource.match(/desktop\.photoshopDocumentStatus\(/g) || []).length,
+  1,
+  'the bounded loop contains only one read-only app-native status call site',
+);
+assert.match(
+  exactFinalStatusHelperSource,
+  /expectedDocumentName: expectedName[\s\S]*?const observedName = exactPhotoshopDocumentProofIdentity\([\s\S]*?status\.data\?\.activeDocumentName,[\s\S]*?observedName === expectedName[\s\S]*?status\.data\.widthPx === widthPx[\s\S]*?status\.data\.heightPx === heightPx/,
+  'each fresh observation must prove the same safe raw receipt name and exact dimensions',
+);
+const exactFinalNameComparisonStart = exactFinalStatusHelperSource.indexOf(
+  'const observedName = exactPhotoshopDocumentProofIdentity(',
+);
+const exactFinalNameComparisonEnd = exactFinalStatusHelperSource.indexOf(
+  'status.data.heightPx === heightPx',
+  exactFinalNameComparisonStart,
+);
+assert(
+  exactFinalNameComparisonStart >= 0 && exactFinalNameComparisonEnd > exactFinalNameComparisonStart,
+  'the independent final-name comparison block is present',
+);
+assert.doesNotMatch(
+  exactFinalStatusHelperSource.slice(
+    exactFinalNameComparisonStart,
+    exactFinalNameComparisonEnd,
+  ),
+  /String\(|\.trim\(|\.normalize\(|\.replace\(/,
+  'the independent active-document proof is never lossily normalized before comparison',
+);
+assert.match(
+  exactFinalStatusHelperSource,
+  /waitForExactPhotoshopFinalStatusRetry\(signal\)/,
+  'bounded proof retry delays preserve the caller AbortSignal',
+);
+assert.match(
+  exactFinalStatusHelperSource,
+  /const status = await desktop\.photoshopDocumentStatus\(\{[\s\S]*?\}\);\s*if \(signal\?\.aborted\) \{\s*return \{ ok: false, actualName, aborted: true, error: lastError \};/,
+  'each awaited post-create status read checks cancellation before accepting proof',
+);
+assert.doesNotMatch(
+  exactFinalStatusHelperSource,
+  /photoshopCreateDocument|launchApp|focusApp|click|coordinate|file_/,
+  'post-create race recovery is read-only and cannot replay or substitute a mutation',
+);
+const exactPhotoshopIdentityPatternMatch = computerRuntimeSource.match(
+  /const EXACT_PHOTOSHOP_APP_IDENTITY_PATTERN = \/(.+)\/([a-z]*);/,
+);
+assert(exactPhotoshopIdentityPatternMatch, 'the exact Photoshop identity allowlist is explicit');
+const exactPhotoshopIdentityPattern = new RegExp(
+  exactPhotoshopIdentityPatternMatch[1],
+  exactPhotoshopIdentityPatternMatch[2],
+);
+for (const acceptedIdentity of [
+  'Photoshop',
+  'Adobe Photoshop',
+  'Adobe Photoshop 2026',
+  'Adobe Photoshop 2025.app',
+  'Photoshop.app',
+  'Adobe Photoshop (Beta).app',
+  'Photoshop CC 2025',
+  'Adobe Photoshop (Beta)',
+]) {
+  assert.equal(
+    exactPhotoshopIdentityPattern.test(acceptedIdentity),
+    true,
+    `the anchored allowlist accepts real Photoshop alias: ${acceptedIdentity}`,
+  );
+}
+for (const rejectedIdentity of [
+  'Not Photoshop',
+  'Photoshop Helper',
+  'Photoshop Helper.app',
+  'Adobe Photoshop Helper',
+  'Fake Photoshop 2026',
+  'Adobe Photoshop 2025.app Helper',
+  'Adobe Photoshop 2025.app.app',
+  '/Applications/Adobe Photoshop 2025.app',
+]) {
+  assert.equal(
+    exactPhotoshopIdentityPattern.test(rejectedIdentity),
+    false,
+    `the anchored allowlist rejects non-app identity: ${rejectedIdentity}`,
+  );
+}
+assert.match(
+  computerRuntimeSource,
+  /function isPhotoshopAppIdentity[\s\S]*?EXACT_PHOTOSHOP_APP_IDENTITY_PATTERN\.test\(normalized\)/,
+  'foreground identity checks use the strict anchored Photoshop allowlist',
+);
+assert.doesNotMatch(
+  computerRuntimeSource.slice(
+    computerRuntimeSource.indexOf('function isPhotoshopAppIdentity'),
+    computerRuntimeSource.indexOf('function compactExactForegroundError'),
+  ),
+  /\.includes\(/,
+  'Photoshop foreground identity never uses substring acceptance',
+);
+const exactDocumentProofIdentityMaxMatch = computerRuntimeSource.match(
+  /const EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_MAX_CHARS = (\d+);/,
+);
+assert(exactDocumentProofIdentityMaxMatch, 'the exact document proof identity has a named bound');
+const exactDocumentProofIdentityMaxChars = Number(exactDocumentProofIdentityMaxMatch[1]);
+assert.equal(
+  exactDocumentProofIdentityMaxChars,
+  260,
+  'the proof identity bound aligns with the bridge expected-document guard',
+);
+const exactDocumentProofUnsafePatternMatch = computerRuntimeSource.match(
+  /const EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_UNSAFE_PATTERN = \/(.+)\/([a-z]*);/,
+);
+assert(exactDocumentProofUnsafePatternMatch, 'unsafe document proof characters are explicit');
+const exactDocumentProofUnsafePattern = new RegExp(
+  exactDocumentProofUnsafePatternMatch[1],
+  exactDocumentProofUnsafePatternMatch[2],
+);
+const exactDocumentProofIdentityStart = computerRuntimeSource.indexOf(
+  'function exactPhotoshopDocumentProofIdentity(',
+);
+const exactDocumentProofIdentityEnd = computerRuntimeSource.indexOf(
+  '\n\nfunction compactExactForegroundError',
+  exactDocumentProofIdentityStart,
+);
+assert(
+  exactDocumentProofIdentityStart >= 0
+    && exactDocumentProofIdentityEnd > exactDocumentProofIdentityStart,
+  'the exact raw document proof identity validator is present',
+);
+const exactDocumentProofIdentitySource = computerRuntimeSource.slice(
+  exactDocumentProofIdentityStart,
+  exactDocumentProofIdentityEnd,
+);
+assert.match(
+  exactDocumentProofIdentitySource,
+  /typeof value !== 'string'[\s\S]*?value\.length === 0[\s\S]*?value\.length > EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_MAX_CHARS[\s\S]*?value\.trim\(\) !== value[\s\S]*?EXACT_PHOTOSHOP_DOCUMENT_PROOF_IDENTITY_UNSAFE_PATTERN\.test\(value\)[\s\S]*?return value;/,
+  'the validator rejects non-string, empty, oversize, padded, control, and bidi identities before returning the raw value',
+);
+assert.doesNotMatch(
+  exactDocumentProofIdentitySource,
+  /String\(|\.normalize\(|\.replace\(/,
+  'the proof identity validator never coerces or normalizes a receipt name',
+);
+const exactDocumentProofIdentityContract = (value: unknown): string | null => {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > exactDocumentProofIdentityMaxChars
+    || value.trim() !== value
+    || exactDocumentProofUnsafePattern.test(value)
+  ) return null;
+  return value;
+};
+for (const acceptedDocumentName of [
+  'Untitled-1',
+  'Design 01.psd',
+  'Café Draft',
+  'Cafe\u0301 Draft',
+]) {
+  assert.equal(
+    exactDocumentProofIdentityContract(acceptedDocumentName),
+    acceptedDocumentName,
+    `safe document identity is preserved exactly: ${acceptedDocumentName}`,
+  );
+}
+for (const rejectedDocumentName of [
+  '',
+  ' Untitled-1',
+  'Untitled-1 ',
+  'Untitled\n1',
+  'Untitled\u00001',
+  'Untitled\u202e1',
+  'Untitled\u20661',
+  '\u200bUntitled-1',
+  'x'.repeat(exactDocumentProofIdentityMaxChars + 1),
+]) {
+  assert.equal(
+    exactDocumentProofIdentityContract(rejectedDocumentName),
+    null,
+    'ambiguous or unsafe document proof identity is rejected',
+  );
+}
+assert.notEqual(
+  exactDocumentProofIdentityContract('Café'),
+  exactDocumentProofIdentityContract('Cafe\u0301'),
+  'canonically similar but byte-distinct JavaScript strings remain distinct proof identities',
 );
 const exactForegroundHelperStart = computerRuntimeSource.indexOf(
   'async function ensureExactPhotoshopForeground(',
@@ -163,6 +382,11 @@ assert.match(
   /catch \{\s*observed = null;\s*\}[\s\S]*?if \(isPhotoshopAppIdentity\(frontmostApp\)\)[\s\S]*?desktop\.focusApp\('Photoshop'\)/,
   'a failed or empty initial observation falls through to the one bounded Photoshop focus dispatch',
 );
+assert.match(
+  exactForegroundHelperSource,
+  /signal\?: AbortSignal[\s\S]*?if \(signal\?\.aborted\)[\s\S]*?observed = await desktop\.getWindowState\(\);[\s\S]*?if \(signal\?\.aborted\)[\s\S]*?focused = await desktop\.focusApp\('Photoshop'\);[\s\S]*?if \(signal\?\.aborted\)[\s\S]*?verified = await desktop\.getWindowState\(\);[\s\S]*?if \(signal\?\.aborted\)/,
+  'foreground verification checks STOP before focus and after every awaited native observation/action',
+);
 
 const exactHandlerStart = computerRuntimeSource.indexOf(
   'async function executeAuthorizedExactSequenceProgram(',
@@ -174,21 +398,31 @@ const exactHandlerEnd = computerRuntimeSource.indexOf(
 assert(exactHandlerStart >= 0 && exactHandlerEnd > exactHandlerStart);
 const exactHandlerSource = computerRuntimeSource.slice(exactHandlerStart, exactHandlerEnd);
 const foregroundBeforeCreateIndex = exactHandlerSource.indexOf(
-  'const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop);',
+  'const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop, signal);',
 );
 const createDocumentIndex = exactHandlerSource.indexOf(
   'created = await desktop.photoshopCreateDocument({',
 );
 const finalDocumentStatusIndex = exactHandlerSource.indexOf(
-  "const after = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });",
+  'const finalStatus = await observeExactPhotoshopFinalStatus({',
 );
 const foregroundAfterCreateIndex = exactHandlerSource.indexOf(
-  'const foregroundAfterCreate = await ensureExactPhotoshopForeground(desktop);',
+  'const foregroundAfterCreate = await ensureExactPhotoshopForeground(desktop, signal);',
 );
 const completedResultIndex = exactHandlerSource.lastIndexOf("status: 'completed'");
 assert(
   foregroundBeforeCreateIndex >= 0 && foregroundBeforeCreateIndex < createDocumentIndex,
   'the exact program verifies or focuses Photoshop before document creation',
+);
+assert.equal(
+  (exactHandlerSource.match(/desktop\.photoshopCreateDocument\(/g) || []).length,
+  1,
+  'the exact program has exactly one create dispatch site and never retries it',
+);
+assert.match(
+  exactHandlerSource,
+  /const expectedName = exactPhotoshopDocumentProofIdentity\(created\.data\?\.documentName\);[\s\S]*?if \(!created\.ok \|\| !created\.data\?\.created \|\| expectedName === null\)[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?const finalStatus = await observeExactPhotoshopFinalStatus\(\{[\s\S]*?signal,/,
+  'bounded final-status retries begin only after a positive safe raw creation receipt and retain cancellation',
 );
 assert(
   finalDocumentStatusIndex > createDocumentIndex
@@ -202,14 +436,39 @@ assert.match(
   'a post-mutation foreground verification failure remains partial and non-replayable',
 );
 assert.match(
+  exactHandlerSource,
+  /if \(stopped\(\)\) \{\s*return exactSequenceManualVerificationResult\([\s\S]*?final foreground verification was cancelled[\s\S]*?const foregroundAfterCreate = await ensureExactPhotoshopForeground\(desktop, signal\);[\s\S]*?if \(stopped\(\)\) \{\s*return exactSequenceManualVerificationResult\([\s\S]*?completion was cancelled after foreground verification[\s\S]*?status: 'completed'/,
+  'STOP is checked before final foreground work and again before completion after mutation',
+);
+assert.match(
+  exactHandlerSource,
+  /const before = await desktop\.photoshopDocumentStatus\(\{ appName: 'Photoshop' \}\);\s*if \(stopped\(\)\)/,
+  'the initial Photoshop status read checks STOP immediately after its await',
+);
+assert.match(
+  exactHandlerSource,
+  /ready = await desktop\.photoshopDocumentStatus\(\{ appName: 'Photoshop' \}\);\s*if \(stopped\(\)\)/,
+  'each cold-start Photoshop status read checks STOP before accepting readiness',
+);
+assert.match(
+  exactHandlerSource,
+  /const requested = String\(launch\.data\.requestedAppName \|\| ''\)\.trim\(\);[\s\S]*?const resolved = String\(launch\.data\.resolvedAppName \|\| ''\)\.trim\(\);[\s\S]*?!isPhotoshopAppIdentity\(requested\)[\s\S]*?!isPhotoshopAppIdentity\(resolved\)/,
+  'launch receipts use the same strict anchored Photoshop identity allowlist',
+);
+assert.doesNotMatch(
+  exactHandlerSource,
+  /\.includes\('photoshop'\)/,
+  'the exact Photoshop executor has no substring identity acceptance',
+);
+assert.match(
   computerRuntimeSource,
   /catch \(error: any\) \{[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?automatic replay is disabled/,
   'a transport exception after create dispatch remains outcome-unknown and non-replayable',
 );
 assert.match(
   computerRuntimeSource,
-  /if \(!created\.ok \|\| !created\.data\?\.created\) \{[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?automatic replay is disabled/,
-  'a missing creation receipt cannot be downgraded to a safe-to-retry failure',
+  /if \(!created\.ok \|\| !created\.data\?\.created \|\| expectedName === null\) \{[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?automatic replay is disabled/,
+  'a missing or unsafe creation receipt cannot be downgraded to a safe-to-retry failure',
 );
 assert.match(
   computerRuntimeSource,
