@@ -4,6 +4,13 @@
   command = "npm run build"
   publish = "dist"
 
+  [build.environment]
+    # These smoke fixtures intentionally contain synthetic credential-shaped
+    # strings to verify redaction. Keep Netlify secret scanning enabled for the
+    # app, build output, and every other repo file; omit only the reviewed test
+    # fixtures that smart detection reported as false positives.
+    SECRETS_SCAN_OMIT_PATHS = "scripts/agent-run-proof-publisher-core-smoketest.ts,scripts/approval-intent-preview-smoketest.ts,scripts/approval-preview-core-smoketest.ts,scripts/chat-multi-intent-core-smoketest.ts,scripts/chat-session-resumption-core-smoketest.ts,scripts/connected-resources-panel-core-smoketest.ts,scripts/failure-recovery-copy-core-smoketest.ts,scripts/integration-health-badge-core-smoketest.ts,scripts/memory-provenance-core-smoketest.ts,scripts/messaging-notify-smoketest.ts,scripts/office-bridge-diag-panel-core-smoketest.ts,scripts/proactive-surfacing-core-smoketest.ts,scripts/room-message-metadata-bounds-smoketest.ts,scripts/run-outcome-memory-core-smoketest.ts,scripts/transport-failover-badge-core-smoketest.ts,scripts/user-memory-caps-smoketest.ts,scripts/verification-diagnostics-core-smoketest.ts"
+
 # Environment variables (set these in Netlify UI: Site Settings → Environment variables)
 # EXPO_PUBLIC_SUPABASE_URL
 # EXPO_PUBLIC_SUPABASE_ANON_KEY
