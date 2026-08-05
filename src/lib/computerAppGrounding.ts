@@ -4,6 +4,7 @@ import {
   type ComputerAppStrategyId,
 } from './computerAppTaskStrategy';
 import { buildDesignAppAutomationPlan } from './designAppAutomation';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 import type { UserTaskPipelineDecision } from './userTaskPipelines';
 
 export type ComputerAppGroundingSurface =
@@ -838,6 +839,54 @@ export function buildComputerAppGroundingPlan(
 ): ComputerAppGroundingPlan | null {
   const strategy = buildComputerAppTaskStrategy(message, pipelineDecision);
   if (!strategy) return null;
+  const exactProgram = compileComputerSequenceProgram(message);
+  if (exactProgram?.id === 'photoshop_new_document') {
+    const createStep = exactProgram.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
+    const widthPx = Number(createStep?.args.widthPx);
+    const heightPx = Number(createStep?.args.heightPx);
+    const sizeLabel = Number.isFinite(widthPx) && Number.isFinite(heightPx)
+      ? `${widthPx}x${heightPx}`
+      : 'requested-size';
+    const directRequestAuthorized = exactProgram.authorization.mode === 'direct_user_request';
+    return {
+      strategy,
+      primarySurface: 'desktop',
+      observationRules: [
+        rule(
+          'photoshop-document-status',
+          'desktop',
+          'desktop.photoshop_document_status',
+          'Read Photoshop running/scriptable and active-document state before launch/create and again after creation.',
+          true,
+          LAYOUT_FRESHNESS_MS,
+        ),
+      ],
+      actionDiscipline: [
+        'Execute the compiled program exactly: status -> conditional launch -> status -> create_document -> final status.',
+        'Treat no active document as the expected from-scratch starting state, not a source-file or inventory blocker.',
+        directRequestAuthorized
+          ? `Create only the requested ${sizeLabel} unsaved blank document; the current direct user request is the authority for this bounded action.`
+          : `Create only the requested ${sizeLabel} blank document after the enclosing Chat plan approval is accepted.`,
+        'Do not add file search/stat/open, layer inventory, screenshot, a11y, menu, keyboard, or coordinate actions.',
+      ],
+      fallbackChain: exactProgram.steps.map((step) => step.tool),
+      approvalGates: directRequestAuthorized
+        ? []
+        : ['one Chat plan-level approval before the oversized blank-document allocation'],
+      forbiddenFallbacks: [
+        'No source-file/package discovery for a from-scratch blank document.',
+        'No layer inventory or destructive-edit preconditions for a new blank document.',
+        'No generic UI or coordinate fallback when the dedicated create-document tool fails.',
+        directRequestAuthorized
+          ? 'Do not extend direct-request authority to saves, exports, overwrites, existing-document edits, deletes, or external actions.'
+          : 'Do not dispatch the oversized blank-document allocation before its enclosing Chat plan approval.',
+      ],
+      verificationSignals: [
+        `final desktop.photoshop_document_status reports an active ${sizeLabel} document`,
+        'final app-native status includes the created document name and dimensions',
+      ],
+    };
+  }
   return { strategy, ...strategyGrounding(strategy, message) };
 }
 
@@ -866,10 +915,15 @@ function compactIdentityText(value: unknown, max = 240): string | null {
   return compact ? compact.slice(0, max) : null;
 }
 
+function compactIdentityCodePoints(value: unknown, max: number): string | null {
+  const compact = String(value ?? '').trim().replace(/\s+/g, ' ');
+  return compact ? Array.from(compact).slice(0, max).join('') : null;
+}
+
 function compactObservationTarget(target: ComputerAppObservationTarget): ComputerAppObservationTarget {
   const pid = Number(target.pid);
   return {
-    appName: compactIdentityText(target.appName, 120),
+    appName: compactIdentityCodePoints(target.appName, 160),
     bundleId: compactIdentityText(target.bundleId, 180),
     pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
     windowId: typeof target.windowId === 'number' && Number.isFinite(target.windowId)
@@ -1046,8 +1100,7 @@ export type GenericNativeUiMutationFamily =
   | 'press'
   | 'menu'
   | 'coordinate'
-  | 'mouse'
-  | 'set_value';
+  | 'mouse';
 
 export type GenericNativeUiMutationTool =
   | 'desktop.type_text'
@@ -1060,8 +1113,7 @@ export type GenericNativeUiMutationTool =
   | 'desktop.mouse_down'
   | 'desktop.mouse_up'
   | 'desktop.mouse_drag'
-  | 'desktop.mouse_scroll'
-  | 'desktop.set_element_value';
+  | 'desktop.mouse_scroll';
 
 const GENERIC_NATIVE_UI_MUTATION_FAMILY_BY_TOOL: Readonly<
   Record<GenericNativeUiMutationTool, GenericNativeUiMutationFamily>
@@ -1077,7 +1129,6 @@ const GENERIC_NATIVE_UI_MUTATION_FAMILY_BY_TOOL: Readonly<
   'desktop.mouse_up': 'mouse',
   'desktop.mouse_drag': 'mouse',
   'desktop.mouse_scroll': 'mouse',
-  'desktop.set_element_value': 'set_value',
 });
 
 export function genericNativeUiMutationFamilyForTool(
@@ -1291,7 +1342,7 @@ function exactGenericNativeUiAppName(value: unknown): string | null {
   const name = value.trim();
   return (
     name
-    && name.length <= 120
+    && Array.from(name).length <= 160
     && !/[\u0000-\u001f\u007f]/.test(name)
   )
     ? name
@@ -1365,7 +1416,6 @@ function genericNativeUiFallbackMatchesFamily(
       || family === 'paste'
       || family === 'press'
       || family === 'menu'
-      || family === 'set_value'
     );
   }
   if (kind === 'frontmost_menu_bar') {
@@ -4096,7 +4146,7 @@ export function buildComputerAppGroundingPromptBlock(
     'Action discipline:',
     ...plan.actionDiscipline.map((item) => `- ${item}`),
     `Fallback chain: ${plan.fallbackChain.join(' -> ')}`,
-    `Approval gates: ${plan.approvalGates.length ? plan.approvalGates.join(' | ') : 'none for read-only work'}`,
+    `Approval gates: ${plan.approvalGates.length ? plan.approvalGates.join(' | ') : 'none required by this plan'}`,
     'Action readiness contract:',
     '- Every mutating action must carry sourceObservationIds for applicable required observations.',
     '- Use evaluateComputerAppActionReadiness semantics before click/type/fill/drag/submit/deploy actions.',

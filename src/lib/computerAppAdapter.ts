@@ -26,12 +26,12 @@ import {
   launchApp as bridgeLaunchApp,
   focusApp as bridgeFocusApp,
   manageWindow as bridgeManageWindow,
-  mouseMove as bridgeMouseMove,
-  mouseClick as bridgeMouseClick,
-  mouseDown as bridgeMouseDown,
-  mouseUp as bridgeMouseUp,
-  mouseDrag as bridgeMouseDrag,
-  mouseScroll as bridgeMouseScroll,
+  mouseMove as rawBridgeMouseMove,
+  mouseClick as rawBridgeMouseClick,
+  mouseDown as rawBridgeMouseDown,
+  mouseUp as rawBridgeMouseUp,
+  mouseDrag as rawBridgeMouseDrag,
+  mouseScroll as rawBridgeMouseScroll,
   takeScreenshot as bridgeTakeScreenshot,
   getScreenSize as bridgeGetScreenSize,
   openUrl as bridgeOpenUrl,
@@ -46,10 +46,10 @@ import {
   readA11yTree as bridgeReadA11yTree,
   clickElement as bridgeClickElement,
   setElementValue as bridgeSetElementValue,
-  typeText as bridgeTypeText,
-  pasteText as bridgePasteText,
-  pressKeys as bridgePressKeys,
-  clickMenu as bridgeClickMenu,
+  typeText as rawBridgeTypeText,
+  pasteText as rawBridgePasteText,
+  pressKeys as rawBridgePressKeys,
+  clickMenu as rawBridgeClickMenu,
   indesignFindChange as bridgeInDesignFindChange,
   indesignBatchFindChange as bridgeInDesignBatchFindChange,
   indesignDocumentStatus as bridgeInDesignDocumentStatus,
@@ -76,6 +76,8 @@ import {
   type ObserveAppData,
   type NativeSemanticActionExecution,
   type NativeSemanticActionTarget,
+  type DesktopNativeUiTargetGuard,
+  type DesktopResult,
 } from './desktopBridge';
 import {
   detectBlockingAppModalPlan,
@@ -325,6 +327,192 @@ export type NativeSemanticActionDeps = {
   ) => Promise<NativeSemanticActionApprovalDecision>;
 };
 
+export type NativeSemanticValueRequest = {
+  action: 'set_value';
+  appName: string;
+  /** Positive PID bound by the caller's preceding model-visible observation. */
+  expectedPid: number;
+  /** Exact dotted AX path from the same fresh observation. */
+  targetPath: string;
+  expectedRole: string;
+  expectedLabel: string;
+  /** Transient exact current value. Never persist or render it. */
+  expectedCurrentValue: string;
+  /** Transient exact requested value. Never persist or render it. */
+  value: string;
+};
+
+export type NativeSemanticValueClass = 'non_secret_text';
+
+export type NativeSemanticValueTarget = {
+  schemaVersion: 1;
+  action: 'set_value';
+  /** Null for a bridge-proven no-op; otherwise a short-lived one-shot capability. */
+  targetId: string | null;
+  /** Exact app/PID/path/role/label identity hash; excludes field contents. */
+  targetFingerprint: string;
+  currentValueHash: string;
+  requestedValueHash: string;
+  currentValueLength: number;
+  requestedValueLength: number;
+  valueClass: NativeSemanticValueClass;
+  evidenceId: string;
+  observedAt: string;
+  expiresAt: string;
+  app: string;
+  resolvedAppName: string;
+  pid: number;
+  /** Approval-time identity only. Never return it in a receipt. */
+  targetPath: string;
+  targetRole: string;
+  /** Approval-time identity only. Never return it in a receipt. */
+  targetLabel: string;
+  indexGeneration: number;
+  valueCapable: true;
+  mutationNeeded: boolean;
+  /** Redacted, bounded approval copy with no path, label, or value. */
+  targetSummary: string;
+  approvalRequired: boolean;
+  risk: 'low' | 'medium';
+};
+
+export type NativeSemanticValueProofSnapshot = {
+  observedAt: string;
+  app: string;
+  pid: number;
+  indexGeneration: number;
+  targetPresent: boolean;
+  valueCapable: boolean;
+  targetFingerprint: string | null;
+  valueHash: string | null;
+  valueLength: number | null;
+};
+
+export type NativeSemanticValueProof = {
+  schemaVersion: 1;
+  operation: 'native_semantic_set_value';
+  action: 'set_value';
+  app: string;
+  pid: number;
+  targetRole: string;
+  /** Receipts carry hashes, never the raw AX path, label, or value. */
+  targetPathHash: string;
+  targetLabelHash: string;
+  targetFingerprint: string;
+  currentValueHash: string;
+  requestedValueHash: string;
+  currentValueLength: number;
+  requestedValueLength: number;
+  valueClass: NativeSemanticValueClass;
+  evidenceId: string;
+  approvalRequired: true;
+  approvalReceiptHash: string;
+  mutationNeeded: true;
+  mutationAttempted: boolean;
+  mutationPerformed: boolean;
+  noOp: false;
+  dispatchedAt?: string;
+  dispatchAcknowledged: boolean;
+  dispatchMethod: 'ax_set_value' | 'none' | 'unknown';
+  completionVerified: boolean;
+  outcomeUnknown: boolean;
+  outcomeUnknownPolicy: 'verify_before_retry';
+  replayAllowed: false;
+  before: NativeSemanticValueProofSnapshot | null;
+  after: NativeSemanticValueProofSnapshot | null;
+  diff: {
+    kind: 'target_value_changed' | 'unchanged' | 'identity_unavailable' | 'not_dispatched';
+    targetPresentBefore: boolean;
+    targetPresentAfter: boolean;
+    valueChanged: boolean;
+  };
+};
+
+export type NativeSemanticValueExecution = {
+  app: string;
+  pid: number;
+  action: 'set_value';
+  targetRole: string;
+  targetPathHash: string;
+  targetLabelHash: string;
+  targetFingerprint: string;
+  currentValueHash: string;
+  requestedValueHash: string;
+  currentValueLength: number;
+  requestedValueLength: number;
+  evidenceId: string;
+  completionVerified: boolean;
+  outcomeUnknown: boolean;
+  replayAllowed: false;
+  proof: NativeSemanticValueProof;
+};
+
+export type NativeSemanticValueApprovalProposal = {
+  schemaVersion: 1;
+  operation: 'native_semantic_set_value';
+  action: 'set_value';
+  app: string;
+  pid: number;
+  targetRole: string;
+  targetFingerprint: string;
+  currentValueHash: string;
+  requestedValueHash: string;
+  currentValueLength: number;
+  requestedValueLength: number;
+  valueClass: NativeSemanticValueClass;
+  overwritesExistingValue: boolean;
+  evidenceId: string;
+  observedAt: string;
+  indexGeneration: number;
+  targetSummary: string;
+  approvalRequired: true;
+  risk: 'medium';
+  expiresAt: string;
+};
+
+export type NativeSemanticValueApprovalDecision = {
+  approved: boolean;
+  /** Runtime-issued approval receipt; never the model's own assertion. */
+  approvalId?: string;
+  reason?: string;
+};
+
+export type NativeSemanticValueDeps = {
+  observeApp: (args: {
+    appName?: string;
+    maxDepth?: number;
+    maxNodes?: number;
+    target?: string;
+  }) => Promise<NativeAppActivationBridgeResult<ObserveAppData>>;
+  /** Must return a cryptographic SHA-256 hex digest or null. */
+  fingerprint: (value: unknown) => Promise<string | null>;
+  /**
+   * Future sealed bridge preparation call. Raw values are transient here and
+   * must remain only inside the bridge's in-memory one-shot capability.
+   */
+  observeNativeSemanticValueTarget: (args: {
+    action: 'set_value';
+    appName: string;
+    pid: number;
+    indexGeneration: number;
+    targetPath: string;
+    expectedRole: string;
+    expectedLabel: string;
+    expectedCurrentValue: string;
+    value: string;
+  }) => Promise<NativeAppActivationBridgeResult<NativeSemanticValueTarget>>;
+  /** Consumes one target before fresh target validation and the sole dispatch. */
+  performNativeSemanticValue: (args: {
+    targetId: string;
+    targetFingerprint: string;
+    approvalId: string;
+  }) => Promise<NativeAppActivationBridgeResult<NativeSemanticValueExecution>>;
+  approvalGate: (
+    proposal: NativeSemanticValueApprovalProposal,
+  ) => Promise<NativeSemanticValueApprovalDecision>;
+  now?: () => string;
+};
+
 export type BoundedNativeAppObservation = {
   observedAt: string;
   app: string;
@@ -387,6 +575,137 @@ function exactOrExplicitNativeAppAliasMatches(
   return NATIVE_APP_EXPLICIT_ALIAS_GROUPS.some(
     (group) => group.includes(observedNoVersion) && group.includes(expectedNoVersion),
   );
+}
+
+/**
+ * Generic native input receives its exact app/PID/CGWindow/bounds authority
+ * from a fresh bridge observation immediately before dispatch. The sealed
+ * guard stays private to this adapter and is never placed in model arguments,
+ * approval payloads, receipts, or durable metadata.
+ */
+async function withFreshNativeTargetGuard<T>(
+  expectedAppName: string | undefined,
+  dispatch: (targetGuard: DesktopNativeUiTargetGuard) => Promise<DesktopResult<T>>,
+): Promise<DesktopResult<T>> {
+  const observation = await bridgeObserveApp();
+  if (!observation.ok || !observation.data) {
+    return {
+      ok: false,
+      error: observation.error || 'Could not obtain a fresh exact native app/window observation.',
+      errorCode: observation.errorCode || 'uncertain_ui_target',
+      recoveryHint: observation.recoveryHint,
+    };
+  }
+  const observed = observation.data;
+  const appName = String(observed.resolvedAppName || observed.app || '').trim();
+  if (
+    !observed.appRunning
+    || !observed.frontmost
+    || !appName
+    || !Number.isSafeInteger(observed.pid)
+    || observed.pid <= 0
+    || !observed.targetWindow
+  ) {
+    return {
+      ok: false,
+      error: 'The frontmost native app/PID/CGWindow/bounds could not be proven immediately before input dispatch.',
+      errorCode: 'uncertain_ui_target',
+    };
+  }
+  if (expectedAppName && !exactOrExplicitNativeAppAliasMatches(appName, expectedAppName)) {
+    return {
+      ok: false,
+      error: 'The freshly observed frontmost app does not match the requested native input target.',
+      errorCode: 'uncertain_ui_target',
+    };
+  }
+  return dispatch({
+    appName,
+    pid: observed.pid,
+    window: observed.targetWindow,
+  });
+}
+
+function bridgeMouseMove(x: number, y: number): Promise<DesktopResult<{ x: number; y: number }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgeMouseMove(x, y, targetGuard));
+}
+
+function bridgeMouseClick(args: {
+  x: number;
+  y: number;
+  button?: 'left' | 'right';
+  count?: number;
+}): Promise<DesktopResult<{ x: number; y: number; button: string; count: number }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgeMouseClick({ ...args, targetGuard }));
+}
+
+function bridgeMouseDown(args: {
+  x: number;
+  y: number;
+  button?: 'left' | 'right';
+}): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgeMouseDown({ ...args, targetGuard }));
+}
+
+function bridgeMouseUp(args: {
+  x: number;
+  y: number;
+  button?: 'left' | 'right';
+}): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgeMouseUp({ ...args, targetGuard }));
+}
+
+function bridgeMouseDrag(args: {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  durationMs?: number;
+}): Promise<DesktopResult<{ fromX: number; fromY: number; toX: number; toY: number; durationMs: number }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgeMouseDrag({ ...args, targetGuard }));
+}
+
+function bridgeMouseScroll(args: {
+  deltaY?: number;
+  deltaX?: number;
+  x: number;
+  y: number;
+}): Promise<DesktopResult<{ x: number; y: number; deltaX: number; deltaY: number }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgeMouseScroll({ ...args, targetGuard }));
+}
+
+function bridgeTypeText(text: string): Promise<DesktopResult<{ chars: number }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgeTypeText(text, targetGuard));
+}
+
+function bridgePasteText(
+  text: string,
+  options: {
+    appName?: string;
+    restoreClipboard?: boolean;
+    focusMode?: 'require' | 'best_effort' | 'skip';
+  } = {},
+): Promise<DesktopResult<{ chars: number; appName: string | null; restoredClipboard: boolean; focusWarning?: string | null }>> {
+  return withFreshNativeTargetGuard(options.appName, (targetGuard) => rawBridgePasteText(text, {
+    ...options,
+    appName: targetGuard.appName,
+    targetGuard,
+  }));
+}
+
+function bridgePressKeys(combo: string): Promise<DesktopResult<{ combo: string }>> {
+  return withFreshNativeTargetGuard(undefined, (targetGuard) => rawBridgePressKeys(combo, targetGuard));
+}
+
+function bridgeClickMenu(args: {
+  appName?: string;
+  menuPath: string[];
+}): Promise<DesktopResult<{ appName: string | null; menuPath: string[] }>> {
+  return withFreshNativeTargetGuard(args.appName, (targetGuard) => rawBridgeClickMenu({
+    ...args,
+    appName: targetGuard.appName,
+    targetGuard,
+  }));
 }
 
 function resolveInitialNativeAppIdentity(
@@ -1680,6 +1999,825 @@ export async function executeObservedNativeSemanticAction(
   };
 }
 
+type NativeSemanticValueClassification =
+  | { ok: true; currentValue: string }
+  | {
+      ok: false;
+      reason:
+        | 'unsupported_role'
+        | 'secure_control'
+        | 'modal_context'
+        | 'missing_label'
+        | 'auth_or_secret_context'
+        | 'destructive_context'
+        | 'permission_or_payment_context'
+        | 'secret_value'
+        | 'current_value_mismatch';
+    };
+
+function looksLikeSecretSemanticValue(value: string): boolean {
+  const normalized = value.normalize('NFKC').trim();
+  if (!normalized) return false;
+  if (/-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/i.test(normalized)) return true;
+  if (/\b(?:bearer|basic)\s+[A-Za-z0-9+/=_-]{12,}\b/i.test(normalized)) return true;
+  if (/\b(?:password|passwd|passcode|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S{4,}/i.test(normalized)) return true;
+  if (/\b(?:sk|pk|ghp|github_pat|xox[baprs]|ya29)[-_][A-Za-z0-9_-]{12,}\b/i.test(normalized)) return true;
+  const compactDigits = normalized.replace(/[\s-]/g, '');
+  if (/^\d{13,19}$/.test(compactDigits)) return true;
+  // A single opaque high-entropy token in an otherwise context-free field is
+  // secret-ambiguous. Normal prose, paths, and punctuation-rich text do not
+  // match this deliberately narrow guard.
+  return normalized.length >= 32
+    && normalized.length <= 512
+    && !/\s/.test(normalized)
+    && /^[A-Za-z0-9+/=_-]+$/.test(normalized);
+}
+
+function classifyNativeSemanticValueNode(
+  match: ExactNativeSemanticNode,
+  expectedCurrentValue: string,
+  requestedValue: string,
+): NativeSemanticValueClassification {
+  const role = normalizeNativeSemanticText(match.node.role).replace(/[\s_-]+/g, '');
+  const containerRole = normalizeNativeSemanticText(match.container?.role).replace(/[\s_-]+/g, '');
+  const label = normalizeNativeSemanticText(match.node.label);
+  const context = normalizeNativeSemanticText(`${label} ${nativeSemanticContext(match)}`).slice(0, 2000);
+  const currentValue = String(match.node.value ?? '');
+  if (/secure|password/.test(role)) return { ok: false, reason: 'secure_control' };
+  if (!['axtextfield', 'axtextarea', 'axtextview', 'axsearchfield'].includes(role)) {
+    return { ok: false, reason: 'unsupported_role' };
+  }
+  if (/^ax(alert|dialog|sheet)$/.test(containerRole)) {
+    return { ok: false, reason: 'modal_context' };
+  }
+  if (!label) return { ok: false, reason: 'missing_label' };
+  if (/\b(password|passcode|pin|one[- ]?time|2fa|mfa|sign[ -]?in|log[ -]?in|authenticate|authentication|identity|credential|secret|token|api key|private key|recovery code)\b/.test(context)) {
+    return { ok: false, reason: 'auth_or_secret_context' };
+  }
+  if (/\b(delete|remove|erase|trash|discard|reset|replace|overwrite|clear all|quit|terminate|uninstall|revoke)\b/.test(context)) {
+    return { ok: false, reason: 'destructive_context' };
+  }
+  if (/\b(pay|payment|purchase|buy|checkout|order|subscribe|billing|credit card|debit card|bank|wire|transfer|refund|permission|authorize|authorization|privacy|camera|microphone|location|contacts|screen recording|accessibility)\b/.test(context)) {
+    return { ok: false, reason: 'permission_or_payment_context' };
+  }
+  if (looksLikeSecretSemanticValue(currentValue) || looksLikeSecretSemanticValue(requestedValue)) {
+    return { ok: false, reason: 'secret_value' };
+  }
+  if (currentValue !== expectedCurrentValue) {
+    return { ok: false, reason: 'current_value_mismatch' };
+  }
+  return { ok: true, currentValue };
+}
+
+async function nativeSemanticValueHash(
+  fingerprint: NativeSemanticValueDeps['fingerprint'],
+  value: unknown,
+): Promise<string | null> {
+  try {
+    const result = String(await fingerprint(value) || '').trim().toLowerCase();
+    return /^[a-f0-9]{64}$/.test(result) ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function nativeSemanticValueFailureData(
+  phase: string,
+  errorCode: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    kind: 'desktop_semantic_value',
+    operation: 'native_semantic_set_value',
+    phase,
+    errorCode,
+    completionVerified: false,
+    outcomeUnknown: false,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    ...extra,
+  };
+}
+
+function nativeSemanticValueProofSnapshotMatches(
+  snapshot: NativeSemanticValueProofSnapshot | null,
+  expected: {
+    app: string;
+    pid: number;
+    targetFingerprint: string;
+    valueHash: string;
+    valueLength: number;
+    indexGeneration?: number;
+  },
+): boolean {
+  return !!snapshot
+    && Number.isFinite(Date.parse(snapshot.observedAt))
+    && exactOrExplicitNativeAppAliasMatches(snapshot.app, expected.app)
+    && snapshot.pid === expected.pid
+    && snapshot.indexGeneration > 0
+    && (expected.indexGeneration == null || snapshot.indexGeneration === expected.indexGeneration)
+    && snapshot.targetPresent === true
+    && snapshot.valueCapable === true
+    && snapshot.targetFingerprint === expected.targetFingerprint
+    && snapshot.valueHash === expected.valueHash
+    && snapshot.valueLength === expected.valueLength;
+}
+
+function projectNativeSemanticValueProof(
+  proof: NativeSemanticValueProof,
+  context: {
+    app: string;
+    pid: number;
+    targetRole: string;
+    targetPathHash: string;
+    targetLabelHash: string;
+    targetFingerprint: string;
+    currentValueHash: string;
+    requestedValueHash: string;
+    currentValueLength: number;
+    requestedValueLength: number;
+    evidenceId: string;
+    approvalReceiptHash: string;
+  },
+): Record<string, unknown> {
+  const projectSnapshot = (
+    snapshot: NativeSemanticValueProofSnapshot | null,
+  ): Record<string, unknown> | null => {
+    if (!snapshot) return null;
+    const observedAt = Number.isFinite(Date.parse(snapshot.observedAt))
+      ? snapshot.observedAt
+      : '';
+    const targetFingerprint = /^[a-f0-9]{64}$/.test(String(snapshot.targetFingerprint || ''))
+      ? snapshot.targetFingerprint
+      : null;
+    const valueHash = /^[a-f0-9]{64}$/.test(String(snapshot.valueHash || ''))
+      ? snapshot.valueHash
+      : null;
+    return {
+      observedAt,
+      app: context.app,
+      pid: context.pid,
+      indexGeneration: Math.max(0, Math.min(2_147_483_647, Math.trunc(Number(snapshot.indexGeneration || 0)))),
+      targetPresent: snapshot.targetPresent === true,
+      valueCapable: snapshot.valueCapable === true,
+      targetFingerprint,
+      valueHash,
+      valueLength: snapshot.valueLength == null
+        ? null
+        : Math.max(0, Math.min(20_000, Math.trunc(Number(snapshot.valueLength || 0)))),
+    };
+  };
+  const dispatchMethod = proof.dispatchMethod === 'ax_set_value'
+    || proof.dispatchMethod === 'none'
+    ? proof.dispatchMethod
+    : 'unknown';
+  const diffKind = [
+    'target_value_changed',
+    'unchanged',
+    'identity_unavailable',
+    'not_dispatched',
+  ].includes(proof.diff?.kind)
+    ? proof.diff.kind
+    : 'identity_unavailable';
+  const dispatchedAt = Number.isFinite(Date.parse(String(proof.dispatchedAt || '')))
+    ? proof.dispatchedAt
+    : undefined;
+  return {
+    schemaVersion: 1,
+    operation: 'native_semantic_set_value',
+    action: 'set_value',
+    app: context.app,
+    pid: context.pid,
+    targetRole: context.targetRole,
+    targetPathHash: context.targetPathHash,
+    targetLabelHash: context.targetLabelHash,
+    targetFingerprint: context.targetFingerprint,
+    currentValueHash: context.currentValueHash,
+    requestedValueHash: context.requestedValueHash,
+    currentValueLength: context.currentValueLength,
+    requestedValueLength: context.requestedValueLength,
+    valueClass: 'non_secret_text',
+    evidenceId: context.evidenceId,
+    approvalRequired: true,
+    approvalReceiptHash: context.approvalReceiptHash,
+    mutationNeeded: true,
+    mutationAttempted: proof.mutationAttempted === true,
+    mutationPerformed: proof.mutationPerformed === true,
+    noOp: false,
+    ...(dispatchedAt ? { dispatchedAt } : {}),
+    dispatchAcknowledged: proof.dispatchAcknowledged === true,
+    dispatchMethod,
+    completionVerified: proof.completionVerified === true,
+    outcomeUnknown: proof.outcomeUnknown === true,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    before: projectSnapshot(proof.before),
+    after: projectSnapshot(proof.after),
+    diff: {
+      kind: diffKind,
+      targetPresentBefore: proof.diff?.targetPresentBefore === true,
+      targetPresentAfter: proof.diff?.targetPresentAfter === true,
+      valueChanged: proof.diff?.valueChanged === true,
+    },
+  };
+}
+
+/**
+ * Observe → classify one exact value-capable AX node → prepare one-shot value
+ * target → approval → dispatch once → accept only exact same-target value proof.
+ *
+ * This adapter intentionally has no raw `setElementValue` or coordinate
+ * dependency. A production caller must provide the sealed bridge methods in
+ * `NativeSemanticValueDeps`; until those exist, this function cannot be wired
+ * to the legacy PID/path/text endpoint without violating its contract.
+ */
+export async function executeObservedNativeSemanticValueMutation(
+  requestInput: NativeSemanticValueRequest,
+  deps: NativeSemanticValueDeps,
+): Promise<ComputerAppAdapterResult> {
+  const request: NativeSemanticValueRequest = {
+    action: requestInput?.action,
+    appName: String(requestInput?.appName || '').trim().slice(0, 120),
+    expectedPid: Math.trunc(Number(requestInput?.expectedPid || 0)),
+    targetPath: String(requestInput?.targetPath || '').trim(),
+    expectedRole: String(requestInput?.expectedRole || '').trim().slice(0, 80),
+    expectedLabel: String(requestInput?.expectedLabel || '').trim().slice(0, 120),
+    expectedCurrentValue: typeof requestInput?.expectedCurrentValue === 'string'
+      ? requestInput.expectedCurrentValue
+      : '',
+    value: typeof requestInput?.value === 'string' ? requestInput.value : '',
+  };
+  const now = deps.now || (() => new Date().toISOString());
+  if (
+    request.action !== 'set_value'
+    || !request.appName
+    || !/^[A-Za-z0-9 .\-_()]+$/.test(request.appName)
+    || !(request.expectedPid > 0)
+    || request.targetPath.length > 240
+    || !/^[0-9]+(\.[0-9]+)*$/.test(request.targetPath)
+    || !request.expectedRole
+    || !request.expectedLabel
+    || request.expectedCurrentValue.length > 20_000
+    || request.value.length === 0
+    || request.value.length > 20_000
+    || !request.value.trim()
+    || /[\u0000\u007f\u202a-\u202e\u2066-\u2069]/.test(request.value)
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before observing the native app because the exact semantic value target or requested value was invalid.',
+      warnings: ['native semantic value blocked before observation: invalid exact target identity or value'],
+      data: nativeSemanticValueFailureData('input', 'invalid_input'),
+    };
+  }
+  if (looksLikeSecretSemanticValue(request.value)) {
+    return {
+      ok: false,
+      message: 'I stopped before observing the native app because the requested value resembles a credential or secret. Use the dedicated credential lane instead.',
+      warnings: ['native semantic value blocked before observation: secret-like value'],
+      data: nativeSemanticValueFailureData('input', 'native_semantic_secret_blocked'),
+    };
+  }
+
+  let observation: NativeAppActivationBridgeResult<ObserveAppData>;
+  try {
+    observation = await deps.observeApp({
+      appName: request.appName,
+      maxDepth: 10,
+      maxNodes: 400,
+    });
+  } catch {
+    observation = { ok: false, errorCode: 'bridge_exception' };
+  }
+  if (!observation?.ok || !observation.data) {
+    const observationErrorCode = normalizeNativeBridgeErrorCode(observation.errorCode);
+    return {
+      ok: false,
+      message: `I stopped before preparing the native value change because a fresh app observation was unavailable: ${renderNativeBridgeFailure(observationErrorCode)}.`,
+      warnings: ['native semantic value blocked before mutation: fresh app observation unavailable'],
+      data: nativeSemanticValueFailureData('before_observation', observationErrorCode),
+    };
+  }
+
+  const observed = observation.data;
+  const resolvedApp = resolveInitialNativeAppIdentity(observed, request.appName);
+  const pid = Math.max(0, Math.trunc(Number(observed.pid || 0)));
+  const indexGeneration = Math.max(0, Math.trunc(Number(observed.indexGeneration || 0)));
+  if (
+    !resolvedApp
+    || observed.appRunning !== true
+    || observed.frontmost !== true
+    || !(pid > 0)
+    || pid !== request.expectedPid
+    || !(indexGeneration > 0)
+    || !observed.tree
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before preparing the native value change because the exact running app, PID, or fresh accessibility tree was unavailable.',
+      warnings: ['native semantic value blocked before mutation: incomplete exact observation'],
+      data: nativeSemanticValueFailureData('before_observation', 'uncertain_ui_target'),
+    };
+  }
+
+  const exactNode = findExactNativeSemanticNode(observed.tree, request.targetPath);
+  if (
+    !exactNode
+    || String(exactNode.node.role || '') !== request.expectedRole
+    || normalizeNativeSemanticText(exactNode.node.label) !== normalizeNativeSemanticText(request.expectedLabel)
+  ) {
+    return {
+      ok: false,
+      message: 'I stopped before preparing the native value change because the exact AX path, role, and label did not all match the fresh observation.',
+      warnings: ['native semantic value blocked before mutation: exact target mismatch'],
+      data: nativeSemanticValueFailureData('target_validation', 'uncertain_ui_target'),
+    };
+  }
+  const localClassification = classifyNativeSemanticValueNode(
+    exactNode,
+    request.expectedCurrentValue,
+    request.value,
+  );
+  if ('reason' in localClassification) {
+    return {
+      ok: false,
+      message: 'I stopped before preparing the native value change because that field is not a proven non-secret, non-consequential text target.',
+      warnings: [`native semantic value blocked before mutation: ${localClassification.reason}`],
+      data: nativeSemanticValueFailureData('target_validation', 'native_semantic_value_target_blocked'),
+    };
+  }
+
+  const [targetPathHash, targetLabelHash, targetFingerprint, currentValueHash, requestedValueHash] = await Promise.all([
+    nativeSemanticValueHash(deps.fingerprint, request.targetPath),
+    nativeSemanticValueHash(deps.fingerprint, normalizeNativeSemanticText(request.expectedLabel)),
+    nativeSemanticValueHash(deps.fingerprint, {
+      schemaVersion: 1,
+      operation: 'native_semantic_set_value_target',
+      app: normalizedAppIdentity(resolvedApp),
+      pid,
+      targetPath: request.targetPath,
+      targetRole: request.expectedRole,
+      targetLabel: normalizeNativeSemanticText(request.expectedLabel),
+    }),
+    nativeSemanticValueHash(deps.fingerprint, request.expectedCurrentValue),
+    nativeSemanticValueHash(deps.fingerprint, request.value),
+  ]);
+  if (!targetPathHash || !targetLabelHash || !targetFingerprint || !currentValueHash || !requestedValueHash) {
+    return {
+      ok: false,
+      message: 'I stopped before preparing the native value change because cryptographic target binding was unavailable.',
+      warnings: ['native semantic value blocked before mutation: target binding unavailable'],
+      data: nativeSemanticValueFailureData('target_binding', 'invalid_input'),
+    };
+  }
+
+  let prepared: NativeAppActivationBridgeResult<NativeSemanticValueTarget>;
+  try {
+    prepared = await deps.observeNativeSemanticValueTarget({
+      action: 'set_value',
+      appName: resolvedApp,
+      pid,
+      indexGeneration,
+      targetPath: request.targetPath,
+      expectedRole: request.expectedRole,
+      expectedLabel: request.expectedLabel,
+      expectedCurrentValue: request.expectedCurrentValue,
+      value: request.value,
+    });
+  } catch {
+    prepared = { ok: false, errorCode: 'bridge_exception' };
+  }
+  if (!prepared?.ok || !prepared.data) {
+    const preparationErrorCode = normalizeNativeBridgeErrorCode(prepared.errorCode);
+    return {
+      ok: false,
+      message: `I stopped before approval because the bridge could not seal the exact fresh native value target: ${renderNativeBridgeFailure(preparationErrorCode)}.`,
+      warnings: ['native semantic value blocked before mutation: one-shot target unavailable'],
+      data: nativeSemanticValueFailureData('target_preparation', preparationErrorCode),
+    };
+  }
+
+  const target = prepared.data;
+  const observedAtMs = Date.parse(target.observedAt);
+  const expiresAtMs = Date.parse(target.expiresAt);
+  const nowMs = Date.parse(now());
+  const expectedNoOp = currentValueHash === requestedValueHash
+    && request.expectedCurrentValue === request.value;
+  const expectedSummary = `Set one exact non-secret text field in ${resolvedApp}`.slice(0, 200);
+  const commonTargetMatched = (
+    target.schemaVersion === 1
+    && target.action === 'set_value'
+    && exactOrExplicitNativeAppAliasMatches(target.app, resolvedApp)
+    && exactOrExplicitNativeAppAliasMatches(target.resolvedAppName, resolvedApp)
+    && target.pid === pid
+    && target.indexGeneration === indexGeneration
+    && target.targetPath === request.targetPath
+    && target.targetRole === request.expectedRole
+    && normalizeNativeSemanticText(target.targetLabel) === normalizeNativeSemanticText(request.expectedLabel)
+    && target.targetFingerprint === targetFingerprint
+    && target.currentValueHash === currentValueHash
+    && target.requestedValueHash === requestedValueHash
+    && target.currentValueLength === request.expectedCurrentValue.length
+    && target.requestedValueLength === request.value.length
+    && target.valueClass === 'non_secret_text'
+    && target.valueCapable === true
+    && /^[A-Za-z0-9._:-]{8,120}$/.test(target.evidenceId)
+    && Number.isFinite(observedAtMs)
+    && Number.isFinite(expiresAtMs)
+    && Number.isFinite(nowMs)
+    && nowMs >= observedAtMs
+    && nowMs - observedAtMs <= 5_000
+    && expiresAtMs > observedAtMs
+    && expiresAtMs > nowMs
+    && target.targetSummary === expectedSummary
+  );
+  const noOpTargetMatched = expectedNoOp
+    && target.mutationNeeded === false
+    && target.targetId === null
+    && target.approvalRequired === false
+    && target.risk === 'low';
+  const mutationTargetMatched = !expectedNoOp
+    && target.mutationNeeded === true
+    && typeof target.targetId === 'string'
+    && /^[a-f0-9]{48}$/.test(target.targetId)
+    && target.approvalRequired === true
+    && target.risk === 'medium';
+  if (!commonTargetMatched || (!noOpTargetMatched && !mutationTargetMatched)) {
+    return {
+      ok: false,
+      message: 'I stopped before approval because the prepared target did not preserve the exact observed app, PID, field identity, value hashes, and mutation requirement.',
+      warnings: ['native semantic value blocked before mutation: prepared target mismatch'],
+      data: nativeSemanticValueFailureData('target_preparation', 'uncertain_ui_target'),
+    };
+  }
+
+  if (noOpTargetMatched) {
+    const noOpSnapshot = {
+      observedAt: target.observedAt,
+      app: resolvedApp,
+      pid,
+      indexGeneration,
+      targetPresent: true,
+      valueCapable: true,
+      targetFingerprint,
+      valueHash: currentValueHash,
+      valueLength: request.expectedCurrentValue.length,
+    };
+    return {
+      ok: true,
+      message: `The exact target field in **${resolvedApp}** already has the requested value; no change was needed.`,
+      warnings: [],
+      data: {
+        kind: 'desktop_semantic_value',
+        operation: 'native_semantic_set_value',
+        phase: 'completed',
+        app: resolvedApp,
+        pid,
+        evidenceId: target.evidenceId,
+        targetRole: target.targetRole,
+        targetFingerprint,
+        currentValueHash,
+        requestedValueHash,
+        currentValueLength: request.expectedCurrentValue.length,
+        requestedValueLength: request.value.length,
+        valueClass: 'non_secret_text',
+        approvalRequired: false,
+        approvalGranted: false,
+        mutationNeeded: false,
+        mutationAttempted: false,
+        mutationPerformed: false,
+        noOp: true,
+        completionVerified: true,
+        outcomeUnknown: false,
+        outcomeUnknownPolicy: 'verify_before_retry',
+        replayAllowed: false,
+        proof: {
+          schemaVersion: 1,
+          operation: 'native_semantic_set_value',
+          action: 'set_value',
+          app: resolvedApp,
+          pid,
+          targetRole: target.targetRole,
+          targetPathHash,
+          targetLabelHash,
+          targetFingerprint,
+          currentValueHash,
+          requestedValueHash,
+          currentValueLength: request.expectedCurrentValue.length,
+          requestedValueLength: request.value.length,
+          valueClass: 'non_secret_text',
+          evidenceId: target.evidenceId,
+          approvalRequired: false,
+          mutationNeeded: false,
+          mutationAttempted: false,
+          mutationPerformed: false,
+          noOp: true,
+          dispatchAcknowledged: false,
+          dispatchMethod: 'none',
+          completionVerified: true,
+          outcomeUnknown: false,
+          outcomeUnknownPolicy: 'verify_before_retry',
+          replayAllowed: false,
+          before: noOpSnapshot,
+          after: noOpSnapshot,
+          diff: {
+            kind: 'unchanged',
+            targetPresentBefore: true,
+            targetPresentAfter: true,
+            valueChanged: false,
+          },
+        },
+      },
+    };
+  }
+
+  const approvalProposal: NativeSemanticValueApprovalProposal = {
+    schemaVersion: 1,
+    operation: 'native_semantic_set_value',
+    action: 'set_value',
+    app: resolvedApp,
+    pid,
+    targetRole: target.targetRole,
+    targetFingerprint,
+    currentValueHash,
+    requestedValueHash,
+    currentValueLength: request.expectedCurrentValue.length,
+    requestedValueLength: request.value.length,
+    valueClass: 'non_secret_text',
+    overwritesExistingValue: request.expectedCurrentValue.length > 0,
+    evidenceId: target.evidenceId,
+    observedAt: target.observedAt,
+    indexGeneration,
+    targetSummary: expectedSummary,
+    approvalRequired: true,
+    risk: 'medium',
+    expiresAt: target.expiresAt,
+  };
+  let approval: NativeSemanticValueApprovalDecision;
+  try {
+    approval = await deps.approvalGate(approvalProposal);
+  } catch {
+    approval = { approved: false, reason: 'approval_gate_unavailable' };
+  }
+  const approvalId = String(approval.approvalId || '').trim();
+  if (!approval.approved || !/^[A-Za-z0-9._:-]{8,160}$/.test(approvalId)) {
+    return {
+      ok: false,
+      message: approval.approved
+        ? 'I did not dispatch the native value change because the approval gate did not return a valid runtime receipt.'
+        : 'The native value change was not approved. Review or retry the approval request.',
+      warnings: ['native semantic value not dispatched: approval required'],
+      data: nativeSemanticValueFailureData('approval', 'approval_required', {
+        approvalRequired: true,
+        approvalGranted: false,
+        evidenceId: target.evidenceId,
+        mutationAttempted: false,
+      }),
+    };
+  }
+
+  const approvalReceiptHash = await nativeSemanticValueHash(deps.fingerprint, approvalId);
+  if (!approvalReceiptHash) {
+    return {
+      ok: false,
+      message: 'I did not dispatch the native value change because the runtime approval receipt could not be cryptographically bound.',
+      warnings: ['native semantic value not dispatched: approval binding unavailable'],
+      data: nativeSemanticValueFailureData('approval', 'approval_required', {
+        approvalRequired: true,
+        approvalGranted: false,
+        evidenceId: target.evidenceId,
+        mutationAttempted: false,
+      }),
+    };
+  }
+
+  let execution: NativeAppActivationBridgeResult<NativeSemanticValueExecution>;
+  try {
+    execution = await deps.performNativeSemanticValue({
+      targetId: target.targetId!,
+      targetFingerprint,
+      approvalId,
+    });
+  } catch {
+    return {
+      ok: false,
+      message: 'The approved native value call ended without a receipt. Its outcome is unknown, so I will not replay it.',
+      warnings: ['native semantic value outcome unknown after dispatch call; verify before any retry'],
+      data: nativeSemanticValueFailureData('dispatch', 'bridge_offline', {
+        evidenceId: target.evidenceId,
+        mutationAttempted: true,
+        outcomeUnknown: true,
+      }),
+    };
+  }
+
+  if (!execution.ok || !execution.data) {
+    const proof = execution.data?.proof;
+    const mutationAttempted = proof ? proof.mutationAttempted === true : true;
+    const outcomeUnknown = proof
+      ? proof.outcomeUnknown === true || proof.mutationAttempted === true
+      : true;
+    return {
+      ok: false,
+      message: outcomeUnknown
+        ? 'The approved native value change was not verified against the exact target. Its outcome is unknown, so I will not replay it.'
+        : `The bridge stopped before dispatching the approved native value change: ${renderNativeBridgeFailure(execution.errorCode)}.`,
+      warnings: [
+        outcomeUnknown
+          ? 'native semantic value outcome unknown; verify before any retry'
+          : 'native semantic value consumed without dispatch after fresh target validation failed',
+      ],
+      data: nativeSemanticValueFailureData(
+        mutationAttempted ? 'after_observation' : 'before_dispatch',
+        normalizeNativeBridgeErrorCode(execution.errorCode),
+        {
+          evidenceId: target.evidenceId,
+          mutationAttempted,
+          outcomeUnknown,
+          ...(proof ? {
+            proof: projectNativeSemanticValueProof(proof, {
+              app: resolvedApp,
+              pid,
+              targetRole: target.targetRole,
+              targetPathHash,
+              targetLabelHash,
+              targetFingerprint,
+              currentValueHash,
+              requestedValueHash,
+              currentValueLength: request.expectedCurrentValue.length,
+              requestedValueLength: request.value.length,
+              evidenceId: target.evidenceId,
+              approvalReceiptHash,
+            }),
+          } : {}),
+        },
+      ),
+    };
+  }
+
+  const completed = execution.data;
+  const proof = completed.proof;
+  if (!proof || typeof proof !== 'object') {
+    return {
+      ok: false,
+      message: 'The bridge returned a receipt without structured same-target value proof. Its outcome is unknown, so I will not replay the change.',
+      warnings: ['native semantic value failed closed: structured value proof missing'],
+      data: nativeSemanticValueFailureData('after_observation', 'native_semantic_value_verification_failed', {
+        evidenceId: target.evidenceId,
+        mutationAttempted: true,
+        outcomeUnknown: true,
+      }),
+    };
+  }
+  const exactBefore = nativeSemanticValueProofSnapshotMatches(proof.before, {
+    app: resolvedApp,
+    pid,
+    indexGeneration,
+    targetFingerprint,
+    valueHash: currentValueHash,
+    valueLength: request.expectedCurrentValue.length,
+  });
+  const exactAfter = nativeSemanticValueProofSnapshotMatches(proof.after, {
+    app: resolvedApp,
+    pid,
+    targetFingerprint,
+    valueHash: requestedValueHash,
+    valueLength: request.value.length,
+  });
+  const beforeObservedAtMs = Date.parse(String(proof.before?.observedAt || ''));
+  const dispatchedAtMs = Date.parse(String(proof.dispatchedAt || ''));
+  const afterObservedAtMs = Date.parse(String(proof.after?.observedAt || ''));
+  const exactProofOrder = Number.isFinite(beforeObservedAtMs)
+    && Number.isFinite(dispatchedAtMs)
+    && Number.isFinite(afterObservedAtMs)
+    && beforeObservedAtMs <= dispatchedAtMs
+    && dispatchedAtMs <= afterObservedAtMs
+    && Number(proof.after?.indexGeneration || 0) > Number(proof.before?.indexGeneration || 0);
+  const exactCompletion = (
+    exactOrExplicitNativeAppAliasMatches(completed.app, resolvedApp)
+    && completed.pid === pid
+    && completed.action === 'set_value'
+    && completed.targetRole === target.targetRole
+    && completed.targetPathHash === targetPathHash
+    && completed.targetLabelHash === targetLabelHash
+    && completed.targetFingerprint === targetFingerprint
+    && completed.currentValueHash === currentValueHash
+    && completed.requestedValueHash === requestedValueHash
+    && completed.currentValueLength === request.expectedCurrentValue.length
+    && completed.requestedValueLength === request.value.length
+    && completed.evidenceId === target.evidenceId
+    && completed.completionVerified === true
+    && completed.outcomeUnknown === false
+    && completed.replayAllowed === false
+    && proof.schemaVersion === 1
+    && proof.operation === 'native_semantic_set_value'
+    && proof.action === 'set_value'
+    && exactOrExplicitNativeAppAliasMatches(proof.app, resolvedApp)
+    && proof.pid === pid
+    && proof.targetRole === target.targetRole
+    && proof.targetPathHash === targetPathHash
+    && proof.targetLabelHash === targetLabelHash
+    && proof.targetFingerprint === targetFingerprint
+    && proof.currentValueHash === currentValueHash
+    && proof.requestedValueHash === requestedValueHash
+    && proof.currentValueLength === request.expectedCurrentValue.length
+    && proof.requestedValueLength === request.value.length
+    && proof.valueClass === 'non_secret_text'
+    && proof.evidenceId === target.evidenceId
+    && proof.approvalRequired === true
+    && proof.approvalReceiptHash === approvalReceiptHash
+    && proof.mutationNeeded === true
+    && proof.mutationAttempted === true
+    && proof.mutationPerformed === true
+    && proof.noOp === false
+    && proof.dispatchAcknowledged === true
+    && proof.dispatchMethod === 'ax_set_value'
+    && proof.completionVerified === true
+    && proof.outcomeUnknown === false
+    && proof.replayAllowed === false
+    && proof.diff?.kind === 'target_value_changed'
+    && proof.diff?.targetPresentBefore === true
+    && proof.diff?.targetPresentAfter === true
+    && proof.diff?.valueChanged === true
+    && exactBefore
+    && exactAfter
+    && exactProofOrder
+  );
+  if (!exactCompletion) {
+    const projectedProof = projectNativeSemanticValueProof(proof, {
+      app: resolvedApp,
+      pid,
+      targetRole: target.targetRole,
+      targetPathHash,
+      targetLabelHash,
+      targetFingerprint,
+      currentValueHash,
+      requestedValueHash,
+      currentValueLength: request.expectedCurrentValue.length,
+      requestedValueLength: request.value.length,
+      evidenceId: target.evidenceId,
+      approvalReceiptHash,
+    });
+    return {
+      ok: false,
+      message: 'The bridge returned a receipt, but it did not prove the exact requested value on the same approved native target. I will not replay the change.',
+      warnings: ['native semantic value failed closed: exact same-target value proof missing'],
+      data: nativeSemanticValueFailureData('after_observation', 'native_semantic_value_verification_failed', {
+        evidenceId: target.evidenceId,
+        mutationAttempted: true,
+        outcomeUnknown: true,
+        proof: projectedProof,
+      }),
+    };
+  }
+
+  const projectedProof = projectNativeSemanticValueProof(proof, {
+    app: resolvedApp,
+    pid,
+    targetRole: target.targetRole,
+    targetPathHash,
+    targetLabelHash,
+    targetFingerprint,
+    currentValueHash,
+    requestedValueHash,
+    currentValueLength: request.expectedCurrentValue.length,
+    requestedValueLength: request.value.length,
+    evidenceId: target.evidenceId,
+    approvalReceiptHash,
+  });
+  return {
+    ok: true,
+    message: `Set and verified the approved native text field in **${resolvedApp}**.`,
+    warnings: [],
+    data: {
+      kind: 'desktop_semantic_value',
+      operation: 'native_semantic_set_value',
+      phase: 'completed',
+      app: resolvedApp,
+      pid,
+      evidenceId: target.evidenceId,
+      targetRole: target.targetRole,
+      targetFingerprint,
+      currentValueHash,
+      requestedValueHash,
+      currentValueLength: request.expectedCurrentValue.length,
+      requestedValueLength: request.value.length,
+      valueClass: 'non_secret_text',
+      approvalRequired: true,
+      approvalGranted: true,
+      mutationNeeded: true,
+      mutationAttempted: true,
+      mutationPerformed: true,
+      noOp: false,
+      completionVerified: true,
+      outcomeUnknown: false,
+      outcomeUnknownPolicy: 'verify_before_retry',
+      replayAllowed: false,
+      proof: projectedProof,
+    },
+  };
+}
+
 function toolMatches(tool: Pick<McpTool, 'name' | 'description'>, needles: string[]): boolean {
   const haystack = `${normalizeText(tool.name)} ${normalizeText(tool.description)}`;
   return needles.some((needle) => haystack.includes(needle));
@@ -2771,6 +3909,7 @@ export const __computerAppAdapterTestables = {
   detectComputerAppAdapterSequence,
   executeObservedNativeAppActivation,
   executeObservedNativeSemanticAction,
+  executeObservedNativeSemanticValueMutation,
 };
 
 // E3 — region-zoom coordinate re-click. When an a11y element click fails
@@ -5185,11 +6324,16 @@ async function executeLocalDesktopIntent(
     }
 
     if (intent.kind === 'mouse_up') {
-      const hasCoords = typeof intent.x === 'number' && typeof intent.y === 'number';
-      if (hasCoords) {
-        const observed = await observeBeforeCoordinateAction([{ x: intent.x as number, y: intent.y as number }]);
-        if (!observed.ok) return { ok: false, message: observed.message, warnings: ['coordinate preflight failed'], data: { kind: 'desktop_coordinate_preflight_failed' } };
+      if (typeof intent.x !== 'number' || typeof intent.y !== 'number') {
+        return {
+          ok: false,
+          message: 'Mouse release requires exact x,y coordinates from the current observed target window.',
+          warnings: ['desktop_mouse_up rejected without exact coordinates'],
+          data: { kind: 'desktop_invalid_input', errorCode: 'invalid_input' },
+        };
       }
+      const observed = await observeBeforeCoordinateAction([{ x: intent.x, y: intent.y }]);
+      if (!observed.ok) return { ok: false, message: observed.message, warnings: ['coordinate preflight failed'], data: { kind: 'desktop_coordinate_preflight_failed' } };
       const r = await bridgeMouseUp({ x: intent.x, y: intent.y, button: intent.mouseButton });
       if (!r.ok) return { ok: false, message: `Mouse up failed: ${r.error || r.errorCode || 'unknown bridge error'}.`, warnings: [`desktop_mouse_up failed with ${r.errorCode || 'unknown_error'}`], data: { kind: 'desktop_bridge_error', errorCode: r.errorCode } };
       return { ok: true, message: `Released ${r.data?.button || 'left'} mouse${r.data?.x != null && r.data?.y != null ? ` at (${r.data.x}, ${r.data.y})` : ''}.`, warnings: [], data: { kind: 'desktop_mouse_up', ...r.data } };
@@ -5203,14 +6347,15 @@ async function executeLocalDesktopIntent(
       return { ok: true, message: `${observed.note}\nDragged from (${r.data?.fromX}, ${r.data?.fromY}) to (${r.data?.toX}, ${r.data?.toY}).`, warnings: [], data: { kind: 'desktop_mouse_drag', ...r.data } };
     }
 
-    // Scroll REQUIRES coordinates and narrows them in the branch condition, the
-    // same shape as mouse_down above. Coord-less scroll is not a safe no-op: the
-    // bridge defaults a missing x/y to `Number(parsed?.x ?? 0)`, so it would
-    // scroll at (0,0) — the screen's top-left — while the preflight was skipped
-    // precisely because no coordinates were supplied. A mutation at an
-    // unverified location is the exact thing observeBeforeCoordinateAction
-    // exists to prevent, so this fails closed instead.
-    if (intent.kind === 'mouse_scroll' && typeof intent.x === 'number' && typeof intent.y === 'number') {
+    if (intent.kind === 'mouse_scroll') {
+      if (typeof intent.x !== 'number' || typeof intent.y !== 'number') {
+        return {
+          ok: false,
+          message: 'Mouse scrolling requires exact x,y coordinates from the current observed target window.',
+          warnings: ['desktop_mouse_scroll rejected without exact coordinates'],
+          data: { kind: 'desktop_invalid_input', errorCode: 'invalid_input' },
+        };
+      }
       const observed = await observeBeforeCoordinateAction([{ x: intent.x, y: intent.y }]);
       if (!observed.ok) return { ok: false, message: observed.message, warnings: ['coordinate preflight failed'], data: { kind: 'desktop_coordinate_preflight_failed' } };
       const r = await bridgeMouseScroll({ deltaX: intent.deltaX, deltaY: intent.deltaY, x: intent.x, y: intent.y });

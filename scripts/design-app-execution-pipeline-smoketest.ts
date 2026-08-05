@@ -49,6 +49,44 @@ assert(photoshopPipeline?.phases.some((phase) => phase.id === 'recover_or_build_
 assert(photoshopPipeline?.proofTools.includes('desktop.photoshop_export_proof'));
 assert(photoshopPipeline?.failClosedRules.some((rule) => /approval|selection|proof/i.test(rule)));
 
+const blankDocumentTask = 'Open Photoshop and start a new project 600 x 600';
+const blankDocumentPipeline = buildDesignAppExecutionPipelinePlan(blankDocumentTask);
+const blankDocumentPipelinePrompt = buildDesignAppExecutionPipelinePromptBlock(blankDocumentTask) || '';
+assert.equal(blankDocumentPipeline?.appId, 'adobe_photoshop');
+assert.deepEqual(blankDocumentPipeline?.requiredToolSequence, [
+  'desktop.photoshop_document_status',
+  'desktop.launch_app',
+  'desktop.photoshop_document_status',
+  'desktop.photoshop_create_document',
+  'desktop.photoshop_document_status',
+]);
+assert.deepEqual(blankDocumentPipeline?.mutationTools, ['desktop.photoshop_create_document']);
+assert.deepEqual(blankDocumentPipeline?.proofTools, ['desktop.photoshop_document_status']);
+assert.equal(blankDocumentPipeline?.buildoutTools.length, 0);
+assert.equal(blankDocumentPipeline?.adapterGapOperations.length, 0);
+assert(blankDocumentPipeline?.phases.some((phase) => (
+  phase.id === 'execute_design_mutations'
+  && phase.tools.length === 1
+  && phase.tools[0] === 'desktop.photoshop_create_document'
+  && !phase.approvalRequired
+)));
+assert(blankDocumentPipeline?.phases.some((phase) => phase.id === 'prepare_app'));
+assert(!blankDocumentPipeline?.phases.some((phase) => phase.id === 'resolve_source_package'));
+assert.deepEqual(blankDocumentPipeline?.approvalTools, []);
+for (const forbidden of [
+  'desktop.file_search',
+  'desktop.file_stat',
+  'desktop.open_path',
+  'desktop.photoshop_layer_inventory',
+  'desktop.screenshot',
+  'agent.build_app_capability',
+]) {
+  assert(!blankDocumentPipeline?.requiredToolSequence.includes(forbidden), `blank-document sequence omits ${forbidden}`);
+}
+assert(!/source file or package exists|refreshed layer\/text\/link inventory|destructive pixel edit/i.test(blankDocumentPipelinePrompt));
+assert.match(blankDocumentPipeline?.nextVisibleAction || '', /desktop\.photoshop_create_document.*600x600.*no redundant approval/i);
+assert.doesNotMatch(blankDocumentPipelinePrompt, /canonical tool approval|second per-tool approval (?:is )?required/i);
+
 // ── HUNT invariant pin: resolve→observe→approve→mutate→export→verify order,
 // and NO mutation/output/generation runs before approval + observation.
 {

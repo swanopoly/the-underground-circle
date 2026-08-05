@@ -9,11 +9,15 @@ export type PendingBotMessageRecord = {
   isBot?: boolean;
   isUser?: boolean;
   userName?: string;
+  authorId?: string | null;
   replyTo?: { name: string; content: string } | null;
   reactions?: Record<string, string[]>;
   source?: unknown;
   usage?: unknown;
   runId?: string | null;
+  requestId?: string | null;
+  requestAuthorId?: string | null;
+  persistedMetadataSnapshot?: unknown;
   delegatedTo?: string;
   delegatedSubagents?: string[];
   artifacts?: unknown[];
@@ -31,6 +35,9 @@ export type PendingBotMessageRecord = {
   computerTaskStatus?: ComputerTaskOutcomeStatus | null;
   computerHandoff?: unknown;
   chatAutomationPlanPreview?: unknown;
+  computerFindings?: unknown;
+  bestOfN?: unknown;
+  outcomeSignal?: unknown;
   modeOutcomeSummary?: { headline: string; bulletPoints?: string[]; blockers?: string[] } | null;
   observedEval?: unknown;
   commandDecisions?: unknown[];

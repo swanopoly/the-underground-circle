@@ -181,6 +181,11 @@ const AUTO_EXTERNAL_READ_TOOLS = new Set([
 //  (c) listed per-tool exceptions with a stable, documented reason.
 const AUTO_MUTATION_TOOL_EXCEPTIONS = new Set([
   'desktop.convert_image', // bounded deterministic local conversion next to the source; approvalKind file_write.
+  // Reversible local lifecycle changes only. Both require an authenticated,
+  // persisted exact provider call plus fresh before/after app/PID/frontmost
+  // proof; they authorize no edit, save, export, submission, or other action.
+  'desktop.launch_app',
+  'desktop.focus_app',
 ]);
 
 // ── Lint engine ─────────────────────────────────────────────────────────────

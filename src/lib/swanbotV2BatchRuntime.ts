@@ -1,5 +1,5 @@
 /**
- * swanbotV2BatchRuntime — the flag-gated loop-convergence runtime.
+ * swanbotV2BatchRuntime — the local loop-convergence runtime.
  *
  * CONSOLIDATE #1 (`docs/adr/ADR-0002-loop-convergence.md`,
  * `docs/LOOP_CONVERGENCE_RUNBOOK.md` §2). This is the thin runtime that repoints
@@ -10,10 +10,11 @@
  * existing exports (no new engine), mirroring the proven `runTypedCoreToolLoop`
  * reference impl (`openswanSessionRuntime.ts:542`) without editing it.
  *
- * LIVE BUT FLAG-DARK: `callSwanBotV2` delegates here only when
- * `uc_swanbot_v2_client_loop === 'true'`. The flag remains DEFAULT OFF until
- * production telemetry satisfies the M4 readiness gate; the deployed edge loop
- * remains the rollback target.
+ * LIVE WITH A NARROW REQUIRED LANE: ordinary turns delegate here only when
+ * `uc_swanbot_v2_client_loop === 'true'`; authenticated computer app/file
+ * tasks require it per turn because their canonical local tool catalog does
+ * not exist in the legacy text fallback. The global flag remains DEFAULT OFF
+ * until production telemetry satisfies the M4 readiness gate.
  *
  * DROP-IN CONTRACT: `runSwanbotV2Batch` matches `callSwanBotV2`'s positional
  * params + `V2CallResult` return shape EXACTLY, plus ONE trailing options bag
@@ -37,10 +38,16 @@ import {
   type AgentEvent,
   type AgentMessage,
   type AgentProvider,
+  type AgentToolConstraintGuard,
   type AgentToolDefinition,
 } from './agentExecutionCore';
 import { createPersistedRun } from './agentRunPersistence';
 import { updateRunStatus } from './agentRunSystem';
+import {
+  isRetryableInvokeError,
+  runWithTransientRetry,
+  type RetryAttemptResult,
+} from './swanbotV2Retry';
 import {
   toAgentCoreMessages,
   toAgentCoreToolDefs,
@@ -54,6 +61,11 @@ import {
 import { buildSnapshotAwareInitialMessages } from './circleSnapshotContextInjection';
 import { getOpenSwanToolsForSurface, createOpenSwanToolParallelPolicyProvider } from './openswanBridge';
 import type { OpenSwanRuntimeToolContext } from './openswanToolRuntime';
+import {
+  evaluateTaskExecutionSurfaceToolCall,
+  taskExecutionSurfaceAllowsTool,
+  type TaskExecutionSurfaceGuard,
+} from './taskCapabilityProfiles';
 import {
   resolveChatComputerConstraintInputs,
   type ChatComputerConstraintCategory,
@@ -142,6 +154,8 @@ export type SwanbotV2BatchContext = {
    * cannot erase the policy by omitting this context.
    */
   alwaysConfirmFloor?: ChatComputerConstraintCategory[];
+  /** Hard catalog/handler ceiling derived from the task capability profile. */
+  executionSurfaceGuard?: TaskExecutionSurfaceGuard;
 };
 
 /**
@@ -305,7 +319,11 @@ export async function runSwanbotV2Batch(
       activePluginIds: extra.activePluginIds,
       userConstraints,
     };
-    const catalog = getOpenSwanToolsForSurface(V2_BATCH_RUN_SURFACE, toolCtx, { mode });
+    const catalog = getOpenSwanToolsForSurface(V2_BATCH_RUN_SURFACE, toolCtx, { mode })
+      .filter((tool) => taskExecutionSurfaceAllowsTool(
+        extra.executionSurfaceGuard,
+        tool.name,
+      ));
     const handlerByName = new Map<string, AgentToolDefinition['handler']>(
       catalog.map((t) => [t.name, t.handler] as const),
     );
@@ -329,27 +347,37 @@ export async function runSwanbotV2Batch(
     const provider: AgentProvider = {
       turn: async ({ messages, tools: turnTools }) => {
         let data: unknown = null;
-        let error: unknown = null;
         try {
           const accessToken = await getFreshAccessToken();
-          const res = await supabase.functions.invoke('swanbot-ai', {
-            headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
-            body: buildSwanbotToolTurnBody({
-              userMessage: message,
-              circleId,
-              userId,
-              model: loopModel,
-              systemPrompt,
-              tools: toAnthropicToolShapes(turnTools),
-              messages,
-            }),
+          data = await runWithTransientRetry<unknown>(async (): Promise<RetryAttemptResult<unknown>> => {
+            const res = await supabase.functions.invoke('swanbot-ai', {
+              headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+              body: buildSwanbotToolTurnBody({
+                userMessage: message,
+                circleId,
+                userId,
+                model: loopModel,
+                systemPrompt,
+                tools: toAnthropicToolShapes(turnTools),
+                messages,
+              }),
+            });
+            if (res.error) {
+              return { ok: false, retryable: isRetryableInvokeError(res.error) };
+            }
+            return res.data
+              ? { ok: true, value: res.data }
+              : { ok: false, retryable: true };
+          }, {
+            maxRetries: 2,
+            baseDelayMs: 400,
+            onRetry: ({ attempt, delayMs }) =>
+              console.warn(`[SwanBot/v2 batch] relay retry ${attempt} in ${delayMs}ms`),
           });
-          data = res.data;
-          error = res.error;
-        } catch (e) {
-          error = e;
+        } catch {
+          data = null;
         }
-        if (error || !data) {
+        if (!data) {
           // Record the transport failure (handled after runAgent) but END the turn
           // gracefully so any tool work already executed this round is not lost.
           relayFailed = true;
@@ -361,16 +389,37 @@ export async function runSwanbotV2Batch(
 
     // 2.6 runAgent — nine reliability layers + STOP-button cancellation.
     // Approval and constraint seams are materialized before entering the core:
-    // a missing approval gate leaves ordinary catalog policy unchanged, while
-    // ask-before and always-confirm matches fail closed in the universal guard.
+    // a missing surface gate leaves ordinary catalog policy unchanged. Ask and
+    // floor matches may reach only a canonical handler that owns the exact
+    // durable approval boundary; all other matches fail closed in this guard.
     const toolApprovalGate = extra.toolApprovalGate
       ? createLegacyApprovalGateAdapter(extra.toolApprovalGate)
       : undefined;
-    const toolConstraintGuard = createSwanbotV2BatchToolConstraintGuard({
+    const toolParallelPolicyProvider = createOpenSwanToolParallelPolicyProvider({
+      activePluginIds: extra.activePluginIds,
+    });
+    const runtimeApprovalToolNames = new Set(
+      tools
+        .map((tool) => tool.name)
+        .filter((toolName) => toolParallelPolicyProvider(toolName)?.approvalMode === 'ask'),
+    );
+    const baseToolConstraintGuard = createSwanbotV2BatchToolConstraintGuard({
       userConstraints,
       alwaysConfirmFloor,
       hasApprovalGate: toolApprovalGate !== undefined,
+      runtimeApprovalToolNames,
     });
+    const toolConstraintGuard: AgentToolConstraintGuard = async (call) => {
+      const surfaceVerdict = evaluateTaskExecutionSurfaceToolCall(
+        extra.executionSurfaceGuard,
+        call.toolName,
+        call.input,
+      );
+      if (!surfaceVerdict.allowed) {
+        return { block: true, reason: surfaceVerdict.reason };
+      }
+      return baseToolConstraintGuard(call);
+    };
     const toolResultStopGuard = createSwanbotV2BatchToolResultStopGuard(
       userConstraints?.stopConditions,
     );
@@ -407,9 +456,7 @@ export async function runSwanbotV2Batch(
       // the bounded, secret-safe replay-safety appendix on a failed outcome-
       // unknown mutate ("verify first before retrying") so this lane can't
       // silently double a committed side effect the edge round-trip guarded.
-      toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({
-        activePluginIds: extra.activePluginIds,
-      }),
+      toolParallelPolicyProvider,
     });
 
     // A swanbot-ai relay transport failure must NOT read as a clean completion —

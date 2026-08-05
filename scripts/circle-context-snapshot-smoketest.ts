@@ -26,6 +26,7 @@
  * Run: npm run smoke:circle-context-snapshot
  */
 
+import { readFileSync } from 'node:fs';
 import {
   assembleCircleContextSnapshot,
   buildCircleContextSnapshot,
@@ -40,6 +41,15 @@ import {
 } from '../src/lib/circleContextSnapshot';
 import { resolveCrossSurfaceReferences } from '../src/lib/crossSurfaceReferenceResolverCore';
 
+const snapshotSource = readFileSync(
+  new URL('../src/lib/circleContextSnapshot.ts', import.meta.url),
+  'utf8',
+);
+const runtimeSource = readFileSync(
+  new URL('../src/lib/openswanToolRuntime.ts', import.meta.url),
+  'utf8',
+);
+
 let failures = 0;
 function fail(message: string) { failures += 1; console.error('FAIL:', message); }
 function pass(message: string) { console.log('pass:', message); }
@@ -47,6 +57,17 @@ function assert(condition: unknown, message: string, detail?: string) {
   if (condition) pass(message);
   else fail(`${message}${detail ? ` — ${detail}` : ''}`);
 }
+
+assert(
+  snapshotSource.includes(".from('project_rooms')") && !snapshotSource.includes(".from('rooms')"),
+  'source: context snapshot reads the canonical project_rooms table',
+);
+assert(
+  runtimeSource.includes("case 'rooms.list'")
+    && runtimeSource.includes(".from('project_rooms')")
+    && !runtimeSource.includes(".from('rooms')"),
+  'source: rooms.list reads the canonical project_rooms table',
+);
 
 // ── Case 1 — pure assembly: bounds, truncation, ordering, counts ─────────────
 

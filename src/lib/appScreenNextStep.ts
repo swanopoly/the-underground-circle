@@ -12,7 +12,7 @@
  * the same advice and the smoke test can pin every branch.
  *
  * Priority ladder (lower number wins — smoke-pinned):
- *   1. app not running          → launch_app (chat can launch after approval)
+ *   1. app not running          → launch_app (authenticated exact call + fresh proof)
  *   2. running, not frontmost   → focus_app
  *   3. dialog/sheet/alert nodes → handle_dialog; destructive/save wording
  *      → confirm_with_user + approvals.request (NEVER auto-dismiss)
@@ -259,12 +259,12 @@ export function buildAppScreenNextStep(input: AppScreenObservationInput): AppScr
     );
   }
 
-  // 1. Not running → launch (approval-gated on the chat side).
+  // 1. Not running → authenticated exact launch with fresh proof.
   if (!appRunning) {
     return finish(
       'launch_app',
       'desktop.launch_app',
-      `${name} is not running — chat can launch it after approval.`,
+      `${name} is not running — chat can launch it directly and verify the foreground app.`,
       `${name} is not running${frontName ? ` (frontmost app: ${frontName})` : ''}.`,
     );
   }

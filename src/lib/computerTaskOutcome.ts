@@ -14,6 +14,13 @@ export type ComputerTaskOutcomeStatus =
   | 'failed'
   | 'cancelled';
 
+/**
+ * Mutation replay authority is independent from terminal status. A task can
+ * be `partial` because post-change proof was lost after the mutation crossed
+ * the bridge; that must never be converted into a generic retry.
+ */
+export type ComputerTaskReplayPolicy = 'normal' | 'manual_verify_only';
+
 export type AgentTaskCompletionExpectation = 'response' | 'verified_task';
 
 /**

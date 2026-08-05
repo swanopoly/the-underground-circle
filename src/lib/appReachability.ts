@@ -136,7 +136,7 @@ const BRIDGE_OFFLINE_FIX = 'Start the desktop bridge: npm run bridge';
 const BRIDGE_OUTDATED_FIX =
   'The bridge is running an older build — restart it with npm run bridge to pick up the new tools.';
 const NEEDS_LAUNCH_FIX =
-  'Not running — chat can launch it (desktop.launch_app) after your approval.';
+  'Not running — chat can launch it directly (desktop.launch_app) and verify the foreground app.';
 const A11Y_BLOCKED_FIX =
   "Grant Accessibility and Automation access to the bridge's host app in System Settings → " +
   'Privacy & Security, then restart the bridge process (npm run bridge) — grants can go stale ' +
@@ -379,7 +379,7 @@ export function buildAppReachabilityReport(inputs: AppReachabilityProbeInputs): 
     fail(
       'frontmost',
       `"${frontmostApp}" is in front instead of ${resolvedAppName}.`,
-      `Another app is in front — chat can bring ${resolvedAppName} forward (desktop.focus_app) after your approval.`,
+      `Another app is in front — chat can bring ${resolvedAppName} forward (desktop.focus_app) and verify it directly.`,
       'needs_focus',
       true,
     );

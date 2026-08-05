@@ -37,6 +37,7 @@
 import {
   segmentChatIntents,
   isCompoundRequest,
+  shouldSurfaceMultiIntentNotice,
   MAX_INTENT_INPUT_CHARS,
   MAX_INTENT_SEGMENTS,
   MAX_SEGMENT_CHARS,
@@ -183,6 +184,42 @@ function main(): void {
   assertJson(cons('fix the bug plus deploy the fix'), ['lead', 'also'], '(5) "plus" is additive');
   assertJson(cons('fix the bug and also deploy it'), ['lead', 'also'], '(5) "and also" is additive');
   assertEq(isCompoundRequest('review the PR and merge it'), true, '(5) review + merge → multi');
+  {
+    const photoshopTask = 'Open Photoshop and start a new project 600 x 600';
+    assertJson(
+      texts(photoshopTask),
+      ['Open Photoshop', 'start a new project 600 x 600'],
+      '(5) Photoshop workflow remains linguistically segmented for planning',
+    );
+    assertEq(
+      shouldSurfaceMultiIntentNotice('run_computer_task'),
+      false,
+      '(5) atomic computer workflow suppresses cosmetic ask #1 notice',
+    );
+    assertEq(
+      shouldSurfaceMultiIntentNotice('run_command_handler'),
+      true,
+      '(5) single command handler keeps later-ask guidance',
+    );
+    assertEq(
+      shouldSurfaceMultiIntentNotice('run_build_discovery'),
+      true,
+      '(5) single build discovery keeps later-ask guidance',
+    );
+    for (const excludedLane of [
+      'run_openswan',
+      'run_plain_chat',
+      'ask_clarification',
+      'unknown',
+      null,
+    ]) {
+      assertEq(
+        shouldSurfaceMultiIntentNotice(excludedLane),
+        false,
+        `(5) ${String(excludedLane)} does not surface multi-ask guidance`,
+      );
+    }
+  }
 
   // ─── (6) multi — structural (enumerated / newline / semicolon) ──────────────
   {

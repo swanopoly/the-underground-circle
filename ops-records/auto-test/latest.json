@@ -1,31 +1,42 @@
 {
-  "stamp": "2026-07-31T17:35:03.434Z",
+  "stamp": "2026-08-05T08:38:17.804Z",
   "typecheck": {
     "total": 0,
     "byFile": {}
   },
   "suites": {
-    "total": 570,
-    "failing": []
+    "total": 573,
+    "failing": [
+      "smoke:progressive-tool-disclosure",
+      "smoke:tool-result-formatters"
+    ]
   },
   "invariants": {
     "no unreachable private rows (private + user_id IS NULL)": "PASS",
     "agent-scope rows carry an agent_id": "PASS",
     "every active row has a circle": "PASS",
-    "recent memories are traceable to the run that produced them": "FAIL",
+    "recent memories are traceable to the run that produced them": "PASS",
     "source_surface distribution": "PASS",
-    "memories are reachable by semantic search": "PASS",
+    "memories are reachable by semantic search": "FAIL",
     "no orphaned satellite rows": "PASS",
     "memory_access_log is being written": "PASS",
     "no exact-content duplicate rows": "PASS",
     "content diversity (informational, NOT a defect)": "PASS",
     "no SELECT policy exposes private rows without an owner check": "PASS",
-    "hot-path indexes present": "PASS",
+    "hot-path indexes present": "FAIL",
     "match_memories is SECURITY INVOKER": "PASS"
   },
   "diff": {
-    "regressions": [],
-    "improvements": [],
-    "known": []
+    "regressions": [
+      "suite newly failing: smoke:progressive-tool-disclosure",
+      "suite newly failing: smoke:tool-result-formatters",
+      "invariant PASS→FAIL: memories are reachable by semantic search",
+      "invariant PASS→FAIL: hot-path indexes present"
+    ],
+    "improvements": [
+      "invariant FAIL→PASS: recent memories are traceable to the run that produced them"
+    ],
+    "known": [],
+    "flaky": []
   }
 }

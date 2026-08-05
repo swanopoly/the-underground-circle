@@ -37,7 +37,10 @@ const SERVICES = [
   { name: 'cursor-bridge', port: 7781, cmd: NODE, args: [path.join(REPO, 'scripts/cursor-bridge.js')] },
   { name: 'openswan-proxy', port: 18790, cmd: NODE, args: [path.join(REPO, 'openswan-proxy.js')] },
   ...(EXPO_ENABLED
-    ? [{ name: 'expo-web', port: 8081, cmd: path.join(NODE_DIR, 'npx'), args: ['expo', 'start', '--web'] }]
+    // A keepalive respawn follows a crash/recovery boundary, not the normal
+    // edit/refresh loop. Clear Metro's transform cache at that boundary so an
+    // already-open Chat tab cannot reconnect to a pre-repair bundle graph.
+    ? [{ name: 'expo-web', port: 8081, cmd: path.join(NODE_DIR, 'npx'), args: ['expo', 'start', '--web', '--clear'] }]
     : []),
 ];
 

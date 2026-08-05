@@ -3,6 +3,7 @@ import {
   isLowRiskLocalImageExportTask,
   type ComputerTaskPlanPreview,
 } from './computerTaskPlanner';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 
 export type ComputerTaskGrantId =
   | 'browser_navigation'
@@ -121,6 +122,8 @@ export function buildComputerTaskGrantPlan(args: {
 }): ComputerTaskGrantPlan {
   const risk = inferTaskRisk(args.task);
   const lowRiskLocalImageExport = isLowRiskLocalImageExportTask(args.task);
+  const exactProgram = compileComputerSequenceProgram(args.task);
+  const directUserAuthorizedLocalDraft = exactProgram?.authorization.mode === 'direct_user_request';
   const grants = new Map<ComputerTaskGrantId, ComputerTaskGrant>();
   const grantedSet = new Set(args.grantedIds || []);
   const needsBrowserAutomation = args.preview.requiredCapabilities.includes('browser_automation') ||
@@ -197,20 +200,22 @@ export function buildComputerTaskGrantPlan(args: {
   }
 
   if (args.preview.kind === 'app_task' || needsAppAccess) {
-    if (risk.hasActionIntent || risk.hasWriteIntent) {
+    if (risk.hasActionIntent || risk.hasWriteIntent || directUserAuthorizedLocalDraft) {
       pushGrant(grants, {
         id: 'app_action',
         label: 'Connected app actions',
         level: 'action',
-        approvalRequired: !lowRiskLocalImageExport,
-        reason: lowRiskLocalImageExport
+        approvalRequired: !lowRiskLocalImageExport && !directUserAuthorizedLocalDraft,
+        reason: directUserAuthorizedLocalDraft
+          ? 'The compiler-owned task creates one bounded new unsaved blank document from the current direct user request.'
+          : lowRiskLocalImageExport
           ? 'The task only opens a local image in Photoshop and exports a new PNG/JPEG through Save for Web.'
           : 'The task may send messages, create records, or make changes in a connected app.',
       });
     }
   }
 
-  if (args.audit && args.audit.activeMcpToolCount > 0 && args.preview.kind !== 'browser_task') {
+  if (!exactProgram && args.audit && args.audit.activeMcpToolCount > 0 && args.preview.kind !== 'browser_task') {
     pushGrant(grants, {
       id: 'mcp_tool',
       label: 'MCP tool execution',
@@ -220,7 +225,7 @@ export function buildComputerTaskGrantPlan(args: {
     });
   }
 
-  if (args.audit && args.audit.activeBridgeProviders.length > 0 && args.preview.kind !== 'browser_task') {
+  if (!exactProgram && args.audit && args.audit.activeBridgeProviders.length > 0 && args.preview.kind !== 'browser_task') {
     pushGrant(grants, {
       id: 'bridge_tool',
       label: 'Bridge-based agent access',

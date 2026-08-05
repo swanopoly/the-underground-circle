@@ -2,7 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated, ScrollView, Platform } from 'react-native';
 import { AgentApproval, resolveApproval } from '../services/hitlService';
 import { safeGetUserId } from '../lib/authSession';
-import { applyApprovedAction } from '../lib/agentApprovalsWorker';
+import {
+  applyApprovedAction,
+  isRuntimeOwnedAgentApprovalActionType,
+} from '../lib/agentApprovalsWorker';
 import { planApprovalOrder } from '../lib/approvalUnblockOrderCore';
 import {
   AUTO_APPROVE_CATEGORY_LABELS,
@@ -39,6 +42,15 @@ interface Props {
    * callers (ChatTab, OfficeTab) that don't pass this keep working unchanged.
    */
   onEdit?: (approval: AgentApproval) => void;
+  /**
+   * Optional host continuation after the pending row is resolved. Runtime-
+   * owned approvals deliberately are not applied by the generic worker; Chat
+   * uses this seam to resume the exact plan that originally filed the row.
+   */
+  onResolved?: (
+    approval: AgentApproval,
+    status: 'approved' | 'rejected',
+  ) => void | Promise<void>;
 }
 
 function actionColor(type: string): string {
@@ -137,7 +149,11 @@ function deriveCommandText(ap: AgentApproval): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-export default function HitlApprovalBanner({ approvals, circleId, onEditAndResend, onEdit }: Props) {
+function isRuntimeOwnedApproval(ap: AgentApproval | undefined): boolean {
+  return isRuntimeOwnedAgentApprovalActionType(ap?.action_type);
+}
+
+export default function HitlApprovalBanner({ approvals, circleId, onEditAndResend, onEdit, onResolved }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [rememberPerApproval, setRememberPerApproval] = useState<Record<string, boolean>>({});
   const [editBusy, setEditBusy] = useState<Record<string, boolean>>({});
@@ -170,13 +186,16 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
     try {
       const userId = await safeGetUserId();
       if (!userId) return;
+      const approval = approvals.find((item) => item.id === approvalId);
       await resolveApproval(approvalId, status, userId);
 
       // Close the HITL loop: resolveApproval only flips status to "approved";
       // the proposed side-effect (skill/memory write) runs here via the worker.
-      // The worker is idempotent (it checks applied_at) and never throws across
-      // this boundary, so a failure is logged but does not break the UI.
-      if (status === 'approved') {
+      // Chat/scheduled approvals are runtime-owned: their exact runner claims
+      // one dispatch after resolution. Sending those rows through the generic
+      // worker would perform an unnecessary applied_at lookup (and on a legacy
+      // schema, fail before the runtime gets a chance to consume authority).
+      if (status === 'approved' && !isRuntimeOwnedApproval(approval)) {
         const applied = await applyApprovedAction(approvalId);
         if (!applied.ok) {
           console.error(
@@ -204,6 +223,7 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
         delete next[approvalId];
         return next;
       });
+      if (approval) await onResolved?.(approval, status);
     } catch (e) {
       console.error(e);
     }

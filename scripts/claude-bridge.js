@@ -2682,7 +2682,7 @@ const server = http.createServer(async (req, res) => {
            'illustrator_document_status', 'illustrator_export_proof', 'illustrator_text_inventory', 'illustrator_set_layer_state', 'illustrator_update_text_layer',
            'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper'))
-             ? ['a11y_tree', 'click_element', 'set_element_value', 'semantic_action_target', 'semantic_action']
+             ? ['a11y_tree', 'click_element', 'set_element_value', 'semantic_action_target', 'semantic_action', 'semantic_value_target', 'semantic_value']
              : [])]
         : [],
       // Surface whether the more-reliable click backend is available
@@ -2734,7 +2734,10 @@ const server = http.createServer(async (req, res) => {
       const pairingChallenge = String(pairInput?.pairingChallenge || '').trim();
       if (!pairingChallenge) {
         const issued = desktopPairingChallenges.issue(req.socket.remoteAddress);
-        res.writeHead(428, CORS);
+        // A challenge is the expected first leg, not a transport failure.
+        // Keep the challenge-v1 body/code while returning 200 so browsers do
+        // not report normal pairing negotiation as a failed resource.
+        res.writeHead(200, CORS);
         res.end(JSON.stringify({
           ok: false,
           code: 'pairing_challenge_required',
@@ -3115,6 +3118,8 @@ const server = http.createServer(async (req, res) => {
     if (url === '/desktop/paste_text' && req.method === 'POST') {
       readJsonBody(req, 40 * 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const text = String(parsed?.text ?? '');
         const appName = String(parsed?.appName || '').trim();
         const restoreClipboard = parsed?.restoreClipboard !== false;
@@ -3129,7 +3134,7 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: false, error: 'text too long (max 20000 chars per paste)' }));
           return;
         }
-        if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+        if (appName && !isValidDesktopNativeAppNameServer(appName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
@@ -3137,6 +3142,13 @@ const server = http.createServer(async (req, res) => {
         if (!['require', 'best_effort', 'skip'].includes(focusMode)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Invalid focusMode.' }));
+          return;
+        }
+        if (appName !== guarded.guard.appName || focusMode !== 'skip') {
+          writeDesktopNativeTargetGuardFailure(res, CORS, {
+            error: 'Guarded paste requires the exact sealed appName and focusMode "skip".',
+            errorCode: 'uncertain_ui_target',
+          });
           return;
         }
 
@@ -3198,39 +3210,50 @@ end tell`;
           res.end(JSON.stringify(payload));
         };
 
-        execFile('pbpaste', [], { timeout: 3000, maxBuffer: 1024 * 1024 }, (_readErr, oldClipboard) => {
-          focusTarget((focusErr, targetAppName, focusWarning) => {
-            if (focusErr) {
-              finish(400, { ok: false, error: focusErr.message || 'focus failed before paste' });
-              return;
-            }
-            exec(`printf %s ${shellSingleQuote(text)} | pbcopy`, { timeout: 3000 }, (copyErr) => {
-              if (copyErr) {
-                finish(400, { ok: false, error: copyErr.message || 'clipboard write failed before paste' });
+        verifyDesktopNativeTargetGuardServer(guarded.guard, (guardErr) => {
+          if (guardErr) { writeDesktopNativeTargetGuardFailure(res, CORS, guardErr); return; }
+          execFile('pbpaste', [], { timeout: 3000, maxBuffer: 1024 * 1024 }, (_readErr, oldClipboard) => {
+            focusTarget((focusErr, targetAppName, focusWarning) => {
+              if (focusErr) {
+                finish(400, { ok: false, error: focusErr.message || 'focus failed before paste' });
                 return;
               }
-              const script = 'tell application "System Events" to keystroke "v" using command down';
-              exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000 }, (pasteErr) => {
-                if (pasteErr) {
-                  finish(400, { ok: false, error: pasteErr.message || 'paste keystroke failed' });
+              exec(`printf %s ${shellSingleQuote(text)} | pbcopy`, { timeout: 3000 }, (copyErr) => {
+                if (copyErr) {
+                  finish(400, { ok: false, error: copyErr.message || 'clipboard write failed before paste' });
                   return;
                 }
-                if (!restoreClipboard) {
-                  finish(200, { ok: true, chars: text.length, appName: targetAppName || null, restoredClipboard: false, focusWarning: focusWarning || undefined });
-                  return;
-                }
-                setTimeout(() => {
-                  exec(`printf %s ${shellSingleQuote(String(oldClipboard || ''))} | pbcopy`, { timeout: 3000 }, (restoreErr) => {
-                    finish(200, {
-                      ok: true,
-                      chars: text.length,
-                      appName: targetAppName || null,
-                      restoredClipboard: !restoreErr,
-                      focusWarning: focusWarning || undefined,
-                      restoreError: restoreErr ? String(restoreErr.message || restoreErr).slice(0, 200) : undefined,
-                    });
-                  });
-                }, 350);
+                runDesktopInputHelper(
+                  [
+                    'key', '--key-code', '9', '--modifiers', 'command',
+                    ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+                  ],
+                  { timeout: 5000, fallbackError: 'Guarded paste keystroke failed.' },
+                  (pasteError) => {
+                    if (pasteError) {
+                      const writeFailure = () => writeDesktopNativeTargetGuardFailure(res, CORS, pasteError);
+                      if (!restoreClipboard) { writeFailure(); return; }
+                      exec(`printf %s ${shellSingleQuote(String(oldClipboard || ''))} | pbcopy`, { timeout: 3000 }, writeFailure);
+                      return;
+                    }
+                    if (!restoreClipboard) {
+                      finish(200, { ok: true, chars: text.length, appName: targetAppName || null, restoredClipboard: false, focusWarning: focusWarning || undefined });
+                      return;
+                    }
+                    setTimeout(() => {
+                      exec(`printf %s ${shellSingleQuote(String(oldClipboard || ''))} | pbcopy`, { timeout: 3000 }, (restoreErr) => {
+                        finish(200, {
+                          ok: true,
+                          chars: text.length,
+                          appName: targetAppName || null,
+                          restoredClipboard: !restoreErr,
+                          focusWarning: focusWarning || undefined,
+                          restoreError: restoreErr ? String(restoreErr.message || restoreErr).slice(0, 200) : undefined,
+                        });
+                      });
+                    }, 350);
+                  },
+                );
               });
             });
           });
@@ -3748,6 +3771,8 @@ end tell`;
     if (url === '/desktop/mouse_move' && req.method === 'POST') {
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const x = Number(parsed?.x);
         const y = Number(parsed?.y);
         if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x > 20000 || y > 20000) {
@@ -3755,20 +3780,13 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'x and y must be non-negative integers <= 20000' }));
           return;
         }
-        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
-        if (!fs.existsSync(helperPath)) {
-          res.writeHead(503, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse move.' }));
-          return;
-        }
-        execFile(helperPath, ['move', '--x', String(x), '--y', String(y)], { timeout: 3000 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'move failed').toString().slice(0, 300) }));
-            return;
-          }
+        runDesktopInputHelper([
+          'move', '--x', String(x), '--y', String(y),
+          ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+        ], { timeout: 3000, fallbackError: 'Guarded mouse move failed.' }, (helperError, helperPayload) => {
+          if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
           res.writeHead(200, CORS);
-          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, x, y }));
+          res.end(JSON.stringify({ ok: true, x, y, helper: helperPayload }));
         });
       });
       return;
@@ -3777,6 +3795,8 @@ end tell`;
     if (url === '/desktop/mouse_click' && req.method === 'POST') {
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const x = Number(parsed?.x);
         const y = Number(parsed?.y);
         const button = String(parsed?.button || 'left').toLowerCase();
@@ -3791,20 +3811,13 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'button must be left or right' }));
           return;
         }
-        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
-        if (!fs.existsSync(helperPath)) {
-          res.writeHead(503, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse click.' }));
-          return;
-        }
-        execFile(helperPath, ['click', '--x', String(x), '--y', String(y), '--button', button, '--count', String(count)], { timeout: 5000 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'click failed').toString().slice(0, 300) }));
-            return;
-          }
+        runDesktopInputHelper([
+          'click', '--x', String(x), '--y', String(y), '--button', button, '--count', String(count),
+          ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+        ], { timeout: 5000, fallbackError: 'Guarded mouse click failed.' }, (helperError, helperPayload) => {
+          if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
           res.writeHead(200, CORS);
-          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, x, y, button, count }));
+          res.end(JSON.stringify({ ok: true, x, y, button, count, helper: helperPayload }));
         });
       });
       return;
@@ -3813,42 +3826,33 @@ end tell`;
     if ((url === '/desktop/mouse_down' || url === '/desktop/mouse_up') && req.method === 'POST') {
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const isDown = url === '/desktop/mouse_down';
-        const xRaw = parsed?.x;
-        const yRaw = parsed?.y;
-        const x = Number(xRaw);
-        const y = Number(yRaw);
+        const x = parsed?.x;
+        const y = parsed?.y;
         const button = String(parsed?.button || 'left').toLowerCase();
         if (button !== 'left' && button !== 'right') {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'button must be left or right' }));
           return;
         }
-        if (isDown || xRaw !== undefined || yRaw !== undefined) {
-          if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x > 20000 || y > 20000) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: 'x and y must be non-negative integers <= 20000' }));
-            return;
-          }
-        }
-        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
-        if (!fs.existsSync(helperPath)) {
-          res.writeHead(503, CORS);
-          res.end(JSON.stringify({ ok: false, error: `uc-input-helper not found. Build or install the helper before using mouse ${isDown ? 'down' : 'up'}.` }));
+        if (typeof x !== 'number' || typeof y !== 'number' || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x > 20000 || y > 20000) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'x and y are required JSON integers between 0 and 20000' }));
           return;
         }
-        const helperArgs = [isDown ? 'down' : 'up', '--button', button];
-        if (isDown || (xRaw !== undefined && yRaw !== undefined)) {
-          helperArgs.push('--x', String(x), '--y', String(y));
-        }
-        execFile(helperPath, helperArgs, { timeout: 3000 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || `mouse ${isDown ? 'down' : 'up'} failed`).toString().slice(0, 300) }));
-            return;
-          }
+        const helperArgs = [
+          isDown ? 'down' : 'up', '--button', button, '--x', String(x), '--y', String(y),
+          ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+        ];
+        runDesktopInputHelper(helperArgs, {
+          timeout: 3000,
+          fallbackError: `Guarded mouse ${isDown ? 'down' : 'up'} failed.`,
+        }, (helperError, helperPayload) => {
+          if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
           res.writeHead(200, CORS);
-          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, x: Number.isInteger(x) ? x : null, y: Number.isInteger(y) ? y : null, button }));
+          res.end(JSON.stringify({ ok: true, x, y, button, helper: helperPayload }));
         });
       });
       return;
@@ -3857,6 +3861,8 @@ end tell`;
     if (url === '/desktop/mouse_drag' && req.method === 'POST') {
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const fromX = Number(parsed?.fromX);
         const fromY = Number(parsed?.fromY);
         const toX = Number(parsed?.toX);
@@ -3867,20 +3873,13 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'fromX/fromY/toX/toY must be non-negative integers <= 20000' }));
           return;
         }
-        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
-        if (!fs.existsSync(helperPath)) {
-          res.writeHead(503, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse drag.' }));
-          return;
-        }
-        execFile(helperPath, ['drag', '--from-x', String(fromX), '--from-y', String(fromY), '--to-x', String(toX), '--to-y', String(toY), '--duration-ms', String(durationMs)], { timeout: 8000 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'drag failed').toString().slice(0, 300) }));
-            return;
-          }
+        runDesktopInputHelper([
+          'drag', '--from-x', String(fromX), '--from-y', String(fromY), '--to-x', String(toX), '--to-y', String(toY), '--duration-ms', String(durationMs),
+          ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+        ], { timeout: 8000, fallbackError: 'Guarded mouse drag failed.' }, (helperError, helperPayload) => {
+          if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
           res.writeHead(200, CORS);
-          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, fromX, fromY, toX, toY, durationMs }));
+          res.end(JSON.stringify({ ok: true, fromX, fromY, toX, toY, durationMs, helper: helperPayload }));
         });
       });
       return;
@@ -3889,24 +3888,29 @@ end tell`;
     if (url === '/desktop/mouse_scroll' && req.method === 'POST') {
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
-        const deltaY = Math.max(-5000, Math.min(5000, Number(parsed?.deltaY ?? -600)));
-        const deltaX = Math.max(-5000, Math.min(5000, Number(parsed?.deltaX ?? 0)));
-        const x = Math.max(0, Math.min(20000, Number(parsed?.x ?? 0)));
-        const y = Math.max(0, Math.min(20000, Number(parsed?.y ?? 0)));
-        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
-        if (!fs.existsSync(helperPath)) {
-          res.writeHead(503, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse scroll.' }));
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
+        const deltaY = parsed?.deltaY ?? -600;
+        const deltaX = parsed?.deltaX ?? 0;
+        const x = parsed?.x;
+        const y = parsed?.y;
+        if (![x, y].every((value) => typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 20000)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'x and y are required JSON integers between 0 and 20000' }));
           return;
         }
-        execFile(helperPath, ['scroll', '--x', String(x), '--y', String(y), '--delta-x', String(deltaX), '--delta-y', String(deltaY)], { timeout: 3000 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'scroll failed').toString().slice(0, 300) }));
-            return;
-          }
+        if (![deltaX, deltaY].every((value) => typeof value === 'number' && Number.isInteger(value) && value >= -5000 && value <= 5000) || (deltaX === 0 && deltaY === 0)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'deltaX and deltaY must be JSON integers between -5000 and 5000, with at least one non-zero' }));
+          return;
+        }
+        runDesktopInputHelper([
+          'scroll', '--x', String(x), '--y', String(y), '--delta-x', String(deltaX), '--delta-y', String(deltaY),
+          ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+        ], { timeout: 3000, fallbackError: 'Guarded mouse scroll failed.' }, (helperError, helperPayload) => {
+          if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, x, y, deltaX, deltaY, output: String(stdout || '').slice(0, 500) }));
+          res.end(JSON.stringify({ ok: true, x, y, deltaX, deltaY, helper: helperPayload }));
         });
       });
       return;
@@ -3916,9 +3920,9 @@ end tell`;
       readJsonBody(req, 2048, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const appName = String(parsed?.appName || '').trim();
-        if (!appName || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+        if (!isValidDesktopNativeAppNameServer(appName)) {
           res.writeHead(400, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'Invalid appName. Letters, numbers, spaces, . - _ ( ) only.' }));
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
         const resolved = resolveInstalledMacApp(appName);
@@ -3975,7 +3979,7 @@ end tell`;
       readJsonBody(req, 2048, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const appName = String(parsed?.appName || '').trim();
-        if (!appName || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+        if (!isValidDesktopNativeAppNameServer(appName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
@@ -4004,23 +4008,26 @@ end tell`;
     }
 
     if (url === '/desktop/type' && req.method === 'POST') {
-      readJsonBody(req, 8192, (parsed, bodyErr) => {
+      readJsonBody(req, 40 * 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const text = String(parsed?.text ?? '');
         if (text.length === 0) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text is required' })); return; }
         if (text.length > 4000) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text too long (max 4000 chars per call)' })); return; }
-        // AppleScript string escape — backslash first, then quote.
-        const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        const script = `tell application "System Events" to keystroke "${escaped}"`;
-        exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 10000 }, (err) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: err.message }));
-            return;
-          }
-          res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, chars: text.length }));
-        });
+        runDesktopInputHelper(
+          ['type', ...desktopNativeTargetGuardHelperArgs(guarded.guard)],
+          {
+            timeout: 10000,
+            stdin: text,
+            fallbackError: 'Guarded native text input failed.',
+          },
+          (helperError, helperPayload) => {
+            if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true, chars: text.length, helper: helperPayload }));
+          },
+        );
       });
       return;
     }
@@ -4028,23 +4035,30 @@ end tell`;
     if (url === '/desktop/keys' && req.method === 'POST') {
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const combo = String(parsed?.combo || '').trim();
-        const stanza = keyComboToAppleScript(combo);
-        if (!stanza) {
+        const nativeKey = keyComboToNativeInput(combo);
+        if (!nativeKey) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Invalid key combo. Examples: "Cmd+T", "Cmd+Shift+N", "Return", "Escape".' }));
           return;
         }
-        const script = `tell application "System Events" to ${stanza}`;
-        exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000 }, (err) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: err.message }));
-            return;
-          }
-          res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, combo }));
-        });
+        const helperArgs = [
+          'key',
+          '--key-code', String(nativeKey.keyCode),
+          ...(nativeKey.modifiers.length > 0 ? ['--modifiers', nativeKey.modifiers.join(',')] : []),
+          ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+        ];
+        runDesktopInputHelper(
+          helperArgs,
+          { timeout: 5000, fallbackError: 'Guarded native key input failed.' },
+          (helperError, helperPayload) => {
+            if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true, combo, helper: helperPayload }));
+          },
+        );
       });
       return;
     }
@@ -4055,7 +4069,7 @@ end tell`;
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const appName = String(parsed?.appName || '').trim();
         const menuTitle = String(parsed?.menuTitle || '').trim();
-        if (!appName || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+        if (!isValidDesktopNativeAppNameServer(appName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'appName is required (exact app name from window_state / running apps).' }));
           return;
@@ -4139,14 +4153,23 @@ end tell`;
     if (url === '/desktop/menu_click' && req.method === 'POST') {
       readJsonBody(req, 2048, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const appName = String(parsed?.appName || '').trim();
         const rawPath = Array.isArray(parsed?.menuPath)
           ? parsed.menuPath
           : String(parsed?.menuPath || '').split(/\s*(?:>|→|›)\s*/g);
         const menuPath = rawPath.map((part) => String(part || '').trim()).filter(Boolean);
-        if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+        if (appName && !isValidDesktopNativeAppNameServer(appName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (appName !== guarded.guard.appName) {
+          writeDesktopNativeTargetGuardFailure(res, CORS, {
+            error: 'Menu appName must exactly match the sealed native target guard.',
+            errorCode: 'uncertain_ui_target',
+          });
           return;
         }
         if (menuPath.length < 2 || menuPath.length > 6 || menuPath.some((part) => part.length > 80 || /[\x00-\x1f\u2028\u2029]/.test(part))) {
@@ -4160,14 +4183,17 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Could not build menu click script.' }));
           return;
         }
-        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 7000 }, (err) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: err.message }));
-            return;
-          }
-          res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, appName: built.appName || null, menuPath: built.menuPath }));
+        verifyDesktopNativeTargetGuardServer(guarded.guard, (guardErr) => {
+          if (guardErr) { writeDesktopNativeTargetGuardFailure(res, CORS, guardErr); return; }
+          exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 7000 }, (err) => {
+            if (err) {
+              res.writeHead(400, CORS);
+              res.end(JSON.stringify({ ok: false, error: err.message }));
+              return;
+            }
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true, appName: built.appName || null, menuPath: built.menuPath }));
+          });
         });
       });
       return;
@@ -7245,8 +7271,10 @@ end tell`;
     }
 
     if (url === '/desktop/click_at' && req.method === 'POST') {
-      readJsonBody(req, 512, (parsed, bodyErr) => {
+      readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const guarded = parseDesktopNativeTargetGuardServer(parsed?.targetGuard);
+        if (!guarded.ok) { writeDesktopNativeTargetGuardFailure(res, CORS, guarded); return; }
         const xn = Number(parsed?.x);
         const yn = Number(parsed?.y);
         if (!Number.isInteger(xn) || !Number.isInteger(yn) || xn < 0 || yn < 0 || xn > 20000 || yn > 20000) {
@@ -7254,25 +7282,13 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'x and y must be non-negative integers ≤ 20000' }));
           return;
         }
-        // Prefer cliclick (more reliable); fall back to AppleScript.
-        const useCliclick = desktopToolsHas('cliclick');
-        const cmd = useCliclick
-          ? `cliclick c:${xn},${yn}`
-          : `osascript -e ${shellSingleQuote(`tell application "System Events" to click at {${xn}, ${yn}}`)}`;
-        exec(cmd, { timeout: 3000 }, (err) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({
-              ok: false,
-              error: useCliclick
-                ? err.message
-                : 'AppleScript click-at-coords is unreliable on current macOS. Install cliclick (`brew install cliclick`) for accurate clicks.',
-              via: useCliclick ? 'cliclick' : 'applescript',
-            }));
-            return;
-          }
+        runDesktopInputHelper([
+          'click', '--x', String(xn), '--y', String(yn), '--button', 'left', '--count', '1',
+          ...desktopNativeTargetGuardHelperArgs(guarded.guard),
+        ], { timeout: 5000, fallbackError: 'Guarded native click failed.' }, (helperError, helperPayload) => {
+          if (helperError) { writeDesktopNativeTargetGuardFailure(res, CORS, helperError); return; }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, x: xn, y: yn, via: useCliclick ? 'cliclick' : 'applescript' }));
+          res.end(JSON.stringify({ ok: true, x: xn, y: yn, via: 'uc-input-helper', helper: helperPayload }));
         });
       });
       return;
@@ -7417,9 +7433,9 @@ end tell`;
       readJsonBody(req, 4096, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const appNameRaw = String(parsed?.appName || '').trim();
-        if (appNameRaw && (appNameRaw.length > 120 || !/^[A-Za-z0-9 .\-_()]+$/.test(appNameRaw))) {
+        if (appNameRaw && !isValidDesktopNativeAppNameServer(appNameRaw)) {
           res.writeHead(400, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'Invalid appName. Letters, numbers, spaces, . - _ ( ) only, max 120 chars.' }));
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
         const resolved = appNameRaw ? resolveInstalledMacApp(appNameRaw) : null;
@@ -7479,7 +7495,7 @@ end tell
             .slice(0, 8)
             .map((title) => title.slice(0, 160));
           const appRunning = !!resolvedProc;
-          const continueObservation = (targetWindow) => {
+          const continueObservation = (targetWindow, targetWindowError = null, targetWindowErrorCode = null) => {
             const base = {
               ok: true,
               app: resolvedProc || resolvedAppName || frontmostApp,
@@ -7493,6 +7509,8 @@ end tell
               windowCount: appRunning ? windowCount : 0,
               windowTitles: appRunning ? windowTitles : [],
               ...(targetWindow ? { targetWindow } : {}),
+              ...(targetWindowError ? { targetWindowError: String(targetWindowError).slice(0, 300) } : {}),
+              ...(targetWindowErrorCode ? { targetWindowErrorCode: String(targetWindowErrorCode).slice(0, 80) } : {}),
             };
             if (!appRunning) {
               // Absence IS the observation — the advisor turns this into a
@@ -7556,20 +7574,12 @@ end tell
           // A generic native mutation needs one concrete CGWindow identity and
           // exact bounds, not just a process-owned title/count. The helper also
           // verifies that this pid is still the focused application.
-          const inputHelperPath = path.join(__dirname, 'bin', 'uc-input-helper');
-          if (!fs.existsSync(inputHelperPath)) {
-            continueObservation(null);
-            return;
-          }
-          execFile(
-            inputHelperPath,
+          runDesktopInputHelper(
             ['window-proof', '--pid', String(processId)],
-            { timeout: 3000, maxBuffer: 64 * 1024 },
-            (proofErr, proofStdout) => {
-              let proof = null;
-              try { proof = JSON.parse(String(proofStdout || '').trim()); } catch { proof = null; }
+            { timeout: 3000, fallbackError: 'Exact native window proof unavailable.' },
+            (proofError, proof) => {
               const targetWindow = (
-                !proofErr
+                !proofError
                 && proof?.ok === true
                 && String(proof.appName || '') === resolvedProc
                 && Number(proof.pid) === processId
@@ -7588,7 +7598,11 @@ end tell
                     height: Number(proof.height),
                   }
                 : null;
-              continueObservation(targetWindow);
+              continueObservation(
+                targetWindow,
+                targetWindow ? null : proofError?.error || 'exact native window proof unavailable',
+                targetWindow ? null : proofError?.errorCode || 'uncertain_ui_target',
+              );
             },
           );
         });
@@ -7964,6 +7978,428 @@ end tell
       return;
     }
 
+    // Sealed semantic value lane. Preparation binds one freshly observed,
+    // non-secret text field plus the exact current/requested value hashes into
+    // a short-lived one-shot capability. Dispatch receives no raw path, label,
+    // or text; the bridge consumes the capability, re-observes the same target,
+    // sets the stored value once, and accepts completion only when a refreshed
+    // AX value hash/length matches the requested value on that same field.
+    if (url === '/desktop/semantic_value_target' && req.method === 'POST') {
+      readJsonBody(req, 48 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: bodyErr, errorCode: 'invalid_input' }));
+          return;
+        }
+        const action = String(parsed?.action || '').trim();
+        const appName = String(parsed?.appName || '').trim().slice(0, 120);
+        const pid = Math.trunc(Number(parsed?.pid || 0));
+        const indexGeneration = Math.trunc(Number(parsed?.indexGeneration || 0));
+        const targetPath = String(parsed?.targetPath || '').trim();
+        const expectedRole = String(parsed?.expectedRole || '').trim().slice(0, 80);
+        const expectedLabel = String(parsed?.expectedLabel || '').trim().slice(0, 120);
+        const expectedCurrentValue = typeof parsed?.expectedCurrentValue === 'string'
+          ? parsed.expectedCurrentValue
+          : '';
+        const requestedValue = typeof parsed?.value === 'string'
+          ? parsed.value
+          : '';
+        if (
+          action !== 'set_value'
+          || !appName
+          || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)
+          || !(pid > 0)
+          || !(indexGeneration > 0)
+          || targetPath.length > 240
+          || !/^[0-9]+(\.[0-9]+)*$/.test(targetPath)
+          || !expectedRole
+          || !expectedLabel
+          || expectedCurrentValue.length > 20_000
+          || requestedValue.length === 0
+          || requestedValue.length > 20_000
+          || !requestedValue.trim()
+          || /[\u0000\u007f\u202a-\u202e\u2066-\u2069]/.test(requestedValue)
+        ) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'set_value plus exact app/PID/generation/path/role/label/current/requested values are required',
+            errorCode: 'invalid_input',
+          }));
+          return;
+        }
+        if (
+          looksLikeSecretNativeSemanticValue(expectedCurrentValue)
+          || looksLikeSecretNativeSemanticValue(requestedValue)
+        ) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'The generic semantic value lane refuses credential-like or secret-like values.',
+            errorCode: 'native_semantic_secret_blocked',
+          }));
+          return;
+        }
+
+        const cached = a11yIndexStateByPid.get(pid) || null;
+        const cachedAgeMs = cached ? Date.now() - Number(cached.at || 0) : Infinity;
+        if (
+          !cached
+          || cached.generation !== indexGeneration
+          || cachedAgeMs < 0
+          || cachedAgeMs > NATIVE_SEMANTIC_OBSERVATION_MAX_AGE_MS
+          || normalizeNativeSemanticAppIdentity(cached.app) !== normalizeNativeSemanticAppIdentity(appName)
+          || cached.semanticSlice !== 'full'
+          || cached.semanticMaxDepth !== 10
+          || cached.semanticMaxNodes !== 400
+          || !cached.semanticSnapshot
+        ) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'The exact accessibility observation is missing, superseded, or too old.',
+            errorCode: 'native_semantic_target_stale',
+            recoveryHint: 'Observe the exact app again, then prepare the value change from that fresh tree.',
+          }));
+          return;
+        }
+
+        const observedNode = cached.semanticSnapshot.nodesByPath[targetPath] || null;
+        const observedRole = String(observedNode?.role || '');
+        const observedLabel = String(observedNode?.label || '');
+        const currentValueHash = nativeSemanticValueProofHash(expectedCurrentValue);
+        const requestedValueHash = nativeSemanticValueProofHash(requestedValue);
+        if (
+          !observedNode
+          || observedRole !== expectedRole
+          || normalizeNativeSemanticText(observedLabel) !== normalizeNativeSemanticText(expectedLabel)
+          || observedNode.exactValueHash !== currentValueHash
+          || observedNode.exactValueLength !== expectedCurrentValue.length
+        ) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'The exact accessibility field identity or current value did not match the fresh observation.',
+            errorCode: 'native_semantic_target_stale',
+            recoveryHint: 'Observe the exact app again and use the fresh path, role, label, and current field value.',
+          }));
+          return;
+        }
+
+        const classification = classifyNativeSemanticValueTarget(
+          observedNode,
+          nativeSemanticContextForTarget(cached.semanticSnapshot, targetPath),
+        );
+        if (!classification.ok) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'That accessibility field is not a proven non-secret, non-consequential text target.',
+            errorCode: 'native_semantic_value_target_blocked',
+            reason: classification.reason,
+          }));
+          return;
+        }
+
+        const targetFingerprint = nativeSemanticValueTargetFingerprint(
+          appName,
+          pid,
+          targetPath,
+          expectedRole,
+          expectedLabel,
+        );
+        const mutationNeeded = currentValueHash !== requestedValueHash
+          || expectedCurrentValue.length !== requestedValue.length;
+        const issued = mutationNeeded
+          ? issueNativeSemanticValueTarget({
+              action: 'set_value',
+              app: appName,
+              pid,
+              indexGeneration,
+              targetPath,
+              targetRole: classification.role,
+              targetLabel: classification.label,
+              targetFingerprint,
+              currentValueHash,
+              requestedValueHash,
+              currentValueLength: expectedCurrentValue.length,
+              requestedValueLength: requestedValue.length,
+              valueClass: 'non_secret_text',
+              requestedValue,
+              observedAtMs: Number(cached.at || Date.now()),
+            })
+          : {
+              action: 'set_value',
+              targetId: null,
+              evidenceId: `native-semantic-value-noop-${crypto.randomBytes(8).toString('hex')}`,
+              observedAtMs: Number(cached.at || Date.now()),
+              expiresAtMs: Date.now() + NATIVE_SEMANTIC_TARGET_TTL_MS,
+              app: appName,
+              pid,
+              indexGeneration,
+              targetPath,
+              targetRole: classification.role,
+              targetLabel: classification.label,
+              targetFingerprint,
+              currentValueHash,
+              requestedValueHash,
+              currentValueLength: expectedCurrentValue.length,
+              requestedValueLength: requestedValue.length,
+              valueClass: 'non_secret_text',
+            };
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          schemaVersion: 1,
+          action: 'set_value',
+          targetId: issued.targetId,
+          targetFingerprint: issued.targetFingerprint,
+          currentValueHash: issued.currentValueHash,
+          requestedValueHash: issued.requestedValueHash,
+          currentValueLength: issued.currentValueLength,
+          requestedValueLength: issued.requestedValueLength,
+          valueClass: 'non_secret_text',
+          evidenceId: issued.evidenceId,
+          observedAt: new Date(issued.observedAtMs).toISOString(),
+          expiresAt: new Date(issued.expiresAtMs).toISOString(),
+          app: issued.app,
+          resolvedAppName: issued.app,
+          pid: issued.pid,
+          targetPath: issued.targetPath,
+          targetRole: issued.targetRole,
+          targetLabel: issued.targetLabel,
+          indexGeneration: issued.indexGeneration,
+          valueCapable: true,
+          mutationNeeded,
+          targetSummary: buildNativeSemanticValueTargetSummary(issued),
+          approvalRequired: mutationNeeded,
+          risk: mutationNeeded ? 'medium' : 'low',
+        }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/semantic_value' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: bodyErr, errorCode: 'invalid_input' }));
+          return;
+        }
+        const targetId = String(parsed?.targetId || '').trim().toLowerCase();
+        const targetFingerprint = String(parsed?.targetFingerprint || '').trim().toLowerCase();
+        const approvalId = String(parsed?.approvalId || '').trim();
+        if (
+          !/^[a-f0-9]{48}$/.test(targetId)
+          || !/^[a-f0-9]{64}$/.test(targetFingerprint)
+          || !/^[A-Za-z0-9._:-]{8,160}$/.test(approvalId)
+        ) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'valid one-shot targetId, targetFingerprint, and approvalId are required',
+            errorCode: 'invalid_input',
+          }));
+          return;
+        }
+
+        // Consume before every other check. A lost response can never turn
+        // into a duplicate field mutation.
+        const capability = consumeNativeSemanticValueTarget(targetId);
+        if (!capability) {
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'The one-shot native semantic value target is unknown or already consumed.',
+            errorCode: 'native_semantic_target_replayed',
+            replayAllowed: false,
+          }));
+          return;
+        }
+        if (Date.now() > capability.expiresAtMs) {
+          writeNativeSemanticValuePreDispatchFailure(
+            res, CORS, capability, 'native_semantic_target_expired',
+            'The one-shot native semantic value target expired before dispatch.', approvalId,
+          );
+          return;
+        }
+        if (targetFingerprint !== capability.targetFingerprint) {
+          writeNativeSemanticValuePreDispatchFailure(
+            res, CORS, capability, 'native_semantic_target_stale',
+            'The sealed native semantic value target fingerprint did not match.', approvalId,
+          );
+          return;
+        }
+
+        collectFreshFrontmostNativeSemanticTree(capability, (beforeResult) => {
+          if (beforeResult.kind !== 'payload') {
+            writeNativeSemanticValuePreDispatchFailure(
+              res, CORS, capability, 'native_semantic_target_stale',
+              'A fresh pre-dispatch accessibility observation was unavailable.', approvalId,
+            );
+            return;
+          }
+          const beforePayload = beforeResult.payload;
+          const beforePid = Math.trunc(Number(beforePayload.pid || 0));
+          const beforeApp = String(beforePayload.app || capability.app);
+          const beforeSnapshot = buildNativeSemanticTreeSnapshot(
+            beforePayload.tree,
+            beforeApp,
+            beforePid,
+            Number(beforePayload.index_generation || 0),
+          );
+          const beforeTarget = beforeSnapshot.nodesByPath[capability.targetPath] || null;
+          const beforeClassification = beforeTarget
+            ? classifyNativeSemanticValueTarget(
+                beforeTarget,
+                nativeSemanticContextForTarget(beforeSnapshot, capability.targetPath),
+              )
+            : { ok: false, reason: 'target_missing' };
+          const beforeTargetFingerprint = beforeTarget
+            ? nativeSemanticValueTargetFingerprint(
+                capability.app,
+                capability.pid,
+                capability.targetPath,
+                beforeTarget.role,
+                beforeTarget.label,
+              )
+            : '';
+          const exactBeforeTarget = (
+            beforePid === capability.pid
+            && normalizeNativeSemanticAppIdentity(beforeApp) === normalizeNativeSemanticAppIdentity(capability.app)
+            && beforeTargetFingerprint === capability.targetFingerprint
+            && beforeTarget?.exactValueHash === capability.currentValueHash
+            && beforeTarget?.exactValueLength === capability.currentValueLength
+            && beforeClassification.ok === true
+          );
+          if (!exactBeforeTarget) {
+            writeNativeSemanticValuePreDispatchFailure(
+              res, CORS, capability, 'native_semantic_target_stale',
+              'The app, PID, exact field identity, or current value changed before dispatch.',
+              approvalId, beforeSnapshot,
+            );
+            return;
+          }
+
+          const helperPath = path.join(__dirname, 'bin', 'uc-ax-helper');
+          if (!fs.existsSync(helperPath)) {
+            writeNativeSemanticValuePreDispatchFailure(
+              res, CORS, capability, 'helper_missing',
+              'The native accessibility helper is unavailable.', approvalId, beforeSnapshot,
+            );
+            return;
+          }
+
+          const dispatchedAt = Date.now();
+          execFile(
+            helperPath,
+            ['set-value', '--pid', String(capability.pid), '--path', capability.targetPath, '--text', capability.requestedValue],
+            { timeout: 7000, maxBuffer: 1024 * 1024 },
+            (dispatchErr, stdout, stderr) => {
+              let dispatchPayload = null;
+              try { dispatchPayload = JSON.parse(String(stdout || '').trim()); } catch { dispatchPayload = null; }
+              const dispatchMethod = dispatchPayload?.method === 'ax_set_value'
+                ? 'ax_set_value'
+                : 'unknown';
+              const dispatchAcknowledged = dispatchPayload?.ok === true
+                && dispatchMethod === 'ax_set_value'
+                && Number(dispatchPayload?.chars) === capability.requestedValueLength;
+              const dispatchError = String(
+                dispatchPayload?.error || stderr || dispatchErr?.message || 'native semantic value change was not acknowledged',
+              ).slice(0, 300);
+
+              setTimeout(() => {
+                collectA11yTreeForApp({
+                  appName: capability.app,
+                  maxDepth: 10,
+                  maxNodes: 400,
+                  slice: 'full',
+                }, (afterResult) => {
+                  const afterPayload = afterResult.kind === 'payload' ? afterResult.payload : null;
+                  const afterPid = Math.trunc(Number(afterPayload?.pid || 0));
+                  const afterApp = String(afterPayload?.app || capability.app);
+                  const afterSnapshot = afterPayload
+                    ? buildNativeSemanticTreeSnapshot(
+                        afterPayload.tree,
+                        afterApp,
+                        afterPid,
+                        Number(afterPayload.index_generation || 0),
+                      )
+                    : null;
+                  const afterTarget = afterSnapshot?.nodesByPath[capability.targetPath] || null;
+                  const afterClassification = afterTarget && afterSnapshot
+                    ? classifyNativeSemanticValueTarget(
+                        afterTarget,
+                        nativeSemanticContextForTarget(afterSnapshot, capability.targetPath),
+                      )
+                    : { ok: false };
+                  const afterTargetFingerprint = afterTarget
+                    ? nativeSemanticValueTargetFingerprint(
+                        capability.app,
+                        capability.pid,
+                        capability.targetPath,
+                        afterTarget.role,
+                        afterTarget.label,
+                      )
+                    : '';
+                  const afterIdentityMatched = !!afterSnapshot
+                    && afterPid === capability.pid
+                    && normalizeNativeSemanticAppIdentity(afterApp) === normalizeNativeSemanticAppIdentity(capability.app)
+                    && afterTargetFingerprint === capability.targetFingerprint
+                    && afterClassification.ok === true;
+                  const completionVerified = dispatchAcknowledged
+                    && afterIdentityMatched
+                    && afterTarget?.exactValueHash === capability.requestedValueHash
+                    && afterTarget?.exactValueLength === capability.requestedValueLength;
+                  const outcomeUnknown = !completionVerified;
+                  const proof = buildNativeSemanticValueProof({
+                    capability,
+                    approvalId,
+                    beforeSnapshot,
+                    afterSnapshot: afterIdentityMatched ? afterSnapshot : null,
+                    dispatchedAt,
+                    dispatchAcknowledged,
+                    dispatchMethod,
+                    completionVerified,
+                    outcomeUnknown,
+                  });
+                  res.writeHead(200, CORS);
+                  res.end(JSON.stringify({
+                    ok: completionVerified,
+                    ...(!completionVerified ? {
+                      error: dispatchAcknowledged
+                        ? 'The field was set once, but a fresh exact-value observation did not verify the requested value.'
+                        : dispatchError,
+                      errorCode: dispatchAcknowledged
+                        ? 'native_semantic_value_verification_failed'
+                        : 'native_semantic_value_dispatch_failed',
+                    } : {}),
+                    app: capability.app,
+                    pid: capability.pid,
+                    action: 'set_value',
+                    targetRole: capability.targetRole,
+                    targetPathHash: nativeSemanticHash(capability.targetPath),
+                    targetLabelHash: nativeSemanticHash(normalizeNativeSemanticText(capability.targetLabel)),
+                    targetFingerprint: capability.targetFingerprint,
+                    currentValueHash: capability.currentValueHash,
+                    requestedValueHash: capability.requestedValueHash,
+                    currentValueLength: capability.currentValueLength,
+                    requestedValueLength: capability.requestedValueLength,
+                    evidenceId: capability.evidenceId,
+                    completionVerified,
+                    outcomeUnknown,
+                    replayAllowed: false,
+                    proof,
+                  }));
+                });
+              }, NATIVE_SEMANTIC_AFTER_OBSERVATION_DELAY_MS);
+            },
+          );
+        });
+      });
+      return;
+    }
+
     // `/desktop/click_element` — clicks an element by the dotted path
     // returned from `/desktop/a11y_tree`. Tries AXPress first (native
     // accessibility click); falls back to a synthesised CGEvent at bbox
@@ -8164,6 +8600,206 @@ function readJsonBody(req, maxBytes, callback) {
     }
   });
   req.on('error', (err) => { if (!destroyed) callback(null, err.message); });
+}
+
+/**
+ * Validate the exact native-window authority emitted by desktopBridge.ts.
+ * Generic input is intentionally fail-closed: a caller must bind the action
+ * to the currently observed app, PID, CGWindowID, and unchanged bounds.
+ */
+function isValidDesktopNativeAppNameServer(value) {
+  if (typeof value !== 'string') return false;
+  const appName = value.trim();
+  return (
+    appName.length > 0
+    && Array.from(appName).length <= 160
+    && !/[\u0000-\u001f\u007f]/.test(appName)
+  );
+}
+
+function parseDesktopNativeTargetGuardServer(rawGuard) {
+  const guardIsObject = !!rawGuard && typeof rawGuard === 'object' && !Array.isArray(rawGuard);
+  const appName = guardIsObject && typeof rawGuard.appName === 'string' ? rawGuard.appName.trim() : '';
+  const pid = guardIsObject ? rawGuard.pid : null;
+  const window = rawGuard?.window;
+  const windowIsObject = !!window && typeof window === 'object' && !Array.isArray(window);
+  const id = windowIsObject ? window.id : null;
+  const x = windowIsObject ? window.x : null;
+  const y = windowIsObject ? window.y : null;
+  const width = windowIsObject ? window.width : null;
+  const height = windowIsObject ? window.height : null;
+  const validAppName = isValidDesktopNativeAppNameServer(appName);
+  const valid = (
+    guardIsObject
+    && windowIsObject
+    && validAppName
+    && typeof pid === 'number'
+    && Number.isInteger(pid)
+    && pid >= 1
+    && pid <= 2_147_483_647
+    && typeof id === 'number'
+    && Number.isInteger(id)
+    && id >= 1
+    && id <= 4_294_967_295
+    && typeof x === 'number'
+    && Number.isSafeInteger(x)
+    && x >= -32_768
+    && x <= 32_768
+    && typeof y === 'number'
+    && Number.isSafeInteger(y)
+    && y >= -32_768
+    && y <= 32_768
+    && typeof width === 'number'
+    && Number.isSafeInteger(width)
+    && width >= 1
+    && width <= 32_768
+    && typeof height === 'number'
+    && Number.isSafeInteger(height)
+    && height >= 1
+    && height <= 32_768
+  );
+  if (!valid) {
+    return {
+      ok: false,
+      error: 'Exact frontmost app/PID/CGWindow/bounds target guard is required.',
+      errorCode: 'uncertain_ui_target',
+    };
+  }
+  return {
+    ok: true,
+    guard: { appName, pid, window: { id, x, y, width, height } },
+  };
+}
+
+function desktopNativeTargetGuardHelperArgs(guard) {
+  return [
+    '--expect-app', guard.appName,
+    '--expect-pid', String(guard.pid),
+    '--expect-window-id', String(guard.window.id),
+    '--expect-window-x', String(guard.window.x),
+    '--expect-window-y', String(guard.window.y),
+    '--expect-window-width', String(guard.window.width),
+    '--expect-window-height', String(guard.window.height),
+  ];
+}
+
+function writeDesktopNativeTargetGuardFailure(res, CORS, failure) {
+  const knownCodes = new Set([
+    'uncertain_ui_target',
+    'permission_denied',
+    'helper_missing',
+    'invalid_request',
+    'input_dispatch_failed',
+  ]);
+  const rawErrorCode = String(failure?.errorCode || 'uncertain_ui_target');
+  const errorCode = knownCodes.has(rawErrorCode) ? rawErrorCode : 'input_dispatch_failed';
+  const status = errorCode === 'uncertain_ui_target'
+    ? 409
+    : errorCode === 'permission_denied'
+      ? 403
+      : errorCode === 'helper_missing'
+        ? 503
+        : errorCode === 'invalid_request'
+          ? 400
+          : 500;
+  res.writeHead(status, CORS);
+  res.end(JSON.stringify({
+    ok: false,
+    error: String(failure?.error || failure || 'Native UI target could not be verified.').slice(0, 500),
+    errorCode,
+  }));
+}
+
+function parseDesktopInputHelperJson(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const candidates = [text, ...text.split(/\r?\n/g).reverse()];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+  return null;
+}
+
+function classifyDesktopInputHelperFailure(err, stdout, stderr, fallbackError = 'Native input helper failed.') {
+  const stdoutPayload = parseDesktopInputHelperJson(stdout);
+  const stderrPayload = parseDesktopInputHelperJson(stderr);
+  const payload = stdoutPayload || stderrPayload;
+  const rawMessage = String(payload?.error || stderr || err?.message || fallbackError).trim().slice(0, 500);
+  const rawCode = String(payload?.errorCode || '');
+  const knownCodes = new Set([
+    'uncertain_ui_target',
+    'permission_denied',
+    'helper_missing',
+    'invalid_request',
+    'input_dispatch_failed',
+  ]);
+  let errorCode = knownCodes.has(rawCode) ? rawCode : '';
+  if (!errorCode && err?.code === 'ENOENT') errorCode = 'helper_missing';
+  if (!errorCode && /accessibility permission|not authorized|operation not permitted/i.test(rawMessage)) errorCode = 'permission_denied';
+  if (!errorCode && /target guard|frontmost|target window|window proof|overlay|window-bounds/i.test(rawMessage)) errorCode = 'uncertain_ui_target';
+  if (!errorCode) errorCode = 'input_dispatch_failed';
+  return {
+    error: rawMessage || fallbackError,
+    errorCode,
+  };
+}
+
+function runDesktopInputHelper(args, options, callback) {
+  const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
+  if (!fs.existsSync(helperPath)) {
+    callback({ error: 'uc-input-helper not found.', errorCode: 'helper_missing' }, null);
+    return;
+  }
+  const child = execFile(
+    helperPath,
+    args,
+    {
+      timeout: options?.timeout || 5000,
+      maxBuffer: 64 * 1024,
+    },
+    (err, stdout, stderr) => {
+      const payload = parseDesktopInputHelperJson(stdout) || parseDesktopInputHelperJson(stderr);
+      if (err || payload?.ok !== true) {
+        callback(
+          classifyDesktopInputHelperFailure(err, stdout, stderr, options?.fallbackError),
+          null,
+        );
+        return;
+      }
+      callback(null, payload);
+    },
+  );
+  if (options && Object.prototype.hasOwnProperty.call(options, 'stdin')) {
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(String(options.stdin), 'utf8');
+  }
+}
+
+/** Verify non-input System Events mutations immediately before dispatch. */
+function verifyDesktopNativeTargetGuardServer(guard, callback) {
+  runDesktopInputHelper(
+    ['window-proof', '--pid', String(guard.pid)],
+    { timeout: 3000, fallbackError: 'Native target proof failed.' },
+    (helperError, proof) => {
+      if (helperError) { callback(helperError); return; }
+      const matches = (
+        String(proof.appName || '') === guard.appName
+        && Number(proof.pid) === guard.pid
+        && Number(proof.windowId) === guard.window.id
+        && Number(proof.x) === guard.window.x
+        && Number(proof.y) === guard.window.y
+        && Number(proof.width) === guard.window.width
+        && Number(proof.height) === guard.window.height
+      );
+      callback(matches ? null : {
+        error: 'Native target proof no longer matches the sealed app window.',
+        errorCode: 'uncertain_ui_target',
+      });
+    },
+  );
 }
 
 /* UC_SMOKE_EXTRACT_START shellSingleQuote */
@@ -8423,6 +9059,7 @@ const NATIVE_SEMANTIC_TARGET_TTL_MS = 2 * 60_000;
 const NATIVE_SEMANTIC_TARGET_STORE_MAX = 32;
 const NATIVE_SEMANTIC_AFTER_OBSERVATION_DELAY_MS = 220;
 const nativeSemanticActionTargets = new Map();
+const nativeSemanticValueTargets = new Map();
 
 function normalizeNativeSemanticText(value) {
   return String(value || '')
@@ -8443,6 +9080,28 @@ function normalizeNativeSemanticAppIdentity(value) {
 
 function nativeSemanticHash(value) {
   return crypto.createHash('sha256').update(String(value || ''), 'utf8').digest('hex');
+}
+
+// Value proof deliberately preserves case and whitespace. Labels and app
+// identity use normalized hashes, but a setter is complete only when the
+// exact requested value is independently visible in the refreshed AX tree.
+function nativeSemanticValueProofHash(value) {
+  return nativeSemanticHash(String(value ?? ''));
+}
+
+function looksLikeSecretNativeSemanticValue(value) {
+  const normalized = String(value ?? '').normalize('NFKC').trim();
+  if (!normalized) return false;
+  if (/-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/i.test(normalized)) return true;
+  if (/\b(?:bearer|basic)\s+[A-Za-z0-9+/=_-]{12,}\b/i.test(normalized)) return true;
+  if (/\b(?:password|passwd|passcode|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|private[_ -]?key)\s*[:=]\s*\S{4,}/i.test(normalized)) return true;
+  if (/\b(?:sk|pk|ghp|github_pat|xox[baprs]|ya29)[-_][A-Za-z0-9_-]{12,}\b/i.test(normalized)) return true;
+  const compactDigits = normalized.replace(/[\s-]/g, '');
+  if (/^\d{13,19}$/.test(compactDigits)) return true;
+  return normalized.length >= 32
+    && normalized.length <= 512
+    && !/\s/.test(normalized)
+    && /^[A-Za-z0-9+/=_-]+$/.test(normalized);
 }
 
 /* UC_SMOKE_EXTRACT_START classifyNativeSemanticActionTarget */
@@ -8495,7 +9154,60 @@ function classifyNativeSemanticActionTarget(node, contextText) {
 }
 /* UC_SMOKE_EXTRACT_END classifyNativeSemanticActionTarget */
 
-function buildNativeSemanticTreeSnapshot(tree, app, pid) {
+/* UC_SMOKE_EXTRACT_START classifyNativeSemanticValueTarget */
+function classifyNativeSemanticValueTarget(node, contextText) {
+  const normalized = (value) => String(value || '')
+    .replace(/[\u2026]/g, '...')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const role = String(node?.role || '').trim().slice(0, 80);
+  const roleKey = normalized(role).replace(/[\s_-]+/g, '');
+  const containerRoleKey = normalized(node?.containerRole).replace(/[\s_-]+/g, '');
+  const labelRaw = String(node?.label || '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  const label = normalized(labelRaw);
+  const context = normalized(`${label} ${contextText || ''}`).slice(0, 2000);
+  const allowedRole = roleKey === 'axtextfield'
+    || roleKey === 'axtextarea'
+    || roleKey === 'axtextview'
+    || roleKey === 'axsearchfield';
+  if (!role || /secure|password/.test(roleKey)) {
+    return { ok: false, reason: 'secure_or_credential_control' };
+  }
+  if (!allowedRole) return { ok: false, reason: 'unsupported_role' };
+  if (/^ax(alert|dialog|sheet)$/.test(containerRoleKey)) {
+    return { ok: false, reason: 'modal_context' };
+  }
+  if (!label) return { ok: false, reason: 'missing_label' };
+  // Secrets and high-impact financial/identity fields must use the dedicated
+  // vault/origin-gated lane. The generic value capability never handles them,
+  // even with a normal approval receipt.
+  const sensitive = /\b(password|passcode|pin|one[- ]?time code|otp|mfa|two[- ]?factor|verification code|security code|secret|api key|access token|refresh token|private key|seed phrase|recovery phrase|credit card|card number|cvv|cvc|bank account|routing number|social security|ssn|tax id|sign in|signin|log in|login|credential)\b/;
+  if (sensitive.test(context)) {
+    return { ok: false, reason: 'secure_or_credential_context' };
+  }
+  if (/\b(delete|remove|erase|trash|discard|reset|replace|overwrite|clear all|quit|terminate|uninstall|revoke)\b/.test(context)) {
+    return { ok: false, reason: 'destructive_context' };
+  }
+  if (/\b(pay|payment|purchase|buy|checkout|order|subscribe|billing|credit card|debit card|bank|wire|transfer|refund|permission|authorize|authorization|privacy|camera|microphone|location|contacts|screen recording|accessibility)\b/.test(context)) {
+    return { ok: false, reason: 'permission_or_payment_context' };
+  }
+  return {
+    ok: true,
+    action: 'set_value',
+    role,
+    label: labelRaw,
+    risk: 'medium',
+  };
+}
+/* UC_SMOKE_EXTRACT_END classifyNativeSemanticValueTarget */
+
+function buildNativeSemanticTreeSnapshot(tree, app, pid, indexGeneration = 0) {
   const nodesByPath = Object.create(null);
   const canonical = [];
   let nodeCount = 0;
@@ -8509,7 +9221,8 @@ function buildNativeSemanticTreeSnapshot(tree, app, pid) {
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 120);
-    const value = String(node.value || '')
+    const rawValue = String(node.value ?? '');
+    const value = rawValue
       .replace(/[\u0000-\u001f\u007f]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
@@ -8528,6 +9241,8 @@ function buildNativeSemanticTreeSnapshot(tree, app, pid) {
       value,
       labelHash: nativeSemanticHash(normalizeNativeSemanticText(label)),
       valueHash: nativeSemanticHash(normalizeNativeSemanticText(value)),
+      exactValueHash: nativeSemanticValueProofHash(rawValue),
+      exactValueLength: rawValue.length,
       parentPath: parentPath || null,
       containerPath: containerPath || null,
       containerRole: containerRole || null,
@@ -8548,6 +9263,7 @@ function buildNativeSemanticTreeSnapshot(tree, app, pid) {
     observedAtMs: Date.now(),
     app: String(app || '').trim().slice(0, 120),
     pid: Math.max(0, Math.trunc(Number(pid || 0))),
+    indexGeneration: Math.max(0, Math.trunc(Number(indexGeneration || 0))),
     nodeCount,
     treeFingerprint: nativeSemanticHash(canonical.join('\n')),
     nodesByPath,
@@ -8624,6 +9340,39 @@ function consumeNativeSemanticActionTarget(targetId) {
   return entry;
 }
 
+function purgeExpiredNativeSemanticValueTargets(nowMs) {
+  for (const [targetId, entry] of nativeSemanticValueTargets) {
+    if (Number(entry.expiresAtMs || 0) < nowMs) nativeSemanticValueTargets.delete(targetId);
+  }
+}
+
+function issueNativeSemanticValueTarget(input) {
+  const nowMs = Date.now();
+  purgeExpiredNativeSemanticValueTargets(nowMs);
+  while (nativeSemanticValueTargets.size >= NATIVE_SEMANTIC_TARGET_STORE_MAX) {
+    const oldestKey = nativeSemanticValueTargets.keys().next().value;
+    if (!oldestKey) break;
+    nativeSemanticValueTargets.delete(oldestKey);
+  }
+  const targetId = crypto.randomBytes(24).toString('hex');
+  const entry = {
+    schemaVersion: 1,
+    targetId,
+    evidenceId: `native-semantic-value-${crypto.randomBytes(12).toString('hex')}`,
+    issuedAtMs: nowMs,
+    expiresAtMs: nowMs + NATIVE_SEMANTIC_TARGET_TTL_MS,
+    ...input,
+  };
+  nativeSemanticValueTargets.set(targetId, entry);
+  return entry;
+}
+
+function consumeNativeSemanticValueTarget(targetId) {
+  const entry = nativeSemanticValueTargets.get(targetId) || null;
+  nativeSemanticValueTargets.delete(targetId);
+  return entry;
+}
+
 function collectFreshFrontmostNativeSemanticTree(capability, cb) {
   if (process.platform !== 'darwin') {
     cb({ kind: 'frontmost_unavailable', error: 'native semantic actions require macOS' });
@@ -8654,6 +9403,181 @@ function buildNativeSemanticTargetSummary(capability) {
   const role = String(capability?.targetRole || '').replace(/\s+/g, ' ').trim().slice(0, 80);
   const app = String(capability?.app || '').replace(/\s+/g, ' ').trim().slice(0, 120);
   return `Press "${label}" (${role}) in ${app}`.slice(0, 240);
+}
+
+function nativeSemanticValueTargetFingerprint(app, pid, targetPath, targetRole, targetLabel) {
+  return nativeSemanticHash(JSON.stringify({
+    schemaVersion: 1,
+    operation: 'native_semantic_set_value_target',
+    app: normalizeNativeSemanticAppIdentity(app),
+    pid: Math.max(0, Math.trunc(Number(pid || 0))),
+    targetPath: String(targetPath || ''),
+    targetRole: String(targetRole || ''),
+    targetLabel: normalizeNativeSemanticText(targetLabel),
+  }));
+}
+
+function buildNativeSemanticValueTargetSummary(capability) {
+  const app = String(capability?.app || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return `Set one exact non-secret text field in ${app}`.slice(0, 200);
+}
+
+function nativeSemanticValueProofSnapshot(snapshot, capability) {
+  if (!snapshot) return null;
+  const target = snapshot.nodesByPath[capability.targetPath] || null;
+  const classification = target
+    ? classifyNativeSemanticValueTarget(
+        target,
+        nativeSemanticContextForTarget(snapshot, capability.targetPath),
+      )
+    : { ok: false };
+  return {
+    observedAt: new Date(snapshot.observedAtMs).toISOString(),
+    app: String(snapshot.app || capability.app).slice(0, 120),
+    pid: Math.max(0, Math.trunc(Number(snapshot.pid || 0))),
+    // This receipt field denotes the sealed source generation. Handler-entry
+    // and after reads use fresh internal generations, but those must never
+    // replace the capability generation the adapter approved.
+    indexGeneration: Math.max(0, Math.trunc(Number(capability.indexGeneration || 0))),
+    targetPresent: !!target,
+    valueCapable: classification.ok === true,
+    targetFingerprint: target ? capability.targetFingerprint : null,
+    valueHash: target ? String(target.exactValueHash || '') : null,
+    valueLength: target ? Math.max(0, Math.trunc(Number(target.exactValueLength || 0))) : null,
+  };
+}
+
+function buildNativeSemanticValueProof(input) {
+  const {
+    capability,
+    approvalId,
+    beforeSnapshot,
+    afterSnapshot,
+    dispatchedAt,
+    dispatchAcknowledged,
+    dispatchMethod,
+    completionVerified,
+    outcomeUnknown,
+  } = input;
+  const before = nativeSemanticValueProofSnapshot(beforeSnapshot, capability);
+  const after = nativeSemanticValueProofSnapshot(afterSnapshot, capability);
+  const valueChanged = !!before
+    && !!after
+    && before.valueHash !== after.valueHash;
+  const diffKind = !before || !after
+    ? 'identity_unavailable'
+    : valueChanged
+      ? 'target_value_changed'
+      : 'unchanged';
+  return {
+    schemaVersion: 1,
+    operation: 'native_semantic_set_value',
+    action: 'set_value',
+    app: capability.app,
+    pid: capability.pid,
+    targetRole: capability.targetRole,
+    targetPathHash: nativeSemanticHash(capability.targetPath),
+    targetLabelHash: nativeSemanticHash(normalizeNativeSemanticText(capability.targetLabel)),
+    targetFingerprint: capability.targetFingerprint,
+    currentValueHash: capability.currentValueHash,
+    requestedValueHash: capability.requestedValueHash,
+    currentValueLength: capability.currentValueLength,
+    requestedValueLength: capability.requestedValueLength,
+    valueClass: 'non_secret_text',
+    evidenceId: capability.evidenceId,
+    approvalRequired: true,
+    approvalReceiptHash: nativeSemanticHash(approvalId),
+    mutationNeeded: true,
+    mutationAttempted: true,
+    mutationPerformed: completionVerified === true,
+    noOp: false,
+    dispatchedAt: new Date(dispatchedAt).toISOString(),
+    dispatchAcknowledged: dispatchAcknowledged === true,
+    dispatchMethod,
+    completionVerified: completionVerified === true,
+    outcomeUnknown: outcomeUnknown === true,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    before,
+    after,
+    diff: {
+      kind: diffKind,
+      targetPresentBefore: before?.targetPresent === true,
+      targetPresentAfter: after?.targetPresent === true,
+      valueChanged,
+    },
+  };
+}
+
+function writeNativeSemanticValuePreDispatchFailure(
+  res,
+  corsHeaders,
+  capability,
+  errorCode,
+  error,
+  approvalId,
+  beforeSnapshot,
+) {
+  const before = nativeSemanticValueProofSnapshot(beforeSnapshot || null, capability);
+  const proof = {
+    schemaVersion: 1,
+    operation: 'native_semantic_set_value',
+    action: 'set_value',
+    app: capability.app,
+    pid: capability.pid,
+    targetRole: capability.targetRole,
+    targetPathHash: nativeSemanticHash(capability.targetPath),
+    targetLabelHash: nativeSemanticHash(normalizeNativeSemanticText(capability.targetLabel)),
+    targetFingerprint: capability.targetFingerprint,
+    currentValueHash: capability.currentValueHash,
+    requestedValueHash: capability.requestedValueHash,
+    currentValueLength: capability.currentValueLength,
+    requestedValueLength: capability.requestedValueLength,
+    valueClass: 'non_secret_text',
+    evidenceId: capability.evidenceId,
+    approvalRequired: true,
+    approvalReceiptHash: nativeSemanticHash(approvalId),
+    mutationNeeded: true,
+    mutationAttempted: false,
+    mutationPerformed: false,
+    noOp: false,
+    dispatchAcknowledged: false,
+    dispatchMethod: 'none',
+    completionVerified: false,
+    outcomeUnknown: false,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    before,
+    after: null,
+    diff: {
+      kind: 'not_dispatched',
+      targetPresentBefore: before?.targetPresent === true,
+      targetPresentAfter: false,
+      valueChanged: false,
+    },
+  };
+  res.writeHead(200, corsHeaders);
+  res.end(JSON.stringify({
+    ok: false,
+    error,
+    errorCode,
+    app: capability.app,
+    pid: capability.pid,
+    action: 'set_value',
+    targetRole: capability.targetRole,
+    targetPathHash: proof.targetPathHash,
+    targetLabelHash: proof.targetLabelHash,
+    targetFingerprint: capability.targetFingerprint,
+    currentValueHash: capability.currentValueHash,
+    requestedValueHash: capability.requestedValueHash,
+    currentValueLength: capability.currentValueLength,
+    requestedValueLength: capability.requestedValueLength,
+    evidenceId: capability.evidenceId,
+    completionVerified: false,
+    outcomeUnknown: false,
+    replayAllowed: false,
+    proof,
+  }));
 }
 
 function normalizeNativeSemanticDispatchMethod(value) {
@@ -8871,6 +9795,7 @@ function collectA11yTreeForApp(opts, cb) {
         payload.tree,
         String(payload.app || appName || ''),
         pidNum,
+        generation,
       );
       rememberA11yIndexMap(pidNum, {
         app: String(payload.app || appName || ''),
@@ -9357,17 +10282,16 @@ function resolvePhotoshopMacApp(appName) {
   return value;
 }
 
-// Keys supported in combos. Extend as needed; each map entry must be
-// a valid AppleScript identifier.
+// Keys supported by the atomic uc-input-helper combo parser. Keep the
+// canonical modifier names and key codes in sync with the Swift helper's
+// bounded allowlist; aliases are normalized before they cross the process.
 const MODIFIER_TOKENS = {
-  cmd: 'command down', command: 'command down', meta: 'command down', super: 'command down',
-  shift: 'shift down',
-  opt: 'option down', option: 'option down', alt: 'option down',
-  ctrl: 'control down', control: 'control down',
-  fn: 'function down',
+  cmd: 'command', command: 'command', meta: 'command', super: 'command',
+  shift: 'shift',
+  opt: 'option', option: 'option', alt: 'option',
+  ctrl: 'control', control: 'control',
+  fn: 'function',
 };
-// Named keys → AppleScript key codes. Letters / digits we pass via
-// `keystroke "x"`; these need `key code N`.
 const NAMED_KEY_CODES = {
   return: 36, enter: 36, tab: 48, space: 49, delete: 51, escape: 53, esc: 53,
   left: 123, right: 124, down: 125, up: 126,
@@ -9375,30 +10299,46 @@ const NAMED_KEY_CODES = {
   f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100,
   f9: 101, f10: 109, f11: 103, f12: 111,
 };
-const PUNCTUATION_KEYS = new Set([',', '.', '-', '=', '`', '[', ']']);
+const CHARACTER_KEY_CODES = {
+  a: 0, s: 1, d: 2, f: 3, h: 4, g: 5, z: 6, x: 7, c: 8, v: 9, b: 11,
+  q: 12, w: 13, e: 14, r: 15, y: 16, t: 17,
+  1: 18, 2: 19, 3: 20, 4: 21, 6: 22, 5: 23, '=': 24, 9: 25,
+  7: 26, '-': 27, 8: 28, 0: 29, ']': 30,
+  o: 31, u: 32, '[': 33, i: 34, p: 35,
+  l: 37, j: 38, k: 40, ',': 43, n: 45, m: 46, '.': 47, '`': 50,
+};
+const NATIVE_MODIFIER_ORDER = ['command', 'shift', 'option', 'control', 'function'];
 
-function keyComboToAppleScript(combo) {
+function keyComboToNativeInput(combo) {
   if (!combo || typeof combo !== 'string') return null;
   const parts = combo.split('+').map((p) => p.trim()).filter(Boolean);
   if (parts.length === 0 || parts.length > 5) return null;
-  const modifiers = [];
+  const modifiers = new Set();
   let key = null;
   for (const raw of parts) {
     const lower = raw.toLowerCase();
-    if (MODIFIER_TOKENS[lower]) { modifiers.push(MODIFIER_TOKENS[lower]); continue; }
+    if (MODIFIER_TOKENS[lower]) {
+      const modifier = MODIFIER_TOKENS[lower];
+      if (modifiers.has(modifier)) return null;
+      modifiers.add(modifier);
+      continue;
+    }
     if (key !== null) return null; // two terminal keys — reject
     key = raw;
   }
   if (!key) return null;
-  const usingClause = modifiers.length > 0 ? ` using {${modifiers.join(', ')}}` : '';
   const lowerKey = key.toLowerCase();
+  let keyCode = null;
   if (Object.prototype.hasOwnProperty.call(NAMED_KEY_CODES, lowerKey)) {
-    return `key code ${NAMED_KEY_CODES[lowerKey]}${usingClause}`;
+    keyCode = NAMED_KEY_CODES[lowerKey];
+  } else if (Object.prototype.hasOwnProperty.call(CHARACTER_KEY_CODES, lowerKey)) {
+    keyCode = CHARACTER_KEY_CODES[lowerKey];
   }
-  if (/^[a-zA-Z0-9]$/.test(key) || PUNCTUATION_KEYS.has(key)) {
-    return `keystroke "${key}"${usingClause}`;
-  }
-  return null;
+  if (!Number.isInteger(keyCode)) return null;
+  return {
+    keyCode,
+    modifiers: NATIVE_MODIFIER_ORDER.filter((modifier) => modifiers.has(modifier)),
+  };
 }
 
 // Cached result of `which <cmd>` probes. Populated on first `/desktop/*`
@@ -15994,7 +16934,7 @@ function ensureInputHelper() {
     console.log('[bridge] ✓ uc-input-helper ready at', bin);
   } catch (err) {
     console.warn('[bridge] Could not compile uc-input-helper:', err.message);
-    console.warn('[bridge] /desktop/mouse_scroll will return 503 until the helper is built.');
+    console.warn('[bridge] Guarded /desktop mouse, type, key, and paste input will return 503 until the helper is built.');
     console.warn('[bridge] Install Xcode command-line tools: xcode-select --install');
   }
 }

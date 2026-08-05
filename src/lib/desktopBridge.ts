@@ -1593,42 +1593,79 @@ export interface DesktopNativeUiTargetGuard {
   window: DesktopNativeUiTargetWindow;
 }
 
-function normalizeDesktopNativeUiTargetGuard(
-  value: DesktopNativeUiTargetGuard | undefined,
-): DesktopNativeUiTargetGuard | null {
-  const appName = String(value?.appName || '').trim();
-  const window = value?.window;
+const DESKTOP_NATIVE_PID_MAX = 2_147_483_647;
+const DESKTOP_NATIVE_WINDOW_ID_MAX = 4_294_967_295;
+const DESKTOP_NATIVE_APP_NAME_MAX_CHARS = 160;
+const DESKTOP_NATIVE_BOUND_MIN = -32_768;
+const DESKTOP_NATIVE_BOUND_MAX = 32_768;
+
+function normalizeDesktopNativeTargetAppName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const appName = value.trim();
   if (
-    !isValidAppName(appName)
-    || !Number.isSafeInteger(value?.pid)
-    || Number(value?.pid) <= 0
-    || !window
-    || !Number.isSafeInteger(window.id)
-    || window.id <= 0
-    || !Number.isSafeInteger(window.x)
-    || !Number.isSafeInteger(window.y)
-    || !Number.isSafeInteger(window.width)
-    || !Number.isSafeInteger(window.height)
-    || window.x < -32_768
-    || window.y < -32_768
-    || window.x > 32_768
-    || window.y > 32_768
-    || window.width < 1
-    || window.height < 1
-    || window.width > 32_768
-    || window.height > 32_768
+    !appName
+    || Array.from(appName).length > DESKTOP_NATIVE_APP_NAME_MAX_CHARS
+    || /[\u0000-\u001f\u007f]/.test(appName)
+  ) {
+    return null;
+  }
+  return appName;
+}
+
+export function normalizeDesktopNativeUiTargetGuard(
+  value: unknown,
+): DesktopNativeUiTargetGuard | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const appName = normalizeDesktopNativeTargetAppName(candidate.appName);
+  const pid = candidate.pid;
+  const window = candidate.window;
+  if (!window || typeof window !== 'object' || Array.isArray(window)) return null;
+  const targetWindow = window as Record<string, unknown>;
+  if (
+    !appName
+    || typeof pid !== 'number'
+    || !Number.isSafeInteger(pid)
+    || pid <= 0
+    || pid > DESKTOP_NATIVE_PID_MAX
+    || typeof targetWindow.id !== 'number'
+    || !Number.isSafeInteger(targetWindow.id)
+    || targetWindow.id <= 0
+    || targetWindow.id > DESKTOP_NATIVE_WINDOW_ID_MAX
+    || typeof targetWindow.x !== 'number'
+    || !Number.isSafeInteger(targetWindow.x)
+    || typeof targetWindow.y !== 'number'
+    || !Number.isSafeInteger(targetWindow.y)
+    || typeof targetWindow.width !== 'number'
+    || !Number.isSafeInteger(targetWindow.width)
+    || typeof targetWindow.height !== 'number'
+    || !Number.isSafeInteger(targetWindow.height)
+    || targetWindow.x < DESKTOP_NATIVE_BOUND_MIN
+    || targetWindow.y < DESKTOP_NATIVE_BOUND_MIN
+    || targetWindow.x > DESKTOP_NATIVE_BOUND_MAX
+    || targetWindow.y > DESKTOP_NATIVE_BOUND_MAX
+    || targetWindow.width < 1
+    || targetWindow.height < 1
+    || targetWindow.width > DESKTOP_NATIVE_BOUND_MAX
+    || targetWindow.height > DESKTOP_NATIVE_BOUND_MAX
   ) {
     return null;
   }
   return {
     appName,
-    pid: Number(value?.pid),
-    window: { ...window },
+    pid,
+    window: {
+      id: targetWindow.id,
+      x: targetWindow.x,
+      y: targetWindow.y,
+      width: targetWindow.width,
+      height: targetWindow.height,
+    },
   };
 }
 
 function guardedDesktopMutationBody(
-  targetGuard: DesktopNativeUiTargetGuard | undefined,
+  targetGuard: DesktopNativeUiTargetGuard,
 ): { ok: true; targetGuard: DesktopNativeUiTargetGuard } | {
   ok: false;
   result: DesktopResult<never>;
@@ -1649,7 +1686,7 @@ function guardedDesktopMutationBody(
 export async function mouseMove(
   x: number,
   y: number,
-  targetGuard?: DesktopNativeUiTargetGuard,
+  targetGuard: DesktopNativeUiTargetGuard,
 ): Promise<DesktopResult<{ x: number; y: number }>> {
   const v = validateClickCoords(x, y);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
@@ -1670,7 +1707,7 @@ export async function mouseClick(args: {
   y: number;
   button?: 'left' | 'right';
   count?: number;
-  targetGuard?: DesktopNativeUiTargetGuard;
+  targetGuard: DesktopNativeUiTargetGuard;
 }): Promise<DesktopResult<{ x: number; y: number; button: string; count: number }>> {
   const v = validateClickCoords(args.x, args.y);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
@@ -1694,7 +1731,7 @@ export async function mouseDown(args: {
   x: number;
   y: number;
   button?: 'left' | 'right';
-  targetGuard?: DesktopNativeUiTargetGuard;
+  targetGuard: DesktopNativeUiTargetGuard;
 }): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
   const v = validateClickCoords(args.x, args.y);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
@@ -1713,37 +1750,19 @@ export async function mouseDown(args: {
 }
 
 export async function mouseUp(args: {
-  /** OPTIONAL on purpose: the bridge skips coordinate validation for mouse_up
-   *  when x/y are absent (`if (isDown || xRaw !== undefined || yRaw !== undefined)`
-   *  in claude-bridge.js), releasing wherever the pointer already is. Typing
-   *  these as required contradicted the server and forced callers to pass
-   *  `number | undefined` into a `number` slot. `mouseDown` is different — the
-   *  server always requires coords there, so it stays required. */
-  x?: number;
-  y?: number;
+  x: number;
+  y: number;
   button?: 'left' | 'right';
-  targetGuard?: DesktopNativeUiTargetGuard;
-} = {}): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
-  // Coord-less release ("let go wherever the pointer is") is a real, supported
-  // operation: the bridge only validates x/y for mouse_up when they are present,
-  // and `SwanBotDesktopClientToolBridge` declares this method's whole argument
-  // object as optional. The client used to validate unconditionally, so that
-  // path always failed with invalid_input and the capability never worked.
-  // Coordinates, when supplied, are still validated exactly as before.
-  const wantsPoint = args.x !== undefined || args.y !== undefined;
-  let point: { ok: true; x: number; y: number } | { ok: false; error: string } | null = null;
-  if (wantsPoint) {
-    const validated = validateClickCoords(args.x, args.y);
-    if (!validated.ok) return { ok: false, error: validated.error, errorCode: 'invalid_input' };
-    point = validated;
-  }
+  targetGuard: DesktopNativeUiTargetGuard;
+}): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
+  const point = validateClickCoords(args.x, args.y);
+  if (!point.ok) return { ok: false, error: point.error, errorCode: 'invalid_input' };
   const button = args.button === 'right' ? 'right' : 'left';
   const guarded = guardedDesktopMutationBody(args.targetGuard);
   if (!guarded.ok) return guarded.result;
   const r = await callBridge('POST', '/desktop/mouse_up', {
-    // Omit x/y entirely when absent so the bridge takes its coord-less path
-    // rather than coercing `undefined` into a coordinate.
-    ...(point && point.ok ? { x: point.x, y: point.y } : {}),
+    x: point.x,
+    y: point.y,
     button,
     targetGuard: guarded.targetGuard,
   });
@@ -1752,12 +1771,8 @@ export async function mouseUp(args: {
   return {
     ok: true,
     data: {
-      // The bridge echoes the coordinates it actually released at, which is the
-      // only source of truth for a coord-less release. Fall back to the
-      // requested point when one was supplied; otherwise report 0 rather than
-      // NaN, and let the caller read the echoed values.
-      x: Number(d?.x ?? (point && point.ok ? point.x : 0)),
-      y: Number(d?.y ?? (point && point.ok ? point.y : 0)),
+      x: Number(d?.x ?? point.x),
+      y: Number(d?.y ?? point.y),
       button: String(d?.button || button),
     },
   };
@@ -1769,7 +1784,7 @@ export async function mouseDrag(args: {
   toX: number;
   toY: number;
   durationMs?: number;
-  targetGuard?: DesktopNativeUiTargetGuard;
+  targetGuard: DesktopNativeUiTargetGuard;
 }): Promise<DesktopResult<{ fromX: number; fromY: number; toX: number; toY: number; durationMs: number }>> {
   const start = validateClickCoords(args.fromX, args.fromY);
   if (!start.ok) return { ok: false, error: start.error, errorCode: 'invalid_input' };
@@ -1805,7 +1820,7 @@ export async function mouseScroll(args: {
   deltaX?: number;
   x: number;
   y: number;
-  targetGuard?: DesktopNativeUiTargetGuard;
+  targetGuard: DesktopNativeUiTargetGuard;
 }): Promise<DesktopResult<{ x: number; y: number; deltaX: number; deltaY: number }>> {
   const point = validateClickCoords(args.x, args.y);
   if (!point.ok) return { ok: false, error: point.error, errorCode: 'invalid_input' };
@@ -1864,7 +1879,7 @@ export async function focusApp(appName: string): Promise<DesktopResult<DesktopAp
 
 export async function typeText(
   text: string,
-  targetGuard?: DesktopNativeUiTargetGuard,
+  targetGuard: DesktopNativeUiTargetGuard,
 ): Promise<DesktopResult<{ chars: number }>> {
   if (typeof text !== 'string' || text.length === 0) {
     return { ok: false, error: 'text must be a non-empty string', errorCode: 'invalid_input' };
@@ -1888,8 +1903,8 @@ export async function pasteText(
     appName?: string;
     restoreClipboard?: boolean;
     focusMode?: 'require' | 'best_effort' | 'skip';
-    targetGuard?: DesktopNativeUiTargetGuard;
-  } = {},
+    targetGuard: DesktopNativeUiTargetGuard;
+  },
 ): Promise<DesktopResult<{ chars: number; appName: string | null; restoredClipboard: boolean; focusWarning?: string | null }>> {
   if (typeof text !== 'string' || text.length === 0) {
     return { ok: false, error: 'text must be a non-empty string', errorCode: 'invalid_input' };
@@ -1898,7 +1913,7 @@ export async function pasteText(
     return { ok: false, error: 'text too long (max 20000 chars per paste)', errorCode: 'invalid_input' };
   }
   const appName = String(options.appName || '').trim();
-  if (appName && !isValidAppName(appName)) {
+  if (appName && !normalizeDesktopNativeTargetAppName(appName)) {
     return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
   }
   const focusMode = options.focusMode || 'skip';
@@ -2110,7 +2125,7 @@ export async function stageAttachmentManifestForDesktop(args: {
 export async function clickAt(
   x: number,
   y: number,
-  targetGuard?: DesktopNativeUiTargetGuard,
+  targetGuard: DesktopNativeUiTargetGuard,
 ): Promise<DesktopResult<{ x: number; y: number; via: string }>> {
   const v = validateClickCoords(x, y);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
@@ -2357,7 +2372,7 @@ export async function observeApp(args: {
   target?: string;
 } = {}): Promise<DesktopResult<ObserveAppData>> {
   const body: Record<string, unknown> = {};
-  const appName = typeof args.appName === 'string' ? args.appName.trim().slice(0, 120) : '';
+  const appName = typeof args.appName === 'string' ? args.appName.trim().slice(0, DESKTOP_NATIVE_APP_NAME_MAX_CHARS) : '';
   if (appName) body.appName = appName;
   if (typeof args.maxDepth === 'number') body.maxDepth = args.maxDepth;
   if (typeof args.maxNodes === 'number') body.maxNodes = args.maxNodes;
@@ -2365,9 +2380,15 @@ export async function observeApp(args: {
   const r = await callBridge('POST', '/desktop/observe_app', body);
   if (!r.ok) return r as DesktopResult<ObserveAppData>;
   const d = r.data as any;
-  const requestedAppName = String(d?.requestedAppName || appName || '').trim().slice(0, 120);
-  const resolvedAppName = String(d?.resolvedAppName || d?.app || appName || '').trim().slice(0, 120);
-  const pid = Math.max(0, Math.trunc(Number(d?.pid || 0)));
+  const requestedAppName = normalizeDesktopNativeTargetAppName(d?.requestedAppName || appName || '') || '';
+  const resolvedAppName = normalizeDesktopNativeTargetAppName(d?.resolvedAppName || d?.app || appName || '') || '';
+  const rawPid = d?.pid;
+  const pid = (
+    typeof rawPid === 'number'
+    && Number.isSafeInteger(rawPid)
+    && rawPid > 0
+    && rawPid <= DESKTOP_NATIVE_PID_MAX
+  ) ? rawPid : 0;
   if (appName && requestedAppName.toLowerCase() !== appName.toLowerCase()) {
     return {
       ok: false,
@@ -2396,24 +2417,12 @@ export async function observeApp(args: {
   // observe read can detect `index_stale`.
   const indexGeneration = Number(d?.index_generation || 0) || undefined;
   recordA11yIndexGeneration(pid, indexGeneration);
-  const rawTargetWindow = d?.targetWindow;
-  const targetWindow = (
-    rawTargetWindow
-    && Number.isSafeInteger(Number(rawTargetWindow.id))
-    && Number(rawTargetWindow.id) > 0
-    && [rawTargetWindow.x, rawTargetWindow.y, rawTargetWindow.width, rawTargetWindow.height]
-      .every((value) => Number.isSafeInteger(Number(value)))
-    && Number(rawTargetWindow.width) > 0
-    && Number(rawTargetWindow.height) > 0
-  )
-    ? {
-        id: Number(rawTargetWindow.id),
-        x: Number(rawTargetWindow.x),
-        y: Number(rawTargetWindow.y),
-        width: Number(rawTargetWindow.width),
-        height: Number(rawTargetWindow.height),
-      }
-    : null;
+  const normalizedTargetGuard = normalizeDesktopNativeUiTargetGuard({
+    appName: resolvedAppName,
+    pid,
+    window: d?.targetWindow,
+  });
+  const targetWindow = normalizedTargetGuard?.window || null;
   return {
     ok: true,
     data: {
@@ -2844,6 +2853,500 @@ export async function performNativeSemanticAction(args: {
   return { ok: true, data: mapped };
 }
 
+// ─── Guarded exact native semantic value lane ──────────────────────────
+
+export type NativeSemanticValueClass = 'non_secret_text';
+
+export interface NativeSemanticValueTarget {
+  schemaVersion: 1;
+  action: 'set_value';
+  targetId: string | null;
+  targetFingerprint: string;
+  currentValueHash: string;
+  requestedValueHash: string;
+  currentValueLength: number;
+  requestedValueLength: number;
+  valueClass: NativeSemanticValueClass;
+  evidenceId: string;
+  observedAt: string;
+  expiresAt: string;
+  app: string;
+  resolvedAppName: string;
+  pid: number;
+  targetPath: string;
+  targetRole: string;
+  targetLabel: string;
+  indexGeneration: number;
+  valueCapable: true;
+  mutationNeeded: boolean;
+  targetSummary: string;
+  approvalRequired: boolean;
+  risk: 'low' | 'medium';
+}
+
+export interface NativeSemanticValueProofSnapshot {
+  observedAt: string;
+  app: string;
+  pid: number;
+  indexGeneration: number;
+  targetPresent: boolean;
+  valueCapable: boolean;
+  targetFingerprint: string | null;
+  valueHash: string | null;
+  valueLength: number | null;
+}
+
+export interface NativeSemanticValueProof {
+  schemaVersion: 1;
+  operation: 'native_semantic_set_value';
+  action: 'set_value';
+  app: string;
+  pid: number;
+  targetRole: string;
+  targetPathHash: string;
+  targetLabelHash: string;
+  targetFingerprint: string;
+  currentValueHash: string;
+  requestedValueHash: string;
+  currentValueLength: number;
+  requestedValueLength: number;
+  valueClass: NativeSemanticValueClass;
+  evidenceId: string;
+  approvalRequired: true;
+  approvalReceiptHash: string;
+  mutationNeeded: true;
+  mutationAttempted: boolean;
+  mutationPerformed: boolean;
+  noOp: false;
+  dispatchedAt?: string;
+  dispatchAcknowledged: boolean;
+  dispatchMethod: 'ax_set_value' | 'none' | 'unknown';
+  completionVerified: boolean;
+  outcomeUnknown: boolean;
+  outcomeUnknownPolicy: 'verify_before_retry';
+  replayAllowed: false;
+  before: NativeSemanticValueProofSnapshot | null;
+  after: NativeSemanticValueProofSnapshot | null;
+  diff: {
+    kind: 'target_value_changed' | 'unchanged' | 'identity_unavailable' | 'not_dispatched';
+    targetPresentBefore: boolean;
+    targetPresentAfter: boolean;
+    valueChanged: boolean;
+  };
+}
+
+export interface NativeSemanticValueExecution {
+  app: string;
+  pid: number;
+  action: 'set_value';
+  targetRole: string;
+  targetPathHash: string;
+  targetLabelHash: string;
+  targetFingerprint: string;
+  currentValueHash: string;
+  requestedValueHash: string;
+  currentValueLength: number;
+  requestedValueLength: number;
+  evidenceId: string;
+  completionVerified: boolean;
+  outcomeUnknown: boolean;
+  replayAllowed: false;
+  proof: NativeSemanticValueProof;
+}
+
+function nativeSemanticValueAppIdentity(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .replace(/\.app$/i, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Cryptographic helper shared with the adapter's transient value binding. */
+export async function fingerprintNativeSemanticValue(
+  value: unknown,
+): Promise<string | null> {
+  if (
+    typeof globalThis.crypto?.subtle?.digest !== 'function'
+    || typeof TextEncoder !== 'function'
+  ) return null;
+  let payload: string;
+  try {
+    payload = typeof value === 'string' ? value : JSON.stringify(value);
+  } catch {
+    return null;
+  }
+  if (typeof payload !== 'string' || payload.length > 80_000) return null;
+  try {
+    const bytes = new TextEncoder().encode(payload);
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    const hex = Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    return /^[a-f0-9]{64}$/.test(hex) ? hex : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapNativeSemanticValueProofSnapshot(
+  value: unknown,
+): NativeSemanticValueProofSnapshot | null {
+  if (!value || typeof value !== 'object') return null;
+  const d = value as Record<string, unknown>;
+  const observedAt = semanticActionIso(d.observedAt);
+  const app = String(d.app || '').trim().slice(0, 120);
+  const pid = Math.max(0, Math.trunc(Number(d.pid || 0)));
+  const indexGeneration = Math.max(0, Math.trunc(Number(d.indexGeneration || 0)));
+  const targetFingerprint = d.targetFingerprint == null
+    ? null
+    : semanticActionHash(d.targetFingerprint);
+  const valueHash = d.valueHash == null ? null : semanticActionHash(d.valueHash);
+  const valueLength = d.valueLength == null
+    ? null
+    : Math.max(0, Math.trunc(Number(d.valueLength)));
+  if (
+    !observedAt
+    || !app
+    || !(pid > 0)
+    || !(indexGeneration > 0)
+    || (d.targetFingerprint != null && !targetFingerprint)
+    || (d.valueHash != null && !valueHash)
+    || (d.valueLength != null && !Number.isSafeInteger(Number(d.valueLength)))
+  ) return null;
+  return {
+    observedAt,
+    app,
+    pid,
+    indexGeneration,
+    targetPresent: d.targetPresent === true,
+    valueCapable: d.valueCapable === true,
+    targetFingerprint,
+    valueHash,
+    valueLength,
+  };
+}
+
+function mapNativeSemanticValueProof(value: unknown): NativeSemanticValueProof | null {
+  if (!value || typeof value !== 'object') return null;
+  const d = value as Record<string, any>;
+  const allowedDiffKinds = new Set<NativeSemanticValueProof['diff']['kind']>([
+    'target_value_changed',
+    'unchanged',
+    'identity_unavailable',
+    'not_dispatched',
+  ]);
+  const diffKind = String(d.diff?.kind || '') as NativeSemanticValueProof['diff']['kind'];
+  const dispatchMethod = String(d.dispatchMethod || '') as NativeSemanticValueProof['dispatchMethod'];
+  const hashes = {
+    targetPathHash: semanticActionHash(d.targetPathHash),
+    targetLabelHash: semanticActionHash(d.targetLabelHash),
+    targetFingerprint: semanticActionHash(d.targetFingerprint),
+    currentValueHash: semanticActionHash(d.currentValueHash),
+    requestedValueHash: semanticActionHash(d.requestedValueHash),
+    approvalReceiptHash: semanticActionHash(d.approvalReceiptHash),
+  };
+  const before = mapNativeSemanticValueProofSnapshot(d.before);
+  const after = mapNativeSemanticValueProofSnapshot(d.after);
+  if (
+    d.schemaVersion !== 1
+    || d.operation !== 'native_semantic_set_value'
+    || d.action !== 'set_value'
+    || !String(d.app || '').trim()
+    || !(Number(d.pid) > 0)
+    || Object.values(hashes).some((hash) => !hash)
+    || !allowedDiffKinds.has(diffKind)
+    || !['ax_set_value', 'none', 'unknown'].includes(dispatchMethod)
+    || d.valueClass !== 'non_secret_text'
+    || d.approvalRequired !== true
+    || d.mutationNeeded !== true
+    || d.noOp !== false
+    || d.outcomeUnknownPolicy !== 'verify_before_retry'
+    || d.replayAllowed !== false
+    || !Number.isSafeInteger(Number(d.currentValueLength))
+    || !Number.isSafeInteger(Number(d.requestedValueLength))
+  ) return null;
+  return {
+    schemaVersion: 1,
+    operation: 'native_semantic_set_value',
+    action: 'set_value',
+    app: String(d.app).trim().slice(0, 120),
+    pid: Math.trunc(Number(d.pid)),
+    targetRole: String(d.targetRole || '').trim().slice(0, 80),
+    ...hashes,
+    currentValueLength: Math.max(0, Math.trunc(Number(d.currentValueLength))),
+    requestedValueLength: Math.max(0, Math.trunc(Number(d.requestedValueLength))),
+    valueClass: 'non_secret_text',
+    evidenceId: String(d.evidenceId || '').trim().slice(0, 120),
+    approvalRequired: true,
+    mutationNeeded: true,
+    mutationAttempted: d.mutationAttempted === true,
+    mutationPerformed: d.mutationPerformed === true,
+    noOp: false,
+    ...(semanticActionIso(d.dispatchedAt) ? { dispatchedAt: semanticActionIso(d.dispatchedAt) } : {}),
+    dispatchAcknowledged: d.dispatchAcknowledged === true,
+    dispatchMethod,
+    completionVerified: d.completionVerified === true,
+    outcomeUnknown: d.outcomeUnknown === true,
+    outcomeUnknownPolicy: 'verify_before_retry',
+    replayAllowed: false,
+    before,
+    after,
+    diff: {
+      kind: diffKind,
+      targetPresentBefore: d.diff?.targetPresentBefore === true,
+      targetPresentAfter: d.diff?.targetPresentAfter === true,
+      valueChanged: d.diff?.valueChanged === true,
+    },
+  };
+}
+
+function hasExactNativeSemanticValuePostcondition(proof: NativeSemanticValueProof): boolean {
+  const before = proof.before;
+  const after = proof.after;
+  return !!before
+    && !!after
+    && before.app === proof.app
+    && after.app === proof.app
+    && before.pid === proof.pid
+    && after.pid === proof.pid
+    && before.targetPresent === true
+    && after.targetPresent === true
+    && before.valueCapable === true
+    && after.valueCapable === true
+    && before.targetFingerprint === proof.targetFingerprint
+    && after.targetFingerprint === proof.targetFingerprint
+    && before.valueHash === proof.currentValueHash
+    && before.valueLength === proof.currentValueLength
+    && after.valueHash === proof.requestedValueHash
+    && after.valueLength === proof.requestedValueLength
+    && proof.diff.kind === 'target_value_changed'
+    && proof.diff.valueChanged === true;
+}
+
+/** Seal one exact non-secret editable AX field and requested value. */
+export async function observeNativeSemanticValueTarget(args: {
+  action: 'set_value';
+  appName: string;
+  pid: number;
+  indexGeneration: number;
+  targetPath: string;
+  expectedRole: string;
+  expectedLabel: string;
+  expectedCurrentValue: string;
+  value: string;
+}): Promise<DesktopResult<NativeSemanticValueTarget>> {
+  const appName = String(args.appName || '').trim().slice(0, 120);
+  const targetPath = String(args.targetPath || '').trim();
+  const expectedRole = String(args.expectedRole || '').trim().slice(0, 80);
+  const expectedLabel = String(args.expectedLabel || '').trim().slice(0, 120);
+  const expectedCurrentValue = typeof args.expectedCurrentValue === 'string'
+    ? args.expectedCurrentValue
+    : '';
+  const value = typeof args.value === 'string' ? args.value : '';
+  if (
+    args.action !== 'set_value'
+    || !appName
+    || !/^[A-Za-z0-9 .\-_()]+$/.test(appName)
+    || !(Number.isInteger(args.pid) && args.pid > 0)
+    || !(Number.isInteger(args.indexGeneration) && args.indexGeneration > 0)
+    || targetPath.length > 240
+    || !/^[0-9]+(\.[0-9]+)*$/.test(targetPath)
+    || !expectedRole
+    || !expectedLabel
+    || expectedCurrentValue.length > 20_000
+    || value.length < 1
+    || value.length > 20_000
+  ) {
+    return {
+      ok: false,
+      error: 'set_value and exact app/PID/generation/path/role/label/current/requested values are required',
+      errorCode: 'invalid_input',
+    };
+  }
+  const [targetFingerprint, currentValueHash, requestedValueHash] = await Promise.all([
+    fingerprintNativeSemanticValue({
+      schemaVersion: 1,
+      operation: 'native_semantic_set_value_target',
+      app: nativeSemanticValueAppIdentity(appName),
+      pid: args.pid,
+      targetPath,
+      targetRole: expectedRole,
+      targetLabel: String(expectedLabel || '')
+        .replace(/[\u2026]/g, '...')
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase(),
+    }),
+    fingerprintNativeSemanticValue(expectedCurrentValue),
+    fingerprintNativeSemanticValue(value),
+  ]);
+  if (!targetFingerprint || !currentValueHash || !requestedValueHash) {
+    return { ok: false, error: 'Cryptographic semantic value binding unavailable.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/semantic_value_target', {
+    action: 'set_value',
+    appName,
+    pid: args.pid,
+    indexGeneration: args.indexGeneration,
+    targetPath,
+    expectedRole,
+    expectedLabel,
+    expectedCurrentValue,
+    value,
+  });
+  if (!r.ok) return r as DesktopResult<NativeSemanticValueTarget>;
+  const d = r.data as any;
+  const observedAt = semanticActionIso(d?.observedAt);
+  const expiresAt = semanticActionIso(d?.expiresAt);
+  const mutationNeeded = expectedCurrentValue !== value;
+  const targetId = d?.targetId == null ? null : String(d.targetId).trim().toLowerCase();
+  const commonMatched = d?.schemaVersion === 1
+    && d?.action === 'set_value'
+    && semanticActionHash(d?.targetFingerprint) === targetFingerprint
+    && semanticActionHash(d?.currentValueHash) === currentValueHash
+    && semanticActionHash(d?.requestedValueHash) === requestedValueHash
+    && Number(d?.currentValueLength) === expectedCurrentValue.length
+    && Number(d?.requestedValueLength) === value.length
+    && d?.valueClass === 'non_secret_text'
+    && /^[A-Za-z0-9._:-]{8,120}$/.test(String(d?.evidenceId || ''))
+    && !!observedAt
+    && !!expiresAt
+    && String(d?.app || '').trim().toLowerCase() === appName.toLowerCase()
+    && String(d?.resolvedAppName || '').trim().toLowerCase() === appName.toLowerCase()
+    && Number(d?.pid) === args.pid
+    && String(d?.targetPath || '') === targetPath
+    && String(d?.targetRole || '') === expectedRole
+    && String(d?.targetLabel || '').trim().toLowerCase() === expectedLabel.toLowerCase()
+    && Number(d?.indexGeneration) === args.indexGeneration
+    && d?.valueCapable === true
+    && d?.mutationNeeded === mutationNeeded
+    && String(d?.targetSummary || '') === `Set one exact non-secret text field in ${appName}`.slice(0, 200);
+  const modeMatched = mutationNeeded
+    ? /^[a-f0-9]{48}$/.test(String(targetId || ''))
+      && d?.approvalRequired === true
+      && d?.risk === 'medium'
+    : targetId === null
+      && d?.approvalRequired === false
+      && d?.risk === 'low';
+  if (!commonMatched || !modeMatched) {
+    return {
+      ok: false,
+      error: 'The desktop bridge returned a different or malformed semantic value target.',
+      errorCode: 'uncertain_ui_target',
+    };
+  }
+  return {
+    ok: true,
+    data: {
+      schemaVersion: 1,
+      action: 'set_value',
+      targetId,
+      targetFingerprint,
+      currentValueHash,
+      requestedValueHash,
+      currentValueLength: expectedCurrentValue.length,
+      requestedValueLength: value.length,
+      valueClass: 'non_secret_text',
+      evidenceId: String(d.evidenceId),
+      observedAt,
+      expiresAt,
+      app: appName,
+      resolvedAppName: appName,
+      pid: args.pid,
+      targetPath,
+      targetRole: expectedRole,
+      targetLabel: expectedLabel,
+      indexGeneration: args.indexGeneration,
+      valueCapable: true,
+      mutationNeeded,
+      targetSummary: `Set one exact non-secret text field in ${appName}`.slice(0, 200),
+      approvalRequired: mutationNeeded,
+      risk: mutationNeeded ? 'medium' : 'low',
+    },
+  };
+}
+
+/** Consume a prepared semantic value target exactly once. */
+export async function performNativeSemanticValue(args: {
+  targetId: string;
+  targetFingerprint: string;
+  approvalId: string;
+}): Promise<DesktopResult<NativeSemanticValueExecution>> {
+  const targetId = String(args.targetId || '').trim().toLowerCase();
+  const targetFingerprint = semanticActionHash(args.targetFingerprint);
+  const approvalId = String(args.approvalId || '').trim();
+  if (
+    !/^[a-f0-9]{48}$/.test(targetId)
+    || !targetFingerprint
+    || !/^[A-Za-z0-9._:-]{8,160}$/.test(approvalId)
+  ) {
+    return {
+      ok: false,
+      error: 'valid one-shot targetId, targetFingerprint, and approvalId are required',
+      errorCode: 'invalid_input',
+    };
+  }
+  const r = await callBridge('POST', '/desktop/semantic_value', {
+    targetId,
+    targetFingerprint,
+    approvalId,
+  }, { attachBodyOnError: true });
+  const d = r.data as any;
+  const proof = mapNativeSemanticValueProof(d?.proof);
+  const mapped: NativeSemanticValueExecution | null = proof ? {
+    app: String(d?.app || proof.app).trim().slice(0, 120),
+    pid: Math.max(0, Math.trunc(Number(d?.pid || proof.pid))),
+    action: 'set_value',
+    targetRole: String(d?.targetRole || proof.targetRole).trim().slice(0, 80),
+    targetPathHash: semanticActionHash(d?.targetPathHash) || proof.targetPathHash,
+    targetLabelHash: semanticActionHash(d?.targetLabelHash) || proof.targetLabelHash,
+    targetFingerprint: semanticActionHash(d?.targetFingerprint) || proof.targetFingerprint,
+    currentValueHash: semanticActionHash(d?.currentValueHash) || proof.currentValueHash,
+    requestedValueHash: semanticActionHash(d?.requestedValueHash) || proof.requestedValueHash,
+    currentValueLength: Math.max(0, Math.trunc(Number(d?.currentValueLength ?? proof.currentValueLength))),
+    requestedValueLength: Math.max(0, Math.trunc(Number(d?.requestedValueLength ?? proof.requestedValueLength))),
+    evidenceId: String(d?.evidenceId || proof.evidenceId).trim().slice(0, 120),
+    completionVerified: d?.completionVerified === true,
+    outcomeUnknown: d?.outcomeUnknown === true,
+    replayAllowed: false,
+    proof,
+  } : null;
+  if (!r.ok) {
+    return {
+      ok: false,
+      error: r.error,
+      errorCode: r.errorCode,
+      recoveryHint: r.recoveryHint,
+      ...(mapped ? { data: mapped } : {}),
+    };
+  }
+  if (
+    !mapped
+    || !mapped.completionVerified
+    || mapped.outcomeUnknown
+    || mapped.proof.completionVerified !== true
+    || mapped.proof.outcomeUnknown !== false
+    || mapped.proof.replayAllowed !== false
+    || mapped.proof.mutationAttempted !== true
+    || mapped.proof.mutationPerformed !== true
+    || mapped.proof.dispatchAcknowledged !== true
+    || mapped.proof.dispatchMethod !== 'ax_set_value'
+    || !hasExactNativeSemanticValuePostcondition(mapped.proof)
+  ) {
+    return {
+      ok: false,
+      error: 'The desktop bridge did not return exact same-target semantic value completion proof.',
+      errorCode: 'stale_bridge',
+      ...(mapped ? { data: mapped } : {}),
+    };
+  }
+  return { ok: true, data: mapped };
+}
+
 /**
  * Click an element by its dotted path (as returned from readA11yTree).
  * `pid` must match the PID the tree was fetched from — element paths
@@ -2949,7 +3452,7 @@ export function renderA11yTree(node: A11yNode, depth = 0, out: string[] = []): s
 
 export async function pressKeys(
   combo: string,
-  targetGuard?: DesktopNativeUiTargetGuard,
+  targetGuard: DesktopNativeUiTargetGuard,
 ): Promise<DesktopResult<{ combo: string }>> {
   const parsed = parseKeyCombo(combo);
   if (!parsed.ok) {
@@ -2968,10 +3471,10 @@ export async function pressKeys(
 export async function clickMenu(args: {
   appName?: string;
   menuPath: string[];
-  targetGuard?: DesktopNativeUiTargetGuard;
+  targetGuard: DesktopNativeUiTargetGuard;
 }): Promise<DesktopResult<{ appName: string | null; menuPath: string[] }>> {
   const appName = String(args.appName || '').trim();
-  if (appName && !isValidAppName(appName)) {
+  if (appName && !normalizeDesktopNativeTargetAppName(appName)) {
     return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
   }
   const menuPath = Array.isArray(args.menuPath)
@@ -5407,30 +5910,38 @@ async function callBridge(
 }
 
 function failFromStatus(status: number, bodyText: string): DesktopResult {
+  const parsedBody = parseDesktopBridgeHttpErrorBody(bodyText);
+  const parsedMessage = parsedBody.error;
+  const result = (
+    fallbackMessage: string,
+    fallbackCode?: DesktopBridgeError,
+  ): DesktopResult => {
+    const error = parsedMessage || fallbackMessage;
+    return {
+      ok: false,
+      error,
+      errorCode: parsedBody.errorCode || fallbackCode || mapBodyErrorToCode(error),
+      ...(parsedBody.recoveryHint ? { recoveryHint: parsedBody.recoveryHint } : {}),
+    };
+  };
   if (status === 401) return { ok: false, error: 'Desktop token rejected — re-pair.', errorCode: 'not_paired' };
   if (status === 403) {
-    const parsed = tryParseJsonError(bodyText);
-    if (parsed && parsed.toLowerCase().includes('local file access')) {
-      return { ok: false, error: parsed, errorCode: 'file_access_not_granted' };
+    if (parsedMessage && parsedMessage.toLowerCase().includes('local file access')) {
+      return result(parsedMessage, 'file_access_not_granted');
     }
-    return { ok: false, error: parsed || 'Origin blocked by bridge.', errorCode: parsed ? mapBodyErrorToCode(parsed) : 'origin_blocked' };
+    return result('Origin blocked by bridge.', parsedMessage ? undefined : 'origin_blocked');
   }
-  if (status === 501) return { ok: false, error: 'Bridge is on a platform that does not support desktop automation.', errorCode: 'platform_unsupported' };
+  if (status === 501) return result('Bridge is on a platform that does not support desktop automation.', 'platform_unsupported');
   if (status === 400) {
-    const parsed = tryParseJsonError(bodyText);
-    return { ok: false, error: parsed || 'bad request', errorCode: mapBodyErrorToCode(parsed || '') };
+    return result('bad request');
   }
   if (status === 404) {
-    const parsed = tryParseJsonError(bodyText);
-    const message = parsed || bodyText || 'not found';
-    return { ok: false, error: message, errorCode: mapBodyErrorToCode(message) };
+    return result(bodyText || 'not found');
   }
   if (status === 409) {
-    const parsed = tryParseJsonError(bodyText);
-    const message = parsed || bodyText || 'conflict';
-    return { ok: false, error: message, errorCode: mapBodyErrorToCode(message) };
+    return result(bodyText || 'conflict');
   }
-  return { ok: false, error: bodyText || `HTTP ${status}`, errorCode: mapBodyErrorToCode(bodyText || '') };
+  return result(bodyText || `HTTP ${status}`);
 }
 
 // Structured codes the bridge sets explicitly in ok:false bodies.
@@ -5442,6 +5953,8 @@ const EXPLICIT_BRIDGE_BODY_CODES = new Set<DesktopBridgeError>([
   'helper_missing',
   'human_verification_required',
   'invalid_input',
+  'permission_denied',
+  'uncertain_ui_target',
   // E2/E3 bridge-issued codes. The canonical union lives in
   // desktopBridgeProtocol.ts; until it is extended there these ride
   // through as bridge-body codes (callers read errorCode as string).
@@ -5470,6 +5983,31 @@ function normalizeExplicitBridgeBodyCode(value: unknown): DesktopBridgeError | n
   return EXPLICIT_BRIDGE_BODY_CODES.has(code) ? code : null;
 }
 
+export function parseDesktopBridgeHttpErrorBody(bodyText: string): {
+  error: string | null;
+  errorCode: DesktopBridgeError | null;
+  recoveryHint: string | null;
+} {
+  try {
+    const parsed: unknown = JSON.parse(String(bodyText || ''));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { error: null, errorCode: null, recoveryHint: null };
+    }
+    const body = parsed as Record<string, unknown>;
+    return {
+      error: typeof body.error === 'string' ? body.error.slice(0, 2_000) : null,
+      // Only the fixed bridge-code allowlist crosses this trust boundary.
+      // Unknown strings stay untrusted and are never cast into the result union.
+      errorCode: normalizeExplicitBridgeBodyCode(body.errorCode),
+      recoveryHint: typeof body.recoveryHint === 'string'
+        ? body.recoveryHint.slice(0, 1_000)
+        : null,
+    };
+  } catch {
+    return { error: null, errorCode: null, recoveryHint: null };
+  }
+}
+
 function mapBodyErrorToCode(err: string | undefined | null): DesktopBridgeError {
   const m = String(err || '').toLowerCase();
   if (m.includes('unknown /desktop endpoint')) return 'stale_bridge';
@@ -5482,14 +6020,6 @@ function mapBodyErrorToCode(err: string | undefined | null): DesktopBridgeError 
   if (m.includes('timed out')) return 'timeout';
   if (m.includes('invalid')) return 'invalid_input';
   return 'unknown';
-}
-
-function tryParseJsonError(bodyText: string): string | null {
-  try {
-    const parsed = JSON.parse(bodyText);
-    if (parsed && typeof parsed.error === 'string') return parsed.error;
-  } catch {}
-  return null;
 }
 
 async function safeText(res: Response): Promise<string> {

@@ -22,6 +22,7 @@ import {
 } from './computerTaskEvidenceRecovery';
 import { buildAppAdapterGapPlan } from './appAdapterGapContract';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
+import type { ComputerTaskReplayPolicy } from './computerTaskOutcome';
 import {
   buildChatComputerRequestRoute,
   type ChatComputerRequestRoute,
@@ -66,6 +67,9 @@ export interface ChatFailureRecoveryInput {
   repeatCount?: number;
   suppressConnectedHandoff?: boolean;
   suppressionReason?: string | null;
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
 }
 
 export interface ChatFailureRecoveryResult {
@@ -821,6 +825,9 @@ function resolveEvidenceRecovery(input: ChatFailureRecoveryInput): ComputerTaskE
     // QW4: real fresh-evidence gating — the harvested loop observations decide
     // evidenceReadiness.ready. Missing/absent → advisory (never blocks).
     observations: Array.isArray(input.observations) ? input.observations : [],
+    replayPolicy: input.replayPolicy || null,
+    mutationDispatched: input.mutationDispatched === true,
+    verificationOnlyTools: input.verificationOnlyTools || [],
   });
 }
 

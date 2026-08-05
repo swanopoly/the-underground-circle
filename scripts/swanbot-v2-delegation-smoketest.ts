@@ -14,6 +14,7 @@ import {
   serializeSwanBotClientToolResult,
   type SwanBotDesktopClientToolBridge,
 } from '../src/lib/swanbotClientToolDispatcher';
+import type { DesktopNativeUiTargetGuard } from '../src/lib/desktopBridge';
 
 type Call = { id: string; name: string; input: unknown };
 type Result = { tool_use_id: string; content: string; is_error?: boolean };
@@ -43,15 +44,60 @@ async function executeClientToolCalls(bridge: StubBridge, calls: Call[]): Promis
 }
 
 // ─── Stub bridge ───────────────────────────────────────────────────
+const observedNativeApps: string[] = [];
+const receivedTargetGuards: Array<{
+  tool: string;
+  guard: DesktopNativeUiTargetGuard;
+}> = [];
+function recordTargetGuard(
+  tool: string,
+  guard: DesktopNativeUiTargetGuard,
+): void {
+  receivedTargetGuards.push({ tool, guard });
+}
+
 const stubBridge: StubBridge = {
   launchApp: async (name) => ({ ok: true, data: { appName: name } }),
   focusApp: async (name) => ({ ok: true, data: { appName: name } }),
-  typeText: async (text) => ({ ok: true, data: { chars: text.length } }),
-  pasteText: async (text, options) => ({ ok: true, data: { chars: text.length, appName: options?.appName || null, restoredClipboard: options?.restoreClipboard !== false } }),
+  observeApp: async ({ appName = '' }) => {
+    observedNativeApps.push(appName);
+    return {
+      ok: true,
+      data: {
+        requestedAppName: appName,
+        resolvedAppName: appName,
+        pid: 4_567,
+        processIdentityVersion: 1 as const,
+        app: appName,
+        appRunning: true,
+        frontmost: true,
+        frontmostApp: appName,
+        windowCount: 1,
+        windowTitles: ['Fixture'],
+        targetWindow: { id: 91_234, x: 0, y: 0, width: 1920, height: 1080 },
+        tree: null,
+        budget_used: 0,
+      },
+    };
+  },
+  typeText: async (text, targetGuard) => {
+    recordTargetGuard('desktop.type_text', targetGuard);
+    return { ok: true, data: { chars: text.length } };
+  },
+  pasteText: async (text, options) => {
+    recordTargetGuard('desktop.paste_text', options.targetGuard);
+    return { ok: true, data: { chars: text.length, appName: options.appName, restoredClipboard: options.restoreClipboard !== false } };
+  },
   runDesktopAppleScript: async (program) => ({ ok: true, data: { output: program.scriptLines.join('\n'), args: program.args || [] } }),
   convertImage: async (args) => ({ ok: true, data: { source: args.source, format: args.format || 'png', outputPath: '/Users/cswanson/Desktop/pearsoncdjr-img.png', bytes: 1234 } }),
-  pressKeys: async (combo) => ({ ok: true, data: { combo } }),
-  clickMenu: async (args) => ({ ok: true, data: { appName: args.appName || null, menuPath: args.menuPath } }),
+  pressKeys: async (combo, targetGuard) => {
+    recordTargetGuard('desktop.press_keys', targetGuard);
+    return { ok: true, data: { combo } };
+  },
+  clickMenu: async (args) => {
+    recordTargetGuard('desktop.menu_click', args.targetGuard);
+    return { ok: true, data: { appName: args.appName, menuPath: args.menuPath } };
+  },
   listRunningApps: async () => ({ ok: true, data: ['Zoom', 'Terminal', 'Safari'] }),
   waitForApp: async (name) => ({ ok: true, data: { appName: name, elapsedMs: 350 } }),
   takeScreenshot: async () => ({ ok: true, data: { base64: 'iVBORw0KG'.repeat(200), mimeType: 'image/png', sizeBytes: 4096 } }),
@@ -79,13 +125,34 @@ const stubBridge: StubBridge = {
       createdAt: '2026-06-25T11:00:00.000Z',
     },
   }),
-  clickAt: async (x, y) => ({ ok: true, data: { x, y, via: 'applescript' } }),
-  mouseMove: async (x, y) => ({ ok: true, data: { x, y } }),
-  mouseClick: async (args) => ({ ok: true, data: { x: args.x, y: args.y, button: args.button || 'left', count: args.count || 1 } }),
-  mouseDown: async (args) => ({ ok: true, data: { x: args.x, y: args.y, button: args.button || 'left' } }),
-  mouseUp: async (args) => ({ ok: true, data: { x: args?.x ?? null, y: args?.y ?? null, button: args?.button || 'left' } }),
-  mouseDrag: async (args) => ({ ok: true, data: { ...args, durationMs: args.durationMs || 450 } }),
-  mouseScroll: async (args) => ({ ok: true, data: { x: args?.x || 0, y: args?.y || 0, deltaX: args?.deltaX || 0, deltaY: args?.deltaY || 0 } }),
+  clickAt: async (x, y, targetGuard) => {
+    recordTargetGuard('desktop.click_at', targetGuard);
+    return { ok: true, data: { x, y, via: 'guarded-native-helper' } };
+  },
+  mouseMove: async (x, y, targetGuard) => {
+    recordTargetGuard('desktop.mouse_move', targetGuard);
+    return { ok: true, data: { x, y } };
+  },
+  mouseClick: async (args) => {
+    recordTargetGuard('desktop.mouse_click', args.targetGuard);
+    return { ok: true, data: { x: args.x, y: args.y, button: args.button || 'left', count: args.count || 1 } };
+  },
+  mouseDown: async (args) => {
+    recordTargetGuard('desktop.mouse_down', args.targetGuard);
+    return { ok: true, data: { x: args.x, y: args.y, button: args.button || 'left' } };
+  },
+  mouseUp: async (args) => {
+    recordTargetGuard('desktop.mouse_up', args.targetGuard);
+    return { ok: true, data: { x: args.x, y: args.y, button: args.button || 'left' } };
+  },
+  mouseDrag: async (args) => {
+    recordTargetGuard('desktop.mouse_drag', args.targetGuard);
+    return { ok: true, data: { ...args, durationMs: args.durationMs || 450 } };
+  },
+  mouseScroll: async (args) => {
+    recordTargetGuard('desktop.mouse_scroll', args.targetGuard);
+    return { ok: true, data: { x: args.x, y: args.y, deltaX: args.deltaX || 0, deltaY: args.deltaY || 0 } };
+  },
   getScreenSize: async () => ({ ok: true, data: { width: 1920, height: 1080 } }),
   readA11yTree: async () => ({ ok: true, data: { app: 'Safari', pid: 456, budget_used: 3, tree: { role: 'window' } } }),
   renderA11yTree: () => ['[0] window "Safari"', '[0.1] button "Reload"', '[0.2] textField "Search"'],
@@ -105,10 +172,10 @@ async function main() {
   const calls: Call[] = [
     { id: 'tu_1', name: 'desktop.launch_app', input: { appName: 'Zoom' } },
     { id: 'tu_2', name: 'desktop.focus_app', input: { appName: 'Terminal' } },
-    { id: 'tu_3', name: 'desktop.type_text', input: { text: 'hello world' } },
+    { id: 'tu_3', name: 'desktop.type_text', input: { appName: 'TextEdit', text: 'hello world' } },
     { id: 'tu_4', name: 'desktop.paste_text', input: { text: 'hello world', appName: 'TextEdit' } },
     { id: 'tu_5', name: 'desktop.run_applescript', input: { intent: 'create_reminder', params: { text: 'call mom', listName: 'Personal' } } },
-    { id: 'tu_6', name: 'desktop.press_keys', input: { combo: 'Cmd+T' } },
+    { id: 'tu_6', name: 'desktop.press_keys', input: { appName: 'TextEdit', combo: 'Cmd+T' } },
     { id: 'tu_7', name: 'desktop.menu_click', input: { appName: 'Photoshop', menuPath: ['File', 'Save'] } },
     { id: 'tu_8', name: 'desktop.list_running_apps', input: {} },
     { id: 'tu_9', name: 'desktop.wait_for_app', input: { appName: 'Zoom', timeoutMs: 3000 } },
@@ -118,22 +185,22 @@ async function main() {
     { id: 'tu_13', name: 'desktop.file_search', input: { rootPath: '~/Desktop', query: 'logo.png', maxResults: 5, extensions: ['png'] } },
     { id: 'tu_14', name: 'desktop.file_stat', input: { path: '~/Desktop/logo.png' } },
     { id: 'tu_15', name: 'desktop.convert_image', input: { source: 'pearsoncdjr-img', format: 'png' } },
-    { id: 'tu_16', name: 'desktop.click_at', input: { x: 100, y: 200 } },
-    { id: 'tu_17', name: 'desktop.mouse_move', input: { x: 90, y: 180 } },
-    { id: 'tu_18', name: 'desktop.mouse_click', input: { x: 100, y: 200, button: 'right', count: 2 } },
-    { id: 'tu_19', name: 'desktop.mouse_down', input: { x: 100, y: 200 } },
-    { id: 'tu_20', name: 'desktop.mouse_up', input: { x: 120, y: 240 } },
-    { id: 'tu_21', name: 'desktop.mouse_drag', input: { fromX: 100, fromY: 200, toX: 300, toY: 400 } },
+    { id: 'tu_16', name: 'desktop.click_at', input: { appName: 'TextEdit', x: 100, y: 200 } },
+    { id: 'tu_17', name: 'desktop.mouse_move', input: { appName: 'TextEdit', x: 90, y: 180 } },
+    { id: 'tu_18', name: 'desktop.mouse_click', input: { appName: 'TextEdit', x: 100, y: 200, button: 'right', count: 2 } },
+    { id: 'tu_19', name: 'desktop.mouse_down', input: { appName: 'TextEdit', x: 100, y: 200 } },
+    { id: 'tu_20', name: 'desktop.mouse_up', input: { appName: 'TextEdit', x: 120, y: 240 } },
+    { id: 'tu_21', name: 'desktop.mouse_drag', input: { appName: 'TextEdit', fromX: 100, fromY: 200, toX: 300, toY: 400 } },
     // x/y are REQUIRED for scroll: the bridge coerces a missing coordinate to 0,
     // so a coord-less scroll would act at the screen's top-left with the
     // coordinate preflight skipped. The dispatcher now fails closed.
-    { id: 'tu_22', name: 'desktop.mouse_scroll', input: { deltaY: 500, x: 640, y: 400 } },
+    { id: 'tu_22', name: 'desktop.mouse_scroll', input: { appName: 'TextEdit', deltaY: 500, x: 640, y: 400 } },
     { id: 'tu_23', name: 'desktop.screen_size', input: {} },
     { id: 'tu_24', name: 'desktop.read_a11y_tree', input: { appName: 'Safari', maxNodes: 25 } },
     { id: 'tu_25', name: 'desktop.click_element', input: { pid: 456, path: '0.1' } },
-    { id: 'tu_26', name: 'desktop.set_element_value', input: { pid: 123, path: '0.2.1', text: 'hello field' } },
+    { id: 'tu_26', name: 'desktop.set_element_value', input: { action: 'set_value', appName: 'TextEdit', pid: 123, path: '0.2.1', expectedRole: 'AXTextField', expectedLabel: 'Project name', expectedCurrentValue: '', text: 'hello field' } },
   ];
-  // Three native-app mutations are DELIBERATELY refused by this raw dispatcher
+  // Four native-app actions are DELIBERATELY refused by this raw dispatcher
   // and must go through the sealed approval + fresh-proof runtime gateway
   // instead. They still return a well-formed result — they just decline, with a
   // reason — so the loop below asserts the refusal rather than treating it as a
@@ -142,6 +209,7 @@ async function main() {
     'desktop.launch_app',
     'desktop.focus_app',
     'desktop.click_element',
+    'desktop.set_element_value',
   ]);
 
   const results = await executeClientToolCalls(stubBridge, calls);
@@ -161,10 +229,51 @@ async function main() {
     assert(parsed.ok === true, `result ${i}: content.ok=true`);
   }
   assert(
-    GATEWAY_ONLY_TOOLS.size === 3
-      && calls.filter((c) => GATEWAY_ONLY_TOOLS.has(c.name)).length === 3,
+    GATEWAY_ONLY_TOOLS.size === 4
+      && calls.filter((c) => GATEWAY_ONLY_TOOLS.has(c.name)).length === 4,
     'every gateway-only tool is actually exercised by this fixture',
   );
+  const GUARDED_NATIVE_TOOLS = new Set([
+    'desktop.type_text',
+    'desktop.paste_text',
+    'desktop.press_keys',
+    'desktop.menu_click',
+    'desktop.click_at',
+    'desktop.mouse_move',
+    'desktop.mouse_click',
+    'desktop.mouse_down',
+    'desktop.mouse_up',
+    'desktop.mouse_drag',
+    'desktop.mouse_scroll',
+  ]);
+  assert(
+    observedNativeApps.length === GUARDED_NATIVE_TOOLS.size,
+    'every direct native input dispatch obtains one fresh exact app observation',
+  );
+  assert(
+    receivedTargetGuards.length === GUARDED_NATIVE_TOOLS.size
+      && receivedTargetGuards.every(({ guard }) => (
+        guard.appName.length > 0
+        && guard.pid === 4_567
+        && guard.window.id === 91_234
+        && guard.window.width === 1_920
+        && guard.window.height === 1_080
+      )),
+    'every direct native input bridge call receives app/PID/CGWindow/bounds authority',
+  );
+  assert(
+    new Set(receivedTargetGuards.map(({ guard }) => guard)).size
+      === GUARDED_NATIVE_TOOLS.size,
+    'each native input dispatch receives a distinct one-shot target guard',
+  );
+  for (const [index, call] of calls.entries()) {
+    if (!GUARDED_NATIVE_TOOLS.has(call.name)) continue;
+    assert(
+      !results[index].content.includes('targetGuard')
+        && !results[index].content.includes('91234'),
+      `${call.name}: transient target authority is absent from serialized result`,
+    );
+  }
 
   // ─── Screenshot preview shape — content-cap for large base64 ────
   const shotResult = results.find((r) => r.tool_use_id === 'tu_10')!;

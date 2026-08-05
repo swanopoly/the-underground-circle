@@ -21,6 +21,7 @@ import type { AgentPlanDraft } from './agentPlanMode';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
 import type { ChatFailureRecoveryOption } from './chatFailureRecovery';
 import type {
+  PersistedChatBotMetadata,
   PersistedChatRecoveryReliabilitySummary,
   PersistedComputerFindings,
   PersistedBestOfNRace,
@@ -58,6 +59,8 @@ export type ChatMessage = {
   isBot: boolean;
   isUser: boolean;
   userName?: string;
+  /** Stable human author id; null/undefined for bot or legacy unknown rows. */
+  authorId?: string | null;
   timestamp: Date;
   reactions: Record<string, string[]>;
   replyTo?: { name: string; content: string } | null;
@@ -73,6 +76,8 @@ export type ChatMessage = {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   source?: ChatMessageSource;
+  /** Mounted-only guidance is excluded from persistence, recovery, and model/memory history. */
+  durability?: 'transcript' | 'ephemeral';
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   usage?: SwanBotStructuredResponse['usage'];
   executionStream?: OpenSwanExecutionContract[];
@@ -111,6 +116,14 @@ export type ChatMessage = {
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
   runId?: string | null;
+  /** Immutable provider/client request lineage when a turn spans run ids. */
+  requestId?: string | null;
+  /** Stable human requester for this bot turn. Unlike nearest-message
+   *  inference, this remains correct when multiple circle members interleave. */
+  requestAuthorId?: string | null;
+  /** Last complete parsed envelope. Sync paths merge into this snapshot so a
+   *  small reaction/status update cannot erase metadata not rendered in UI. */
+  persistedMetadataSnapshot?: PersistedChatBotMetadata | null;
   taskPlan?: OpenSwanTaskPlan;
   toolEvents?: OpenSwanToolEvent[];
   verificationResults?: OpenSwanVerificationResult[];
@@ -159,7 +172,16 @@ export type ChatBotMessageExtra = {
   /** Optional kicker above the quickReplies chips (see ChatMessage). */
   quickRepliesLabel?: string;
   localOnly?: boolean;
+  /**
+   * Transcript rows survive refresh and sync to other clients. Ephemeral rows
+   * are mounted UI guidance only (greetings, routing hints, progress notices)
+   * and must never enter pending recovery, Supabase, session archives, or
+   * memory extraction. `localOnly` controls surface behavior, not durability.
+   */
+  durability?: 'transcript' | 'ephemeral';
   runId?: string | null;
+  requestId?: string | null;
+  requestAuthorId?: string | null;
   /**
    * followup-chips: set true by error-path callers so the outcome verdict can
    * reach 'failed' (deriveOutcomeVerdict) independently of recoveryOptions —
@@ -276,8 +298,12 @@ export function isChatBotMessageExtra(value: unknown): value is ChatBotMessageEx
   if (!rec) return false;
   const localOnly = safeGet(rec, 'localOnly');
   if (localOnly !== undefined && typeof localOnly !== 'boolean') return false;
+  const durability = safeGet(rec, 'durability');
+  if (durability !== undefined && durability !== 'transcript' && durability !== 'ephemeral') return false;
   const runId = safeGet(rec, 'runId');
   if (runId !== undefined && runId !== null && typeof runId !== 'string') return false;
+  const requestId = safeGet(rec, 'requestId');
+  if (requestId !== undefined && requestId !== null && typeof requestId !== 'string') return false;
   const commandsHelp = safeGet(rec, 'commandsHelp');
   if (commandsHelp !== undefined && typeof commandsHelp !== 'boolean') return false;
   const showRunTrace = safeGet(rec, 'showRunTrace');

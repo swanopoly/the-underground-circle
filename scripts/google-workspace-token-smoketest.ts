@@ -28,6 +28,7 @@ import {
   googleTokenNeedsRefresh,
   resolveGoogleWorkspaceAccessToken,
 } from '../supabase/functions/_shared/google-workspace-token.ts';
+import { readFileSync } from 'node:fs';
 
 let passes = 0;
 let failures = 0;
@@ -98,6 +99,21 @@ function stubFetch(response: { ok: boolean; status?: number; json?: () => Promis
 function restoreFetch(): void { globalThis.fetch = realFetch; }
 
 async function main(): Promise<void> {
+  // The browser's Authorization-bearing status fetch preflights before the
+  // edge function sees it. Keep the hosted router and function response in
+  // lockstep so localhost does not log a CORS failure on every Chat load.
+  const supabaseConfig = readFileSync(new URL('../supabase/config.toml', import.meta.url), 'utf8');
+  const oauthSource = readFileSync(new URL('../supabase/functions/google-oauth/index.ts', import.meta.url), 'utf8');
+  assert(
+    /\[functions\.google-oauth\][\s\S]*?verify_jwt\s*=\s*false[\s\S]*?entrypoint\s*=\s*"\.\/functions\/google-oauth\/index\.ts"/.test(supabaseConfig),
+    '(0) google-oauth lets unauthenticated OPTIONS/callback reach its own auth boundary',
+  );
+  assert(
+    oauthSource.includes('"Access-Control-Allow-Methods": "GET, POST, OPTIONS"')
+      && oauthSource.includes('if (req.method === "OPTIONS")'),
+    '(0) google-oauth answers browser preflight with explicit allowed methods',
+  );
+
   // ─── (1) googleTokenNeedsRefresh: missing / empty expiry → true ───────────
   assertEq(googleTokenNeedsRefresh(null, NOW), true, '(1) null expiry needs refresh');
   assertEq(googleTokenNeedsRefresh(undefined, NOW), true, '(1) undefined expiry needs refresh');

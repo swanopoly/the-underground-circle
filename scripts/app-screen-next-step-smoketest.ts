@@ -132,7 +132,7 @@ function main() {
     const r = build(base({ appRunning: false, frontmost: false, frontmostApp: 'Finder', a11ySummary: null, windowCount: 0 }));
     assert(r.nextStep.kind === 'launch_app', 'rule1: not running → launch_app', r.nextStep.kind);
     assert(r.nextStep.tool === 'desktop.launch_app', 'rule1: tool is desktop.launch_app', String(r.nextStep.tool));
-    assert(/chat can launch it after approval/i.test(r.nextStep.hint), 'rule1: hint carries the approval wording', r.nextStep.hint);
+    assert(/chat can launch it directly/i.test(r.nextStep.hint), 'rule1: hint carries the direct verified launch wording', r.nextStep.hint);
     assert(r.assessment.includes('Photoshop') && /not running/i.test(r.assessment), 'rule1: assessment names app + not running');
   }
   // Priority collision: not-running beats dialog AND mutation-no-change.

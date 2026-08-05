@@ -24,6 +24,11 @@ import {
   renderDesktopBridgeDiag,
 } from '../src/lib/desktopBridgeDiag';
 
+const autoConnectSource = readFileSync(
+  new URL('../src/lib/desktopBridgeAutoConnect.ts', import.meta.url),
+  'utf8',
+);
+
 let failures = 0;
 function fail(m: string) { failures += 1; console.error('FAIL:', m); }
 function pass(m: string) { console.log('pass:', m); }
@@ -32,6 +37,13 @@ function assert(cond: unknown, name: string, detail?: string) {
 }
 
 function main() {
+  assert(
+    autoConnectSource.includes("const { ensureDesktopBridgePaired, isDesktopBridgePaired } = await import('./desktopBridge')")
+      && autoConnectSource.includes('const paired = await ensureDesktopBridgePaired();')
+      && !autoConnectSource.includes('const paired = await pairDesktopBridge();'),
+    'auto-connect: cached pairing is reused instead of forcing a fresh network challenge on every task',
+  );
+
   // ─── Offline branch — short-circuits after step 1 ─────────────
   {
     const r = renderDesktopBridgeDiag({

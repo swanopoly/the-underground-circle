@@ -16,7 +16,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   type CircleChatThread,
-  deleteThread,
   groupThreadsByDate,
   useThreads,
 } from '../../../../lib/circleChatThreads';
@@ -33,8 +32,10 @@ interface Props {
   onOpenAutomations?: () => void;
   onOpenMarketplace?: () => void;
   onDeleteThread?: (threadId: string) => void;
+  onActiveThreadUnavailable?: () => void;
   refreshToken?: number;
   collapsed: boolean;
+  compact?: boolean;
   onToggleCollapsed: () => void;
 }
 
@@ -275,9 +276,10 @@ function CompactActionButton({
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 export default function ChatThreadSidebar({
-  circleId, activeThreadId, onSelectThread, onNewThread, onNewAgent, onOpenAutomations, onOpenMarketplace, onDeleteThread, refreshToken = 0, collapsed, onToggleCollapsed,
+  circleId, activeThreadId, onSelectThread, onNewThread, onNewAgent, onOpenAutomations, onOpenMarketplace, onDeleteThread, onActiveThreadUnavailable, refreshToken = 0, collapsed, compact = false, onToggleCollapsed,
 }: Props) {
   const { threads, loading } = useThreads(circleId, refreshToken);
+  const unavailableNotificationRef = useRef<string | null>(null);
   const widthAnim = useRef(new Animated.Value(collapsed ? 48 : 280)).current;
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
@@ -293,6 +295,16 @@ export default function ChatThreadSidebar({
     automations: onOpenAutomations,
     marketplace: onOpenMarketplace,
   }), [onNewAgent, onNewThread, onOpenAutomations, onOpenMarketplace]);
+
+  useEffect(() => {
+    if (loading || !activeThreadId || threads.length === 0) return;
+    if (threads.some((thread) => thread.id === activeThreadId)) {
+      unavailableNotificationRef.current = null;
+    } else if (unavailableNotificationRef.current !== activeThreadId) {
+      unavailableNotificationRef.current = activeThreadId;
+      onActiveThreadUnavailable?.();
+    }
+  }, [activeThreadId, loading, onActiveThreadUnavailable, threads]);
 
   useEffect(() => {
     fadeAnim.setValue(0);
@@ -331,10 +343,10 @@ export default function ChatThreadSidebar({
   if (collapsed) {
     return (
       <Animated.View style={[styles.railCollapsed, shellAnimatedStyle]}>
-        <Pressable onPress={onToggleCollapsed} style={styles.iconBtn}>
+        <Pressable onPress={onToggleCollapsed} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel="Expand conversations sidebar">
           <Text style={styles.iconText}>›</Text>
         </Pressable>
-        <Pressable onPress={onNewThread} style={styles.iconBtn}>
+        <Pressable onPress={onNewThread} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel="Start a new conversation">
           <Text style={styles.iconText}>+</Text>
         </Pressable>
         {SIDEBAR_ACTIONS.slice(1).map((action) => {
@@ -345,6 +357,9 @@ export default function ChatThreadSidebar({
         {circleThread && (
           <Pressable
             onPress={() => onSelectThread(circleThread.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${circleThread.title}`}
+            accessibilityState={{ selected: activeThreadId === circleThread.id }}
             style={[styles.iconBtn, activeThreadId === circleThread.id && styles.iconBtnActive]}
           >
             <AnimatedCircleAvatar size={18} />
@@ -354,6 +369,9 @@ export default function ChatThreadSidebar({
           <Pressable
             key={t.id}
             onPress={() => onSelectThread(t.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${t.title}`}
+            accessibilityState={{ selected: activeThreadId === t.id }}
             style={[styles.iconBtn, activeThreadId === t.id && styles.iconBtnActive]}
           >
             <Text style={styles.iconDot}>•</Text>
@@ -364,11 +382,11 @@ export default function ChatThreadSidebar({
   }
 
   return (
-    <Animated.View style={[styles.rail, shellAnimatedStyle]}>
+    <Animated.View style={[styles.rail, compact && styles.railOverlay, shellAnimatedStyle]}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>CHATS</Text>
         <View style={styles.headerActions}>
-          <Pressable onPress={onToggleCollapsed} style={styles.headerCollapseBtn}>
+          <Pressable onPress={onToggleCollapsed} style={styles.headerCollapseBtn} accessibilityRole="button" accessibilityLabel="Collapse conversations sidebar">
             <Text style={styles.headerCollapseBtnText}>‹</Text>
           </Pressable>
         </View>
@@ -449,6 +467,9 @@ function ThreadRow({
   return (
     <Pressable
       onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${thread.title}`}
+      accessibilityState={{ selected: isActive }}
       style={({ hovered }: any) => [
         styles.row,
         isActive && styles.rowActive,
@@ -469,6 +490,8 @@ function ThreadRow({
         {onDelete && !starred && (
           <Pressable
             onPress={(e) => { e.stopPropagation(); onDelete(); }}
+            accessibilityRole="button"
+            accessibilityLabel={`Delete ${thread.title}`}
             style={({ hovered: h, pressed }: any) => [
               {
                 width: 20, height: 20, borderRadius: 4,
@@ -499,6 +522,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#0A0A0A',
     borderRightWidth: 1,
     borderRightColor: '#1a1a1a',
+  },
+  railOverlay: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 50,
+    shadowColor: '#000000',
+    shadowOpacity: 0.8,
+    shadowRadius: 24,
+    shadowOffset: { width: 8, height: 0 },
+    elevation: 24,
   },
   railCollapsed: {
     width: 48,

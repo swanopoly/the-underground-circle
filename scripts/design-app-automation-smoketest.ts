@@ -68,6 +68,30 @@ assert(photoshopPromptBlock.includes('desktop.photoshop_layer_inventory'), 'Phot
 assert(photoshopPromptBlock.includes('desktop.photoshop_set_layer_state'), 'Photoshop prompt block names layer-state tool');
 assert(photoshopPromptBlock.includes('fresh screenshot or raster proof'), 'Photoshop prompt block preserves visual proof requirement');
 
+const blankDocumentRequest = 'Open Photoshop and start a new project 600 x 600';
+const blankDocumentPlan = buildDesignAppAutomationPlan(blankDocumentRequest);
+const blankDocumentPrompt = buildDesignAppAutomationPromptBlock(blankDocumentRequest) || '';
+assert(blankDocumentPlan?.appId === 'adobe_photoshop', 'blank document selects Photoshop');
+assert(
+  JSON.stringify(blankDocumentPlan?.recommendedTools) === JSON.stringify([
+    'desktop.photoshop_document_status',
+    'desktop.launch_app',
+    'desktop.photoshop_create_document',
+  ]),
+  'blank document owns the exact Photoshop tool catalog',
+  JSON.stringify(blankDocumentPlan?.recommendedTools),
+);
+assert(
+  blankDocumentPlan?.approvalGates.length === 0,
+  'bounded unsaved blank document needs no redundant approval',
+);
+assert(!/canonical tool approval|per-tool approval remains mandatory/i.test(blankDocumentPrompt), 'blank document does not invent a second tool-level approval');
+assert(blankDocumentPlan?.verificationSignals.some((signal) => signal.includes('600x600')), 'blank document verifies exact dimensions');
+for (const forbidden of ['desktop.file_search', 'desktop.file_stat', 'desktop.photoshop_layer_inventory', 'desktop.screenshot', 'desktop.read_a11y_tree', 'desktop.menu_click']) {
+  assert(!blankDocumentPrompt.includes(forbidden), `blank document prompt omits ${forbidden}`);
+}
+assert(!/destructive pixel|flatten|rasteriz/i.test(blankDocumentPrompt), 'blank document prompt omits destructive-edit requirements');
+
 const unrelated = buildDesignAppAutomationPlan('Summarize unread Gmail messages');
 assert(unrelated === null, 'non-design task does not get a design automation plan');
 

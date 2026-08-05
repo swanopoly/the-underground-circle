@@ -398,4 +398,28 @@ const maybeFallback = diagnoseComputerTaskEvidenceFailure({
 });
 assert.equal(maybeFallback?.appFallback ?? null, null, "AR4: a 'maybe' desktop fallback is not offered as a switch");
 
+// A mutation that crossed the bridge boundary can be inspected, never replayed.
+const postDispatchExactRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: photoshopRoute.evidenceContract,
+  task: 'Open Photoshop and start a new project 600 x 600',
+  failureMessage: 'Create request dispatched; final receipt was unavailable.',
+  outcomeStatus: 'partial',
+  replayPolicy: 'manual_verify_only',
+  mutationDispatched: true,
+  verificationOnlyTools: ['desktop.photoshop_document_status'],
+});
+assert.equal(postDispatchExactRecovery?.failureArea, 'proof_after', 'post-dispatch unknown is a proof problem, not an actionability retry');
+assert.equal(postDispatchExactRecovery?.retryAllowed, false, 'post-dispatch exact mutation cannot be retried');
+assert.equal(postDispatchExactRecovery?.connectedAgentAllowed, false, 'connected-agent repair cannot replay an uncertain mutation');
+assert.equal(postDispatchExactRecovery?.recommendedOptionId, 'stop_and_report', 'post-dispatch exact mutation offers no retry option');
+assert.equal(postDispatchExactRecovery?.replayPolicy, 'manual_verify_only');
+assert.equal(postDispatchExactRecovery?.mutationDispatched, true);
+assert.deepEqual(postDispatchExactRecovery?.verificationOnlyTools, ['desktop.photoshop_document_status']);
+assert.deepEqual(
+  postDispatchExactRecovery?.requiredEvidence.map((item) => item.tool),
+  ['desktop.photoshop_document_status'],
+  'only read-only Photoshop status is permitted after uncertain dispatch',
+);
+assert.match(postDispatchExactRecovery?.resumeInstruction || '', /Do not retry the original action/i);
+
 console.log('All computer task evidence recovery smoke cases passed.');

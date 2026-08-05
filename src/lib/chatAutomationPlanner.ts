@@ -34,6 +34,7 @@ import type { ScenarioPolicy } from './scenarioPolicies';
 import type { LocalComputerAwarenessKind } from './localComputerAwarenessIntent';
 import { detectWordPressImagePostIntent } from './wpImagePostFlow';
 import { isDecisionRelevantAmbiguity, describeClarificationValue } from './clarificationGate';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 
 export type PlannerConversationalIntent =
   | { type: 'wordpress_publish'; title?: string; imageUrl?: string; status: 'draft' | 'publish' }
@@ -583,7 +584,10 @@ function buildRecurringSchedulePlan(
 function looksLikeChatChannelMessageSend(message: string): boolean {
   const text = String(message || '');
   if (!/\b(?:slack|discord|(?:ms|microsoft)\s+teams)\b/i.test(text)) return false;
-  if (!/\b(?:post|send|share|announce|message|dm|notify)\b/i.test(text)) return false;
+  const bareMessageCommand = /(?:^(?:please\s+)?|\b(?:and|then)\s+)(?:dm|message)\s+(?!(?:from|in|thread)\b)(?:@?[a-z0-9][\w.-]*|the\s+(?:channel|team|workspace|user))\b/i.test(text);
+  const explicitSendAction = /\b(?:announce|notify|post|reply\s+to|send|share)\b/i.test(text)
+    || bareMessageCommand;
+  if (!explicitSendAction) return false;
   return /\b(?:channel|#[a-z0-9][\w-]*|workspace|dm|direct message|thread|message)\b/i.test(text);
 }
 
@@ -811,8 +815,34 @@ function buildPlanFromLocalComputerSequence(
   bestPipeline: UserTaskPipelineMatch | null,
   pipelineDecision: UserTaskPipelineDecision | null,
 ): ChatAutomationPlan | null {
+  const exactProgram = compileComputerSequenceProgram(normalized);
+  if (exactProgram) {
+    const exactRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
+    if (exactRoute) {
+      const plan = buildPlanFromComputerRequestRoute(exactRoute, normalized);
+      return {
+        ...plan,
+        notes: [
+          `Compiled one atomic desktop program: ${exactProgram.steps.map((step) => step.tool).join(' -> ')}.`,
+          ...plan.notes,
+        ],
+      };
+    }
+  }
   const localComputerSequence = detectLocalComputerAwarenessIntentSequence(normalized);
   if (localComputerSequence.length <= 1) return null;
+  const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
+  if (computerRequestRoute) {
+    const canonicalPlan = buildPlanFromComputerRequestRoute(computerRequestRoute, normalized);
+    return {
+      ...canonicalPlan,
+      confidence: Math.max(canonicalPlan.confidence, 0.93),
+      notes: [
+        `Detected multi-step local desktop sequence: ${localComputerSequence.map((step) => step.kind || step.reason).join(' → ')}.`,
+        ...canonicalPlan.notes,
+      ],
+    };
+  }
   const sequenceRisks = localComputerSequence.map(getLocalComputerAwarenessRisk);
   const parsedRisk: ChatAutomationRisk = sequenceRisks.includes('external_side_effect')
     ? 'external_side_effect'
@@ -828,7 +858,6 @@ function buildPlanFromLocalComputerSequence(
     pipelineDecision,
     surfacePlan,
   }) : null;
-  const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
   return {
     source: 'plain_chat',
     intent: { kind: 'direct_chat', message: normalized },
@@ -855,6 +884,18 @@ function buildPlanFromLocalComputerIntent(
 ): ChatAutomationPlan | null {
   const localComputerIntent = detectLocalComputerAwarenessIntent(normalized);
   if (!localComputerIntent.route) return null;
+  const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
+  if (computerRequestRoute) {
+    const canonicalPlan = buildPlanFromComputerRequestRoute(computerRequestRoute, normalized);
+    return {
+      ...canonicalPlan,
+      confidence: Math.max(canonicalPlan.confidence, 0.92),
+      notes: [
+        `Detected local desktop bridge intent: ${localComputerIntent.kind || localComputerIntent.reason}.`,
+        ...canonicalPlan.notes,
+      ],
+    };
+  }
   const useComputerTask = shouldUseComputerTaskForLocalIntent(localComputerIntent.kind);
   const localRisk = getLocalComputerAwarenessRisk(localComputerIntent);
   const risk: ChatAutomationRisk = isLowRiskLocalImageExportTask(normalized)
@@ -872,7 +913,6 @@ function buildPlanFromLocalComputerIntent(
     pipelineDecision,
     surfacePlan,
   }) : null;
-  const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
   return {
     source: 'plain_chat',
     intent: { kind: 'direct_chat', message: normalized },

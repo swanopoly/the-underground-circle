@@ -43,7 +43,7 @@ import {
 } from './computerGrantGate';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
 import { getModelCapabilityFlags, normalizeModelId } from './modelCapabilities';
-import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import type { ComputerTaskOutcomeStatus, ComputerTaskReplayPolicy } from './computerTaskOutcome';
 
 export type ChatComputerSurfaceKind = 'browser' | 'desktop' | 'local_files' | 'computer';
 
@@ -61,6 +61,9 @@ export interface ChatComputerHandoffContextInput {
   browserActionCount?: number | null;
   runId?: string | null;
   outcomeStatus?: ComputerTaskOutcomeStatus | null;
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
   preflightStatus?: string | null;
   preflightSummary?: string | null;
   groundingStatus?: string | null;
@@ -106,6 +109,9 @@ export interface ChatComputerHandoffMetadata {
   browserActionCount?: number | null;
   runId?: string | null;
   outcomeStatus?: ComputerTaskOutcomeStatus | null;
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
   preflightStatus?: string | null;
   preflightSummary?: string | null;
   groundingStatus?: string | null;
@@ -432,6 +438,7 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
     appRouteDecision ? `- App route decision: ${appRouteDecision.status} via ${appRouteDecision.chosenSurfaceLabel} for ${appRouteDecision.taskFamily}` : null,
     groundingStatusText ? `- Grounding: ${groundingStatusText}` : null,
     input.outcomeStatus ? `- Outcome: ${input.outcomeStatus.replace(/_/g, ' ')}` : null,
+    input.replayPolicy === 'manual_verify_only' ? '- Replay: blocked; read-only verification only' : null,
     approvalSummaryText ? `- Approval: ${approvalSummaryText}` : null,
     standingGrant ? `- Standing grant: ${standingGrant.scopeKey}` : null,
     warnings.length ? `- Warnings: ${warnings.join('; ')}` : null,
@@ -464,6 +471,9 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
       browserActionCount: input.browserActionCount ?? null,
       runId: input.runId || null,
       outcomeStatus: input.outcomeStatus || null,
+      replayPolicy: input.replayPolicy || 'normal',
+      mutationDispatched: input.mutationDispatched === true,
+      verificationOnlyTools: compactList(input.verificationOnlyTools || [], 4),
       preflightStatus: preflightStatusText,
       preflightSummary: preflightSummaryText,
       groundingStatus: groundingStatusText,

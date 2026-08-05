@@ -13,6 +13,8 @@ import {
   resolveApprovalExpiresAt,
   type ChatAttentionApprovalInput,
 } from '../src/lib/chatAttentionQueue';
+import fs from 'node:fs';
+import path from 'node:path';
 
 let failures = 0;
 
@@ -35,6 +37,7 @@ const MINUTE = 60_000;
 function approvalRow(overrides: Partial<ChatAttentionApprovalInput> = {}): ChatAttentionApprovalInput {
   return {
     id: 'aaaa1111-0000-0000-0000-000000000000',
+    session_key: 'chat::thread-1',
     action_type: 'chat.run_computer_task.browser',
     description: 'Approve chat action run_computer_task: "book the hotel"',
     status: 'pending',
@@ -43,6 +46,23 @@ function approvalRow(overrides: Partial<ChatAttentionApprovalInput> = {}): ChatA
     ...overrides,
   };
 }
+
+const chatTabSource = fs.readFileSync(
+  path.join(process.cwd(), 'src/screens/circles/tabs/ChatTab.tsx'),
+  'utf8',
+);
+expect(
+  /pendingExactPlanApprovalResumesRef\.current\.has\(approval\.id\)/.test(chatTabSource),
+  'Chat checks mounted exact-plan continuation ownership before presenting approval as resumable',
+);
+expect(
+  /resumable: canResumeApprovalInMountedChat\(approval\)/.test(chatTabSource),
+  'Chat passes exact approval resumability into the attention queue',
+);
+expect(
+  /return canResumeApprovalInMountedChat\(approval\)\s*&& isApprovalRowLive/.test(chatTabSource),
+  'the approval banner cannot expose Approve for an unresumable exact desktop row',
+);
 
 // ── Empty state ──────────────────────────────────────────────────────────────
 {
@@ -81,6 +101,119 @@ function approvalRow(overrides: Partial<ChatAttentionApprovalInput> = {}): ChatA
   expect(expired.items[0].kind === 'approval_expired', 'past-timeout pending row surfaces as expired');
   expect(expired.items[0].primaryAction.kind === 'refile_approval', 'expired approval offers Ask again');
   expect(String(expired.statusLine).includes('expired approval'), 'status line names the expiry');
+
+  const unresumableAfterRefresh = buildChatAttentionState(
+    { approvals: [approvalRow({ resumable: false })] },
+    { now: NOW },
+  );
+  expect(
+    unresumableAfterRefresh.items[0]?.kind === 'approval_expired',
+    'a nominally live exact computer approval becomes recovery-only when this Chat cannot resume it',
+  );
+  expect(
+    unresumableAfterRefresh.items[0]?.primaryAction.kind === 'refile_approval',
+    'an unresumable exact computer approval offers Ask again instead of Approve',
+  );
+  expect(
+    unresumableAfterRefresh.items[0]?.detail.includes('cannot safely resume'),
+    'the refresh recovery item explains why a fresh request is required',
+  );
+
+  const ancientUnresumableExactApproval = buildChatAttentionState(
+    {
+      approvals: [approvalRow({
+        resumable: false,
+        requested_at: new Date(NOW - 24 * 60 * MINUTE).toISOString(),
+        timeout_seconds: 60,
+      })],
+    },
+    { now: NOW },
+  );
+  expect(
+    ancientUnresumableExactApproval.items.length === 0,
+    'a 24h-old unresumable exact approval with a 60s timeout ages out instead of returning after refresh',
+  );
+
+  const recentlyExpiredUnresumableExactApproval = buildChatAttentionState(
+    {
+      approvals: [approvalRow({
+        resumable: false,
+        requested_at: new Date(NOW - 2 * MINUTE).toISOString(),
+        timeout_seconds: 60,
+      })],
+    },
+    { now: NOW },
+  );
+  expect(
+    recentlyExpiredUnresumableExactApproval.items[0]?.kind === 'approval_expired',
+    'a recently expired unresumable exact approval follows normal expiry behavior',
+  );
+  expect(
+    recentlyExpiredUnresumableExactApproval.items[0]?.title.startsWith('Approval expired:'),
+    'expiry presentation wins over refresh recovery for an already expired exact approval',
+  );
+
+  const liveApprovalWithUnrelatedSameThreadCompletion = buildChatAttentionState(
+    { approvals: [approvalRow({ resumable: true })] },
+    {
+      now: NOW,
+      latestCompletedComputerTaskAt: NOW - MINUTE,
+      latestCompletedComputerTaskSessionKey: 'chat::thread-1',
+    },
+  );
+  expect(
+    liveApprovalWithUnrelatedSameThreadCompletion.items[0]?.kind === 'approval_pending',
+    'an unrelated newer same-thread completion cannot hide a distinct live approval',
+  );
+
+  const expiredApprovalWithUnrelatedSameThreadCompletion = buildChatAttentionState(
+    { approvals: [approvalRow({ requested_at: new Date(NOW - 20 * MINUTE).toISOString() })] },
+    {
+      now: NOW,
+      latestCompletedComputerTaskAt: NOW - MINUTE,
+      latestCompletedComputerTaskSessionKey: 'chat::thread-1',
+    },
+  );
+  expect(
+    expiredApprovalWithUnrelatedSameThreadCompletion.items[0]?.kind === 'approval_expired',
+    'same-thread completion chronology is not used as task correlation for expired approvals',
+  );
+
+  const unrelatedExpiredApproval = buildChatAttentionState(
+    {
+      approvals: [approvalRow({
+        action_type: 'chat.run_command_handler.wordpress',
+        requested_at: new Date(NOW - 20 * MINUTE).toISOString(),
+      })],
+    },
+    {
+      now: NOW,
+      latestCompletedComputerTaskAt: NOW - MINUTE,
+      latestCompletedComputerTaskSessionKey: 'chat::thread-1',
+    },
+  );
+  expect(
+    unrelatedExpiredApproval.items[0]?.kind === 'approval_expired',
+    'a computer-task completion does not hide an unrelated expired approval',
+  );
+
+  const otherThreadExpiredApproval = buildChatAttentionState(
+    {
+      approvals: [approvalRow({
+        session_key: 'chat::thread-2',
+        requested_at: new Date(NOW - 20 * MINUTE).toISOString(),
+      })],
+    },
+    {
+      now: NOW,
+      latestCompletedComputerTaskAt: NOW - MINUTE,
+      latestCompletedComputerTaskSessionKey: 'chat::thread-1',
+    },
+  );
+  expect(
+    otherThreadExpiredApproval.items[0]?.kind === 'approval_expired',
+    'a completion in one chat thread does not hide another thread approval',
+  );
 
   const ancient = buildChatAttentionState(
     { approvals: [approvalRow({ requested_at: new Date(NOW - 5 * 60 * MINUTE).toISOString() })] },

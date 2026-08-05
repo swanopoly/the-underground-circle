@@ -19,6 +19,139 @@ export type TaskCapabilityProfileKey =
   | 'computer_hybrid'
   | 'room_curator';
 
+/**
+ * A hard execution-surface ceiling derived from the task profile. This is
+ * intentionally narrower than prompt guidance: downstream model loops use it
+ * to remove incompatible tools from their advertised catalog and from their
+ * dispatchable handler set.
+ */
+export type TaskExecutionSurfaceGuard = 'desktop_app_only' | 'local_file_only';
+
+const NON_BROWSER_EXECUTION_SURFACE_ESCAPE_TOOLS = new Set([
+  'desktop.open_url',
+  // The generic catalog search can reveal excluded browser tools and is not
+  // needed when the complete guard-scoped catalog is already advertised.
+  'tools.search',
+]);
+
+export function resolveTaskExecutionSurfaceGuard(
+  profileKey?: string | null,
+): TaskExecutionSurfaceGuard | undefined {
+  if (profileKey === 'computer_apps') return 'desktop_app_only';
+  if (profileKey === 'computer_files') return 'local_file_only';
+  return undefined;
+}
+
+export function taskExecutionSurfaceAllowsTool(
+  guard: TaskExecutionSurfaceGuard | undefined,
+  toolName: string,
+): boolean {
+  if (!guard) return true;
+  const normalized = String(toolName || '').trim().toLowerCase();
+  if (!normalized) return false;
+  if (guard === 'desktop_app_only' || guard === 'local_file_only') {
+    return !normalized.startsWith('browser.')
+      && !NON_BROWSER_EXECUTION_SURFACE_ESCAPE_TOOLS.has(normalized);
+  }
+  return false;
+}
+
+export type TaskExecutionSurfaceToolCallVerdict =
+  | { allowed: true }
+  | { allowed: false; reason: string };
+
+const KNOWN_BROWSER_APP_TARGET_PREFIXES = [
+  'google chrome',
+  'chrome',
+  'chromium',
+  'safari',
+  'firefox',
+  'microsoft edge',
+  'edge',
+  'arc',
+  'brave',
+  'opera',
+  'vivaldi',
+] as const;
+
+const KNOWN_BROWSER_BUNDLE_PREFIXES = [
+  'com.google.chrome',
+  'org.chromium.chromium',
+  'com.apple.safari',
+  'org.mozilla.firefox',
+  'com.microsoft.edgemac',
+  'company.thebrowser.browser',
+  'com.brave.browser',
+  'com.operasoftware.opera',
+  'com.vivaldi.vivaldi',
+] as const;
+
+function hasAppNameBoundary(value: string, prefix: string): boolean {
+  if (value === prefix) return true;
+  const next = value.charAt(prefix.length);
+  return value.startsWith(prefix) && (next === ' ' || next === '-' || next === '(');
+}
+
+export function isKnownBrowserAppTarget(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase().replace(/\.app$/i, '').trim();
+  if (!normalized) return false;
+  if (KNOWN_BROWSER_APP_TARGET_PREFIXES.some((prefix) =>
+    hasAppNameBoundary(normalized, prefix),
+  )) {
+    return true;
+  }
+  return KNOWN_BROWSER_BUNDLE_PREFIXES.some((prefix) =>
+    normalized === prefix || normalized.startsWith(`${prefix}.`),
+  );
+}
+
+/**
+ * Evaluate the exact tool call after catalog scoping but before any approval
+ * or handler dispatch. Desktop-app-only and local-file-only runs may use their
+ * allowed native tools, but may never use them as a side door to activate or
+ * control a browser process.
+ */
+export function evaluateTaskExecutionSurfaceToolCall(
+  guard: TaskExecutionSurfaceGuard | undefined,
+  toolName: string,
+  input: unknown,
+): TaskExecutionSurfaceToolCallVerdict {
+  if (!taskExecutionSurfaceAllowsTool(guard, toolName)) {
+    const guardLabel = guard === 'local_file_only' ? 'local-file-only' : 'desktop-app-only';
+    return {
+      allowed: false,
+      reason: `Execution-surface guard blocked "${String(toolName || 'unknown')}". This ${guardLabel} task cannot use browser tools or open a URL in the browser.`,
+    };
+  }
+  if (guard !== 'desktop_app_only' && guard !== 'local_file_only') return { allowed: true };
+
+  const args = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : null;
+  const normalizedToolName = String(toolName || '').trim().toLowerCase();
+  const appName = args?.appName;
+  if (normalizedToolName.startsWith('desktop.') && isKnownBrowserAppTarget(appName)) {
+    return {
+      allowed: false,
+      reason: `Execution-surface guard blocked browser app target "${String(appName)}" for "${toolName}". Use a computer_hybrid or browser task for browser control.`,
+    };
+  }
+
+  if (normalizedToolName === 'desktop.window_manage') {
+    const action = typeof args?.action === 'string' ? args.action.trim().toLowerCase() : '';
+    const hasExplicitAppName = typeof appName === 'string' && appName.trim().length > 0;
+    if (['focus', 'raise', 'unminimize'].includes(action) && !hasExplicitAppName) {
+      return {
+        allowed: false,
+        reason: `Execution-surface guard requires an explicit non-browser appName before desktop.window_manage can ${action || 'raise'} a window.`,
+      };
+    }
+  }
+
+  return { allowed: true };
+}
+
 export interface TaskCapabilityProfile {
   key: TaskCapabilityProfileKey;
   label: string;

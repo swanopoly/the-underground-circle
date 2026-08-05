@@ -236,23 +236,28 @@ lacks(runner, 'error: message', 'raw handler errors must never be returned');
 
 // The generic approval worker must not pre-consume either runtime-owned lane.
 const runtimeDeferral = worker.slice(
-  worker.indexOf("if (actionType.startsWith('scheduled_action.')"),
+  worker.indexOf('if (isRuntimeOwnedAgentApprovalActionType(actionType))'),
   worker.indexOf('// ── Idempotency guard'),
 );
 has(
-  runtimeDeferral,
-  "actionType.startsWith('scheduled_action.')",
+  worker,
+  "normalized.startsWith('scheduled_action.')",
   'generic worker must defer scheduled actions',
 );
 has(
-  runtimeDeferral,
-  "actionType.startsWith('chat.')",
+  worker,
+  "normalized.startsWith('chat.') && normalized !== REVIEW_COMMENT_ACTION_TYPE",
   'generic worker must defer chat transport approvals',
+);
+has(
+  runtimeDeferral,
+  'if (isRuntimeOwnedAgentApprovalActionType(actionType))',
+  'generic worker checks runtime ownership before dispatch',
 );
 lacks(runtimeDeferral, 'applied_at', 'runtime deferral must not stamp applied_at');
 lacks(runtimeDeferral, '.update(', 'runtime deferral must not mutate the approval row');
 ok(
-  worker.indexOf('// Runtime-owned approvals') < worker.indexOf("if (actionType.startsWith('skill.'))"),
+  worker.indexOf('if (isRuntimeOwnedAgentApprovalActionType(actionType))') < worker.indexOf("if (actionType.startsWith('skill.'))"),
   'runtime deferral must happen before generic dispatch',
 );
 

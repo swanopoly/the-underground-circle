@@ -1,6 +1,7 @@
 # Agentic Computer/App Automation Guide
 
 **Last researched:** 2026-05-29
+**Implementation sync:** 2026-08-05
 
 This guide is the standard for agents building or reviewing browser, desktop,
 local-file, and native-app automation in The Underground Circle. Use it when a
@@ -119,6 +120,31 @@ If the status is not `ready_to_execute`, do not take the action. Re-observe,
 request approval, ask the user to unblock the app/permission, or request a
 connected-agent buildout according to the returned `nextSteps`.
 
+### Generic Semantic Workflow
+
+`src/lib/genericAppNavigator.ts` owns unfamiliar-app decomposition through
+`buildGenericAppSemanticWorkflow(task)`. Preserve the user's exact request as
+`originalRequest`; classify only a normalized copy. The schema emits at most
+ten ordered checkpoints, reserves the last checkpoint for verification, and
+names goals, observation requirements, allowed semantic surfaces, mutation
+class, approval class, expected postcondition, and a buildout/stop rule.
+
+This workflow is semantic by construction. Its allowed surfaces are existing
+adapters, lifecycle controls, app-native APIs/scripts, documented file
+adapters, embedded DOM/CDP, accessibility, semantic menus, and verified
+shortcuts. It never emits coordinates, guessed selectors, guessed menu paths,
+or pointer targets. Coordinate fallback remains a separate, higher-risk route
+that needs fresh visual target evidence and exact approval; it cannot inherit
+authority from the semantic workflow.
+
+Use one bounded workflow review for named, reversible, non-secret field,
+menu, and toggle checkpoints so the user is not prompted once per control.
+That review is planning authority, not a raw bridge pass: each dispatched
+mutation still needs its canonical exact-call receipt and same-target proof.
+Persistent file writes, external sends/submissions, destructive actions,
+credentials, permission grants, payments, and ambiguous choices keep their
+own exact approval or user-choice floor.
+
 ## Runtime Rules
 
 ### 1. Classify Before Acting
@@ -131,9 +157,12 @@ Every request should produce a typed route before execution:
   generic native app, or custom.
 - `risk`: read-only, write, export, destructive, billing, credential, privacy,
   or unknown.
-- `requiresApproval`: true for writes, exports, destructive work, credential
-  access, billing risk, private files, unfamiliar apps, and low-confidence
-  targets.
+- `requiresApproval`: true for persistent writes, exports, destructive work,
+  credential access, billing risk, private files, unfamiliar apps, and
+  low-confidence targets. A current direct user command may authorize one
+  compiler-owned, bounded, reversible unsaved scratch artifact only when its
+  closed-world tool program has no source-file, save, export, overwrite,
+  delete, external, credential, or generic-UI action.
 - `evidencePlan`: before state, action receipts, after state, output files, and
   user-visible proof.
 
@@ -172,12 +201,30 @@ observations only when exact args, PID, and surface remain unchanged. Any PID,
 surface, argument, TTL, cloned-guard, or replay drift must stop before mutation.
 Coordinate and mouse actions additionally require both fresh screen bounds and
 a visible window belonging to the exact target app; screen bounds alone are
-never target authority. `desktop.set_element_value` requires `appName` at its
-schema boundary but currently stops before approval because its accessibility
-generation and dotted-path identity are not yet sealed through handler entry.
-If the bridge provides acknowledgement but no independent after-state, record
-`outcome_unknown`, disable automatic replay, and ask the normal recovery loop
-to inspect the app before proposing a new action.
+never target authority.
+
+`desktop.set_element_value` is the dedicated sealed non-secret field lane. It
+requires an authenticated persisted run plus exact provider tool-call identity,
+then binds the fresh frontmost app, positive PID, accessibility generation,
+dotted path, role, label, exact current-value hash/length, and requested-value
+hash/length into a short-lived one-shot target. The raw value and dotted path
+remain transient. A genuine exact-call approval receipt is required before one
+AX set-value dispatch, and completion requires a newer observation of the same
+field with the exact requested hash and length. Secure, credential, payment,
+permission, destructive, modal, ambiguous, stale, and coordinate-fallback
+targets fail closed.
+
+Read/observe actions require no mutation approval. Exact
+`desktop.launch_app`/`desktop.focus_app` also avoid a redundant approval only
+when they run through an authenticated persisted call with an exact provider
+tool-use identity and fresh bounded before/after proof. Launch must prove the
+exact app is running; focus must prove it is running and frontmost. A bridge
+acknowledgement is never completion, and this policy does not authorize a
+browser target inside a desktop-app-only execution profile.
+
+If any mutation may have reached its handler but independent after-state is
+missing, record `outcome_unknown`, disable automatic replay, and permit only
+fresh read-only verification before proposing a new action.
 
 ### 3. Use Deterministic Control Surfaces
 
@@ -194,18 +241,44 @@ For Photoshop and InDesign, prefer Adobe UXP/script APIs for layer, document,
 export, and text-frame changes. Use UI automation only when the API cannot
 reach the feature or when the user explicitly asks for interactive app control.
 
+An execution profile is a hard surface ceiling. A desktop-app-only run must not
+advertise or dispatch browser tools, URL opening, generic tool discovery, or a
+desktop launch/focus/window-raise call whose app argument names a browser. Use a
+browser or hybrid profile only when the router deliberately selected that
+surface. Enforce this both while building the catalog and immediately before
+dispatch so injected or stale tool calls cannot cross the boundary.
+
+Do not use `launchctl submit` for a one-shot foreground or accessibility proof.
+macOS treats a submitted short-lived command as an inferred keepalive job, so a
+test that activates an app can relaunch indefinitely after the test finishes.
+Run bounded proof commands in the current process, or use an explicitly managed
+job with keepalive disabled and an unconditional exact-label `bootout` cleanup.
+Before handing off a live GUI test, verify that no task-scoped launch job remains.
+
 ### 4. Approval Gates
 
 Approval gates are required for:
 
 - Writing or overwriting local files.
-- Changing native app documents, layers, canvases, CAD models, or browser data.
+- Changing existing native app documents, layers, canvases, CAD models, or
+  browser data. Exception: one compiler-owned new unsaved blank scratch
+  document may use the current direct request when the dimensions are within
+  the program's conservative resource bound and before/after app-native proof
+  is mandatory.
 - Exports, uploads, downloads, publishing, sending messages, or submitting
   forms.
 - Credential access, OAuth scopes, API keys, private paths, or billing.
 - Installing tools, running shell commands, or launching connected agents that
   may make changes.
 - Any fallback from semantic automation to coordinate or visual actions.
+
+Pure reads and observations do not need mutation approval. Exact app
+launch/focus is the narrow reversible lifecycle exception described above.
+Named non-secret reversible field/menu/toggle work may share one bounded
+workflow review, but the dispatch runtime must still issue and consume its
+exact-call receipt. Persistent, external, destructive, credential, payment,
+permission, private-file, and ambiguous actions may never inherit either
+exception.
 
 The approval payload should say what will change, which app/file/site is in
 scope, what proof will be captured, and how the user can stop or inspect.
@@ -224,6 +297,8 @@ Every completed app automation task should return:
 
 Never claim completion from a tool call alone. Completion requires observed
 after-state or a clear "manual verification required" result.
+`outcome_unknown` means the effect may have landed: do not replay it, do not
+offer a normal retry, and do not convert later model prose into completion.
 
 ### 6. Fail Safe With Recovery Options
 
@@ -292,6 +367,10 @@ Chat should show only what the user needs:
 - Use least privilege grants by app, site, file scope, command, and time window.
 - Fail closed for untrusted MCP/tool annotations, unexpected tool lists,
   malformed outputs, and route mismatches.
+- For generic native input, bind each adjacent mutation to a fresh transient
+  frontmost app/PID/CGWindowID/bounds guard. Revalidate inside the native input
+  process, keep pointer coordinates inside that window, require exact release
+  and scroll coordinates, and never persist or expose the raw guard.
 - Keep a human approval path for high-impact or destructive tool invocations.
 
 ## Verification Matrix
@@ -304,6 +383,15 @@ Chat should show only what the user needs:
 | Evidence contracts | `npm run smoke:computer-task-evidence-contract`, relevant route smoke, `npm run typecheck:app` |
 | Desktop bridge or recovery | Desktop/bridge smoke, negative-path recovery smoke, `npm run typecheck:app` |
 | New app adapter | Fixture or dry-run smoke, official source refs, approval-path smoke, typecheck, `git diff --check` |
+| Generic unfamiliar-app workflow | `npm run smoke:generic-app-navigator`, `npm run smoke:universal-app-task-eval`, `npm run smoke:computer-app-execution-surface-guard`, router/runtime smoke, `npm run typecheck:app` |
+| Native semantic field value | `npm run smoke:native-semantic-value-runtime`, `npm run smoke:computer-app-grounding`, approval/runtime smoke, `npm run typecheck:app` |
+
+The generic workflow and native semantic-value entries above are source and
+contract validation. The universal corpus currently covers 160 requests and
+7,417 assertions, including native app, local file, browser, persistent,
+external, credential, and destructive boundaries. It does not prove a live
+arbitrary-app GUI run, deployed
+edge parity, database contention, or universal completion across every app.
 
 ## Sources To Recheck
 

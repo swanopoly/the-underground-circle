@@ -85,6 +85,9 @@ export const MAX_KEY_SEGMENT = 128;
  */
 export const MAX_DRAFT_LENGTH = 20000;
 
+/** React-compatible state-action resolver kept pure for async owner buckets. */
+export type StateAction<T> = T | ((current: T) => T);
+
 /** Placeholder for an empty/missing/hostile key segment (never blank). */
 const EMPTY_SEGMENT = '_';
 
@@ -173,6 +176,17 @@ export function shouldPreserveDraft(text: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve a value or functional state update against the latest owner state.
+ * This matters for attachments, where a value add is immediately followed by
+ * a functional "mark uploading" update from the same render.
+ */
+export function resolveStateAction<T>(current: T, action: StateAction<T>): T {
+  return typeof action === 'function'
+    ? (action as (value: T) => T)(current)
+    : action;
 }
 
 /**

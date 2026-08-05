@@ -39,7 +39,9 @@ const files = {
   chatTab: fs.readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8'),
   chatUserFacingOutcomes: fs.readFileSync('src/lib/chatUserFacingOutcomes.ts', 'utf8'),
   chatRecoveryDisplayCore: fs.readFileSync('src/lib/chatRecoveryDisplayCore.ts', 'utf8'),
+  swanbotV2Edge: fs.readFileSync('supabase/functions/swanbot-v2-ai/index.ts', 'utf8'),
   bridge: fs.readFileSync('scripts/claude-bridge.js', 'utf8'),
+  inputHelper: fs.readFileSync('scripts/bin/uc-input-helper.swift', 'utf8'),
   pkg: JSON.parse(fs.readFileSync('package.json', 'utf8')),
 };
 
@@ -130,6 +132,49 @@ for (const tool of tools) {
   }
 }
 
+const sealedSemanticValueStages = [
+  {
+    endpoint: '/desktop/semantic_value_target',
+    client: 'observeNativeSemanticValueTarget',
+    health: 'semantic_value_target',
+  },
+  {
+    endpoint: '/desktop/semantic_value',
+    client: 'performNativeSemanticValue',
+    health: 'semantic_value',
+  },
+];
+for (const stage of sealedSemanticValueStages) {
+  assert(
+    files.client.includes(`export async function ${stage.client}`),
+    `desktop.set_element_value sealed lane: desktopBridge client ${stage.client}`,
+  );
+  assert(
+    files.client.includes(stage.endpoint),
+    `desktop.set_element_value sealed lane: desktopBridge endpoint ${stage.endpoint}`,
+  );
+  assert(
+    files.bridge.includes(`url === '${stage.endpoint}'`),
+    `desktop.set_element_value sealed lane: bridge endpoint ${stage.endpoint}`,
+  );
+  assert(
+    files.bridge.includes(`'${stage.health}'`),
+    `desktop.set_element_value sealed lane: health advertises ${stage.health}`,
+  );
+}
+assert(
+  files.runtime.includes('executeGuardedNativeSemanticValue(')
+    && files.runtime.includes('executeObservedNativeSemanticValueMutation(\n      {')
+    && files.runtime.includes("if (tool === 'desktop.set_element_value')"),
+  'desktop.set_element_value: OpenSwan routes through the sealed observe/approve/set/verify lane',
+);
+assert(
+  files.runtime.includes('raw desktop bridge path cannot dispatch it')
+    && fs.readFileSync('src/lib/swanbotClientToolDispatcher.ts', 'utf8')
+      .includes('cannot use the raw client bridge dispatcher'),
+  'desktop.set_element_value: both raw dispatch paths fail closed',
+);
+
 for (const tool of browserTools) {
   assert(files.runtime.includes(`name: '${tool.name}'`), `${tool.name}: tool catalog entry`);
   assert(files.runtime.includes(`case '${tool.name}'`), `${tool.name}: runtime execution case`);
@@ -141,6 +186,139 @@ for (const tool of browserTools) {
   if (tool.writeMode) {
     assert(files.runtime.includes(`'${tool.name}': ['execute']`) || files.runtime.includes(`'${tool.name}': ['execute', 'support']`), `${tool.name}: execute-mode gated`);
   }
+}
+
+const guardedBridgeEndpoints = [
+  '/desktop/mouse_move',
+  '/desktop/mouse_click',
+  '/desktop/mouse_down',
+  '/desktop/mouse_up',
+  '/desktop/mouse_drag',
+  '/desktop/mouse_scroll',
+  '/desktop/type',
+  '/desktop/keys',
+  '/desktop/paste_text',
+  '/desktop/menu_click',
+  '/desktop/click_at',
+];
+function bridgeEndpointBlock(endpoint, size = 2_400) {
+  const marker = endpoint === '/desktop/mouse_down' || endpoint === '/desktop/mouse_up'
+    ? "if ((url === '/desktop/mouse_down' || url === '/desktop/mouse_up')"
+    : `if (url === '${endpoint}'`;
+  const start = files.bridge.indexOf(marker);
+  return start >= 0 ? files.bridge.slice(start, start + size) : '';
+}
+for (const endpoint of guardedBridgeEndpoints) {
+  const endpointBlock = bridgeEndpointBlock(endpoint);
+  assert(
+    endpointBlock.includes('parseDesktopNativeTargetGuardServer(parsed?.targetGuard)'),
+    `${endpoint}: server validates sealed native target guard`,
+  );
+}
+for (const endpoint of [
+  '/desktop/mouse_move',
+  '/desktop/mouse_click',
+  '/desktop/mouse_down',
+  '/desktop/mouse_up',
+  '/desktop/mouse_drag',
+  '/desktop/mouse_scroll',
+  '/desktop/click_at',
+]) {
+  const endpointBlock = bridgeEndpointBlock(endpoint, 3_200);
+  assert(
+    endpointBlock.includes('desktopNativeTargetGuardHelperArgs(guarded.guard)'),
+    `${endpoint}: forwards exact app/PID/CGWindow/bounds to input helper`,
+  );
+}
+for (const endpoint of ['/desktop/type', '/desktop/keys']) {
+  const endpointBlock = bridgeEndpointBlock(endpoint, 8_000);
+  assert(
+    endpointBlock.includes('runDesktopInputHelper(')
+      && endpointBlock.includes('desktopNativeTargetGuardHelperArgs(guarded.guard)'),
+    `${endpoint}: verifies and dispatches through one guarded native helper process`,
+  );
+}
+for (const endpoint of ['/desktop/paste_text', '/desktop/menu_click']) {
+  const endpointBlock = bridgeEndpointBlock(endpoint, 8_000);
+  assert(
+    endpointBlock.includes('verifyDesktopNativeTargetGuardServer(guarded.guard'),
+    `${endpoint}: re-verifies sealed window before System Events mutation`,
+  );
+}
+assert(
+  files.inputHelper.includes("arg(\"--expect-app\")")
+  && files.inputHelper.includes("intArg(\"--expect-window-id\"")
+  && files.inputHelper.includes('requireNativeWindowExpectation'),
+  'input helper: enforces exact app/PID/CGWindow/bounds target expectation',
+);
+
+function clientFunctionBlock(name, size = 2_800) {
+  const start = files.client.indexOf(`export async function ${name}`);
+  return start >= 0 ? files.client.slice(start, start + size) : '';
+}
+for (const name of [
+  'mouseMove',
+  'mouseClick',
+  'mouseDown',
+  'mouseUp',
+  'mouseDrag',
+  'mouseScroll',
+  'typeText',
+  'pasteText',
+  'clickAt',
+  'pressKeys',
+  'clickMenu',
+]) {
+  const definition = clientFunctionBlock(name);
+  assert(
+    definition.includes('targetGuard: DesktopNativeUiTargetGuard')
+      && !definition.includes('targetGuard?: DesktopNativeUiTargetGuard'),
+    `${name}: TypeScript bridge contract requires exact targetGuard`,
+  );
+}
+for (const name of ['mouseUp', 'mouseScroll']) {
+  const definition = clientFunctionBlock(name, 1_200);
+  assert(
+    definition.includes('x: number;')
+      && definition.includes('y: number;')
+      && !definition.includes('x?: number;')
+      && !definition.includes('y?: number;'),
+    `${name}: exact x+y are required by the TypeScript bridge contract`,
+  );
+}
+assert(
+  files.client.includes('const DESKTOP_NATIVE_PID_MAX = 2_147_483_647')
+    && files.client.includes('const DESKTOP_NATIVE_WINDOW_ID_MAX = 4_294_967_295')
+    && files.client.includes("typeof pid !== 'number'")
+    && files.client.includes("typeof targetWindow.id !== 'number'"),
+  'desktop client: native guard uses Swift integer limits and rejects numeric-string coercion',
+);
+assert(
+  files.client.includes("'uncertain_ui_target',")
+    && files.client.includes('parseDesktopBridgeHttpErrorBody(bodyText)')
+    && files.client.includes('errorCode: parsedBody.errorCode'),
+  'desktop client: structured non-2xx errors preserve only whitelisted bridge codes',
+);
+assert(
+  files.appAdapter.includes('async function withFreshNativeTargetGuard')
+    && files.appAdapter.includes('const observation = await bridgeObserveApp()')
+    && files.appAdapter.includes('window: observed.targetWindow'),
+  'computer app adapter: native input receives a private fresh app/PID/CGWindow/bounds guard',
+);
+
+function edgeToolDefinition(name) {
+  const marker = `name: "${name}"`;
+  const start = files.swanbotV2Edge.indexOf(marker);
+  const next = files.swanbotV2Edge.indexOf('name: "', start + marker.length);
+  return start >= 0 ? files.swanbotV2Edge.slice(start, next < 0 ? files.swanbotV2Edge.length : next) : '';
+}
+for (const name of ['desktop.mouse_up', 'desktop.mouse_scroll']) {
+  const definition = edgeToolDefinition(name);
+  assert(
+    /required:\s*\[[^\]]*"appName"[^\]]*"x"[^\]]*"y"/.test(definition)
+      && definition.includes('maximum: 20000'),
+    `${name}: SwanBot edge schema requires bounded exact x+y`,
+  );
 }
 
 for (const plannerTool of [

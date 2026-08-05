@@ -26,8 +26,9 @@ function assert(condition: unknown, message: string): void {
 const runtimeSource = readFileSync('src/lib/openswanToolRuntime.ts', 'utf8');
 const edgeSource = readFileSync('supabase/functions/swanbot-v2-ai/index.ts', 'utf8');
 const groundingSource = readFileSync('src/lib/computerAppGrounding.ts', 'utf8');
+const clientDispatcherSource = readFileSync('src/lib/swanbotClientToolDispatcher.ts', 'utf8');
 
-const guardedTools = [
+const genericGuardedTools = [
   'desktop.type_text',
   'desktop.paste_text',
   'desktop.press_keys',
@@ -39,6 +40,10 @@ const guardedTools = [
   'desktop.mouse_up',
   'desktop.mouse_drag',
   'desktop.mouse_scroll',
+] as const;
+
+const exactAppTargetTools = [
+  ...genericGuardedTools,
   'desktop.set_element_value',
 ] as const;
 
@@ -54,7 +59,7 @@ function definitionSlice(
   return source.slice(start, next < 0 ? source.length : next);
 }
 
-for (const tool of guardedTools) {
+for (const tool of exactAppTargetTools) {
   const runtimeDefinition = definitionSlice(runtimeSource, tool, "'");
   const edgeDefinition = definitionSlice(edgeSource, tool, '"');
   assert(
@@ -72,9 +77,13 @@ for (const tool of guardedTools) {
 assert(
   runtimeSource.includes('const GENERIC_NATIVE_UI_MUTATION_TOOLS')
     && runtimeSource.includes("genericNativeUiMutationFamilyForTool(tool)")
+    && !runtimeSource.slice(
+      runtimeSource.indexOf('const GENERIC_NATIVE_UI_MUTATION_TOOLS'),
+      runtimeSource.indexOf('function isGenericNativeUiMutationTool'),
+    ).includes("'desktop.set_element_value'")
     && !definitionSlice(runtimeSource, 'desktop.click_element', "'")
       .includes('generic native UI observation'),
-  'click_element remains on its specialized sealed semantic path',
+  'semantic click and value tools stay off the acknowledgement-only generic mutation path',
 );
 
 const prepareIndex = runtimeSource.indexOf(
@@ -115,10 +124,20 @@ assert(
     && runtimeSource.includes('Number(data.windowCount || 0) <= 0'),
   'coordinate and mouse actions require both live screen bounds and a visible target-app window',
 );
+const semanticValueRuntimeIndex = runtimeSource.indexOf(
+  'async function executeGuardedNativeSemanticValue(',
+);
+const semanticValueDispatchIndex = runtimeSource.indexOf(
+  "if (tool === 'desktop.set_element_value')",
+  runtimeSource.indexOf('export async function executeOpenSwanRuntimeTool'),
+);
 assert(
-  runtimeSource.includes("if (tool === 'desktop.set_element_value')")
-    && runtimeSource.includes('cannot yet seal a fresh exact accessibility target generation and dotted-path identity'),
-  'set_element_value fails closed before approval until exact accessibility-target sealing is available',
+  semanticValueRuntimeIndex >= 0
+    && semanticValueDispatchIndex >= 0
+    && runtimeSource.includes('executeGuardedNativeSemanticValue(')
+    && runtimeSource.includes('exact same-target value-proof gateway')
+    && clientDispatcherSource.includes('cannot use the raw client bridge dispatcher'),
+  'set_element_value uses its sealed semantic target/value runtime and both raw dispatchers fail closed',
 );
 // The bridge still returns only an acknowledgement; proof now comes from a
 // fresh before/after accessibility diff of the exact target app. What must
@@ -158,14 +177,12 @@ assert(
   'a missing before or after snapshot degrades to unusable — absence of evidence is not evidence',
 );
 assert(
-  guardedTools.every((tool) => runtimeSource.includes(
+  genericGuardedTools.every((tool) => runtimeSource.includes(
     tool === 'desktop.click_at'
       ? 'desktop.click_at is sealed behind the generic native UI observation'
-      : tool === 'desktop.set_element_value'
-        ? 'desktop.set_element_value is sealed behind the generic native UI observation'
-        : tool.startsWith('desktop.mouse_')
-          ? `${tool}'`
-          : `${tool}'`,
+      : tool.startsWith('desktop.mouse_')
+        ? `${tool}'`
+        : `${tool}'`,
   )),
   'all guarded generic tools remain represented while raw dispatch is sealed',
 );

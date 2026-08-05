@@ -1,3 +1,8 @@
+import type {
+  DesktopNativeUiTargetGuard,
+  ObserveAppData,
+} from './desktopBridge';
+
 export type SwanBotClientToolCall = {
   id: string;
   name: string;
@@ -137,10 +142,22 @@ export function serializeSwanBotClientToolError(error: unknown): string {
 export interface SwanBotDesktopClientToolBridge {
   launchApp: (name: string) => Promise<SwanBotClientToolDispatchResult>;
   focusApp: (name: string) => Promise<SwanBotClientToolDispatchResult>;
-  typeText: (text: string) => Promise<SwanBotClientToolDispatchResult>;
+  observeApp: (args: {
+    appName?: string;
+    maxDepth?: number;
+    maxNodes?: number;
+  }) => Promise<SwanBotClientToolDispatchResult & { data?: ObserveAppData }>;
+  typeText: (
+    text: string,
+    targetGuard: DesktopNativeUiTargetGuard,
+  ) => Promise<SwanBotClientToolDispatchResult>;
   pasteText: (
     text: string,
-    options?: { appName?: string; restoreClipboard?: boolean },
+    options: {
+      appName: string;
+      restoreClipboard?: boolean;
+      targetGuard: DesktopNativeUiTargetGuard;
+    },
   ) => Promise<SwanBotClientToolDispatchResult>;
   runDesktopAppleScript: (
     program: { scriptLines: string[]; args?: string[] },
@@ -148,9 +165,16 @@ export interface SwanBotDesktopClientToolBridge {
   convertImage: (
     args: { source: string; format?: string },
   ) => Promise<SwanBotClientToolDispatchResult>;
-  pressKeys: (combo: string) => Promise<SwanBotClientToolDispatchResult>;
+  pressKeys: (
+    combo: string,
+    targetGuard: DesktopNativeUiTargetGuard,
+  ) => Promise<SwanBotClientToolDispatchResult>;
   clickMenu: (
-    args: { appName?: string; menuPath: string[] },
+    args: {
+      appName: string;
+      menuPath: string[];
+      targetGuard: DesktopNativeUiTargetGuard;
+    },
   ) => Promise<SwanBotClientToolDispatchResult>;
   listRunningApps: () => Promise<SwanBotClientToolDispatchResult>;
   waitForApp: (name: string, timeout?: number) => Promise<SwanBotClientToolDispatchResult>;
@@ -169,27 +193,62 @@ export interface SwanBotDesktopClientToolBridge {
     },
   ) => Promise<SwanBotClientToolDispatchResult>;
   statFile: (path: string) => Promise<SwanBotClientToolDispatchResult>;
-  clickAt: (x: number, y: number) => Promise<SwanBotClientToolDispatchResult>;
-  mouseMove: (x: number, y: number) => Promise<SwanBotClientToolDispatchResult>;
+  clickAt: (
+    x: number,
+    y: number,
+    targetGuard: DesktopNativeUiTargetGuard,
+  ) => Promise<SwanBotClientToolDispatchResult>;
+  mouseMove: (
+    x: number,
+    y: number,
+    targetGuard: DesktopNativeUiTargetGuard,
+  ) => Promise<SwanBotClientToolDispatchResult>;
   mouseClick: (
-    args: { x: number; y: number; button?: 'left' | 'right'; count?: number },
+    args: {
+      x: number;
+      y: number;
+      button?: 'left' | 'right';
+      count?: number;
+      targetGuard: DesktopNativeUiTargetGuard;
+    },
   ) => Promise<SwanBotClientToolDispatchResult>;
   mouseDown: (
-    args: { x: number; y: number; button?: 'left' | 'right' },
+    args: {
+      x: number;
+      y: number;
+      button?: 'left' | 'right';
+      targetGuard: DesktopNativeUiTargetGuard;
+    },
   ) => Promise<SwanBotClientToolDispatchResult>;
   mouseUp: (
-    args?: { x?: number; y?: number; button?: 'left' | 'right' },
+    args: {
+      x: number;
+      y: number;
+      button?: 'left' | 'right';
+      targetGuard: DesktopNativeUiTargetGuard;
+    },
   ) => Promise<SwanBotClientToolDispatchResult>;
   mouseDrag: (
-    args: { fromX: number; fromY: number; toX: number; toY: number; durationMs?: number },
+    args: {
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+      durationMs?: number;
+      targetGuard: DesktopNativeUiTargetGuard;
+    },
   ) => Promise<SwanBotClientToolDispatchResult>;
-  /** x/y are REQUIRED: the bridge coerces a missing coordinate to 0, so a
-   *  coord-less scroll acts at the screen's top-left rather than at the
-   *  pointer. Declaring them optional here is what allowed that unsafe call to
-   *  typecheck. (mouseUp is genuinely coord-optional — the bridge skips
-   *  validation there and releases in place.) */
+  /** x/y are REQUIRED for both release and scroll. The native helper performs
+   *  an exact guarded event at a concrete point; a coordinate-less release or
+   *  scroll cannot prove where the mutation landed. */
   mouseScroll: (
-    args: { deltaY?: number; deltaX?: number; x: number; y: number },
+    args: {
+      deltaY?: number;
+      deltaX?: number;
+      x: number;
+      y: number;
+      targetGuard: DesktopNativeUiTargetGuard;
+    },
   ) => Promise<SwanBotClientToolDispatchResult>;
   getScreenSize: () => Promise<SwanBotClientToolDispatchResult>;
   readA11yTree: (
@@ -202,6 +261,186 @@ export interface SwanBotDesktopClientToolBridge {
   setElementValue: (
     args: { pid: number; path: string; text: string },
   ) => Promise<SwanBotClientToolDispatchResult>;
+}
+
+const SWANBOT_NATIVE_TARGET_MAX_PID = 2_147_483_647;
+const SWANBOT_NATIVE_TARGET_MAX_WINDOW_ID = 4_294_967_295;
+
+function exactSwanBotNativeAppName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const appName = value.trim();
+  return (
+    appName.length > 0
+    && Array.from(appName).length <= 160
+    && !/[\u0000-\u001f\u007f]/.test(appName)
+  )
+    ? appName
+    : null;
+}
+
+function exactSwanBotNativeTargetGuard(
+  value: unknown,
+  expectedAppName: string,
+): DesktopNativeUiTargetGuard | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const observation = value as Record<string, unknown>;
+  const targetWindow = observation.targetWindow;
+  if (
+    exactSwanBotNativeAppName(observation.resolvedAppName) !== expectedAppName
+    || exactSwanBotNativeAppName(observation.requestedAppName) !== expectedAppName
+    || exactSwanBotNativeAppName(observation.app) !== expectedAppName
+    || exactSwanBotNativeAppName(observation.frontmostApp) !== expectedAppName
+    || observation.processIdentityVersion !== 1
+    || observation.appRunning !== true
+    || observation.frontmost !== true
+    || typeof observation.windowCount !== 'number'
+    || !Number.isSafeInteger(observation.windowCount)
+    || observation.windowCount <= 0
+    || typeof observation.pid !== 'number'
+    || !Number.isSafeInteger(observation.pid)
+    || observation.pid <= 0
+    || observation.pid > SWANBOT_NATIVE_TARGET_MAX_PID
+    || !targetWindow
+    || typeof targetWindow !== 'object'
+    || Array.isArray(targetWindow)
+  ) {
+    return null;
+  }
+  const window = targetWindow as Record<string, unknown>;
+  if (
+    typeof window.id !== 'number'
+    || !Number.isSafeInteger(window.id)
+    || window.id <= 0
+    || window.id > SWANBOT_NATIVE_TARGET_MAX_WINDOW_ID
+    || typeof window.x !== 'number'
+    || !Number.isSafeInteger(window.x)
+    || window.x < -32_768
+    || window.x > 32_768
+    || typeof window.y !== 'number'
+    || !Number.isSafeInteger(window.y)
+    || window.y < -32_768
+    || window.y > 32_768
+    || typeof window.width !== 'number'
+    || !Number.isSafeInteger(window.width)
+    || window.width < 1
+    || window.width > 32_768
+    || typeof window.height !== 'number'
+    || !Number.isSafeInteger(window.height)
+    || window.height < 1
+    || window.height > 32_768
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    appName: expectedAppName,
+    pid: observation.pid,
+    window: Object.freeze({
+      id: window.id,
+      x: window.x,
+      y: window.y,
+      width: window.width,
+      height: window.height,
+    }),
+  });
+}
+
+function swanBotNativePointsFitTargetWindow(
+  points: ReadonlyArray<readonly [number, number]>,
+  targetGuard: DesktopNativeUiTargetGuard,
+): boolean {
+  const { x, y, width, height } = targetGuard.window;
+  return points.every(([pointX, pointY]) => (
+    Number.isSafeInteger(pointX)
+    && Number.isSafeInteger(pointY)
+    && pointX >= x
+    && pointY >= y
+    && pointX < x + width
+    && pointY < y + height
+  ));
+}
+
+function redactTransientNativeTargetAuthority(
+  value: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+): unknown {
+  if (!value || typeof value !== 'object' || depth > 6) return value;
+  if (seen.has(value as object)) return '[redacted: circular]';
+  seen.add(value as object);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((child) => redactTransientNativeTargetAuthority(
+        child,
+        depth + 1,
+        seen,
+      ));
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      Object.prototype.hasOwnProperty.call(record, 'appName')
+      && Object.prototype.hasOwnProperty.call(record, 'pid')
+      && Object.prototype.hasOwnProperty.call(record, 'window')
+      && exactSwanBotNativeAppName(record.appName)
+      && typeof record.pid === 'number'
+    ) {
+      return '[redacted: transient native target authority]';
+    }
+    const clean: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) {
+      if (key === 'targetGuard' || key === 'targetWindow') continue;
+      clean[key] = redactTransientNativeTargetAuthority(child, depth + 1, seen);
+    }
+    return clean;
+  } finally {
+    seen.delete(value as object);
+  }
+}
+
+async function dispatchWithFreshSwanBotNativeTarget(
+  bridge: SwanBotDesktopClientToolBridge,
+  input: Record<string, any>,
+  points: ReadonlyArray<readonly [number, number]>,
+  dispatch: (
+    targetGuard: DesktopNativeUiTargetGuard,
+  ) => Promise<SwanBotClientToolDispatchResult>,
+): Promise<SwanBotClientToolDispatchResult> {
+  const appName = exactSwanBotNativeAppName(input.appName);
+  if (!appName) {
+    return {
+      ok: false,
+      error: 'Exact appName from a fresh desktop.observe_app result is required before native input.',
+    };
+  }
+  const observed = await bridge.observeApp({
+    appName,
+    maxDepth: 1,
+    maxNodes: 1,
+  });
+  if (!observed.ok || !observed.data) {
+    return {
+      ok: false,
+      error: 'Fresh exact native app/window observation was unavailable; no input was sent.',
+    };
+  }
+  let targetGuard: DesktopNativeUiTargetGuard | null =
+    exactSwanBotNativeTargetGuard(observed.data, appName);
+  if (!targetGuard || !swanBotNativePointsFitTargetWindow(points, targetGuard)) {
+    return {
+      ok: false,
+      error: 'Fresh frontmost app/PID/CGWindow/bounds proof was missing or did not contain the requested coordinates; no input was sent.',
+    };
+  }
+  // Consume the private capability synchronously and exactly once. It is not
+  // merged into model input or returned result data.
+  const oneShotTargetGuard = targetGuard;
+  targetGuard = null;
+  const result = await dispatch(oneShotTargetGuard);
+  return {
+    ...result,
+    ...(result.data === undefined
+      ? {}
+      : { data: redactTransientNativeTargetAuthority(result.data) }),
+  };
 }
 
 export async function dispatchSwanBotDesktopClientTool(
@@ -229,20 +468,34 @@ export async function dispatchSwanBotDesktopClientTool(
     case 'desktop.launch_app':
       return {
         ok: false,
-        error: 'desktop.launch_app must run through the approval and fresh native-app proof runtime gateway.',
+        error: 'desktop.launch_app must run through the authenticated typed runtime and fresh native-app proof gateway.',
       };
     case 'desktop.focus_app':
       return {
         ok: false,
-        error: 'desktop.focus_app must run through the approval and fresh native-app proof runtime gateway.',
+        error: 'desktop.focus_app must run through the authenticated typed runtime and fresh native-app proof gateway.',
       };
     case 'desktop.type_text':
-      return bridge.typeText(String(input.text || ''));
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [],
+        (targetGuard) => bridge.typeText(
+          String(input.text || ''),
+          targetGuard,
+        ),
+      );
     case 'desktop.paste_text':
-      return bridge.pasteText(String(input.text || ''), {
-        appName: typeof input.appName === 'string' ? input.appName : undefined,
-        restoreClipboard: input.restoreClipboard !== false,
-      });
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [],
+        (targetGuard) => bridge.pasteText(String(input.text || ''), {
+          appName: targetGuard.appName,
+          restoreClipboard: input.restoreClipboard !== false,
+          targetGuard,
+        }),
+      );
     case 'desktop.run_applescript': {
       const { buildProgramFromToolInput } = await import('./scriptableMacApps');
       const program = buildProgramFromToolInput(input);
@@ -257,12 +510,26 @@ export async function dispatchSwanBotDesktopClientTool(
         format: typeof input.format === 'string' ? input.format : 'png',
       });
     case 'desktop.press_keys':
-      return bridge.pressKeys(String(input.combo || ''));
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [],
+        (targetGuard) => bridge.pressKeys(
+          String(input.combo || ''),
+          targetGuard,
+        ),
+      );
     case 'desktop.menu_click':
-      return bridge.clickMenu({
-        appName: typeof input.appName === 'string' ? input.appName : undefined,
-        menuPath: Array.isArray(input.menuPath) ? input.menuPath.map(String) : [],
-      });
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [],
+        (targetGuard) => bridge.clickMenu({
+          appName: targetGuard.appName,
+          menuPath: Array.isArray(input.menuPath) ? input.menuPath.map(String) : [],
+          targetGuard,
+        }),
+      );
     case 'desktop.list_running_apps': {
       const result = await bridge.listRunningApps();
       return result.ok ? { ok: true, data: { apps: result.data || [] } } : result;
@@ -332,40 +599,90 @@ export async function dispatchSwanBotDesktopClientTool(
     case 'desktop.file_stat':
       return bridge.statFile(String(input.path || ''));
     case 'desktop.click_at':
-      return bridge.clickAt(Number(input.x), Number(input.y));
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [[Number(input.x), Number(input.y)]],
+        (targetGuard) => bridge.clickAt(
+          Number(input.x),
+          Number(input.y),
+          targetGuard,
+        ),
+      );
     case 'desktop.screen_size':
       return bridge.getScreenSize();
     case 'desktop.mouse_move':
-      return bridge.mouseMove(Number(input.x), Number(input.y));
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [[Number(input.x), Number(input.y)]],
+        (targetGuard) => bridge.mouseMove(
+          Number(input.x),
+          Number(input.y),
+          targetGuard,
+        ),
+      );
     case 'desktop.mouse_click':
-      return bridge.mouseClick({
-        x: Number(input.x),
-        y: Number(input.y),
-        button: input.button === 'right' ? 'right' : 'left',
-        count: typeof input.count === 'number' ? input.count : undefined,
-      });
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [[Number(input.x), Number(input.y)]],
+        (targetGuard) => bridge.mouseClick({
+          x: Number(input.x),
+          y: Number(input.y),
+          button: input.button === 'right' ? 'right' : 'left',
+          count: typeof input.count === 'number' ? input.count : undefined,
+          targetGuard,
+        }),
+      );
     case 'desktop.mouse_down':
-      return bridge.mouseDown({
-        x: Number(input.x),
-        y: Number(input.y),
-        button: input.button === 'right' ? 'right' : 'left',
-      });
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [[Number(input.x), Number(input.y)]],
+        (targetGuard) => bridge.mouseDown({
+          x: Number(input.x),
+          y: Number(input.y),
+          button: input.button === 'right' ? 'right' : 'left',
+          targetGuard,
+        }),
+      );
     case 'desktop.mouse_up': {
-      const hasCoords = typeof input.x === 'number' && typeof input.y === 'number';
-      return bridge.mouseUp({
-        x: hasCoords ? Number(input.x) : undefined,
-        y: hasCoords ? Number(input.y) : undefined,
-        button: input.button === 'right' ? 'right' : 'left',
-      });
+      if (typeof input.x !== 'number' || typeof input.y !== 'number') {
+        return {
+          ok: false,
+          error: 'desktop.mouse_up requires numeric x and y so release location is exact.',
+        };
+      }
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [[input.x, input.y]],
+        (targetGuard) => bridge.mouseUp({
+          x: input.x,
+          y: input.y,
+          button: input.button === 'right' ? 'right' : 'left',
+          targetGuard,
+        }),
+      );
     }
     case 'desktop.mouse_drag':
-      return bridge.mouseDrag({
-        fromX: Number(input.fromX),
-        fromY: Number(input.fromY),
-        toX: Number(input.toX),
-        toY: Number(input.toY),
-        durationMs: typeof input.durationMs === 'number' ? input.durationMs : undefined,
-      });
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [
+          [Number(input.fromX), Number(input.fromY)],
+          [Number(input.toX), Number(input.toY)],
+        ],
+        (targetGuard) => bridge.mouseDrag({
+          fromX: Number(input.fromX),
+          fromY: Number(input.fromY),
+          toX: Number(input.toX),
+          toY: Number(input.toY),
+          durationMs: typeof input.durationMs === 'number' ? input.durationMs : undefined,
+          targetGuard,
+        }),
+      );
     case 'desktop.mouse_scroll': {
       // Fail closed rather than scrolling at (0,0) — see the interface comment.
       if (typeof input.x !== 'number' || typeof input.y !== 'number') {
@@ -374,12 +691,18 @@ export async function dispatchSwanBotDesktopClientTool(
           error: 'desktop.mouse_scroll requires numeric x and y. Observe the app first and pass the exact scroll point.',
         } as SwanBotClientToolDispatchResult;
       }
-      return bridge.mouseScroll({
-        deltaY: typeof input.deltaY === 'number' ? input.deltaY : undefined,
-        deltaX: typeof input.deltaX === 'number' ? input.deltaX : undefined,
-        x: input.x,
-        y: input.y,
-      });
+      return dispatchWithFreshSwanBotNativeTarget(
+        bridge,
+        input,
+        [[input.x, input.y]],
+        (targetGuard) => bridge.mouseScroll({
+          deltaY: typeof input.deltaY === 'number' ? input.deltaY : undefined,
+          deltaX: typeof input.deltaX === 'number' ? input.deltaX : undefined,
+          x: input.x,
+          y: input.y,
+          targetGuard,
+        }),
+      );
     }
     case 'desktop.read_a11y_tree': {
       const result = await bridge.readA11yTree({
@@ -407,11 +730,10 @@ export async function dispatchSwanBotDesktopClientTool(
         error: 'desktop.click_element requires the sealed OpenSwan native semantic-action runtime and cannot use the raw client bridge dispatcher.',
       };
     case 'desktop.set_element_value':
-      return bridge.setElementValue({
-        pid: Number(input.pid),
-        path: String(input.path || ''),
-        text: String(input.text || ''),
-      });
+      return {
+        ok: false,
+        error: 'desktop.set_element_value requires the sealed OpenSwan semantic field/value runtime and cannot use the raw client bridge dispatcher.',
+      };
     default:
       return call.name.startsWith('desktop.')
         ? { ok: false, error: `Unknown client tool "${call.name}"` }

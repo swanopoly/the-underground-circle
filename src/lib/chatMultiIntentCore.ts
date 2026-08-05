@@ -424,6 +424,21 @@ function singleResult(s: string, clauses: Clause[]): MultiIntentResult {
 
 // ── Exports ──────────────────────────────────────────────────────────────────
 
+const MULTI_INTENT_NOTICE_EXECUTION_KINDS = new Set([
+  'run_command_handler',
+  'run_build_discovery',
+]);
+
+/**
+ * Whether Chat should preview later segmented asks for an execution lane.
+ * Computer tasks are deliberately excluded: their shared runtime receives the
+ * complete original message and owns its ordered substeps as one workflow.
+ */
+export function shouldSurfaceMultiIntentNotice(executionKind: unknown): boolean {
+  return typeof executionKind === 'string'
+    && MULTI_INTENT_NOTICE_EXECUTION_KINDS.has(executionKind);
+}
+
 /**
  * Enumerate the distinct top-level ACTIONABLE requests packed into one chat
  * turn. Total + deterministic. Returns a single 'lead' segment (isMultiIntent

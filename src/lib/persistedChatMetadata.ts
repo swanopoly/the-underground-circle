@@ -122,6 +122,14 @@ const BEST_OF_N_TEXT_MAX = 1500;
 
 export type PersistedChatBotMetadata = {
   localMessageId?: string;
+  /** Optional durable execution lineage. Older callers may only supply the
+   * handoff/computer-finding run id; the legacy-cap fallback promotes that
+   * value into this bounded field when available. */
+  runId?: string | null;
+  /** Optional provider/client request lineage. Never derived from task text. */
+  requestId?: string | null;
+  /** Stable human requester for shared-thread ownership reconciliation. */
+  requestAuthorId?: string | null;
   source?: {
     actor?: string;
     surface?: string;
@@ -739,6 +747,9 @@ function compactComputerAppRouteDecision(
 function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
   return !!metadata && (
     !!metadata.localMessageId ||
+    !!metadata.runId ||
+    !!metadata.requestId ||
+    !!metadata.requestAuthorId ||
     !!metadata.source ||
     !!compactAgentSubjectMetadata(metadata.agentSubjectMetadata) ||
     !!metadata.usage ||
@@ -858,6 +869,9 @@ function compactComputerHandoff(
       browserActionCount: handoff.browserActionCount ?? null,
       runId: null,
       outcomeStatus: normalizeComputerTaskOutcomeStatus(handoff.outcomeStatus),
+      replayPolicy: handoff.replayPolicy === 'manual_verify_only' ? 'manual_verify_only' : 'normal',
+      mutationDispatched: handoff.mutationDispatched === true,
+      verificationOnlyTools: (handoff.verificationOnlyTools || []).slice(0, 4).map((value) => truncateText(String(value), 120)),
       preflightStatus: handoff.preflightStatus || null,
       preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), 120) : null,
       groundingStatus: handoff.groundingStatus || null,
@@ -1031,6 +1045,9 @@ function compactComputerHandoff(
     browserActionCount: handoff.browserActionCount ?? null,
     runId: mode === 'minimal' ? null : handoff.runId || null,
     outcomeStatus: normalizeComputerTaskOutcomeStatus(handoff.outcomeStatus),
+    replayPolicy: handoff.replayPolicy === 'manual_verify_only' ? 'manual_verify_only' : 'normal',
+    mutationDispatched: handoff.mutationDispatched === true,
+    verificationOnlyTools: (handoff.verificationOnlyTools || []).slice(0, 4).map((value) => truncateText(String(value), 120)),
     preflightStatus: handoff.preflightStatus || null,
     preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), mode === 'minimal' ? 160 : 360) : null,
     groundingStatus: handoff.groundingStatus || null,
@@ -1236,6 +1253,9 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
   if (!metadata) return undefined;
   return {
     localMessageId: metadata.localMessageId,
+    runId: metadata.runId,
+    requestId: metadata.requestId,
+    requestAuthorId: metadata.requestAuthorId,
     source: metadata.source,
     agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
     usage: metadata.usage,
@@ -1377,6 +1397,9 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
   if (!metadata) return undefined;
   return {
     localMessageId: metadata.localMessageId,
+    runId: metadata.runId,
+    requestId: metadata.requestId,
+    requestAuthorId: metadata.requestAuthorId,
     source: metadata.source,
     agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
     usage: metadata.usage,
@@ -1514,6 +1537,7 @@ export function readPersistedChatBotMetadata(content: string | null | undefined)
     const agentSubjectMetadata = compactAgentSubjectMetadata(parsed.agentSubjectMetadata);
     return {
       ...parsed,
+      requestAuthorId: boundedLegacyValue(parsed.requestAuthorId, 160) || undefined,
       agentSubjectMetadata: agentSubjectMetadata || undefined,
       computerTaskStatus: normalizeComputerTaskOutcomeStatus(parsed.computerTaskStatus),
       computerHandoff: parsed.computerHandoff
@@ -1523,6 +1547,265 @@ export function readPersistedChatBotMetadata(content: string | null | undefined)
   } catch {
     return null;
   }
+}
+
+export type LegacyPersistedChatFallbackMode = 'metadata' | 'text_only';
+
+export type LegacyPersistedChatFallback =
+  | {
+      content: string;
+      mode: 'metadata';
+      metadataRoundTrips: true;
+      /** Safe to submit. Pending state still waits for the returned DB row to
+       * pass `canReleasePendingAfterPersistedChatRoundTrip`. */
+      safeToPersist: true;
+    }
+  | {
+      content: string;
+      mode: 'text_only';
+      metadataRoundTrips: false;
+      /** Invalid metadata was removed completely, so this explicit text-only
+       * fallback is safe to submit without masquerading as structured data. */
+      safeToPersist: true;
+    };
+
+const LEGACY_LINEAGE_ID_MAX = 96;
+const LEGACY_SOURCE_VALUE_MAX = 80;
+
+function boundedLegacyValue(value: unknown, max: number): string | null {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text ? text.slice(0, max) : null;
+}
+
+function fitPersistedTextToBudget(value: string, maxChars: number): string {
+  const budget = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 0;
+  if (value.length <= budget) return value;
+  if (budget === 0) return '';
+  const marker = '\n\n[truncated for saved chat]';
+  if (budget <= marker.length) return value.slice(0, budget);
+  return `${value.slice(0, budget - marker.length).trimEnd()}${marker}`;
+}
+
+function buildLegacyMetadataEnvelope(
+  metadata: PersistedChatBotMetadata,
+): PersistedChatBotMetadata | null {
+  const routing = metadata.routing as Record<string, unknown> | null | undefined;
+  const localMessageId = boundedLegacyValue(metadata.localMessageId, LEGACY_LINEAGE_ID_MAX);
+  const runId = boundedLegacyValue(
+    metadata.runId
+      || metadata.computerHandoff?.runId
+      || metadata.computerFindings?.runId,
+    LEGACY_LINEAGE_ID_MAX,
+  );
+  const requestId = boundedLegacyValue(
+    metadata.requestId
+      || routing?.requestId
+      || routing?.request_id,
+    LEGACY_LINEAGE_ID_MAX,
+  );
+  const requestAuthorId = boundedLegacyValue(
+    metadata.requestAuthorId,
+    LEGACY_LINEAGE_ID_MAX,
+  );
+  const sourceSurface = boundedLegacyValue(metadata.source?.surface, LEGACY_SOURCE_VALUE_MAX);
+  const handoffSurface = metadata.computerHandoff?.surface;
+  const safeHandoffSurface = handoffSurface === 'browser'
+    || handoffSurface === 'desktop'
+    || handoffSurface === 'local_files'
+    || handoffSurface === 'computer'
+    ? handoffSurface
+    : null;
+  const handoffStatus = normalizeComputerTaskOutcomeStatus(metadata.computerHandoff?.outcomeStatus);
+  const handoffReplayPolicy = metadata.computerHandoff?.replayPolicy === 'manual_verify_only'
+    ? 'manual_verify_only'
+    : 'normal';
+  const handoffMutationDispatched = handoffReplayPolicy === 'manual_verify_only'
+    && metadata.computerHandoff?.mutationDispatched === true;
+  const handoffVerificationOnlyTools = handoffMutationDispatched
+    ? (metadata.computerHandoff?.verificationOnlyTools || [])
+        .filter((tool) => tool === 'desktop.photoshop_document_status' || tool === 'desktop.window_state')
+        .slice(0, 2)
+    : [];
+  const compactSignal = compactOutcomeSignal(metadata.outcomeSignal);
+  const computerTaskStatus = normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus)
+    || handoffStatus
+    || (sourceSurface === 'main_chat_computer_task' && compactSignal?.verdict === 'completed'
+      ? 'completed'
+      : null);
+  const handoff = metadata.computerHandoff && safeHandoffSurface
+    ? {
+        // Deliberately lineage/status only. Never persist task labels, paths,
+        // document signals, warnings, or other app-observation text through
+        // the emergency 1,000-char compatibility envelope.
+        surface: safeHandoffSurface,
+        runId: runId || null,
+        outcomeStatus: handoffStatus || computerTaskStatus,
+        replayPolicy: handoffReplayPolicy,
+        mutationDispatched: handoffMutationDispatched,
+        verificationOnlyTools: handoffVerificationOnlyTools,
+        warningCount: 0,
+        blockerCount: 0,
+        warnings: [],
+        blockers: [],
+      } as ChatComputerHandoffMetadata
+    : undefined;
+  const source = sourceSurface
+    ? {
+        surface: sourceSurface,
+      }
+    : undefined;
+  const envelope: PersistedChatBotMetadata = {
+    localMessageId: localMessageId || undefined,
+    runId: runId || undefined,
+    requestId: requestId || undefined,
+    requestAuthorId: requestAuthorId || undefined,
+    source,
+    computerTaskStatus,
+    computerHandoff: handoff,
+    outcomeSignal: compactSignal ? { verdict: compactSignal.verdict } : undefined,
+  };
+  return hasPersistedMetadata(envelope) ? envelope : null;
+}
+
+/**
+ * Builds the retry body for deployments that still enforce the historical
+ * `messages.content <= 1000` constraint. JSON is assembled before the visible
+ * body is trimmed, then parsed again before return; arbitrary string slicing
+ * can therefore never leave a metadata marker followed by invalid JSON.
+ */
+export function buildLegacyPersistedChatFallback(
+  content: string,
+  maxChars = 1000,
+): LegacyPersistedChatFallback {
+  const value = String(content || '');
+  const cap = Number.isFinite(maxChars) ? Math.max(0, Math.floor(maxChars)) : 1000;
+  const markerIndex = value.indexOf(BOT_META_MARKER);
+  const visibleBase = markerIndex >= 0 ? value.slice(0, markerIndex) : value;
+  const metadata = markerIndex >= 0 ? readPersistedChatBotMetadata(value) : null;
+  const envelope = metadata ? buildLegacyMetadataEnvelope(metadata) : null;
+
+  if (envelope) {
+    const suffix = `${BOT_META_MARKER}${JSON.stringify(envelope)}`;
+    const bodyBudget = cap - suffix.length;
+    if (bodyBudget >= 0) {
+      const candidate = `${fitPersistedTextToBudget(visibleBase, bodyBudget)}${suffix}`;
+      const roundTrip = readPersistedChatBotMetadata(candidate);
+      const expectedStatus = normalizeComputerTaskOutcomeStatus(envelope.computerTaskStatus);
+      const expectedSurface = envelope.source?.surface || null;
+      const expectedRunId = envelope.runId || envelope.computerHandoff?.runId || null;
+      const expectedRequestId = envelope.requestId || null;
+      const expectedRequestAuthorId = envelope.requestAuthorId || null;
+      if (
+        candidate.length <= cap
+        && roundTrip
+        && (!expectedStatus || roundTrip.computerTaskStatus === expectedStatus)
+        && (!expectedSurface || roundTrip.source?.surface === expectedSurface)
+        && (!expectedRunId || roundTrip.runId === expectedRunId || roundTrip.computerHandoff?.runId === expectedRunId)
+        && (!expectedRequestId || roundTrip.requestId === expectedRequestId)
+        && (!expectedRequestAuthorId || roundTrip.requestAuthorId === expectedRequestAuthorId)
+      ) {
+        return {
+          content: candidate,
+          mode: 'metadata',
+          metadataRoundTrips: true,
+          safeToPersist: true,
+        };
+      }
+    }
+  }
+
+  // Invalid/oversized metadata degrades to an explicit marker-free text row.
+  // The raw suffix is never exposed as narrative and can never be mistaken for
+  // a structured completion after reload.
+  return {
+    content: fitPersistedTextToBudget(visibleBase, cap),
+    mode: 'text_only',
+    metadataRoundTrips: false,
+    safeToPersist: true,
+  };
+}
+
+/**
+ * Persistence acknowledgement guard used before deleting the recoverable
+ * local bot record. The returned DB content must either carry parseable
+ * metadata or exactly reflect an explicitly marker-free text-only submission.
+ */
+export function canReleasePendingAfterPersistedChatRoundTrip(input: {
+  submittedContent: string;
+  persistedContent: string | null | undefined;
+  isBot: boolean;
+}): boolean {
+  if (!input.isBot) return true;
+  const submitted = String(input.submittedContent || '');
+  const persisted = String(input.persistedContent || '');
+  const submittedHasMetadata = submitted.includes(BOT_META_MARKER);
+  const persistedHasMetadata = persisted.includes(BOT_META_MARKER);
+  if (!submittedHasMetadata || !persistedHasMetadata) {
+    return !submittedHasMetadata && !persistedHasMetadata && persisted === submitted;
+  }
+
+  const expected = readPersistedChatBotMetadata(submitted);
+  const actual = readPersistedChatBotMetadata(persisted);
+  if (!expected || !actual) return false;
+  const asPresentString = (value: unknown): string | null => (
+    typeof value === 'string' && value.length > 0 ? value : null
+  );
+  const routingRequestId = (metadata: PersistedChatBotMetadata): string | null => {
+    const routing = metadata.routing as Record<string, unknown> | null | undefined;
+    return asPresentString(metadata.requestId)
+      || asPresentString(routing?.requestId)
+      || asPresentString(routing?.request_id);
+  };
+  const runId = (metadata: PersistedChatBotMetadata): string | null => (
+    asPresentString(metadata.runId)
+      || asPresentString(metadata.computerHandoff?.runId)
+      || asPresentString(metadata.computerFindings?.runId)
+  );
+  const status = (metadata: PersistedChatBotMetadata): ComputerTaskOutcomeStatus | null => (
+    normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus)
+      || normalizeComputerTaskOutcomeStatus(metadata.computerHandoff?.outcomeStatus)
+  );
+  const replayPolicy = (metadata: PersistedChatBotMetadata): string | null => (
+    metadata.computerHandoff?.replayPolicy === 'manual_verify_only'
+      ? 'manual_verify_only'
+      : null
+  );
+  const mutationDispatched = (metadata: PersistedChatBotMetadata): boolean | null => (
+    metadata.computerHandoff?.mutationDispatched === true ? true : null
+  );
+  const matchesWhenPresent = <T,>(expectedValue: T | null, actualValue: T | null): boolean => (
+    expectedValue === null || actualValue === expectedValue
+  );
+  const expectedTopLevelRunId = asPresentString(expected.runId);
+  const expectedTopLevelRequestId = asPresentString(expected.requestId);
+  const expectedRequestAuthorId = asPresentString(expected.requestAuthorId);
+  const expectedTopLevelStatus = normalizeComputerTaskOutcomeStatus(expected.computerTaskStatus);
+
+  return matchesWhenPresent(asPresentString(expected.localMessageId), asPresentString(actual.localMessageId))
+    && matchesWhenPresent(
+      expectedTopLevelRunId || runId(expected),
+      expectedTopLevelRunId ? asPresentString(actual.runId) : runId(actual),
+    )
+    && matchesWhenPresent(
+      expectedTopLevelRequestId || routingRequestId(expected),
+      expectedTopLevelRequestId ? asPresentString(actual.requestId) : routingRequestId(actual),
+    )
+    && matchesWhenPresent(
+      expectedRequestAuthorId,
+      asPresentString(actual.requestAuthorId),
+    )
+    && matchesWhenPresent(
+      expectedTopLevelStatus || status(expected),
+      expectedTopLevelStatus
+        ? normalizeComputerTaskOutcomeStatus(actual.computerTaskStatus)
+        : status(actual),
+    )
+    && matchesWhenPresent(
+      asPresentString(expected.source?.surface),
+      asPresentString(actual.source?.surface),
+    )
+    && matchesWhenPresent(replayPolicy(expected), replayPolicy(actual))
+    && matchesWhenPresent(mutationDispatched(expected), mutationDispatched(actual));
 }
 
 export function formatPersistedChatBotMessage(
@@ -1536,6 +1819,7 @@ export function formatPersistedChatBotMessage(
   const normalizedMetadata = metadata
     ? {
         ...metadata,
+        requestAuthorId: boundedLegacyValue(metadata.requestAuthorId, 160) || undefined,
         agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
         recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),
         recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
@@ -1556,6 +1840,9 @@ export function formatPersistedChatBotMessage(
   // behavior rather than collapsing straight to no metadata.
   const tinyHandoff = normalizedMetadata?.computerHandoff
     ? compactComputerHandoff(normalizedMetadata.computerHandoff, 'tiny')
+    : undefined;
+  const legacyLineageEnvelope = normalizedMetadata
+    ? buildLegacyMetadataEnvelope(normalizedMetadata)
     : undefined;
   const candidates = [
     normalizedMetadata,
@@ -1595,11 +1882,26 @@ export function formatPersistedChatBotMessage(
   if (findingsOnly && hasPersistedMetadata({ computerFindings: findingsOnly })) {
     const findingsMeta: PersistedChatBotMetadata = {
       localMessageId: normalizedMetadata?.localMessageId,
+      requestAuthorId: normalizedMetadata?.requestAuthorId,
       source: normalizedMetadata?.source,
       agentSubjectMetadata: normalizedMetadata?.agentSubjectMetadata,
       computerFindings: findingsOnly,
     };
     const suffix = `${BOT_META_MARKER}${JSON.stringify(findingsMeta)}`;
+    const bodyBudget = MAX_PERSISTED_BOT_MESSAGE_CHARS - suffix.length;
+    if (bodyBudget > 0) {
+      const trimmedBase = base.length <= bodyBudget ? base : truncateText(base, bodyBudget);
+      const message = `${trimmedBase}${suffix}`;
+      if (message.length <= MAX_PERSISTED_BOT_MESSAGE_CHARS) return message;
+    }
+  }
+
+  // Canonical app handoffs can still make every richer tier exceed the
+  // 9,000-char row budget even after the visible answer is capped. Keep the
+  // privacy-bounded lineage/status envelope as the final structured fallback,
+  // after durable findings have had their dedicated chance to fit.
+  if (legacyLineageEnvelope && hasPersistedMetadata(legacyLineageEnvelope)) {
+    const suffix = `${BOT_META_MARKER}${JSON.stringify(legacyLineageEnvelope)}`;
     const bodyBudget = MAX_PERSISTED_BOT_MESSAGE_CHARS - suffix.length;
     if (bodyBudget > 0) {
       const trimmedBase = base.length <= bodyBudget ? base : truncateText(base, bodyBudget);

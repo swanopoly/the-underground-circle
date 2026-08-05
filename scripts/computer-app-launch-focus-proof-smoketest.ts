@@ -483,10 +483,11 @@ async function main() {
     check(!bridgeSource.includes('name contains targetName'), 'native observation has no fuzzy process substring fallback');
     check(bridgeSource.includes('unix id of targetProc'), 'native observation binds the process id');
     check(runtimeSource.includes('executeObservedNativeAppActivation'), 'OpenSwan reuses the canonical proof-bearing native executor');
-    check(runtimeSource.includes('no genuine exact-call approval receipt and provider tool-call identity'), 'OpenSwan native mutation requires genuine exact-call identity');
+    check(runtimeSource.includes("if (tool === 'desktop.launch_app' || tool === 'desktop.focus_app')") && runtimeSource.includes("approvalMode: 'auto'"), 'reversible app launch/focus does not create a redundant approval prompt');
+    check(runtimeSource.includes('hasAuthenticatedPersistedOpenSwanCallIdentity(tool, context)'), 'OpenSwan lifecycle action still requires authenticated persisted exact-call identity');
     check(swanbotSource.includes("case 'desktop.launch_app':") && swanbotSource.includes("case 'desktop.focus_app':"), 'SwanBot routes launch and focus through its runtime gateway switch');
     check(swanbotSource.includes('receipt_metadata: result.receipt_metadata'), 'SwanBot sends trusted receipts beside model-visible content');
-    check(dispatcherSource.includes('must run through the approval and fresh native-app proof runtime gateway'), 'legacy SwanBot native dispatch fails closed');
+    check(dispatcherSource.includes('must run through the authenticated typed runtime and fresh native-app proof gateway'), 'legacy SwanBot native dispatch fails closed');
   }
 
   console.log(`computer-app-launch-focus-proof smoke: ${assertions} assertions passed`);

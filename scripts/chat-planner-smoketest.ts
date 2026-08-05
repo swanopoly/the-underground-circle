@@ -431,31 +431,31 @@ for (const input of [
 check(
   'local file search → computer task with session grant',
   buildChatAutomationPlan({ message: 'Search files in my Downloads folder for invoice' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'safe', minConfidence: 0.7 },
 );
 
 check(
   'local file rename → computer task with write review',
   buildChatAutomationPlan({ message: 'can you change the file landscaping-img.png thats on the desktop to andscaping-img-1.png' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'local app launch → computer task/app adapter, not plain model chat',
   buildChatAutomationPlan({ message: 'open Photoshop' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
 );
 
 check(
   'local app follow-up task → computer task/app adapter',
   buildChatAutomationPlan({ message: 'open Photoshop and crop this image' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'local app plus creative generation stays deterministic computer task',
   buildChatAutomationPlan({ message: 'open Photoshop then create an image from the clipboard' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 const localPhotoshopPlan = buildChatAutomationPlan({ message: 'open Photoshop then create an image from the clipboard' });
 if (localPhotoshopPlan.computerRequestRoute?.appStrategy?.id !== 'creative_layout_control') {
@@ -464,10 +464,38 @@ if (localPhotoshopPlan.computerRequestRoute?.appStrategy?.id !== 'creative_layou
   console.log('pass: local Photoshop app task exposes computer route metadata');
 }
 
+const exactPhotoshopPlan = buildChatAutomationPlan({ message: 'Open Photoshop and start a new project 600 x 600' });
+check(
+  'exact Photoshop blank-document ask stays one atomic computer task',
+  exactPhotoshopPlan,
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+);
+const exactPhotoshopPlanTools = exactPhotoshopPlan.computerRequestRoute?.actionItems.map((item) => item.tool) || [];
+const expectedExactPhotoshopPlanTools = [
+  'desktop.photoshop_document_status',
+  'desktop.launch_app',
+  'desktop.photoshop_document_status',
+  'desktop.photoshop_create_document',
+  'desktop.photoshop_document_status',
+];
+if (JSON.stringify(exactPhotoshopPlanTools) !== JSON.stringify(expectedExactPhotoshopPlanTools)) {
+  fail(`exact Photoshop planner sequence expected ${expectedExactPhotoshopPlanTools.join(' -> ')}, got ${exactPhotoshopPlanTools.join(' -> ')}`);
+} else if (exactPhotoshopPlan.notes.some((note) => /parsed steps|count 2 asks|on #1 now/i.test(note))) {
+  fail(`exact Photoshop planner must not split the request into asks: ${exactPhotoshopPlan.notes.join(' | ')}`);
+} else if (!exactPhotoshopPlan.notes.some((note) => /Compiled one atomic desktop program/i.test(note))) {
+  fail('exact Photoshop planner did not record atomic compiler ownership');
+} else if (exactPhotoshopPlan.approval.required || exactPhotoshopPlan.approval.reason) {
+  fail(`exact Photoshop planner must not require redundant approval, got ${exactPhotoshopPlan.approval.reason || 'required'}`);
+} else if (exactPhotoshopPlan.computerRequestRoute?.actionItems.some((item) => item.requiresApproval)) {
+  fail('exact Photoshop planner must not add a second per-tool approval');
+} else {
+  pass('exact Photoshop planner bypasses parsed multi-ask splitting and uses one direct-request-authorized program');
+}
+
 check(
   'local Photoshop save-as filename stays deterministic computer task',
   buildChatAutomationPlan({ message: 'Open Photoshop and save the image as test-it.jpg' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', approvalRequired: true, minConfidence: 0.7 },
 );
 
 const pearsonPngPlan = buildChatAutomationPlan({ message: 'on the desktop open pearsoncdjr-img in photoshop and save it as a png' });
@@ -480,7 +508,7 @@ if (pearsonPngConversion?.source !== 'pearsoncdjr-img' || pearsonPngConversion.f
 check(
   'local Photoshop simple image format conversion uses direct conversion path',
   pearsonPngPlan,
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
 );
 if (pearsonPngPlan.computerRequestRoute?.appStrategy?.id !== 'file_readonly') {
   fail('local Photoshop simple image format conversion uses local-file conversion strategy');
@@ -514,7 +542,7 @@ if (desktopGeminiJpgConversion?.source !== 'Gemini_Generated_Image_lppqo8lppqo8l
 check(
   'desktop filename pronoun image conversion uses direct conversion path',
   desktopGeminiJpgPlan,
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
 );
 if (!desktopGeminiJpgPlan.computerRequestRoute?.recommendedTools.includes('desktop.convert_image')) {
   fail('desktop filename pronoun image conversion recommends desktop.convert_image');
@@ -542,7 +570,7 @@ if (photoshopScreenshotRenameConversion !== null) {
 check(
   'local Photoshop screenshot open/rename/export stays deterministic computer task',
   photoshopScreenshotRenamePlan,
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', approvalRequired: true, minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', approvalRequired: true, minConfidence: 0.7 },
 );
 if (photoshopScreenshotRenamePlan.computerRequestRoute?.appStrategy?.id !== 'creative_layout_control') {
   fail('local Photoshop screenshot open/rename/export uses creative layout strategy');
@@ -564,7 +592,7 @@ if (photoshopScreenshotRenamePlan.computerRequestRoute?.recommendedTools.include
 check(
   'local InDesign PDF export stays deterministic computer task',
   buildChatAutomationPlan({ message: 'Open InDesign and export high quality pdf as brochure.pdf' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
@@ -600,13 +628,13 @@ check(
 check(
   'generic local app launch → computer task/app adapter',
   buildChatAutomationPlan({ message: 'open Affinity Designer' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
 );
 
 check(
   'unfamiliar app task → computer task/app adapter, not plain model chat',
   buildChatAutomationPlan({ message: 'Use Ableton Live to create a four-bar drum loop and export it after approval' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 const unfamiliarAppPlan = buildChatAutomationPlan({ message: 'Use Ableton Live to create a four-bar drum loop and export it after approval' });
 if (unfamiliarAppPlan.computerRequestRoute?.appStrategy?.id !== 'universal_app_control') {
@@ -618,56 +646,80 @@ if (unfamiliarAppPlan.computerRequestRoute?.appStrategy?.id !== 'universal_app_c
 check(
   'semantic app click → computer task/app adapter',
   buildChatAutomationPlan({ message: 'click the Save button in Photoshop' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'native menu click → computer task/app adapter',
   buildChatAutomationPlan({ message: 'click File > Save As in Photoshop' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'desktop text entry → computer task/app adapter',
   buildChatAutomationPlan({ message: 'type "hello world" in TextEdit' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'desktop paste text → computer task/app adapter',
   buildChatAutomationPlan({ message: 'paste "hello world" in TextEdit' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'desktop named field fill → computer task/app adapter',
   buildChatAutomationPlan({ message: 'fill the email field with test@example.com in TextEdit' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'desktop key combo → computer task/app adapter',
   buildChatAutomationPlan({ message: 'press Command S in Photoshop' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'coordinate desktop click → computer task/app adapter',
   buildChatAutomationPlan({ message: 'right double click at 400,500' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'held desktop mouse → computer task/app adapter',
   buildChatAutomationPlan({ message: 'hold mouse down at 400,500' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
 
 check(
   'sequenced desktop app instruction → computer task/app adapter',
   buildChatAutomationPlan({ message: 'open TextEdit then type "hello" then press Command S' }),
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'review', minConfidence: 0.7 },
 );
+
+for (const [label, message, expectedSurface] of [
+  ['Mail visible-state read', 'Open Mail and read the subject of the selected message', 'desktop_app'],
+  ['Slack visible-state read', 'Open Slack and read the latest visible message in general', 'desktop_app'],
+  ['VLC visible-state read', 'Use VLC to read the current track title', 'desktop_app'],
+  ['R visible-state read', 'Open R and read the active console prompt', 'desktop_app'],
+  ['Preview visible-state read', 'Open Preview and report the visible PDF page number', 'local_file'],
+  ['Finder visible-state read', 'Open Finder and show the path of the selected folder in Documents', 'local_file'],
+] as const) {
+  const plan = buildChatAutomationPlan({ message });
+  check(
+    `${label} uses the canonical approval-free native/local plan`,
+    plan,
+    { source: 'plain_chat', kind: 'run_computer_task', routeId: null, risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+  );
+  if (
+    plan.computerRequestRoute?.kind !== expectedSurface
+    || plan.computerRequestRoute.recommendedTools.some((tool) => /^(?:browser|browserbase)\./i.test(tool))
+  ) {
+    fail(`${label} expected ${expectedSurface} with no browser tools, got ${plan.computerRequestRoute?.kind || 'none'}`);
+  } else {
+    pass(`${label} keeps ${expectedSurface} ownership and never pulls the browser forward`);
+  }
+}
 
 // ─── User-task pipeline routing ────────────────────────────────────────────
 
@@ -1211,6 +1263,11 @@ check(
 check(
   'W-A1/M2: #channel send in Slack is an approval-gated OpenSwan send',
   buildChatAutomationPlan({ message: 'send a message to the #general channel in Slack saying the deploy is done' }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'external_side_effect', approvalRequired: true },
+);
+check(
+  'W-A1/M2: explicit message command after opening Slack remains an approval-gated send',
+  buildChatAutomationPlan({ message: 'Open Slack and message Jordan hello' }),
   { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'external_side_effect', approvalRequired: true },
 );
 check(

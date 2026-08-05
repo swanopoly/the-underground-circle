@@ -19,6 +19,7 @@ import {
   draftKey,
   shouldPreserveDraft,
   reconcileDraft,
+  resolveStateAction,
   KEY_PREFIX,
   MAX_KEY_SEGMENT,
   MAX_DRAFT_LENGTH,
@@ -364,6 +365,29 @@ function reconcile(
   }
   assert(!threw, '6.7 reconcileDraft survives throwing getter');
   assertShape(dec as DraftDecision, '6.8 reconcileDraft safe decision from throwing getter');
+}
+
+// ── 7. sequential attachment updates use the latest owner bucket ────────────
+{
+  type FakeStagedFile = { id: string; uploading: boolean };
+  let staged: FakeStagedFile[] = [];
+  staged = resolveStateAction(staged, [{ id: 'file-1', uploading: false }]);
+  staged = resolveStateAction(
+    staged,
+    (current) => current.map((file) => (
+      file.id === 'file-1' ? { ...file, uploading: true } : file
+    )),
+  );
+  assertEq(staged.length, 1, '7.1 value then functional update keeps the newly staged file');
+  assertEq(staged[0]?.uploading, true, '7.2 functional update resolves against latest staged state');
+
+  const savedBucket = [{ id: 'file-A', uploading: false }];
+  const updatedBucket = resolveStateAction(
+    savedBucket,
+    (current) => [...current, { id: 'file-B', uploading: true }],
+  );
+  assertEq(updatedBucket.length, 2, '7.3 background owner bucket resolves functional updates against its own state');
+  assertEq(savedBucket.length, 1, '7.4 resolver does not mutate the prior bucket');
 }
 
 // ── Summary ──────────────────────────────────────────────────────────────────

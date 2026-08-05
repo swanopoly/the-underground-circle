@@ -202,8 +202,8 @@ const DESKTOP_DISPOSITION_SEVERITY: Readonly<Record<DesktopDisposition, number>>
 });
 
 const FALLBACK_ACTIONS: Readonly<Record<LiveSurfacePreconditionKind, (app: string) => string>> = Object.freeze({
-  launch_app: (a) => `Launch ${a} first — chat can do this after your approval.`,
-  focus_app: (a) => `Bring ${a} to the front first — chat can do this after your approval.`,
+  launch_app: (a) => `Launch ${a} first — chat can do this directly and verify the foreground app.`,
+  focus_app: (a) => `Bring ${a} to the front first — chat can do this directly and verify the foreground app.`,
   restart_bridge: () => 'Restart the desktop bridge (npm run bridge), then try again.',
   install_app: (a) => `Install ${a} on this machine, then try again.`,
   grant_accessibility: (a) =>

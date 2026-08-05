@@ -181,11 +181,14 @@ assert('isChatMessageSource string', isChatMessageSource('src') === false);
 // ─── 4. isChatBotMessageExtra ────────────────────────────────────────────────
 assert('isChatBotMessageExtra empty object', isChatBotMessageExtra({}) === true);
 assert('isChatBotMessageExtra localOnly true', isChatBotMessageExtra({ localOnly: true }) === true);
+assert('isChatBotMessageExtra transcript durability', isChatBotMessageExtra({ durability: 'transcript' }) === true);
+assert('isChatBotMessageExtra ephemeral durability', isChatBotMessageExtra({ durability: 'ephemeral' }) === true);
 assert('isChatBotMessageExtra runId null', isChatBotMessageExtra({ runId: null }) === true);
 assert('isChatBotMessageExtra runId string', isChatBotMessageExtra({ runId: 'r1' }) === true);
 assert('isChatBotMessageExtra commandsHelp true', isChatBotMessageExtra({ commandsHelp: true }) === true);
 assert('isChatBotMessageExtra showRunTrace false', isChatBotMessageExtra({ showRunTrace: false }) === true);
 assert('isChatBotMessageExtra localOnly wrong type', isChatBotMessageExtra({ localOnly: 'x' }) === false);
+assert('isChatBotMessageExtra rejects unknown durability', isChatBotMessageExtra({ durability: 'temporary' }) === false);
 assert('isChatBotMessageExtra runId wrong type', isChatBotMessageExtra({ runId: 5 }) === false);
 assert('isChatBotMessageExtra commandsHelp wrong type', isChatBotMessageExtra({ commandsHelp: 'x' }) === false);
 assert('isChatBotMessageExtra showRunTrace wrong type', isChatBotMessageExtra({ showRunTrace: 1 }) === false);

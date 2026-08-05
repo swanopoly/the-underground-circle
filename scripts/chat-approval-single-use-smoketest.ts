@@ -101,8 +101,27 @@ async function main(): Promise<void> {
   );
   assert(
     source.includes(".is('applied_at', null)")
-      && source.includes(".update({ applied_at: new Date().toISOString() })"),
+      && source.includes(": { applied_at: new Date().toISOString() }"),
     'approved row is claimed with a single-use applied_at compare-and-set',
+  );
+  assert(
+    source.includes('isMissingApprovalAppliedAtColumn(lookupError)')
+      && source.includes("code === '42703'")
+      && source.includes("code === 'PGRST204'")
+      && source.includes("message.includes('applied_at')"),
+    'only a confirmed missing applied_at column activates schema compatibility',
+  );
+  assert(
+    source.includes(".update(useLegacyStatusClaim")
+      && source.includes("? { status: 'consumed' }")
+      && source.includes(".in('status', ['approved', 'auto_approved'])")
+      && source.includes("if (status === 'consumed')"),
+    'legacy schema retains a one-winner status compare-and-set and never reuses the consumed row',
+  );
+  assert(
+    source.includes(".select('id, status, resolved_at, resolved_by, requested_at, timeout_seconds')")
+      && source.includes('useLegacyStatusClaim = !lookupError;'),
+    'legacy lookup omits only the unavailable applied_at column and keeps exact bound fields',
   );
   assert(
     source.includes(".eq('session_key', sessionKey)")

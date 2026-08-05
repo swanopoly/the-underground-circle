@@ -1,4 +1,5 @@
 import { buildAppAutomationControlSurfacePlan } from './appAutomationControlSurfaces';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 import {
   buildDesignAppCreativeAiPlan,
   type DesignAppCreativeAiCapabilityId,
@@ -328,6 +329,67 @@ function buildInDesignPlan(text: string): DesignAppAutomationPlan {
 }
 
 function buildPhotoshopPlan(text: string): DesignAppAutomationPlan {
+  const exactProgram = compileComputerSequenceProgram(text);
+  if (exactProgram?.id === 'photoshop_new_document') {
+    const dimensions = exactProgram.steps.find((step) => step.tool === 'desktop.photoshop_create_document')?.args || {};
+    const widthPx = Number(dimensions.widthPx);
+    const heightPx = Number(dimensions.heightPx);
+    const sizeLabel = Number.isFinite(widthPx) && Number.isFinite(heightPx)
+      ? `${widthPx}x${heightPx}`
+      : 'requested';
+    const directRequestAuthorized = exactProgram.authorization.mode === 'direct_user_request';
+    return {
+      appId: 'adobe_photoshop',
+      appName: 'Adobe Photoshop',
+      taskKind: 'raster_image_edit',
+      documentSignals: [`from-scratch ${sizeLabel} blank document`],
+      // Document creation is represented by the exact tool program rather
+      // than a generic layer/edit operation. Keep the existing operation
+      // vocabulary narrow so downstream exhaustive operation maps do not
+      // need a fake "create document" runbook.
+      operations: ['inspect_image_document'],
+      controlOrder: [
+        'Read Photoshop document status first; no active document is an expected from-scratch state, not a missing-source blocker.',
+        'Launch Photoshop only when the first status result reports appRunning:false.',
+        'Read document status again until Photoshop is scriptable.',
+        directRequestAuthorized
+          ? `Run desktop.photoshop_create_document with widthPx=${widthPx} and heightPx=${heightPx}; the direct request authorizes only this new unsaved blank document.`
+          : `After the enclosing Chat plan approval, run desktop.photoshop_create_document with widthPx=${widthPx} and heightPx=${heightPx}.`,
+        `Read document status once more and require an active ${sizeLabel} document before reporting completion.`,
+      ],
+      requiredInventory: [
+        'Photoshop running/scriptable state from desktop.photoshop_document_status',
+        `final active document dimensions equal ${sizeLabel}`,
+      ],
+      approvalGates: directRequestAuthorized
+        ? []
+        : ['one Chat plan-level approval before the oversized blank-document allocation'],
+      verificationSignals: [
+        `final desktop.photoshop_document_status reports an active ${sizeLabel} document`,
+        'document status supplies the created document name and dimensions',
+      ],
+      recoveryRules: [
+        'If Photoshop is not running, launch it once and retry document status during the bounded cold-start window.',
+        'If Photoshop is installed but not scriptable, stop with the exact bridge/license/login/modal blocker.',
+        'If creation is rejected or the final dimensions differ, do not claim completion or substitute menu/a11y/coordinate actions.',
+      ],
+      recommendedTools: [
+        'desktop.photoshop_document_status',
+        'desktop.launch_app',
+        'desktop.photoshop_create_document',
+      ],
+      controlSurfaceOrder: ['Photoshop UXP DOM/app API in modal scope'],
+      controlSurfaceSourceRefs: [],
+      failSafeRules: [
+        'No file search/stat/open is required because this task creates a document from scratch.',
+        'No layer inventory is required because the requested artifact is a new blank document.',
+        'Do not fall back to accessibility, menus, screenshots, or coordinates for this compiled task.',
+        directRequestAuthorized
+          ? 'Do not add an approval stop for this directly requested unsaved blank document; saves, exports, existing-document edits, and external actions remain outside this program.'
+          : 'Do not dispatch the oversized blank-document allocation before its enclosing Chat plan approval.',
+      ],
+    };
+  }
   const operations = detectPhotoshopOperations(text);
   const wantsMarketingCreative = /\bbanner|display ad|leaderboard|social|story|post|hero|marketing|campaign|dealer|offer|promo|thumbnail|flyer|poster\b/i.test(text);
   const surfacePlan = buildAppAutomationControlSurfacePlan(text, {
@@ -433,7 +495,7 @@ export function buildDesignAppAutomationPromptBlock(task: string): string | null
     plan.creativeAiCapabilities?.length ? `Creative AI capabilities: ${plan.creativeAiCapabilities.join(' | ')}` : null,
     `Control order: ${plan.controlOrder.join(' | ')}`,
     `Required inventory: ${plan.requiredInventory.join(' | ')}`,
-    `Approval gates: ${plan.approvalGates.join(' | ')}`,
+    `Approval gates: ${plan.approvalGates.join(' | ') || 'none required by this exact plan'}`,
     `Verification signals: ${plan.verificationSignals.join(' | ')}`,
     `Recovery rules: ${plan.recoveryRules.join(' | ')}`,
     `Control surface order: ${plan.controlSurfaceOrder.join(' | ')}`,

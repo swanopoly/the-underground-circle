@@ -800,7 +800,7 @@ export function buildComputerAppTaskStrategyPromptBlock(
     `Action order: ${strategy.actionOrder.join(' | ')}`,
     `Verification: ${strategy.verificationOrder.join(' | ')}`,
     `Recovery: ${strategy.recoveryPolicy.join(' | ')}`,
-    `Approval checkpoints: ${strategy.approvalCheckpoints.length ? strategy.approvalCheckpoints.join(' | ') : 'none for read-only work'}`,
+    `Approval checkpoints: ${strategy.approvalCheckpoints.length ? strategy.approvalCheckpoints.join(' | ') : 'none required by this strategy'}`,
     `Stop conditions: ${strategy.stopConditions.join(' | ')}`,
     `Bridge requirements: ${strategy.bridgeRequirements.join(' | ')}`,
     `Blind action budget: ${strategy.maxBlindActions}. Never perform blind clicks/typing when this is 0.`,

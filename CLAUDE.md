@@ -1,7 +1,7 @@
 # CLAUDE.md - The Underground Circle
 
 > Project context for Claude Code, OpenSwan, Codex, Gemini, and other agents.
-> Last reviewed: 2026-07-27
+> Last reviewed: 2026-08-05
 
 Start with `AGENTS.md`. `docs/AGENTS_ROADMAP.md` is canonical for ownership,
 phase status, SQL status, and runtime rules. This file is a current app review
@@ -71,6 +71,8 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Chat computer/app user notices | `src/lib/chatComputerRequestUx.ts` |
 | Computer task evidence contract | `src/lib/computerTaskEvidenceContract.ts`, `src/lib/computerTaskEvidenceRecovery.ts` |
 | Chat execution | `src/lib/runChatAutomationPlan.ts`, `src/lib/chatAgentContextPack.ts` |
+| Chat transcript and thread lifecycle | `src/screens/circles/tabs/ChatTab.tsx`, `src/screens/circles/tabs/chat/ChatThreadSidebar.tsx`, `src/screens/circles/tabs/chat/ChatThreadHeader.tsx`, `src/lib/chatService.ts`, `src/lib/chatMessageShape.ts`, `src/lib/circleChatThreads.ts`, `src/lib/chatComposerDraftCore.ts`, `src/lib/subscribeWithReconnect.ts` |
+| Chat thread/message database authority | `supabase/migrations/20260805_messages_thread_rls_and_reactions.sql`, `docs/RUN_THIS_SQL.sql` §31, `scripts/messages-thread-rls-smoketest.ts` |
 | BlackSwan response path | `src/lib/swanbot.ts`, `src/lib/swanbotClientToolDispatcher.ts`, `supabase/functions/swanbot-ai/index.ts` |
 | v2 SwanBot tool loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts`, `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `src/lib/swanbotV2BatchRuntime.ts`, `src/lib/swanbotV2BatchPolicy.ts`, `src/lib/swanbotV2ClientLoopFlag.ts` |
 | SwanBot continuation checkpoint privacy | `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/migrations/20260726_swanbot_continuation_privacy.sql`, `docs/RUN_THIS_SQL.sql` §29 |
@@ -82,13 +84,15 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Cross-provider fallback | `src/lib/crossProviderRouter.ts`, `src/lib/universalInvoke.ts` |
 | Billing preference | `src/lib/billingPriority.ts` |
 | BlackSwan model routing | `src/lib/blackswanRouting.ts` |
-| Computer task runtime and truthful outcomes | `src/lib/computerTaskRuntime.ts`, `src/lib/computerTaskOutcome.ts` |
+| Computer task runtime, exact programs, and truthful outcomes | `src/lib/computerTaskRuntime.ts`, `src/lib/computerSequenceProgramCore.ts`, `src/lib/computerTaskOutcome.ts` |
 | Browser computer use and typed mutation handoffs | `src/lib/computerUseAgent.ts`, `src/lib/useComputerUseTask.ts`, `src/lib/useComputerUseQueue.ts`, `supabase/functions/computer-use-agent/index.ts`, `src/lib/computerUse.ts`; cloud starts require a bounded v1 policy, while all legacy recorder mutations remain value-stripped typed OpenSwan handoffs |
 | Local desktop intent | `src/lib/localComputerAwarenessIntent.ts` |
 | Desktop bridge authentication boundary | `scripts/desktop-bridge-security.js`, all four local agent bridge servers, `src/lib/bridgeAuth.ts`, `src/lib/desktopBridge.ts` |
 | App observation epochs and mutation receipts | `src/lib/computerAppGrounding.ts` |
+| Unfamiliar-app semantic workflow | `src/lib/genericAppNavigator.ts` (`buildGenericAppSemanticWorkflow`) |
 | Guarded browser mutation canaries | typed `browser.fill_field`, `browser.set_toggle`, and `browser.select_option` in `src/lib/openswanToolRuntime.ts`, `src/lib/browserBridge.ts`, `scripts/browser-bridge.js` |
 | Narrow native semantic-press canary | typed `desktop.click_element` in `src/lib/openswanToolRuntime.ts`, `src/lib/computerAppAdapter.ts`, `src/lib/desktopBridge.ts` |
+| Sealed native semantic-value lane | typed `desktop.set_element_value` in `src/lib/openswanToolRuntime.ts`, `src/lib/computerAppAdapter.ts`, `src/lib/desktopBridge.ts`, `scripts/claude-bridge.js` |
 | Durable exact action-call ledger | `src/lib/agentActionCalls.ts`, `supabase/migrations/20260726_agent_action_calls.sql`, `docs/RUN_THIS_SQL.sql` §26 |
 | Exact single-use approval authority | `src/lib/chatApprovalGate.ts`, `src/lib/openswanToolApprovals.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/swanbot.ts`, `supabase/migrations/20260726_database_authority_guards.sql` / `docs/RUN_THIS_SQL.sql` §28 |
 | Scheduled external-action authority | `src/lib/scheduledActions.ts`, `supabase/functions/scheduled-action-runner/index.ts`, `supabase/migrations/20260726_scheduled_action_mutation_guard.sql` |
@@ -158,7 +162,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Marketplace prompt context | `src/lib/marketplaceIntegrationContext.ts` |
 | Codebase index/search + @mentions + conventions (coding-agent P4) | `src/lib/codebaseIndexRuntime.ts`, `src/lib/projectConventions.ts`, pure cores `codebaseIndexCore/codebaseSymbolCore/codebaseMentionsCore` |
 | Live TODO + tool-result summarization + run-and-fix gate (coding-agent P6) | `src/lib/agentTodoCore.ts` + `agentTodoStore.ts`, `src/lib/toolResultSummaryCore.ts` (in `agentExecutionCore.ts`), `src/lib/runAndFixGateCore.ts` (in `openswanSessionRuntime.ts`) |
-| Google Workspace tools (Gmail/Docs/Sheets/Drive/Calendar) | `src/lib/googleWorkspaceOps.ts` (pure contracts), `src/lib/googleWorkspaceRuntime.ts` (token+fetch), `gmail.*`/`gdocs.*`/`gsheets.*`/`gdrive.*`/`gcal.*` in `openswanToolRuntime.ts`; OAuth Phase A: `supabase/functions/google-oauth/index.ts` + `src/lib/googleCreds.ts` |
+| Google Workspace tools (Gmail/Docs/Sheets/Drive/Calendar) | `src/lib/googleWorkspaceOps.ts` (pure contracts), `src/lib/googleWorkspaceRuntime.ts` (token+fetch), `gmail.*`/`gdocs.*`/`gsheets.*`/`gdrive.*`/`gcal.*` in `openswanToolRuntime.ts`; OAuth Phase A: `supabase/functions/google-oauth/index.ts` + `src/lib/googleCreds.ts` + `[functions.google-oauth]` in `supabase/config.toml` so OPTIONS/callback reach the function's own auth boundary |
 | Cross-dashboard awareness (what's connected: marketplace/vault/Google/keys) | `src/lib/connectedResourcesDigest.ts` (pure, secret-safe) + `src/lib/connectedResourcesRuntime.ts` → `connected_resources` prompt section in `swanbot.ts` |
 | Vault credential → browser login | `browser.fill_credential_field` (`credentialId` = circle vault via `vaultAgentAccess`, or `item` = 1Password) in `openswanToolRuntime.ts`; remote `fill_saved_login` in `supabase/functions/computer-use-agent/index.ts`; login-wall recovery pointer in `src/lib/computerTaskEvidenceRecovery.ts` |
 | Local diagnostics + connected coding execution | `local.run_shell` + `git.run` remain compatibility names in `openswanToolRuntime.ts`, but now expose only fixed read-only git diagnostics and `node --check/--version` through `POST /desktop/exec_file` with an exact read grant. Shells, package scripts, tests/builds, and mutations are refused and must delegate through a paired Codex/Claude/Cursor/Gemini structured spawn/launch handoff with its normal approval/file-coordination boundary. |
@@ -212,6 +216,46 @@ Model IDs may be provider-prefixed, such as `openrouter/auto`,
 OpenSwan remains the in-app shared agent/runtime brand. The internal default
 agent id `default::blackswan` should not be renamed without a migration plan.
 
+Chat presents one consistent OpenSwan navigation map in circle, private, and
+shared threads. `ChatThreadHeader` remains mounted before Chat chooses an
+empty or populated transcript state, clears stale metadata while a new thread
+loads, and keeps the `OPEN`/`OPENSWAN` and `RUNS` entries available through
+loading, empty, active, and thread-resolution error states.
+`OpenSwanServiceMenu` owns mode and crew selection, sends
+agent/model/approval/tool configuration to the existing Control Panel, and
+sends past or blocked work to the existing Run History surface. These are
+navigation-only components: preserve the callbacks and canonical runtime
+owners, plus responsive layout, keyboard focus, and semantic labels. Run
+`npm run check:openswan-chat-ux` when changing this surface. The composer
+selector uses `chatAgentSelectorPresentation` so target availability and
+runtime activation remain truthful: normal Chat reads
+`Chat · OpenSwan available`; only a selected runtime mode reads
+`<Mode> · OpenSwan active`. Advanced choices expose expanded/selected
+accessibility state. `Reset Mind` requires explicit destructive confirmation,
+clears circle session and current-user memory context, and preserves the
+visible transcript.
+
+Changing threads is an authoritative lifecycle. Chat clears the old transcript
+immediately, validates exact circle/archive access, restores only the target
+thread's draft and staged attachments, and blocks sending until hydration is
+ready; resolution failure exposes Retry. It refuses silent switching while a
+run or upload can still write back to the old thread. On narrow screens the
+conversation list opens as an accessible overlay, and destructive archive,
+delete, leave, and member-removal actions are confirmed. Message and thread
+subscriptions reconnect with a scoped catch-up and run a quiet repair
+heartbeat; the message transcript additionally polls every 15 seconds only
+while its channel is degraded. An authoritative tail removes
+missed deletes while preserving older pages, optimistic sends, and rows created
+after the read began. Older pagination uses `(created_at, id)`, and reply
+previews are batch-hydrated.
+
+Bot-message durability is explicit. `transcript` is the default and may enter
+Postgres, model history, memory extraction, pending recovery, and the session
+archive. `ephemeral` greetings, progress/routing copy, and command/navigation
+help stay visible locally but enter none of those durable/model inputs. Known
+legacy ephemeral source surfaces are also dropped during hydration. Outcomes,
+blockers, and recovery evidence remain transcript messages.
+
 ## Computer Use
 
 For the end-to-end app/browser/desktop task pipeline (route -> contract -> loop
@@ -245,9 +289,12 @@ computer-use-capable model.
 Local computer awareness goes through `src/lib/localComputerAwarenessIntent.ts`
 and bridge tools. Reads such as tabs, running apps, clipboard inspection,
 screen state, file list/read/search, and accessibility tree are lower risk.
-Actions such as launch/focus app, open URL/path, clipboard write/clear,
-shortcut run, and window management need the risk/approval path described in
-the runtime docs.
+Exact launch/focus is the narrow reversible lifecycle exception: it needs no
+separate approval only through an authenticated persisted call with exact
+provider tool-use identity and fresh exact-app before/after proof. Open
+URL/path, clipboard write/clear, shortcut run, window management, and all
+downstream mutations keep the risk/approval path described in the runtime
+docs.
 
 Before executing a chat request that asks to operate another app, browser,
 local file, CAD tool, Adobe design file, or unfamiliar desktop program,
@@ -274,6 +321,32 @@ when observations are missing or stale. Pass the compact app route decision into
 that recovery path so route-level missing confirmations, approvals,
 user-action blockers, and connected-agent buildout decisions shape the recovery
 options instead of being lost after preflight.
+
+Strongly framed `Use`/`Open`/`In <App>` requests, including long-tail app
+names, stay desktop-owned and exclude browser tools/fallbacks. Literal URLs,
+browser or web-only apps, WordPress, and transactional web intent remain
+browser-owned; Finder/Preview/TextEdit file-shaped work stays local-file. The
+closed-world Photoshop compiler remains isolated from this generic route.
+
+`buildGenericAppSemanticWorkflow` in `src/lib/genericAppNavigator.ts` is the
+canonical unfamiliar-app decomposition contract. It preserves the exact user
+request and emits at most ten ordered checkpoints with observe-before evidence,
+allowed semantic surfaces, mutation/approval class, expected postcondition,
+and a buildout/stop rule; verification of every original clause is always the
+last checkpoint. The allowed surfaces are adapters, app lifecycle,
+app-native APIs/scripts, documented file adapters, embedded DOM/CDP,
+accessibility, semantic menus, and verified shortcuts. Coordinates are not in
+the workflow schema.
+
+Pure observation and exact launch/focus/wait do not create approval prompts,
+although launch/focus still require authenticated persisted-call identity and
+fresh exact proof. Reversible non-secret field/menu/toggle checkpoints share
+one bounded workflow review rather than prompting once per control, but each
+runtime mutation must still consume its canonical exact-call receipt.
+Persistent/external/destructive/credential/permission and ambiguous steps keep
+their exact approval or user-choice floor. Missing semantic target, target
+drift, or uncertain post-dispatch state stops the workflow; it does not unlock
+coordinates or automatic replay.
 
 The first enforced-action foundation lives in
 `src/lib/computerAppGrounding.ts`: short-lived observation epochs bind a
@@ -383,7 +456,7 @@ coordinates, consequential controls, or general native-app mutations.
 
 SwanBot v2 routes every browser/desktop mutation currently registered as
 client-delegated through the canonical OpenSwan runtime before any raw
-dispatcher, preserving provider tool name/id/iteration. The four guarded
+dispatcher, preserving provider tool name/id/iteration. The five guarded
 canaries additionally keep their sealed proof, durable action-call, and
 sanitized receipt contract; hidden receipt subsets never enter model content,
 are re-sanitized at the edge, and persist as correlated client result events.
@@ -514,10 +587,105 @@ Secret-bearing type/key/credential/question data is redacted or omitted across
 SSE actions, progress/action traces, model history, guided replay, stuck-solver
 payloads, usage metadata, and errors.
 
-`computerTaskRuntime` no longer performs a deterministic app mutation or
-attachment open/wait before the authenticated typed agent loop. Read-only live
-observation may still precede `executeAgentRun`; app/hybrid work itself does
-not. This removes the pre-agent app-adapter and attachment-open bypasses.
+`computerTaskRuntime` no longer performs a generic deterministic app mutation
+or attachment open/wait before the authenticated typed agent loop. Read-only
+live observation may still precede `executeAgentRun`; model-planned app/hybrid
+work itself does not. A compiler-owned exact program is the narrow exception:
+when every call, argument, and authorization mode is present in the immutable
+Chat plan, its local executor can run without an LLM relay. The first family is
+Photoshop blank-document creation: app-native
+status, conditional launch, status, exact create, and final status proof. It
+uses the current direct command for one closed-world new unsaved document at or
+below 4096 px per axis / 16 MP; larger allocations retain one SHA-bound Chat
+approval. Appended or unknown edit/save/export/overwrite/delete/login/purchase/
+external instructions cannot inherit direct authority. It does not request a
+source file, layer inventory, generic UI fallback, or capability buildout, and
+an unverified post-dispatch result cannot replay. The
+visible exact-task card mirrors that program as Status -> Prepare -> Create ->
+Verify and omits generic file resolution, edit, layer review, export, and
+handoff copy. When required, a filed/pending plan approval remains an awaiting-approval state
+instead of launching generic failure recovery. Chat holds only an ephemeral
+approval-id -> exact task/thread resume entry, deletes it before continuation,
+and automatically reruns the exact executor after approval; the durable gate
+still recomputes and atomically consumes the fingerprint before desktop work.
+That convenience is same-mounted-ChatTab only: approval after refresh or from
+Office/another client safely requires an exact retry rather than persisting raw
+task text as continuation state.
+This removes the broad pre-agent app-adapter and attachment-open bypasses.
+Live validation on 2026-07-31 submitted the motivating request through the
+refreshed authenticated Chat UI from a fresh Photoshop `appRunning:false`
+status. It created no approval row, persisted the completion, and final
+app-native status proved `Untitled-1` at 600x600 px, RGB, 72 ppi, with one
+layer. After refresh, an exact computer-task approval has no durable in-memory
+continuation, so Chat offers `Ask again` only while that row remains inside its
+normal live/expired visibility window; stale rows age out. A newer completion
+in the same thread never suppresses an approval by chronology alone because a
+thread can contain unrelated tasks.
+Chat never reconciles task cards by prompt wording, normalized request text,
+structural similarity, or a shared chat-turn id. An older ready/approval card
+becomes `Superseded` only when a later structured, verified completion shares
+its exact immutable run id or explicit request id. Without that exact lineage,
+the card becomes `Historical` only after a newer human turn from the same
+stable author; a different circle member's later turn cannot deactivate it.
+New bot rows persist that requester as `requestAuthorId`, so interleaved shared
+threads do not infer ownership from message proximity. Legacy proximity
+inference is allowed only when the transcript has at most one known human
+author; ambiguous multi-author legacy cards fail open as `Current`.
+For metadata-free legacy rows, the only fallback is a strict actionable
+desktop-plan signature: approval/readiness language plus a concrete control
+phrase such as `Approve desktop run`, `desktop-app path`, `app-native tool`, or
+`desktop.*`, with failure and blocked statuses excluded. Even that fallback can
+only become `Historical` after a newer same-author turn; text can never prove
+completion or supersession. Both inactive states are read-only: phase, proof,
+review, and browser-session evidence remain visible while approval, launch,
+verification retry, recovery, run-stop, and run-again mutations disappear.
+
+Legacy deployments that still enforce `messages.content <= 1000` use a safe,
+parseable persistence retry instead of slicing through structured metadata.
+`persistedChatMetadata` preserves only a bounded, redacted source/status/
+lineage envelope, fits visible text around complete JSON, validates the
+candidate before submission, and otherwise emits an explicit marker-free
+text-only row. `chatService` acknowledges the returned database row only when
+its present local-message, run, request, requester, status, and source fields strictly
+round-trip (or the marker-free text matches exactly). Truncated, unparsable, or
+parseable-but-mutated metadata keeps the recoverable local pending record.
+Typed-batch and outer failure terminals now use one durable pending-row
+finalizer, verification retries update the saved bot row, and message Realtime
+merges INSERT and UPDATE envelopes through reconnect/catch-up into mounted
+clients; an authoritative bounded snapshot repairs missed DELETE events. If a
+bot UPDATE has no valid envelope, Chat clears stale structured controls instead
+of retaining unproven actions. If a computer mutation may have dispatched but
+final proof is missing, the persisted handoff carries
+`replayPolicy: manual_verify_only`, `mutationDispatched: true`, and only the
+bounded read-only `verificationOnlyTools`. After refresh Chat hides every
+approval, retry, recovery, app-choice, preflight, quick-reply, run-again, and
+cross-surface mutation affordance; only that verification path remains.
+
+The 2026-08-01 desktop-target hardening keeps that exact program attached to
+the requested app. Chat classifies and compiles the unmodified user utterance;
+dispatch prefixes are metadata only, so `Use computer:` cannot turn one exact
+Photoshop workflow into two linguistic asks. The primary web composer never
+auto-focuses and blurs only at the native-dispatch boundary. Before creating a
+document and again after app-native status proof, the exact executor requires a
+fresh window-state observation that identifies Photoshop as foreground. A
+missing or contrary observation permits one semantic Photoshop focus call and
+one verification read, never a coordinate fallback; pre-create failure blocks
+without mutation and post-create failure remains partial/non-replayable.
+
+Model-planned `computer_apps` turns also carry a strict `desktop_app_only`
+execution-surface ceiling through both typed tool loops. Browser tools,
+`desktop.open_url`, generic tool search, and browser-named launch/focus/raise
+targets are unavailable in that profile. A browser is legal only when routing
+selected an explicit browser or hybrid profile.
+
+Model-planned `computer_files` turns carry a parallel `local_file_only`
+ceiling. Scoped file operations, `desktop.open_path`, Preview, and non-browser
+native apps remain available, but browser tools, URL opening, generic search,
+and Chrome/Safari launch, focus, or window raising are rejected before
+dispatch. The outer automation planner projects the canonical embedded route,
+risk, and approval decision, so it cannot relabel a native/local task as a
+browser task or add a redundant plan approval.
+
 Uploaded files remain staged and return a value-free, non-executable
 `desktop.open_path` handoff with no raw path or fabricated identity, approval,
 receipt, or proof. The exact staged context remains in the authenticated task
@@ -527,7 +695,14 @@ telemetry.
 Approval authority is exact and single-use across the audited Chat,
 OpenSwan, and SwanBot lanes. Chat hashes the complete normalized plan and
 user/circle/thread/room scope, then consumes `agent_approvals.applied_at`
-before one transport dispatch. OpenSwan hashes canonical tool arguments plus
+before one transport dispatch. If a deployed project specifically reports that
+the additive `applied_at` column is missing, Chat repeats the exact fingerprint
+lookup without only that field and atomically consumes legacy authority through
+an `approved`/`auto_approved` -> `consumed` status claim. Other database,
+network, RLS, payload, or schema failures still fail closed; §10b/§28 remains
+the canonical database target. The generic approval worker does not touch
+runtime-owned Chat/scheduled rows, while `chat.review_comment` remains a real
+worker-owned exception. OpenSwan hashes canonical tool arguments plus
 authenticated persisted-run/provider-call identity and atomically stamps one
 dispatch binding. SwanBot WordPress writes and the generic risk floor use that
 same schema-v2 digest/claim model. Durable and model-visible payloads keep only
@@ -570,9 +745,16 @@ replay drift fails before mutation. These legacy endpoints return only bridge
 acknowledgement, so an attempted call returns `ok: false`,
 `completionVerified: false`, and `outcomeUnknown: true`, then seals
 replay-blocked `outcome_unknown`; it is never reported as independently
-verified completion. `desktop.set_element_value` requires `appName` in its
-schema but stops before approval until a fresh accessibility generation and
-dotted-path identity can be sealed through handler entry.
+verified completion. `desktop.set_element_value` is a separate sealed lane:
+authenticated persisted run/provider call identity and one fresh full
+accessibility observation bind exact app/PID/generation/dotted path/role/label
+plus current/requested value hashes and lengths into a short-lived one-shot
+non-secret target. A genuine exact-call approval receipt precedes one AX
+set-value dispatch, and only a newer same-field observation with the requested
+hash and length can complete it. Raw field values and paths stay transient;
+secure, credential, payment, permission, destructive, modal, stale, drifting,
+raw-dispatch, paste, and coordinate variants fail closed. Missing proof after a
+possible dispatch is `outcome_unknown` and cannot replay.
 
 `automation-executor` keeps service/scheduled invocation read-only and permits
 a manual room-file write only with fresh exact one-use authority plus §26.
@@ -600,7 +782,15 @@ to the same process/context/page/exact URL. Model-visible URLs are HTTP(S)
 origin-only; an opaque process-HMAC URL identity lets actionability reject
 exact URL or document drift without revealing userinfo, path, query, or
 fragment. The identity rotates on bridge restart; every raw/forged legacy URL
-identity and non-HTTP snapshot fails closed. The typed client loop remains device-local opt-in/default-off, current
+identity and non-HTTP snapshot fails closed. The typed client loop remains
+device-local opt-in/default-off for ordinary chat. Authenticated non-exact
+app/file/hybrid computer turns require it per turn because it owns the
+canonical local Photoshop/desktop catalog; bounded transient relay failures
+retry, and a local loop failure cannot replay through v1 text-only chat. Ask
+tools defer only to their own durable exact-call runtime approval boundary,
+never to a generic plan approval. Compiler-owned exact programs are different:
+their full local program and authorization mode are already fixed, so only
+their post-policy handler receives execution authority. Current
 SwanBot v2 edge source has not been deployed/re-verified, and production
 telemetry still gates a default flip. Section 29 is authored/mirrored but has
 not been applied or live-DB verified. Consequently there is no live proof yet
@@ -609,7 +799,7 @@ historical checkpoint scrubbing. Pre-deployment plaintext/legacy continuations
 fail closed or are scrubbed only after the edge is deployed and §29 is applied.
 The updated `computer-use-agent` edge is also source-only and has not been
 deployed/re-verified. No live Browserbase/DB confirmation integration or
-native-app GUI run was performed. Its HTTP 400 response for authenticated
+generic native-input GUI run was performed. Its HTTP 400 response for authenticated
 legacy callers without a v1 policy is intentional.
 
 Native `desktop.launch_app` and `desktop.focus_app` also converge on one
@@ -617,17 +807,23 @@ proof-bearing helper across the app adapter, typed OpenSwan, and SwanBot v2:
 fresh before/after observations, exact-or-explicit-alias resolution, positive
 PID identity for running targets, no-op detection, dispatch-target checks, and
 outcome-unknown/no-replay when verification is missing. A bridge
-acknowledgement by itself never completes launch/focus.
+acknowledgement by itself never completes launch/focus. These reversible
+lifecycle actions need no separate approval only after the runtime proves the
+authenticated user/persisted run/exact provider-call identity. Launch proves
+the exact app is running; focus proves it is running and frontmost. Neither
+policy permits a browser target in the `desktop_app_only` profile.
 
 `/desktop diag` is a read-only bridge health/pairing/running-app probe.
 `/desktop diag <app>` remains read-only too: it does not launch, focus, open,
 click, or type. It returns a value-free non-executable `desktop.launch_app`
 typed-runtime handoff so a fresh authenticated run can obtain exact provider
-call identity, approval, dispatch receipt, and post-launch focus proof.
+call identity, dispatch receipt, and post-launch proof. The diagnostic itself
+never inherits lifecycle authority.
 
 The verified boundary remains narrow. It covers non-submit/non-credential fill,
 clearly local presentation/accessibility toggle, one exact option in a native
-HTML single-value select, and one exact low-consequence native semantic press.
+HTML single-value select, one exact low-consequence native semantic press, and
+one exact non-secret native accessibility field value.
 Eleven generic native typing, paste, keypress, menu, bounded
 coordinate/mouse/scroll actions now share observe-before-approval, stable
 args/app/PID/surface binding, one-shot handler-entry recheck, and §26
@@ -639,7 +835,7 @@ before/after accessibility diff of the exact target app
 (`src/lib/nativeUiVerificationCore.ts`) rather than by the acknowledgement:
 
 - `verified` requires attribution, not movement. Text entry
-  (`type_text`/`paste_text`/`set_element_value`) verifies only when a changed
+  (`type_text`/`paste_text`) verifies only when a changed
   field value contains the exact text sent — or, when the snapshot truncated at
   `A11Y_SNAPSHOT_MAX_STRING_LENGTH`, when the sent text contains that truncated
   value. `menu_click` verifies only when a node labelled like the invoked leaf
@@ -672,13 +868,16 @@ The pure policy and its runtime wiring are source/contract-verified
 (`native-ui-verification-core` incl. integration cases over the real
 `snapshotA11ySummary`/`diffA11ySummaries`, plus
 `openswan-generic-native-ui-runtime`). The bridge read path is live-verified
-read-only. No live native-app MUTATION has been executed end to end. Accessibility value-setting requires `appName`
-but fails closed before approval pending exact generation/path sealing. The
+read-only. No live generic native-app mutation has been executed end to end.
+Accessibility value-setting is source/contract-verified through the dedicated
+sealed runtime: exact generation/path/role/label/current/requested bindings,
+one-shot approval and dispatch, and same-target hash/length proof. The
 separately vault/origin-gated credential tool retains its own compatibility
 boundary. Submit, upload, browser navigation/close, generalized native
 after-state verification, future catalog additions, non-typed callers, and a
 complete universal sealed gateway remain pending. Focused source/contract
-smokes and app typecheck verify this slice; current edge source is not
+smokes—including `native-semantic-value-runtime`—and app typecheck verify this
+slice; current edge source is not
 deployed/re-verified, §29 is not applied, and pre-deployment plaintext/legacy
 pending continuations do not gain the fail-closed/scrub boundary until those
 steps. No live browser/native-app GUI execution or live Postgres
@@ -735,9 +934,20 @@ unproven against a live database.
 Local bridge mutation authority stays loopback-bound and is remote-accessible
 only through an explicitly allowlisted tunnel. The Claude, Codex, Cursor, and
 Gemini bridges share source/Host/Origin checks, challenge pairing, and bearer
-token validation. The Claude desktop surface additionally enforces exact file
-grants and denies shell-family launchers on its fixed read-only exec-file
-route. If a bridge is intentionally tunneled, the server must also be restarted
+token validation. Claude returns the normal first pairing challenge as HTTP 200
+to avoid a false browser-console failure; the client remains compatible with
+rolling 428 bridges and the challenge/token security exchange is unchanged.
+The Claude desktop surface additionally enforces exact file grants and denies
+shell-family launchers on its fixed read-only exec-file route. Generic native
+typing, paste, key, menu, and pointer calls carry a transient exact
+app/PID/CGWindowID/bounds guard captured immediately before dispatch. The
+native Swift helper revalidates that target during atomic type/key/paste input;
+it no longer proves focus and then performs keyboard input in a separate
+AppleScript process. Pointer coordinates must stay inside the sealed window,
+mouse-up/scroll require x/y, and raw guards are stripped from model, approval,
+receipt, durable, and serialized result surfaces. This contract is
+source/compile/smoke verified; no generic native-input mutation was run live.
+If a bridge is intentionally tunneled, the server must also be restarted
 with `UC_BRIDGE_ALLOWED_HOSTS` set to the exact tunnel Host value and
 `UC_BRIDGE_ALLOWED_ORIGINS` set to the exact browser origin; a public client URL
 alone never authorizes the tunnel.
@@ -808,6 +1018,14 @@ changes must follow the HITL/approval rules in the roadmap.
   applied or live-DB verified**. Its source checks do not prove encrypted
   continuation resume/key rotation, live claim races, cron expiry, or the
   historical scrub against Postgres.
+- `20260805_messages_thread_rls_and_reactions.sql` is mirrored as §31 but is
+  **not applied to or verified against the target Supabase project**. A focused
+  224-assertion smoke and disposable PostgreSQL 14 adversarial run applied it
+  twice successfully. Production still needs authenticated private/shared/
+  circle visibility, revocation, reply/reaction concurrency, and two-client
+  message/thread Realtime proof. It deliberately preserves creator-owned bot
+  persistence compatibility; trusted bot provenance still needs a later
+  server/RPC writer.
 - After schema changes, use `NOTIFY pgrst, 'reload schema';` when relevant.
 
 Schema gotchas:
@@ -816,6 +1034,9 @@ Schema gotchas:
 - `circle_office_agents` has no `model` column; owner FK is `owner_id`.
 - `user_xp` primary key is `user_id`.
 - `room_messages.message_type` is constrained.
+- Under §31, every `messages` row has one canonical non-null `thread_id`, its
+  circle/thread/reply lineage must agree, and reactions use
+  `set_message_reaction` instead of whole-object replacement.
 - `circle_members` RLS can recurse; use security-definer helpers where present.
 
 ## Critical Guarantees
@@ -892,6 +1113,16 @@ It also does not prove §26/§27/§28/§29 application, live Realtime/RLS behavi
 encrypted continuation/key-rotation or cron-expiry behavior, concurrent claims,
 external provider dispatch, or updated edge deployment.
 
+The 2026-08-05 unfamiliar-app slice is source/contract-checked by
+`smoke:generic-app-navigator`, `smoke:universal-app-task-eval`,
+`smoke:native-semantic-value-runtime`, launch/focus, grounding, approval, and
+runtime smokes plus the desktop/local execution-surface guard and app
+typecheck. The universal source corpus covers 160 requests and 7,417
+assertions. This proves the typed workflow and guarded
+boundaries in source; it does not prove a live generic native-app mutation,
+deployed edge parity, a database contention race, or universal completion for
+every human action in every app.
+
 ## Known Risk Areas
 
 - Older code still has many direct Supabase auth calls. Do not add new unsafe
@@ -904,8 +1135,8 @@ external provider dispatch, or updated edge deployment.
   browser plans, artifacts, memories, and execution stream. Keep payloads
   bounded to avoid oversized message rows.
 - Browser and desktop actions must stay explicit about risk and approval.
-- The universal browser/desktop mutation gateway remains incomplete; the four
-  guarded canaries and unapplied §26 ledger must not be generalized into a
+- The universal browser/desktop mutation gateway remains incomplete; the five
+  guarded canaries and current-catalog interception must not be generalized into a
   claim that arbitrary apps can already be operated safely end to end.
 - Current SwanBot v2 encrypted-continuation edge changes are source-only until
   deployed and re-verified; §29 is source-only until applied and live-DB

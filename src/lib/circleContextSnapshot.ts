@@ -709,7 +709,7 @@ async function createDefaultDeps(): Promise<CircleContextSnapshotDeps> {
     // Same shape as `rooms.list`.
     fetchRooms: async (circleId) => {
       const { data, error } = await supabase
-        .from('rooms')
+        .from('project_rooms')
         .select('id, name, status, created_at')
         .eq('circle_id', circleId)
         .order('created_at', { ascending: false })

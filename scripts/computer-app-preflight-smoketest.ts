@@ -172,6 +172,38 @@ assertPreflight('Open Photoshop and crop this PSD after I approve desktop contro
   expansionVerify: 'npm run smoke:app-automation-control-surfaces',
 });
 
+const blankDocumentPreflight = buildComputerAppPreflight({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  audit: audit({
+    desktop_control: 'ready',
+    app_tools: 'ready',
+  }),
+});
+const blankDocumentPreflightPrompt = buildComputerAppPreflightPromptBlock(blankDocumentPreflight) || '';
+if (blankDocumentPreflight.status !== 'ready') {
+  fail(`blank Photoshop document expected ready preflight, got ${blankDocumentPreflight.status}: ${blankDocumentPreflight.summary}`);
+} else if (blankDocumentPreflight.requiredCapabilities.join(',') !== 'desktop_control,app_tools') {
+  fail(`blank Photoshop document expected only desktop_control,app_tools; got ${blankDocumentPreflight.requiredCapabilities.join(',')}`);
+} else if (blankDocumentPreflight.routeDecision !== null || blankDocumentPreflight.capabilityExpansionPlan !== null) {
+  fail('blank Photoshop document should not enter generic route-decision or capability-expansion planning');
+} else if (blankDocumentPreflight.warnings.length > 0 || blankDocumentPreflight.blockers.length > 0) {
+  fail(`blank Photoshop document should have no generic warnings/blockers: ${blankDocumentPreflight.warnings.map((item) => item.id).join(',')}`);
+} else if (
+  /Research-backed control surface order required|document inventory required|destructive edit approval|required source|file_search|file_stat|layer_inventory/i.test(blankDocumentPreflightPrompt)
+) {
+  fail('blank Photoshop document preflight leaked generic file/layer/destructive planning');
+} else if (!blankDocumentPreflightPrompt.includes('Exact Photoshop blank-document program selected')) {
+  fail('blank Photoshop document preflight did not name exact-program ownership');
+} else if (!blankDocumentPreflightPrompt.includes('directly requested unsaved blank-document program')) {
+  fail('blank Photoshop document preflight did not preserve direct-request authority');
+} else if (/canonical tool approval|per-tool approval remains required/i.test(blankDocumentPreflightPrompt)) {
+  fail('blank Photoshop document preflight invented a second tool-level approval');
+} else {
+  pass('blank Photoshop document preflight is exact-program-owned and ready');
+}
+
+assertMissingCapability('Open Photoshop and start a new project 600 x 600', 'app_tools');
+
 assertPreflight('Open this InDesign file and make changes for a marketing banner with different layers', {
   strategy: 'creative_layout_control',
   status: 'partial',

@@ -10,6 +10,7 @@ import { buildChatAutomationPlan, summarisePlanForTelemetry } from '../src/lib/c
 import { buildChatComputerTaskAutonomy } from '../src/lib/chatComputerTaskAutonomy';
 import { buildChatComputerRequestRoute } from '../src/lib/chatComputerRequestRouter';
 import {
+  buildChatComputerTaskPlanPreview,
   buildChatComputerRequestUserNotice,
   formatChatComputerRequestUserNotice,
   summarizeChatComputerRequestUserNotice,
@@ -56,6 +57,34 @@ if (photoshopRoute) {
   expect(formatted.includes('Ready for review'), 'formatted Photoshop notice should include a concise title');
   expect(!formatted.includes('/Users/'), 'formatted Photoshop notice should not leak local absolute paths');
   pass('Photoshop notice is concise, approval-focused, and sanitized');
+}
+
+const exactBlankDocumentRoute = routeOrFail('Open Photoshop and start a new project 600 x 600');
+if (exactBlankDocumentRoute) {
+  const notice = buildChatComputerRequestUserNotice(exactBlankDocumentRoute);
+  const preview = buildChatComputerTaskPlanPreview(exactBlankDocumentRoute);
+  const formatted = formatChatComputerRequestUserNotice(notice);
+  expect(notice.summary.includes('exact Photoshop blank-document path'), 'exact blank-document notice names the deterministic path');
+  expect(notice.summary.includes('immediately'), 'exact blank-document summary promises direct execution');
+  expect(notice.visibility === 'hidden', 'bounded exact blank-document route runs quietly without a user step');
+  expect(notice.autonomy.userEffort === 'none', 'bounded exact blank-document route requires no approval effort');
+  expect(notice.primaryAction === null, 'bounded exact blank-document route exposes no approval button');
+  expect(notice.planPreview === null, 'quiet exact blank-document route does not interrupt chat with a plan card');
+  expect(
+    JSON.stringify(preview.steps) === JSON.stringify([
+      'Read Photoshop status',
+      'Ensure Photoshop is ready',
+      'Create blank document',
+      'Verify document dimensions',
+    ]),
+    `exact blank-document preview uses four compiled phases (got ${JSON.stringify(preview.steps)})`,
+  );
+  expect(!/resolve file|inspect image|layer inventory|handoff/i.test(formatted), 'exact blank-document notice omits edit-file presentation');
+  expect(preview.surfaces.length === 1 && preview.surfaces[0] === 'Photoshop app-native bridge', 'exact blank-document preview names only its app-native surface');
+  expect(preview.approvalGates.length === 0, 'exact blank-document preview has no redundant approval gate');
+  expect(notice.badges.includes('No approval'), 'exact blank-document route carries the no-approval badge');
+  expect(preview.proof.length === 2 && preview.proof.some((item) => /600x600/.test(item)), 'exact blank-document preview keeps compact dimension proof');
+  pass('Exact Photoshop blank-document request uses a compact four-phase notice');
 }
 
 // Rename-free export is the bounded low-risk shape (computerTaskPlanner

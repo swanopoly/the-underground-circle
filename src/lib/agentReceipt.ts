@@ -393,23 +393,30 @@ function deriveProof(input: BuildAgentReceiptInput): AgentReceiptProof[] {
 
 // ─── Action + verdict ────────────────────────────────────────────────────────
 
-function deriveAction(input: BuildAgentReceiptInput, proof: AgentReceiptProof[]): string {
+function deriveAction(
+  input: BuildAgentReceiptInput,
+  proof: AgentReceiptProof[],
+  verdict: ChatOutcomeVerdict | null,
+): string {
   const handoff = input.computerHandoff || null;
   const label = asString(handoff?.taskLabel);
   if (label) return clamp(label, ACTION_MAX);
-  const designApp = asString(handoff?.designAppTask?.appName);
-  if (designApp) return clamp(`Worked in ${designApp}`, ACTION_MAX);
   const firstBrowserTask = asArray<LooseBrowserPlan>(input.browserPlans)
     .map((plan) => asString(plan?.task))
     .find(Boolean);
   if (firstBrowserTask) return clamp(firstBrowserTask, ACTION_MAX);
+  if (verdict === 'blocked') return 'Action blocked before completion';
+  if (verdict === 'failed') return 'Action did not complete';
+  if (verdict === 'partial') return 'Action partially completed';
+  const designApp = asString(handoff?.designAppTask?.appName);
+  if (designApp) return clamp(`Worked in ${designApp}`, ACTION_MAX);
   const surface = asString(handoff?.surface);
   if (surface === 'browser') return 'Ran a browser task';
   if (surface === 'desktop') return 'Ran a desktop app task';
   if (surface === 'local_files') return 'Worked with local files';
   if (surface === 'computer') return 'Ran a computer task';
   if (proof.length > 0) return `Produced ${proof.length === 1 ? '1 result' : `${proof.length} results`}`;
-  return 'Completed an action';
+  return 'Action result recorded';
 }
 
 function deriveVerdict(input: BuildAgentReceiptInput): ChatOutcomeVerdict | null {
@@ -454,7 +461,7 @@ export function buildAgentReceipt(input: BuildAgentReceiptInput | null | undefin
     return null;
   }
 
-  const action = deriveAction(input, proof);
+  const action = deriveAction(input, proof, verdict);
 
   return {
     action,

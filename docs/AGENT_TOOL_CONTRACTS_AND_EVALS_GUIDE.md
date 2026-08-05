@@ -1,6 +1,7 @@
 # Agent Tool Contracts And Evals Guide
 
 **Last researched:** 2026-05-29
+**Implementation sync:** 2026-08-05
 
 This guide is the standard for agents adding or reviewing OpenSwan tools,
 desktop/browser bridge tools, MCP tools, connected-agent dispatch tools,
@@ -122,6 +123,22 @@ type ToolResult =
 
 ## Approval And Consent
 
+Use this policy matrix before deciding that a tool call needs a prompt:
+
+| Task category | User-facing gate | Dispatch authority and proof |
+|---|---|---|
+| Read or observe | No mutation approval | Authenticated scoped read; returned observation is the proof |
+| Exact app launch or focus | No separate approval for this reversible lifecycle action | Authenticated persisted run and exact provider call identity; fresh exact-app before/after proof; launch proves running, focus proves running and frontmost |
+| Reversible non-secret semantic field/menu/toggle workflow | One bounded workflow review, not one prompt per control | Every mutation still uses its canonical exact-call receipt, one-shot target binding, and same-target after-proof |
+| Persistent file/app change, export, upload, publish, send, submit, destructive action, credential/payment/private-data use, or permission grant | Exact approval immediately before the consequential boundary | Exact actor/scope/tool/arguments binding, single-use consume, one dispatch, independent receipt/proof |
+| Coordinate or screenshot-guided fallback | Exact approval after fresh bounds/target evidence | Separate higher-risk lane; semantic-workflow review is not authority |
+
+An approval-free read or launch/focus call is not blanket desktop authority.
+It must fail before action when persisted actor/run/provider-call identity or
+exact target proof is unavailable. A shared workflow review also cannot be
+reused for a save, submit, permission, credential, destructive, or external
+step discovered later.
+
 Require approval before:
 
 - writes, exports, deletes, submissions, purchases, publishes, or external sends;
@@ -129,11 +146,38 @@ Require approval before:
 - shell commands, installs, generated scripts, or connected-agent launches that
   can make changes;
 - fallback from API/semantic actions to coordinate or screenshot-guided actions;
-- app automation that changes a document, layer, canvas, model, drawing, or
-  remote account.
+- app automation that changes an existing document, layer, canvas, model,
+  drawing, or remote account. The only direct-request exception is a
+  compiler-owned, closed-world, bounded new unsaved scratch artifact with no
+  save/export/overwrite/delete/external/credential/generic-UI step and required
+  before/after app-native proof.
 
 Approval payloads should include actor, tool, target, risk, proposed change,
 evidence plan, retry limit, and stop condition.
+
+### Sealed native semantic value contract
+
+`desktop.set_element_value` is a dedicated non-secret field mutation, not the
+raw PID/path/text bridge setter and not the acknowledgement-only generic input
+lane. Its contract requires:
+
+- a fresh full accessibility observation of one exact frontmost app, positive
+  PID, generation, dotted path, editable role, non-empty label, and exact
+  current value;
+- a short-lived single-use capability binding target fingerprint plus current
+  and requested value hashes and lengths; raw values, labels, and dotted paths
+  remain transient and out of durable approval/receipt data;
+- a genuine exact-call approval receipt bound to the authenticated persisted
+  run, provider tool-use id, iteration, target, and requested value;
+- one AX set-value dispatch through the sealed handler and a newer same-target
+  observation proving the requested hash and length;
+- fail-closed handling for secrets, authentication, payment, permission,
+  destructive/modal context, staleness, drift, raw-dispatch bypass, or any
+  coordinate/paste fallback.
+
+A proven already-desired value may return as a no-op without dispatch. Once a
+mutation may have dispatched, missing or malformed proof is
+`outcome_unknown`: replay stays disabled and only fresh verification is safe.
 
 ## Output And Redaction
 
@@ -165,6 +209,9 @@ Every recoverable failure should return:
 
 Automatic retries are allowed only when the tool result says retry is safe and
 fresh evidence or idempotency prevents duplicate side effects.
+`outcome_unknown` is never an automatic-retry state. A fresh observation may
+verify what happened, but it cannot turn uncertainty into authority to resend
+the same side effect.
 
 ## Eval Matrix
 
@@ -180,6 +227,9 @@ fresh evidence or idempotency prevents duplicate side effects.
 | Retry/idempotency | Re-running cannot duplicate side effects without approval |
 | Prompt-injection resistance | Untrusted page/app/file content cannot override tool policy |
 | Regression golden task | A representative real user task keeps working across changes |
+| Surface isolation | Desktop-only workflows cannot advertise or dispatch browser/URL/coordinate tools outside their declared profile |
+| Workflow approval scope | Reversible checkpoints share one review while persistent/external/destructive/credential/permission steps retain exact floors |
+| Outcome-unknown replay | A possibly dispatched call exposes verification-only recovery and cannot re-enter the handler |
 
 ## Review Questions
 
@@ -200,10 +250,17 @@ Use `reviewAgentToolContractDraft(description, draft, options)` before a tool
 contract is handed back as ready. The draft should include:
 
 - `toolName`, `purpose`, `inputs`, `trustBoundary`, and `riskTags`.
-- `approvalRequired` for any write, export, destructive, billing, credential,
-  privacy, shell, external-submission, or connected-agent launch risk.
+- `approvalRequired` for any persistent write, export, destructive, billing,
+  credential, privacy, shell, external-submission, or connected-agent launch
+  risk. If a narrow unsaved-scratch exception applies, record the exact direct
+  authorization mode, resource cap, closed-world grammar, and negative evals
+  that prevent appended actions from inheriting it.
 - `idempotency`, `observationRequirement`, `outputVariants`, `evidence`, and
   `redaction`.
+- Native-input contracts must keep exact app/PID/CGWindowID/bounds authority
+  transient, revalidate it inside the input helper at dispatch, require
+  in-window pointer/release/scroll coordinates, and exclude it from model,
+  approval, receipt, durable metadata, and serialized results.
 - `evalIds`, `recoveryFields`, and `smokeCommands`.
 
 The review returns:
@@ -230,12 +287,21 @@ be retried automatically or marked ready for chat.
 | Connected-agent dispatch tool | Custom-agent bridge smoke, standards handoff smoke, recovery smoke |
 | Recovery policy | Recovery smoke plus one negative-path case proving no blind retry |
 | Eval suite | Golden task plus malformed-input and unsafe-action cases |
+| Generic semantic workflow | `npm run smoke:generic-app-navigator`, `npm run smoke:universal-app-task-eval`, `npm run smoke:computer-app-execution-surface-guard`, route/runtime smoke, typecheck |
+| Native semantic field value | `npm run smoke:native-semantic-value-runtime`, approval/grounding/runtime smoke, typecheck |
 
 Run the helper smoke after changing this guide or the typed helper:
 
 ```sh
 npm run smoke:agent-tool-contract-standards
 ```
+
+The generic-workflow and semantic-value checks are source/contract evidence.
+The universal corpus currently covers 160 requests and 7,417 assertions across
+native app, local file, browser, persistent, external, credential, and
+destructive boundaries. Do not present it as a live arbitrary-app GUI pass,
+edge deployment proof,
+database race proof, or universal ability to complete every human app action.
 
 ## Sources To Recheck
 

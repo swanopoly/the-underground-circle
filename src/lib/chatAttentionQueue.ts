@@ -33,11 +33,15 @@ import { classifyApprovalAge, APPROVAL_EXPIRED_MS } from './approvalPreviewCore'
  */
 export type ChatAttentionApprovalInput = {
   id: string;
+  session_key?: string | null;
   action_type: string;
   description: string;
   status: string;
   requested_at: string;
   timeout_seconds: number;
+  /** False when this mounted Chat surface cannot safely resume the exact row
+   * (for example after refresh erased its in-memory exact-task continuation). */
+  resumable?: boolean;
 };
 
 /** Structural mirror of `useComputerUseTask`'s `PendingConfirmation`. */
@@ -99,6 +103,14 @@ export type ChatAttentionOptions = {
    * passed; nagging about a stale row is noise). Default 60 min.
    */
   expiredVisibilityMs?: number;
+  /**
+   * Deprecated compatibility input. Thread chronology cannot safely correlate
+   * a completion with an approval because one thread can contain many tasks.
+   * Kept temporarily so existing callers compile; the queue ignores it.
+   */
+  latestCompletedComputerTaskAt?: number | null;
+  /** Deprecated with `latestCompletedComputerTaskAt`; intentionally ignored. */
+  latestCompletedComputerTaskSessionKey?: string | null;
   /**
    * Item ids the user dismissed this session. Filtered BEFORE the status
    * line + urgency roll-up so the summary never counts rows the user can't
@@ -199,6 +211,12 @@ function humanizeActionType(actionType: string): string {
   return withoutPrefix.map((part) => part.replace(/_/g, ' ')).join(' · ');
 }
 
+function isExactComputerTaskApproval(actionType: string): boolean {
+  const value = String(actionType || '');
+  return value === 'chat.run_computer_task'
+    || value.startsWith('chat.run_computer_task.');
+}
+
 function clampText(value: string, max: number): string {
   const text = String(value || '').trim();
   if (text.length <= max) return text;
@@ -239,6 +257,9 @@ function approvalItems(
     const what = humanizeActionType(approval.action_type);
     const detail = clampText(approval.description, 160);
 
+    // Expiry and visibility must win over the refresh-recovery presentation
+    // below. Otherwise a resumable:false row bypasses aging forever and comes
+    // back as "Ask again" after every refresh.
     if (expiresAt !== null && expiresAt <= now) {
       // Row timed out but the poller hasn't flipped status yet — treat as
       // expired so the user learns the window closed instead of tapping a
@@ -251,6 +272,25 @@ function approvalItems(
         detail: detail
           ? `${detail} — the approval window closed before anyone decided.`
           : 'The approval window closed before anyone decided.',
+        urgency: 'soon',
+        waitingMs,
+        expiresAt,
+        primaryAction: { kind: 'refile_approval', label: 'Ask again' },
+        secondaryActions: [{ kind: 'dismiss', label: 'Dismiss' }],
+        refId: approval.id,
+      });
+      continue;
+    }
+
+    if (
+      isExactComputerTaskApproval(approval.action_type)
+      && approval.resumable === false
+    ) {
+      items.push({
+        id: `approval:${approval.id}`,
+        kind: 'approval_expired',
+        title: `Approval needs a fresh request: ${what}`,
+        detail: 'This exact desktop run cannot safely resume after Chat was refreshed. Ask again to file a fresh plan.',
         urgency: 'soon',
         waitingMs,
         expiresAt,
@@ -447,7 +487,12 @@ export function buildChatAttentionState(
 
   const items: ChatAttentionItem[] = [];
 
-  items.push(...approvalItems(inputs.approvals ?? [], now, expiringThresholdMs, expiredVisibilityMs));
+  items.push(...approvalItems(
+    inputs.approvals ?? [],
+    now,
+    expiringThresholdMs,
+    expiredVisibilityMs,
+  ));
   if (inputs.pendingClarification) items.push(clarificationItem(inputs.pendingClarification, now));
   if (inputs.pendingTaskQuestion) items.push(taskQuestionItem(inputs.pendingTaskQuestion, now));
   const recoveryOptions = (inputs.recoveryOptions ?? []).filter(Boolean);

@@ -64,6 +64,10 @@ import {
   type ResolvedAppOption,
   type TaskAppCategory,
 } from './knownAppShortcuts';
+import {
+  compileComputerSequenceProgram,
+  type ComputerSequenceProgram,
+} from './computerSequenceProgramCore';
 
 export type ChatComputerRequestRouteKind =
   | 'browser'
@@ -384,12 +388,70 @@ export interface ChatComputerRequestRoute {
 }
 
 export interface ChatComputerModelOrchestration {
-  mode: 'model_guided_tools' | 'multi_agent_model_guided_tools';
-  coordinator: 'selected_chat_model_then_openswan';
+  mode: 'deterministic_local_program' | 'model_guided_tools' | 'multi_agent_model_guided_tools';
+  coordinator: 'chat_plan_then_local_program' | 'selected_chat_model_then_openswan';
   selectedModelRole: string;
   activationPath: string[];
   modelSelectionHint: string;
   multiAgentHint?: string;
+}
+
+function narrowStrategyForExactComputerSequence(
+  strategy: ComputerAppTaskStrategy | null,
+  program: ComputerSequenceProgram | null,
+): ComputerAppTaskStrategy | null {
+  if (!strategy || program?.id !== 'photoshop_new_document') return strategy;
+  const createStep = program.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
+  const widthPx = Number(createStep?.args.widthPx);
+  const heightPx = Number(createStep?.args.heightPx);
+  const sizeLabel = Number.isFinite(widthPx) && Number.isFinite(heightPx)
+    ? `${widthPx}x${heightPx}`
+    : 'requested-size';
+  const directRequestAuthorized = program.authorization.mode === 'direct_user_request';
+  return {
+    ...strategy,
+    label: 'Photoshop Blank Document Control Loop',
+    summary: `Execute the compiled app-native sequence to create one blank ${sizeLabel} Photoshop document; no source file, layer edit, export, or generic UI planning is involved.`,
+    observeFirst: [
+      'desktop.photoshop_document_status for running/scriptable and active-document state',
+      'no active document is the expected from-scratch starting state',
+    ],
+    actionOrder: [
+      'desktop.photoshop_document_status',
+      'desktop.launch_app only when appRunning:false',
+      'desktop.photoshop_document_status until scriptable',
+      `desktop.photoshop_create_document widthPx=${widthPx} heightPx=${heightPx}`,
+      'desktop.photoshop_document_status for final proof',
+    ],
+    verificationOrder: [
+      `final app-native document status reports an active ${sizeLabel} document`,
+      'final app-native status includes created document name and dimensions',
+    ],
+    recoveryPolicy: [
+      'Retry only Photoshop document status during the bounded cold-start window.',
+      `Stop on bridge/install/license/login/permission/modal/${directRequestAuthorized ? '' : 'approval/'}create failure or final dimension mismatch.`,
+      'Do not fall back to file, layer, screenshot, a11y, menu, keyboard, coordinate, or connected-agent planning.',
+    ],
+    approvalCheckpoints: directRequestAuthorized
+      ? []
+      : ['One Chat plan-level approval authorizes the oversized Photoshop blank-document allocation before dispatch.'],
+    stopConditions: [
+      `active ${sizeLabel} document verified`,
+      ...(!directRequestAuthorized ? ['Chat plan-level approval rejected'] : []),
+      'Photoshop or the dedicated bridge tool is unavailable',
+      'final document status does not match the requested dimensions',
+    ],
+    recommendedTools: [
+      'desktop.photoshop_document_status',
+      'desktop.launch_app',
+      'desktop.photoshop_create_document',
+    ],
+    bridgeRequirements: [
+      'local desktop bridge with Photoshop UXP/app API tools',
+      'Adobe Photoshop installed and scriptable',
+    ],
+    maxBlindActions: 0,
+  };
 }
 
 function wantsMaximumAgentFanout(message: string): boolean {
@@ -405,7 +467,25 @@ function buildChatComputerModelOrchestration(input: {
   kind: ChatComputerRequestRouteKind;
   recommendedTools: string[];
   aiNeed: DesktopTaskAiNeedClassification;
+  exactProgramAuthorization?: ComputerSequenceProgram['authorization'] | null;
 }): ChatComputerModelOrchestration {
+  if (input.exactProgramAuthorization) {
+    const directRequest = input.exactProgramAuthorization.mode === 'direct_user_request';
+    return {
+      mode: 'deterministic_local_program',
+      coordinator: 'chat_plan_then_local_program',
+      selectedModelRole: 'No execution model is needed after deterministic classification; the immutable program runs through the local desktop bridge.',
+      activationPath: [
+        'compile the exact desktop program',
+        directRequest
+          ? 'accept the current direct user command as authority for the bounded unsaved draft'
+          : 'bind and consume one Chat plan approval',
+        'execute the local program once',
+        'verify fresh app-native document status',
+      ],
+      modelSelectionHint: 'Do not call the AI relay for this exact task; return only verified proof or the exact local blocker.',
+    };
+  }
   const multiAgent = wantsMaximumAgentFanout(input.message);
   const toolSurface = input.kind === 'browser'
     ? 'browser tools'
@@ -926,12 +1006,193 @@ function hasTransactionalWebIntent(message: string): boolean {
   return false;
 }
 
+function hasExplicitWebsiteOperation(message: string): boolean {
+  const text = String(message || '');
+  return EXPLICIT_WEB_TARGET_RE.test(text)
+    && /\b(?:browse|buy|click|download|fill|find|go\s+to|log\s*in|navigate|open|order|purchase|reserve|search|submit|upload|visit)\b/i.test(text);
+}
+
+/**
+ * One strongly framed request to operate a named app. This intentionally does
+ * not try to maintain a catalog of every desktop product: long-tail apps are
+ * exactly where the generic desktop navigator is supposed to take over.
+ * Browser products and web-only apps remain explicit browser requests.
+ */
+interface ExplicitNamedAppAction {
+  appName: string;
+  surface: 'desktop_app' | 'browser' | 'local_file';
+  intent: 'launch_or_read' | 'mutation';
+}
+
+const NAMED_APP_ACTION_VERB = '(?:accept|add|adjust|animate|apply|authenticate|authorize|browse|build|cancel|change|charge|check|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|find|focus|generate|go|grant|import|inspect|insert|invite|launch|link|list|load|log\\s*in|login|look(?:\\s+at)?|make|model|move|mute|navigate|open|overwrite|package|paint|paste|post|press|print|publish|put|read|record|remove|rename|render|replace|report|resize|retouch|run|save|search|select|send|set|show|sign\\s*in|split|start|submit|summari[sz]e|sync|tell|toggle|trim|turn|type|update|upload|verify|view|visit|wipe|write)';
+const NAMED_APP_COMMAND_LEAD = '(?:please\\s+)?(?:(?:(?:can|could|would|will)\\s+you|i\\s+(?:want|need|would\\s+like)\\s+you)\\s+to\\s+)?';
+const NAMED_APP_PREFIX_RE = new RegExp(
+  `^${NAMED_APP_COMMAND_LEAD}(?:use|open|launch|start|focus|switch\\s+to)\\s+(?:the\\s+)?(.{1,72}?)(?:\\s+(?:app|application|program))?(?:\\s*[,;:]\\s*|\\s+(?:and|to)\\s+)${NAMED_APP_ACTION_VERB}\\b`,
+  'i',
+);
+const NAMED_APP_CONTEXT_RE = new RegExp(
+  `^${NAMED_APP_COMMAND_LEAD}(?:in|inside|using|with)\\s+(?:the\\s+)?(.{1,72}?)(?:\\s+(?:app|application|program))?(?:\\s*[,;:]\\s*|\\s+to\\s+)${NAMED_APP_ACTION_VERB}\\b`,
+  'i',
+);
+const NAMED_APP_OPEN_ONLY_RE = new RegExp(
+  `^${NAMED_APP_COMMAND_LEAD}(?:open|launch|start|focus)\\s+(?:the\\s+)?(.{1,72}?)(?:\\s+(?:app|application|program))?[.!]?$`,
+  'i',
+);
+const IMPERATIVE_APP_ACTION_RE = new RegExp(`^${NAMED_APP_COMMAND_LEAD}${NAMED_APP_ACTION_VERB}\\b`, 'i');
+
+function hasExplicitNamedAppFraming(message: string): boolean {
+  const text = String(message || '').trim();
+  return NAMED_APP_PREFIX_RE.test(text)
+    || NAMED_APP_CONTEXT_RE.test(text)
+    || NAMED_APP_OPEN_ONLY_RE.test(text);
+}
+
+const GENERIC_NON_APP_TARGETS = new Set([
+  'a browser', 'browser', 'the browser', 'a website', 'website', 'site', 'webpage', 'web page',
+  'a file', 'file', 'folder', 'document', 'image', 'photo', 'video', 'audio', 'project', 'task',
+  'computer', 'desktop', 'logic', 'reasoning', 'this', 'that', 'it', 'something', 'anything', 'any app',
+]);
+
+const BROWSER_APP_IDS = new Set(['chrome', 'safari']);
+const LOCAL_FILE_APP_IDS = new Set(['finder', 'preview', 'textedit']);
+const LOCAL_FILE_APP_NAMES = new Set(['finder', 'preview', 'apple preview', 'textedit', 'text edit']);
+const BROWSER_APP_NAMES = new Set([
+  'arc', 'arc browser', 'brave', 'brave browser', 'chrome', 'chromium', 'comet browser',
+  'edge', 'firefox', 'google chrome', 'microsoft edge', 'opera', 'opera browser', 'orion',
+  'safari', 'vivaldi', 'web browser', 'browser',
+]);
+const BROWSER_PLATFORM_NAMES = new Set([
+  'bigcommerce', 'framer', 'google docs', 'google sheets', 'google slides', 'shopify',
+  'squarespace', 'webflow', 'wix', 'woocommerce', 'wordpress', 'wordpress admin', 'wp admin',
+]);
+const SHORT_NATIVE_APP_NAMES = new Set(['mpv', 'obs', 'r', 'vlc', 'zed']);
+const EXPLICIT_WEB_TARGET_RE = /\b(?:https?:\/\/|www\.)\S+|(?<!@)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.(?:com|org|net|io|app|dev|ai|co|us|gov|edu)(?:\/\S*)?/i;
+const BROWSERBASE_DATA_SIDE_EFFECT_RE = /\b(?:authenticate|authorize|buy|checkout|delete|download|edit|export|fill|grant|log\s*in|login|order|pay|post|publish|purchase|remove|save|send|sign\s*in|submit|update|upload)\b/i;
+const NAMED_APP_MUTATION_RE = /\b(?:accept|add|adjust|animate|apply|authenticate|authorize|build|cancel|change|charge|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|generate|grant|import|insert|invite|link|log\s*in|login|make|model|move|mute|overwrite|package|paint|paste|post|press|print|publish|put|record|remove|rename|render|replace|resize|retouch|run|save|select|send|set|sign\s*in|split|submit|sync|toggle|trim|turn|type|update|upload|wipe|write)\b/i;
+
+function cleanNamedAppCandidate(value: string): string {
+  return String(value || '')
+    .replace(/^[\s'"`]+|[\s'"`]+$/g, '')
+    .replace(/^an?\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 72);
+}
+
+function isLikelyNamedAppCandidate(value: string): boolean {
+  const candidate = cleanNamedAppCandidate(value);
+  if (!candidate) return false;
+  const lower = candidate.toLowerCase();
+  if (GENERIC_NON_APP_TARGETS.has(lower)) return false;
+  // A filename/path between "Open" and the next action is a local artifact,
+  // not an unfamiliar application name (for example, "Open image.png from
+  // the Desktop and make it a jpg"). Let the direct-file planner own it.
+  if (/\.(?:avif|bmp|csv|docx?|gif|heic|jpe?g|json|md|mov|mp3|mp4|pdf|png|psd|svg|tiff?|txt|wav|xlsx?)\b/i.test(candidate)) return false;
+  if (/\bfrom\s+(?:the\s+)?(?:desktop|downloads?|documents?|folder|directory)\b/i.test(candidate)) return false;
+  const words = candidate.split(/\s+/);
+  if (words.length > 6) return false;
+  if (!words.every((word) => /^[A-Za-z0-9][A-Za-z0-9+._'’-]*$/.test(word))) return false;
+  if (words.length === 1 && candidate.length <= 3) {
+    const shortName = candidate.toLowerCase();
+    if (!findKnownAppInText(candidate) && !SHORT_NATIVE_APP_NAMES.has(shortName)) return false;
+  }
+  return candidate.length >= 2 || SHORT_NATIVE_APP_NAMES.has(candidate.toLowerCase());
+}
+
+function isAppGuidanceOrChoiceQuestion(message: string): boolean {
+  const text = String(message || '').trim();
+  return /^(?:should|would|could|can|may|might|do)\s+i\b/i.test(text)
+    || /^(?:what|why|which|when|where)\b/i.test(text)
+    || /^(?:is|are|does|do)\s+(?:the\s+)?[A-Za-z0-9][\s\S]{0,70}\?$/i.test(text);
+}
+
+function detectExplicitNamedAppAction(message: string): ExplicitNamedAppAction | null {
+  const text = String(message || '').trim();
+  if (!text || isAppGuidanceOrChoiceQuestion(text)) return null;
+
+  const knownInMessage = findKnownAppInText(text);
+  const framed = text.match(NAMED_APP_PREFIX_RE)
+    || text.match(NAMED_APP_CONTEXT_RE)
+    || text.match(NAMED_APP_OPEN_ONLY_RE);
+  const framedCandidate = cleanNamedAppCandidate(framed?.[1] || '');
+  let candidate = framedCandidate;
+
+  // A leading task verb plus a catalogued app also proves action intent:
+  // "Edit the title slide in PowerPoint and save it". Unknown apps require
+  // the stronger Use/Open/In framing above to avoid treating prose nouns as
+  // application names.
+  if (!candidate && knownInMessage && IMPERATIVE_APP_ACTION_RE.test(text)) {
+    candidate = knownInMessage.app.displayName;
+  }
+  if (!isLikelyNamedAppCandidate(candidate)) return null;
+
+  const knownCandidate = findKnownAppInText(candidate);
+  const normalizedCandidate = candidate.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const localFileEvidenceText = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, ' ');
+  const framedCandidateIndex = framedCandidate
+    ? text.toLowerCase().indexOf(framedCandidate.toLowerCase())
+    : -1;
+  const actionScope = framedCandidateIndex >= 0
+    ? text.slice(framedCandidateIndex + framedCandidate.length)
+    : text;
+  const intent = NAMED_APP_MUTATION_RE.test(actionScope) ? 'mutation' : 'launch_or_read';
+  const browserSurface = Boolean(
+    knownCandidate?.app.webOnly
+    || (knownCandidate && BROWSER_APP_IDS.has(knownCandidate.app.id))
+    || BROWSER_APP_NAMES.has(normalizedCandidate)
+    || BROWSER_PLATFORM_NAMES.has(normalizedCandidate)
+    || /^(?:browser|web)\s+(?:computer\s+use\s+)?task\b/i.test(normalizedCandidate)
+    || (!knownCandidate && EXPLICIT_WEB_TARGET_RE.test(text) && /\b(?:browse|go\s+to|navigate|open|visit)\b/i.test(text)),
+  );
+  const localFileSurface = Boolean(
+    (knownCandidate && LOCAL_FILE_APP_IDS.has(knownCandidate.app.id) || LOCAL_FILE_APP_NAMES.has(normalizedCandidate))
+    && (
+      /(?:~\/|\/Users\/|\b(?:desktop|downloads?|documents?|file|folder|directory)\b|\.[a-z0-9]{1,12}\b)/i.test(localFileEvidenceText)
+      || (/\bpreview\b/i.test(normalizedCandidate) && /\b(?:document|page|pdf)\b/i.test(localFileEvidenceText))
+    ),
+  );
+  return {
+    appName: knownCandidate?.app.displayName || candidate,
+    surface: browserSurface ? 'browser' : localFileSurface ? 'local_file' : 'desktop_app',
+    intent,
+  };
+}
+
+const NAMED_APP_DESTRUCTIVE_RE = /\b(?:erase|wipe)\b|\b(?:delete|remove)\b[\s\S]{0,100}\b(?:forever|permanent(?:ly)?|irreversible|without\s+(?:undo|recovery)|cannot\s+be\s+undone)\b|\b(?:permanent(?:ly)?|forever)\b[\s\S]{0,80}\b(?:delete|erase|remove|wipe)\b/i;
+const NAMED_APP_REMOTE_SIDE_EFFECT_RE = /\b(?:email|invite|post|publish|send|submit|upload)\b[\s\S]{0,120}\b(?:account|alert|announcement|customer|message|person|response|report|team|update|workspace)\b/i;
+const NAMED_APP_CREDENTIAL_OR_GRANT_RE = /\b(?:authenticate|authorize|connect|credentials?|grant|link|log\s*in|login|oauth|password|permission|sign\s*in|consent)\b/i;
+
+function normalizeNamedDesktopRisk(
+  message: string,
+  action: ExplicitNamedAppAction | null,
+  baselineRisk: UserTaskPipelineRisk,
+): UserTaskPipelineRisk {
+  if (action?.surface === 'local_file') {
+    if (baselineRisk === 'destructive' || baselineRisk === 'external_side_effect') return baselineRisk;
+    return action.intent === 'launch_or_read' ? 'safe' : maxRisk(baselineRisk, 'review');
+  }
+  if (action?.surface !== 'desktop_app') return baselineRisk;
+  if (NAMED_APP_DESTRUCTIVE_RE.test(message)) return 'destructive';
+  if (NAMED_APP_REMOTE_SIDE_EFFECT_RE.test(message)) return 'external_side_effect';
+  if (action.intent === 'launch_or_read') return 'safe';
+  // Credential and grant tasks keep any stronger classification while their
+  // non-grantable login/grant floor owns the mandatory confirmation.
+  if (NAMED_APP_CREDENTIAL_OR_GRANT_RE.test(message)) return maxRisk(baselineRisk, 'review');
+  // Named-app field/menu/toggle/dialog/canvas/timeline edits are local. Some
+  // broad keyword pipelines label "confirm", "track", or "response" as an
+  // external side effect; cap those false positives at review unless an
+  // explicit remote or destructive verb above proved the stronger boundary.
+  return 'review';
+}
+
 function explicitComputerSurfaceRequested(
   message: string,
   preview: ComputerTaskPlanPreview,
   strategy: ComputerAppTaskStrategy | null,
   designPipeline: DesignAppExecutionPipelinePlan | null,
+  namedAppAction: ExplicitNamedAppAction | null = null,
 ): boolean {
+  if (namedAppAction) return true;
   if (preview.kind !== 'unknown') return true;
   if (classifyBrowserbaseWorkflow(message).kind !== 'general_browser') return true;
   if (designPipeline) return true;
@@ -1016,7 +1277,9 @@ function synthesizePipelineSummary(
     : null;
   const fallbackTools = kind === 'local_file'
     ? ['desktop.file_search', 'desktop.file_stat', 'desktop.file_read']
-    : preview.requiredCapabilities.map((item) => `capability.${item}`);
+    : kind === 'browser'
+      ? ['browser.open_url', 'browser.dom_snapshot', 'browser.click_role', 'browser.fill_field']
+      : preview.requiredCapabilities.map((item) => `capability.${item}`);
   return {
     id,
     title: displayStrategyTargetLabel(strategy) || preview.label || 'Computer/App Request',
@@ -1032,6 +1295,99 @@ function synthesizePipelineSummary(
       ? [strategy.stopConditions[0]]
       : [preview.detail || 'Requested computer/app state is completed or an exact blocker is reported.'],
     approvalTriggers: (strategy?.approvalCheckpoints || []).slice(0, 8),
+    persistenceTargets: ['computer_task_state', 'run_ledger', 'chat_message'],
+  };
+}
+
+const DESKTOP_NATIVE_PIPELINE_IDS = new Set<UserTaskPipelineId>([
+  'desktop_app_control',
+  'creative_layout_design',
+  'adobe_creative_cloud',
+  'terminal_agents',
+]);
+
+const NAMED_DESKTOP_BASE_TOOLS = [
+  'desktop.list_running_apps',
+  'desktop.launch_app',
+  'desktop.wait_for_app',
+  'desktop.window_state',
+  'desktop.read_a11y_tree',
+  'desktop.menu_click',
+  'desktop.click_element',
+  'desktop.set_element_value',
+  'desktop.press_keys',
+  'desktop.type_text',
+  'desktop.screenshot',
+  'tools.search',
+  'research.search',
+  'fetch_url',
+  'agent.build_app_capability',
+];
+
+function isBrowserExecutionTool(tool: string): boolean {
+  return /^(?:browser|browserbase)\./i.test(String(tool || ''))
+    || /^capability\.browser(?:_|\b)/i.test(String(tool || ''));
+}
+
+/**
+ * A named native app must enter the desktop execution profile even when a
+ * generic visual/file classifier happened to rank a web or local-file
+ * pipeline first. Keep genuinely native specialist profiles (Adobe/design,
+ * terminal) but replace browser/file profiles with the universal desktop
+ * control loop and strip browser executable tools.
+ */
+function buildNamedDesktopPipelineSummary(input: {
+  appName: string;
+  base: UserTaskPipelineSummary;
+  risk: UserTaskPipelineRisk;
+  confidence: number;
+}): UserTaskPipelineSummary {
+  const keepNativeProfile = DESKTOP_NATIVE_PIPELINE_IDS.has(input.base.id);
+  const recommendedTools = uniqueStrings([
+    ...NAMED_DESKTOP_BASE_TOOLS,
+    ...(input.base.recommendedTools || []).filter((tool) => !isBrowserExecutionTool(tool)),
+  ]).slice(0, 20);
+
+  if (keepNativeProfile) {
+    return {
+      ...input.base,
+      category: 'desktop',
+      routeId: null,
+      executionKind: 'run_computer_task',
+      risk: maxRisk(input.base.risk, input.risk),
+      confidence: Number(Math.max(input.base.confidence, input.confidence).toFixed(2)),
+      recommendedTools,
+    };
+  }
+
+  return {
+    id: 'desktop_app_control',
+    title: `${input.appName} Desktop App Control`,
+    category: 'desktop',
+    routeId: null,
+    executionKind: 'run_computer_task',
+    risk: input.risk,
+    confidence: Number(input.confidence.toFixed(2)),
+    recommendedTools,
+    executionRequirements: [
+      `local desktop bridge able to launch and observe ${input.appName}`,
+      'fresh running-app, window, and accessibility state before mutation',
+      'app-native API, script, command, menu, or semantic control when available',
+    ],
+    solutionSteps: [
+      `Observe whether ${input.appName} is running and identify its active window/document.`,
+      `Launch ${input.appName} only when it is not already running, then wait until it is ready.`,
+      'Inspect app-native state or the accessibility tree before choosing a control.',
+      'Perform the smallest requested semantic action; refresh observation after any failed action before one bounded retry.',
+      'Verify the changed app state or output artifact before reporting completion.',
+      'If the app lacks a safe control surface, research official docs and build one reusable capability for the exact missing step.',
+    ],
+    completionCriteria: [
+      `the requested result is verified in ${input.appName}, or an exact install/license/permission/control blocker is reported`,
+    ],
+    approvalTriggers: (input.base.approvalTriggers || []).length
+      ? input.base.approvalTriggers.slice(0, 8)
+      : ['desktop document mutation, save, export, overwrite, delete, send, publish, upload, or new script/plugin execution'],
     persistenceTargets: ['computer_task_state', 'run_ledger', 'chat_message'],
   };
 }
@@ -1094,9 +1450,10 @@ function resolveRisk(input: {
 }
 
 /**
- * WI-2: A browser route whose commit step is a *plain-web* transaction
- * (browse/book/buy on a public site) defers its single side-effect confirm to
- * the mid-run payment floor, so the route no longer stops the user up front.
+ * WI-2: A browser route whose commit step is a *plain-web* transaction or
+ * upload (browse/book/buy/upload on a public site) defers its single
+ * side-effect confirm to the exact mid-run tool call, so the route no longer
+ * stops the user up front.
  * Credentialed website-admin routes (WordPress/Dealer Inspire admin, other
  * login-gated platform control) and desktop mutations are explicitly excluded
  * so their route-level approval checkpoint survives — the credential/login
@@ -1143,6 +1500,12 @@ function buildApproval(input: {
   stickyScopes?: StickyAllowScope[] | null;
   taskTargets?: StickyScopeTaskTarget | null;
   requestedCategories?: ChatComputerConstraintCategory[];
+  /**
+   * A compiler-owned program whose complete effect is one new unsaved local
+   * draft. The current direct user command is sufficient authority only after
+   * destructive floors and explicit ask-before constraints are checked.
+   */
+  directUserAuthorizedLocalDraft?: boolean;
 }): { required: boolean; reason: string | null; stickyApplied: StickyScopeAppliedSummary | null } {
   // T7 UX sticky-grant candidate — computed BEFORE the floor check so the
   // floor (and destructive risk, explicit "ask me" intent, and user
@@ -1174,10 +1537,17 @@ function buildApproval(input: {
     return { required: true, reason: 'The request includes destructive computer/app actions.', stickyApplied: null };
   }
   // WI-2: a plain-web browser route defers its single commit confirm to the
-  // mid-run payment floor. Credentialed website-admin routes and non-browser
-  // routes are excluded so their up-front approval checkpoint survives.
-  const browserRouteDefersFloor =
-    input.kind === 'browser' && !isCredentialedWebsiteAdminRoute(input.strategy, input.message);
+  // exact mid-run tool call. Upload joins the existing booking/purchase path:
+  // `browser.upload_file` is itself approvalMode:'ask', so a route-level gate
+  // would ask twice. Credentialed website-admin routes and non-browser routes
+  // are excluded so their up-front approval checkpoint survives.
+  const browserRouteDefersFloor = input.kind === 'browser'
+    && !isCredentialedWebsiteAdminRoute(input.strategy, input.message)
+    && (
+      hasTransactionalWebIntent(input.message)
+      || Boolean(input.alwaysConfirmFloor?.includes('pay'))
+      || Boolean(input.requestedCategories?.includes('upload'))
+    );
   // T7 floor: checked before every downgrade path (low-risk exports,
   // read-only routing, autonomy, sticky grants) so nothing below can return
   // required=false for a delete/login/grant task. Not user-disableable
@@ -1211,18 +1581,26 @@ function buildApproval(input: {
     return { required: true, reason: 'The user explicitly requested approval before execution.', stickyApplied: null };
   }
   if (input.risk === 'external_side_effect') {
-    // WI-2: a plain-web browser route (book/order/generic side-effect verbs)
-    // does not stop the user up front for external side effects — its single
-    // commit confirmation fires mid-run at the payment floor
-    // (`constraintBlocksToolCall`). Credentialed website-admin routes and
+    // WI-2: a plain-web browser route (book/order/upload) does not stop the
+    // user up front for external side effects — its single commit confirmation
+    // fires on the exact mutating tool call. The pay floor is enforced by
+    // `constraintBlocksToolCall`; upload is enforced by browser.upload_file's
+    // approvalMode:'ask' runtime policy. Credentialed website-admin routes and
     // desktop/app routes still require route-level approval here.
     if (browserRouteDefersFloor) {
-      return { required: false, reason: 'commit step confirmed mid-run at the payment floor', stickyApplied };
+      return { required: false, reason: 'exact browser commit step is confirmation-gated mid-run', stickyApplied };
     }
     if (stickyApplied) return { required: false, reason: null, stickyApplied };
     return { required: true, reason: 'The selected computer/browser path can affect external systems or user files.', stickyApplied: null };
   }
-  if (isLowRiskLocalImageExportTask(input.message)) {
+  if (
+    input.directUserAuthorizedLocalDraft
+    && input.kind === 'desktop_app'
+    && input.risk === 'review'
+  ) {
+    return { required: false, reason: null, stickyApplied: null };
+  }
+  if (input.kind === 'local_file' && isLowRiskLocalImageExportTask(input.message)) {
     return { required: false, reason: null, stickyApplied: null };
   }
   if (input.strategy?.id === 'agent_asset_acquisition' || input.kind === 'agent_buildout') {
@@ -1281,6 +1659,17 @@ function inferLocalFileReadToolFromMessage(message: string, tools: string[]): st
   return candidates.find(([tool, pattern]) => tools.includes(tool) && pattern.test(text))?.[0] || null;
 }
 
+function inferBrowserSemanticActionToolFromMessage(message: string, tools: string[]): string | null {
+  const text = String(message || '');
+  const candidates: Array<[string, RegExp]> = [
+    ['browser.set_toggle', /\b(?:check|choose|select|toggle|turn\s+(?:on|off)|uncheck)\b[\s\S]{0,100}\b(?:checkbox|dark\s+mode|dropdown|option|radio|setting|switch|theme)\b/i],
+    ['browser.fill_field', /\b(?:enter|fill|paste|search\s+for|type|write)\b/i],
+    ['browser.click_role', /\b(?:click|open|press|select)\b[\s\S]{0,120}\b(?:button|link|menu|tab)\b/i],
+    ['browser.dom_snapshot', /\b(?:extract|inspect|list|read|report|show|summari[sz]e|tell\s+me|view)\b/i],
+  ];
+  return candidates.find(([tool, pattern]) => tools.includes(tool) && pattern.test(text))?.[0] || null;
+}
+
 function inferWordPressActionToolFromMessage(message: string, tools: string[]): string | null {
   const text = String(message || '');
   const contentMutation = /\b(?:post|page|blog|article|draft|publish|schedule|slug|excerpt|featured image|featured media|content|title|di\s+slides?|di_slide|flavor_di_slides|slide|slider|expiration(?:_date)?|quick edit|menu order|media library|attach|upload)\b/i.test(text);
@@ -1335,6 +1724,25 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
   const tools = route.recommendedTools || [];
   const proof = route.completionProof || [];
   const items: ChatComputerRequestActionItem[] = [];
+  const exactProgram = compileComputerSequenceProgram(route.sourceMessage);
+
+  if (exactProgram?.id === 'photoshop_new_document') {
+    return exactProgram.steps.map((step, index) => {
+      const isFinalStatus = step.tool === 'desktop.photoshop_document_status'
+        && index === exactProgram.steps.length - 1;
+      return buildActionItem({
+        id: `exact-${index + 1}-${step.tool.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`,
+        surface: isFinalStatus ? 'verification' : 'desktop_app',
+        tool: step.tool,
+        label: step.note,
+        proof: isFinalStatus
+          ? route.evidenceContract?.proofAfter?.[0] || 'Final Photoshop document status with exact dimensions.'
+          : step.tool === 'desktop.photoshop_create_document'
+            ? 'App-native receipt for the directly requested unsaved blank document.'
+            : 'App-native Photoshop status/launch receipt.',
+      });
+    });
+  }
 
   if (route.kind === 'local_file') {
     if (tools.includes('desktop.file_search')) {
@@ -1585,14 +1993,27 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
         }));
       }
     } else {
-      const browserTool = firstTool(tools, ['browser.open_url', 'browser.dom_snapshot', 'browser.set_toggle', 'browser.click_role', 'browser.fill_field']);
-      if (browserTool) {
+      const openTool = tools.includes('browser.open_url') ? 'browser.open_url' : null;
+      if (openTool) {
+        addUniqueActionItem(items, buildActionItem({
+          id: 'open-browser-target',
+          surface: 'browser',
+          tool: openTool,
+          label: 'Open the explicit URL or requested browser target and verify the origin before operating the page.',
+          proof: 'Verified URL, origin, page title, or exact navigation blocker.',
+        }));
+      }
+      const semanticTool = inferBrowserSemanticActionToolFromMessage(route.sourceMessage || '', tools)
+        || (!openTool ? firstTool(tools, ['browser.dom_snapshot', 'browser.set_toggle', 'browser.click_role', 'browser.fill_field']) : null);
+      if (semanticTool) {
         addUniqueActionItem(items, buildActionItem({
           id: 'execute-browser-action',
           surface: 'browser',
-          tool: browserTool,
-          label: 'Use the selected browser tool with semantic locators and actionability checks.',
-          proof: proof[0] || 'Browser state or exact blocker.',
+          tool: semanticTool,
+          label: semanticTool === 'browser.dom_snapshot'
+            ? 'Read the requested page content from a fresh semantic DOM/ARIA snapshot after navigation.'
+            : 'Perform the requested semantic browser operation with role, label, or field actionability checks after navigation.',
+          proof: proof[0] || 'Requested browser state or exact blocker.',
           requiresApproval: route.approvalRequired,
         }));
       }
@@ -1657,22 +2078,71 @@ export function buildChatComputerRequestRoute(
   // computer route. High-precision interrogative anchors only, so real
   // requests ("can you open amazon…") are untouched.
   if (isAutomationMetaQuestion(normalized)) return null;
+  if (isAppGuidanceOrChoiceQuestion(normalized)) return null;
+
+  let namedAppAction = detectExplicitNamedAppAction(normalized);
 
   const bestMatch = getBestUserTaskPipeline(normalized, { includeFallback: false });
   const initialPipeline = bestMatch ? summarizeUserTaskPipelineMatch(bestMatch) : null;
-  if (isPureCreativeGeneration(normalized)) return null;
-  if (isPlainBuildDiscoveryRequest(normalized)) return null;
+  if (!namedAppAction && isPureCreativeGeneration(normalized)) return null;
+  if (!namedAppAction && isPlainBuildDiscoveryRequest(normalized)) return null;
   if (isSimpleWordpressConversationalIntent(normalized, initialPipeline)) return null;
   if (initialPipeline?.id === 'bridge_troubleshooting') return null;
   if (initialPipeline?.id === 'workflow_recording_replay' && isWorkflowRecordingRequest(normalized)) return null;
+  // Aggregate inbox/notification triage can mention several products without
+  // asking Chat to drive any one native app. Keep that higher-level OpenSwan
+  // integration workflow intact. A strongly framed command such as "Open
+  // Mail and read..." or "Use Slack to..." still opts into native control.
+  if (
+    initialPipeline?.id === 'inbox_notifications'
+    && initialPipeline.executionKind === 'run_openswan'
+    && !hasExplicitNamedAppFraming(normalized)
+    && !/\b(?:browser|webpage|website)\b/i.test(normalized)
+    && !EXPLICIT_WEB_TARGET_RE.test(normalized)
+  ) return null;
 
   const pipelineDecision = opts.pipelineDecision ?? buildUserTaskPipelineDecision(normalized, { includeFallback: false });
   const preview = planComputerTaskPreview(normalized);
-  const directImageConversion = isDirectLocalImageFormatConversionTask(normalized);
+  const exactProgram = compileComputerSequenceProgram(normalized);
+  // "Export as PNG" is a direct file conversion only when the user did not
+  // explicitly choose an app. In "Open Pixelmator Pro and export…", app
+  // identity is a hard surface constraint, not a hint to bypass the app.
+  const directImageConversion = namedAppAction?.surface !== 'desktop_app'
+    && isDirectLocalImageFormatConversionTask(normalized);
   const rawStrategy = buildComputerAppTaskStrategy(normalized, pipelineDecision);
-  const strategy = shouldPreferLocalFilePreview(normalized, preview, rawStrategy) ? null : rawStrategy;
+  const transactionalWebRequest = hasTransactionalWebIntent(normalized);
+  const browserbaseWorkflow = classifyBrowserbaseWorkflow(normalized);
+  // A literal URL is stronger evidence than any alias discovered inside that
+  // URL (for example, "developer" in developer.example.com must not launch
+  // the macOS Developer app). Multi-surface download/import workflows are
+  // restored to hybrid by the staged-transfer check below.
+  const explicitWebsiteRequest = hasExplicitWebsiteOperation(normalized);
+  const explicitBrowserTaskRequest = /^(?:browser|web)\s+(?:computer\s+use\s+)?task\s*:/i.test(normalized);
+  const explicitBrowserbaseWebWorkflow = browserbaseWorkflow.kind !== 'general_browser'
+    && EXPLICIT_WEB_TARGET_RE.test(normalized);
+  const browserSurfaceRequest = transactionalWebRequest
+    || explicitWebsiteRequest
+    || explicitBrowserTaskRequest
+    || explicitBrowserbaseWebWorkflow;
   const isWordPressRoute = initialPipeline?.id === 'wordpress_cms' || isWordPressAdminBrowserTask(normalized, rawStrategy);
   const isDealerInspireWordPressRoute = initialPipeline?.id === 'wordpress_cms' && /\b(dealer\s+inspire|dealerinspire|di\s+slides?|di_slide|flavor_di_slides|quick edit|expiration(?:_date)?|reload cache|admin\.php)\b/i.test(normalized);
+  // Explicit transactional/WordPress web evidence outranks a generic app-name
+  // parse. This prevents phrases such as "Open Amazon and buy…" or "Open the
+  // WordPress customizer…" from being treated as native long-tail apps.
+  if (namedAppAction && (browserSurfaceRequest || isWordPressRoute)) {
+    namedAppAction = { ...namedAppAction, surface: 'browser' };
+  }
+  const selectedRawStrategy = shouldPreferLocalFilePreview(normalized, preview, rawStrategy) ? null : rawStrategy;
+  const narrowedStrategy = narrowStrategyForExactComputerSequence(selectedRawStrategy, exactProgram);
+  const strategy = browserSurfaceRequest
+    ? narrowedStrategy && BROWSER_STRATEGIES.has(narrowedStrategy.id) ? narrowedStrategy : null
+    : namedAppAction?.surface === 'desktop_app'
+    ? narrowedStrategy && APP_STRATEGIES.has(narrowedStrategy.id) ? narrowedStrategy : null
+    : namedAppAction?.surface === 'browser'
+      ? narrowedStrategy && BROWSER_STRATEGIES.has(narrowedStrategy.id) ? narrowedStrategy : null
+      : namedAppAction?.surface === 'local_file'
+        ? narrowedStrategy && FILE_STRATEGIES.has(narrowedStrategy.id) ? narrowedStrategy : null
+      : narrowedStrategy;
   const designPipeline = directImageConversion || isWordPressRoute ? null : buildDesignAppExecutionPipelinePlan(normalized);
 
   // Wave-2 task→best-app resolution. URL-bearing and generic web-browsing
@@ -1683,6 +2153,20 @@ export function buildChatComputerRequestRoute(
   let appResolution = rawAppResolution && rawAppResolution.category !== 'web_browsing'
     ? summarizeAppResolution(rawAppResolution)
     : null;
+  // A strongly named surface owns opening. The generic resolver is allowed to
+  // choose an alternative only when the user did not name an app; otherwise
+  // its offline web fallback can silently turn "Use Affinity Photo" into
+  // Photopea/browser execution.
+  if (namedAppAction) {
+    const resolutionMatchesNamedSurface = Boolean(
+      appResolution?.explicitAppNamed
+      && (
+        (namedAppAction.surface === 'desktop_app' && appResolution.best.surface === 'desktop')
+        || (namedAppAction.surface === 'browser' && appResolution.best.surface === 'browser')
+      ),
+    );
+    if (!resolutionMatchesNamedSurface) appResolution = null;
+  }
   // A resolution CREATES a route only for high-confidence app-workbench
   // detections ("edit this photo"). Named apps and conversational
   // categories only stamp routes other signals built: operative named-app
@@ -1693,10 +2177,14 @@ export function buildChatComputerRequestRoute(
     && APP_WORKBENCH_TASK_CATEGORIES.has(appResolution!.category)
     && detectTaskAppCategory(normalized)?.confidence === 'high';
 
-  if (!resolutionCreatesRoute && !explicitComputerSurfaceRequested(normalized, preview, strategy, designPipeline)) return null;
+  if (!resolutionCreatesRoute && !explicitComputerSurfaceRequested(normalized, preview, strategy, designPipeline, namedAppAction)) return null;
 
   const stagedBrowserTransferIntoDesktopApp = isStagedBrowserFileTransferIntoDesktopApp(normalized, strategy);
   let kind = directImageConversion ? 'local_file' as const : resolveKind(preview, strategy, designPipeline, normalized);
+  if (namedAppAction?.surface === 'desktop_app') kind = 'desktop_app';
+  if (namedAppAction?.surface === 'browser') kind = 'browser';
+  if (namedAppAction?.surface === 'local_file') kind = 'local_file';
+  if (browserSurfaceRequest) kind = 'browser';
   if (stagedBrowserTransferIntoDesktopApp) kind = 'hybrid';
   if (appResolution && !appResolution.explicitAppNamed) {
     // Keep the surface consistent with the resolver's pick: an installed
@@ -1719,6 +2207,17 @@ export function buildChatComputerRequestRoute(
   if (appResolution && appResolution.explicitAppNamed && appResolution.best.surface === 'browser' && kind === 'desktop_app') {
     appResolution = null;
   }
+  // Pure local-file work must never inherit a resolver's web substitute. A
+  // filename conversion that happens to mention Photoshop is still a scoped
+  // file operation; opening Photoshop Web/Photopea would steal focus and
+  // violate the route's desktop-bridge-only evidence contract. A genuinely
+  // installed native app remains valid when it is part of the requested path,
+  // but its browser recovery fallback is removed from this local-only route.
+  if (kind === 'local_file' && appResolution?.best.surface === 'browser') {
+    appResolution = null;
+  } else if (kind === 'local_file' && appResolution?.recoveryFallback?.surface === 'browser') {
+    appResolution = { ...appResolution, recoveryFallback: null };
+  }
   const confidence = Number(Math.max(0.78, Math.min(0.96, Math.max(
     initialPipeline?.confidence || 0,
     pipelineDecision?.confidence || 0,
@@ -1726,14 +2225,32 @@ export function buildChatComputerRequestRoute(
     strategy ? 0.88 : 0,
     designPipeline ? 0.94 : 0,
   ))).toFixed(2));
-  const risk = resolveRisk({
+  const baselineRisk = resolveRisk({
     message: normalized,
     kind,
     preview,
     selectedPipeline: kind === 'local_file' ? null : initialPipeline,
     strategy,
   });
-  const selectedPipelineBase: UserTaskPipelineSummary = initialPipeline && initialPipeline.executionKind === 'run_computer_task'
+  // A fixed, bounded unsaved blank-document allocation has no persistent file
+  // or external side effect. Preserve stronger classifications, but do not
+  // label this exact direct-request program as generic review work.
+  const risk = exactProgram?.authorization.mode === 'direct_user_request'
+    && baselineRisk === 'review'
+    ? 'safe'
+    : kind === 'browser'
+      && explicitBrowserbaseWebWorkflow
+      && browserbaseWorkflow.kind === 'web_data_retrieval'
+      && !BROWSERBASE_DATA_SIDE_EFFECT_RE.test(normalized)
+      ? 'safe'
+    : kind === 'browser'
+      && baselineRisk === 'external_side_effect'
+      && !hasExternalSideEffectIntent(normalized)
+      && !NAMED_APP_CREDENTIAL_OR_GRANT_RE.test(normalized)
+      && !isCredentialedWebsiteAdminRoute(strategy, normalized)
+      ? 'review'
+    : normalizeNamedDesktopRisk(normalized, namedAppAction, baselineRisk);
+  const selectedPipelineCandidate: UserTaskPipelineSummary = initialPipeline && initialPipeline.executionKind === 'run_computer_task'
     ? { ...initialPipeline, risk: maxRisk(initialPipeline.risk, risk) }
     : initialPipeline && (
       initialPipeline.id === 'desktop_app_control' ||
@@ -1749,9 +2266,55 @@ export function buildChatComputerRequestRoute(
     )
       ? { ...initialPipeline, executionKind: 'run_computer_task' as const, routeId: isDealerInspireWordPressRoute || kind === 'browser' ? 'browser' : initialPipeline.routeId || null, risk: maxRisk(initialPipeline.risk, risk) }
       : synthesizePipelineSummary(kind, strategy, preview, risk, confidence);
+  const selectedPipelineBase: UserTaskPipelineSummary = !exactProgram
+    && namedAppAction?.surface === 'desktop_app'
+    && kind === 'desktop_app'
+    ? buildNamedDesktopPipelineSummary({
+        appName: namedAppAction.appName,
+        base: selectedPipelineCandidate,
+        risk,
+        confidence,
+      })
+    : !exactProgram && namedAppAction?.surface === 'local_file' && kind === 'local_file'
+      ? synthesizePipelineSummary('local_file', strategy, preview, risk, confidence)
+    : !exactProgram && kind === 'browser'
+      && explicitBrowserbaseWebWorkflow
+      && browserbaseWorkflow.kind === 'web_data_retrieval'
+      ? {
+          ...synthesizePipelineSummary('browser', null, preview, risk, confidence),
+          id: 'browser_data_retrieval',
+          title: browserbaseWorkflow.label,
+          recommendedTools: ['browser.open_url', 'browser.dom_snapshot', 'browser.screenshot', 'fetch_url'],
+          executionRequirements: browserbaseWorkflow.safetyNotes.slice(0, 8),
+          solutionSteps: browserbaseWorkflow.completionCriteria.slice(0, 8),
+          completionCriteria: ['Requested structured web data is returned with source context, or an exact browser blocker is reported.'],
+        }
+    : !exactProgram && kind === 'browser' && !strategy && !isWordPressRoute
+      && (namedAppAction?.surface === 'browser' || browserSurfaceRequest)
+      ? synthesizePipelineSummary('browser', strategy, preview, risk, confidence)
+      : selectedPipelineCandidate;
   // Wave-2: the chosen app is opened FIRST — prepend the open-first steps to
   // the route's solution steps so plan previews and prompts lead with it.
-  const selectedPipeline: UserTaskPipelineSummary = appResolution
+  const selectedPipeline: UserTaskPipelineSummary = exactProgram
+    ? {
+        ...selectedPipelineBase,
+        title: exactProgram.title,
+        solutionSteps: exactProgram.steps.map((step) => `${step.tool} ${JSON.stringify(step.args)} — ${step.note}`).slice(0, 8),
+        recommendedTools: uniqueStrings(exactProgram.steps.map((step) => step.tool)),
+        executionRequirements: [
+          'local desktop bridge with the dedicated Photoshop status, launch, and create-document tools',
+          exactProgram.authorization.mode === 'direct_user_request'
+            ? 'the current direct user command authorizes only this new unsaved blank document'
+            : 'one enclosing Chat plan-level approval before the oversized blank-document allocation',
+        ],
+        completionCriteria: [
+          'final Photoshop document status reports an active document with the exact requested dimensions',
+        ],
+        approvalTriggers: exactProgram.authorization.mode === 'direct_user_request'
+          ? []
+          : ['one Chat plan-level approval before dispatching the complete exact program'],
+      }
+    : appResolution
     ? {
         ...selectedPipelineBase,
         solutionSteps: uniqueStrings([
@@ -1760,19 +2323,30 @@ export function buildChatComputerRequestRoute(
         ]).slice(0, 8),
       }
     : selectedPipelineBase;
-  const routeId: ChatCommandRouteId | null = selectedPipeline.routeId || 'browser';
-  const surfacePlan = buildExecutionSurfacePlan({
-    message: normalized,
-    pipeline: selectedPipeline,
-    pipelineDecision: pipelineDecision || null,
-  });
+  // An exact native program is not a browser command. Leaving the synthesized
+  // creative pipeline's legacy `browser` route id attached made approval rows
+  // look like `chat.run_computer_task.browser`, even though every executable
+  // call targets the local Photoshop bridge.
+  const routeId: ChatCommandRouteId | null = exactProgram || kind === 'desktop_app' || kind === 'local_file'
+    ? null
+    : selectedPipeline.routeId || 'browser';
+  // A compiled sequence is already the complete executable surface plan.
+  // Running it through the generic surface planner is what reintroduced file,
+  // design-inventory, and fallback requirements into this simple request.
+  const surfacePlan = exactProgram
+    ? null
+    : buildExecutionSurfacePlan({
+        message: normalized,
+        pipeline: selectedPipeline,
+        pipelineDecision: pipelineDecision || null,
+      });
   const ledgerPreview = buildAgentRunLedgerPreview({
     message: normalized,
     pipeline: selectedPipeline,
     pipelineDecision: pipelineDecision || null,
     surfacePlan,
   });
-  const appAutomationRouteDecision = kind === 'local_file' || kind === 'agent_buildout' || strategy?.id === 'agent_asset_acquisition'
+  const appAutomationRouteDecision = exactProgram || kind === 'local_file' || kind === 'agent_buildout' || strategy?.id === 'agent_asset_acquisition'
     ? null
     : buildAppAutomationRouteDecision(normalized);
   const userConstraints = parseChatComputerUserConstraints(normalized);
@@ -1781,7 +2355,7 @@ export function buildChatComputerRequestRoute(
   const extractedTargets = extractStickyTaskTargets(normalized);
   const taskTargets: StickyScopeTaskTarget = {
     hostname: extractedTargets.hostname,
-    appName: extractedTargets.appName || designPipeline?.appName || null,
+    appName: extractedTargets.appName || namedAppAction?.appName || designPipeline?.appName || null,
   };
   const approval = buildApproval({
     message: normalized,
@@ -1793,34 +2367,59 @@ export function buildChatComputerRequestRoute(
     stickyScopes,
     taskTargets,
     requestedCategories: categoriesInText(normalized),
+    directUserAuthorizedLocalDraft: exactProgram?.authorization.mode === 'direct_user_request',
   });
-  const recommendedTools = uniqueStrings([
-    ...(directImageConversion ? ['desktop.convert_image', 'desktop.file_search', 'desktop.file_stat'] : []),
-    ...(stagedBrowserTransferIntoDesktopApp
-      ? ['browser.open_url', 'desktop.file_search', 'desktop.file_stat', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.window_state', 'desktop.read_a11y_tree']
-      : []),
-    ...(appResolution && rawAppResolution
-      ? buildAppOpenPlan(rawAppResolution.best).steps.map((step) => step.tool)
-      : []),
-    ...(strategy?.recommendedTools || []),
-    ...(designPipeline?.requiredToolSequence || []),
-    ...(selectedPipeline.recommendedTools || []),
-    ...(surfacePlan?.requiredApprovals.length ? ['approvals.request'] : []),
-  ]).slice(0, 28);
-  const completionProof = uniqueStrings([
-    ...(directImageConversion ? ['converted output file_stat', 'output basename and byte size'] : []),
-    ...(stagedBrowserTransferIntoDesktopApp ? ['downloaded artifact file_stat', 'target app/window state after import'] : []),
-    ...(surfacePlan?.completionProof || []),
-    ...(strategy?.verificationOrder || []),
-    ...(designPipeline ? ['design document inventory', 'proof screenshot or exported proof', 'output file stats'] : []),
-  ]).slice(0, 12);
-  const fallbackPipelineIds = uniqueStrings([
-    ...(pipelineDecision?.supporting.map((item) => item.id) || []),
-    selectedPipeline.id !== 'desktop_app_control' && kind === 'desktop_app' ? 'desktop_app_control' : null,
-    selectedPipeline.id !== 'local_files' && kind === 'local_file' ? 'local_files' : null,
-    selectedPipeline.id !== 'browser_navigation' && kind === 'browser' ? 'browser_navigation' : null,
-  ]) as UserTaskPipelineId[];
-  const bestPath = buildBestPath({ kind, preview, strategy, designPipeline, pipeline: selectedPipeline });
+  const recommendedToolCandidates = exactProgram
+    ? uniqueStrings(exactProgram.steps.map((step) => step.tool))
+    : uniqueStrings([
+        ...(directImageConversion ? ['desktop.convert_image', 'desktop.file_search', 'desktop.file_stat'] : []),
+        ...(stagedBrowserTransferIntoDesktopApp
+          ? ['browser.open_url', 'desktop.file_search', 'desktop.file_stat', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.window_state', 'desktop.read_a11y_tree']
+          : []),
+        ...(appResolution && rawAppResolution
+          ? buildAppOpenPlan(rawAppResolution.best).steps.map((step) => step.tool)
+          : []),
+        ...(strategy?.recommendedTools || []),
+        ...(designPipeline?.requiredToolSequence || []),
+        ...(selectedPipeline.recommendedTools || []),
+        ...(approval.required ? ['approvals.request'] : []),
+      ]);
+  const recommendedTools = (!exactProgram && namedAppAction?.surface === 'desktop_app' && kind === 'desktop_app'
+    ? uniqueStrings([
+        ...NAMED_DESKTOP_BASE_TOOLS,
+        ...recommendedToolCandidates.filter((tool) => (
+          !isBrowserExecutionTool(tool)
+          && (tool !== 'approvals.request' || approval.required)
+        )),
+      ])
+    : kind === 'local_file'
+      ? recommendedToolCandidates.filter((tool) => !isBrowserExecutionTool(tool))
+    : recommendedToolCandidates).slice(0, 28);
+  const completionProof = exactProgram
+    ? [
+        `final desktop.photoshop_document_status reports the requested active document dimensions`,
+        'created Photoshop document name and dimensions from app-native status',
+      ]
+    : uniqueStrings([
+        ...(directImageConversion ? ['converted output file_stat', 'output basename and byte size'] : []),
+        ...(stagedBrowserTransferIntoDesktopApp ? ['downloaded artifact file_stat', 'target app/window state after import'] : []),
+        ...(surfacePlan?.completionProof || []),
+        ...(strategy?.verificationOrder || []),
+        ...(designPipeline ? ['design document inventory', 'proof screenshot or exported proof', 'output file stats'] : []),
+      ]).slice(0, 12);
+  const fallbackPipelineIds = exactProgram
+    ? []
+    : uniqueStrings([
+        ...(pipelineDecision?.supporting.map((item) => item.id) || []),
+        selectedPipeline.id !== 'desktop_app_control' && kind === 'desktop_app' ? 'desktop_app_control' : null,
+        selectedPipeline.id !== 'local_files' && kind === 'local_file' ? 'local_files' : null,
+        selectedPipeline.id !== 'browser_navigation' && kind === 'browser' ? 'browser_navigation' : null,
+      ]) as UserTaskPipelineId[];
+  const bestPath = exactProgram
+    ? `desktop app: ${exactProgram.title} exact program`
+    : namedAppAction && kind !== 'hybrid'
+      ? `${kind.replace(/_/g, ' ')}: ${namedAppAction.appName}${selectedPipeline.title !== namedAppAction.appName ? ` via ${selectedPipeline.title}` : ''}`
+    : buildBestPath({ kind, preview, strategy, designPipeline, pipeline: selectedPipeline });
   const aiNeed = classifyDesktopTaskAiNeed({
     message: normalized,
     kind,
@@ -1834,13 +2433,15 @@ export function buildChatComputerRequestRoute(
     kind,
     recommendedTools,
     aiNeed,
+    exactProgramAuthorization: exactProgram?.authorization || null,
   });
   const notes = uniqueStrings([
     `Computer request route: ${bestPath}.`,
+    exactProgram ? `Exact program owns execution: ${exactProgram.steps.map((step) => step.tool).join(' -> ')}.` : null,
     `Preview kind: ${preview.kind}.`,
     `AI need: ${aiNeed.label} — ${aiNeed.reason}`,
     `Model orchestration: ${modelOrchestration.mode}; ${modelOrchestration.modelSelectionHint}`,
-    appResolution
+    !exactProgram && appResolution
       ? `App choice: ${appResolution.best.displayName} (${shortAppReason(appResolution.best.reason)}); alternatives: ${appResolution.alternativesSummary.map((alt) => alt.split(' — ')[0]).join(', ') || 'none'}.`
       : null,
     userConstraints
@@ -1856,6 +2457,8 @@ export function buildChatComputerRequestRoute(
       ? `Approval required: ${approval.reason}.`
       : approval.stickyApplied
         ? `Approval not required: standing grant for ${approval.stickyApplied.scopeKey} covers this task.`
+        : exactProgram?.authorization.mode === 'direct_user_request'
+          ? 'Approval not required: the current command authorizes one bounded new unsaved blank document.'
         : isLowRiskLocalImageExportTask(normalized)
           ? 'Approval not required for this bounded local image export.'
           : 'Approval not required before read-only routing.',
@@ -1889,7 +2492,7 @@ export function buildChatComputerRequestRoute(
     userConstraints,
     alwaysConfirmFloor,
     stickyScopeApplied: approval.stickyApplied,
-    appResolution,
+    appResolution: exactProgram ? null : appResolution,
     notes,
   };
   route.evidenceContract = buildComputerTaskEvidenceContract(route);
@@ -1915,6 +2518,24 @@ function routeNeedsDataTransferPrecisionRules(kind: ChatComputerRequestRouteKind
 export function buildChatComputerRequestRoutePromptBlock(message: string): string | null {
   const route = buildChatComputerRequestRoute(message);
   if (!route) return null;
+  const exactProgram = compileComputerSequenceProgram(route.sourceMessage);
+  if (exactProgram?.id === 'photoshop_new_document') {
+    return [
+      '## Chat Computer Request Route — Exact Program',
+      `Best path: ${route.bestPath}`,
+      `Request kind: ${route.kind}; execution=${route.executionKind}; route=${route.routeId || 'computer'}`,
+      `Risk: ${route.risk}; approval=${route.approvalRequired ? route.approvalReason || 'required before dispatch' : 'not required for this bounded unsaved draft'}`,
+      route.approvalRequired
+        ? 'Approval model: consume the one unified Chat plan-level approval before dispatching this complete program.'
+        : 'Authorization model: the current direct user command authorizes this one compiler-owned unsaved blank document. Saving, exporting, editing existing content, or external actions are outside this program.',
+      exactProgram.promptBlock,
+      route.evidenceContract ? formatComputerTaskEvidenceContractPromptBlock(route.evidenceContract) : null,
+      `Actionable desktop items: ${(route.actionItems || []).map((item, index) => `${index + 1}. ${item.label} [${item.tool}]`).join(' | ') || 'none'}`,
+      `Recommended tools: ${route.recommendedTools.join(' | ') || 'none'}`,
+      `Completion proof: ${route.completionProof.join(' | ') || 'exact blocker or final answer'}`,
+      'Execution rule: execute this one compiled program in order. No file/source/layer/export/buildout planning and no generic fallback pipeline applies.',
+    ].filter(Boolean).join('\n');
+  }
   return [
     '## Chat Computer Request Route',
     `Best path: ${route.bestPath}`,

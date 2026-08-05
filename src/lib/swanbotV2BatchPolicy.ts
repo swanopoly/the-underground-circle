@@ -15,6 +15,12 @@ export type SwanbotV2BatchToolPolicyContext = {
   userConstraints: ChatComputerUserConstraints | null;
   alwaysConfirmFloor: ChatComputerConstraintCategory[];
   hasApprovalGate: boolean;
+  /**
+   * Canonical catalog tools whose handler owns a durable, exact-argument
+   * approval boundary. This lets the pre-dispatch constraint guard defer to
+   * that boundary without pretending a surface callback exists.
+   */
+  runtimeApprovalToolNames?: ReadonlySet<string>;
 };
 
 export type SwanbotV2EdgeClientApprovalGate = (
@@ -214,8 +220,10 @@ export function createSwanbotV2BatchToolResultStopGuard(
  *
  * Explicit prohibitions always block. Ask-before and always-confirm matches
  * proceed only when the live surface supplied a genuine exact-call approval
- * gate; otherwise the core receives a fail-closed `requireApproval` verdict.
- * The core invokes the approval gate after this guard.
+ * gate or the named canonical tool handler owns the durable exact-call
+ * approval boundary; otherwise the core receives a fail-closed
+ * `requireApproval` verdict. The core invokes a surface gate after this guard;
+ * canonical handlers file and consume their own bound approval rows.
  */
 export function createSwanbotV2BatchToolConstraintGuard(
   context: SwanbotV2BatchToolPolicyContext,
@@ -229,6 +237,8 @@ export function createSwanbotV2BatchToolConstraintGuard(
         }
       : null;
   const turnFloor = new Set(context.alwaysConfirmFloor);
+  const hasExactApprovalBoundary = (toolName: string): boolean =>
+    context.hasApprovalGate || context.runtimeApprovalToolNames?.has(toolName) === true;
 
   return ({ toolName, input }) => {
     const verdict = constraintBlocksToolCall(context.userConstraints, toolName, input);
@@ -242,14 +252,14 @@ export function createSwanbotV2BatchToolConstraintGuard(
     const askBeforeVerdict = askBeforeConstraints
       ? constraintBlocksToolCall(askBeforeConstraints, toolName, input)
       : null;
-    if (askBeforeVerdict?.blocked && !context.hasApprovalGate) {
+    if (askBeforeVerdict?.blocked && !hasExactApprovalBoundary(toolName)) {
       return {
         requireApproval: true,
         reason: `The user asked for confirmation before "${askBeforeVerdict.category || 'sensitive'}" actions, but this turn has no approval gate.`,
       };
     }
 
-    if (verdict.floorConfirmRequired && !context.hasApprovalGate) {
+    if (verdict.floorConfirmRequired && !hasExactApprovalBoundary(toolName)) {
       const category = verdict.floorCategory;
       const categoryLabel = category || 'sensitive';
       const detectedInTurn = category && turnFloor.has(category)
@@ -264,7 +274,7 @@ export function createSwanbotV2BatchToolConstraintGuard(
     if (
       turnFloor.size > 0
       && isSwanbotV2DeferredFloorClientMutation(toolName)
-      && !context.hasApprovalGate
+      && !hasExactApprovalBoundary(toolName)
     ) {
       const categories = Array.from(turnFloor).join(', ');
       return {
@@ -299,6 +309,7 @@ export async function authorizeSwanbotV2EdgeClientToolCall(
     userConstraints: context.userConstraints,
     alwaysConfirmFloor: context.alwaysConfirmFloor,
     hasApprovalGate: Boolean(context.toolApprovalGate),
+    runtimeApprovalToolNames: context.runtimeApprovalToolNames,
   });
 
   let verdict: Awaited<ReturnType<AgentToolConstraintGuard>>;

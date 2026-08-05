@@ -112,7 +112,9 @@ export default function BestOfNResultCard({
       })}
       <View style={styles.footerRow}>
         <Text style={styles.footer}>
-          Adopting posts that answer as the reply. Race again with /bestof.
+          {onAdopt || onRaceAgain
+            ? 'Adopting posts that answer as the reply. Race again with /bestof.'
+            : 'Saved candidates from this earlier race. Expand any answer to review it.'}
         </Text>
         {onRaceAgain ? (
           <Pressable

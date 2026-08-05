@@ -34,6 +34,25 @@ assert(photoshopRoute.evidenceContract.proofAfter.some((item) => /Photoshop docu
 assert(photoshopRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes('/photoshop/uxp/scripting/')), 'Photoshop contract cites UXP scripting');
 assert(photoshopRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes('/executeasmodal/')), 'Photoshop contract cites executeAsModal');
 
+const exactBlankDocumentRoute = buildChatComputerRequestRoute('Open Photoshop and start a new project 600 x 600');
+assert(exactBlankDocumentRoute?.evidenceContract, 'exact blank-document route carries an evidence contract');
+assert.equal(exactBlankDocumentRoute.evidenceContract.taskFamily, 'from-scratch 600x600 blank-document creation');
+assert.deepEqual(exactBlankDocumentRoute.evidenceContract.proofAfter, [
+  'final desktop.photoshop_document_status reports an active 600x600 document',
+  'final app-native status reports the created document name and dimensions',
+]);
+assert.deepEqual(exactBlankDocumentRoute.evidenceContract.approvalBefore, [], 'bounded unsaved blank document has no redundant approval gate');
+assert(
+  exactBlankDocumentRoute.evidenceContract.mutationGuardrails.some((item) => /direct user command.*unsaved blank document/i.test(item)),
+  'exact blank-document contract records narrow direct-request authority',
+);
+assert(!/layer|source file|package|screenshot|export/i.test([
+  ...exactBlankDocumentRoute.evidenceContract.observeBefore,
+  ...exactBlankDocumentRoute.evidenceContract.actionabilityChecks,
+  ...exactBlankDocumentRoute.evidenceContract.proofAfter,
+  ...exactBlankDocumentRoute.evidenceContract.freshEvidenceRequired,
+].join(' ')), 'exact blank-document evidence omits generic edit-file review');
+
 const indesignRoute = buildChatComputerRequestRoute('Open this InDesign file and make changes for a marketing banner with different layers');
 assert(indesignRoute?.evidenceContract, 'InDesign route carries evidence contract');
 assert.equal(indesignRoute.evidenceContract.targetName, 'Adobe InDesign');

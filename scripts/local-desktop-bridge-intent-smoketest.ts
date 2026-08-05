@@ -169,6 +169,34 @@ function assertBlockingModalDetection() {
 function main() {
   assertBlockingModalDetection();
 
+  const exactBlankDocumentTask = 'Open Photoshop and start a new project 600 x 600';
+  const exactBlankDocumentGrants = buildComputerTaskGrantPlan({
+    task: exactBlankDocumentTask,
+    preview: planComputerTaskPreview(exactBlankDocumentTask),
+    audit: {
+      findings: [],
+      missing: [],
+      availableIntegrationProviders: [],
+      availableIntegrationCapabilities: [],
+      activeBridgeProviders: ['claude-code'],
+      activeMcpServerCount: 1,
+      activeMcpToolCount: 4,
+    },
+    grantedIds: [],
+  });
+  assert(
+    exactBlankDocumentGrants.grants.some((grant) => grant.id === 'app_action' && grant.approvalRequired === false),
+    'bounded exact blank document carries an approval-free app-action grant',
+  );
+  assert(
+    !exactBlankDocumentGrants.grants.some((grant) => grant.id === 'mcp_tool' || grant.id === 'bridge_tool'),
+    'exact program suppresses irrelevant generic MCP/agent-bridge grants',
+  );
+  assert(
+    exactBlankDocumentGrants.approvalSummary === null,
+    'exact blank-document access plan emits no false approval recommendation',
+  );
+
   assertIntent(
     'are you able to see all of the Chrome tabs I have open?',
     'browser_tabs',
@@ -396,6 +424,9 @@ function main() {
   // file searches — asserted right below.
   assertIntent('Open Photoshop on my computer', 'launch_app', { appQuery: 'Photoshop' }, 'run_computer_task');
   assertIntent('open Illustrator on my mac', 'launch_app', { appQuery: 'Illustrator' }, 'run_computer_task');
+  assertIntent('start Photoshop', 'launch_app', { appQuery: 'Photoshop' }, 'run_computer_task');
+  assertIntent('start Microsoft Project', 'launch_app', { appQuery: 'Microsoft Project' }, 'run_computer_task');
+  assertIntent('start Canvas', 'launch_app', { appQuery: 'Canvas' }, 'run_computer_task');
   // P22b: new-document phrasing covers spreadsheet/presentation/etc, not just
   // "document/file" — otherwise "start a new spreadsheet" launched an app
   // literally named "a new spreadsheet".
@@ -423,6 +454,18 @@ function main() {
     assert(seq[0]?.kind === 'launch_app' && seq[0]?.appQuery === 'Photoshop', 'first step launches Photoshop (not a file search)', `saw ${seq[0]?.kind}/${seq[0]?.appQuery}`);
     assert(!seq.some((s) => s.kind === 'open_file_search_match' || s.kind === 'file_search'), 'no file-search step for a fileless launch+create', seq.map((s) => s.kind).join(','));
     assert(seq.some((s) => s.kind === 'press_keys' && s.combo === 'Cmd+N'), 'create-a-new-project maps to Cmd+N', seq.map((s) => `${s.kind}:${(s as any).combo || ''}`).join(','));
+  }
+  {
+    const artifactIntent = detectLocalComputerAwarenessIntent('start a new project 600 x 600');
+    assert(!artifactIntent.route && artifactIntent.kind === null, 'sized project creation is not parsed as an app launch', `${artifactIntent.kind}/${artifactIntent.appQuery || ''}`);
+    for (const noun of ['document', 'canvas', 'image', 'composition']) {
+      const intent = detectLocalComputerAwarenessIntent(`start a new ${noun} 600 x 600`);
+      assert(!intent.route && intent.kind === null, `sized ${noun} creation is not parsed as an app launch`, `${intent.kind}/${intent.appQuery || ''}`);
+    }
+    const exactSequence = detectLocalComputerAwarenessIntentSequence('Open Photoshop and start a new project 600 x 600');
+    const falseLaunches = exactSequence.filter((step) => step.kind === 'launch_app' && !/^photoshop$/i.test(step.appQuery || ''));
+    assert(falseLaunches.length === 0, 'Photoshop sized-project request never launches an app named after the project', falseLaunches.map((step) => step.appQuery || '').join(','));
+    assert(exactSequence.filter((step) => step.kind === 'launch_app').length <= 1, 'Photoshop sized-project request is not counted as two launch steps', exactSequence.map((step) => `${step.kind}:${step.appQuery || ''}`).join(','));
   }
   assertExtraIntent(
     'Can you find the landscaping-img.png image on my desktop',
@@ -537,14 +580,23 @@ function main() {
     'run_computer_task',
   );
   assertExtraIntent(
-    'scroll down by 700',
+    'scroll down by 700 at 640,400',
     'mouse_scroll',
     (intent) => {
       assert(intent.deltaY === 700, 'mouse scroll delta parsed', `saw ${intent.deltaY}`);
       assert(intent.deltaX === 0, 'mouse scroll x delta parsed', `saw ${intent.deltaX}`);
+      assert(intent.x === 640 && intent.y === 400, 'mouse scroll exact coords parsed', `saw ${intent.x},${intent.y}`);
     },
     'run_computer_task',
   );
+  for (const unsafeCoordlessInput of ['scroll down by 700', 'mouse up', 'release the mouse']) {
+    const intent = detectLocalComputerAwarenessIntent(unsafeCoordlessInput);
+    assert(
+      !intent.route && intent.kind === null,
+      `"${unsafeCoordlessInput}" does not create a coord-less pointer mutation`,
+      `saw ${intent.kind}/${intent.reason}`,
+    );
+  }
   assertExtraIntent(
     'click the Save button in Photoshop',
     'semantic_click',

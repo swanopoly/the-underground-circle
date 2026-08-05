@@ -21,6 +21,7 @@ import {
   formatAppAutomationRouteDecisionPromptBlock,
   type AppAutomationRouteDecision,
 } from './appAutomationControlSurfaces';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 
 export type ComputerAppPreflightSeverity = 'info' | 'warning' | 'blocker';
 
@@ -431,19 +432,32 @@ export function buildComputerAppPreflight(args: {
     };
   }
 
-  const requiredCapabilities = STRATEGY_CAPABILITIES[strategy.id] || [];
+  const exactProgram = compileComputerSequenceProgram(args.task);
+  const ownsPhotoshopBlankDocument = exactProgram?.id === 'photoshop_new_document';
+  const directRequestAuthorized = exactProgram?.authorization.mode === 'direct_user_request';
+  // The compiled blank-document path has no source file, asset package,
+  // output file, layer edit, coordinate fallback, or connected-agent gap.
+  // Its entire capability footprint is the desktop bridge plus Photoshop
+  // app tools. A bounded draft uses direct-request authority; a resource-heavy
+  // allocation keeps one enclosing plan approval. Neither path adds a second
+  // per-tool stop.
+  const requiredCapabilities: ComputerCapabilityId[] = ownsPhotoshopBlankDocument
+    ? ['desktop_control', 'app_tools']
+    : STRATEGY_CAPABILITIES[strategy.id] || [];
   const capabilityItems = requiredCapabilities.map((capability) => buildCapabilityItem(capability, statusFor(args.audit, capability)));
-  const routeDecision = shouldBuildRouteDecision(strategy)
+  const routeDecision = !ownsPhotoshopBlankDocument && shouldBuildRouteDecision(strategy)
     // Feed the capability audit in as observed evidence so the decision reflects
     // what's actually connected (bridge, file grants) instead of reporting
     // needs_observation for infrastructure we already know is present.
     ? buildAppAutomationRouteDecision(args.task, { observedEvidence: deriveAuditObservedEvidence(args.audit) })
     : null;
-  const capabilityExpansionPlan = buildComputerCapabilityExpansionPlan(args.task, args.audit);
+  const capabilityExpansionPlan = ownsPhotoshopBlankDocument
+    ? null
+    : buildComputerCapabilityExpansionPlan(args.task, args.audit);
   // Research-first buildout detail for an unfamiliar (non-Adobe) app, attached
   // up front when a connected-agent buildout is already indicated. Adobe keeps
   // its richer design path; self-gates to null otherwise.
-  const appAdapterGapContract = buildDesignAppAutomationPlan(args.task)
+  const appAdapterGapContract = (ownsPhotoshopBlankDocument || buildDesignAppAutomationPlan(args.task))
     ? null
     : buildAppAdapterGapPlan(args.task)?.contract || null;
   const buildoutIndicated = !!appAdapterGapContract && (
@@ -465,7 +479,17 @@ export function buildComputerAppPreflight(args: {
       }
     : null;
   const routeDecisionItem = routeDecision ? buildRouteDecisionItem(routeDecision) : null;
-  const strategyItems = buildStrategySpecificItems(strategy, args.task);
+  const strategyItems = ownsPhotoshopBlankDocument
+    ? [{
+        id: 'photoshop:exact-blank-document-program',
+        severity: 'info' as const,
+        label: 'Exact Photoshop blank-document program selected',
+        detail: 'This from-scratch request is owned by the compiled status -> conditional launch -> status -> create_document -> final status sequence.',
+        fix: directRequestAuthorized
+          ? 'Execute the directly requested unsaved blank-document program without a redundant approval stop.'
+          : 'After the enclosing Chat plan approval, execute the oversized blank-document program without a second per-tool stop.',
+      }]
+    : buildStrategySpecificItems(strategy, args.task);
   const allItems = [...capabilityItems, ...strategyItems, routeDecisionItem].filter(Boolean) as ComputerAppPreflightItem[];
   const blockers = allItems.filter((item) => item.severity === 'blocker');
   const warnings = allItems.filter((item) => item.severity === 'warning');
@@ -477,7 +501,8 @@ export function buildComputerAppPreflight(args: {
     warnings.length > 0 ? 'partial' :
     ready ? 'ready' :
     'unknown';
-  const summary = `${strategy.label} preflight: ${status}. ${
+  const summaryLabel = ownsPhotoshopBlankDocument ? exactProgram?.title || strategy.label : strategy.label;
+  const summary = `${summaryLabel} preflight: ${status}. ${
     blockers.length > 0
       ? `${blockers.length} blocker${blockers.length === 1 ? '' : 's'}: ${blockers.map((item) => item.label).join(', ')}.`
       : warnings.length > 0
@@ -508,6 +533,11 @@ export function buildComputerAppPreflightPromptBlock(preflight: ComputerAppPrefl
     preflight.summary,
     `Required capabilities: ${preflight.requiredCapabilities.join(', ') || 'none'}`,
   ];
+  const exactProgramInfo = preflight.info.find((item) => item.id === 'photoshop:exact-blank-document-program');
+  if (exactProgramInfo) {
+    lines.push(`${exactProgramInfo.label}: ${exactProgramInfo.detail}`);
+    lines.push(`Exact-program authorization: ${exactProgramInfo.fix}`);
+  }
   if (preflight.routeDecision) {
     lines.push(formatAppAutomationRouteDecisionPromptBlock(preflight.routeDecision));
   }

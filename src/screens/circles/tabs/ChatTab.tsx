@@ -16,11 +16,19 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../lib/subscribeWithReconnect';
+import {
+  MAX_DRAFT_LENGTH,
+  draftKey,
+  reconcileDraft,
+  resolveStateAction,
+  shouldPreserveDraft,
+} from '../../../lib/chatComposerDraftCore';
 import FlatIcon from '../../../components/FlatIcon';
 import MemoryViewer from '../../../components/agent/MemoryViewer';
 import ChatThreadSidebar, { getInitialSidebarCollapsed, persistSidebarCollapsed } from './chat/ChatThreadSidebar';
 import ChatThreadHeader from './chat/ChatThreadHeader';
-import { createPrivateThread, getCircleDefaultThread, getThread, renameThread, updateThreadDefaultModel } from '../../../lib/circleChatThreads';
+import { createPrivateThread, deleteThread, getCircleDefaultThread, getThread, renameThread, updateThreadDefaultModel } from '../../../lib/circleChatThreads';
 import RunStatusBar from '../../../components/agent/RunStatusBar';
 import PluginPicker from '../../../components/agent/PluginPicker';
 import MemoryToast from '../../../components/agent/MemoryToast';
@@ -77,6 +85,7 @@ import {
   resolveChatAgentTarget,
   type ChatAgentTarget,
 } from '../../../lib/chatAgentTargets';
+import { resolveChatAgentSelectorPresentation } from '../../../lib/chatAgentSelectorPresentation';
 import {
   dispatchCustomAgentBridgeTask,
   supportsGenericCustomAgentDispatch,
@@ -204,7 +213,10 @@ import { matchStopResolution as matchChatStopResolution, resolveChatStopMessage 
 import { assessStreamDegeneracy, describeStreamDegeneracy } from '../../../lib/streamDegeneracyCore';
 import { formatVerificationReceipt } from '../../../lib/verificationReceiptCore';
 import { guardChatSend } from '../../../lib/chatSendGuardCore';
-import { segmentChatIntents } from '../../../lib/chatMultiIntentCore';
+import {
+  segmentChatIntents,
+  shouldSurfaceMultiIntentNotice,
+} from '../../../lib/chatMultiIntentCore';
 import ChatArtifacts from '../../../components/chat/ChatArtifacts';
 // V2 Builder adds copy/download/publish toolbar, device frames, and an
 // iframe runtime error overlay. Lives in tabs/chat/ because the components/
@@ -235,7 +247,6 @@ import {
   saveChatAgentAvatar,
   saveChatAgentName,
   saveLastThreadBuildArtifact,
-  stripPersistedChatBotPrefix,
   type PersistedChatBotMetadata,
   type PersistedChatRecoveryReliabilitySummary,
 } from '../../../lib/chatAgentIdentity';
@@ -260,6 +271,7 @@ import {
   buildChatInfluenceReferences,
 } from '../../../lib/chatAgentService';
 import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
+import { compileComputerSequenceProgram } from '../../../lib/computerSequenceProgramCore';
 import { UNIFIED_CONVERSATIONAL_INTENT_TYPES } from '../../../lib/chatConversationalCutoverParity';
 import { buildChatAutomationPlanPreview, type ChatAutomationPlanPreview } from '../../../lib/chatAutomationPlanPreview';
 import { createHitlApprovalGate } from '../../../lib/chatApprovalGate';
@@ -286,7 +298,11 @@ import {
   serializeLastAppResolution,
 } from '../../../lib/chatSessionStatePersistence';
 import type { ComputerTaskEvidenceContract } from '../../../lib/computerTaskEvidenceContract';
-import { buildChatDesignTaskCardModel } from '../../../lib/chatDesignTaskCard';
+import {
+  applyChatDesignTaskTimelineDisposition,
+  buildChatDesignTaskCardModel,
+  classifyChatDesignTaskTimeline,
+} from '../../../lib/chatDesignTaskCard';
 import { SEED_EVENT_NAME, parseComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
 import EngineeringDesignCard from '../../../components/chat/EngineeringDesignCard';
 import { extractEngineeringCapturesFromToolEvents } from '../../../lib/engineeringRuntimeCaptureCore';
@@ -311,7 +327,11 @@ import { createChatTransportHandlers, getOutcomeStateRequests, type ChatTranspor
 import { chooseChatTerminalTransport, looksLikeTerminalActionRequest as looksLikeActionRequest } from '../../../lib/chatTerminalTransportPolicy';
 import { decideChatOrchestration } from '../../../lib/aiFirstChatPolicy';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
-import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
+import {
+  deriveChatActivityFlags,
+  reconcileChatMessageSnapshot,
+  shapePersistedChatMessage,
+} from '../../../lib/chatMessageShape';
 import type { ChatMessage, ChatMessageSource, ChatBotMessageExtra } from '../../../lib/chatMessageTypes';
 import { buildFailoverBadge, type FailoverBadge } from '../../../lib/transportFailoverBadgeCore';
 import {
@@ -344,8 +364,11 @@ import {
 import {
   getCurrentChatUserProfile,
   loadCircleChatMembers,
+  loadMessageReactions,
+  loadOlderThreadMessages,
   loadThreadMessages,
   persistChatMessage,
+  setMessageReaction,
   updateChatMessageContent,
 } from '../../../lib/chatService';
 import {
@@ -499,6 +522,38 @@ const CHAT_SURFACE_MAX_WIDTH = 1680;
 // (deterministic + bounded) so the empty chat surfaces real, tappable examples.
 const EMPTY_CHAT_STARTERS = buildEmptyChatSuggestions({ max: 5 });
 const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
+type ChatThreadLoadState = {
+  status: 'resolving' | 'loading' | 'ready' | 'error';
+  threadId: string | null;
+  message?: string;
+};
+
+function activeChatThreadStorageKey(circleId: string, userId?: string | null): string {
+  const safeCircleId = String(circleId || '').trim().slice(0, 160) || '_';
+  const safeUserId = String(userId || '').trim().slice(0, 160) || '_';
+  return `uc_chat_active_thread::${safeCircleId}::${safeUserId}`;
+}
+
+function transcriptChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => message.durability !== 'ephemeral');
+}
+
+const LEGACY_EPHEMERAL_CHAT_SURFACES = new Set([
+  'main_chat_multi_intent_notice',
+  'main_chat_session_greeting',
+  'chat_automation_suggestion',
+  'chat_agent_selector_setup',
+  'agent_plan_mode_help',
+  'multi_agent_dispatch',
+  'multi_agent_roundtable',
+  'multi_agent_chain',
+  'multi_agent_debate',
+  'multi_agent_help',
+]);
+
+function isLegacyEphemeralChatSurface(surface?: string | null): boolean {
+  return LEGACY_EPHEMERAL_CHAT_SURFACES.has(String(surface || '').trim());
+}
 // Auto is the default — the runtime resolver in serviceProfileSouls
 // picks Haiku for casual / status / clarifying turns, Sonnet for
 // general code + design, and Opus for research / architecture / deep
@@ -712,6 +767,104 @@ type PendingBotMessageRecordWithAgentSubject = PendingBotMessageRecord & {
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
 };
 
+/** One hydration path for initial loads and realtime inserts. Keeping this
+ * parity is important: a row must not lose action-safety lineage merely
+ * because it arrived over Realtime instead of the initial query. */
+function hydratePersistedChatBotMetadata(
+  metadata?: PersistedChatBotMetadata | null,
+): Partial<ChatMessage> {
+  if (!metadata) return {};
+  return {
+    persistedMetadataSnapshot: metadata,
+    artifacts: metadata.artifacts,
+    wikiRefs: metadata.wikiRefs,
+    researchRefs: metadata.researchRefs,
+    memoriesUsed: metadata.memoriesUsed,
+    memoryRefs: metadata.memoryRefs,
+    memoryRecommendations: metadata.memoryRecommendations,
+    source: metadata.source,
+    agentSubjectMetadata: metadata.agentSubjectMetadata || undefined,
+    usage: metadata.usage || undefined,
+    executionStream: metadata.executionStream,
+    agentPlan: metadata.agentPlan,
+    taskPlan: metadata.taskPlan,
+    toolEvents: metadata.toolEvents,
+    verificationResults: metadata.verificationResults,
+    browserPlans: metadata.browserPlans,
+    browserPlanEvents: metadata.browserPlanEvents,
+    browserSessions: metadata.browserSessions,
+    runId: metadata.runId || metadata.computerHandoff?.runId || undefined,
+    requestId: metadata.requestId || undefined,
+    requestAuthorId: metadata.requestAuthorId || undefined,
+    recoveryOptions: metadata.recoveryOptions,
+    recoveryReliability: metadata.recoveryReliability || undefined,
+    computerTaskStatus: normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus)
+      || normalizeComputerTaskOutcomeStatus(metadata.computerHandoff?.outcomeStatus)
+      || undefined,
+    computerHandoff: metadata.computerHandoff || undefined,
+    chatAutomationPlanPreview: metadata.chatAutomationPlanPreview || undefined,
+    computerFindings: metadata.computerFindings || undefined,
+    bestOfN: metadata.bestOfN || undefined,
+    outcomeSignal: metadata.outcomeSignal || undefined,
+    quickReplies: metadata.computerFindings?.items?.length
+      ? metadata.computerFindings.items.map((_, i) => `Book option ${i + 1}`)
+      : undefined,
+    routing: metadata.routing || undefined,
+  };
+}
+
+/** Lossless persistence projector. Structured UI fields override their last
+ * parsed values, while envelope-only fields (for example observed evals and
+ * verification receipts) survive unrelated reaction/status updates. */
+function projectPersistedChatBotMetadata(
+  message: ChatMessage,
+  fallbackAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null,
+): PersistedChatBotMetadata {
+  const metadata: PersistedChatBotMetadata = {
+    ...(message.persistedMetadataSnapshot || {}),
+    localMessageId: message.id,
+  };
+  const assign = <K extends keyof PersistedChatBotMetadata>(
+    key: K,
+    value: PersistedChatBotMetadata[K] | undefined,
+  ) => {
+    if (value !== undefined) metadata[key] = value;
+  };
+  assign('runId', message.runId);
+  assign('requestId', message.requestId);
+  assign('requestAuthorId', message.requestAuthorId);
+  assign('source', message.source);
+  assign('agentSubjectMetadata', message.agentSubjectMetadata);
+  assign('usage', message.usage);
+  assign('artifacts', message.artifacts);
+  assign('wikiRefs', message.wikiRefs);
+  assign('researchRefs', message.researchRefs);
+  assign('memoriesUsed', message.memoriesUsed);
+  assign('memoryRefs', message.memoryRefs);
+  assign('memoryRecommendations', message.memoryRecommendations);
+  assign('executionStream', message.executionStream);
+  assign('agentPlan', message.agentPlan);
+  assign('taskPlan', message.taskPlan);
+  assign('toolEvents', message.toolEvents);
+  assign('verificationResults', message.verificationResults);
+  assign('browserPlans', message.browserPlans);
+  assign('browserPlanEvents', message.browserPlanEvents);
+  assign('browserSessions', message.browserSessions);
+  assign('recoveryOptions', message.recoveryOptions);
+  assign('recoveryReliability', message.recoveryReliability);
+  assign('computerTaskStatus', message.computerTaskStatus);
+  assign('computerHandoff', message.computerHandoff);
+  assign('chatAutomationPlanPreview', message.chatAutomationPlanPreview);
+  assign('computerFindings', message.computerFindings);
+  assign('bestOfN', message.bestOfN);
+  assign('routing', message.routing);
+  assign('outcomeSignal', message.outcomeSignal);
+  if (!metadata.agentSubjectMetadata && fallbackAgentSubjectMetadata) {
+    metadata.agentSubjectMetadata = fallbackAgentSubjectMetadata;
+  }
+  return metadata;
+}
+
 // Memory-reference label formatters (8) extracted verbatim to the pure,
 // smoke-tested src/lib/chatMemoryLabelCore.ts (decomposition unit U1) and
 // imported above. Behavior-identical to the former inline copies.
@@ -732,47 +885,24 @@ function mapPersistedRowsToChatMessages(
     return {
       ...base,
       reactions: row.reactions || {},
-      replyTo: null,
-      artifacts: metadata?.artifacts,
-      wikiRefs: metadata?.wikiRefs,
-      researchRefs: metadata?.researchRefs,
-      memoriesUsed: metadata?.memoriesUsed,
-      memoryRefs: metadata?.memoryRefs,
-      memoryRecommendations: metadata?.memoryRecommendations,
-      source: metadata?.source,
-      agentSubjectMetadata: metadata?.agentSubjectMetadata || undefined,
-      usage: metadata?.usage || undefined,
-      executionStream: metadata?.executionStream,
-      agentPlan: metadata?.agentPlan,
-      taskPlan: metadata?.taskPlan,
-      toolEvents: metadata?.toolEvents,
-      verificationResults: metadata?.verificationResults,
-      browserPlans: metadata?.browserPlans,
-      browserPlanEvents: metadata?.browserPlanEvents,
-      browserSessions: metadata?.browserSessions,
-      recoveryOptions: metadata?.recoveryOptions,
-      recoveryReliability: metadata?.recoveryReliability || undefined,
-      computerTaskStatus: metadata?.computerTaskStatus
-        || metadata?.computerHandoff?.outcomeStatus
-        || undefined,
-      computerHandoff: metadata?.computerHandoff || undefined,
-      chatAutomationPlanPreview: metadata?.chatAutomationPlanPreview || undefined,
-      computerFindings: metadata?.computerFindings || undefined,
-      bestOfN: (metadata as any)?.bestOfN || undefined,
-      // WI-4/WI-11: rebuild the "Book option N" quick-reply chips on reload so
-      // they survive persistence (the pending-record path carries live
-      // quickReplies already). Label must match the live builder exactly.
-      quickReplies: metadata?.computerFindings?.items?.length
-        ? metadata.computerFindings.items.map((_, i) => `Book option ${i + 1}`)
-        : undefined,
-      routing: metadata?.routing || undefined,
+      replyTo: row.reply
+        ? {
+            name: row.reply.is_bot
+              ? agentName
+              : (row.reply.user?.display_name || row.reply.user?.username || 'Circle Member'),
+            content: String(row.reply.content || '').slice(0, 80),
+          }
+        : null,
+      ...hydratePersistedChatBotMetadata(metadata),
       ...deriveChatActivityFlags(row.content),
     };
-  });
+  }).filter((message) => !isLegacyEphemeralChatSurface(message.source?.surface));
 }
 
 function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], agentName: string): ChatMessage[] {
-  return records.map((record) => {
+  return records.filter((record) => !isLegacyEphemeralChatSurface(
+    (record.source as ChatMessageSource | undefined)?.surface,
+  )).map((record) => {
     const pendingRecord = record as PendingBotMessageRecordWithAgentSubject;
     const timestampMs = Date.parse(record.createdAt);
     const isBot = record.isBot !== false;
@@ -782,6 +912,7 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       isBot,
       isUser: !isBot,
       userName: record.userName || agentName,
+      authorId: record.authorId || null,
       timestamp: Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date(),
       reactions: record.reactions || {},
       replyTo: record.replyTo || null,
@@ -808,10 +939,16 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       delegatedTo: record.delegatedTo,
       delegatedSubagents: record.delegatedSubagents,
       runId: record.runId,
+      requestId: record.requestId,
+      requestAuthorId: record.requestAuthorId,
+      persistedMetadataSnapshot: record.persistedMetadataSnapshot as PersistedChatBotMetadata | undefined,
       agentPlan: record.agentPlan as AgentPlanDraft | Record<string, unknown> | undefined,
       taskPlan: record.taskPlan as OpenSwanTaskPlan | undefined,
       toolEvents: record.toolEvents as OpenSwanToolEvent[] | undefined,
       verificationResults: record.verificationResults as OpenSwanVerificationResult[] | undefined,
+      computerFindings: record.computerFindings as PersistedComputerFindings | undefined,
+      bestOfN: record.bestOfN as PersistedBestOfNRace | undefined,
+      outcomeSignal: record.outcomeSignal as ChatMessage['outcomeSignal'],
       routing: record.routing as SwanBotStructuredResponse['routing'] | undefined,
       isPending: false,
       ...deriveChatActivityFlags(record.content),
@@ -878,6 +1015,9 @@ type ChatFailureRecoveryDetails = {
   checkpointRecovery?: ComputerTaskCheckpointRecoveryContext | null;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+  replayPolicy?: 'normal' | 'manual_verify_only';
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
 };
 
 type ChatFailureRecoveryPayload = {
@@ -1021,7 +1161,7 @@ function failoverBadgeForMessage(message: ChatMessage): FailoverBadge | null {
 }
 
 function describeLastTaskModel(messages: ChatMessage[]): string {
-  const lastBot = [...messages].reverse().find((message) => (
+  const lastBot = [...transcriptChatMessages(messages)].reverse().find((message) => (
     message.isBot
     && !message.isPending
     && !!message.content?.trim()
@@ -1111,12 +1251,16 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     isBot: message.isBot,
     isUser: message.isUser,
     userName: message.userName,
+    authorId: message.authorId || null,
     replyTo: message.replyTo || null,
     reactions: message.reactions,
     source: message.source,
     agentSubjectMetadata: message.agentSubjectMetadata || undefined,
     usage: message.usage,
     runId: message.runId,
+    requestId: message.requestId,
+    requestAuthorId: message.requestAuthorId,
+    persistedMetadataSnapshot: message.persistedMetadataSnapshot,
     delegatedTo: message.delegatedTo,
     delegatedSubagents: message.delegatedSubagents,
     artifacts: message.artifacts,
@@ -1135,6 +1279,9 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     computerTaskStatus: message.computerTaskStatus,
     computerHandoff: message.computerHandoff,
     chatAutomationPlanPreview: message.chatAutomationPlanPreview,
+    computerFindings: message.computerFindings,
+    bestOfN: message.bestOfN,
+    outcomeSignal: message.outcomeSignal,
     taskPlan: message.taskPlan,
     toolEvents: message.toolEvents,
     verificationResults: message.verificationResults,
@@ -1353,12 +1500,53 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const { width: viewportWidth } = useWindowDimensions();
   const desktopWriteGrantSeededRef = useRef(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  messagesRef.current = messages;
   // ── Threaded chat state ──────────────────────────────────────────────────
   // activeThreadId is the row in circle_chat_threads currently displayed.
-  // null until we resolve the circle's default thread. Persisted in the URL
-  // hash so refresh keeps you on the same thread.
+  // null until we resolve a validated saved/default thread. The selection is
+  // persisted per circle + user through the cross-platform storage helper.
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [threadLoadState, setThreadLoadState] = useState<ChatThreadLoadState>({
+    status: 'resolving',
+    threadId: null,
+  });
+  const [threadReloadToken, setThreadReloadToken] = useState(0);
+  const [circleInitRetryToken, setCircleInitRetryToken] = useState(0);
+  const [threadNavigationNotice, setThreadNavigationNotice] = useState<string | null>(null);
+  const [olderMessagesState, setOlderMessagesState] = useState<{
+    loading: boolean;
+    hasMore: boolean;
+    error: string | null;
+  }>({ loading: false, hasMore: true, error: null });
+  const olderMessagesInFlightRef = useRef(false);
+  const threadLoadGenerationRef = useRef(0);
+  const circleInitGenerationRef = useRef(0);
+  const initializedCircleRef = useRef<string | null>(null);
+  const activeThreadScopeRef = useRef<{ circleId: string; threadId: string | null }>({
+    circleId,
+    threadId: null,
+  });
+  activeThreadScopeRef.current = { circleId, threadId: activeThreadId };
+
+  // Fast Refresh preserves mounted React state. Remove legacy durable copies of
+  // what are now ephemeral routing/progress surfaces without requiring the user
+  // to reload Chat; newly-created ephemeral rows carry durability and remain
+  // visible for their current session.
+  useEffect(() => {
+    setMessages((current) => {
+      const next = current.filter((message) => (
+        message.durability === 'ephemeral'
+        || !isLegacyEphemeralChatSurface(message.source?.surface)
+      ));
+      if (next.length === current.length) return current;
+      messagesRef.current = next;
+      return next;
+    });
+  }, [activeThreadId, circleId]);
+
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(getInitialSidebarCollapsed);
+  const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
   const [threadListRefreshToken, setThreadListRefreshToken] = useState(0);
   const [members, setMembers] = useState<any[]>([]);
   const [input, setInput] = useState('');
@@ -1427,7 +1615,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [circleId]);
+  }, [circleId, circleInitRetryToken]);
   const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
     return new Set(
       marketplaceModelGroups
@@ -1583,6 +1771,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
   const pendingHitlApprovals = useAgentApprovals(circleId);
+  // Exact Chat plan approvals end the filing turn before any desktop action.
+  // Keep the original compiled request only in this tab's memory, keyed by the
+  // opaque approval id, so approving the card can resume it immediately
+  // without persisting raw task text in the approval row. The gate still
+  // recomputes and atomically consumes the exact plan fingerprint. Remaining
+  // limitation: this local continuation does not survive a tab refresh or an
+  // approval resolved exclusively from another member's client.
+  const pendingExactPlanApprovalResumesRef = useRef(new Map<string, {
+    task: string;
+    circleId: string;
+    threadId: string | null;
+    expiresAt: number;
+    originSettled: Promise<void>;
+  }>());
+  // Approval resolution can race the filing turn's final UI writes. Track the
+  // committed Chat context independently of the callback closure so a resume
+  // approved in one thread cannot dispatch after navigation or unmount. The
+  // generation also catches leave-and-return navigation where the identifiers
+  // happen to match again before originSettled resolves.
+  const exactApprovalResumeContextRef = useRef({
+    mounted: false,
+    circleId,
+    threadId: activeThreadId || null,
+    generation: 0,
+  });
+  useEffect(() => {
+    const generation = exactApprovalResumeContextRef.current.generation + 1;
+    exactApprovalResumeContextRef.current = {
+      mounted: true,
+      circleId,
+      threadId: activeThreadId || null,
+      generation,
+    };
+    return () => {
+      if (exactApprovalResumeContextRef.current.generation === generation) {
+        exactApprovalResumeContextRef.current = {
+          ...exactApprovalResumeContextRef.current,
+          mounted: false,
+        };
+      }
+    };
+  }, [activeThreadId, circleId]);
+  useEffect(() => {
+    for (const [approvalId, pending] of pendingExactPlanApprovalResumesRef.current) {
+      if (pending.circleId !== circleId || pending.threadId !== (activeThreadId || null)) {
+        pendingExactPlanApprovalResumesRef.current.delete(approvalId);
+      }
+    }
+  }, [activeThreadId, circleId]);
   // "Needs you" attention strip state (plan §1b/§1c/§2b). Declared up here —
   // ahead of sendMessage and the persistence effects that reference the
   // setters — while the derived attention state is computed just before the
@@ -1606,12 +1843,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // runner is fail-soft (missing table / creds → silent skip) and never
   // grants approvals — watch tasks are floor-checked read-only at create.
   useComputerTaskScheduleRunner({ circleId, userId: currentUserId, enabled: !!circleId });
+  const chatAutomationApprovalSessionKey = activeThreadId
+    ? `chat::${activeThreadId}`
+    : `chat::${circleId}`;
   const chatAutomationApprovalGate = useMemo(() => createHitlApprovalGate({
-    sessionKey: activeThreadId ? `chat::${activeThreadId}` : `chat::${circleId}`,
+    sessionKey: chatAutomationApprovalSessionKey,
     agentName,
     timeoutSeconds: 15 * 60,
     describe: (plan) => describeChatAutomationApproval(agentName, plan),
-  }), [activeThreadId, agentName, circleId]);
+  }), [agentName, chatAutomationApprovalSessionKey]);
   const automationSuggestionSeenRef = useRef<Set<string>>(new Set());
   const setAgentName = useCallback((name: string) => {
     const trimmed = name.trim() || MAIN_CHAT_AGENT_NAME;
@@ -1846,6 +2086,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     checkpointRecoveryObservations?: ComputerTaskCheckpointEvidenceObservation[];
     /** D6: result summary used as the completed/failed notification body. */
     resultSummary?: string | null;
+    /** A new active run is replacing any terminal notice from the prior run. */
+    startsNewActiveRun?: boolean;
   }) => {
     const checkpointRecovery = args.checkpointRecoveryIsNew
       ? markComputerTaskCheckpointRecoveryObserved(computerTaskState?.checkpointRecovery || null, args.checkpointRecovery || null, args.checkpointRecoveryObservations || [])
@@ -1902,12 +2144,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Reading storage (not React state) also keeps this callback's deps
     // narrow — widening them would re-trigger the run-status effect loop.
     const previousForNotifications = await loadComputerTaskState(circleId, activeThreadId).catch(() => null);
+    // A fresh planning/executing dispatch owns the status surface now. Keep
+    // unresolved needs-you notices, but acknowledge terminal notices from the
+    // previous attempt so a persisted "Blocked" banner cannot sit above a
+    // genuinely live run after reload/retry.
+    const notificationsToCarry = args.startsNewActiveRun
+      && (args.phase === 'planning' || args.phase === 'executing')
+      ? (previousForNotifications?.notifications || []).map((item) => (
+          item.kind === 'completed'
+          || item.kind === 'failed'
+          || item.kind === 'blocked'
+          || item.kind === 'partial_result'
+            ? { ...item, acknowledged: true }
+            : item
+        ))
+      : previousForNotifications?.notifications;
     const notification = deriveComputerTaskNotification(
       nextState,
       computerTaskNotificationSnapshot(previousForNotifications),
       { resultSummary: args.resultSummary || null },
     );
-    nextState.notifications = appendComputerTaskNotification(previousForNotifications?.notifications, notification);
+    nextState.notifications = appendComputerTaskNotification(notificationsToCarry, notification);
     setComputerTaskState(nextState);
     // Best-effort persistence (UI recovery convenience, not task-critical): on
     // native, storage is AsyncStorage directly and setItem can reject (I/O
@@ -2276,6 +2533,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }) => {
     const trimmed = taskText.trim();
     if (!trimmed) return;
+    const exactSequenceProgram = compileComputerSequenceProgram(trimmed);
+    let settleExactApprovalOrigin: () => void = () => {};
+    const exactApprovalOriginSettled = exactSequenceProgram
+      ? new Promise<void>((resolve) => { settleExactApprovalOrigin = resolve; })
+      : Promise.resolve();
     // Show the typing indicator immediately so the ~430-line multi-await
     // preamble below (capability audit, Supabase reads, optional bridge
     // autoconnect, persist writes) never leaves the user staring at their own
@@ -2496,7 +2758,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       ...execution.preflight.blockers.map((item) => `${item.label}: ${item.fix}`),
     ];
     const preflightWarnings = execution.preflight.warnings.map((item) => `${item.label}: ${item.fix}`);
-    const preflightIssues = [...preflightBlockers, ...preflightWarnings];
     const defaultNextSteps = execution.entrypoint === 'browser_runtime'
       ? ['Review the access plan', 'Approve browser access if the task looks right']
       : ['Run the best available computer surface', 'Review the result and blockers'];
@@ -2566,13 +2827,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       taskKind: execution.preview.kind,
       taskLabel: execution.preview.label,
       phase: options?.readyCapabilityBuildout ? 'executing' : 'planning',
+      startsNewActiveRun: true,
       outcomeStatus: null,
       adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
       grantedAccess: execution.grants.granted,
       accessPlan: execution.grants.summary,
       blockers: [
         ...(!execution.readiness.ready ? [execution.readiness.summary] : []),
-        ...preflightIssues,
+        ...preflightBlockers,
         ...groundingBlockers,
       ].slice(0, 6),
       nextSteps: execution.preflight.fixActions.length > 0
@@ -2620,10 +2882,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       },
     });
 
-    const builtPlan = buildChatAutomationPlan({
-      message: options?.planPrefix ? `${options.planPrefix}${trimmed}` : trimmed,
+    // Classifiers and exact-program compilers must see the user's raw task.
+    // Console/retry labels are dispatch context only; prepending them used to
+    // turn an exact desktop program into a generic browser-tagged plan.
+    const classifiedPlan = buildChatAutomationPlan({
+      message: trimmed,
       selectedMode: chatMode,
     });
+    const builtPlan: ChatAutomationPlan = options?.planPrefix
+      ? {
+          ...classifiedPlan,
+          notes: [
+            `Dispatch context: ${options.planPrefix.trim()}`,
+            ...classifiedPlan.notes,
+          ],
+        }
+      : classifiedPlan;
     const computerPlan: ChatAutomationPlan = builtPlan.execution.kind === 'run_computer_task'
       ? builtPlan
       : {
@@ -2662,6 +2936,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       checkpointRecovery?: ComputerTaskCheckpointRecoveryContext | null;
       evidenceContract?: ComputerTaskEvidenceContract | null;
       appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+      replayPolicy?: 'normal' | 'manual_verify_only';
+      mutationDispatched?: boolean;
+      verificationOnlyTools?: string[];
     }): Promise<ChatFailureRecoveryPayload> => {
       const checkpointRecovery = details.checkpointRecovery || diagnoseComputerTaskCheckpointFailure({
         task: trimmed,
@@ -2718,6 +2995,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         checkpointRecovery,
         evidenceContract: details.evidenceContract || computerEvidenceContract,
         appRouteDecision: details.appRouteDecision || computerAppRouteDecision,
+        replayPolicy: details.replayPolicy || 'normal',
+        mutationDispatched: details.mutationDispatched === true,
+        verificationOnlyTools: details.verificationOnlyTools || [],
         touched: [
           'surface:computer_use',
           `computer_task:${trimmed}`,
@@ -2733,6 +3013,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setBotTyping(true);
     setRunStatus('running');
     let computerTaskController: AbortController | null = null;
+    const releaseComputerTaskTransientUi = () => {
+      if (openSwanAbortRef.current === computerTaskController) {
+        openSwanAbortRef.current = null;
+      }
+      setRunStatus('idle');
+      setBotTyping(false);
+    };
     try {
       if (preflightBlockers.length > 0) {
         const blockerLines = preflightBlockers.map((blocker) => `- ${blocker}`).join('\n');
@@ -2826,6 +3113,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             checkpointRecovery: preflightCheckpointRecovery,
           },
         });
+        releaseComputerTaskTransientUi();
         const recovery = await startTaskFailureRecovery({
           failureMessage: preflightFailureMessage,
           outcomeStatus: 'blocked',
@@ -2872,6 +3160,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             audit,
           },
         },
+        // Only compiler-owned sequences have complete, immutable calls at
+        // plan time. The dispatcher can therefore authorize their local
+        // deterministic handler from the declared policy: a direct request for
+        // the bounded unsaved draft, or one approval when the compiler marks a
+        // resource-heavy allocation. Generic/model-planned computer work keeps
+        // its existing per-tool exact approval boundaries.
+        approvalGate: exactSequenceProgram ? chatAutomationApprovalGate : undefined,
         handlers: {
           run_computer_task: async (_dispatchedPlan, transportCtx) => {
             if (execution.entrypoint === 'browser_runtime') {
@@ -2892,7 +3187,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   // re-asks questions the user already answered in chat.
                   appResolutionName: computerPlan.computerRequestRoute?.appResolution?.best?.displayName || null,
                   hasAttachments: attachments.length > 0,
-                  chatHistoryTail: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n').slice(-1500),
+                  chatHistoryTail: transcriptChatMessages(messages).slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n').slice(-1500),
                   isLaunchOnly: false,
                 });
                 if (clarification) {
@@ -2979,11 +3274,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 .then(({ recordStickyAllowScopeUse }) => recordStickyAllowScopeUse([computerStickyScopeApplied.scopeId]))
                 .catch(() => {});
             }
+            // This branch is the native app/file/hybrid boundary (the browser
+            // runtime returned above). Release the web composer immediately
+            // before dispatch so later task-state reconciliation cannot make
+            // Chrome reclaim the foreground from the target desktop app.
+            if (Platform.OS === 'web') {
+              try { inputRef.current?.blur(); } catch {}
+            }
             // Give the native app/file/hybrid agent lane the same real STOP
-            // signal used by OpenSwan session turns. The plan-level approval
-            // gate cannot review individual tool calls, so it is intentionally
-            // NOT adapted into a toolApprovalGate; ask-before/floor matches
-            // stay closed.
+            // signal used by OpenSwan session turns. The dispatcher above
+            // authorizes a compiled exact sequence at entry (direct request
+            // for a bounded unsaved draft, or a consumed plan approval); it is
+            // intentionally NOT adapted into a generic per-tool approval gate,
+            // so non-exact ask-before/floor matches remain closed.
             computerTaskController = new AbortController();
             // The legacy edge batch lane does not consume AbortSignal. Expose
             // STOP only when the SwanBot v2 client loop can honor it.
@@ -2999,7 +3302,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               audit,
               grantedIds,
               businessModelPlan,
-              chatHistory: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+              chatHistory: transcriptChatMessages(messages).slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
               sessionArchiveContext: await loadSessionArchiveContext() || undefined,
               replyTo: replyTo?.content,
               readyCapabilityBuildout: options?.readyCapabilityBuildout || null,
@@ -3010,6 +3313,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               userConstraints: computerPlan.computerRequestRoute?.userConstraints ?? undefined,
               alwaysConfirmFloor: computerPlan.computerRequestRoute?.alwaysConfirmFloor ?? undefined,
               agentContextPack: transportCtx.agentContextPack,
+              exactSequenceDispatchAuthorized: Boolean(exactSequenceProgram),
               // Wave-2 app choice: thread the route's resolution so the
               // dispatch block carries the App-choice contract (open the
               // chosen app first, verify frontmost, one named fallback).
@@ -3082,6 +3386,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 grantIds: result.execution.grants.outstanding.map((grant) => grant.id),
                 handoffSuggestion: result.handoffSuggestion || null,
                 capabilityBuildout: completedAutoRetryBuildout || result.capabilityBuildout || null,
+                replayPolicy: result.replayPolicy || 'normal',
+                mutationDispatched: result.mutationDispatched === true,
+                verificationOnlyTools: result.verificationOnlyTools?.slice(0, 4) || [],
               },
             };
           },
@@ -3099,6 +3406,31 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             .catch(() => {});
         },
       });
+
+      const deferredApprovalCategory = typeof outcome.data?.approvalCategory === 'string'
+        ? outcome.data.approvalCategory
+        : null;
+      if (
+        exactSequenceProgram
+        && outcome.status === 'deferred'
+        && outcome.approvalId
+        && (deferredApprovalCategory === 'filed' || deferredApprovalCategory === 'pending')
+      ) {
+        const now = Date.now();
+        for (const [approvalId, pending] of pendingExactPlanApprovalResumesRef.current) {
+          if (pending.expiresAt <= now) pendingExactPlanApprovalResumesRef.current.delete(approvalId);
+        }
+        const reportedExpiry = Number(outcome.data?.approvalExpiresAt);
+        pendingExactPlanApprovalResumesRef.current.set(outcome.approvalId, {
+          task: trimmed,
+          circleId,
+          threadId: activeThreadId || null,
+          expiresAt: Number.isFinite(reportedExpiry) && reportedExpiry > now
+            ? reportedExpiry
+            : now + 15 * 60 * 1000,
+          originSettled: exactApprovalOriginSettled,
+        });
+      }
 
       const prefix = '';
       const grantSummary = typeof outcome.data?.grantSummary === 'string' ? outcome.data.grantSummary : '';
@@ -3133,6 +3465,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const browserActions = outcome.data?.browserActions as BrowserAction[] | undefined;
       const handoff = outcome.data?.handoffSuggestion as HandoffSuggestion | undefined;
       const capabilityBuildout = outcome.data?.capabilityBuildout as ComputerTaskCapabilityBuildout | null | undefined;
+      const replayPolicy = outcome.data?.replayPolicy === 'manual_verify_only'
+        ? 'manual_verify_only' as const
+        : 'normal' as const;
+      const mutationDispatched = outcome.data?.mutationDispatched === true;
+      const verificationOnlyTools = Array.isArray(outcome.data?.verificationOnlyTools)
+        ? (outcome.data.verificationOnlyTools as unknown[]).map(String).filter(Boolean).slice(0, 4)
+        : [];
       const capabilityBuildoutHints = buildAgentAppCapabilityBuildoutStateHints({
         status: capabilityBuildout?.status,
         message: capabilityBuildout?.message,
@@ -3229,6 +3568,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         requestNotice: computerRequestNotice,
         evidenceContract: computerEvidenceContract,
         appAutomationRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
+        replayPolicy,
+        mutationDispatched,
+        verificationOnlyTools,
         stickyScopeApplied: computerStickyScopeApplied,
         warnings: outcomeWarnings,
         rawWarnings: rawOutcomeWarnings,
@@ -3350,7 +3692,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           blockers: [
             ...(approvalSummary ? [approvalSummary] : []),
             ...outcomePreflightBlockers,
-            ...outcomePreflightWarnings,
             ...outcomeGroundingBlockers,
           ].slice(0, 6),
           grounding: outcomeGroundingState,
@@ -3410,6 +3751,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           capabilityBlockers: capabilityBuildoutHints.blockers,
           capabilityPhase: capabilityBuildoutHints.phase,
           suppressGenericRecovery: capabilityBuildoutHints.suppressGenericRecovery,
+          approvalCategory: deferredApprovalCategory,
+          replayPolicy,
+          mutationDispatched,
+          verificationOnlyTools,
         });
         shouldShowPendingHandoff = Boolean(handoff && !outcomePresentation.hideComputerHandoff);
         shouldClearPendingHandoff = outcomePresentation.hideComputerHandoff;
@@ -3517,8 +3862,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             checkpointRecovery: outcomeCheckpointRecovery,
           },
         });
-        const recovery = shouldRecoverOutcome
-          ? await startTaskFailureRecovery({
+        let recovery: ChatFailureRecoveryPayload | null = null;
+        if (shouldRecoverOutcome) {
+          releaseComputerTaskTransientUi();
+          recovery = await startTaskFailureRecovery({
               failureMessage: outcomeFailureMessage,
               outcomeStatus: computerTaskStatus || (outcome.status === 'completed' ? 'completed_with_warnings' : outcome.status),
               executionKind: outcome.executionKind,
@@ -3530,8 +3877,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               complexityPlan: outcomeComplexityPlan,
               checkpointRecovery: outcomeCheckpointRecovery,
               appRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
-            })
-          : null;
+              replayPolicy,
+              mutationDispatched,
+              verificationOnlyTools,
+            });
+        }
         const userVisibleOutcome = outcomePresentation.compactUserMessage
           ? outcomePresentation.compactUserMessage
           : `${prefix}${visibleOutcomeMessage || outcome.message}${handoffBlock}${accessBlock}${warningBlock}${recovery?.message || ''}`;
@@ -3612,6 +3962,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         typeof error?.stack === 'string' ? error.stack : null,
         exceptionHandoffContext.touched,
       );
+      releaseComputerTaskTransientUi();
       const recovery = await startTaskFailureRecovery({
         failureMessage: error?.message || 'Unknown error',
         failureStack: typeof error?.stack === 'string' ? error.stack : null,
@@ -3645,10 +3996,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
       setRunStatus('idle');
       setBotTyping(false);
+      // A realtime approval click can arrive while the filing invocation is
+      // still persisting its awaiting-approval state. Release a queued resume
+      // only after this invocation has completed its own final UI writes, so
+      // it cannot clobber the resumed run back to idle/awaiting approval.
+      settleExactApprovalOrigin();
     }
   }, [
     activeThreadId,
     agentName,
+    chatAutomationApprovalGate,
     chatMode,
     circleId,
     currentUserId,
@@ -3753,7 +4110,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const toolLabels = Array.from(new Set(queued.map((q) => q.tool)));
     // The "resuming" notice prints ONLY at actual dispatch — never before a
     // guard that could silently drop the continuation.
-    addBotMessage(`✅ Approval${queued.length > 1 ? 's' : ''} granted — resuming ${toolLabels.join(', ')} now.`, undefined, { localOnly: true });
+    addBotMessage(`✅ Approval${queued.length > 1 ? 's' : ''} granted — resuming ${toolLabels.join(', ')} now.`, undefined, {
+      localOnly: true,
+      durability: 'ephemeral',
+    });
     const lines = queued.map((q) => `Approval ${q.id.slice(0, 8)} for ${q.tool} was granted.`);
     void sendMessage(
       `${lines.join(' ')} For each approved tool call that has not already executed since its approval, retry that exact call with the same arguments now — skip any that already completed. Then continue the task.`,
@@ -4056,53 +4416,322 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // ─── Init ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    init();
+    const generation = ++circleInitGenerationRef.current;
+    initializedCircleRef.current = null;
+    threadLoadGenerationRef.current += 1;
+    setLoaded(false);
+    setActiveThreadId(null);
+    activeThreadScopeRef.current = { circleId, threadId: null };
+    setThreadLoadState({ status: 'resolving', threadId: null });
+    setThreadNavigationNotice(null);
+    setMessages([]);
+    messagesRef.current = [];
+    setInput('');
+    setReplyTo(null);
+    setShowReactions(null);
+    setShowMentions(false);
+    setMentionQuery('');
+    setAttachments([]);
+    setStagedFiles([]);
+    setOlderMessagesState({ loading: false, hasMore: true, error: null });
+    void init(circleId, generation);
+    return () => {
+      if (circleInitGenerationRef.current === generation) {
+        circleInitGenerationRef.current += 1;
+      }
+    };
   }, [circleId]);
 
-  // ── Reload messages when the user switches threads ───────────────────────
-  // Runs only on subsequent thread changes — initial load is handled by init().
-  // Skip when activeThreadId is null (still resolving) or matches the freshly
-  // loaded set.
-  const initialThreadRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!circleId || !activeThreadId) return;
-    if (initialThreadRef.current === null) {
-      initialThreadRef.current = activeThreadId;
-      return; // first set during init() — don't double-load
-    }
-    if (initialThreadRef.current === activeThreadId) return;
-    initialThreadRef.current = activeThreadId;
+  // ── Thread-scoped composer + transcript transition ───────────────────────
+  // Draft text is durable per circle/thread/user. In-memory attachment buckets
+  // keep files from one thread from being dispatched in another; late async
+  // callbacks are additionally checked against activeThreadScopeRef.
+  const threadComposerSessionsRef = useRef(new Map<string, {
+    attachments: ChatAttachment[];
+    stagedFiles: StagedFile[];
+  }>());
 
+  const persistDraftForThread = useCallback((threadId: string | null, text: string) => {
+    if (!threadId || !currentUserId) return;
+    const key = draftKey({ circleId, threadId, userId: currentUserId });
+    const operation = shouldPreserveDraft(text)
+      ? storage.setItem(key, text.slice(0, MAX_DRAFT_LENGTH))
+      : storage.removeItem(key);
+    void Promise.resolve(operation).catch(() => {});
+  }, [circleId, currentUserId]);
+
+  const saveMountedComposerSession = useCallback(() => {
+    if (!activeThreadId) return;
+    persistDraftForThread(activeThreadId, input);
+    threadComposerSessionsRef.current.set(activeThreadId, {
+      attachments: [...attachments],
+      stagedFiles: [...stagedFiles],
+    });
+  }, [activeThreadId, attachments, input, persistDraftForThread, stagedFiles]);
+
+  const clearMountedThreadState = useCallback(() => {
+    setMessages([]);
+    messagesRef.current = [];
+    setInput('');
+    setReplyTo(null);
+    setShowReactions(null);
+    setShowMentions(false);
+    setMentionQuery('');
+    setExpandedCategory(null);
+    setAttachments([]);
+    setStagedFiles([]);
+    setOlderMessagesState({ loading: false, hasMore: true, error: null });
+  }, []);
+
+  const transitionToThread = useCallback((id: string, options?: { force?: boolean; skipSave?: boolean }) => {
+    const nextThreadId = String(id || '').trim();
+    if (!nextThreadId) return;
+    const taskOwnsMountedThread = botTyping
+      || runStatus === 'running'
+      || computerUseTask.state.status === 'starting'
+      || computerUseTask.state.status === 'running';
+    const uploadOwnsMountedThread = stagedFiles.some((file) => file.uploading || (!file.attachment && !file.error));
+    if (!options?.force && nextThreadId !== activeThreadId && uploadOwnsMountedThread) {
+      setThreadNavigationNotice('Wait for the current file upload to finish before switching conversations.');
+      return;
+    }
+    if (!options?.force && nextThreadId !== activeThreadId && taskOwnsMountedThread) {
+      setThreadNavigationNotice('Finish or stop the running task before switching conversations. This keeps its live output in the correct thread.');
+      return;
+    }
+    if (nextThreadId === activeThreadId && threadLoadState.status === 'ready') return;
+
+    if (!options?.skipSave) saveMountedComposerSession();
+    setThreadNavigationNotice(null);
+    setCompactSidebarOpen(false);
+    clearMountedThreadState();
+    activeThreadScopeRef.current = { circleId, threadId: nextThreadId };
+    setThreadLoadState({ status: 'loading', threadId: nextThreadId });
+    setActiveThreadId(nextThreadId);
+  }, [
+    activeThreadId,
+    botTyping,
+    circleId,
+    clearMountedThreadState,
+    computerUseTask.state.status,
+    runStatus,
+    saveMountedComposerSession,
+    stagedFiles,
+    threadLoadState.status,
+  ]);
+
+  // One authoritative load path handles both the initial selection and every
+  // later switch. It validates circle ownership before revealing the composer,
+  // clears the prior transcript immediately, and ignores late responses.
+  useEffect(() => {
+    if (!circleId || !activeThreadId || initializedCircleRef.current !== circleId) return;
+
+    const generation = ++threadLoadGenerationRef.current;
     let cancelled = false;
+    setThreadLoadState({ status: 'loading', threadId: activeThreadId });
+    setMessages([]);
+    messagesRef.current = [];
     (async () => {
       try {
+        const thread = await getThread(activeThreadId);
+        if (!thread || thread.circle_id !== circleId || thread.archived) {
+          throw new Error('That conversation is no longer available in this circle.');
+        }
         const { rows } = await loadThreadMessages(circleId, activeThreadId);
-        if (cancelled) return;
+        if (cancelled || generation !== threadLoadGenerationRef.current) return;
         const nextMessages = await mapLoadedThreadMessages(rows, activeThreadId, currentUserId || undefined, agentName);
-        if (cancelled) return;
+        const storedDraft = currentUserId
+          ? await storage.getItem(draftKey({ circleId, threadId: activeThreadId, userId: currentUserId })).catch(() => null)
+          : null;
+        if (cancelled || generation !== threadLoadGenerationRef.current) return;
+        const draftDecision = reconcileDraft({
+          current: '',
+          incomingThreadId: activeThreadId,
+          prevThreadId: null,
+          stored: storedDraft,
+        });
+        const composerSession = threadComposerSessionsRef.current.get(activeThreadId);
         setMessages(nextMessages);
+        messagesRef.current = nextMessages;
+        setInput(draftDecision.action === 'restore' ? draftDecision.value : '');
+        setAttachments(composerSession?.attachments || []);
+        setStagedFiles(composerSession?.stagedFiles || []);
+        setOlderMessagesState({ loading: false, hasMore: rows.length >= 50, error: null });
+        setThreadLoadState({ status: 'ready', threadId: activeThreadId });
+        await storage.setItem(activeChatThreadStorageKey(circleId, currentUserId), activeThreadId).catch(() => {});
       } catch (err) {
-        console.warn('[ChatTab] Thread switch reload failed:', err);
+        if (cancelled || generation !== threadLoadGenerationRef.current) return;
+        console.warn('[ChatTab] Thread load failed:', err);
+        const message = err instanceof Error && err.message
+          ? err.message
+          : 'Could not refresh this conversation.';
+        setMessages([]);
+        messagesRef.current = [];
+        setThreadLoadState({ status: 'error', threadId: activeThreadId, message });
       }
     })();
     return () => { cancelled = true; };
-  }, [activeThreadId, circleId, currentUserId, agentName]);
+  }, [activeThreadId, circleId, currentUserId, agentName, threadReloadToken]);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (
+      olderMessagesInFlightRef.current
+      || !olderMessagesState.hasMore
+      || !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+    ) return;
+    const oldestPersisted = messagesRef.current.find((message) => !!message.dbId);
+    if (!oldestPersisted?.dbId) {
+      setOlderMessagesState({ loading: false, hasMore: false, error: null });
+      return;
+    }
+
+    const scopedCircleId = circleId;
+    const scopedThreadId = activeThreadId;
+    const generation = threadLoadGenerationRef.current;
+    olderMessagesInFlightRef.current = true;
+    setOlderMessagesState((state) => ({ ...state, loading: true, error: null }));
+    try {
+      const { rows, hasMore } = await loadOlderThreadMessages(
+        scopedCircleId,
+        scopedThreadId,
+        { createdAt: oldestPersisted.timestamp.toISOString(), id: oldestPersisted.dbId },
+      );
+      if (
+        generation !== threadLoadGenerationRef.current
+        || activeThreadScopeRef.current.circleId !== scopedCircleId
+        || activeThreadScopeRef.current.threadId !== scopedThreadId
+      ) return;
+      const older = await mapLoadedThreadMessages(rows, scopedThreadId, currentUserId || undefined, agentName);
+      if (
+        generation !== threadLoadGenerationRef.current
+        || activeThreadScopeRef.current.circleId !== scopedCircleId
+        || activeThreadScopeRef.current.threadId !== scopedThreadId
+      ) return;
+      setMessages((current) => {
+        const next = reconcileChatMessageSnapshot(current, older);
+        messagesRef.current = next;
+        return next;
+      });
+      setOlderMessagesState({ loading: false, hasMore, error: null });
+    } catch (error) {
+      console.warn('[ChatTab] older message load failed:', error);
+      if (
+        generation === threadLoadGenerationRef.current
+        && activeThreadScopeRef.current.circleId === scopedCircleId
+        && activeThreadScopeRef.current.threadId === scopedThreadId
+      ) {
+        setOlderMessagesState((state) => ({
+          ...state,
+          loading: false,
+          error: 'Could not load earlier messages. Tap to retry.',
+        }));
+      }
+    } finally {
+      olderMessagesInFlightRef.current = false;
+    }
+  }, [
+    activeThreadId,
+    agentName,
+    circleId,
+    currentUserId,
+    olderMessagesState.hasMore,
+    threadLoadState.status,
+    threadLoadState.threadId,
+  ]);
 
   const handleSelectThread = useCallback((id: string) => {
-    setActiveThreadId(id);
-  }, []);
+    transitionToThread(id);
+  }, [transitionToThread]);
+
+  const retryActiveThreadLoad = useCallback(() => {
+    if (!activeThreadId) {
+      setCircleInitRetryToken((value) => value + 1);
+      return;
+    }
+    clearMountedThreadState();
+    setThreadLoadState({ status: 'loading', threadId: activeThreadId });
+    setThreadReloadToken((value) => value + 1);
+  }, [activeThreadId, clearMountedThreadState]);
 
   const handleNewThread = useCallback(async () => {
     if (!circleId) return;
     try {
       const t = await createPrivateThread(circleId, SESSION_FALLBACK_TITLE);
       setThreadListRefreshToken(prev => prev + 1);
-      setActiveThreadId(t.id);
-      setMessages([]);
+      transitionToThread(t.id);
     } catch (err) {
       console.error('[ChatTab] createPrivateThread failed:', err);
     }
-  }, [circleId]);
+  }, [circleId, transitionToThread]);
+
+  const handleDeleteThread = useCallback(async (threadId: string) => {
+    const deletingActiveThread = activeThreadId === threadId;
+    if (
+      deletingActiveThread
+      && (botTyping
+        || runStatus === 'running'
+        || computerUseTask.state.status === 'starting'
+        || computerUseTask.state.status === 'running')
+    ) {
+      setThreadNavigationNotice('Finish or stop the running task before deleting this conversation.');
+      return;
+    }
+    const uploadOwnsMountedThread = deletingActiveThread
+      && stagedFiles.some((file) => file.uploading || (!file.attachment && !file.error));
+    if (uploadOwnsMountedThread) {
+      setThreadNavigationNotice('Wait for the current file upload to finish before deleting this conversation.');
+      return;
+    }
+    const prompt = 'Delete this conversation and its messages? This cannot be undone.';
+    const confirmed = Platform.OS === 'web'
+      ? (typeof window !== 'undefined' && window.confirm(prompt))
+      : await new Promise<boolean>((resolve) => {
+          import('react-native')
+            .then(({ Alert }) => Alert.alert('Delete conversation?', prompt, [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
+            ]))
+            .catch(() => resolve(false));
+        });
+    if (!confirmed) return;
+
+    try {
+      await deleteThread(threadId);
+      threadComposerSessionsRef.current.delete(threadId);
+      setThreadListRefreshToken(prev => prev + 1);
+      if (!deletingActiveThread) return;
+
+      clearMountedThreadState();
+      setActiveThreadId(null);
+      activeThreadScopeRef.current = { circleId, threadId: null };
+      await storage.removeItem(activeChatThreadStorageKey(circleId, currentUserId)).catch(() => {});
+      const defaultThread = await getCircleDefaultThread(circleId);
+      if (!defaultThread || defaultThread.id === threadId || defaultThread.archived) {
+        setThreadLoadState({
+          status: 'error',
+          threadId: null,
+          message: 'The conversation was deleted, but Chat could not open the default conversation.',
+        });
+        return;
+      }
+      transitionToThread(defaultThread.id, { force: true, skipSave: true });
+    } catch (err) {
+      console.warn('[ChatTab] delete thread failed:', err);
+      setThreadNavigationNotice('Could not delete that conversation. Nothing was removed; try again.');
+    }
+  }, [
+    activeThreadId,
+    botTyping,
+    circleId,
+    clearMountedThreadState,
+    computerUseTask.state.status,
+    currentUserId,
+    runStatus,
+    stagedFiles,
+    transitionToThread,
+  ]);
 
   const handleSidebarNewAgent = useCallback(() => {
     setSpawnModalOpen(true);
@@ -4127,16 +4756,53 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }, [circleId, navigation]);
 
   const handleToggleSidebar = useCallback(() => {
+    if (viewportWidth < 900) {
+      setCompactSidebarOpen((open) => !open);
+      return;
+    }
     setSidebarCollapsed(prev => {
       const next = !prev;
       persistSidebarCollapsed(next);
       return next;
     });
-  }, []);
+  }, [viewportWidth]);
+
+  useEffect(() => {
+    if (viewportWidth >= 900) setCompactSidebarOpen(false);
+  }, [viewportWidth]);
 
   const handleThreadMetaChanged = useCallback(() => {
     setThreadListRefreshToken(prev => prev + 1);
-  }, []);
+    const scopedThreadId = activeThreadId;
+    if (!scopedThreadId) return;
+    void (async () => {
+      const thread = await getThread(scopedThreadId);
+      if (
+        activeThreadScopeRef.current.circleId !== circleId
+        || activeThreadScopeRef.current.threadId !== scopedThreadId
+      ) return;
+      if (thread?.circle_id === circleId && !thread.archived) return;
+
+      threadComposerSessionsRef.current.delete(scopedThreadId);
+      clearMountedThreadState();
+      setActiveThreadId(null);
+      activeThreadScopeRef.current = { circleId, threadId: null };
+      await storage.removeItem(activeChatThreadStorageKey(circleId, currentUserId)).catch(() => {});
+      const defaultThread = await getCircleDefaultThread(circleId);
+      if (defaultThread && defaultThread.id !== scopedThreadId && !defaultThread.archived) {
+        transitionToThread(defaultThread.id, { force: true, skipSave: true });
+      } else {
+        setThreadLoadState({
+          status: 'error',
+          threadId: null,
+          message: 'This conversation is no longer available, and Chat could not open the default conversation.',
+        });
+      }
+    })().catch((error) => {
+      console.warn('[ChatTab] active thread validation failed:', error);
+      setThreadNavigationNotice('Could not verify this conversation after the update. Retry if it does not refresh.');
+    });
+  }, [activeThreadId, circleId, clearMountedThreadState, currentUserId, transitionToThread]);
 
   useEffect(() => {
     if (!activeThreadId) {
@@ -4842,10 +5508,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
   }, [circleId, showPluginPicker]);
 
-  const init = async () => {
+  const init = async (scopedCircleId: string, generation: number) => {
+    const isCurrent = () => circleInitGenerationRef.current === generation && circleId === scopedCircleId;
     try {
     // Get current user
     const currentUser = await getCurrentChatUserProfile();
+    if (!isCurrent()) return;
     const userId = currentUser?.id;
     if (userId) {
       setCurrentUserId(userId);
@@ -4853,7 +5521,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // Check if first visit (uses cross-platform storage helper)
-    const visitKey = `circle_${circleId}_visited`;
+    const visitKey = `circle_${scopedCircleId}_visited`;
     const hasVisited = await storage.getItem(visitKey);
     if (!hasVisited) {
       setIsFirstVisit(true);
@@ -4869,39 +5537,42 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     // Fetch members
     try {
-      const m = await loadCircleChatMembers(circleId);
+      const m = await loadCircleChatMembers(scopedCircleId);
+      if (!isCurrent()) return;
       m.push({ id: BLACKSWAN_ID, username: 'openswan', display_name: agentName });
       setMembers(m);
     } catch (e) { /* circle may not exist yet */ }
 
-    // Resolve the circle's default thread first so the message query can
-    // filter by thread_id. The migration backfills this row for every circle.
-    let resolvedThreadId: string | null = activeThreadId;
+    // Restore only a visible, non-archived thread from this exact circle. A
+    // stale id from another circle/account is discarded before any transcript
+    // query, then we fall back to the circle's canonical default thread.
+    let resolvedThreadId: string | null = null;
+    const selectionKey = activeChatThreadStorageKey(scopedCircleId, userId);
+    const storedThreadId = String(await storage.getItem(selectionKey).catch(() => '') || '').trim();
+    if (storedThreadId) {
+      const storedThread = await getThread(storedThreadId);
+      if (!isCurrent()) return;
+      if (storedThread?.circle_id === scopedCircleId && !storedThread.archived) {
+        resolvedThreadId = storedThread.id;
+      } else {
+        await storage.removeItem(selectionKey).catch(() => {});
+      }
+    }
     if (!resolvedThreadId) {
-      try {
-        const defaultThread = await getCircleDefaultThread(circleId);
-        if (defaultThread) {
-          resolvedThreadId = defaultThread.id;
-          setActiveThreadId(defaultThread.id);
-        }
-      } catch (err) {
-        console.warn('[ChatTab] Default thread lookup failed (migration may be pending):', err);
+      const defaultThread = await getCircleDefaultThread(scopedCircleId);
+      if (!isCurrent()) return;
+      if (defaultThread?.circle_id === scopedCircleId && !defaultThread.archived) {
+        resolvedThreadId = defaultThread.id;
       }
     }
-
-    // Load persisted messages — filter by thread_id when we have one so
-    // multi-thread chats stay separated.
-    try {
-      const { rows, usedFallback } = await loadThreadMessages(circleId, resolvedThreadId);
-      if (usedFallback) {
-        console.warn('[ChatTab] Schema migration pending — loading without is_bot/reactions');
-      }
-      const nextMessages = await mapLoadedThreadMessages(rows, resolvedThreadId, userId, agentName);
-      setMessages(nextMessages);
-    } catch (e) { 
-      console.error('[ChatTab] Unexpected error loading messages:', e);
+    if (!resolvedThreadId) {
+      throw new Error('Could not find an available Chat conversation for this circle.');
     }
 
+    initializedCircleRef.current = scopedCircleId;
+    activeThreadScopeRef.current = { circleId: scopedCircleId, threadId: resolvedThreadId };
+    setActiveThreadId(resolvedThreadId);
+    setThreadLoadState({ status: 'loading', threadId: resolvedThreadId });
     setLoaded(true);
 
     // Non-critical enrichments — load after the chat shell is ready
@@ -4909,44 +5580,59 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       try {
         const { getConnectedWallet } = await import('../../../lib/crypto');
         const w = await getConnectedWallet();
-        if (w) setWallet(w);
+        if (w && isCurrent()) setWallet(w);
       } catch {}
     })();
 
     void (async () => {
       try {
-        const dConfig = await getCircleDiscordConfig(circleId);
+        const dConfig = await getCircleDiscordConfig(scopedCircleId);
+        if (!isCurrent()) return;
         setDiscordConfig(dConfig);
         if (dConfig.guild_id) {
-          const chans = await getCachedChannels(circleId);
-          setDiscordChannels(chans.filter(c => isTextChannel(c.type)).map(c => c.name));
+          const chans = await getCachedChannels(scopedCircleId);
+          if (isCurrent()) setDiscordChannels(chans.filter(c => isTextChannel(c.type)).map(c => c.name));
         }
       } catch {}
     })();
 
     void (async () => {
       try {
-        const props = await getProposals(circleId, 'active');
+        const props = await getProposals(scopedCircleId, 'active');
+        if (!isCurrent()) return;
         setProposals(props);
-        const pins = await getPinnedMessages(circleId);
-        setPinnedMessages(pins);
+        const pins = await getPinnedMessages(scopedCircleId);
+        if (isCurrent()) setPinnedMessages(pins);
       } catch {}
     })();
 
     } catch (e) {
+      if (!isCurrent()) return;
       console.error('[ChatTab] init error:', e);
+      initializedCircleRef.current = scopedCircleId;
+      const message = e instanceof Error && e.message
+        ? e.message
+        : 'Could not open Chat for this circle.';
+      setThreadLoadState({ status: 'error', threadId: null, message });
     } finally {
-      setLoaded(true);
+      if (isCurrent()) setLoaded(true);
     }
   };
 
   // ─── Agent greeting on session start ──────────────────────────────────────
   // Personalized greeting when user first lands on chat each session.
   // Uses local greetings (instant) — no network dependency.
-  const greetingSentRef = useRef(false);
+  const greetingSentCircleRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!loaded || !currentUserId || !circleId || greetingSentRef.current) return;
+    if (
+      !loaded
+      || !currentUserId
+      || !circleId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+      || greetingSentCircleRef.current === circleId
+    ) return;
 
     // Check if we already greeted this session
     const greetKey = `uc_greeted_${circleId}`;
@@ -4954,7 +5640,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       try { if (sessionStorage.getItem(greetKey)) return; } catch {}
     }
 
-    greetingSentRef.current = true;
+    greetingSentCircleRef.current = circleId;
     if (Platform.OS === 'web') {
       try { sessionStorage.setItem(greetKey, '1'); } catch {}
     }
@@ -4987,9 +5673,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const greeting = pool[Math.floor(Math.random() * pool.length)];
 
     // Small delay so it feels natural, not instant
-    const timer = setTimeout(() => addBotMessage(greeting), 800);
+    const timer = setTimeout(() => addBotMessage(greeting, undefined, {
+      localOnly: true,
+      durability: 'ephemeral',
+      source: { actor: agentName, surface: 'main_chat_session_greeting' },
+    }), 800);
     return () => clearTimeout(timer);
-  }, [loaded, currentUserId, circleId]);
+  }, [loaded, currentUserId, circleId, activeThreadId, threadLoadState.status, threadLoadState.threadId]);
 
   // ─── Save session to memory — periodic checkpoint + page unload ─────────
   const lastCheckpointRef = useRef(0);
@@ -5032,22 +5722,101 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // ─── Realtime subscription — see other members' messages live ──────────
 
   useEffect(() => {
-    if (!circleId || !currentUserId || !activeThreadId) return;
+    if (
+      !circleId
+      || !currentUserId
+      || !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+    ) return;
 
-    const channel = supabase
-      .channel(`circle-chat-${circleId}-${activeThreadId}`)
+    let disposed = false;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    let fallbackPollTimer: ReturnType<typeof setInterval> | null = null;
+    let hasSubscribed = false;
+    const isMountedScope = () => !disposed
+      && activeThreadScopeRef.current.circleId === circleId
+      && activeThreadScopeRef.current.threadId === activeThreadId;
+
+    // A reconnect must reconcile a bounded authoritative snapshot rather than
+    // fetch only newer rows: message UPDATEs retain their original created_at,
+    // so a cursor-only catch-up would leave stale approval/retry/task metadata
+    // mounted after a dropped channel. Snapshot reconciliation preserves older
+    // loaded pages and current optimistic rows while replacing durable matches.
+    const refreshThreadSnapshot = async () => {
+      if (!isMountedScope()) return;
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        do {
+          refreshQueued = false;
+          const snapshotReadBaselineDbIds = new Set(
+            messagesRef.current
+              .map((message) => message.dbId)
+              .filter((id): id is string => typeof id === 'string' && id.length > 0),
+          );
+          const { rows } = await loadThreadMessages(circleId, activeThreadId);
+          if (!isMountedScope()) return;
+          const snapshot = await mapLoadedThreadMessages(
+            rows,
+            activeThreadId,
+            currentUserId,
+            agentName,
+          );
+          if (!isMountedScope()) return;
+          setMessages((current) => {
+            const reconciled = reconcileChatMessageSnapshot(current, snapshot, {
+              authoritativeTail: true,
+              completeSnapshot: rows.length < 50,
+              readBaselineDbIds: snapshotReadBaselineDbIds,
+            });
+            messagesRef.current = reconciled;
+            return reconciled;
+          });
+        } while (refreshQueued && !disposed);
+      } catch (error) {
+        if (!disposed) console.warn('[ChatTab] Realtime catch-up refresh failed:', error);
+      } finally {
+        refreshInFlight = false;
+      }
+    };
+
+    const stopFallbackPolling = () => {
+      if (!fallbackPollTimer) return;
+      clearInterval(fallbackPollTimer);
+      fallbackPollTimer = null;
+    };
+
+    const startFallbackPolling = () => {
+      if (disposed || fallbackPollTimer) return;
+      void refreshThreadSnapshot();
+      fallbackPollTimer = setInterval(() => {
+        void refreshThreadSnapshot();
+      }, 15_000);
+    };
+
+    const subscription = subscribeWithReconnect({
+      channelName: `circle-chat-${circleId}-${activeThreadId}`,
+      setup: (channel) => channel
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
         table: 'messages',
-        filter: `circle_id=eq.${circleId}`,
+        filter: `thread_id=eq.${activeThreadId}`,
       }, (payload: any) => {
+        if (!isMountedScope()) return;
         const newMsg = payload.new;
         if ((newMsg.thread_id || null) !== activeThreadId) return;
-        // Skip messages we sent ourselves — BUT allow bot messages from FloatingChat
+        // Do not skip rows solely because they share this account's user id:
+        // another tab/device may be signed in as the same user. The db-id and
+        // optimistic matcher below deduplicate this tab's own insert safely.
         const isBotFromPopout = isPersistedChatBotMessage(newMsg.content, newMsg.is_bot === true);
-        if (newMsg.user_id === currentUserId && !isBotFromPopout) return;
         const botMetadata = isBotFromPopout ? readPersistedChatBotMetadata(newMsg.content) : null;
+        if (isLegacyEphemeralChatSurface(botMetadata?.source?.surface)) return;
         if (botMetadata?.localMessageId) {
           void removePendingBotMessage(activeThreadId, botMetadata.localMessageId).catch(() => {});
         }
@@ -5060,23 +5829,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           }),
           reactions: newMsg.reactions || {},
           replyTo: null,
-          artifacts: botMetadata?.artifacts || undefined,
-          wikiRefs: botMetadata?.wikiRefs || undefined,
-          researchRefs: botMetadata?.researchRefs || undefined,
-          memoryRefs: botMetadata?.memoryRefs || undefined,
-          memoriesUsed: botMetadata?.memoriesUsed || undefined,
-          memoryRecommendations: botMetadata?.memoryRecommendations || undefined,
-          executionStream: botMetadata?.executionStream || undefined,
-          browserPlans: botMetadata?.browserPlans || undefined,
-          browserPlanEvents: botMetadata?.browserPlanEvents || undefined,
-          browserSessions: botMetadata?.browserSessions || undefined,
-          recoveryOptions: botMetadata?.recoveryOptions || undefined,
-          recoveryReliability: botMetadata?.recoveryReliability || undefined,
-          computerHandoff: botMetadata?.computerHandoff || undefined,
-          source: botMetadata?.source,
-          agentSubjectMetadata: botMetadata?.agentSubjectMetadata || undefined,
-          usage: botMetadata?.usage || undefined,
-          routing: botMetadata?.routing || undefined,
+          ...hydratePersistedChatBotMetadata(botMetadata),
           ...deriveChatActivityFlags(newMsg.content),
         };
 
@@ -5087,7 +5840,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             .eq('id', newMsg.user_id)
             .single()
             .then(({ data }) => {
-              if (data) {
+              if (data && isMountedScope()) {
                 setMessages(prev => prev.map(m => 
                   m.id === msg.id ? { ...m, userName: data.display_name || data.username || 'Unknown' } : m
                 ));
@@ -5096,7 +5849,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
 
         setMessages(prev => {
-          if (prev.some(m => m.dbId === newMsg.id)) return prev;
+          if (prev.some(m => m.dbId === newMsg.id)) {
+            messagesRef.current = prev;
+            return prev;
+          }
 
           const incomingTs = new Date(newMsg.created_at || Date.now()).getTime();
           const optimisticMatchIndex = prev.findIndex(m => {
@@ -5116,19 +5872,171 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               timestamp: msg.timestamp,
               userName: msg.userName,
             };
+            messagesRef.current = next;
             return next;
           }
 
-          return [...prev, msg];
+          const next = [...prev, msg];
+          messagesRef.current = next;
+          return next;
         });
+        if (newMsg.reply_to) void refreshThreadSnapshot();
         animateNewMessage(msg.id);
       })
-      .subscribe();
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages',
+        filter: `thread_id=eq.${activeThreadId}`,
+      }, (payload: any) => {
+        if (!isMountedScope()) return;
+        const updatedRow = payload.new;
+        if (!updatedRow || (updatedRow.thread_id || null) !== activeThreadId) return;
+
+        const isBot = isPersistedChatBotMessage(updatedRow.content, updatedRow.is_bot === true);
+        const botMetadata = isBot ? readPersistedChatBotMetadata(updatedRow.content) : null;
+        if (isLegacyEphemeralChatSurface(botMetadata?.source?.surface)) {
+          setMessages((prev) => {
+            const next = prev.filter((existing) => existing.dbId !== updatedRow.id);
+            messagesRef.current = next;
+            return next;
+          });
+          return;
+        }
+        if (botMetadata?.localMessageId) {
+          void removePendingBotMessage(activeThreadId, botMetadata.localMessageId).catch(() => {});
+        }
+        const shaped = shapePersistedChatMessage(updatedRow, {
+          currentUserId,
+          botDisplayName: agentName,
+          fallbackUserName: 'Circle Member',
+        });
+        const hydrated: Partial<ChatMessage> = botMetadata
+          ? hydratePersistedChatBotMetadata(botMetadata)
+          : isBot
+            ? {
+                // A metadata-free/invalid bot UPDATE must fail closed. Keeping
+                // the previous structured fields here would leave stale Run,
+                // Retry, approval, or recovery controls executable even though
+                // the durable row no longer proves their lineage.
+                persistedMetadataSnapshot: null,
+                artifacts: undefined,
+                wikiRefs: undefined,
+                researchRefs: undefined,
+                memoriesUsed: undefined,
+                memoryRefs: undefined,
+                memoryRecommendations: undefined,
+                executionStream: undefined,
+                agentPlan: undefined,
+                taskPlan: undefined,
+                toolEvents: undefined,
+                verificationResults: undefined,
+                browserPlans: undefined,
+                browserPlanEvents: undefined,
+                browserSessions: undefined,
+                runId: undefined,
+                requestId: undefined,
+                requestAuthorId: undefined,
+                recoveryOptions: undefined,
+                recoveryReliability: undefined,
+                computerTaskStatus: undefined,
+                computerHandoff: undefined,
+                chatAutomationPlanPreview: undefined,
+                computerPreflightBlockers: undefined,
+                computerFindings: undefined,
+                bestOfN: undefined,
+                outcomeSignal: undefined,
+                quickReplies: undefined,
+                crossSurfaceFollowups: undefined,
+                routing: undefined,
+                showRunTrace: false,
+              }
+            : {};
+
+        // UPDATE can race ahead of INSERT after reconnect. Never drop the
+        // durable change just because this client lacks the row; an immediate
+        // authoritative snapshot will upsert it and clear stale controls.
+        if (!messagesRef.current.some((existing) => existing.dbId === updatedRow.id)) {
+          void refreshThreadSnapshot();
+          return;
+        }
+
+        // Bot metadata is updated after launch, verification, reactions, and
+        // recovery. Merge those UPDATEs into the existing row so other open
+        // clients do not keep stale buttons or stale proof until refresh.
+        setMessages((prev) => {
+          const next = prev.map((existing) => (
+            existing.dbId === updatedRow.id
+            ? {
+                ...existing,
+                ...shaped,
+                ...hydrated,
+                ...deriveChatActivityFlags(updatedRow.content),
+                // Keep optimistic/local identity stable after its database id
+                // is attached; changing the React key would remount live cards.
+                id: existing.id,
+                dbId: updatedRow.id,
+                userName: isBot ? agentName : (existing.userName || shaped.userName),
+                reactions: updatedRow.reactions || {},
+                replyTo: existing.replyTo || null,
+              }
+            : existing
+          ));
+          messagesRef.current = next;
+          return next;
+        });
+        if (updatedRow.reply_to) void refreshThreadSnapshot();
+      }),
+      // The shared subscription helper calls this after a reconnect and when a
+      // seemingly subscribed channel has gone silent past its heartbeat.
+      onCatchUp: () => {
+        void refreshThreadSnapshot();
+      },
+      onStateChange: (state) => {
+        if (state === 'subscribed') {
+          stopFallbackPolling();
+          if (!hasSubscribed) {
+            // Close the initial fetch -> subscribe race. Events committed
+            // between init()'s snapshot and channel establishment are caught
+            // before the user can act on an apparently current transcript.
+            hasSubscribed = true;
+            void refreshThreadSnapshot();
+          }
+        } else if (state === 'error' || state === 'closed' || state === 'reconnecting') {
+          startFallbackPolling();
+        }
+      },
+      // Quiet chats should not reread the latest page every 30 seconds merely
+      // because no member posted. Status failures still poll every 15 seconds,
+      // while this slower guard catches a silently stale subscribed socket.
+      heartbeatMs: 120_000,
+    });
+
+    // Browser tab throttling and laptop sleep can miss the status callback
+    // window. Reconcile immediately when the user returns or connectivity does.
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void refreshThreadSnapshot();
+      }
+    };
+    const handleOnline = () => {
+      void refreshThreadSnapshot();
+    };
+    if (Platform.OS === 'web' && typeof document !== 'undefined' && typeof window !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+      window.addEventListener('online', handleOnline);
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      disposed = true;
+      stopFallbackPolling();
+      subscription.unsubscribe();
+      if (Platform.OS === 'web' && typeof document !== 'undefined' && typeof window !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
+        window.removeEventListener('online', handleOnline);
+      }
     };
-  }, [circleId, currentUserId, activeThreadId, agentName]);
+  }, [circleId, currentUserId, activeThreadId, agentName, threadLoadState.status, threadLoadState.threadId]);
 
   // With inverted FlatList, scroll management is minimal — the latest
   // message is always at index 0 which is pinned to the visual bottom.
@@ -5195,6 +6103,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       isBot: false,
       isUser: true,
       userName: currentUserName,
+      authorId: currentUserId || null,
       timestamp: new Date(),
       reactions: {},
       replyTo: replyTo ? { name: replyTo.userName || '', content: replyTo.content.slice(0, 50) } : null,
@@ -5203,7 +6112,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       source: { actor: 'user', surface: 'main_chat' },
     };
 
-    setMessages(prev => [...prev, msg]);
+    setMessages(prev => {
+      const next = [...prev, msg];
+      messagesRef.current = next;
+      return next;
+    });
+    persistDraftForThread(messageThreadId, '');
     animateNewMessage(msg.id);
 
     // Trigger effects for special messages
@@ -5284,6 +6198,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: ChatBotMessageExtra) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const messageThreadId = activeThreadId;
+    const messageCircleId = circleId;
+    const durability = extra?.durability
+      || (isLegacyEphemeralChatSurface(extra?.source?.surface) ? 'ephemeral' : 'transcript');
+    const isMountedMessageScope = () => activeThreadScopeRef.current.circleId === messageCircleId
+      && activeThreadScopeRef.current.threadId === messageThreadId;
     // One-tap recovery: if a turn ended on a stop/cap/failure message and the
     // caller didn't already attach chips, surface Continue / Try again so the
     // user taps a button instead of re-typing. Single choke point → every lane
@@ -5298,6 +6217,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       surface: extra?.localOnly ? 'main_chat_local' : 'main_chat',
       selectedModel: selectedModel || null,
     };
+    const routedRequestId = (extra?.routing as any)?.requestId
+      || (extra?.routing as any)?.request_id
+      || null;
+    const messageRequestId = String(extra?.requestId || routedRequestId || '').trim().slice(0, 96) || null;
+    const messageRequestAuthorId = String(extra?.requestAuthorId || currentUserId || '').trim().slice(0, 160) || null;
     const messageAgentSubjectMetadata = extra?.agentSubjectMetadata
       || selectedAgentSubjectContext.agentSubjectMetadata;
     // Flywheel: derive the outcome verdict from the data already in scope so
@@ -5327,6 +6251,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       producedText: (content || '').trim().length > 0,
     });
     const finalizeVerdict = authoritativeOutcomeSignal?.verdict || inferredFinalizeVerdict;
+    const initialOutcomeSignal: NonNullable<ChatMessage['outcomeSignal']> = {
+      verdict: finalizeVerdict,
+      lane: messageSource.surface || undefined,
+      model: messageSource.effectiveModel || messageSource.selectedModel || undefined,
+    };
     // crossSurfaceFollowupCore: turn the finalized structural outcome into a
     // ranked chip row (FollowupChipRow) so a finished turn doesn't dead-end in
     // chat. Mission/task handles are deliberately omitted — ChatTab has no
@@ -5361,11 +6290,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       wikiRefs: extra?.wikiRefs,
       researchRefs: extra?.researchRefs,
       source: messageSource,
+      durability,
       agentSubjectMetadata: messageAgentSubjectMetadata,
       usage: extra?.usage || undefined,
       delegatedTo: extra?.delegatedTo,
       delegatedSubagents: extra?.delegatedSubagents,
       runId: extra?.runId,
+      requestId: messageRequestId,
+      requestAuthorId: messageRequestAuthorId,
       memoriesUsed: extra?.memoriesUsed,
       memoryRefs: extra?.memoryRefs,
       memoryRecommendations: extra?.memoryRecommendations,
@@ -5385,6 +6317,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       quickReplies: autoQuickReplies,
       quickRepliesLabel: extra?.quickRepliesLabel,
       crossSurfaceFollowups: crossSurfaceFollowups.length > 0 ? crossSurfaceFollowups : undefined,
+      outcomeSignal: initialOutcomeSignal,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
@@ -5399,88 +6332,75 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       isPending: false,
     };
 
-    setMessages(prev => [...prev, msg]);
-    animateNewMessage(msg.id);
+    const initialPersistedMetadata = projectPersistedChatBotMetadata(
+      msg,
+      messageAgentSubjectMetadata,
+    );
+    msg.persistedMetadataSnapshot = initialPersistedMetadata;
+
+    if (isMountedMessageScope()) {
+      setMessages(prev => {
+        const next = [...prev, msg];
+        messagesRef.current = next;
+        return next;
+      });
+      animateNewMessage(msg.id);
+    }
 
     // Background memory extraction — non-blocking, updates the message with saved indicators
-    if (currentUserId && circleId) {
+    if (durability === 'transcript' && currentUserId && messageCircleId) {
       (async () => {
         try {
           const { autoExtractAndSave } = await import('../../../lib/agentMemory');
-          const history = messages.slice(-6).map(m => ({ role: m.isBot ? 'model' : 'user', text: m.content }));
+          const history = transcriptChatMessages(messages).slice(-6).map(m => ({ role: m.isBot ? 'model' : 'user', text: m.content }));
           history.push({ role: 'model', text: content });
           // Stamp the run that produced this turn so the saved memory is
           // traceable back to it (memory_entries.source_run_id).
-          const { saved } = await autoExtractAndSave(circleId, currentUserId, history, extra?.runId ?? undefined);
+          const { saved } = await autoExtractAndSave(messageCircleId, currentUserId, history, extra?.runId ?? undefined);
           if (saved > 0) {
             // Update the message with memory saved indicator
-            setMessages(prev => prev.map(m =>
-              m.id === msgId ? { ...m, memoriesSaved: [`${saved} new`] } : m
-            ));
-            setMemoryToast({ message: `${saved} memor${saved === 1 ? 'y' : 'ies'} saved from this conversation`, type: 'saved' });
+            if (isMountedMessageScope()) {
+              setMessages(prev => prev.map(m =>
+                m.id === msgId ? { ...m, memoriesSaved: [`${saved} new`] } : m
+              ));
+              setMemoryToast({ message: `${saved} memor${saved === 1 ? 'y' : 'ies'} saved from this conversation`, type: 'saved' });
+            }
           }
         } catch {}
       })();
     }
 
-    // Persist every visible bot message. `localOnly` now only describes
-    // UI behavior; refresh recovery still keeps the transcript intact.
-    if (messageThreadId) {
+    // Only durable outcome/conversation rows enter recovery, Supabase, archives,
+    // and memory. `localOnly` remains a presentation/routing flag; explicit
+    // durability prevents greetings/progress/routing notices from fossilizing.
+    if (durability === 'transcript' && messageThreadId) {
       saveRecoverableChatMessage(messageThreadId, msg);
     }
     // (finalizeVerdict is derived above the message literal so the follow-up
     // chips could reuse it; it is stamped onto the persisted row below.)
-    if (currentUserId && messageThreadId) {
+    if (durability === 'transcript' && currentUserId && messageThreadId) {
       persistChatTabBotMessageWithRetry({
-        circleId,
+        circleId: messageCircleId,
         userId: currentUserId,
         agentName,
         content,
         threadId: messageThreadId,
-        metadata: {
-          localMessageId: msgId,
-          source: messageSource,
-          agentSubjectMetadata: messageAgentSubjectMetadata,
-          usage: extra?.usage || null,
-          artifacts,
-          wikiRefs: extra?.wikiRefs,
-          researchRefs: extra?.researchRefs,
-          memoriesUsed: extra?.memoriesUsed,
-          memoryRefs: extra?.memoryRefs,
-          memoryRecommendations: extra?.memoryRecommendations,
-          executionStream: extra?.executionStream,
-          agentPlan: extra?.agentPlan,
-          taskPlan: extra?.taskPlan,
-          toolEvents: extra?.toolEvents,
-          verificationResults: extra?.verificationResults,
-          browserPlans: extra?.browserPlans,
-          browserPlanEvents: extra?.browserPlanEvents,
-          browserSessions: extra?.browserSessions,
-          recoveryOptions: extra?.recoveryOptions,
-          recoveryReliability: extra?.recoveryReliability,
-          computerTaskStatus: normalizedComputerTaskStatus,
-          computerHandoff: extra?.computerHandoff,
-          chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
-          computerFindings: extra?.computerFindings,
-          bestOfN: extra?.bestOfN,
-          routing: extra?.routing,
-        },
+        metadata: initialPersistedMetadata,
         onError: (error) => {
           console.error('[ChatTab] Unexpected error persisting bot msg:', error);
         },
         onPersisted: (dbId) => {
           void removePendingBotMessage(messageThreadId, msgId).catch(() => {});
-          setMessages(prev => prev.map((message) => (
-            message.id === msgId ? { ...message, dbId } : message
-          )));
-          // Stamp the finalize verdict now that the row has a dbId. The stamp
-          // is best-effort and swallows its own errors, so it never blocks UI.
-          stampOutcomeSignalRef.current(msgId, { verdict: finalizeVerdict });
+          if (isMountedMessageScope()) {
+            setMessages(prev => prev.map((message) => (
+              message.id === msgId ? { ...message, dbId } : message
+            )));
+          }
         },
       });
     }
 
-    syncSessionArchiveMessage(msg);
+    if (durability === 'transcript') syncSessionArchiveMessage(msg);
 
     return msg;
   };
@@ -5519,6 +6439,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
         addBotMessage(suggestion.message, undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           automationProposal: suggestion.proposal,
           automationAgentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
           source: {
@@ -5607,6 +6528,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       isBot: true,
       isUser: false,
       userName: agentName,
+      requestAuthorId: currentUserId || null,
       timestamp: new Date(),
       reactions: {},
       taskPlan: extra?.taskPlan,
@@ -5695,6 +6617,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       });
       if (cancelled) return;
       addBotMessage(formatAgentAppCapabilityBuildoutForUser(runningBuildout) || '**Use Computer**\n- App support is ready. Retrying now.', undefined, {
+        durability: 'ephemeral',
         source: {
           actor: 'OpenSwan',
           surface: 'main_chat_computer_task',
@@ -6026,34 +6949,105 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       messageId: message.dbId,
       agentName,
       content: message.content,
-      metadata: {
-        localMessageId: message.id,
-        artifacts: message.artifacts,
-        wikiRefs: message.wikiRefs,
-        researchRefs: message.researchRefs,
-        memoriesUsed: message.memoriesUsed,
-        memoryRefs: message.memoryRefs,
-        memoryRecommendations: message.memoryRecommendations,
-        executionStream: message.executionStream,
-        taskPlan: message.taskPlan,
-        toolEvents: message.toolEvents,
-        verificationResults: message.verificationResults,
-        browserPlans: message.browserPlans,
-        browserPlanEvents: message.browserPlanEvents,
-        browserSessions: message.browserSessions,
-        recoveryOptions: message.recoveryOptions,
-        recoveryReliability: message.recoveryReliability,
-        chatAutomationPlanPreview: message.chatAutomationPlanPreview,
-        source: message.source,
-        agentSubjectMetadata: message.agentSubjectMetadata || selectedAgentSubjectContext.agentSubjectMetadata,
-        usage: message.usage,
-        routing: message.routing,
-      },
+      metadata: projectPersistedChatBotMetadata(
+        message,
+        selectedAgentSubjectContext.agentSubjectMetadata,
+      ),
       onError: (error) => {
         console.error('[ChatTab] Unexpected error updating bot msg:', error);
       },
     });
   }, [agentName, selectedAgentSubjectContext.agentSubjectMetadata]);
+
+  const finalizeFailedBotMessage = useCallback((details: {
+    pendingMessage?: ChatMessage | null;
+    content: string;
+    recoveryOptions?: ChatMessage['recoveryOptions'];
+    recoveryReliability?: ChatMessage['recoveryReliability'];
+    source?: ChatMessageSource;
+  }): ChatMessage => {
+    const fallbackPending = [...messagesRef.current].reverse().find((entry) => entry.isBot && entry.isPending);
+    const hasPendingMessageHint = Object.prototype.hasOwnProperty.call(details, 'pendingMessage');
+    const base = hasPendingMessageHint
+      ? details.pendingMessage
+        ? messagesRef.current.find((entry) => entry.id === details.pendingMessage?.id) || details.pendingMessage
+        : undefined
+      : fallbackPending;
+    const terminalSource = details.source || base?.source || {
+      actor: agentName,
+      surface: 'main_chat_error',
+      selectedModel: selectedModel || null,
+    };
+    const terminalMessage: ChatMessage = {
+      ...(base || {}),
+      id: base?.id || `bot-error-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      content: details.content,
+      isBot: true,
+      isUser: false,
+      userName: agentName,
+      requestAuthorId: base?.requestAuthorId || currentUserId || null,
+      timestamp: new Date(),
+      reactions: base?.reactions || {},
+      recoveryOptions: details.recoveryOptions,
+      recoveryReliability: details.recoveryReliability,
+      source: terminalSource,
+      outcomeSignal: {
+        verdict: 'failed',
+        lane: terminalSource.surface || undefined,
+        model: terminalSource.effectiveModel || terminalSource.selectedModel || undefined,
+      },
+      isPending: false,
+    };
+    const metadata = projectPersistedChatBotMetadata(
+      terminalMessage,
+      terminalMessage.agentSubjectMetadata || selectedAgentSubjectContext.agentSubjectMetadata,
+    );
+    terminalMessage.persistedMetadataSnapshot = metadata;
+
+    const replaceOrAppend = (items: ChatMessage[]) => (
+      items.some((entry) => entry.id === terminalMessage.id)
+        ? items.map((entry) => entry.id === terminalMessage.id ? terminalMessage : entry)
+        : [...items, terminalMessage]
+    );
+    messagesRef.current = replaceOrAppend(messagesRef.current);
+    setMessages(replaceOrAppend);
+    if (activeThreadId) saveRecoverableChatMessage(activeThreadId, terminalMessage);
+    syncSessionArchiveMessage(terminalMessage);
+
+    if (terminalMessage.dbId) {
+      syncPersistedBotMessage(terminalMessage);
+    } else if (currentUserId && activeThreadId) {
+      persistChatTabBotMessageWithRetry({
+        circleId,
+        userId: currentUserId,
+        agentName,
+        content: terminalMessage.content,
+        threadId: activeThreadId,
+        metadata,
+        onError: (error) => console.error('[ChatTab] persist failed terminal bot message:', error),
+        onPersisted: (dbId) => {
+          void removePendingBotMessage(activeThreadId, terminalMessage.id).catch(() => {});
+          messagesRef.current = messagesRef.current.map((entry) => (
+            entry.id === terminalMessage.id ? { ...entry, dbId } : entry
+          ));
+          setMessages((prev) => prev.map((entry) => (
+            entry.id === terminalMessage.id ? { ...entry, dbId } : entry
+          )));
+        },
+      });
+    }
+
+    return terminalMessage;
+  }, [
+    activeThreadId,
+    agentName,
+    circleId,
+    currentUserId,
+    selectedAgentSubjectContext.agentSubjectMetadata,
+    selectedModel,
+    syncPersistedBotMessage,
+    syncSessionArchiveMessage,
+  ]);
 
   const applyBrowserPlanPatch = useCallback((
     messageId: string,
@@ -6667,6 +7661,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     },
   ) => {
     if (sendLockRef.current) return;
+    if (
+      !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+      || activeThreadScopeRef.current.circleId !== circleId
+      || activeThreadScopeRef.current.threadId !== activeThreadId
+    ) {
+      setThreadNavigationNotice('This conversation is still refreshing. Retry the conversation load before sending.');
+      return;
+    }
     const requestedContent = (overrideText || input).trim();
     const hasPendingAttachments = attachments.length > 0 || stagedFiles.length > 0;
     const content = requestedContent || (hasPendingAttachments ? 'Open the attached file.' : '');
@@ -6675,7 +7679,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // confirm/send both proceed so no new hoop is added to normal sends.
     const sendGuard = guardChatSend(requestedContent, { hasAttachment: hasPendingAttachments });
     if (sendGuard.action === 'block') {
-      addBotMessage(sendGuard.hint, undefined, { localOnly: true });
+      addBotMessage(sendGuard.hint, undefined, { localOnly: true, durability: 'ephemeral' });
       return;
     }
     if (!content) return;
@@ -6804,7 +7808,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           if (!started.started) {
             addBotMessage('I could not continue that booking run. The browser session may have expired — say "book" again to start fresh.', undefined, { localOnly: true });
           } else {
-            addBotMessage('Continuing the booking run — live view', undefined, { localOnly: true });
+            addBotMessage('Continuing the booking run — live view', undefined, {
+              localOnly: true,
+              durability: 'ephemeral',
+            });
           }
           return;
         }
@@ -6855,12 +7862,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (shouldRunDesktopAttachmentTask) {
       const uploading = currentStagedFiles.find((file) => file.uploading || (!file.attachment && !file.error));
       if (uploading) {
-        addBotMessage(`**${uploading.name}** is still uploading. Send again after the upload finishes so I can stage it for the desktop app.`, undefined, { localOnly: true });
+        addBotMessage(`**${uploading.name}** is still uploading. Send again after the upload finishes so I can stage it for the desktop app.`, undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
       const failed = currentStagedFiles.find((file) => file.error);
       if (failed) {
-        addBotMessage(`**${failed.name}** did not upload cleanly. Remove it or upload it again before I open it in a desktop app.`, undefined, { localOnly: true });
+        addBotMessage(`**${failed.name}** did not upload cleanly. Remove it or upload it again before I open it in a desktop app.`, undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
       setBotTyping(true);
@@ -7042,6 +8049,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (multiAgentPlan.kind === 'help') {
         addBotMessage(formatMultiAgentHelp(liveAgents, multiAgentPlan.reason), undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           source: {
             actor: 'OpenSwan',
             surface: 'multi_agent_help',
@@ -7057,6 +8065,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (targets.length < 2) {
         addBotMessage(formatMultiAgentHelp(liveAgents, 'Need at least two available agents for a multi-agent run.'), undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           source: {
             actor: 'OpenSwan',
             surface: 'multi_agent_help',
@@ -7089,6 +8098,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         undefined,
         {
           localOnly: true,
+          durability: 'ephemeral',
           source: {
             actor: 'OpenSwan',
             surface: strategySurface,
@@ -7449,6 +8459,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (!taskText) {
         addBotMessage('Plan mode is on. Send `/plan <task>` or type the task you want me to plan before execution.', undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           source: {
             actor: 'OpenSwan',
             surface: 'agent_plan_mode_help',
@@ -7603,11 +8614,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         selectedMode: effectiveChatMode,
       });
       // multi-intent-loop: compound-message notice. The single-intent execution
-      // lanes below (computer task / command handler / build discovery) classify
-      // ONE ask per turn and early-return, silently dropping
-      // the later asks — so when the deterministic segmenter finds 2-3 verb-led
-      // asks, post a local notice with the later asks as "tap to run next"
-      // chips BEFORE lane #1 runs. Excluded on purpose: ask_clarification (the
+      // lanes below (command handler / build discovery) classify ONE ask per
+      // turn and early-return, silently dropping the later asks — so when the
+      // deterministic segmenter finds 2-3 verb-led asks, post a local notice
+      // with the later asks as "tap to run next" chips BEFORE lane #1 runs.
+      // Excluded on purpose: run_computer_task because its shared runtime owns
+      // the complete original task as one ordered workflow; splitting or
+      // previewing only #1 contradicts what is actually dispatched.
+      // Also excluded: ask_clarification (the
       // clarify-resume seam would fold a chip tap into the pending answer) and
       // run_openswan/run_plain_chat/local_reply/open_modal (the tool-loop agent /
       // SwanBot sees the full text and handles every ask itself; run_openswan's
@@ -7621,18 +8635,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const laterAsks = multiAsk.isMultiIntent
           ? multiAsk.segments.slice(1).map((segment) => segment.text).filter((text) => text.trim().length > 0)
           : [];
-        const multiAskNoticeLanes: string[] = [
-          'run_computer_task',
-          'run_command_handler',
-          'run_build_discovery',
-        ];
         if (
           multiAsk.isMultiIntent
           && multiAsk.segments.length >= 2
           && multiAsk.segments.length <= 3
           && laterAsks.length === multiAsk.segments.length - 1
           && multiAsk.segments[0].text.trim().length > 0
-          && multiAskNoticeLanes.includes(plan.execution.kind)
+          && shouldSurfaceMultiIntentNotice(plan.execution.kind)
         ) {
           const firstAsk = multiAsk.segments[0].text.length > 80
             ? `${multiAsk.segments[0].text.slice(0, 79).trimEnd()}…`
@@ -7642,6 +8651,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             undefined,
             {
               localOnly: true,
+              durability: 'ephemeral',
               quickReplies: laterAsks,
               quickRepliesLabel: 'TAP TO RUN NEXT',
               source: {
@@ -7793,7 +8803,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const clarificationHandlers = createChatTransportHandlers({
           ask_clarification: async (dispatchedPlan, depCtx) => {
             const clarification = dispatchedPlan.execution.clarification!;
-            const recentMessages = messages.slice(-6).map((m) => m.content).filter(Boolean);
+            const recentMessages = transcriptChatMessages(messages).slice(-6).map((m) => m.content).filter(Boolean);
             const fill = await recallForClarification({
               circleId,
               userId: currentUserId || '',
@@ -8170,11 +9180,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (lowerContent.startsWith('/trace ') || lowerContent === '/trace') {
       const arg = content.slice(6).trim();
       if (!arg) {
-        addBotMessage('Usage: `/trace <runId>` — paste a run id from RECENT RUNS to see its step-by-step trace.', undefined, { localOnly: true });
+        addBotMessage('Usage: `/trace <runId>` — paste a run id from RECENT RUNS to see its step-by-step trace.', undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
       addBotMessage(`Loading trace for ${arg.slice(0, 8)}…`, undefined, {
         localOnly: true,
+        durability: 'ephemeral',
         runId: arg,
         showRunTrace: true,
       });
@@ -8185,11 +9196,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // healthy/degraded/offline dots and copy-able restart commands.
     // Brings `npm run bridges:doctor` into chat.
     if (lowerContent === '/diag' || lowerContent === '/bridges') {
-      addBotMessage('Probing bridges…', undefined, { localOnly: true });
+      addBotMessage('Probing bridges…', undefined, { localOnly: true, durability: 'ephemeral' });
       probeBridges({ urlForPort: (port) => getBridgeUrl(port) })
         .then((results) => {
           addBotMessage(`${results.filter(r => r.status === 'healthy').length}/${results.length} bridges healthy`, undefined, {
             localOnly: true,
+            durability: 'ephemeral',
             bridgeDiagResults: results,
           });
         })
@@ -8224,6 +9236,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }));
         addBotMessage('Pick an agent to assign:', undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           assignPickerAgents: pickerAgents,
         });
         return;
@@ -8231,16 +9244,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // Inline mode: /assign @<name> <task>
       const m = rest.match(/^@?([\w][\w-]*)\s+(.+)$/);
       if (!m) {
-        addBotMessage('Usage: `/assign @<agent> <task description>`. Type `/assign` alone to see all agents.', undefined, { localOnly: true });
+        addBotMessage('Usage: `/assign @<agent> <task description>`. Type `/assign` alone to see all agents.', undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
       const [, alias, task] = m;
       const target = liveAgents.find(a => a.name.toLowerCase() === alias.toLowerCase());
       if (!target) {
-        addBotMessage(`No agent named "@${alias}" in this circle. Type \`/assign\` alone to see all agents.`, undefined, { localOnly: true });
+        addBotMessage(`No agent named "@${alias}" in this circle. Type \`/assign\` alone to see all agents.`, undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
-      addBotMessage(`Assigning to **${target.name}**…`, undefined, { localOnly: true });
+      addBotMessage(`Assigning to **${target.name}**…`, undefined, { localOnly: true, durability: 'ephemeral' });
       setBotTyping(true);
       dispatchAssignedAgentTask(target, task)
         .then((reply) => addBotMessage(reply))
@@ -8277,7 +9290,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           ? 'Local agent loop is **ON** for this device (tool turns run locally). `/v2loop off` to revert.'
           : 'Local agent loop is **OFF** for this device (tool turns use the edge). `/v2loop on` to run desktop/app tool turns locally.';
       }
-      addBotMessage(line, undefined, { localOnly: true });
+      addBotMessage(line, undefined, { localOnly: true, durability: 'ephemeral' });
       return;
     }
 
@@ -8285,7 +9298,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // results as clickable rows that jump to the message in chat.
     if (lowerContent.startsWith('/search ')) {
       const query = content.slice(8).trim();
-      if (!query) { addBotMessage('Usage: /search <keyword>', undefined, { localOnly: true }); return; }
+      if (!query) { addBotMessage('Usage: /search <keyword>', undefined, { localOnly: true, durability: 'ephemeral' }); return; }
       const q = query.toLowerCase();
 
       // First pass: scan in-memory messages so we can return ids that
@@ -8338,6 +9351,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
       addBotMessage(`Search results for "${query}"`, undefined, {
         localOnly: true,
+        durability: 'ephemeral',
         searchResults: { query, rows: rows.slice(0, 25) },
       });
       return;
@@ -8544,7 +9558,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // filterable + click-to-insert, so users can find a command they
     // half-remember and seed it into the composer with one tap.
     if (lowerContent === '/help' || lowerContent === '/commands') {
-      addBotMessage('Available commands', undefined, { localOnly: true, commandsHelp: true });
+      addBotMessage('Available commands', undefined, { localOnly: true, durability: 'ephemeral', commandsHelp: true });
       return;
     }
 
@@ -9328,7 +10342,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       setBotTyping(true);
       try {
         const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
-        const recent = messages.slice(-6).map(m => ({
+        const recent = transcriptChatMessages(messages).slice(-6).map(m => ({
           role: m.isBot ? ('assistant' as const) : ('user' as const),
           content: m.content,
         }));
@@ -9359,7 +10373,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const { invokeAnyChat } = await import('../../../lib/universalInvoke');
           const { listApiKeys } = await import('../../../lib/llmProviders');
           const userKeys = await listApiKeys();
-          const recent = messages.slice(-6).map(m => ({
+          const recent = transcriptChatMessages(messages).slice(-6).map(m => ({
             role: m.isBot ? ('assistant' as const) : ('user' as const),
             content: m.content,
           }));
@@ -9451,7 +10465,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const recoveryOptionPromptContext = selectedRecoveryOption
         ? formatChatFailureRecoveryOptionSelectionForPrompt(selectedRecoveryOption)
         : '';
-      const recentMessages = messages.slice(-10);
+      const recentMessages = transcriptChatMessages(messages).slice(-10);
       // P62: the most recent bot message gets a much larger history budget.
       // "Continue"-style follow-ups (including interrupted-stream partials,
       // whose UI hint literally says "Say 'continue'") need that answer's
@@ -9570,6 +10584,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       ].filter(Boolean).join('\n\n');
       startCodingWorkbench(workbenchPrompt);
       setBotTyping(true);
+      let pendingMessage: ChatMessage | null = null;
       try {
         const sessionArchiveContext = await loadSessionArchiveContext();
         const sendModel = effectiveSelectedModel !== 'auto'
@@ -9639,7 +10654,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingHandoff(result.handoffSuggestion);
           }
         } else {
-          let pendingMessage: ChatMessage | null = null;
           try {
             const { buildPluginPrompt, getPluginConnectorRequirements } = await import('../../../lib/pluginRegistry');
             const { getMissingConnectorRequirements } = await import('../../../lib/circleIntegrations');
@@ -9812,6 +10826,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 // token. onDelta below replaces the content wholesale, so the
                 // seed never mixes with real output.
                 const pendingMsg = addPendingBotMessage(`${pickThinkingVerb(Math.floor(Date.now() / 1500))}…`);
+                pendingMessage = pendingMsg;
                 streamPendingMsgId = pendingMsg.id;
                 streamPendingMsg = pendingMsg;
                 streamUiOwner = ++chatUiOwnerRef.current;
@@ -10061,12 +11076,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     console.warn('[ChatTab] stream→tool escalation failed, keeping streamed text:', escalationErr);
                   }
                 }
-                updateBotMessage(pendingMsg.id, {
+                const completedStreamMessage: ChatMessage = {
+                  ...pendingMsg,
                   content: accumulated,
                   isPending: false,
                   source: streamSource,
                   usage: streamingUsage,
-                });
+                  timestamp: new Date(),
+                };
+                const completedStreamMetadata = projectPersistedChatBotMetadata(
+                  completedStreamMessage,
+                  pendingMsg.agentSubjectMetadata
+                    || selectedAgentSubjectContext.agentSubjectMetadata,
+                );
+                completedStreamMessage.persistedMetadataSnapshot = completedStreamMetadata;
+                updateBotMessage(pendingMsg.id, completedStreamMessage);
                 // Post-stream: run memory extraction in background
                 if (accumulated.length > 20) {
                   void (async () => {
@@ -10080,14 +11104,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   })();
                 }
                 if (activeThreadId) {
-                  saveRecoverableChatMessage(activeThreadId, {
-                    ...pendingMsg,
-                    content: accumulated,
-                    source: streamSource,
-                    usage: streamingUsage,
-                    isPending: false,
-                    timestamp: new Date(),
-                  });
+                  saveRecoverableChatMessage(activeThreadId, completedStreamMessage);
                 }
                 if (currentUserId && activeThreadId) {
                   persistChatTabBotMessageWithRetry({
@@ -10096,18 +11113,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     agentName,
                     content: accumulated,
                     threadId: activeThreadId,
-                    metadata: {
-                      localMessageId: pendingMsg.id,
-                      source: streamSource,
-                      agentSubjectMetadata: pendingMsg.agentSubjectMetadata
-                        || selectedAgentSubjectContext.agentSubjectMetadata,
-                      usage: streamingUsage || null,
-                    },
+                    metadata: completedStreamMetadata,
                     onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
                     onPersisted: (dbId) => {
                       void removePendingBotMessage(activeThreadId, pendingMsg.id).catch(() => {});
                       setMessages(prev => prev.map((message) => (
-                        message.id === pendingMsg.id ? { ...message, dbId } : message
+                        message.id === pendingMsg.id
+                          ? { ...message, dbId, persistedMetadataSnapshot: completedStreamMetadata }
+                          : message
                       )));
                     },
                   });
@@ -10163,8 +11176,33 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       selectedModel,
                       effectiveModel: streamCandidateModel,
                     };
+                    const interruptedStreamMessage: ChatMessage | null = streamPendingMsg
+                      ? {
+                          ...streamPendingMsg,
+                          content: interruptedContent,
+                          isPending: false,
+                          source: interruptedSource,
+                          timestamp: new Date(),
+                        }
+                      : null;
+                    const interruptedStreamMetadata: PersistedChatBotMetadata = interruptedStreamMessage
+                      ? projectPersistedChatBotMetadata(
+                          interruptedStreamMessage,
+                          streamPendingMsg?.agentSubjectMetadata
+                            || selectedAgentSubjectContext.agentSubjectMetadata,
+                        )
+                      : {
+                          localMessageId: streamPendingMsgId || undefined,
+                          requestAuthorId: currentUserId || null,
+                          source: interruptedSource,
+                          agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
+                          usage: null,
+                        };
+                    if (interruptedStreamMessage) {
+                      interruptedStreamMessage.persistedMetadataSnapshot = interruptedStreamMetadata;
+                    }
                     if (streamPendingMsgId) {
-                      updateBotMessage(streamPendingMsgId, {
+                      updateBotMessage(streamPendingMsgId, interruptedStreamMessage || {
                         content: interruptedContent,
                         isPending: false,
                         source: interruptedSource,
@@ -10176,13 +11214,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     // "continue" had nothing to continue from. Persist it
                     // exactly like the clean-stream path above.
                     if (activeThreadId && streamPendingMsg) {
-                      saveRecoverableChatMessage(activeThreadId, {
-                        ...streamPendingMsg,
-                        content: interruptedContent,
-                        source: interruptedSource,
-                        isPending: false,
-                        timestamp: new Date(),
-                      });
+                      saveRecoverableChatMessage(
+                        activeThreadId,
+                        interruptedStreamMessage || streamPendingMsg,
+                      );
                     }
                     if (currentUserId && activeThreadId && streamPendingMsgId) {
                       const interruptedMsgId = streamPendingMsgId;
@@ -10192,18 +11227,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                         agentName,
                         content: interruptedContent,
                         threadId: activeThreadId,
-                        metadata: {
-                          localMessageId: interruptedMsgId,
-                          source: interruptedSource,
-                          agentSubjectMetadata: streamPendingMsg?.agentSubjectMetadata
-                            || selectedAgentSubjectContext.agentSubjectMetadata,
-                          usage: null,
-                        },
+                        metadata: interruptedStreamMetadata,
                         onError: (error) => console.error('[ChatTab] persist interrupted stream msg:', error),
                         onPersisted: (dbId) => {
                           void removePendingBotMessage(activeThreadId, interruptedMsgId).catch(() => {});
                           setMessages(prev => prev.map((message) => (
-                            message.id === interruptedMsgId ? { ...message, dbId } : message
+                            message.id === interruptedMsgId
+                              ? { ...message, dbId, persistedMetadataSnapshot: interruptedStreamMetadata }
+                              : message
                           )));
                         },
                       });
@@ -10406,7 +11437,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               effectiveModel: structured.usage?.model || sendModel || null,
               provider: structured.routing?.provider_routed || null,
             };
-            updateBotMessage(pendingMessage.id, {
+            const structuredMessageSnapshot: ChatMessage = {
+              ...pendingMessage,
               content: botResponse,
               artifacts: structured.artifacts,
               wikiRefs,
@@ -10426,35 +11458,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               source: structuredSource,
               usage: structured.usage,
               isPending: false,
-            });
+              timestamp: new Date(),
+            };
+            const structuredPersistedMetadata: PersistedChatBotMetadata = {
+              ...projectPersistedChatBotMetadata(
+                structuredMessageSnapshot,
+                pendingMessage.agentSubjectMetadata
+                  || selectedAgentSubjectContext.agentSubjectMetadata,
+              ),
+              // Envelope-only proof stays in the snapshot so a later reaction
+              // cannot overwrite the row with a metadata subset.
+              modeOutcomeSummary: structured.modeOutcomeSummary || undefined,
+              observedEval: structured.observedEval || undefined,
+              verificationReceipt: structured.verificationReceipt || undefined,
+            };
+            structuredMessageSnapshot.persistedMetadataSnapshot = structuredPersistedMetadata;
+            updateBotMessage(pendingMessage.id, structuredMessageSnapshot);
             if (profileRef.current) {
               profileRef.current = updateProfileFromMessage(profileRef.current, botResponse, false);
               saveUserProfile(profileRef.current).catch(() => {});
             }
             if (activeThreadId) {
-              saveRecoverableChatMessage(activeThreadId, {
-                ...pendingMessage,
-                content: botResponse,
-                artifacts: structured.artifacts,
-                wikiRefs,
-                researchRefs,
-                memoriesUsed: structured.memoriesUsed,
-                memoryRefs: structured.memoryReferences,
-                memoryRecommendations: structured.memoryRecommendations,
-                executionStream,
-                browserPlans: structured.browserPlans,
-                browserPlanEvents: structured.browserPlanEvents,
-                runId: structured.runId,
-                taskPlan: structured.taskPlan,
-                toolEvents: runtimeToolEvents,
-                verificationResults: structured.verificationResults,
-                delegatedSubagents: structured.delegatedSubagents,
-                routing: structured.routing,
-                source: structuredSource,
-                usage: structured.usage,
-                isPending: false,
-                timestamp: new Date(),
-              });
+              saveRecoverableChatMessage(activeThreadId, structuredMessageSnapshot);
             }
             if (currentUserId && activeThreadId) {
               persistChatTabBotMessageWithRetry({
@@ -10463,33 +11488,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 agentName,
                 content: botResponse,
                 threadId: activeThreadId,
-                metadata: {
-                  localMessageId: pendingMessageId,
-                  source: structuredSource,
-                  agentSubjectMetadata: pendingMessage.agentSubjectMetadata
-                    || selectedAgentSubjectContext.agentSubjectMetadata,
-                  usage: structured.usage || null,
-                  artifacts: structured.artifacts,
-                  wikiRefs,
-                  researchRefs,
-                  memoriesUsed: structured.memoriesUsed,
-                  memoryRefs: structured.memoryReferences,
-                  memoryRecommendations: structured.memoryRecommendations,
-                  executionStream,
-                  browserPlans: structured.browserPlans,
-                  browserPlanEvents: structured.browserPlanEvents,
-                  routing: structured.routing,
-                  // Bounded at persist time by compactVerificationReceipt
-                  // (40 files / 20 checks) so message rows stay small.
-                  verificationReceipt: structured.verificationReceipt || undefined,
-                },
+                metadata: structuredPersistedMetadata,
                 onError: (error) => {
                   console.error('[ChatTab] Unexpected error persisting bot msg:', error);
                 },
                 onPersisted: (dbId) => {
                   void removePendingBotMessage(activeThreadId, pendingMessageId).catch(() => {});
                   setMessages(prev => prev.map((message) => (
-                    message.id === pendingMessageId ? { ...message, dbId } : message
+                    message.id === pendingMessageId
+                      ? { ...message, dbId, persistedMetadataSnapshot: structuredPersistedMetadata }
+                      : message
                   )));
                 },
               });
@@ -10545,16 +11553,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               selectedModel,
               effectiveModel: sendModel || null,
             };
+            const terminalContent = appendCustomerSafeRecoveryMessage(
+              `${errorMessage} Technical details were saved for recovery.`,
+              recovery.message,
+            );
             if (pendingMessage) {
-              updateBotMessage(pendingMessage.id, {
-                content: appendCustomerSafeRecoveryMessage(`${errorMessage} Technical details were saved for recovery.`, recovery.message),
-                isPending: false,
+              finalizeFailedBotMessage({
+                pendingMessage,
+                content: terminalContent,
                 recoveryOptions: recovery.recoveryOptions,
                 recoveryReliability: recovery.recoveryReliability,
                 source: errorSource,
               });
             } else {
-              addBotMessage(appendCustomerSafeRecoveryMessage(`${errorMessage} Technical details were saved for recovery.`, recovery.message), undefined, {
+              addBotMessage(terminalContent, undefined, {
                 localOnly: true,
                 hadError: true,
                 recoveryOptions: recovery.recoveryOptions,
@@ -10603,28 +11615,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           launchIfMissing: true,
           touched: ['surface:main_chat'],
         });
-        setMessages((prev) => {
-          const pendingIndex = [...prev].reverse().findIndex((entry) => entry.isBot && entry.isPending);
-          if (pendingIndex === -1) {
-            return [...prev, {
-              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              content: `${errorMessage}${recovery.message}`,
-              isBot: true,
-              isUser: false,
-              userName: agentName,
-              timestamp: new Date(),
-              reactions: {},
-              recoveryOptions: recovery.recoveryOptions,
-              recoveryReliability: recovery.recoveryReliability,
-              isPending: false,
-            }];
-          }
-          const actualIndex = prev.length - 1 - pendingIndex;
-          return prev.map((entry, index) => (
-            index === actualIndex
-              ? { ...entry, content: `${errorMessage}${recovery.message}`, recoveryOptions: recovery.recoveryOptions, recoveryReliability: recovery.recoveryReliability, isPending: false }
-              : entry
-          ));
+        finalizeFailedBotMessage({
+          pendingMessage,
+          content: appendCustomerSafeRecoveryMessage(errorMessage, recovery.message),
+          recoveryOptions: recovery.recoveryOptions,
+          recoveryReliability: recovery.recoveryReliability,
+          source: {
+            actor: agentName,
+            surface: 'main_chat_outer_error',
+            selectedModel,
+          },
         });
         setRunStatus('idle');
         setActiveSubagent(null);
@@ -10808,9 +11808,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     patch: { verdict?: ChatOutcomeVerdict; signal?: ChatUserSignal },
   ) => {
     if (!patch || (!patch.verdict && !patch.signal)) return;
-    let target: ChatMessage | null = null;
-    setMessages((prev) => prev.map((msg) => {
-      if (msg.id !== messageId || !msg.isBot) return msg;
+    const mergeSignal = (msg: ChatMessage): ChatMessage => {
       const prior = msg.outcomeSignal || undefined;
       // Never downgrade a real verdict back to 'unknown' (a later reaction
       // carries no verdict); keep the strongest info we already have.
@@ -10826,25 +11824,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           || msg.source?.selectedModel
           || undefined,
       };
-      target = { ...msg, outcomeSignal: merged };
-      return target;
-    }));
-    // Best-effort durable persistence: read-modify-write the row metadata with
-    // the tiny outcome enums. Guarded so nothing here can surface to the user.
+      return { ...msg, outcomeSignal: merged };
+    };
+    const current = messagesRef.current.find((message) => (
+      message.id === messageId && message.isBot
+    ));
+    if (!current) return;
+    const target = mergeSignal(current);
+    // Keep the synchronous snapshot current so two rapid reactions merge
+    // instead of racing on the previous render. React state remains the UI
+    // owner; this ref is only the persistence-safe lookup boundary.
+    messagesRef.current = messagesRef.current.map((message) => (
+      message.id === messageId ? target : message
+    ));
+    setMessages((prev) => prev.map((message) => (
+      message.id === messageId && message.isBot ? mergeSignal(message) : message
+    )));
+    // Re-persist the complete structured snapshot. Reading metadata from
+    // `target.content` would be wrong because in-memory content is the visible
+    // body without the persistence envelope, and would erase run/status/
+    // handoff lineage from the database row.
     try {
-      const row = target as ChatMessage | null;
-      if (!row?.dbId || !row.outcomeSignal) return;
-      const existing = readPersistedChatBotMetadata(row.content) as PersistedChatBotMetadata | null;
-      const visible = stripPersistedChatBotPrefix(row.content);
-      const nextContent = formatPersistedChatBotMessage(agentName, visible, {
-        ...(existing || {}),
-        agentSubjectMetadata: existing?.agentSubjectMetadata
-          || row.agentSubjectMetadata
-          || selectedAgentSubjectContext.agentSubjectMetadata,
-        outcomeSignal: row.outcomeSignal,
-      });
-      if (nextContent === row.content) return;
-      void updateChatMessageContent(row.dbId, nextContent).catch(() => {});
+      if (!target.dbId || !target.outcomeSignal) return;
+      syncPersistedBotMessage(target);
     } catch {
       // swallow — telemetry must never break chat
     }
@@ -10852,24 +11854,52 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   // ─── Reactions ────────────────────────────────────────────────────────────
 
+  const reactionMutationQueuesRef = useRef(new Map<string, Promise<void>>());
+  const reactionMutationVersionsRef = useRef(new Map<string, number>());
+
+  const replaceMountedMessageReactions = (
+    dbId: string,
+    reactions: Record<string, string[]>,
+    scope: { circleId: string; threadId: string | null },
+  ) => {
+    if (
+      activeThreadScopeRef.current.circleId !== scope.circleId
+      || activeThreadScopeRef.current.threadId !== scope.threadId
+    ) return;
+    messagesRef.current = messagesRef.current.map((message) => (
+      message.dbId === dbId ? { ...message, reactions } : message
+    ));
+    setMessages((current) => current.map((message) => (
+      message.dbId === dbId ? { ...message, reactions } : message
+    )));
+  };
+
   const toggleReaction = (messageId: string, emoji: string) => {
-    let addedReaction = false;
-    setMessages(prev => prev.map(msg => {
-      if (msg.id !== messageId) return msg;
-      const reactions = { ...msg.reactions };
-      const uid = currentUserId || 'me';
-      const users = reactions[emoji] || [];
-      if (users.includes(uid)) {
-        reactions[emoji] = users.filter(u => u !== uid);
-        if (reactions[emoji].length === 0) delete reactions[emoji];
-      } else {
-        reactions[emoji] = [...users, uid];
-        addedReaction = true;
-        // Trigger floating emoji
-        addFloatingReaction(emoji, 200 + Math.random() * 100, 300 + Math.random() * 100);
-      }
-      return { ...msg, reactions };
-    }));
+    const current = messagesRef.current.find((message) => message.id === messageId);
+    if (!current || !currentUserId || !current.dbId) {
+      setShowReactions(null);
+      setThreadNavigationNotice('Wait for this message to finish saving, then try the reaction again.');
+      return;
+    }
+
+    const uid = currentUserId;
+    const previousReactions = Object.fromEntries(
+      Object.entries(current.reactions || {}).map(([key, users]) => [key, [...users]]),
+    );
+    const users = previousReactions[emoji] || [];
+    const addedReaction = !users.includes(uid);
+    const optimisticReactions = { ...previousReactions };
+    if (addedReaction) {
+      optimisticReactions[emoji] = [...users, uid];
+      addFloatingReaction(emoji, 200 + Math.random() * 100, 300 + Math.random() * 100);
+    } else {
+      const remaining = users.filter((userId) => userId !== uid);
+      if (remaining.length > 0) optimisticReactions[emoji] = remaining;
+      else delete optimisticReactions[emoji];
+    }
+
+    const mutationScope = { circleId, threadId: activeThreadId };
+    replaceMountedMessageReactions(current.dbId, optimisticReactions, mutationScope);
     setShowReactions(null);
     // Flywheel: an ADDED 👍/👎 is an explicit accept/reject the user made —
     // record it as training signal. Removing a reaction is ambiguous, so we
@@ -10878,29 +11908,99 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const signal = mapReactionToSignal(emoji);
       if (signal) stampOutcomeSignalRef.current(messageId, { signal });
     }
+
+    const dbId = current.dbId;
+    const nextVersion = (reactionMutationVersionsRef.current.get(dbId) || 0) + 1;
+    reactionMutationVersionsRef.current.set(dbId, nextVersion);
+    const priorMutation = reactionMutationQueuesRef.current.get(dbId) || Promise.resolve();
+    const mutation = priorMutation.catch(() => {}).then(async () => {
+      try {
+        const exactReactions = await setMessageReaction(dbId, emoji, addedReaction);
+        if (reactionMutationVersionsRef.current.get(dbId) === nextVersion) {
+          replaceMountedMessageReactions(dbId, exactReactions, mutationScope);
+        }
+      } catch (error) {
+        console.warn('[ChatTab] reaction mutation failed:', error);
+        if (reactionMutationVersionsRef.current.get(dbId) === nextVersion) {
+          replaceMountedMessageReactions(dbId, previousReactions, mutationScope);
+          setThreadNavigationNotice('Could not save that reaction. Chat restored the server state; try again.');
+          try {
+            const exactReactions = await loadMessageReactions(dbId);
+            if (reactionMutationVersionsRef.current.get(dbId) === nextVersion) {
+              replaceMountedMessageReactions(dbId, exactReactions, mutationScope);
+            }
+          } catch {
+            // The optimistic snapshot is already rolled back. Realtime or the
+            // next bounded catch-up will reconcile if the row changed remotely.
+          }
+        }
+      }
+    });
+    reactionMutationQueuesRef.current.set(dbId, mutation);
+    void mutation.finally(() => {
+      if (reactionMutationQueuesRef.current.get(dbId) === mutation) {
+        reactionMutationQueuesRef.current.delete(dbId);
+      }
+    });
   };
 
   // ─── Delete Message ───────────────────────────────────────────────────
 
   const deleteMessage = async (messageId: string, dbId?: string) => {
-    // Track deletion of bot messages for behavior learning
     const deletedMsg = messages.find(m => m.id === messageId);
-    if (deletedMsg?.isBot && profileRef.current) {
-      profileRef.current = updateProfileFromDeletion(profileRef.current);
-      saveUserProfile(profileRef.current).catch(() => {});
-    }
-    // Remove from local state immediately
-    setMessages(prev => prev.filter(m => m.id !== messageId));
-    // Delete from Supabase if persisted
-    if (dbId) {
-      await supabase.from('messages').delete().eq('id', dbId);
+    if (!deletedMsg) return;
+    const prompt = 'Delete this message? This cannot be undone.';
+    const confirmed = Platform.OS === 'web'
+      ? (typeof window !== 'undefined' && window.confirm(prompt))
+      : await new Promise<boolean>((resolve) => {
+          import('react-native')
+            .then(({ Alert }) => Alert.alert('Delete message?', prompt, [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
+            ]))
+            .catch(() => resolve(false));
+        });
+    if (!confirmed) return;
+
+    const messageCircleId = circleId;
+    const messageThreadId = activeThreadId;
+    setMessages(prev => {
+      const next = prev.filter(m => m.id !== messageId);
+      messagesRef.current = next;
+      return next;
+    });
+    try {
+      if (dbId) {
+        const { error } = await supabase.from('messages').delete().eq('id', dbId);
+        if (error) throw error;
+      }
+      if (deletedMsg.isBot && profileRef.current) {
+        profileRef.current = updateProfileFromDeletion(profileRef.current);
+        saveUserProfile(profileRef.current).catch(() => {});
+      }
+    } catch (error) {
+      console.warn('[ChatTab] delete message failed:', error);
+      if (
+        activeThreadScopeRef.current.circleId === messageCircleId
+        && activeThreadScopeRef.current.threadId === messageThreadId
+      ) {
+        setMessages(prev => {
+          if (prev.some((message) => message.id === deletedMsg.id || (dbId && message.dbId === dbId))) return prev;
+          const next = [...prev, deletedMsg].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+          messagesRef.current = next;
+          return next;
+        });
+        setThreadNavigationNotice('Could not delete that message. It was restored; try again.');
+      }
     }
   };
 
   // ─── Input & Mentions ────────────────────────────────────────────────────
 
   const handleInputChange = (text: string) => {
+    if (threadLoadState.status !== 'ready' || threadLoadState.threadId !== activeThreadId) return;
     setInput(text);
+    persistDraftForThread(activeThreadId, text);
     if (text.trimStart().startsWith('/')) {
       setShowMentions(false);
       return;
@@ -10938,7 +12038,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const insertMention = (member: any) => {
     const lastAt = input.lastIndexOf('@');
     const before = input.slice(0, lastAt);
-    setInput(`${before}@${member.username} `);
+    handleInputChange(`${before}@${member.username} `);
     setShowMentions(false);
     inputRef.current?.focus();
   };
@@ -10965,13 +12065,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             toolEvents: nextToolEvents,
             verificationResults: message.verificationResults || [],
           });
-          let nextMessageToPersist: ChatMessage | null = null;
-          setMessages((prev) => prev.map((entry) => {
-            if (entry.id !== message.id) return entry;
-            nextMessageToPersist = { ...entry, toolEvents: nextToolEvents, executionStream: nextExecutionStream };
-            return nextMessageToPersist;
-          }));
+          const currentMessage = messagesRef.current.find((entry) => entry.id === message.id) || message;
+          const nextMessageToPersist: ChatMessage = {
+            ...currentMessage,
+            toolEvents: nextToolEvents,
+            executionStream: nextExecutionStream,
+          };
+          messagesRef.current = messagesRef.current.map((entry) => (
+            entry.id === message.id ? nextMessageToPersist : entry
+          ));
+          setMessages((prev) => prev.map((entry) => (
+            entry.id === message.id ? { ...entry, ...nextMessageToPersist } : entry
+          )));
           syncSessionArchiveMessage(nextMessageToPersist);
+          syncPersistedBotMessage(nextMessageToPersist);
           if (message.runId && circleId) {
             void appendRunToolEvent({ runId: message.runId, circleId, event });
             void mergeRunMetadata(message.runId, { tool_events: nextToolEvents, execution_stream: nextExecutionStream });
@@ -10988,18 +12095,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         verificationResults: nextVerificationResults,
       });
 
-      let nextMessageToPersist: ChatMessage | null = null;
-      setMessages((prev) => prev.map((entry) => {
-        if (entry.id !== message.id) return entry;
-        nextMessageToPersist = {
-          ...entry,
-          toolEvents: nextToolEvents,
-          verificationResults: nextVerificationResults,
-          executionStream: nextExecutionStream,
-        };
-        return nextMessageToPersist;
-      }));
+      const currentMessage = messagesRef.current.find((entry) => entry.id === message.id) || message;
+      const nextMessageToPersist: ChatMessage = {
+        ...currentMessage,
+        toolEvents: nextToolEvents,
+        verificationResults: nextVerificationResults,
+        executionStream: nextExecutionStream,
+      };
+      messagesRef.current = messagesRef.current.map((entry) => (
+        entry.id === message.id ? nextMessageToPersist : entry
+      ));
+      setMessages((prev) => prev.map((entry) => (
+        entry.id === message.id ? { ...entry, ...nextMessageToPersist } : entry
+      )));
       syncSessionArchiveMessage(nextMessageToPersist);
+      syncPersistedBotMessage(nextMessageToPersist);
       recordSessionArchiveEvent({
         kind: 'verification',
         summary: result.summary,
@@ -11027,7 +12137,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         current?.messageId === message.id && current.checkId === checkId ? null : current
       ));
     }
-  }, [circleId, recordSessionArchiveEvent, syncSessionArchiveMessage]);
+  }, [circleId, recordSessionArchiveEvent, syncPersistedBotMessage, syncSessionArchiveMessage]);
 
   const handlePromoteMemoryRef = useCallback(async (ref: PromptMemoryReference) => {
     const ok = await promoteMemory(ref.id);
@@ -11123,12 +12233,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   // ─── Render Helpers ──────────────────────────────────────────────────────
 
+  // Transcript rows stay immutable, but their presentation must distinguish
+  // the current plan from earlier turns. Exact lineage can mark a pending card
+  // Superseded; a newer human turn makes an otherwise actionable old card
+  // Historical without pretending that an unrelated run completed it.
+  const designTaskTimelineDispositions = useMemo(
+    () => classifyChatDesignTaskTimeline(messages),
+    [messages],
+  );
+  const isInactiveDesignTaskMessage = (message: ChatMessage): boolean => {
+    const disposition = designTaskTimelineDispositions.get(message.id);
+    return disposition === 'superseded' || disposition === 'historical';
+  };
+  const isMutationReplayBlockedMessage = (message: ChatMessage): boolean => (
+    message.computerHandoff?.replayPolicy === 'manual_verify_only'
+    && message.computerHandoff.mutationDispatched === true
+  );
+
   const renderContent = (item: ChatMessage) => {
     const routeChips = buildMessageRouteChips(item);
     const failoverBadge = failoverBadgeForMessage(item);
     const handoffMetadata = item.computerHandoff || null;
+    const mutationReplayBlocked = isMutationReplayBlockedMessage(item);
     const appChoiceCard = buildChatAppChoiceCard(handoffMetadata);
-    const designTaskCard = buildChatDesignTaskCardModel(handoffMetadata);
+    const baseDesignTaskCard = buildChatDesignTaskCardModel(handoffMetadata);
+    const designTaskTimelineDisposition = designTaskTimelineDispositions.get(item.id) ?? 'current';
+    const designTaskCard = baseDesignTaskCard
+      ? applyChatDesignTaskTimelineDisposition(
+          baseDesignTaskCard,
+          designTaskTimelineDisposition,
+        )
+      : null;
+    const isSupersededDesignTask = Boolean(designTaskCard?.isSuperseded);
+    const isLegacyHistoricalComputerPlan = !baseDesignTaskCard
+      && designTaskTimelineDisposition === 'historical';
+    const isHistoricalDesignTask = Boolean(designTaskCard?.isHistorical)
+      || isLegacyHistoricalComputerPlan;
+    const isInactiveDesignTask = isInactiveDesignTaskMessage(item);
     // Engineering design/calc cards — structured tool captures ride the
     // transient event metadata channel (same lane as browserPlan).
     const engineeringCardModels = buildEngineeringCardModels(
@@ -11142,15 +12283,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       ? stripChatAppChoiceLine(visibleContent, handoffMetadata?.requestNotice?.appChoiceLine)
       : visibleContent;
     const hasPlanCard = !!item.chatAutomationPlanPreview;
-    const hasRecoveryOptions = !!(item.recoveryOptions && item.recoveryOptions.length > 0);
+    const hasRecoveryOptions = !isInactiveDesignTask
+      && !mutationReplayBlocked
+      && !!(item.recoveryOptions && item.recoveryOptions.length > 0);
     // P22: computer/desktop/app-task messages collapse their explanatory cards
     // behind ONE "Details" disclosure. Everything else renders byte-identical.
-    const isComputerTaskMessage = !!handoffMetadata || !!recoveryReliabilityCard || hasPlanCard;
+    const isComputerTaskMessage = !!handoffMetadata
+      || !!recoveryReliabilityCard
+      || hasPlanCard
+      || isLegacyHistoricalComputerPlan;
     const computerSummaryLine = isComputerTaskMessage
-      ? buildComputerTaskSummaryLine({ handoff: handoffMetadata, appChoiceCard, body: bodyContent })
+      ? isInactiveDesignTask
+        ? isSupersededDesignTask
+          ? 'Superseded — a verified result replaced this earlier plan.'
+          : 'Historical — this plan belongs to an earlier chat turn.'
+        : buildComputerTaskSummaryLine({ handoff: handoffMetadata, appChoiceCard, body: bodyContent })
       : '';
     // Status cue comes only from data the metadata already carries.
-    const failedSummaryPrefix = recoveryReliabilityCard || hasRecoveryOptions
+    const failedSummaryPrefix = !isInactiveDesignTask && (recoveryReliabilityCard || hasRecoveryOptions)
       ? item.recoveryReliability?.userActionRequired
         ? 'Needs your input'
         : "Couldn't finish"
@@ -11158,6 +12308,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const disclosureStatusTone: 'neutral' | 'attention' | 'approval' | 'complete' = failedSummaryPrefix
       ? item.recoveryReliability?.userActionRequired ? 'approval' : 'attention'
       : 'neutral';
+    const disclosureStatusLabel = isInactiveDesignTask
+      ? isHistoricalDesignTask ? 'Historical' : 'Superseded'
+      : failedSummaryPrefix || undefined;
     // Display-only Route override so the Plan card shows a desktop-accurate
     // Route for desktop/app tasks (routeId semantics unchanged).
     const planRouteLabelOverride = formatHandoffSurfaceRouteLabel(handoffMetadata);
@@ -11170,10 +12323,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // trivially recoverable AND the turn didn't cleanly complete; undo has no
     // safe generic implementation, so it stays undefined (button hidden).
     const priorUserPrompt = item.isBot ? findPriorUserPromptForMessage(messages, item.id) : null;
-    const verdictNeedsRetry = item.outcomeSignal?.verdict === 'failed'
+    const verdictNeedsRetry = !isInactiveDesignTask && !mutationReplayBlocked && (
+      item.outcomeSignal?.verdict === 'failed'
       || item.outcomeSignal?.verdict === 'partial'
       || item.outcomeSignal?.verdict === 'blocked'
-      || hasRecoveryOptions;
+      || hasRecoveryOptions
+    );
     const agentReceipt = item.isBot
       ? buildAgentReceipt({
           content: item.content,
@@ -11182,7 +12337,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           computerFindings: item.computerFindings,
           browserPlans: item.browserPlans,
           toolEvents: item.toolEvents,
-          recoveryOptions: item.recoveryOptions,
+          recoveryOptions: isInactiveDesignTask || mutationReplayBlocked ? undefined : item.recoveryOptions,
           outcomeSignal: item.outcomeSignal,
           canRetry: !!priorUserPrompt && verdictNeedsRetry,
         })
@@ -11218,7 +12373,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             {appChoiceCard.surfaceLabel}{appChoiceCard.openStep ? ` · ${appChoiceCard.openStep}` : ''}
           </Text>
           <Text style={styles.appChoiceReason} numberOfLines={2}>{appChoiceCard.reason}</Text>
-          {appChoiceCard.alternatives.length > 0 ? (
+          {!isInactiveDesignTask && !mutationReplayBlocked && appChoiceCard.alternatives.length > 0 ? (
             <View style={styles.appChoiceAlternativeRow}>
               {appChoiceCard.alternatives.map((alternative) => (
                 <Pressable
@@ -11270,6 +12425,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               <Text style={styles.designTaskStatusText}>{designTaskCard.statusLabel}</Text>
             </View>
           </View>
+          {designTaskCard.timelineActionsEnabled === false ? (
+            <Text style={styles.designTaskNextAction} numberOfLines={2}>
+              {designTaskCard.isSuperseded
+                ? 'Historical plan — a verified result replaced this pending state.'
+                : 'Historical plan — a newer human turn moved the conversation forward.'}
+            </Text>
+          ) : null}
           {designTaskCard.packageSummary ? (
             <Text style={styles.designTaskMeta} numberOfLines={1}>Package: {designTaskCard.packageSummary}</Text>
           ) : null}
@@ -11307,7 +12469,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               </View>
             ))}
           </View>
-          <Text style={styles.designTaskNextAction} numberOfLines={2}>Next: {designTaskCard.nextAction}</Text>
+          <Text style={styles.designTaskNextAction} numberOfLines={2}>
+            {designTaskCard.timelineActionsEnabled === false ? 'Recorded next step' : 'Next'}: {designTaskCard.nextAction}
+          </Text>
           {designTaskCard.proofSignals.length > 0 ? (
             <Text style={styles.designTaskProof} numberOfLines={2}>
               Proof: {designTaskCard.proofSignals.slice(0, 2).join('; ')}
@@ -11487,7 +12651,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             {/* P22: all explanatory cards collapse behind ONE Details toggle. */}
             <ChatMessageDetailsDisclosure
               summary="Details"
-              statusLabel={failedSummaryPrefix || undefined}
+              statusLabel={disclosureStatusLabel}
               statusTone={disclosureStatusTone}
               accentColor={accentColor}
             >
@@ -11589,16 +12753,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           browserSessions={item.browserSessions}
           delegatedSubagents={item.delegatedSubagents}
           accentColor={accentColor}
-          onLaunchBrowserPlan={(plan) => handleLaunchBrowserPlan(item, plan)}
+          onLaunchBrowserPlan={isInactiveDesignTask || mutationReplayBlocked
+            ? undefined
+            : (plan) => handleLaunchBrowserPlan(item, plan)}
           onOpenBrowserSession={handleOpenBrowserSession}
           onOpenBrowserSessionHistory={setSelectedBrowserSession}
-          onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
+          onRetryCheck={isInactiveDesignTask || mutationReplayBlocked
+            ? undefined
+            : (checkId) => handleRetryVerificationCheck(item, checkId)}
           retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
         />
         {/* P22: the "Recovery Status" card moved into the Details disclosure
             near the top of computer-task messages; the actionable Recovery
             Options below stay always-visible. */}
-        {item.recoveryOptions && item.recoveryOptions.length > 0 ? (
+        {!isInactiveDesignTask && !mutationReplayBlocked && item.recoveryOptions && item.recoveryOptions.length > 0 ? (
           <View style={styles.recoveryOptionSection}>
             <Text style={styles.messageSourceLabel}>Recovery Options</Text>
             {item.recoveryOptions.slice(0, 5).map((option) => {
@@ -11974,6 +13142,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // button (prior prompt + failed/partial/blocked verdict, mirroring the
   // receipt's own canRetry gate in renderContent).
   const visibleFollowupChips = (item: ChatMessage): CrossSurfaceFollowup[] => {
+    if (isInactiveDesignTaskMessage(item) || isMutationReplayBlockedMessage(item)) return [];
     const chips = item.crossSurfaceFollowups || [];
     if (chips.length === 0) return chips;
     return chips.filter((chip) => {
@@ -11993,6 +13162,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const reactionEntries = Object.entries(item.reactions).filter(([, u]) => u.length > 0);
     const messageAnim = newMessageAnims.get(item.id) || new Animated.Value(1);
     const isHighlighted = highlightedMessageId === item.id;
+    const mutationReplayBlocked = isMutationReplayBlockedMessage(item);
 
     return (
       <Animated.View
@@ -12087,10 +13257,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 }}
               />
             ) : null}
-            {item.computerPreflightBlockers && item.computerPreflightBlockers.items.length > 0 ? (
+            {item.computerPreflightBlockers
+              && item.computerPreflightBlockers.items.length > 0 ? (
               <PreflightBlockersCard
                 items={item.computerPreflightBlockers.items}
                 accentColor={accentColor}
+                readOnly={isInactiveDesignTaskMessage(item) || mutationReplayBlocked}
                 onConnectBridge={() => { void addDesktopBridgeAutoConnectMessage(); }}
                 onOpenComputerUse={() => setShowComputerUseConsole(true)}
                 onRetry={() => {
@@ -12099,40 +13271,50 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 }}
               />
             ) : null}
-            {item.computerFindings && (item.computerFindings.items?.length || 0) > 0 ? (
+            {item.computerFindings
+              && (item.computerFindings.items?.length || 0) > 0 ? (
               /* Plan §3a: numbered findings inline — tapping fires the same
                  WI-5 follow-up the user would type. The card supersedes the
                  bare "Book option N" quick-reply chips for these messages. */
               <ChatComputerFindingsCard
                 findings={item.computerFindings}
                 accentColor={accentColor}
-                onPickOption={(optionNumber) => { void sendMessage(`Book option ${optionNumber}`); }}
+                onPickOption={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : (optionNumber) => { void sendMessage(`Book option ${optionNumber}`); }}
               />
             ) : null}
-            {item.bestOfN && (item.bestOfN.candidates?.length || 0) > 0 ? (
+            {item.bestOfN
+              && (item.bestOfN.candidates?.length || 0) > 0 ? (
               /* P11: interactive best-of-N — every candidate one tap to
                  adopt; race again pre-fills the same command. */
               <BestOfNResultCard
                 race={item.bestOfN}
                 accentColor={accentColor}
-                onAdopt={(candidateIndex) => {
-                  const candidate = item.bestOfN?.candidates?.[candidateIndex];
-                  if (candidate?.text) {
-                    addBotMessage(
-                      `✅ Adopted **${candidate.model}**'s answer:\n\n${candidate.text}`,
-                      undefined,
-                      { localOnly: true },
-                    );
-                  }
-                }}
-                onRaceAgain={() => {
-                  const models = (item.bestOfN?.candidates || []).map((c) => c.model).join(',');
-                  setInput(`/bestof ${models} ${item.bestOfN?.task || ''}`.trim());
-                  inputRef.current?.focus();
-                }}
+                onAdopt={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : (candidateIndex) => {
+                    const candidate = item.bestOfN?.candidates?.[candidateIndex];
+                    if (candidate?.text) {
+                      addBotMessage(
+                        `✅ Adopted **${candidate.model}**'s answer:\n\n${candidate.text}`,
+                        undefined,
+                        { localOnly: true },
+                      );
+                    }
+                  }}
+                onRaceAgain={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : () => {
+                    const models = (item.bestOfN?.candidates || []).map((c) => c.model).join(',');
+                    setInput(`/bestof ${models} ${item.bestOfN?.task || ''}`.trim());
+                    inputRef.current?.focus();
+                  }}
               />
             ) : null}
-            {item.quickReplies && item.quickReplies.length > 0
+            {!isInactiveDesignTaskMessage(item)
+              && !mutationReplayBlocked
+              && item.quickReplies && item.quickReplies.length > 0
               && !(item.computerFindings && (item.computerFindings.items?.length || 0) > 0) ? (
               <QuickReplyChips
                 replies={item.quickReplies}
@@ -12141,7 +13323,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 onPick={(reply) => { void sendMessage(reply); }}
               />
             ) : null}
-            {item.crossSurfaceFollowups && item.crossSurfaceFollowups.length > 0 ? (
+            {!isInactiveDesignTaskMessage(item)
+              && !mutationReplayBlocked
+              && item.crossSurfaceFollowups
+              && item.crossSurfaceFollowups.length > 0 ? (
               /* followup-chips: cross-surface follow-up row derived by
                  crossSurfaceFollowupCore at finalize time — create Feed task /
                  open run / approve / retry. Renders null when the retry
@@ -12180,10 +13365,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               <RunTraceCard
                 runId={item.runId}
                 accentColor={accentColor}
-                onRunAgain={(run) => {
-                  setInput(run.goal || run.title || '');
-                  inputRef.current?.focus();
-                }}
+                readOnly={isInactiveDesignTaskMessage(item) || mutationReplayBlocked}
+                onRunAgain={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : (run) => {
+                      setInput(run.goal || run.title || '');
+                      inputRef.current?.focus();
+                    }}
               />
             ) : null}
             <MessageCitations
@@ -12274,8 +13462,33 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
     return null;
   })();
+  const latestCompletedComputerTaskAt = (() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (!message.isBot || message.computerTaskStatus !== 'completed') continue;
+      const timestamp = message.timestamp instanceof Date
+        ? message.timestamp.getTime()
+        : Date.parse(String(message.timestamp || ''));
+      return Number.isFinite(timestamp) ? timestamp : null;
+    }
+    return null;
+  })();
+  const isExactComputerApproval = (approval: (typeof pendingHitlApprovals)[number]): boolean => {
+    const actionType = String(approval.action_type || '');
+    return actionType === 'chat.run_computer_task'
+      || actionType.startsWith('chat.run_computer_task.');
+  };
+  const canResumeApprovalInMountedChat = (approval: (typeof pendingHitlApprovals)[number]): boolean => {
+    if (!isExactComputerApproval(approval)) return true;
+    return pendingExactPlanApprovalResumesRef.current.has(approval.id);
+  };
+  const approvalsForAttention = pendingHitlApprovals.map((approval) => (
+    isExactComputerApproval(approval)
+      ? { ...approval, resumable: canResumeApprovalInMountedChat(approval) }
+      : approval
+  ));
   const chatAttention = buildChatAttentionState({
-    approvals: pendingHitlApprovals,
+    approvals: approvalsForAttention,
     pendingClarification: pendingClarificationRef.current.get(activeThreadId || 'main') || null,
     pendingTaskQuestion: computerUseTask.state.pendingConfirmation,
     recoveryOptions: attentionRecoverySource?.recoveryOptions ?? null,
@@ -12284,7 +13497,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       ?? null,
     recoveryRefId: attentionRecoverySource?.id ?? null,
     providerBlockers: attentionProviderBlocker ? [attentionProviderBlocker] : null,
-  }, { dismissedIds: dismissedAttentionIds });
+  }, {
+    dismissedIds: dismissedAttentionIds,
+    latestCompletedComputerTaskAt,
+    latestCompletedComputerTaskSessionKey: chatAutomationApprovalSessionKey,
+  });
   // Proactive surfacing: expose the CURRENT attention items to sendMessage
   // (declared far above this derived block) through a ref — read at send
   // time, so there is no TDZ on the render-scoped const and no stale
@@ -12433,6 +13650,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           </View>
         </View>
       ) : null}
+      {viewportWidth < 900 && compactSidebarOpen ? (
+        <Pressable
+          onPress={() => setCompactSidebarOpen(false)}
+          accessibilityRole="button"
+          accessibilityLabel="Close conversations sidebar"
+          style={[
+            StyleSheet.absoluteFillObject,
+            { zIndex: 40, backgroundColor: '#00000088' },
+          ]}
+        />
+      ) : null}
       {circleId && (
         <ChatThreadSidebar
           circleId={circleId}
@@ -12442,18 +13670,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onNewAgent={handleSidebarNewAgent}
           onOpenAutomations={handleSidebarAutomations}
           onOpenMarketplace={handleSidebarMarketplace}
-          onDeleteThread={async (threadId) => {
-            try {
-              const { deleteThread: dt } = await import('../../../lib/circleChatThreads');
-              await dt(threadId);
-              setThreadListRefreshToken(prev => prev + 1);
-              if (activeThreadId === threadId) setActiveThreadId(null);
-            } catch (err) {
-              console.warn('[ChatTab] delete thread failed:', err);
-            }
-          }}
+          onDeleteThread={handleDeleteThread}
+          onActiveThreadUnavailable={handleThreadMetaChanged}
           refreshToken={threadListRefreshToken}
-          collapsed={sidebarCollapsed}
+          collapsed={viewportWidth < 900 ? !compactSidebarOpen : sidebarCollapsed}
+          compact={viewportWidth < 900}
           onToggleCollapsed={handleToggleSidebar}
         />
       )}
@@ -12610,7 +13831,66 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         title="OpenSwan Run History"
         onClose={() => setShowRunHistory(false)}
       />
-      {messages.length === 0 ? renderEmptyState() : (
+      {threadNavigationNotice ? (
+        <View style={{
+          marginHorizontal: 12,
+          marginBottom: 8,
+          paddingHorizontal: 12,
+          paddingVertical: 9,
+          borderRadius: 10,
+          borderWidth: 1,
+          borderColor: '#f59e0b55',
+          backgroundColor: '#f59e0b12',
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 10,
+        }}>
+          <Text style={{ color: '#f8d38a', fontSize: 12, flex: 1 }}>{threadNavigationNotice}</Text>
+          <Pressable
+            onPress={() => setThreadNavigationNotice(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss conversation notice"
+            style={{ paddingHorizontal: 6, paddingVertical: 3 }}
+          >
+            <Text style={{ color: '#f59e0b', fontSize: 15, fontWeight: '800' }}>×</Text>
+          </Pressable>
+        </View>
+      ) : null}
+      {threadLoadState.status !== 'ready' ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 12 }}>
+          {threadLoadState.status === 'error' ? (
+            <>
+              <Text style={{ color: '#f8fafc', fontSize: 15, fontWeight: '800', textAlign: 'center' }}>
+                Could not refresh this conversation
+              </Text>
+              <Text style={{ color: '#94a3b8', fontSize: 12, textAlign: 'center', maxWidth: 520 }}>
+                {threadLoadState.message || 'Chat could not verify the current thread.'}
+              </Text>
+              <Pressable
+                onPress={retryActiveThreadLoad}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading this conversation"
+                style={{
+                  borderRadius: 9,
+                  borderWidth: 1,
+                  borderColor: accentColor + '88',
+                  backgroundColor: accentColor + '18',
+                  paddingHorizontal: 14,
+                  paddingVertical: 9,
+                  opacity: 1,
+                }}
+              >
+                <Text style={{ color: accentColor, fontSize: 11, fontWeight: '900', letterSpacing: 1 }}>RETRY</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <ChatLoadingWave />
+              <Text style={{ color: '#64748b', fontSize: 11 }}>Refreshing conversation…</Text>
+            </>
+          )}
+        </View>
+      ) : messages.length === 0 ? renderEmptyState() : (
         <View
           ref={Platform.OS === 'web' ? (node => { builderDragContainerRef.current = node as HTMLDivElement | null; }) : undefined}
           style={[styles.chatSurfaceRow, showWorkbenchSidecar && styles.chatSurfaceRowSplit]}
@@ -12761,6 +14041,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             renderItem={renderMessage}
             style={styles.messageListScroll}
             contentContainerStyle={styles.messageList}
+            onEndReached={() => { void loadOlderMessages(); }}
+            onEndReachedThreshold={0.25}
+            ListFooterComponent={olderMessagesState.loading ? (
+              <Text style={{ color: '#64748b', fontSize: 11, textAlign: 'center', paddingVertical: 12 }}>
+                Loading earlier messages…
+              </Text>
+            ) : olderMessagesState.error ? (
+              <Pressable
+                onPress={() => { void loadOlderMessages(); }}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading earlier messages"
+                style={{ alignSelf: 'center', paddingHorizontal: 12, paddingVertical: 9 }}
+              >
+                <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '800' }}>{olderMessagesState.error}</Text>
+              </Pressable>
+            ) : null}
             onScroll={(e) => {
               scrollOffsetRef.current = e.nativeEvent.contentOffset.y;
               contentHeightRef.current = e.nativeEvent.contentSize.height;
@@ -13748,13 +15044,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       />
 
       {/* Phase C1 — Supabase Storage attachment strip (drag-drop + multi-file) */}
-      {circleId && currentUserId && (
+      {circleId
+        && currentUserId
+        && threadLoadState.status === 'ready'
+        && threadLoadState.threadId === activeThreadId
+        && (
         <ChatAttachmentStrip
           circleId={circleId}
           threadId={activeThreadId}
           userId={currentUserId}
           staged={stagedFiles}
-          onStagedChange={setStagedFiles}
+          onStagedChange={(nextFiles) => {
+            const ownerThreadId = activeThreadId;
+            if (!ownerThreadId) return;
+            if (
+              activeThreadScopeRef.current.circleId === circleId
+              && activeThreadScopeRef.current.threadId === ownerThreadId
+            ) {
+              setStagedFiles((currentFiles) => (
+                resolveStateAction(currentFiles, nextFiles)
+              ));
+              return;
+            }
+            const saved = threadComposerSessionsRef.current.get(ownerThreadId) || { attachments: [], stagedFiles: [] };
+            const resolvedFiles = resolveStateAction(saved.stagedFiles, nextFiles);
+            threadComposerSessionsRef.current.set(ownerThreadId, { ...saved, stagedFiles: resolvedFiles });
+          }}
           accentColor={accentColor}
           showAttachButton={false}
         />
@@ -13875,9 +15190,40 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           // is the only affordance for those. Shared liveness predicate
           // (approvalCardModelCore); no-timeout rows now age out at the
           // 30-min staleness cap too — narrows-only.
-          return isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now());
+          return canResumeApprovalInMountedChat(approval)
+            && isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now());
         })}
         circleId={circleId}
+        onResolved={async (approval, status) => {
+          const pending = pendingExactPlanApprovalResumesRef.current.get(approval.id);
+          const approvalContext = exactApprovalResumeContextRef.current;
+          const approvalActionType = String(approval.action_type || '');
+          const exactComputerApproval = approvalActionType === 'chat.run_computer_task'
+            || approvalActionType.startsWith('chat.run_computer_task.');
+          // Delete before dispatch so a double click or callback retry cannot
+          // launch a second local executor. The approval gate's one-shot CAS
+          // remains the durable cross-client boundary.
+          if (pending) pendingExactPlanApprovalResumesRef.current.delete(approval.id);
+          if (
+            status !== 'approved'
+            || !pending
+            || !exactComputerApproval
+            || !approvalContext.mounted
+            || pending.circleId !== approvalContext.circleId
+            || pending.threadId !== approvalContext.threadId
+            || pending.expiresAt <= Date.now()
+          ) return;
+          await pending.originSettled;
+          const liveContext = exactApprovalResumeContextRef.current;
+          if (
+            !liveContext.mounted
+            || liveContext.generation !== approvalContext.generation
+            || pending.circleId !== liveContext.circleId
+            || pending.threadId !== liveContext.threadId
+            || pending.expiresAt <= Date.now()
+          ) return;
+          await executeSharedComputerTask(pending.task);
+        }}
         onEditAndResend={(_approval, commandText) => {
           setInput(commandText);
           inputRef.current?.focus();
@@ -13957,6 +15303,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         input={input}
         onInputChange={handleInputChange}
         onSend={sendMessage}
+        disabled={threadLoadState.status !== 'ready' || threadLoadState.threadId !== activeThreadId}
         webSearchEnabled={webSearchEnabled}
         onToggleWebSearch={handleToggleWebSearch}
         onFocusBot={() => {
@@ -13971,8 +15318,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         attachments={attachments}
         hasStagedFiles={stagedFiles.length > 0}
         onPickImage={async () => {
+          const attachmentCircleId = circleId;
+          const attachmentThreadId = activeThreadId;
           const results = await pickAttachments();
-          if (results.length > 0) setAttachments(prev => [...prev, ...results]);
+          if (results.length === 0 || !attachmentThreadId) return;
+          if (
+            activeThreadScopeRef.current.circleId === attachmentCircleId
+            && activeThreadScopeRef.current.threadId === attachmentThreadId
+          ) {
+            setAttachments(prev => [...prev, ...results]);
+            return;
+          }
+          const saved = threadComposerSessionsRef.current.get(attachmentThreadId) || { attachments: [], stagedFiles: [] };
+          threadComposerSessionsRef.current.set(attachmentThreadId, {
+            ...saved,
+            attachments: [...saved.attachments, ...results],
+          });
         }}
         onRemoveAttachment={(id: string) => setAttachments(prev => prev.filter(a => a.id !== id))}
         chatMode={chatMode}
@@ -13996,10 +15357,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setShowOpenSwanConsole(true);
         }}
         onResetMind={async () => {
+          const prompt = 'Reset OpenSwan\'s mind for this circle? This permanently deletes session memories and your user-scoped memories for this circle. The visible chat transcript will stay.';
+          const confirmed = Platform.OS === 'web'
+            ? window.confirm(prompt)
+            : await new Promise<boolean>((resolve) => {
+                import('react-native')
+                  .then(({ Alert }) => Alert.alert('Reset OpenSwan Mind', prompt, [
+                    { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+                    { text: 'Reset Mind', style: 'destructive', onPress: () => resolve(true) },
+                  ], { cancelable: true, onDismiss: () => resolve(false) }))
+                  .catch(() => resolve(false));
+              });
+          if (!confirmed) return false;
           const { resetAgentMind } = await import('../../../lib/swanbot');
           const { cleared } = await resetAgentMind(circleId);
-          setMessages([]);
-          addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}Starting fresh.`);
+          addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}The chat transcript is still here, but OpenSwan will start with fresh context.`);
+          return true;
         }}
         onLocalBotMessage={(md: string, extra?: ChatBotMessageExtra) => addBotMessage(md, undefined, extra)}
       />
@@ -15775,6 +17148,7 @@ function EnhancedInput({
   currentRunStep,
   webSearchEnabled,
   onToggleWebSearch,
+  disabled: composerDisabled = false,
 }: any) {
   const [focused, setFocused] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -15806,6 +17180,8 @@ function EnhancedInput({
   const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popularRankingsLoadedRef = useRef(false);
+  const modeTriggerRef = useRef<any>(null);
+  const modeCloseRef = useRef<any>(null);
 
   // Load custom models on mount
   React.useEffect(() => {
@@ -15862,7 +17238,7 @@ function EnhancedInput({
   const slashCommands = useMemo(() => getMatchingChatSlashCommands(input), [input]);
   const slashToken = input.trimStart().split(/\s+/, 1)[0] || '';
   const showSlashCommands = focused && /^\/[^\s]*$/.test(slashToken) && slashCommands.length > 0;
-  const canSend = Boolean(input.trim() || (attachments && attachments.length > 0) || hasStagedFiles);
+  const canSend = !composerDisabled && Boolean(input.trim() || (attachments && attachments.length > 0) || hasStagedFiles);
   // Keep deterministic command parsing available, but do not surface the
   // predictive chip panel in the main chat composer.
   const predictiveCommands = useMemo<PredictiveChatCommand[]>(() => [], []);
@@ -15882,6 +17258,22 @@ function EnhancedInput({
 
   useEffect(() => {
     if (!showModePicker) setShowControlAdvanced(false);
+  }, [showModePicker]);
+
+  useEffect(() => {
+    if (!showModePicker || Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const focusFrame = requestAnimationFrame(() => modeCloseRef.current?.focus?.());
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setShowModePicker(false);
+      requestAnimationFrame(() => modeTriggerRef.current?.focus?.());
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      window.removeEventListener('keydown', handleEscape);
+    };
   }, [showModePicker]);
 
   const applySlashCommand = useCallback((command: ChatSlashCommand) => {
@@ -15925,27 +17317,14 @@ function EnhancedInput({
         return;
       }
     }
-    // Tab toggles OpenSwan mode between `plan` (read-only by the
-    // dispatcher gate) and `execute` (act). Only fires when the slash
-    // palette is closed and the input is empty so it doesn't steal Tab
-    // from completion flows.
-    if (
-      Platform.OS === 'web' &&
-      e.nativeEvent?.key === 'Tab' &&
-      !e.nativeEvent?.shiftKey &&
-      !showSlashCommands &&
-      !input.trim() &&
-      onModeChange
-    ) {
-      e.preventDefault?.();
-      onModeChange(chatMode === 'plan' ? 'execute' : 'plan');
-      return;
-    }
+    // Bare Tab is intentionally not handled here. On web it must remain the
+    // browser's focus-navigation key; changing execution policy is only
+    // available through the explicit mode controls.
     if (Platform.OS === 'web' && e.nativeEvent?.key === 'Enter' && !e.nativeEvent?.shiftKey) {
       e.preventDefault?.();
       if (canSend) onSend();
     }
-  }, [applySlashCommand, highlightedSlashIndex, input, onSend, showSlashCommands, slashCommands, chatMode, onModeChange, canSend]);
+  }, [applySlashCommand, highlightedSlashIndex, onSend, showSlashCommands, slashCommands, canSend]);
 
   const allModels = [...CHAT_MODELS, ...popularModels, ...customModels];
   const marketplaceModelOptions = useMemo(() => {
@@ -16155,11 +17534,11 @@ function EnhancedInput({
   const draftText = String(input || '').trim();
   const connectedAgentCount = chatAgentTargets.filter((target: ChatAgentTarget<AssignableAgent>) => target.connected).length;
   const activePluginCount = Array.isArray(activePlugins) ? activePlugins.length : 0;
-  const selectedAgentStatusLabel = selectedChatAgentTarget
-    ? selectedChatAgentTarget.connected
-      ? selectedChatAgentTarget.status.replace(/_/g, ' ')
-      : 'setup required'
-    : 'ready';
+  const selectedAgentPresentation = resolveChatAgentSelectorPresentation(chatMode, selectedChatAgentTarget);
+  // Availability and OpenSwan route activity are different state domains.
+  // Reuse the route-aware presentation here as well as in the compact trigger
+  // so the expanded control center cannot say Agent "active" beside Mode Off.
+  const selectedAgentStatusLabel = selectedAgentPresentation.stateLabel;
   const selectedAgentDescription = selectedChatAgentTarget
     ? selectedChatAgentTarget.connected
       ? selectedChatAgentTarget.description
@@ -16747,9 +18126,16 @@ function EnhancedInput({
         {/* Mode Selector Dropdown */}
         <View style={{ position: 'relative' as const }}>
           <Pressable
+            ref={modeTriggerRef}
             onPress={() => { setShowModePicker(!showModePicker); setShowModelPicker(false); setShowQuickActions(false); }}
             accessibilityRole="button"
             accessibilityLabel="Open agent and OpenSwan control center"
+            accessibilityState={{ expanded: showModePicker }}
+            {...(Platform.OS === 'web' ? {
+              'aria-expanded': showModePicker,
+              'aria-haspopup': 'dialog',
+              'aria-controls': 'openswan-control-center-popup',
+            } as any : {})}
             style={({ hovered, pressed }: any) => [
               styles.modelButton,
               styles.openswanTriggerButton,
@@ -16776,14 +18162,22 @@ function EnhancedInput({
                 {selectedChatAgentTarget?.label || 'OpenSwan'}
               </Text>
               <Text style={styles.openswanTriggerMeta} numberOfLines={1}>
-                {activeModeConfig?.label || 'Mode'} · {selectedAgentStatusLabel}
+                {selectedAgentPresentation.summaryLabel}
               </Text>
             </View>
             <Text style={styles.modelChevron}>{showModePicker ? '▲' : '▼'}</Text>
           </Pressable>
 
           {showModePicker && (
-            <AnimatedPopup style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
+            <AnimatedPopup
+              nativeID="openswan-control-center-popup"
+              accessibilityLabel="OpenSwan control center"
+              {...(Platform.OS === 'web' ? {
+                role: 'dialog',
+                'aria-label': 'OpenSwan control center',
+              } as any : {})}
+              style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}
+            >
               <View style={styles.controlPanelHeader}>
                 <View style={[styles.controlPanelHeaderIcon, { backgroundColor: controlAccent + '20', borderColor: controlAccent + '55' }]}>
                   <Text style={[styles.controlPanelHeaderIconText, { color: controlAccent }]}>OS</Text>
@@ -16795,7 +18189,11 @@ function EnhancedInput({
                   </Text>
                 </View>
                 <Pressable
-                  onPress={() => setShowModePicker(false)}
+                  ref={modeCloseRef}
+                  onPress={() => {
+                    setShowModePicker(false);
+                    requestAnimationFrame(() => modeTriggerRef.current?.focus?.());
+                  }}
                   accessibilityRole="button"
                   accessibilityLabel="Close OpenSwan controls"
                   style={({ hovered, pressed }: any) => [
@@ -16957,6 +18355,7 @@ function EnhancedInput({
                             }
                             onLocalBotMessage?.(buildChatAgentSetupMessage(target), {
                               localOnly: true,
+                              durability: 'ephemeral',
                               source: {
                                 actor: 'OpenSwan',
                                 surface: 'chat_agent_selector_setup',
@@ -16969,6 +18368,8 @@ function EnhancedInput({
                           }}
                           accessibilityRole="button"
                           accessibilityLabel={target.connected ? `Use ${target.label} for chat tasks` : `Connect ${target.label}`}
+                          accessibilityState={{ selected: isActive }}
+                          {...(Platform.OS === 'web' ? { 'aria-pressed': isActive } as any : {})}
                           style={({ hovered, pressed }: any) => [
                             styles.controlAgentCard,
                             {
@@ -17021,6 +18422,8 @@ function EnhancedInput({
                 ]}
                 accessibilityRole="button"
                 accessibilityLabel={showControlAdvanced ? 'Hide OpenSwan advanced controls' : 'Show OpenSwan advanced controls'}
+                accessibilityState={{ expanded: showControlAdvanced }}
+                {...(Platform.OS === 'web' ? { 'aria-expanded': showControlAdvanced } as any : {})}
               >
                 <Text style={styles.controlAdvancedToggleText}>
                   {showControlAdvanced ? 'Hide advanced controls' : 'Show advanced controls'}
@@ -17070,6 +18473,8 @@ function EnhancedInput({
               <View style={styles.controlCenterGrid}>
                 <Pressable
                   onPress={() => { onOpenPlugins?.(); setShowModePicker(false); }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open plugins, ${activePluginCount} active`}
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -17088,6 +18493,8 @@ function EnhancedInput({
                 </Pressable>
                 <Pressable
                   onPress={() => { onOpenMemory?.(); setShowModePicker(false); }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open OpenSwan memory"
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -17109,6 +18516,8 @@ function EnhancedInput({
                     onToggleBuilder?.();
                     setShowModePicker(false);
                   }}
+                  accessibilityRole="button"
+                  accessibilityLabel={showWorkbenchSidecar ? 'Open live Builder studio' : hasBuilderWork ? 'Open last Builder build' : 'Open Builder studio'}
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -17129,9 +18538,12 @@ function EnhancedInput({
                 </Pressable>
                 <Pressable
                   onPress={async () => {
-                    await onResetMind?.();
-                    setShowModePicker(false);
+                    const didReset = await onResetMind?.();
+                    if (didReset !== false) setShowModePicker(false);
                   }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Reset OpenSwan mind"
+                  accessibilityHint="Requires confirmation before deleting memories"
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -17158,6 +18570,8 @@ function EnhancedInput({
                     onPress={() => { onModeChange?.(m.key); setShowModePicker(false); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Select ${m.label} mode`}
+                    accessibilityState={{ selected: isActive }}
+                    {...(Platform.OS === 'web' ? { 'aria-pressed': isActive } as any : {})}
                     style={({ hovered, pressed }: any) => [
                       styles.dropdownItem,
                       isActive && { backgroundColor: m.color + '18', borderColor: m.color + '40' },
@@ -17286,24 +18700,33 @@ function EnhancedInput({
 
       {/* Input row */}
       <View style={[styles.enhancedInputWrapper, inputStyle]}>
-        <Pressable onPress={onFocusBot} style={[styles.enhancedBotTrigger, { backgroundColor: accentColor + '30' }]}>
+        <Pressable
+          onPress={onFocusBot}
+          disabled={composerDisabled}
+          accessibilityState={{ disabled: composerDisabled }}
+          style={[styles.enhancedBotTrigger, { backgroundColor: accentColor + '30', opacity: composerDisabled ? 0.45 : 1 }]}
+        >
           <Image source={agentAvatarSource} style={styles.mainChatAgentComposerIcon} resizeMode="contain" />
         </Pressable>
         <Pressable
           onPress={onPickImage}
+          disabled={composerDisabled}
           style={[styles.enhancedBotTrigger, { backgroundColor: '#2a2a3e40' }]}
           accessibilityRole="button"
           accessibilityLabel="Attach files"
+          accessibilityState={{ disabled: composerDisabled }}
         >
           <Text style={{ fontSize: 16, color: '#a0a0b0' }}>+</Text>
         </Pressable>
         <TextInput
           ref={inputRef}
           style={styles.enhancedInput}
-          placeholder={`Ask ${agentName} anything...`}
+          placeholder={composerDisabled ? 'Conversation unavailable until refresh completes' : `Ask ${agentName} anything...`}
           placeholderTextColor="#444"
           value={input}
           onChangeText={onInputChange}
+          editable={!composerDisabled}
+          accessibilityState={{ disabled: composerDisabled }}
           onSubmitEditing={() => {
             if (Platform.OS === 'web') return;
             if (showSlashCommands) {

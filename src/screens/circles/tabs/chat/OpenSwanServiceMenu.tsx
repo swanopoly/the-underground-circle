@@ -21,7 +21,33 @@ interface Props {
   onDelegationModeChange: (mode: SessionDelegationMode) => void;
   onOpenControlPanel?: () => void;
   onOpenSkills?: () => void;
+  onOpenRunHistory?: () => void;
   onClose: () => void;
+}
+
+// Keep keyboard behavior explicit on web without forwarding web-only tab
+// semantics to iOS or Android.
+const WEB_BUTTON_FOCUS_PROPS = Platform.OS === 'web'
+  ? ({ focusable: true, tabIndex: 0 } as any)
+  : {};
+
+function webDescriptiveLabel(label: string, hint: string): Record<string, unknown> {
+  return Platform.OS === 'web'
+    ? ({ 'aria-label': `${label}. ${hint}` } as any)
+    : {};
+}
+
+function webChoiceSemantics(
+  label: string,
+  description: string,
+  selected: boolean,
+): Record<string, unknown> {
+  return Platform.OS === 'web'
+    ? ({
+        'aria-label': `${label}. ${description}`,
+        'aria-pressed': selected,
+      } as any)
+    : {};
 }
 
 export default function OpenSwanServiceMenu({
@@ -32,6 +58,7 @@ export default function OpenSwanServiceMenu({
   onDelegationModeChange,
   onOpenControlPanel,
   onOpenSkills,
+  onOpenRunHistory,
   onClose,
 }: Props) {
   const profileMeta = SESSION_PROFILE_OPTIONS.find(o => o.id === sessionProfile) || SESSION_PROFILE_OPTIONS[0];
@@ -40,13 +67,18 @@ export default function OpenSwanServiceMenu({
 
   const renderProfileOption = (option: (typeof SESSION_PROFILE_OPTIONS)[number]) => {
     const active = option.id === sessionProfile;
+    const accessibilityLabel = `Set OpenSwan work mode to ${option.label}`;
     return (
       <Pressable
         key={option.id}
+        {...WEB_BUTTON_FOCUS_PROPS}
+        {...webChoiceSemantics(accessibilityLabel, option.description, active)}
         onPress={() => onSessionProfileChange(option.id)}
         accessibilityRole="button"
-        accessibilityLabel={`Set OpenSwan work mode to ${option.label}`}
-        style={({ hovered, pressed }: any) => [
+        accessibilityLabel={accessibilityLabel}
+        accessibilityHint={option.description}
+        accessibilityState={{ selected: active }}
+        style={({ hovered, pressed, focused }: any) => [
           styles.option,
           {
             borderColor: active ? option.color : '#1e293b',
@@ -54,6 +86,7 @@ export default function OpenSwanServiceMenu({
           },
           hovered && !active && { borderColor: `${option.color}66`, backgroundColor: `${option.color}0d` },
           pressed && { transform: [{ scale: 0.985 }] },
+          focused && Platform.OS === 'web' && styles.keyboardFocus,
           Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
         ]}
       >
@@ -72,13 +105,18 @@ export default function OpenSwanServiceMenu({
 
   const renderDelegationOption = (option: (typeof SESSION_DELEGATION_MODE_OPTIONS)[number]) => {
     const active = option.id === delegationMode;
+    const accessibilityLabel = `Set OpenSwan crew mode to ${option.label}`;
     return (
       <Pressable
         key={option.id}
+        {...WEB_BUTTON_FOCUS_PROPS}
+        {...webChoiceSemantics(accessibilityLabel, option.description, active)}
         onPress={() => onDelegationModeChange(option.id)}
         accessibilityRole="button"
-        accessibilityLabel={`Set OpenSwan crew mode to ${option.label}`}
-        style={({ hovered, pressed }: any) => [
+        accessibilityLabel={accessibilityLabel}
+        accessibilityHint={option.description}
+        accessibilityState={{ selected: active }}
+        style={({ hovered, pressed, focused }: any) => [
           styles.option,
           styles.delegationOption,
           {
@@ -87,6 +125,7 @@ export default function OpenSwanServiceMenu({
           },
           hovered && !active && { borderColor: `${option.color}66`, backgroundColor: `${option.color}0d` },
           pressed && { transform: [{ scale: 0.985 }] },
+          focused && Platform.OS === 'web' && styles.keyboardFocus,
           Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
         ]}
       >
@@ -104,9 +143,15 @@ export default function OpenSwanServiceMenu({
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.scrim} onPress={onClose}>
-        <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      accessibilityLabel="OpenSwan service controls"
+      onRequestClose={onClose}
+    >
+      <View style={styles.scrim}>
+        <View accessibilityViewIsModal style={styles.sheet}>
           <View style={styles.grabber} />
 
           <View style={styles.header}>
@@ -118,13 +163,20 @@ export default function OpenSwanServiceMenu({
               <Text style={styles.title} numberOfLines={1}>Current: {currentSummary}</Text>
             </View>
             <Pressable
+              {...WEB_BUTTON_FOCUS_PROPS}
+              {...webDescriptiveLabel(
+                'Close OpenSwan service menu',
+                'Close the service menu and return to Chat.',
+              )}
               onPress={onClose}
               accessibilityRole="button"
               accessibilityLabel="Close OpenSwan service menu"
-              style={({ hovered, pressed }: any) => [
+              accessibilityHint="Close the service menu and return to Chat."
+              style={({ hovered, pressed, focused }: any) => [
                 styles.closeBtn,
                 hovered && { borderColor: '#475569', backgroundColor: '#111827' },
                 pressed && { transform: [{ scale: 0.95 }] },
+                focused && Platform.OS === 'web' && styles.keyboardFocus,
                 Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
               ]}
             >
@@ -168,19 +220,36 @@ export default function OpenSwanServiceMenu({
           </ScrollView>
 
           <View style={styles.footer}>
+            <View style={styles.controlMap}>
+              <Text style={styles.controlMapLabel}>Where to go</Text>
+              <Text style={styles.controlMapText}>
+                Switch mode and crew here. Agent, model, approvals, and tools are in Control Panel. Past or blocked work is in Runs & recovery.
+              </Text>
+            </View>
+
             {onOpenControlPanel && (
               <Pressable
+                {...WEB_BUTTON_FOCUS_PROPS}
+                {...webDescriptiveLabel(
+                  'Open full OpenSwan control panel',
+                  'Choose the agent and model, review approvals, and manage tools.',
+                )}
                 onPress={() => { onClose(); onOpenControlPanel(); }}
                 accessibilityRole="button"
                 accessibilityLabel="Open full OpenSwan control panel"
-                style={({ hovered, pressed }: any) => [
+                accessibilityHint="Choose the agent and model, review approvals, and manage tools."
+                style={({ hovered, pressed, focused }: any) => [
                   styles.primaryBtn,
                   hovered && { borderColor: '#38bdf8', backgroundColor: '#38bdf820' },
                   pressed && { transform: [{ scale: 0.985 }] },
+                  focused && Platform.OS === 'web' && styles.keyboardFocus,
                   Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
                 ]}
               >
-                <Text style={styles.primaryBtnText}>Open Control Panel</Text>
+                <View style={styles.primaryBtnCopy}>
+                  <Text style={styles.primaryBtnText}>Open Control Panel</Text>
+                  <Text style={styles.primaryBtnHint}>Agent · model · approvals · tools</Text>
+                </View>
                 <Text style={styles.primaryBtnArrow}>{'>'}</Text>
               </Pressable>
             )}
@@ -188,28 +257,67 @@ export default function OpenSwanServiceMenu({
             <View style={styles.secondaryRow}>
               {onOpenSkills && (
                 <Pressable
+                  {...WEB_BUTTON_FOCUS_PROPS}
+                  {...webDescriptiveLabel(
+                    'Open OpenSwan skills',
+                    'Review and manage OpenSwan skills for this circle.',
+                  )}
                   onPress={() => { onClose(); onOpenSkills(); }}
                   accessibilityRole="button"
                   accessibilityLabel="Open OpenSwan skills"
-                  style={({ hovered, pressed }: any) => [
+                  accessibilityHint="Review and manage OpenSwan skills for this circle."
+                  style={({ hovered, pressed, focused }: any) => [
                     styles.secondaryBtn,
                     hovered && { borderColor: '#f59e0b', backgroundColor: '#f59e0b20' },
                     pressed && { transform: [{ scale: 0.985 }] },
+                    focused && Platform.OS === 'web' && styles.keyboardFocus,
                     Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
                   ]}
                 >
                   <Text style={styles.secondaryBtnText}>Skills</Text>
                 </Pressable>
               )}
+              {onOpenRunHistory && (
+                <Pressable
+                  {...WEB_BUTTON_FOCUS_PROPS}
+                  {...webDescriptiveLabel(
+                    'Open OpenSwan runs and recovery',
+                    'Review active, completed, or blocked runs and available recovery actions.',
+                  )}
+                  onPress={() => { onClose(); onOpenRunHistory(); }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open OpenSwan runs and recovery"
+                  accessibilityHint="Review active, completed, or blocked runs and available recovery actions."
+                  style={({ hovered, pressed, focused }: any) => [
+                    styles.secondaryBtn,
+                    hovered && { borderColor: '#38bdf8', backgroundColor: '#38bdf820' },
+                    pressed && { transform: [{ scale: 0.985 }] },
+                    focused && Platform.OS === 'web' && styles.keyboardFocus,
+                    Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
+                  ]}
+                >
+                  <Text style={styles.runsBtnText}>Runs & recovery</Text>
+                </Pressable>
+              )}
+            </View>
+
+            <View style={styles.doneRow}>
               <Pressable
+                {...WEB_BUTTON_FOCUS_PROPS}
+                {...webDescriptiveLabel(
+                  'Close OpenSwan service menu',
+                  'Close the service menu and return to Chat.',
+                )}
                 onPress={onClose}
                 accessibilityRole="button"
                 accessibilityLabel="Close OpenSwan service menu"
-                style={({ hovered, pressed }: any) => [
+                accessibilityHint="Close the service menu and return to Chat."
+                style={({ hovered, pressed, focused }: any) => [
                   styles.secondaryBtn,
                   styles.doneBtn,
                   hovered && { borderColor: '#64748b', backgroundColor: '#111827' },
                   pressed && { transform: [{ scale: 0.985 }] },
+                  focused && Platform.OS === 'web' && styles.keyboardFocus,
                   Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
                 ]}
               >
@@ -217,8 +325,14 @@ export default function OpenSwanServiceMenu({
               </Pressable>
             </View>
           </View>
-        </Pressable>
-      </Pressable>
+        </View>
+        <View
+          accessible={false}
+          style={styles.dismissBackdrop}
+          onStartShouldSetResponder={() => true}
+          onResponderRelease={onClose}
+        />
+      </View>
     </Modal>
   );
 }
@@ -244,7 +358,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#f59e0b25',
     overflow: 'hidden',
+    zIndex: 1,
     ...(Platform.OS === 'web' ? { boxShadow: '0 22px 70px rgba(0,0,0,0.52)' } as any : {}),
+  },
+  dismissBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 0,
   },
   grabber: {
     width: 44,
@@ -428,8 +547,26 @@ const styles = StyleSheet.create({
     gap: 8,
     backgroundColor: '#08111f',
   },
+  controlMap: {
+    gap: 3,
+    paddingHorizontal: 2,
+    paddingBottom: 2,
+  },
+  controlMapLabel: {
+    color: '#64748b',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+    textTransform: 'uppercase',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  controlMapText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 16,
+  },
   primaryBtn: {
-    minHeight: 44,
+    minHeight: 50,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#38bdf866',
@@ -439,10 +576,20 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 13,
   },
+  primaryBtnCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
   primaryBtnText: {
     color: '#38bdf8',
     fontSize: 13,
     fontWeight: '900',
+  },
+  primaryBtnHint: {
+    color: '#7dd3fc',
+    fontSize: 10,
+    fontWeight: '700',
   },
   primaryBtnArrow: {
     color: '#bae6fd',
@@ -469,7 +616,16 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
   },
+  runsBtnText: {
+    color: '#38bdf8',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  doneRow: {
+    flexDirection: 'row',
+  },
   doneBtn: {
+    flex: 1,
     borderColor: '#1e293b',
     backgroundColor: '#0a0f1c',
   },
@@ -478,4 +634,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
   },
+  keyboardFocus: Platform.OS === 'web' ? ({
+    outlineColor: '#f8fafc',
+    outlineOffset: 2,
+    outlineStyle: 'solid',
+    outlineWidth: 2,
+  } as any) : {},
 });

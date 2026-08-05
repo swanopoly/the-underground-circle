@@ -113,6 +113,7 @@ async function testBridge(bridge) {
   });
   try {
     await waitForHealth(bridge.port, child);
+    const expectedChallengeStatus = bridge.label === 'Claude' ? 200 : 428;
 
     const implicitTunnelOrigin = await requestJson({
       port: bridge.port,
@@ -138,7 +139,7 @@ async function testBridge(bridge) {
       headers: { Host: TUNNEL_HOST, Origin: TUNNEL_ORIGIN },
     });
     assert(
-      configuredTunnelOrigin.status === 428 && configuredTunnelOrigin.json?.code === 'pairing_challenge_required',
+      configuredTunnelOrigin.status === expectedChallengeStatus && configuredTunnelOrigin.json?.code === 'pairing_challenge_required',
       `${bridge.label}: tunnel Host accepts its exact configured origin`,
     );
 
@@ -147,7 +148,10 @@ async function testBridge(bridge) {
       path: bridge.pairPath || '/pair',
       headers: { Origin: ALLOWED_ORIGIN },
     });
-    assert(first.status === 428, `${bridge.label}: first pairing POST returns 428 challenge`);
+    assert(
+      first.status === expectedChallengeStatus,
+      `${bridge.label}: first pairing POST returns ${expectedChallengeStatus} challenge`,
+    );
     assert(first.json?.code === 'pairing_challenge_required', `${bridge.label}: challenge response has stable code`);
     assert(typeof first.json?.challenge === 'string' && /^[a-f0-9]{48}$/i.test(first.json.challenge), `${bridge.label}: challenge is bounded random hex`);
     assert(!first.json?.token, `${bridge.label}: first pairing POST does not disclose bearer token`);

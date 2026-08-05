@@ -100,7 +100,7 @@ export function buildDesktopDiagLaunchRuntimeHandoff(
     },
     requiredContext: [...DESKTOP_DIAG_LAUNCH_REQUIRED_CONTEXT],
     message:
-      `Diagnostics did not launch ${displayName}. Continue through the OpenSwan desktop.launch_app typed runtime only after it receives current authenticated run/provider-call identity, exact approval, a fresh app observation, a runtime dispatch receipt, and post-launch focus proof.`,
+      `Diagnostics did not launch ${displayName}. Continue through the OpenSwan desktop.launch_app typed runtime only after it receives current authenticated run/provider-call identity, a fresh app observation, a runtime dispatch receipt, and post-launch focus proof. The reversible lifecycle step does not need a separate approval; downstream app mutations retain their own policy.`,
   };
 }
 

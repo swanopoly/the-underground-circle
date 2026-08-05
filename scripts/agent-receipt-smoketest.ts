@@ -117,7 +117,20 @@ assert(shouldRenderReceipt(failedReceipt) === true, 'failed receipt renders (ver
 {
   const blocked = buildAgentReceipt({ outcomeSignal: { verdict: 'blocked' } });
   assert(blocked !== null && blocked.verdict === 'blocked', 'blocked verdict alone -> receipt');
+  assert(blocked!.action === 'Action blocked before completion', 'blocked verdict never claims an action completed');
+  assert(blocked!.riskTier === null, 'blocked verdict without a handoff has no fabricated read-only risk');
+  assert(blocked!.approval.state === 'not_required', 'blocked verdict carries no fabricated approval event');
   assert(shouldRenderReceipt(blocked) === true, 'blocked verdict renders');
+}
+{
+  const blockedDesktop = buildAgentReceipt({
+    computerHandoff: { surface: 'desktop' } as any,
+    outcomeSignal: { verdict: 'blocked' },
+  });
+  assert(
+    blockedDesktop?.action === 'Action blocked before completion',
+    'generic blocked desktop handoff never claims the desktop task ran',
+  );
 }
 
 // ─── 4. Bounded proof list (<= 6, clamped) ───────────────────────────────────

@@ -72,6 +72,7 @@ import {
   deriveComputerTaskAgentOutcomeStatus,
   isComputerTaskOutcomeComplete,
   type ComputerTaskOutcomeStatus,
+  type ComputerTaskReplayPolicy,
 } from './computerTaskOutcome';
 import type { ChatAgentContextPack } from './chatAgentContextPack';
 import { sanitizeUntrustedForModel } from './untrustedContent';
@@ -205,6 +206,12 @@ export interface ComputerTaskRuntimeResult {
   adapterId: ComputerTaskRuntimeAdapterId;
   execution: ComputerTaskExecutionEnvelope;
   response: string;
+  /** Whether recovery may dispatch the original mutation again. */
+  replayPolicy?: ComputerTaskReplayPolicy;
+  /** True once a mutating request crossed the local bridge boundary. */
+  mutationDispatched?: boolean;
+  /** Read-only tools allowed to resolve a manual-verification-only outcome. */
+  verificationOnlyTools?: string[];
   runId?: string | null;
   modeOutcomeSummary?: AgentRunResult['modeOutcomeSummary'];
   observedEval?: OpenSwanObservedEvalSummary | null;
@@ -237,6 +244,305 @@ export interface ComputerTaskRuntimeResult {
    * questions; nothing was executed. The user's reply re-enters planning.
    */
   clarification?: { questions: string[]; assumptions: string[] } | null;
+}
+
+function exactSequenceBlockedResult(
+  execution: ComputerTaskExecutionEnvelope,
+  response: string,
+  warnings: string[] = [],
+): ComputerTaskRuntimeResult {
+  return {
+    status: 'blocked',
+    adapterId: 'app_adapter',
+    execution,
+    response,
+    warnings,
+  };
+}
+
+function exactSequenceManualVerificationResult(
+  execution: ComputerTaskExecutionEnvelope,
+  response: string,
+  warnings: string[],
+): ComputerTaskRuntimeResult {
+  return {
+    status: 'partial',
+    adapterId: 'app_adapter',
+    execution,
+    response,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.photoshop_document_status'],
+    warnings,
+  };
+}
+
+type ExactPhotoshopForegroundResult =
+  | { ok: true; refocused: boolean }
+  | { ok: false; error: string };
+
+function isPhotoshopAppIdentity(value: unknown): boolean {
+  return String(value || '').trim().toLowerCase().includes('photoshop');
+}
+
+function compactExactForegroundError(value: unknown, fallback: string): string {
+  const message = String(value || '').replace(/\s+/g, ' ').trim();
+  return (message || fallback).slice(0, 240);
+}
+
+/**
+ * Keep the exact Photoshop program attached to the visible target without
+ * introducing a coordinate-based fallback. Photoshop may proceed immediately
+ * only when the initial window observation positively identifies it as the
+ * foreground app. Missing or contrary evidence triggers exactly one focus
+ * dispatch followed by one required verification observation.
+ */
+async function ensureExactPhotoshopForeground(
+  desktop: typeof import('./desktopBridge'),
+): Promise<ExactPhotoshopForegroundResult> {
+  let observed: Awaited<ReturnType<typeof desktop.getWindowState>> | null = null;
+  try {
+    observed = await desktop.getWindowState();
+  } catch {
+    observed = null;
+  }
+
+  const frontmostApp = observed?.ok
+    ? String(observed.data?.frontmostApp || '').trim()
+    : '';
+  if (isPhotoshopAppIdentity(frontmostApp)) {
+    return { ok: true, refocused: false };
+  }
+
+  let focused: Awaited<ReturnType<typeof desktop.focusApp>>;
+  try {
+    focused = await desktop.focusApp('Photoshop');
+  } catch (error: any) {
+    return {
+      ok: false,
+      error: compactExactForegroundError(error?.message, 'Photoshop focus failed'),
+    };
+  }
+  if (
+    !focused.ok
+    || !focused.data
+    || !isPhotoshopAppIdentity(focused.data.requestedAppName)
+    || !isPhotoshopAppIdentity(focused.data.resolvedAppName)
+  ) {
+    return {
+      ok: false,
+      error: compactExactForegroundError(focused.error, 'Photoshop focus was not confirmed'),
+    };
+  }
+
+  let verified: Awaited<ReturnType<typeof desktop.getWindowState>>;
+  try {
+    verified = await desktop.getWindowState();
+  } catch {
+    return { ok: false, error: 'Photoshop foreground verification was unavailable after focus' };
+  }
+  const verifiedFrontmostApp = verified.ok
+    ? String(verified.data?.frontmostApp || '').trim()
+    : '';
+  if (!verifiedFrontmostApp) {
+    return { ok: false, error: 'Photoshop foreground verification was unavailable after focus' };
+  }
+  if (!isPhotoshopAppIdentity(verifiedFrontmostApp)) {
+    return { ok: false, error: 'Photoshop did not remain the foreground application after focus' };
+  }
+  return { ok: true, refocused: true };
+}
+
+/**
+ * Execute a compiler-owned, dispatcher-authorized Photoshop creation program
+ * without an LLM round trip. This is intentionally narrower than the generic
+ * app adapter: the caller must have passed the program's declared policy
+ * (direct request for a bounded unsaved draft, or an enclosing approval), and
+ * the program must compile to the one supported from-scratch task family.
+ */
+async function executeAuthorizedExactSequenceProgram(input: {
+  program: NonNullable<ReturnType<typeof compileComputerSequenceProgram>>;
+  execution: ComputerTaskExecutionEnvelope;
+  signal?: AbortSignal;
+}): Promise<ComputerTaskRuntimeResult> {
+  const { program, execution, signal } = input;
+  if (program.id !== 'photoshop_new_document') {
+    return exactSequenceBlockedResult(
+      execution,
+      'The exact local sequence was not recognized, so no app action was attempted.',
+      ['unsupported exact computer sequence'],
+    );
+  }
+  const createStep = program.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
+  const widthPx = Number(createStep?.args.widthPx);
+  const heightPx = Number(createStep?.args.heightPx);
+  if (
+    !Number.isInteger(widthPx)
+    || !Number.isInteger(heightPx)
+    || widthPx < 1
+    || heightPx < 1
+    || widthPx > 30_000
+    || heightPx > 30_000
+  ) {
+    return exactSequenceBlockedResult(
+      execution,
+      'The requested Photoshop dimensions were invalid, so no app action was attempted.',
+      ['invalid exact Photoshop dimensions'],
+    );
+  }
+  const stopped = () => signal?.aborted === true;
+  if (stopped()) {
+    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before any app action.');
+  }
+
+  const desktop = await import('./desktopBridge');
+  if (!(await desktop.isDesktopBridgeAvailable())) {
+    return exactSequenceBlockedResult(
+      execution,
+      'The local desktop bridge is offline, so Photoshop was not changed. Restart the local app stack, then retry once.',
+      ['desktop bridge offline before exact Photoshop sequence'],
+    );
+  }
+  const pairing = await desktop.ensureDesktopBridgePaired();
+  if (!pairing.ok) {
+    return exactSequenceBlockedResult(
+      execution,
+      `The desktop bridge could not be paired, so Photoshop was not changed: ${pairing.error || 'pairing failed'}`,
+      ['desktop bridge pairing failed before exact Photoshop sequence'],
+    );
+  }
+
+  const before = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });
+  if (!before.ok || !before.data) {
+    return exactSequenceBlockedResult(
+      execution,
+      `Photoshop status could not be read before the action, so nothing was changed: ${before.error || 'status unavailable'}`,
+      ['fresh Photoshop status unavailable before exact sequence'],
+    );
+  }
+  if (stopped()) {
+    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before launch or document creation.');
+  }
+
+  let launched = false;
+  if (!before.data.appRunning) {
+    const launch = await desktop.launchApp('Photoshop');
+    if (!launch.ok || !launch.data) {
+      return exactSequenceBlockedResult(
+        execution,
+        `Photoshop could not be opened: ${launch.error || 'launch failed'}`,
+        ['desktop.launch_app failed for Photoshop'],
+      );
+    }
+    const requested = String(launch.data.requestedAppName || '').toLowerCase();
+    const resolved = String(launch.data.resolvedAppName || '').toLowerCase();
+    if (!requested.includes('photoshop') || !resolved.includes('photoshop')) {
+      return exactSequenceBlockedResult(
+        execution,
+        'The launch bridge resolved a different application, so document creation was stopped.',
+        ['Photoshop launch identity mismatch'],
+      );
+    }
+    launched = true;
+  }
+
+  let ready = before;
+  if (launched || !ready.data?.appRunning) {
+    // Cold Adobe launches can take materially longer than `open -a` itself.
+    // The bounded waits are synchronization only; each retry is followed by
+    // fresh app-native status and no mutation happens until scriptability is
+    // confirmed.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (stopped()) {
+        return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped while waiting for the app to become ready.');
+      }
+      await desktop.waitForApp('Photoshop', 12_000).catch(() => null);
+      ready = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });
+      if (ready.ok && ready.data?.appRunning) break;
+    }
+  }
+  if (!ready.ok || !ready.data?.appRunning) {
+    return exactSequenceBlockedResult(
+      execution,
+      `Photoshop opened but did not become scriptable, so no document was created: ${ready.error || ready.data?.error || 'app not ready'}`,
+      ['Photoshop did not become scriptable after launch'],
+    );
+  }
+  if (stopped()) {
+    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before document creation.');
+  }
+
+  const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop);
+  if (!foregroundBeforeCreate.ok) {
+    return exactSequenceBlockedResult(
+      execution,
+      `Photoshop was running, but it could not be confirmed as the foreground app, so no document was created: ${foregroundBeforeCreate.error}.`,
+      ['Photoshop foreground verification failed before exact document creation'],
+    );
+  }
+  if (stopped()) {
+    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before document creation.');
+  }
+
+  let created: Awaited<ReturnType<typeof desktop.photoshopCreateDocument>>;
+  try {
+    created = await desktop.photoshopCreateDocument({
+      appName: 'Photoshop',
+      widthPx,
+      heightPx,
+    });
+  } catch (error: any) {
+    // Once the mutation request crosses the bridge boundary, a transport
+    // exception cannot prove that Photoshop did not create the document.
+    // Preserve outcome-unknown semantics and never replay automatically.
+    return exactSequenceManualVerificationResult(
+      execution,
+      `The ${widthPx}x${heightPx} Photoshop create request was dispatched, but its result could not be verified${error?.message ? `: ${error.message}` : '.'} The action will not be replayed automatically.`,
+      ['Photoshop document creation outcome is unknown after dispatch; automatic replay is disabled'],
+    );
+  }
+  if (!created.ok || !created.data?.created) {
+    return exactSequenceManualVerificationResult(
+      execution,
+      `Photoshop did not confirm the ${widthPx}x${heightPx} document after the create request: ${created.data?.error || created.error || 'creation was not confirmed'}. The action will not be replayed automatically.`,
+      ['Photoshop document creation was not confirmed after dispatch; automatic replay is disabled'],
+    );
+  }
+
+  const after = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });
+  const expectedName = String(created.data.documentName || '').trim();
+  const actualName = String(after.data?.activeDocumentName || '').trim();
+  const dimensionsVerified = Boolean(
+    after.ok
+    && after.data?.appRunning
+    && after.data.widthPx === widthPx
+    && after.data.heightPx === heightPx,
+  );
+  const identityVerified = !expectedName || expectedName === actualName;
+  if (!dimensionsVerified || !identityVerified) {
+    return exactSequenceManualVerificationResult(
+      execution,
+      `Photoshop reported creating ${expectedName || 'a new document'}, but the fresh final status did not prove the expected ${widthPx}x${heightPx} active document. The action will not be replayed automatically.`,
+      ['Photoshop document creation outcome needs manual verification; automatic replay is disabled'],
+    );
+  }
+
+  const foregroundAfterCreate = await ensureExactPhotoshopForeground(desktop);
+  if (!foregroundAfterCreate.ok) {
+    return exactSequenceManualVerificationResult(
+      execution,
+      `Photoshop created and verified **${actualName || expectedName || 'a new document'}** at **${widthPx} × ${heightPx}px**, but it could not be confirmed as the foreground app: ${foregroundAfterCreate.error}. The document action will not be replayed automatically.`,
+      ['Photoshop document was created, but final foreground focus could not be verified; automatic replay is disabled'],
+    );
+  }
+
+  return {
+    status: 'completed',
+    adapterId: 'app_adapter',
+    execution,
+    response: `Opened Photoshop and created **${actualName || expectedName || 'a new document'}** at **${widthPx} × ${heightPx}px**. Photoshop's final document status verified the active document dimensions.`,
+    warnings: [],
+  };
 }
 
 /**
@@ -697,6 +1003,7 @@ async function retryComputerTaskAfterReadyCapabilityBuildout(args: {
       signal: args.signal,
       userConstraints: args.userConstraints,
       alwaysConfirmFloor: args.alwaysConfirmFloor,
+      forceClientToolLoop: true,
       agentContextPack: args.agentContextPack,
       completionExpectation: 'verified_task',
       mode: args.execution.recommendedMode,
@@ -1155,6 +1462,12 @@ export async function executeComputerTaskWithAgent(args: {
   userConstraints?: ComputerTaskAgentLoopContext['userConstraints'];
   alwaysConfirmFloor?: ComputerTaskAgentLoopContext['alwaysConfirmFloor'];
   agentContextPack?: ComputerTaskAgentLoopContext['agentContextPack'];
+  /**
+   * True only when the unified chat dispatcher has accepted the exact
+   * sequence's declared authorization policy. It authorizes the compiler-owned
+   * local program; generic/model-planned calls never consult it.
+   */
+  exactSequenceDispatchAuthorized?: boolean;
   /** Route-level app choice — threads into the complexity plan's dispatch
    *  block so the agent opens the chosen app first (App-choice contract). */
   appResolution?: import('./computerTaskComplexityPlan').ComputerTaskAppChoiceResolution | null;
@@ -1197,6 +1510,7 @@ export async function executeComputerTaskWithAgent(args: {
     : args.task;
   const attachedDesktopFiles = isAttachedDesktopFileTask ? parseDesktopAttachmentTaskFiles(args.task) : [];
   const executionForResult = redactStagedAttachmentExecutionForTelemetry(execution, attachedDesktopFiles);
+  const sequenceProgram = compileComputerSequenceProgram(args.task);
   // Selection is read-only. Its exact staged target remains only inside this
   // authenticated task function and the agent prompt; the handoff is static.
   const hasSelectedStagedAttachment = selectDesktopAttachmentsToPreOpen(
@@ -1221,7 +1535,7 @@ export async function executeComputerTaskWithAgent(args: {
   // reply re-enters planning with the answers). Shared with the BROWSER lane
   // via runComputerTaskClarifierCheck (P57 parity). Never runs on a
   // buildout-retry pass (the task was already clarified before the gap).
-  if (!readyCapabilityBuildout) {
+  if (!readyCapabilityBuildout && !sequenceProgram) {
     const clarification = await runComputerTaskClarifierCheck({
       task: args.task,
       circleId: args.circleId,
@@ -1267,18 +1581,38 @@ export async function executeComputerTaskWithAgent(args: {
   if (!execution.readiness.ready && execution.readiness.missing.length > 0) {
     warnings.push(execution.readiness.summary);
   }
-  if (execution.preflight.status !== 'ready') {
+  // Advisory preflight warnings belong to the plan/receipt metadata. Copying
+  // them into the runtime warning stream lets presentation code mistake a
+  // recommended file/status check for an observed failure. Only real
+  // preflight blockers are terminally actionable here.
+  if (execution.preflight.blockers.length > 0) {
     warnings.push(execution.preflight.summary);
     warnings.push(...execution.preflight.blockers.map((item) => `${item.label}: ${item.fix}`));
-    warnings.push(...execution.preflight.warnings.map((item) => `${item.label}: ${item.fix}`));
   }
   if (execution.grants.approvalSummary) {
     warnings.push(execution.grants.approvalSummary);
   }
 
-  // Learned per-app facts still gate read-only trace/example context. Direct
-  // deterministic app execution is intentionally absent: mutations descend
-  // through the authenticated typed agent loop instead.
+  if (sequenceProgram && args.exactSequenceDispatchAuthorized) {
+    if (execution.preflight.blockers.length > 0) {
+      return exactSequenceBlockedResult(
+        executionForResult,
+        `The exact Photoshop sequence is blocked before execution: ${execution.preflight.blockers.map((item) => item.label).join('; ')}`,
+        warnings,
+      );
+    }
+    return executeAuthorizedExactSequenceProgram({
+      program: sequenceProgram,
+      execution: executionForResult,
+      signal: args.signal,
+    });
+  }
+
+  // Learned per-app facts still gate read-only trace/example context. Generic
+  // deterministic app execution remains intentionally absent: only the
+  // compiler-owned, dispatcher-authorized exact program above may bypass an LLM turn;
+  // every model-planned mutation descends through the authenticated typed
+  // agent loop.
   // Attachment task text contains the staged local path and inferred app.
   // Keep both out of learned-facts/action-trace telemetry; the exact task is
   // retained below only in the authenticated agent execution prompt.
@@ -1377,12 +1711,18 @@ export async function executeComputerTaskWithAgent(args: {
     execution.preview.kind === 'file_task'
     && !isAttachedDesktopFileTask
     && !isTypedFileMutation;
-  const requiresInitialAppObservation = requiresFreshInitialAppObservation({
-    taskKind: execution.preview.kind,
-    strategyId: execution.computerAppGrounding?.strategy.id,
-    isAttachedDesktopFileTask,
-    opensAppSurface: directLocalFilePlan.mode === 'open_path',
-  });
+  // An exact program begins with an app-native read-only status call and ends
+  // with the same status call as proof. That is the freshest and most
+  // relevant observation boundary; do not prepend the generic screen/window
+  // capture path or treat a missing active document as a blocker.
+  const requiresInitialAppObservation = sequenceProgram
+    ? false
+    : requiresFreshInitialAppObservation({
+        taskKind: execution.preview.kind,
+        strategyId: execution.computerAppGrounding?.strategy.id,
+        isAttachedDesktopFileTask,
+        opensAppSurface: directLocalFilePlan.mode === 'open_path',
+      });
 
   if (shouldRunDeterministicReadOnlyFileAdapter) {
     const fileResult = await executeComputerFileTask({
@@ -1425,7 +1765,8 @@ export async function executeComputerTaskWithAgent(args: {
   // Action-trace retrieval remains read-only context enrichment. The mandatory
   // fresh app observation is collected after it, immediately before dispatch.
   const isDesktopTraceTaskKind =
-    !isAttachedDesktopFileTask
+    !sequenceProgram
+    && !isAttachedDesktopFileTask
     && (execution.preview.kind === 'app_task' || execution.preview.kind === 'hybrid_task');
   // L1 retrieval-as-context: if this EXACT task (normalized like the edge
   // replay matcher) succeeded recently in this circle, inject the prior
@@ -1505,15 +1846,13 @@ export async function executeComputerTaskWithAgent(args: {
         appAdapterMessage: null,
         dispatchPrefix: execution.dispatchPrefix,
       })}`
-    : (() => {
-        // Deterministic-first: when the ask compiles to a literal 1:1 tool
-        // program (computerSequenceProgramCore), it leads the prompt — the
-        // model sequences the pre-approved calls instead of re-planning
-        // against the advisory contract prose. Null → unchanged prompt.
-        const sequenceProgram = compileComputerSequenceProgram(args.task);
-        const programBlock = sequenceProgram ? `${sequenceProgram.promptBlock}\n\n` : '';
-        return `${programBlock}${execution.dispatchPrefix}\n${observeBeforeActBlock}${followUpPreamble}${attachmentStagingPreamble}${desktopTraceExampleBlock}USER COMPUTER TASK\n${args.task}`;
-      })();
+    : sequenceProgram
+      // Exact programs own the complete execution instructions. Mixing the
+      // generic design/file dispatch prefix back in reintroduces source-file,
+      // layer-inventory, and fallback requirements that do not apply to a
+      // from-scratch document.
+      ? `${sequenceProgram.promptBlock}\n\nUSER COMPUTER TASK\n${args.task}`
+      : `${execution.dispatchPrefix}\n${observeBeforeActBlock}${followUpPreamble}${attachmentStagingPreamble}${desktopTraceExampleBlock}USER COMPUTER TASK\n${args.task}`;
 
   // Belt-and-suspenders: if executeAgentRun throws (provider outage,
   // v2 continuation cap, model returns null), we still need to surface
@@ -1533,6 +1872,7 @@ export async function executeComputerTaskWithAgent(args: {
       signal: args.signal,
       userConstraints: args.userConstraints,
       alwaysConfirmFloor: args.alwaysConfirmFloor,
+      forceClientToolLoop: true,
       agentContextPack: args.agentContextPack,
       completionExpectation: 'verified_task',
       mode: execution.recommendedMode,

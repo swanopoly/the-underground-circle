@@ -68,6 +68,11 @@ taskkill /PID <PID> /F
 - Clear Metro cache: `npm start -- --clear`
 - Delete node_modules and reinstall: `rm -rf node_modules && npm install`
 
+The always-on `dev-stack-keepalive` also starts Expo with `--clear` whenever it
+has to respawn port 8081. After source/runtime changes, reload the browser tab;
+if Chat still repeats pre-change behavior, verify the Metro log shows a fresh
+`ChatTab.tsx` bundle before retrying the action.
+
 ---
 
 ## Architecture

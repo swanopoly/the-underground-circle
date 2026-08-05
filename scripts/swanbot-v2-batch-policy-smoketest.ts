@@ -80,8 +80,8 @@ includes(
 );
 includes(
   policySource,
-  'if (verdict.floorConfirmRequired && !context.hasApprovalGate)',
-  'always-confirm floor can never dispatch without a live per-call gate',
+  'context.runtimeApprovalToolNames?.has(toolName) === true',
+  'always-confirm floor can defer only to a named canonical runtime approval boundary',
 );
 includes(
   policySource,
@@ -92,6 +92,36 @@ includes(
   batchSource,
   'const parsedConstraintInputs = resolveChatComputerConstraintInputs(message)',
   'runtime derives policy inputs from the original turn itself',
+);
+includes(
+  batchSource,
+  'runWithTransientRetry<unknown>',
+  'typed batch relay retries transient 5xx/network failures before ending the tool loop',
+);
+includes(
+  batchSource,
+  'retryable: isRetryableInvokeError(res.error)',
+  'typed batch relay distinguishes transient failures from structural failures',
+);
+includes(
+  batchSource,
+  "filter((toolName) => toolParallelPolicyProvider(toolName)?.approvalMode === 'ask')",
+  'runtime approval deferral is derived from the canonical catalog policy',
+);
+includes(
+  swanbotSource,
+  'if (forceClientToolLoop || isSwanbotV2ClientLoopEnabled())',
+  'computer tasks can require the canonical client tool loop independent of the rollout flag',
+);
+includes(
+  swanbotSource,
+  'isSwanbotV2Enabled() || forceClientToolLoop',
+  'required computer tool turns cannot be routed around by the v2 preference flag',
+);
+includes(
+  swanbotSource,
+  'It was not replayed through the text-only fallback.',
+  'required computer tool turns fail visibly instead of replaying through v1 text chat',
 );
 includes(
   batchSource,
@@ -248,11 +278,13 @@ const callGuard = (
   hasApprovalGate: boolean,
   toolName: string,
   input: unknown,
+  runtimeApprovalToolNames?: ReadonlySet<string>,
 ) => {
   const verdict = createSwanbotV2BatchToolConstraintGuard({
     userConstraints: merged,
     alwaysConfirmFloor: ['pay'],
     hasApprovalGate,
+    runtimeApprovalToolNames,
   })({
     toolName,
     toolUseId: 'tool-use-1',
@@ -278,6 +310,36 @@ const floor = callGuard(false, 'browser.click_role', { name: 'Buy now' });
 assert(floor?.requireApproval === true, 'always-confirm floor fails closed without a gate');
 const floorWithGate = callGuard(true, 'browser.click_role', { name: 'Buy now' });
 assert(floorWithGate === undefined, 'always-confirm floor proceeds only to the live approval gate');
+const floorWithRuntimeBoundary = callGuard(
+  false,
+  'browser.click_role',
+  { name: 'Buy now' },
+  new Set(['browser.click_role']),
+);
+assert(
+  floorWithRuntimeBoundary === undefined,
+  'always-confirm floor can reach the canonical durable exact-call approval boundary',
+);
+const floorWithUnrelatedRuntimeBoundary = callGuard(
+  false,
+  'browser.click_role',
+  { name: 'Buy now' },
+  new Set(['desktop.launch_app']),
+);
+assert(
+  floorWithUnrelatedRuntimeBoundary?.requireApproval === true,
+  'an unrelated runtime approval tool cannot widen the current call',
+);
+const forbiddenWithRuntimeBoundary = callGuard(
+  false,
+  'browser.submit_form',
+  {},
+  new Set(['browser.submit_form']),
+);
+assert(
+  forbiddenWithRuntimeBoundary?.block === true,
+  'hard prohibition still wins over a canonical runtime approval boundary',
+);
 const blandFloor = callGuard(false, 'browser.press_key', { combo: 'Enter' });
 assert(
   blandFloor?.requireApproval === true,

@@ -131,6 +131,36 @@ assert.equal(photoshopSaveForWebCard.statusTone, 'ready');
 assert.equal(photoshopSaveForWebCard.statusLabel, 'Ready');
 assert.notEqual(photoshopSaveForWebCard.statusLabel, 'Approval needed');
 
+const exactBlankDocumentHandoff = buildChatComputerHandoffContext({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  taskKind: 'app_task',
+  taskLabel: 'Photoshop new 600x600 document exact program',
+  preflightStatus: 'ready',
+  groundingStatus: 'needs_observation',
+  groundingSummary: 'Observe photoshop-document-status.',
+});
+const exactBlankDocumentCard = buildChatDesignTaskCardModel(exactBlankDocumentHandoff.metadata);
+assert(exactBlankDocumentCard, 'exact Photoshop blank-document handoff builds a design-task card');
+assert.equal(exactBlankDocumentCard.subtitle, 'Blank Document');
+assert.equal(exactBlankDocumentCard.statusTone, 'ready');
+assert.equal(exactBlankDocumentCard.statusLabel, 'Ready');
+assert.deepEqual(exactBlankDocumentCard.operations, ['Create blank document']);
+assert.deepEqual(
+  exactBlankDocumentCard.phases.map((phase) => phase.label),
+  ['Status', 'Prepare', 'Create', 'Verify'],
+  'exact card exposes only the compiled blank-document phases',
+);
+assert.equal(exactBlankDocumentCard.reviewChecklist.length, 0, 'exact card omits generic layer/file review');
+assert(!/resolve file|inspect image|layer inventory|handoff/i.test(JSON.stringify(exactBlankDocumentCard)), 'exact card omits edit-file presentation');
+assert(exactBlankDocumentCard.proofSignals.some((signal) => /600x600/i.test(signal)), 'exact card keeps dimension proof');
+const exactCardWithStaleGrantCopy = buildChatDesignTaskCardModel({
+  ...exactBlankDocumentHandoff.metadata,
+  approvalSummary: 'Approval recommended for: connected app actions.',
+});
+assert.equal(exactCardWithStaleGrantCopy?.statusLabel, 'Ready', 'stale generic grant copy cannot turn a direct-authorized exact card back into Approval needed');
+
 const quietPhotoshopSaveForWebRoute = buildChatComputerRequestRoute('open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png');
 assert(quietPhotoshopSaveForWebRoute, 'quiet Photoshop Save for Web route exists');
 const quietPhotoshopSaveForWebHandoff = buildChatComputerHandoffContext({

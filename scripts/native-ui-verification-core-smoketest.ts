@@ -202,15 +202,15 @@ function main() {
     assert(other.verdict === 'unknown', 'a DIFFERENT dialog appearing is not proof this menu item ran');
   }
 
-  // ─── set_element_value + paste share the text-entry contract ─────
+  // ─── Generic paste keeps the accessibility-diff text contract. The
+  // semantic setter has its own exact same-target hash/length proof lane. ──
   {
-    for (const t of ['desktop.paste_text', 'desktop.set_element_value'] as const) {
-      const plan = planNativeUiVerification(t, { text: 'payload' });
-      const ok = verifyNativeUiAfterState({ tool: t, plan, diff: valueChange('payload'), snapshotsUsable: true });
-      assert(ok.verdict === 'verified', `${t}: text present → verified`);
-      const nope = verifyNativeUiAfterState({ tool: t, plan, diff: EMPTY, snapshotsUsable: true });
-      assert(nope.verdict === 'no_effect', `${t}: nothing moved → no_effect`);
-    }
+    const t = 'desktop.paste_text' as const;
+    const plan = planNativeUiVerification(t, { text: 'payload' });
+    const ok = verifyNativeUiAfterState({ tool: t, plan, diff: valueChange('payload'), snapshotsUsable: true });
+    assert(ok.verdict === 'verified', `${t}: text present → verified`);
+    const nope = verifyNativeUiAfterState({ tool: t, plan, diff: EMPTY, snapshotsUsable: true });
+    assert(nope.verdict === 'no_effect', `${t}: nothing moved → no_effect`);
   }
 
   // ─── Reasons are bounded and never echo the sent text ────────────

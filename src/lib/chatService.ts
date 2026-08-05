@@ -1,4 +1,13 @@
 import { supabase } from './supabase';
+import {
+  BOT_META_MARKER,
+  buildLegacyPersistedChatFallback,
+  canReleasePendingAfterPersistedChatRoundTrip,
+} from './persistedChatMetadata';
+import {
+  normalizePersistedMessageReactions,
+  type PersistedMessageReactions,
+} from './chatMessageShape';
 
 export interface ChatCurrentUserProfile {
   id: string;
@@ -19,6 +28,16 @@ export interface PersistedChatMessageRow {
     display_name?: string | null;
   } | null;
   thread_id?: string | null;
+  reply?: {
+    id: string;
+    content: string;
+    user_id: string;
+    is_bot?: boolean;
+    user?: {
+      username?: string | null;
+      display_name?: string | null;
+    } | null;
+  } | null;
 }
 
 export interface CircleChatMemberOption {
@@ -37,6 +56,11 @@ export interface PersistChatMessageInput {
   reactions?: Record<string, unknown>;
 }
 
+export interface PersistedChatMessageCursor {
+  createdAt: string;
+  id: string;
+}
+
 const MESSAGE_SELECT =
   'id, circle_id, user_id, content, reply_to, created_at, is_bot, reactions, thread_id, user:profiles(username, display_name)';
 const FALLBACK_MESSAGE_SELECT =
@@ -50,13 +74,44 @@ function isColumnMissingError(error: { code?: string; message?: string } | null 
   );
 }
 
+async function attachReplyPreviews(
+  rows: PersistedChatMessageRow[],
+  fallbackSchema = false,
+): Promise<PersistedChatMessageRow[]> {
+  const parentIds = Array.from(new Set(
+    rows.map((row) => row.reply_to).filter((id): id is string => typeof id === 'string' && id.length > 0),
+  )).slice(0, 50);
+  if (parentIds.length === 0) return rows;
+
+  const fullSelect = 'id, content, user_id, is_bot, user:profiles(username, display_name)';
+  const fallbackSelect = 'id, content, user_id, user:profiles(username, display_name)';
+  const initial = await (supabase
+    .from('messages')
+    .select(fallbackSchema ? fallbackSelect : fullSelect)
+    .in('id', parentIds) as any);
+  let data: any[] | null = initial.data || null;
+  let error: { code?: string; message?: string } | null = initial.error || null;
+  if (error && !fallbackSchema && isColumnMissingError(error)) {
+    const fallback = await (supabase.from('messages').select(fallbackSelect).in('id', parentIds) as any);
+    data = fallback.data || null;
+    error = fallback.error || null;
+  }
+  // Reply context is helpful but must never make the transcript unavailable.
+  // RLS may also intentionally hide a parent; those rows simply keep null.
+  if (error) return rows;
+  const parents = new Map<string, PersistedChatMessageRow['reply']>(
+    ((data || []) as any[]).map((row) => [row.id, row as PersistedChatMessageRow['reply']]),
+  );
+  return rows.map((row) => ({ ...row, reply: row.reply_to ? parents.get(row.reply_to) || null : null }));
+}
+
 /**
  * A CHECK-constraint violation — specifically the `messages_content_check`
  * length cap. Surfaced as Postgres code 23514 / a "violates check constraint"
  * message. Pre-migration the cap is 1000 chars (see
  * `20260612_messages_content_cap.sql`), which long agent/recovery messages
- * exceed; we truncate and retry so persistence degrades gracefully instead of
- * hard-failing with a 400.
+ * exceed; we retry with a bounded fallback so persistence degrades gracefully
+ * instead of hard-failing with a 400.
  */
 function isContentCheckViolation(error: { code?: string; message?: string } | null | undefined): boolean {
   return !!error && (
@@ -73,6 +128,38 @@ export function truncateMessageContentForColumn(content: string, cap = MESSAGES_
   if (text.length <= cap) return text;
   const marker = '… (truncated)';
   return `${text.slice(0, Math.max(0, cap - marker.length))}${marker}`;
+}
+
+function contentCheckFallback(
+  content: string,
+  isBot: boolean,
+  cap = MESSAGES_CONTENT_FALLBACK_CAP,
+): string {
+  if (isBot || content.includes(BOT_META_MARKER)) {
+    const fallback = buildLegacyPersistedChatFallback(content, cap);
+    // The builder's return type makes this invariant explicit. Keep the guard
+    // at the persistence boundary in case a future implementation weakens it.
+    if (!fallback.safeToPersist) {
+      throw new Error('Unsafe persisted Chat fallback was rejected.');
+    }
+    return fallback.content;
+  }
+  return truncateMessageContentForColumn(content, cap);
+}
+
+function persistedMessageIdAfterRoundTrip(
+  data: { id?: string | null; content?: string | null } | null | undefined,
+  isBot: boolean,
+  submittedContent: string,
+): string | null {
+  const id = data?.id || null;
+  if (!id || !isBot) return id;
+  const content = typeof data?.content === 'string' ? data.content : '';
+  return canReleasePendingAfterPersistedChatRoundTrip({
+    submittedContent,
+    persistedContent: content,
+    isBot,
+  }) ? id : null;
 }
 
 export async function getCurrentChatUserProfile(): Promise<ChatCurrentUserProfile | null> {
@@ -116,6 +203,7 @@ export async function loadThreadMessages(
     .select(MESSAGE_SELECT)
     .eq('circle_id', circleId)
     .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
     .limit(limit);
 
   if (threadId) query = query.eq('thread_id', threadId);
@@ -123,7 +211,8 @@ export async function loadThreadMessages(
 
   if (!error) {
     const rows = (data || []) as PersistedChatMessageRow[];
-    return { rows: rows.reverse(), usedFallback: false };
+    const hydrated = await attachReplyPreviews(rows, false);
+    return { rows: hydrated.reverse(), usedFallback: false };
   }
 
   if (!isColumnMissingError(error)) throw error;
@@ -133,13 +222,15 @@ export async function loadThreadMessages(
     .select(FALLBACK_MESSAGE_SELECT)
     .eq('circle_id', circleId)
     .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
     .limit(limit);
 
   if (threadId) fallbackQuery = fallbackQuery.eq('thread_id', threadId);
   const { data: fallback, error: fallbackError } = await fallbackQuery;
   if (fallbackError) throw fallbackError;
   const rows = (fallback || []) as PersistedChatMessageRow[];
-  return { rows: rows.reverse(), usedFallback: true };
+  const hydrated = await attachReplyPreviews(rows, true);
+  return { rows: hydrated.reverse(), usedFallback: true };
 }
 
 /**
@@ -151,16 +242,23 @@ export async function loadThreadMessages(
 export async function loadOlderThreadMessages(
   circleId: string,
   threadId: string | null | undefined,
-  olderThan: string,
+  olderThan: string | PersistedChatMessageCursor,
   limit = 50,
 ): Promise<{ rows: PersistedChatMessageRow[]; hasMore: boolean }> {
+  const cursor = typeof olderThan === 'string'
+    ? { createdAt: olderThan, id: '' }
+    : olderThan;
   let query = supabase
     .from('messages')
     .select(MESSAGE_SELECT)
     .eq('circle_id', circleId)
-    .lt('created_at', olderThan)
     .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
     .limit(limit);
+
+  query = cursor.id
+    ? query.or(`created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`)
+    : query.lt('created_at', cursor.createdAt);
 
   if (threadId) query = query.eq('thread_id', threadId);
   const { data, error } = await query;
@@ -171,17 +269,22 @@ export async function loadOlderThreadMessages(
       .from('messages')
       .select(FALLBACK_MESSAGE_SELECT)
       .eq('circle_id', circleId)
-      .lt('created_at', olderThan)
       .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
       .limit(limit);
+    fb = cursor.id
+      ? fb.or(`created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`)
+      : fb.lt('created_at', cursor.createdAt);
     if (threadId) fb = fb.eq('thread_id', threadId);
     const { data: fbData, error: fbErr } = await fb;
     if (fbErr) throw fbErr;
     const rows = (fbData || []) as PersistedChatMessageRow[];
-    return { rows: rows.reverse(), hasMore: rows.length >= limit };
+    const hydrated = await attachReplyPreviews(rows, true);
+    return { rows: hydrated.reverse(), hasMore: rows.length >= limit };
   }
   const rows = (data || []) as PersistedChatMessageRow[];
-  return { rows: rows.reverse(), hasMore: rows.length >= limit };
+  const hydrated = await attachReplyPreviews(rows, false);
+  return { rows: hydrated.reverse(), hasMore: rows.length >= limit };
 }
 
 /**
@@ -219,9 +322,9 @@ export async function loadNewerThreadMessages(
     if (threadId) fb = fb.eq('thread_id', threadId);
     const { data: fbData, error: fbErr } = await fb;
     if (fbErr) throw fbErr;
-    return { rows: (fbData || []) as PersistedChatMessageRow[] };
+    return { rows: await attachReplyPreviews((fbData || []) as PersistedChatMessageRow[], true) };
   }
-  return { rows: (data || []) as PersistedChatMessageRow[] };
+  return { rows: await attachReplyPreviews((data || []) as PersistedChatMessageRow[], false) };
 }
 
 export async function persistChatMessage(input: PersistChatMessageInput): Promise<string | null> {
@@ -238,21 +341,22 @@ export async function persistChatMessage(input: PersistChatMessageInput): Promis
   const { data, error } = await supabase
     .from('messages')
     .insert(payload)
-    .select('id')
+    .select('id, content')
     .single();
 
-  if (!error) return data?.id || null;
+  if (!error) return persistedMessageIdAfterRoundTrip(data, input.isBot === true, payload.content);
 
   // Long agent/recovery messages exceed the pre-migration 1000-char cap. Retry
-  // once with truncated content so the row still persists (full content stays
-  // in the local recoverable copy). Harmless once the cap migration is applied.
+  // once with a parseable minimal envelope. Arbitrary truncation can cut the
+  // JSON metadata suffix and erase completion/source lineage after reload.
   if (isContentCheckViolation(error)) {
+    const legacyContent = contentCheckFallback(input.content, input.isBot === true);
     const { data: truncatedData, error: truncatedError } = await supabase
       .from('messages')
-      .insert({ ...payload, content: truncateMessageContentForColumn(input.content) })
-      .select('id')
+      .insert({ ...payload, content: legacyContent })
+      .select('id, content')
       .single();
-    if (!truncatedError) return truncatedData?.id || null;
+    if (!truncatedError) return persistedMessageIdAfterRoundTrip(truncatedData, input.isBot === true, legacyContent);
     if (!isColumnMissingError(truncatedError)) throw truncatedError;
   } else if (!isColumnMissingError(error)) {
     throw error;
@@ -269,20 +373,21 @@ export async function persistChatMessage(input: PersistChatMessageInput): Promis
   const { data: fallbackData, error: fallbackError } = await supabase
     .from('messages')
     .insert(fallbackPayload)
-    .select('id')
+    .select('id, content')
     .single();
 
   if (fallbackError && isContentCheckViolation(fallbackError)) {
+    const legacyContent = contentCheckFallback(input.content, input.isBot === true);
     const { data: lastData, error: lastError } = await supabase
       .from('messages')
-      .insert({ ...fallbackPayload, content: truncateMessageContentForColumn(input.content) })
-      .select('id')
+      .insert({ ...fallbackPayload, content: legacyContent })
+      .select('id, content')
       .single();
     if (lastError) throw lastError;
-    return lastData?.id || null;
+    return persistedMessageIdAfterRoundTrip(lastData, input.isBot === true, legacyContent);
   }
   if (fallbackError) throw fallbackError;
-  return fallbackData?.id || null;
+  return persistedMessageIdAfterRoundTrip(fallbackData, input.isBot === true, fallbackPayload.content);
 }
 
 export async function updateChatMessageContent(messageId: string, content: string): Promise<boolean> {
@@ -292,6 +397,15 @@ export async function updateChatMessageContent(messageId: string, content: strin
     .eq('id', messageId);
 
   if (!error) return true;
+  if (isContentCheckViolation(error)) {
+    const legacyContent = contentCheckFallback(content, content.includes(BOT_META_MARKER));
+    const { error: legacyError } = await supabase
+      .from('messages')
+      .update({ content: legacyContent })
+      .eq('id', messageId);
+    if (legacyError) throw legacyError;
+    return true;
+  }
   if (!isColumnMissingError(error)) throw error;
 
   const { error: fallbackError } = await supabase
@@ -301,4 +415,31 @@ export async function updateChatMessageContent(messageId: string, content: strin
 
   if (fallbackError) throw fallbackError;
   return true;
+}
+
+/** Atomic caller-only reaction mutation; callers never replace the JSON blob. */
+export async function setMessageReaction(
+  messageId: string,
+  emoji: string,
+  add: boolean,
+): Promise<PersistedMessageReactions> {
+  const { data, error } = await supabase.rpc('set_message_reaction', {
+    p_message_id: messageId,
+    p_emoji: emoji,
+    p_add: add,
+  });
+  if (error) throw error;
+  return normalizePersistedMessageReactions(data);
+}
+
+/** Read-only recovery after an RPC/transport failure. */
+export async function loadMessageReactions(messageId: string): Promise<PersistedMessageReactions> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('reactions')
+    .eq('id', messageId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('Message is no longer available.');
+  return normalizePersistedMessageReactions(data.reactions || {});
 }

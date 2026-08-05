@@ -14,9 +14,11 @@ import {
   type DesignAppOperationRunbook,
   type DesignAppOperationRunbookPhase,
 } from './designAppOperationRunbooks';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 
 export type DesignAppExecutionPipelinePhaseId =
   | 'resolve_source_package'
+  | 'prepare_app'
   | 'observe_document_inventory'
   | 'prepare_creative_ai_brief'
   | 'request_design_approval'
@@ -151,8 +153,109 @@ function sourceFileDescription(appId: DesignAppAutomationAppId): string {
 
 export function buildDesignAppExecutionPipelinePlan(task: string): DesignAppExecutionPipelinePlan | null {
   const plan = buildDesignAppAutomationPlan(task);
+  if (!plan) return null;
+
+  const exactProgram = compileComputerSequenceProgram(task);
+  if (exactProgram?.id === 'photoshop_new_document' && plan.appId === 'adobe_photoshop') {
+    const createStep = exactProgram.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
+    const widthPx = Number(createStep?.args.widthPx);
+    const heightPx = Number(createStep?.args.heightPx);
+    const sizeLabel = Number.isFinite(widthPx) && Number.isFinite(heightPx)
+      ? `${widthPx}x${heightPx}`
+      : 'requested-size';
+    const directRequestAuthorized = exactProgram.authorization.mode === 'direct_user_request';
+    const phases: DesignAppExecutionPipelinePhase[] = [
+      {
+        id: 'observe_document_inventory',
+        label: 'Read Photoshop status',
+        description: 'Read app-native document status. No active document is expected for a from-scratch request.',
+        operations: ['inspect_image_document'],
+        tools: ['desktop.photoshop_document_status'],
+        requiredEvidence: ['Photoshop running/scriptable state and current active-document state'],
+        approvalRequired: false,
+        userVisibleWhen: 'hidden',
+        failClosedRules: ['stop only for an actual bridge/install/license/login/permission/modal blocker, not for no active document'],
+        recoveryAction: 'If Photoshop is not running, continue to the single conditional launch step.',
+      },
+      {
+        id: 'prepare_app',
+        label: 'Ensure Photoshop is ready',
+        description: 'Launch Photoshop only when the first status says it is not running, then poll status during the bounded cold start.',
+        operations: [],
+        tools: ['desktop.launch_app', 'desktop.photoshop_document_status'],
+        requiredEvidence: ['desktop.photoshop_document_status reports appRunning:true before creation'],
+        approvalRequired: false,
+        userVisibleWhen: 'hidden',
+        failClosedRules: ['do not launch a second time when Photoshop is already running', 'do not replace the status check with menu/a11y/coordinate probing'],
+        recoveryAction: 'Retry document status up to the compiled cold-start bound, then report the exact readiness blocker.',
+      },
+      {
+        id: 'execute_design_mutations',
+        label: 'Create blank document',
+        description: `Create the new ${sizeLabel} Photoshop document through the dedicated app-native bridge tool.`,
+        operations: [],
+        tools: ['desktop.photoshop_create_document'],
+        requiredEvidence: [
+          `tool arguments are exactly widthPx=${widthPx}, heightPx=${heightPx}`,
+          directRequestAuthorized
+            ? 'the current direct user request authorizes only this new unsaved blank document'
+            : 'the enclosing Chat plan approval authorizes the oversized blank-document allocation',
+        ],
+        // This exact program creates only a new unsaved blank document, so the
+        // direct request is sufficient authority. Do not manufacture a gate.
+        approvalRequired: false,
+        userVisibleWhen: 'hidden',
+        failClosedRules: [
+          directRequestAuthorized
+            ? 'do not extend the direct-request authority to save, export, overwrite, delete, edit existing content, or perform an external action'
+            : 'do not dispatch the oversized blank-document allocation before its enclosing Chat plan approval',
+          'do not substitute a generic menu, accessibility, keyboard, screenshot, or coordinate action',
+        ],
+        recoveryAction: directRequestAuthorized
+          ? 'Stop on bridge failure and preserve the exact create-document error.'
+          : 'Stop on approval rejection or bridge failure and preserve the exact create-document error.',
+      },
+      {
+        id: 'verify_design_output',
+        label: 'Verify document dimensions',
+        description: `Read final Photoshop status and require an active ${sizeLabel} document before completion.`,
+        operations: ['inspect_image_document'],
+        tools: ['desktop.photoshop_document_status'],
+        requiredEvidence: [`active document dimensions equal ${sizeLabel}`, 'created document name from app-native status'],
+        approvalRequired: false,
+        userVisibleWhen: 'proof',
+        failClosedRules: ['stop if no active document is reported after creation', `stop if final dimensions are not ${sizeLabel}`],
+        recoveryAction: 'Report the final status mismatch; do not fabricate layer, file, screenshot, or export proof.',
+      },
+    ];
+    return {
+      appId: plan.appId,
+      appName: plan.appName,
+      taskKind: plan.taskKind,
+      operations: plan.operations,
+      phases,
+      // Preserve repeats because this is an executable ordered program, not a
+      // capability catalog. The two status reads bracket the conditional
+      // launch and the final status read proves the new dimensions.
+      requiredToolSequence: exactProgram.steps.map((step) => step.tool),
+      // Approval, when a resource-heavy allocation needs it, is owned by the
+      // enclosing Chat plan; no phase emits an approvals.request tool call.
+      approvalTools: [],
+      mutationTools: ['desktop.photoshop_create_document'],
+      proofTools: ['desktop.photoshop_document_status'],
+      buildoutTools: [],
+      adapterGapOperations: [],
+      creativeAiRecipeIds: [],
+      nextVisibleAction: directRequestAuthorized
+        ? `Run desktop.photoshop_create_document for ${sizeLabel} immediately after the fresh status check; no redundant approval is required for the unsaved blank document.`
+        : `After the one Chat plan-level approval, run desktop.photoshop_create_document for ${sizeLabel}.`,
+      quietUserSummary: `Adobe Photoshop exact blank-document sequence: status -> conditional launch -> status -> create ${sizeLabel} -> status`,
+      failClosedRules: unique(phases.flatMap((phase) => phase.failClosedRules)).slice(0, 12),
+    };
+  }
+
   const runbookPlan = buildDesignAppOperationRunbookPlan(task);
-  if (!plan || !runbookPlan) return null;
+  if (!runbookPlan) return null;
 
   const adapterGapPlan = buildDesignAppAdapterGapPlan(task);
   const creativeRecipePlan = buildDesignAppCreativeAiRecipePlan(task);

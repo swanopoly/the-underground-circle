@@ -73,7 +73,7 @@ function buildComputerAppGroundingDispatchBlock(args: {
   lines.push('- After a successful action, verify before taking another mutating action.');
   lines.push('- If the same action fails twice, switch to recovery instead of retrying.');
   lines.push(`Fallback chain: ${plan.fallbackChain.join(' -> ')}`);
-  lines.push(`Approval gates: ${plan.approvalGates.length ? plan.approvalGates.join(' | ') : 'none for read-only work'}`);
+  lines.push(`Approval gates: ${plan.approvalGates.length ? plan.approvalGates.join(' | ') : 'none required by this plan'}`);
   lines.push('Forbidden fallbacks:');
   for (const item of plan.forbiddenFallbacks) lines.push(`- ${item}`);
   lines.push(`Verification signals: ${plan.verificationSignals.join(' | ')}`);

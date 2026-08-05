@@ -20,6 +20,14 @@ const chatSource = readFileSync(
   `${repoRoot}/src/screens/circles/tabs/ChatTab.tsx`,
   'utf8',
 );
+const runStatusBarSource = readFileSync(
+  `${repoRoot}/src/components/agent/RunStatusBar.tsx`,
+  'utf8',
+);
+const hitlApprovalBannerSource = readFileSync(
+  `${repoRoot}/src/components/HitlApprovalBanner.tsx`,
+  'utf8',
+);
 
 const contextFields = [
   'threadId',
@@ -41,6 +49,16 @@ for (const field of contextFields) {
     `AgentRuntime forwards ${field} into SwanBotContext`,
   );
 }
+assert.match(
+  agentRuntimeSource,
+  /forceClientToolLoop\?: SwanBotContext\['forceClientToolLoop'\]/,
+  'AgentRunRequest exposes the required-client-loop routing seam',
+);
+assert.match(
+  agentRuntimeSource,
+  /forceClientToolLoop: request\.forceClientToolLoop/,
+  'AgentRuntime forwards the required-client-loop routing seam into SwanBotContext',
+);
 assert.match(
   agentRuntimeSource,
   /toolApprovalGate\?: SwanBotContext\['toolApprovalGate'\]/,
@@ -81,6 +99,138 @@ const retryAgentCallEnd = computerRuntimeSource.indexOf(
 );
 assert(retryAgentCallStart >= 0 && retryAgentCallEnd > retryAgentCallStart);
 const retryAgentCall = computerRuntimeSource.slice(retryAgentCallStart, retryAgentCallEnd);
+
+assert.match(
+  mainAgentCall,
+  /forceClientToolLoop: true/,
+  'main computer-task agent call requires the canonical local typed tool loop',
+);
+assert.match(
+  retryAgentCall,
+  /forceClientToolLoop: true/,
+  'capability retry also forbids the legacy text-only fallback',
+);
+
+const exactProgramDispatchIndex = computerRuntimeSource.indexOf(
+  'if (sequenceProgram && args.exactSequenceDispatchAuthorized) {',
+);
+assert(
+  exactProgramDispatchIndex >= 0 && exactProgramDispatchIndex < mainAgentCallStart,
+  'a dispatcher-authorized compiler-owned sequence runs locally before the AI relay',
+);
+assert.match(
+  computerRuntimeSource,
+  /async function executeAuthorizedExactSequenceProgram[\s\S]*?photoshopDocumentStatus\(\{ appName: 'Photoshop' \}\)[\s\S]*?photoshopCreateDocument\(\{[\s\S]*?photoshopDocumentStatus\(\{ appName: 'Photoshop' \}\)/,
+  'the exact Photoshop handler observes, creates once, then reads fresh final proof',
+);
+const exactForegroundHelperStart = computerRuntimeSource.indexOf(
+  'async function ensureExactPhotoshopForeground(',
+);
+const exactForegroundHelperEnd = computerRuntimeSource.indexOf(
+  '\n/**\n * Execute a compiler-owned',
+  exactForegroundHelperStart,
+);
+assert(
+  exactForegroundHelperStart >= 0 && exactForegroundHelperEnd > exactForegroundHelperStart,
+  'the exact Photoshop foreground helper is present',
+);
+const exactForegroundHelperSource = computerRuntimeSource.slice(
+  exactForegroundHelperStart,
+  exactForegroundHelperEnd,
+);
+assert.equal(
+  (exactForegroundHelperSource.match(/desktop\.focusApp\('Photoshop'\)/g) || []).length,
+  1,
+  'a contrary foreground observation triggers at most one Photoshop focus dispatch per check',
+);
+assert.equal(
+  (exactForegroundHelperSource.match(/desktop\.getWindowState\(\)/g) || []).length,
+  2,
+  'the foreground helper performs one observation and one bounded post-focus verification',
+);
+assert.doesNotMatch(
+  exactForegroundHelperSource,
+  /\b(?:for|while)\s*\(/,
+  'the foreground focus helper never enters an unbounded retry loop',
+);
+assert.doesNotMatch(
+  exactForegroundHelperSource,
+  /evidenceAvailable:\s*false|if \(!frontmostApp\)\s*\{\s*return \{ ok: true/,
+  'missing foreground evidence cannot be accepted as proof',
+);
+assert.match(
+  exactForegroundHelperSource,
+  /catch \{\s*observed = null;\s*\}[\s\S]*?if \(isPhotoshopAppIdentity\(frontmostApp\)\)[\s\S]*?desktop\.focusApp\('Photoshop'\)/,
+  'a failed or empty initial observation falls through to the one bounded Photoshop focus dispatch',
+);
+
+const exactHandlerStart = computerRuntimeSource.indexOf(
+  'async function executeAuthorizedExactSequenceProgram(',
+);
+const exactHandlerEnd = computerRuntimeSource.indexOf(
+  '\n/**\n * Detects whether an app-task utterance',
+  exactHandlerStart,
+);
+assert(exactHandlerStart >= 0 && exactHandlerEnd > exactHandlerStart);
+const exactHandlerSource = computerRuntimeSource.slice(exactHandlerStart, exactHandlerEnd);
+const foregroundBeforeCreateIndex = exactHandlerSource.indexOf(
+  'const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop);',
+);
+const createDocumentIndex = exactHandlerSource.indexOf(
+  'created = await desktop.photoshopCreateDocument({',
+);
+const finalDocumentStatusIndex = exactHandlerSource.indexOf(
+  "const after = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });",
+);
+const foregroundAfterCreateIndex = exactHandlerSource.indexOf(
+  'const foregroundAfterCreate = await ensureExactPhotoshopForeground(desktop);',
+);
+const completedResultIndex = exactHandlerSource.lastIndexOf("status: 'completed'");
+assert(
+  foregroundBeforeCreateIndex >= 0 && foregroundBeforeCreateIndex < createDocumentIndex,
+  'the exact program verifies or focuses Photoshop before document creation',
+);
+assert(
+  finalDocumentStatusIndex > createDocumentIndex
+    && foregroundAfterCreateIndex > finalDocumentStatusIndex
+    && completedResultIndex > foregroundAfterCreateIndex,
+  'the exact program verifies final document proof, then foreground state, before success',
+);
+assert.match(
+  exactHandlerSource.slice(foregroundAfterCreateIndex, completedResultIndex),
+  /exactSequenceManualVerificationResult\([\s\S]*?will not be replayed automatically/,
+  'a post-mutation foreground verification failure remains partial and non-replayable',
+);
+assert.match(
+  computerRuntimeSource,
+  /catch \(error: any\) \{[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?automatic replay is disabled/,
+  'a transport exception after create dispatch remains outcome-unknown and non-replayable',
+);
+assert.match(
+  computerRuntimeSource,
+  /if \(!created\.ok \|\| !created\.data\?\.created\) \{[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?automatic replay is disabled/,
+  'a missing creation receipt cannot be downgraded to a safe-to-retry failure',
+);
+assert.match(
+  computerRuntimeSource,
+  /function exactSequenceManualVerificationResult[\s\S]*?status: 'partial'[\s\S]*?replayPolicy: 'manual_verify_only'[\s\S]*?mutationDispatched: true[\s\S]*?desktop\.photoshop_document_status/,
+  'every exact post-dispatch partial carries structured no-replay authority and one read-only verifier',
+);
+assert.match(
+  chatSource,
+  /replayPolicy: result\.replayPolicy \|\| 'normal'[\s\S]*?mutationDispatched: result\.mutationDispatched === true[\s\S]*?verificationOnlyTools:/,
+  'Chat preserves exact replay policy across the runtime transport boundary',
+);
+assert.match(
+  chatSource,
+  /suppressGenericRecovery:[\s\S]*?replayPolicy,[\s\S]*?mutationDispatched,[\s\S]*?verificationOnlyTools,/,
+  'Chat outcome presentation receives the structured replay boundary before recovery generation',
+);
+assert.doesNotMatch(
+  computerRuntimeSource,
+  /warnings\.push\(\.\.\.execution\.preflight\.warnings/,
+  'advisory preflight guidance never enters the runtime blocker-warning channel',
+);
 
 for (const field of contextFields) {
   assert.match(
@@ -162,9 +312,61 @@ assert.match(
   'the real Chat computer transport forwards the dispatcher-built context pack',
 );
 assert.match(
+  chatComputerCall,
+  /exactSequenceDispatchAuthorized: Boolean\(exactSequenceProgram\)/,
+  'only a compiler-owned deterministic sequence receives dispatcher authorization',
+);
+assert.match(
   chatSource,
   /run_computer_task: async \(_dispatchedPlan, transportCtx\)/,
   'the real computer transport consumes its dispatcher context',
+);
+const sharedComputerTaskStart = chatSource.lastIndexOf(
+  'const executeSharedComputerTask = useCallback(',
+  chatComputerCallStart,
+);
+const nativeDispatchBlurIndex = chatSource.indexOf(
+  'try { inputRef.current?.blur(); } catch {}',
+  sharedComputerTaskStart,
+);
+assert(
+  sharedComputerTaskStart >= 0
+    && nativeDispatchBlurIndex > sharedComputerTaskStart
+    && nativeDispatchBlurIndex < chatComputerCallStart,
+  'Chat releases composer focus immediately before a computer task can activate a native app',
+);
+const primaryComposerRef = chatSource.indexOf(
+  'ref={inputRef}',
+  chatSource.indexOf('function EnhancedInput('),
+);
+const primaryComposerStart = chatSource.lastIndexOf('<TextInput', primaryComposerRef);
+const primaryComposerEnd = chatSource.indexOf('/>', primaryComposerRef);
+assert(
+  primaryComposerRef >= 0
+    && primaryComposerStart >= 0
+    && primaryComposerEnd > primaryComposerRef,
+  'Chat contains the primary EnhancedInput composer',
+);
+const primaryComposer = chatSource.slice(primaryComposerStart, primaryComposerEnd);
+assert.doesNotMatch(
+  primaryComposer,
+  /\bautoFocus(?:\s|=)/,
+  'the primary web composer cannot reclaim Chrome focus merely because Chat remounted',
+);
+assert.match(
+  chatSource,
+  /const exactSequenceProgram = compileComputerSequenceProgram\(trimmed\)/,
+  'the exact-program compiler receives the raw user task',
+);
+assert.match(
+  chatSource,
+  /const classifiedPlan = buildChatAutomationPlan\(\{\s*message: trimmed,/,
+  'computer-task classification always receives the raw user task',
+);
+assert.doesNotMatch(
+  chatSource,
+  /message: options\?\.planPrefix \? `\$\{options\.planPrefix\}\$\{trimmed\}` : trimmed/,
+  'console and retry labels cannot contaminate exact-program classification',
 );
 assert.match(
   computerRuntimeSource,
@@ -174,7 +376,7 @@ assert.match(
 assert.doesNotMatch(
   chatComputerCall,
   /toolApprovalGate|chatAutomationApprovalGate/,
-  'Chat does not reinterpret its plan approval gate as exact tool-call consent',
+  'Chat does not leak plan approval into the generic per-tool approval callback',
 );
 assert.doesNotMatch(
   chatSource,
@@ -226,6 +428,16 @@ for (const readOnlyAwarenessTool of [
 const computerPlanBranchStart = chatSource.indexOf(
   "if (plan.execution.kind === 'run_computer_task') {",
 );
+assert.match(
+  chatSource,
+  /shouldSurfaceMultiIntentNotice\(plan\.execution\.kind\)/,
+  'Chat delegates cosmetic multi-ask notice authority to the pure lane policy',
+);
+assert.doesNotMatch(
+  chatSource,
+  /const multiAskNoticeLanes/,
+  'Chat has no parallel local lane allowlist that can re-enable ask #1 for computer tasks',
+);
 const openSwanPlanBranchStart = chatSource.indexOf(
   "if (plan.execution.kind === 'run_openswan') {",
   computerPlanBranchStart,
@@ -247,6 +459,29 @@ assert.doesNotMatch(
   computerPlanBranch,
   /executeLocalComputerAwarenessRequest|desktop\.(?:launch_app|focus_app)/,
   'computer-task launch/focus cannot exit through local awareness',
+);
+
+const sharedComputerDispatchStart = chatSource.indexOf(
+  'const outcome = await dispatchChatAutomationPlan(computerPlan, {',
+);
+const sharedComputerDispatchEnd = chatSource.indexOf(
+  '\n      const prefix =',
+  sharedComputerDispatchStart,
+);
+assert(
+  sharedComputerDispatchStart >= 0 && sharedComputerDispatchEnd > sharedComputerDispatchStart,
+  'Chat contains the shared computer-plan dispatch boundary',
+);
+const sharedComputerDispatch = chatSource.slice(sharedComputerDispatchStart, sharedComputerDispatchEnd);
+assert.match(
+  sharedComputerDispatch,
+  /approvalGate: exactSequenceProgram \? chatAutomationApprovalGate : undefined/,
+  'only a compiler-owned computer program passes through the plan-level HITL gate',
+);
+assert.match(
+  sharedComputerDispatch,
+  /run_computer_task: async \(_dispatchedPlan, transportCtx\)[\s\S]*exactSequenceDispatchAuthorized: Boolean\(exactSequenceProgram\)/,
+  'the post-gate handler marks only the compiled exact sequence approved',
 );
 const openSwanPlanBranch = chatSource.slice(
   openSwanPlanBranchStart,
@@ -273,6 +508,171 @@ assert.match(
   /isOpenSwanSteeringScopeActive\(activeThreadId\)\s*\|\| !!openSwanAbortRef\.current/,
   'the STOP surface follows a live cancellable controller for both OpenSwan session and canary computer loops',
 );
+
+// Advisory preflight guidance belongs in prompt/metadata, never in the
+// durable blocker channel that drives the notification and needs-you strips.
+const activeRunPhaseIndex = chatSource.indexOf(
+  "phase: options?.readyCapabilityBuildout ? 'executing' : 'planning'",
+);
+const activeRunPersistStart = chatSource.lastIndexOf(
+  'await persistComputerTaskState({',
+  activeRunPhaseIndex,
+);
+const activeRunPersistEnd = chatSource.indexOf('\n    });', activeRunPhaseIndex);
+assert(
+  activeRunPersistStart >= 0 && activeRunPersistEnd > activeRunPersistStart,
+  'Chat contains the initial planning/executing durable-state write',
+);
+const activeRunPersist = chatSource.slice(activeRunPersistStart, activeRunPersistEnd);
+assert.match(
+  activeRunPersist,
+  /startsNewActiveRun: true/,
+  'the initial active-state write explicitly owns stale terminal-notification cleanup',
+);
+assert.match(
+  activeRunPersist,
+  /\.\.\.preflightBlockers/,
+  'true preflight blockers remain in the durable blocker channel',
+);
+assert.doesNotMatch(
+  activeRunPersist,
+  /preflightWarnings|preflightIssues/,
+  'planning/executing state never promotes advisory preflight warnings to blockers',
+);
+assert.doesNotMatch(
+  chatSource,
+  /const preflightIssues\s*=\s*\[\.\.\.preflightBlockers,\s*\.\.\.preflightWarnings\]/,
+  'Chat has no merged preflight issue list that erases blocker/warning severity',
+);
+
+const browserApprovalStart = chatSource.indexOf('if (browserPlan && browserActions) {');
+const browserApprovalPhaseIndex = chatSource.indexOf("phase: 'awaiting_approval'", browserApprovalStart);
+const browserApprovalBlockersStart = chatSource.indexOf('blockers: [', browserApprovalPhaseIndex);
+const browserApprovalBlockersEnd = chatSource.indexOf('].slice(0, 6),', browserApprovalBlockersStart);
+assert(
+  browserApprovalStart >= 0
+    && browserApprovalPhaseIndex > browserApprovalStart
+    && browserApprovalBlockersStart > browserApprovalPhaseIndex
+    && browserApprovalBlockersEnd > browserApprovalBlockersStart,
+  'Chat contains the browser awaiting-approval blocker projection',
+);
+const browserApprovalBlockers = chatSource.slice(browserApprovalBlockersStart, browserApprovalBlockersEnd);
+assert.match(
+  browserApprovalBlockers,
+  /\.\.\.outcomePreflightBlockers/,
+  'browser approval state preserves actual preflight blockers',
+);
+assert.doesNotMatch(
+  browserApprovalBlockers,
+  /outcomePreflightWarnings/,
+  'browser approval state keeps advisory preflight warnings out of blockers',
+);
+
+const statePersistStart = chatSource.indexOf('const persistComputerTaskState = useCallback');
+const statePersistEnd = chatSource.indexOf('\n  useEffect(() => {', statePersistStart);
+assert(statePersistStart >= 0 && statePersistEnd > statePersistStart, 'Chat contains durable computer-task persistence');
+const statePersistBlock = chatSource.slice(statePersistStart, statePersistEnd);
+assert.match(
+  statePersistBlock,
+  /startsNewActiveRun\?: boolean/,
+  'durable state accepts an explicit new-active-run signal instead of guessing from task text',
+);
+for (const staleTerminalKind of ['completed', 'failed', 'blocked', 'partial_result'] as const) {
+  assert(
+    statePersistBlock.includes(`item.kind === '${staleTerminalKind}'`),
+    `a new active run acknowledges stale ${staleTerminalKind} notifications`,
+  );
+}
+assert.match(
+  statePersistBlock,
+  /\? \{ \.\.\.item, acknowledged: true \}\s*: item/,
+  'non-terminal notification entries remain unchanged during terminal-notice cleanup',
+);
+
+// Once a terminal state is durable, the thinking strip and STOP controller
+// must be released before failure-recovery I/O can wait or retry.
+const transientReleaseStart = chatSource.indexOf('const releaseComputerTaskTransientUi = () => {');
+const transientReleaseEnd = chatSource.indexOf('\n    };', transientReleaseStart);
+assert(
+  transientReleaseStart >= 0 && transientReleaseEnd > transientReleaseStart,
+  'Chat contains a bounded transient computer-task UI release helper',
+);
+const transientReleaseBlock = chatSource.slice(transientReleaseStart, transientReleaseEnd);
+assert.match(
+  transientReleaseBlock,
+  /openSwanAbortRef\.current === computerTaskController[\s\S]*openSwanAbortRef\.current = null/,
+  'terminal UI release clears only the controller owned by this run',
+);
+assert.match(transientReleaseBlock, /setRunStatus\('idle'\)/, 'terminal UI release clears the live run status');
+assert.match(transientReleaseBlock, /setBotTyping\(false\)/, 'terminal UI release hides the thinking strip');
+
+const runStatusHooksStart = runStatusBarSource.indexOf('const [verbIdx, setVerbIdx] = useState(0);');
+const runStatusIdleReturn = runStatusBarSource.indexOf("if (status === 'idle') return null;");
+assert(
+  runStatusHooksStart >= 0 && runStatusIdleReturn > runStatusHooksStart,
+  'RunStatusBar keeps hooks mounted across idle/running transitions before hiding its view',
+);
+assert.match(
+  runStatusBarSource.slice(runStatusHooksStart, runStatusIdleReturn),
+  /if \(status === 'idle'\) return;/,
+  'RunStatusBar suspends the thinking-verb interval while idle without changing hook topology',
+);
+
+assert.match(
+  hitlApprovalBannerSource,
+  /status === 'approved' && !isRuntimeOwnedApproval\(approval\)/,
+  'the generic approval worker does not consume runtime-owned Chat authority',
+);
+assert.match(
+  hitlApprovalBannerSource,
+  /if \(approval\) await onResolved\?\.\(approval, status\)/,
+  'the approval banner exposes a post-resolution continuation seam to its host',
+);
+assert.match(
+  chatSource,
+  /pendingExactPlanApprovalResumesRef\.current\.set\(outcome\.approvalId, \{[\s\S]*task: trimmed,[\s\S]*threadId: activeThreadId \|\| null,[\s\S]*expiresAt:[\s\S]*originSettled: exactApprovalOriginSettled/,
+  'an exact deferred plan keeps only an ephemeral approval-id resume entry for the current thread',
+);
+const exactApprovalResumeStart = chatSource.indexOf('onResolved={async (approval, status) => {');
+const exactApprovalResumeEnd = chatSource.indexOf('\n        onEditAndResend=', exactApprovalResumeStart);
+assert(
+  exactApprovalResumeStart >= 0 && exactApprovalResumeEnd > exactApprovalResumeStart,
+  'Chat wires the exact plan approval continuation callback',
+);
+const exactApprovalResumeBlock = chatSource.slice(exactApprovalResumeStart, exactApprovalResumeEnd);
+assert.match(
+  exactApprovalResumeBlock,
+  /if \(pending\) pendingExactPlanApprovalResumesRef\.current\.delete\(approval\.id\);/,
+  'the in-memory exact resume token is burned before any continuation dispatch',
+);
+assert.match(
+  exactApprovalResumeBlock,
+  /approvalActionType === 'chat\.run_computer_task'[\s\S]*approvalActionType\.startsWith\('chat\.run_computer_task\.'\)[\s\S]*!approvalContext\.mounted[\s\S]*pending\.threadId !== approvalContext\.threadId[\s\S]*await pending\.originSettled;[\s\S]*const liveContext = exactApprovalResumeContextRef\.current;[\s\S]*!liveContext\.mounted[\s\S]*liveContext\.generation !== approvalContext\.generation[\s\S]*pending\.threadId !== liveContext\.threadId[\s\S]*await executeSharedComputerTask\(pending\.task\);/,
+  'an approved exact plan revalidates its live mount and circle/thread generation after filing settles',
+);
+assert.match(
+  chatSource,
+  /setRunStatus\('idle'\);[\s\S]{0,180}setBotTyping\(false\);[\s\S]{0,420}settleExactApprovalOrigin\(\);/,
+  'the filing invocation releases an approval continuation only after its terminal UI writes',
+);
+
+const failureRecoveryCallNeedle = 'await startTaskFailureRecovery({';
+const failureRecoveryCallIndexes: number[] = [];
+let failureRecoverySearchIndex = 0;
+while (true) {
+  const callIndex = chatSource.indexOf(failureRecoveryCallNeedle, failureRecoverySearchIndex);
+  if (callIndex < 0) break;
+  failureRecoveryCallIndexes.push(callIndex);
+  failureRecoverySearchIndex = callIndex + failureRecoveryCallNeedle.length;
+}
+assert.equal(failureRecoveryCallIndexes.length, 3, 'all three shared computer-task recovery waits are covered');
+for (const callIndex of failureRecoveryCallIndexes) {
+  assert.match(
+    chatSource.slice(Math.max(0, callIndex - 180), callIndex),
+    /releaseComputerTaskTransientUi\(\);/,
+    'terminal run UI and abort ownership release before awaiting failure recovery',
+  );
+}
 
 assert.doesNotMatch(
   computerRuntimeSource,
@@ -414,7 +814,7 @@ assert(
 );
 assert.match(
   computerRuntimeSource,
-  /const isDesktopTraceTaskKind =\s*!isAttachedDesktopFileTask\s*&&/,
+  /const isDesktopTraceTaskKind =\s*(?:!sequenceProgram\s*&&\s*)?!isAttachedDesktopFileTask\s*&&/,
   'attachment task text is excluded from action-trace telemetry',
 );
 assert.match(
@@ -614,7 +1014,7 @@ assert.match(
 );
 assert.match(
   deterministicFileGate,
-  /const requiresInitialAppObservation = requiresFreshInitialAppObservation\(\{[\s\S]*?opensAppSurface: directLocalFilePlan\.mode === 'open_path'/,
+  /const requiresInitialAppObservation = (?:sequenceProgram\s*\?\s*false\s*:\s*)?requiresFreshInitialAppObservation\(\{[\s\S]*?opensAppSurface: directLocalFilePlan\.mode === 'open_path'/,
   'app mutation classification is computed before either deterministic or agent dispatch',
 );
 assert.equal(

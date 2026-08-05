@@ -13,9 +13,81 @@ export type GenericAppNavigatorTaskFamily =
   | 'launch_or_read'
   | 'field_or_form_entry'
   | 'menu_or_shortcut'
+  | 'toggle_or_select'
   | 'file_open_save_export'
   | 'canvas_or_visual_edit'
+  | 'dialog_handling'
   | 'unknown_mutation';
+
+export type GenericAppNavigatorWorkflowGoalKind =
+  | 'launch_and_inspect'
+  | 'open_requested_file'
+  | 'enter_requested_values'
+  | 'invoke_menu_or_shortcut'
+  | 'set_toggle_or_selection'
+  | 'edit_canvas_or_timeline'
+  | 'save_or_export'
+  | 'commit_external_action'
+  | 'handle_dialog'
+  | 'perform_requested_semantic_action'
+  | 'verify_requested_result';
+
+export type GenericAppNavigatorSemanticSurface =
+  | 'existing_app_adapter'
+  | 'app_lifecycle'
+  | 'app_native_api_or_script'
+  | 'documented_file_adapter'
+  | 'embedded_app_dom_or_cdp'
+  | 'os_accessibility'
+  | 'semantic_menu'
+  | 'verified_keyboard_shortcut';
+
+export type GenericAppNavigatorMutationClass =
+  | 'observation_only'
+  | 'app_lifecycle_change'
+  | 'local_file_access'
+  | 'reversible_input'
+  | 'app_or_document_mutation'
+  | 'persistent_file_write'
+  | 'external_side_effect'
+  | 'destructive_or_sensitive';
+
+export type GenericAppNavigatorApprovalClass =
+  | 'none'
+  | 'shared_workflow_review'
+  | 'approval_before_mutation'
+  | 'approval_before_persistent_or_external'
+  | 'user_choice_if_ambiguous';
+
+export interface GenericAppNavigatorWorkflowCheckpoint {
+  id: GenericAppNavigatorWorkflowGoalKind;
+  ordinal: number;
+  goal: string;
+  observeBefore: string[];
+  allowedSemanticSurfaces: GenericAppNavigatorSemanticSurface[];
+  mutationClass: GenericAppNavigatorMutationClass;
+  approvalClass: GenericAppNavigatorApprovalClass;
+  expectedPostcondition: string;
+  buildoutOrStopRule: string;
+}
+
+export interface GenericAppNavigatorSemanticWorkflow {
+  schemaVersion: 1;
+  /** Exact user text. Classification uses a normalized copy, but this is never rewritten or split. */
+  originalRequest: string;
+  maxCheckpoints: number;
+  wasCapped: boolean;
+  checkpoints: GenericAppNavigatorWorkflowCheckpoint[];
+  approvalScope: {
+    mode: 'single_bounded_workflow_review';
+    /** Reversible semantic steps covered by one review, never one prompt per field/control. */
+    sharedReviewCheckpointIds: GenericAppNavigatorWorkflowGoalKind[];
+    /** Persistent, external, destructive, credential, permission, or ambiguous steps keep an exact floor. */
+    exactApprovalCheckpointIds: GenericAppNavigatorWorkflowGoalKind[];
+  };
+  completionRule: string;
+  stopRule: string;
+}
 
 export type GenericAppNavigatorSourceType =
   | 'official_vendor'
@@ -34,9 +106,12 @@ export interface GenericAppNavigatorSourceRef {
 }
 
 export interface GenericAppNavigatorPlan {
+  /** The exact request is retained so decomposition cannot silently drop a clause. */
+  originalRequest: string;
   targetAppName: string;
   taskFamily: GenericAppNavigatorTaskFamily;
   canNavigateWithoutAdapter: boolean;
+  semanticWorkflow: GenericAppNavigatorSemanticWorkflow;
   userEffortPolicy: string[];
   phases: { id: GenericAppNavigatorPhaseId; instruction: string }[];
   observeFirst: string[];
@@ -143,13 +218,32 @@ const GENERIC_CANDIDATE_STOP_WORDS = new Set([
   'desktop',
   'file',
   'files',
+  'file',
+  'files',
   'folder',
   'website',
   'webpage',
   'site',
+  'http',
+  'https',
+  'www',
   'window',
   'program',
   'computer',
+  'dialog',
+  'modal',
+  'popup',
+  'prompt',
+  'settings',
+  'preferences',
+  'it',
+  'this',
+  'that',
+  'there',
+  'in',
+  'inside',
+  'something',
+  'anything',
   'chat',
   'swanbot',
   'openswan',
@@ -177,14 +271,14 @@ function cleanAppNameCandidate(raw: string | undefined): string | null {
     .replace(/\s+(?:app|application|window|program)$/i, '')
     .trim();
   if (!value) return null;
-  value = value.split(/\s+(?:and then|then|and|to|for|with|before|after)\s+/i)[0]?.trim() || value;
   const words = value.split(/\s+/).filter(Boolean);
   if (words.length > 5) return null;
   const first = words[0]?.toLowerCase() || '';
   const normalized = value.toLowerCase();
   if (GENERIC_CANDIDATE_STOP_WORDS.has(first) || GENERIC_CANDIDATE_STOP_WORDS.has(normalized)) return null;
+  if (/^\d+(?:\s+\d+)*$/.test(value)) return null;
   if (/^(?:https?:\/\/|www\.)/i.test(value) || /\.[a-z0-9]{2,5}\b/i.test(value)) return null;
-  if (/\b(?:screenshot|desktop|downloads?|documents?|image|photo|pdf|csv|png|jpe?g|psd|indd)\b/i.test(value)) return null;
+  if (/\b(?:screenshot|desktop|downloads?|documents?|project|workspace|image|photo|pdf|csv|png|jpe?g|psd|indd)\b/i.test(value)) return null;
   return titleCaseName(value);
 }
 
@@ -196,9 +290,11 @@ export function inferGenericAppName(task: string): string | null {
   const text = compactWhitespace(task);
   if (!text) return null;
   const patterns = [
-    /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4})(?:\s+(?:app|application|window|program))?\s+(?:and|then|to|for|with)\b/i,
-    /\b(?:in|inside|using|with)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4})(?:\s+(?:app|application|window|program))\b/i,
-    /\b(?:in|inside|using|with)\s+(?:the\s+)?([A-Z][A-Za-z0-9.+#&_-]*(?:\s+[A-Z0-9][A-Za-z0-9.+#&_-]*){0,4})\b/,
+    /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4}?)(?:\s+(?:app|application|window|program))?\s+(?:and|then|for|with|to(?=\s+(?:add|create|make|build|edit|change|update|set|fill|enter|type|paste|press|run|open|save|export|render|draw|paint|crop|trim|resize|rotate|record|sync|send|submit|publish|delete|remove|inspect|read)))\b/i,
+    /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4})(?:\s+(?:app|application|window|program))?(?=\s*[,;:!?.]|\s*$)/i,
+    /\b(?:in|inside|using|with)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4})(?:\s+(?:app|application|window|program))\b/i,
+    /\b(?:in|inside|using|with)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4})(?=\s*[,;:!?.])/i,
+    /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,3})(?:\s+(?:app|application|window|program))?[.!?]?$/i,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -213,21 +309,53 @@ export function isKnownConfiguredAppName(appName: string | null | undefined): bo
   return KNOWN_CONFIGURED_APP_NAMES.has(compactWhitespace(appName).toLowerCase());
 }
 
+function isReadOnlyGenericAppObservation(task: string): boolean {
+  const text = compactWhitespace(task).toLowerCase();
+  const hasExplicitReadIntent = (
+    /\b(?:inspect|read|summarize|report|describe|list|look at|tell me|what is|what are|what's)\b/.test(text)
+    || (
+      /\b(?:show|display)\b/.test(text)
+      && /\b(?:path|location|size|dimensions?|metadata|properties|information|info|title|name|status|page(?: number)?|duration|count|version)\b/.test(text)
+    )
+  );
+  if (!hasExplicitReadIntent) return false;
+
+  // App launch/focus and read-only file access are allowed here. Any requested
+  // mutation or commit keeps its more specific family even when the request
+  // also asks to report the result.
+  return !/\b(?:create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|pause|resume|seek|skip|record|configure|apply|rename|replace|overwrite|move|convert|sync|synchronize|delete|remove|erase|wipe|reset|save|export|render|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|authenticate|authorize|grant|connect|link|login|log in|sign in)\b/.test(text);
+}
+
 export function classifyGenericAppTaskFamily(task: string): GenericAppNavigatorTaskFamily {
   const text = String(task || '').toLowerCase();
+  if (isReadOnlyGenericAppObservation(text)) {
+    return 'launch_or_read';
+  }
   if (/\b(save(?:\s+as)?|export|render|print|download|upload|open file|rename|replace|overwrite|png|jpe?g|pdf|mp4|wav|csv|xlsx?|docx?)\b/.test(text)) {
     return 'file_open_save_export';
   }
-  if (/\b(canvas|visual|image|photo|video|audio|timeline|track|clip|layer|mask|draw|design|paint|crop|retouch|animate|render|model|drum loop)\b/.test(text)) {
+  if (/\b(canvas|image|photo|video|audio|recording|timeline|track|clip|layer|mask|draw|design|paint|crop|retouch|animate|render|model|drum loop)\b/.test(text)) {
     return 'canvas_or_visual_edit';
   }
   if (/\b(fill|enter|type|paste|set|update|write|put)\b/.test(text) && /\b(field|form|text box|input|name|title|description|prompt|search|project)\b/.test(text)) {
     return 'field_or_form_entry';
   }
+  if (/\b(dialog|modal|pop-?up|confirmation|permission prompt|alert)\b/.test(text) && /\b(handle|accept|allow|deny|dismiss|close|cancel|confirm|respond|choose|select)\b/.test(text)) {
+    return 'dialog_handling';
+  }
+  if (
+    /\b(toggle|enable|disable|turn on|turn off|check|uncheck|dropdown|checkbox|radio|mute|unmute|show|hide|lock|unlock)\b/.test(text)
+    || (/\b(select|choose|pick)\b/.test(text) && !/\bmenu\b/.test(text))
+  ) {
+    return 'toggle_or_select';
+  }
   if (/\b(click|select|choose|menu|toolbar|preferences?|settings?|shortcut|press|tab|button|dropdown|checkbox|radio)\b/.test(text)) {
     return 'menu_or_shortcut';
   }
-  if (/\b(open|launch|focus|switch to|inspect|read|summarize|look at|show)\b/.test(text) && !/\b(create|make|edit|change|delete|save|export|send|submit|publish|run)\b/.test(text)) {
+  if (
+    /\b(open|launch|focus|switch to|inspect|read|summarize|look at|show)\b/.test(text)
+    && !/\b(create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|record|configure|apply|rename|move|convert|sync|synchronize|delete|remove|save|export|upload|send|submit|publish|purchase|buy|pay)\b/.test(text)
+  ) {
     return 'launch_or_read';
   }
   return 'unknown_mutation';
@@ -243,15 +371,257 @@ export function formatGenericAppTaskFamilyForUser(
       return 'field/form entry';
     case 'menu_or_shortcut':
       return 'menu or shortcut control';
+    case 'toggle_or_select':
+      return 'toggle or selection control';
     case 'file_open_save_export':
       return 'file/save/export work';
     case 'canvas_or_visual_edit':
       return 'visual/canvas work';
+    case 'dialog_handling':
+      return 'dialog handling';
     case 'unknown_mutation':
       return 'app change';
     default:
       return compactWhitespace(String(family || '').replace(/[_-]+/g, ' '));
   }
+}
+
+const MAX_GENERIC_APP_WORKFLOW_CHECKPOINTS = 10;
+
+type GenericAppNavigatorWorkflowCheckpointTemplate = Omit<GenericAppNavigatorWorkflowCheckpoint, 'ordinal'>;
+
+function checkpointTemplate(
+  id: GenericAppNavigatorWorkflowGoalKind,
+  goal: string,
+  observeBefore: string[],
+  allowedSemanticSurfaces: GenericAppNavigatorSemanticSurface[],
+  mutationClass: GenericAppNavigatorMutationClass,
+  approvalClass: GenericAppNavigatorApprovalClass,
+  expectedPostcondition: string,
+  buildoutOrStopRule: string,
+): GenericAppNavigatorWorkflowCheckpointTemplate {
+  return {
+    id,
+    goal,
+    observeBefore,
+    allowedSemanticSurfaces,
+    mutationClass,
+    approvalClass,
+    expectedPostcondition,
+    buildoutOrStopRule,
+  };
+}
+
+/**
+ * Converts the intact user request into a small semantic program. The program
+ * names goals and proof, never guessed labels, selectors, menu paths, or
+ * coordinates. Execution still goes through the canonical computer runtime.
+ */
+export function buildGenericAppSemanticWorkflow(task: string): GenericAppNavigatorSemanticWorkflow {
+  const originalRequest = String(task ?? '');
+  const text = compactWhitespace(originalRequest).toLowerCase();
+  const readOnlyObservation = isReadOnlyGenericAppObservation(text);
+  const destructiveOrSensitive = /\b(?:delete|remove|erase|wipe|reset|overwrite|replace existing|purchase|buy|pay|password|passcode|credential|api key|secret|mfa|two-factor|admin|permission|log\s+in(?:to)?|login|sign\s+in(?:to)?|authenticate|authorize|grant access|oauth)\b/.test(text);
+  const requestsFileOpen = (
+    /\b(?:open|import|load|place|attach)\b(?:(?!\b(?:and|then|to|before|after)\b)[\s\S]){0,80}\b(?:file|document|project|workspace|image|photo|video|audio|drawing|model|spreadsheet|presentation|pdf|csv|png|jpe?g|psd|mp4|wav|xlsx?|docx?)\b/.test(text)
+    || /\b(?:open|import|load|place|attach)\b(?:(?!\b(?:and|then|to|before|after)\b)[\s\S]){0,100}\.[a-z0-9]{2,8}\b/.test(text)
+  );
+  const requestsFieldEntry = (
+    /\b(?:fill|enter|type|paste)\b/.test(text)
+    || (/\b(?:set|update|write|put|replace|search|find)\b/.test(text)
+      && /\b(?:field|form|text|input|name|title|description|query|prompt|value|cell|note|message|caption)\b/.test(text))
+  );
+  const requestsMenuOrShortcut = /\b(?:menu|shortcut|hotkey|command palette|toolbar|preferences?|settings?|press|keystroke|tab|panel|button)\b/.test(text);
+  const requestsToggleOrSelection = (
+    /\b(?:toggle|enable|disable|turn on|turn off|check|uncheck|checkbox|radio|mute|unmute|hide|lock|unlock)\b/.test(text)
+    || (!readOnlyObservation && /\bshow\b/.test(text))
+    || (/\b(?:select|choose|pick)\b/.test(text) && !/\bmenu\b/.test(text))
+  );
+  const requestsCanvasOrTimelineEdit = (
+    /\b(?:canvas|timeline|track|clip|layer|mask|selection|frame|slide|page|image|photo|video|audio|recording|drawing|model|geometry|scene|animation|drum loop|spreadsheet|cell range)\b/.test(text)
+    && /\b(?:create|make|add|insert|edit|change|update|start|stop|record|draw|design|paint|crop|retouch|trim|cut|split|merge|move|resize|rotate|adjust|mute|unmute|animate|model|format|apply|generate|render|delete|remove|erase|wipe)\b/.test(text)
+  );
+  const requestsSaveOrExport = /\b(?:save(?:\s+as)?|export|render|print|download|encode|overwrite|write to disk|create (?:a )?(?:pdf|png|jpe?g|mp4|wav|csv|xlsx?|docx?))\b/.test(text);
+  const requestsExternalCommit = /\b(?:upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|log\s+in(?:to)?|login|sign\s+in(?:to)?|authenticate|authorize|grant|connect|link|oauth)\b/.test(text);
+  const requestsDialogHandling = (
+    /\b(?:dialog|modal|pop-?up|confirmation|permission prompt|alert)\b/.test(text)
+    && /\b(?:handle|accept|allow|deny|dismiss|close|cancel|confirm|respond|choose|select)\b/.test(text)
+  );
+
+  const requested: GenericAppNavigatorWorkflowCheckpointTemplate[] = [];
+  const add = (checkpoint: GenericAppNavigatorWorkflowCheckpointTemplate): void => {
+    if (!requested.some((existing) => existing.id === checkpoint.id)) requested.push(checkpoint);
+  };
+
+  add(checkpointTemplate(
+    'launch_and_inspect',
+    'Launch or focus the requested app only if needed, then inspect its current app, window, document, and blocking-dialog state.',
+    ['running-app inventory', 'fresh target process and window identity', 'visible document/project identity when one exists', 'blocking modal or permission state'],
+    ['existing_app_adapter', 'app_lifecycle', 'app_native_api_or_script', 'os_accessibility'],
+    'app_lifecycle_change',
+    'none',
+    'The intended app is frontmost and its current actionable state is freshly observed; launch/focus/wait does not create an approval prompt.',
+    'Stop for install, license, login, OS permission, or ambiguous app identity; do not substitute or foreground a browser for a desktop-app request.',
+  ));
+
+  if (requestsFileOpen) {
+    add(checkpointTemplate(
+      'open_requested_file',
+      'Resolve and open the requested source through a file-aware or app-native semantic surface.',
+      ['exact source identity and type', 'read permission or file grant', 'current active document/project', 'duplicate or already-open state'],
+      ['existing_app_adapter', 'documented_file_adapter', 'app_native_api_or_script', 'semantic_menu', 'os_accessibility'],
+      'local_file_access',
+      'none',
+      'The app reports the intended source as the active document/project without changing the source contents.',
+      'Stop for a missing or ambiguous source or missing file permission (permission grants keep their own exact floor); build a narrow open/import adapter if semantic file targeting cannot be proven.',
+    ));
+  }
+
+  if (requestsFieldEntry) {
+    add(checkpointTemplate(
+      'enter_requested_values',
+      'Enter all requested non-secret values into uniquely observed editable controls without committing an external action.',
+      ['fresh focused app/window identity', 'unique editable-control identity from native, embedded semantic, or accessibility state', 'current control value/state', 'absence of a blocking dialog'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'embedded_app_dom_or_cdp', 'os_accessibility'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'reversible_input',
+      destructiveOrSensitive ? 'approval_before_persistent_or_external' : 'shared_workflow_review',
+      'Each requested value is present in its intended editable control and no submit, send, save, or publish action has fired.',
+      'After two fresh observations without one unique editable target, stop and build the missing semantic field adapter; never guess a label or type into a coordinate.',
+    ));
+  }
+
+  if (requestsMenuOrShortcut) {
+    add(checkpointTemplate(
+      'invoke_menu_or_shortcut',
+      'Invoke the requested command through an observed semantic command or a documented shortcut bound to the verified target context.',
+      ['fresh focused app/window identity', 'observed menu or command inventory', 'documented shortcut binding when a shortcut is proposed', 'command enabled/actionable state'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'semantic_menu', 'verified_keyboard_shortcut', 'os_accessibility'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'app_or_document_mutation',
+      destructiveOrSensitive ? 'approval_before_persistent_or_external' : 'shared_workflow_review',
+      'The app exposes the expected semantic state change or command receipt in the same verified window/document.',
+      'If the command is not observed or documented, research or build the command adapter and stop; do not invent a menu label, path, or shortcut.',
+    ));
+  }
+
+  if (requestsToggleOrSelection) {
+    add(checkpointTemplate(
+      'set_toggle_or_selection',
+      'Set the requested toggle, option, or selection through one uniquely identified semantic control.',
+      ['fresh focused app/window identity', 'unique control identity and control kind', 'current selected/checked/value state', 'enabled/actionable state'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'embedded_app_dom_or_cdp', 'os_accessibility', 'semantic_menu'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'reversible_input',
+      destructiveOrSensitive ? 'approval_before_persistent_or_external' : 'shared_workflow_review',
+      'The same semantic control reports the requested selected, checked, enabled, disabled, or chosen state.',
+      'If more than one control matches or after-state cannot be read, refresh once and then stop for buildout or the smallest user choice; never choose by screen position.',
+    ));
+  }
+
+  if (requestsCanvasOrTimelineEdit) {
+    add(checkpointTemplate(
+      'edit_canvas_or_timeline',
+      'Apply the requested canvas, timeline, layer, model, drawing, media, or structured-document edit through an app-native semantic operation.',
+      ['fresh active document/project identity', 'app-native object, layer, selection, track, scene, or document inventory appropriate to the task', 'target object identity and current state', 'undo/rollback and proof capability'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'documented_file_adapter', 'os_accessibility'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'app_or_document_mutation',
+      destructiveOrSensitive ? 'approval_before_persistent_or_external' : 'approval_before_mutation',
+      'A refreshed app-native inventory identifies the changed entities and matches the requested edit without unexpected changes.',
+      'If no app-native or uniquely semantic operation can express and verify the edit, stop and build a bounded app capability; visual evidence alone does not authorize guessed coordinates.',
+    ));
+  }
+
+  if (requestsSaveOrExport) {
+    add(checkpointTemplate(
+      'save_or_export',
+      'Save or export only the requested artifact, format, and destination through a deterministic app or file surface.',
+      ['fresh active document/project identity', 'requested output kind and destination', 'existing-target conflict or overwrite state', 'current exact approval and app readiness'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'documented_file_adapter', 'semantic_menu', 'os_accessibility'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'persistent_file_write',
+      'approval_before_persistent_or_external',
+      'The requested output exists with fresh file metadata or an app-native export receipt and the active source remains correctly identified.',
+      'Stop before overwrite, format substitution, an ambiguous destination, or an unverified save dialog; build an app-specific save/export adapter when deterministic proof is unavailable.',
+    ));
+  }
+
+  if (requestsExternalCommit) {
+    add(checkpointTemplate(
+      'commit_external_action',
+      'Perform the requested external, account, submission, sharing, transaction, or destructive commit exactly once.',
+      ['fresh authenticated app/account context', 'exact destination, recipient, target, or transaction scope', 'final payload/selection summary', 'current exact approval and duplicate-action evidence'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'embedded_app_dom_or_cdp', 'os_accessibility', 'semantic_menu'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'external_side_effect',
+      'approval_before_persistent_or_external',
+      'An independent app-native or semantic receipt proves the exact external action and target completed once.',
+      'Stop for credentials, MFA, CAPTCHA, permission, payment ambiguity, target drift, or missing independent proof; after dispatch uncertainty, verify only and never replay automatically.',
+    ));
+  }
+
+  if (requestsDialogHandling) {
+    add(checkpointTemplate(
+      'handle_dialog',
+      'Read and classify the observed dialog, then choose only an option that is explicit in the request and safe in the current workflow.',
+      ['fresh dialog identity within the target app/window', 'complete visible prompt meaning', 'available semantic actions and default action', 'side effects of each relevant choice'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'embedded_app_dom_or_cdp', 'os_accessibility'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'app_or_document_mutation',
+      destructiveOrSensitive ? 'approval_before_persistent_or_external' : 'user_choice_if_ambiguous',
+      'The dialog is resolved through a semantic action and the underlying app returns to the expected verified state.',
+      'Stop for destructive, credential, permission, license, ambiguous, or unrecognized prompts; never accept a default merely to continue.',
+    ));
+  }
+
+  const hasRequestedAction = requested.some((checkpoint) => checkpoint.id !== 'launch_and_inspect');
+  const asksForMutation = /\b(?:create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|record|configure|apply|rename|move|convert|sync|synchronize|delete|remove|erase|wipe|reset|overwrite)\b/.test(text);
+  if (!hasRequestedAction && asksForMutation) {
+    add(checkpointTemplate(
+      'perform_requested_semantic_action',
+      'Perform the remaining requested app action through one observed or officially documented semantic capability.',
+      ['fresh focused app/window/document identity', 'one unique semantic target or app-native operation', 'current target state', 'expected reversible or persistent effect'],
+      ['existing_app_adapter', 'app_native_api_or_script', 'embedded_app_dom_or_cdp', 'os_accessibility', 'semantic_menu', 'verified_keyboard_shortcut'],
+      destructiveOrSensitive ? 'destructive_or_sensitive' : 'app_or_document_mutation',
+      destructiveOrSensitive ? 'approval_before_persistent_or_external' : 'approval_before_mutation',
+      'Fresh semantic or app-native state proves the remaining clause of the original request was completed.',
+      'If the action cannot be represented by one unique semantic target or documented operation, stop and build a narrow capability from the intact request instead of improvising UI details.',
+    ));
+  }
+
+  const verification = checkpointTemplate(
+    'verify_requested_result',
+    'Verify every clause of the original request against fresh app-native, semantic, and file evidence before reporting completion.',
+    ['fresh app/window/document identity after the last action', 'after-state for every prior checkpoint', 'file metadata or external receipt when applicable', 'unexpected dialog, error, or target drift'],
+    ['existing_app_adapter', 'app_native_api_or_script', 'documented_file_adapter', 'embedded_app_dom_or_cdp', 'os_accessibility'],
+    'observation_only',
+    'none',
+    'Every requested clause has independent after-state evidence; incomplete or uncertain mutations remain non-complete.',
+    'When proof is missing, stop with the exact missing evidence and allow only fresh read-only verification; never replay an uncertain mutation.',
+  );
+
+  const roomBeforeVerification = MAX_GENERIC_APP_WORKFLOW_CHECKPOINTS - 1;
+  const wasCapped = requested.length > roomBeforeVerification;
+  const boundedRequested = requested.slice(0, roomBeforeVerification);
+  const checkpoints = [...boundedRequested, verification].map((checkpoint, index) => ({
+    ...checkpoint,
+    ordinal: index + 1,
+  }));
+  const sharedReviewCheckpointIds = checkpoints
+    .filter((checkpoint) => checkpoint.approvalClass === 'shared_workflow_review')
+    .map((checkpoint) => checkpoint.id);
+  const exactApprovalCheckpointIds = checkpoints
+    .filter((checkpoint) => checkpoint.approvalClass !== 'none' && checkpoint.approvalClass !== 'shared_workflow_review')
+    .map((checkpoint) => checkpoint.id);
+
+  return {
+    schemaVersion: 1,
+    originalRequest,
+    maxCheckpoints: MAX_GENERIC_APP_WORKFLOW_CHECKPOINTS,
+    wasCapped,
+    checkpoints,
+    approvalScope: {
+      mode: 'single_bounded_workflow_review',
+      sharedReviewCheckpointIds,
+      exactApprovalCheckpointIds,
+    },
+    completionRule: 'Complete only when every clause in originalRequest has fresh target-bound after-state evidence; a capped workflow must stop for a newly decomposed continuation before any omitted action.',
+    stopRule: 'Stop on target ambiguity, missing permission or approval, unavailable capability, unclassified dialog, target drift, or uncertain post-dispatch outcome; never guess UI labels or coordinates and never replay an uncertain mutation.',
+  };
 }
 
 function buildoutTriggersFor(task: string, family: GenericAppNavigatorTaskFamily): string[] {
@@ -284,7 +654,7 @@ export function shouldUseGenericAppNavigator(task: string): boolean {
   // NOT be routed through the unfamiliar-app / buildout path — that's what
   // made "create a note" stall on "unknown app -> needs buildout".
   if (!inferred || isKnownConfiguredAppName(inferred) || isScriptableMacApp(inferred)) return false;
-  return /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over|click|type|paste|press|fill|set|create|make|build|edit|update|export|save|run)\b/i.test(text);
+  return /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over|inspect|read|summarize|report|look at|show|find|search|list|click|select|choose|type|paste|press|fill|enter|write|put|set|toggle|enable|disable|mute|unmute|create|make|build|add|insert|edit|change|update|configure|apply|rename|move|resize|rotate|crop|trim|split|merge|retouch|draw|design|paint|animate|record|render|export|save|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|delete|remove|erase|wipe|reset|convert|sync|synchronize|authenticate|authorize|grant|connect|link|login|log\s+in(?:to)?|sign\s+in(?:to)?|dismiss|confirm|run|start|stop)\b/i.test(text);
 }
 
 export function shouldUseProfessionalAppAutonomy(task: string): boolean {
@@ -296,7 +666,7 @@ export function shouldUseProfessionalAppAutonomy(task: string): boolean {
   if (shouldUseGenericAppNavigator(text)) return true;
   const inferred = inferGenericAppName(text);
   const asksToOpenOrDrive = /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\b/i.test(text);
-  const asksForAppAction = /\b(?:add|create|make|build|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|export|save|render|send|submit|publish|delete|remove|configure|enable|disable)\b/i.test(text);
+  const asksForAppAction = /\b(?:inspect|read|summarize|report|look at|show|find|search|list|add|create|make|build|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|record|configure|apply|rename|move|resize|rotate|crop|trim|split|merge|retouch|draw|design|paint|animate|toggle|enable|disable|mute|unmute|export|save|render|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|delete|remove|erase|wipe|reset|convert|sync|synchronize|authenticate|authorize|grant|connect|link|login|log\s+in(?:to)?|sign\s+in(?:to)?|dismiss|confirm)\b/i.test(text);
   if (inferred && asksToOpenOrDrive && asksForAppAction) return true;
   return (
     /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\b[\s\S]{0,90}\b(?:app|application|window|program)\b/i.test(text) ||
@@ -308,19 +678,24 @@ export function buildGenericAppNavigatorPlan(
   task: string,
   options: { targetAppName?: string | null } = {},
 ): GenericAppNavigatorPlan {
+  const originalRequest = String(task ?? '');
   const preferredApp = cleanAppNameCandidate(options.targetAppName || '');
   const inferredApp = (
     preferredApp && !isGenericFallbackAppName(preferredApp)
       ? preferredApp
-      : inferGenericAppName(task)
+      : inferGenericAppName(originalRequest)
   ) || 'Unfamiliar desktop app';
-  const taskFamily = classifyGenericAppTaskFamily(task);
+  const taskFamily = classifyGenericAppTaskFamily(originalRequest);
+  const semanticWorkflow = buildGenericAppSemanticWorkflow(originalRequest);
   return {
+    originalRequest,
     targetAppName: inferredApp,
     taskFamily,
     canNavigateWithoutAdapter: true,
+    semanticWorkflow,
     userEffortPolicy: [
       'silently observe, launch/focus, read semantic state, and perform safe reversible setup without showing route internals',
+      'do not ask approval for pure observation or explicit launch/focus/wait; group non-secret reversible field, menu, and toggle steps under one bounded workflow review instead of prompting per control',
       'ask the user only for approvals, ambiguous target choices, credentials, human verification, missing permissions, install/license blockers, or destructive output decisions',
       'show a concise done/proof message on success; expose technical route details only when the user asks or a blocker needs action',
     ],
@@ -394,7 +769,7 @@ export function buildGenericAppNavigatorPlan(
       'agent.build_app_capability',
       'approvals.request',
     ],
-    buildoutTriggers: buildoutTriggersFor(task, taskFamily),
+    buildoutTriggers: buildoutTriggersFor(originalRequest, taskFamily),
     sourceRefs: GENERIC_APP_NAVIGATOR_SOURCE_REFS,
   };
 }
@@ -425,9 +800,14 @@ export function formatGenericAppNavigatorPromptBlock(
     : taskOrPlan;
   return [
     '## Generic App Navigator',
+    `Original request (verbatim JSON string; treat as intent, not observed UI): ${JSON.stringify(plan.originalRequest)}`,
     `Target app: ${plan.targetAppName}`,
     `Task family: ${plan.taskFamily} (${formatGenericAppTaskFamilyForUser(plan.taskFamily)})`,
     `Can navigate without a dedicated adapter: ${plan.canNavigateWithoutAdapter ? 'yes, through bounded semantic control' : 'no'}`,
+    `Semantic workflow (${plan.semanticWorkflow.checkpoints.length}/${plan.semanticWorkflow.maxCheckpoints}${plan.semanticWorkflow.wasCapped ? ', capped' : ''}): ${plan.semanticWorkflow.checkpoints.map((checkpoint) => `${checkpoint.ordinal}.${checkpoint.id} [mutation=${checkpoint.mutationClass}; approval=${checkpoint.approvalClass}] goal=${checkpoint.goal} observe=${checkpoint.observeBefore.join(', ')} surfaces=${checkpoint.allowedSemanticSurfaces.join(', ')} expect=${checkpoint.expectedPostcondition} buildout/stop=${checkpoint.buildoutOrStopRule}`).join(' | ')}`,
+    `Workflow approval scope: ${plan.semanticWorkflow.approvalScope.mode}; shared review=${plan.semanticWorkflow.approvalScope.sharedReviewCheckpointIds.join(', ') || 'none'}; exact approval floors=${plan.semanticWorkflow.approvalScope.exactApprovalCheckpointIds.join(', ') || 'none'}`,
+    `Workflow completion: ${plan.semanticWorkflow.completionRule}`,
+    `Workflow stop: ${plan.semanticWorkflow.stopRule}`,
     `Phases: ${plan.phases.map((phase) => `${phase.id}=${phase.instruction}`).join(' | ')}`,
     `User effort policy: ${plan.userEffortPolicy.join(' | ')}`,
     `Observe first: ${plan.observeFirst.join(' | ')}`,

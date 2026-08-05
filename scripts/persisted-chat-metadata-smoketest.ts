@@ -10,11 +10,14 @@
 import {
   BOT_META_MARKER,
   bestOfNMetadata,
+  buildLegacyPersistedChatFallback,
+  canReleasePendingAfterPersistedChatRoundTrip,
   formatPersistedChatBotMessage,
   readPersistedBestOfNRace,
   readPersistedChatBotMetadata,
   stripPersistedChatBotPrefix,
 } from '../src/lib/persistedChatMetadata';
+import { buildChatComputerHandoffContext } from '../src/lib/chatComputerHandoffContext';
 
 let failures = 0;
 
@@ -65,7 +68,7 @@ const message = formatPersistedChatBotMessage(
         reason: 'Read the user browser tab list from the local desktop bridge.',
         priority: 'high',
       }],
-    } as any,
+    },
     toolEvents: Array.from({ length: 20 }, (_, index) => ({
       tool: 'desktop.list_browser_tabs',
       status: index % 2 === 0 ? 'passed' : 'planned',
@@ -119,6 +122,216 @@ if (message.includes(BOT_META_MARKER)) {
   assert((metadata?.browserPlans?.[0]?.actions?.length || 0) <= 10, 'browser plan actions are compacted');
   assert((metadata?.recoveryOptions?.[0]?.detail?.length || 0) <= 360, 'recovery option details are compacted');
 }
+
+// Legacy production schemas still enforcing messages.content <= 1000 must
+// never slice through the metadata JSON. Preserve only the bounded routing /
+// terminal-status / lineage envelope and trim the visible body around it.
+const legacyComputerMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  `Opened Photoshop and created Untitled-1 at 600 x 600px. ${'Verified by app-native status. '.repeat(80)}`,
+  {
+    localMessageId: 'local-message-legacy-computer-1',
+    runId: 'run-legacy-computer-1',
+    requestId: 'request-legacy-computer-1',
+    requestAuthorId: 'member-legacy-owner-1',
+    source: {
+      actor: 'OpenSwan',
+      surface: 'main_chat_computer_task',
+      effectiveModel: 'computer-app-adapter',
+    },
+    computerTaskStatus: 'completed',
+    outcomeSignal: { verdict: 'completed' },
+    computerHandoff: {
+      surface: 'desktop',
+      runId: 'run-legacy-computer-1',
+      outcomeStatus: 'completed',
+      taskLabel: 'SECRET_RAW_TASK_MUST_NOT_ENTER_LEGACY_ENVELOPE',
+      warningCount: 1,
+      blockerCount: 0,
+      warnings: ['SECRET_OBSERVATION_MUST_NOT_ENTER_LEGACY_ENVELOPE'],
+      blockers: [],
+      designAppTask: {
+        appId: 'adobe_photoshop',
+        appName: 'Adobe Photoshop',
+        taskKind: 'raster_image_edit',
+        documentSignals: ['/Users/example/private/source.psd'],
+        operations: ['inspect_image_document'],
+        requiredInventory: [],
+        approvalGates: [],
+        verificationSignals: [],
+        recommendedTools: ['desktop.photoshop_document_status'],
+      },
+    } as any,
+  },
+);
+assert(legacyComputerMessage.length > 1000, 'legacy regression starts with a row the old DB rejects');
+const legacyComputerFallback = buildLegacyPersistedChatFallback(legacyComputerMessage, 1000);
+assert(legacyComputerFallback.content.length <= 1000, 'legacy fallback fits the old 1000-char constraint');
+assert(legacyComputerFallback.mode === 'metadata', 'legacy computer completion keeps a metadata envelope');
+assert(legacyComputerFallback.metadataRoundTrips, 'legacy metadata envelope is validated before persistence');
+assert(legacyComputerFallback.safeToPersist, 'validated legacy fallback is safe to submit');
+const legacyComputerReloaded = readPersistedChatBotMetadata(legacyComputerFallback.content);
+assert(!!legacyComputerReloaded, 'legacy fallback reload parses metadata JSON');
+assert(legacyComputerReloaded?.source?.surface === 'main_chat_computer_task', 'legacy fallback preserves exact computer-task source surface');
+assert(legacyComputerReloaded?.computerTaskStatus === 'completed', 'legacy fallback preserves successful computer status');
+assert(legacyComputerReloaded?.runId === 'run-legacy-computer-1', 'legacy fallback preserves run lineage');
+assert(legacyComputerReloaded?.requestId === 'request-legacy-computer-1', 'legacy fallback preserves request lineage');
+assert(legacyComputerReloaded?.requestAuthorId === 'member-legacy-owner-1', 'legacy fallback preserves stable requester lineage');
+assert(legacyComputerReloaded?.localMessageId === 'local-message-legacy-computer-1', 'legacy fallback preserves local message lineage');
+assert(legacyComputerReloaded?.computerHandoff?.runId === 'run-legacy-computer-1', 'legacy fallback keeps available handoff run lineage');
+assert(legacyComputerReloaded?.computerHandoff?.outcomeStatus === 'completed', 'legacy fallback keeps available handoff terminal status');
+assert(!legacyComputerFallback.content.includes('SECRET_RAW_TASK'), 'legacy fallback omits raw task text');
+assert(!legacyComputerFallback.content.includes('SECRET_OBSERVATION'), 'legacy fallback omits observation text');
+assert(!legacyComputerFallback.content.includes('/Users/example/private'), 'legacy fallback omits local paths');
+
+// A canonical Photoshop handoff is much larger than the synthetic envelope
+// above. The normal 9,000-char formatter must retain a minimal structured tier
+// first; otherwise the legacy retry receives marker-free text and cannot
+// recover the run/source/completion lineage on its own.
+const canonicalPhotoshopHandoff = buildChatComputerHandoffContext({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  taskKind: 'app_task',
+  taskLabel: 'Photoshop new 600x600 document exact program',
+  runId: 'canonical-photoshop-run',
+  outcomeStatus: 'completed',
+  preflightStatus: 'ready',
+  groundingStatus: 'completed',
+  groundingSummary: 'Final Photoshop document status verified 600 x 600.',
+  approvalSummary: null,
+  blockers: [],
+}).metadata;
+const canonicalPhotoshopMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  'Opened Photoshop and verified the requested document. '.repeat(120),
+  {
+    localMessageId: 'canonical-photoshop-completion',
+    runId: 'canonical-photoshop-run',
+    source: { actor: 'OpenSwan', surface: 'main_chat_computer_task' },
+    computerTaskStatus: 'completed',
+    computerHandoff: canonicalPhotoshopHandoff,
+  },
+);
+assert(canonicalPhotoshopMessage.includes(BOT_META_MARKER), 'oversized canonical handoff retains a minimal metadata tier before DB retry');
+const canonicalPhotoshopFallback = buildLegacyPersistedChatFallback(canonicalPhotoshopMessage, 1000);
+const canonicalPhotoshopReloaded = readPersistedChatBotMetadata(canonicalPhotoshopFallback.content);
+assert(canonicalPhotoshopFallback.metadataRoundTrips, 'canonical Photoshop completion round-trips through the legacy cap');
+assert(canonicalPhotoshopReloaded?.source?.surface === 'main_chat_computer_task', 'canonical legacy reload keeps the Chat computer-task surface');
+assert(canonicalPhotoshopReloaded?.computerTaskStatus === 'completed', 'canonical legacy reload remains a completed computer task');
+assert(canonicalPhotoshopReloaded?.runId === 'canonical-photoshop-run', 'canonical legacy reload keeps run lineage');
+assert(canonicalPhotoshopReloaded?.computerHandoff?.runId === 'canonical-photoshop-run', 'canonical legacy handoff keeps the same run lineage');
+assert(!canonicalPhotoshopFallback.content.includes('Photoshop new 600x600 document exact program'), 'canonical legacy envelope omits the raw task label');
+
+const manualVerificationHandoff = buildChatComputerHandoffContext({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  entrypoint: 'agent_runtime',
+  adapterId: 'app_adapter',
+  taskKind: 'app_task',
+  taskLabel: 'Photoshop new 600x600 document exact program',
+  outcomeStatus: 'partial',
+  replayPolicy: 'manual_verify_only',
+  mutationDispatched: true,
+  verificationOnlyTools: ['desktop.photoshop_document_status'],
+  blockers: ['Create result could not be verified after dispatch.'],
+}).metadata;
+const manualVerificationMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  `The Photoshop create request was sent, but its result is uncertain. ${'Do not replay automatically. '.repeat(90)}`,
+  {
+    localMessageId: 'manual-verification-photoshop',
+    source: { actor: 'OpenSwan', surface: 'main_chat_computer_task' },
+    computerTaskStatus: 'partial',
+    computerHandoff: manualVerificationHandoff,
+  },
+);
+const manualVerificationFallback = buildLegacyPersistedChatFallback(manualVerificationMessage, 1000);
+const manualVerificationReloaded = readPersistedChatBotMetadata(manualVerificationFallback.content);
+assert(manualVerificationFallback.metadataRoundTrips, 'manual-verification-only handoff survives the legacy content cap');
+assert(manualVerificationReloaded?.computerHandoff?.replayPolicy === 'manual_verify_only', 'no-replay policy persists across refresh');
+assert(manualVerificationReloaded?.computerHandoff?.mutationDispatched === true, 'mutation-dispatched proof persists across refresh');
+assert(
+  JSON.stringify(manualVerificationReloaded?.computerHandoff?.verificationOnlyTools) === JSON.stringify(['desktop.photoshop_document_status']),
+  'only the read-only Photoshop status tool persists as a recovery surface',
+);
+
+const legacyCompactCompletion = formatPersistedChatBotMessage(
+  'OpenSwan',
+  `Opened Photoshop and created Untitled-1 at 600 x 600px. ${'Completion detail. '.repeat(90)}`,
+  {
+    localMessageId: 'local-message-compact-completion',
+    source: { actor: 'OpenSwan', surface: 'main_chat_computer_task' },
+    computerTaskStatus: 'completed',
+  },
+);
+const legacyCompactFallback = buildLegacyPersistedChatFallback(legacyCompactCompletion, 1000);
+const legacyCompactReloaded = readPersistedChatBotMetadata(legacyCompactFallback.content);
+assert(legacyCompactFallback.mode === 'metadata', 'compact completion without a handoff still keeps metadata');
+assert(legacyCompactReloaded?.source?.surface === 'main_chat_computer_task', 'compact completion reload keeps source surface');
+assert(legacyCompactReloaded?.computerTaskStatus === 'completed', 'compact completion reload remains distinguishable as successful');
+
+const invalidMetadataFallback = buildLegacyPersistedChatFallback(
+  `🦢 **OpenSwan:** Visible safe response${BOT_META_MARKER}{"source":{"surface":"main_chat_computer_task"`,
+  1000,
+);
+assert(invalidMetadataFallback.mode === 'text_only', 'invalid source metadata degrades explicitly to text-only');
+assert(!invalidMetadataFallback.content.includes(BOT_META_MARKER), 'text-only fallback removes the invalid metadata marker and suffix');
+assert(invalidMetadataFallback.content.includes('Visible safe response'), 'text-only fallback preserves the visible response');
+assert(readPersistedChatBotMetadata(invalidMetadataFallback.content) === null, 'text-only fallback cannot masquerade as structured completion');
+assert(canReleasePendingAfterPersistedChatRoundTrip({
+  submittedContent: legacyComputerFallback.content,
+  persistedContent: legacyComputerFallback.content,
+  isBot: true,
+}), 'parseable DB round-trip allows pending-record release');
+const mutateStructuredMetadata = (
+  content: string,
+  mutate: (metadata: Record<string, any>) => void,
+): string => {
+  const markerIndex = content.indexOf(BOT_META_MARKER);
+  const metadata = JSON.parse(content.slice(markerIndex + BOT_META_MARKER.length)) as Record<string, any>;
+  mutate(metadata);
+  return `${content.slice(0, markerIndex)}${BOT_META_MARKER}${JSON.stringify(metadata)}`;
+};
+const criticalMetadataMutations = [
+  mutateStructuredMetadata(legacyComputerFallback.content, (metadata) => { metadata.localMessageId = 'wrong-local-message'; }),
+  mutateStructuredMetadata(legacyComputerFallback.content, (metadata) => { metadata.runId = 'wrong-run'; }),
+  mutateStructuredMetadata(legacyComputerFallback.content, (metadata) => { metadata.requestId = 'wrong-request'; }),
+  mutateStructuredMetadata(legacyComputerFallback.content, (metadata) => { metadata.requestAuthorId = 'wrong-member'; }),
+  mutateStructuredMetadata(legacyComputerFallback.content, (metadata) => { metadata.computerTaskStatus = 'blocked'; }),
+  mutateStructuredMetadata(legacyComputerFallback.content, (metadata) => { metadata.source.surface = 'office_terminal'; }),
+];
+assert(
+  criticalMetadataMutations.every((content) => readPersistedChatBotMetadata(content) !== null),
+  'critical-field mutations remain parseable metadata for the acknowledgement regression',
+);
+assert(
+  criticalMetadataMutations.every((content) => !canReleasePendingAfterPersistedChatRoundTrip({
+    submittedContent: legacyComputerFallback.content,
+    persistedContent: content,
+    isBot: true,
+  })),
+  'parseable DB metadata with mutated critical lineage/status fields keeps pending state',
+);
+assert(!canReleasePendingAfterPersistedChatRoundTrip({
+  submittedContent: legacyComputerMessage,
+  persistedContent: `${legacyComputerFallback.content.slice(0, 990)}…`,
+  isBot: true,
+}), 'invalid truncated DB metadata keeps the recoverable pending record');
+assert(!canReleasePendingAfterPersistedChatRoundTrip({
+  submittedContent: legacyComputerMessage,
+  persistedContent: stripPersistedChatBotPrefix(legacyComputerMessage),
+  isBot: true,
+}), 'metadata submission cannot silently downgrade to text-only before pending release');
+assert(canReleasePendingAfterPersistedChatRoundTrip({
+  submittedContent: invalidMetadataFallback.content,
+  persistedContent: invalidMetadataFallback.content,
+  isBot: true,
+}), 'explicit marker-free text-only DB round-trip may release pending state');
+assert(!canReleasePendingAfterPersistedChatRoundTrip({
+  submittedContent: invalidMetadataFallback.content,
+  persistedContent: `${invalidMetadataFallback.content} changed by storage`,
+  isBot: true,
+}), 'mutated marker-free DB text keeps the recoverable pending record');
 
 const recoveryOnlyMessage = formatPersistedChatBotMessage(
   'OpenSwan',

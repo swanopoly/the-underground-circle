@@ -14,6 +14,7 @@ import {
   TASK_CAPABILITY_PROFILES,
   inferTaskCapabilityProfile,
   getTaskCapabilityProfile,
+  resolveTaskExecutionSurfaceGuard,
 } from './taskCapabilityProfiles';
 import { buildImpactDomainGuidance } from './impactDomains';
 import { buildTaskOwnershipClaim } from './circleIntegrations';
@@ -101,6 +102,8 @@ export interface AgentRunRequest {
   toolApprovalGate?: SwanBotContext['toolApprovalGate'];
   userConstraints?: SwanBotContext['userConstraints'];
   alwaysConfirmFloor?: SwanBotContext['alwaysConfirmFloor'];
+  /** Require the local typed tool catalog and forbid legacy text fallback. */
+  forceClientToolLoop?: SwanBotContext['forceClientToolLoop'];
   /**
    * Redacted, bounded plan/guardrail/proof handoff built by the Chat
    * dispatcher. It is injected into the actual model prompt and projected
@@ -750,6 +753,8 @@ export async function executeAgentRun(
       toolApprovalGate: request.toolApprovalGate,
       userConstraints: request.userConstraints,
       alwaysConfirmFloor: request.alwaysConfirmFloor,
+      forceClientToolLoop: request.forceClientToolLoop,
+      executionSurfaceGuard: resolveTaskExecutionSurfaceGuard(inferredProfileKey),
     };
 
     // Mark run as running

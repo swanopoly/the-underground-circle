@@ -26,8 +26,14 @@ import type {
   NativeOpenPathDispatchResult,
   NativeSemanticActionApprovalProposal,
   NativeSemanticActionDeps,
+  NativeSemanticValueApprovalProposal,
+  NativeSemanticValueDeps,
 } from './computerAppAdapter';
-import type { NativeSemanticActionExecution } from './desktopBridge';
+import type {
+  DesktopNativeUiTargetGuard,
+  NativeSemanticActionExecution,
+  NativeSemanticValueExecution,
+} from './desktopBridge';
 import { getPlugin } from './pluginRegistry';
 import {
   buildOpenSwanApprovalAuditPayload,
@@ -910,7 +916,16 @@ export type OpenSwanToolExecutionArgs = {
     expectedRole: string;
     expectedLabel: string;
   };
-  'desktop.set_element_value': { appName: string; pid: number; path: string; text: string };
+  'desktop.set_element_value': {
+    action?: 'set_value';
+    appName: string;
+    pid: number;
+    path: string;
+    expectedRole: string;
+    expectedLabel: string;
+    expectedCurrentValue: string;
+    text: string;
+  };
   'skills.view':        { name: string };
   'skills.manage':      { action: 'create' | 'patch' | 'delete' | 'write_file' | 'remove_file'; name: string; content?: string; description?: string; version?: string; tags?: string[]; relpath?: string; mimeType?: string; rationale?: string };
   'user_memory.manage': { action: 'append' | 'replace' | 'delete'; scope?: 'global' | 'circle'; content?: string; rationale?: string };
@@ -1216,7 +1231,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.screen_size':       { ok: boolean; resultsText: string; width?: number; height?: number };
   'desktop.read_a11y_tree':    { ok: boolean; resultsText: string };
   'desktop.click_element':     { ok: boolean; resultsText: string };
-  'desktop.set_element_value': { ok: boolean; resultsText: string };
+  'desktop.set_element_value': { ok: boolean; resultsText: string; completionVerified?: boolean; outcomeUnknown?: boolean };
   'skills.view':        { ok: boolean; resultsText: string };
   'skills.manage':      { ok: boolean; resultsText: string };
   'user_memory.manage': { ok: boolean; resultsText: string };
@@ -3240,7 +3255,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       "local Claude Code bridge. Requires the bridge running and the desktop " +
       "token paired. Example appNames: \"Zoom\", \"Slack\", \"Notion\", " +
       "\"Visual Studio Code\". Use desktop.list_running_apps first to see " +
-      "what's already open. HITL-gated via the `desktop_action` category.",
+      "what's already open. An authenticated exact tool call may perform this reversible lifecycle step without a separate approval; the runtime observes before and accepts completion only from fresh running/frontmost proof. App edits, saves, exports, submissions, and sensitive actions keep their own approval policy.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -3253,7 +3268,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'desktop.focus_app',
     label: 'Focus Desktop App',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: "Brings an already-running app to the foreground so keystrokes land in it. Prefer desktop.launch_app if the app isn't running (launch also focuses). HITL-gated desktop action.",
+    description: "Brings an already-running exact app to the foreground so later semantic actions land in it. Prefer desktop.launch_app if the app is not running. An authenticated exact tool call may perform this reversible lifecycle step without separate approval; completion still requires fresh exact app/PID/frontmost proof.",
     inputSchema: {
       type: 'object',
       properties: { appName: { type: 'string', description: 'Exact running app name, e.g. "Safari", from desktop.list_running_apps.' } },
@@ -3565,7 +3580,11 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
   },
   {
     name: 'desktop.photoshop_document_status',
-    label: 'Inspect Photoshop Document',
+    // Natural "open Photoshop" requests must discover this read-only state
+    // probe before any document mutation. Keeping the intent phrase in the
+    // label lets the generic label scorer express that ordering without a
+    // Photoshop-specific branch in searchOpenSwanToolCatalog.
+    label: 'Inspect Open Photoshop State',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
       'Read-only Photoshop probe for active/open document state, dimensions, color mode, selection state, layer counts, text layers, smart objects, adjustment layers, and locked/hidden layers. Prefer this before editing Photoshop documents.',
@@ -4402,18 +4421,22 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
   },
   {
     name: 'desktop.set_element_value',
-    label: 'Set Accessibility Field Value',
+    label: 'Set Verified Accessibility Field Value',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Sets the value of a text field or editable accessibility element by PID and dotted path from desktop.read_a11y_tree. Prefer this over click+paste when filling named native app fields. HITL-gated desktop action.',
+    description: 'Observe-first, approval-gated semantic setter for one exact non-secret native text field. Pass the exact app, PID, dotted path, role, label, and current value from one fresh desktop.read_a11y_tree observation. The runtime binds current/requested value hashes into a one-shot bridge capability, re-observes at handler entry, dispatches AX set-value once, and accepts completion only when the same field exposes the exact requested value hash and length. Secure/auth/payment/permission/destructive/modal targets, raw PID/path setters, coordinate fallback, and automatic replay are refused.',
     inputSchema: {
       type: 'object',
       properties: {
-        appName: { type: 'string', description: 'Exact resolved frontmost app name from desktop.window_state or desktop.observe_app.' },
+        action: { type: 'string', enum: ['set_value'], description: 'Only exact semantic set_value is supported.' },
+        appName: { type: 'string', description: 'Exact frontmost app name from the fresh observation.' },
         pid: { type: 'number', description: 'Process id of the target app, from desktop.read_a11y_tree.' },
         path: { type: 'string', description: 'Dotted element path from desktop.read_a11y_tree, e.g. "1.2.0.3".' },
-        text: { type: 'string', description: 'New value to set on the field.' },
+        expectedRole: { type: 'string', description: 'Exact accessibility role from the same observation, such as AXTextField.' },
+        expectedLabel: { type: 'string', description: 'Exact bounded field label from the same observation.' },
+        expectedCurrentValue: { type: 'string', maxLength: 20000, description: 'Exact current field value from the same observation. This remains transient and is never returned in receipts.' },
+        text: { type: 'string', minLength: 1, maxLength: 20000, description: 'Exact requested non-secret value. This remains transient and receipts contain only a hash and length.' },
       },
-      required: ['appName', 'pid', 'path', 'text'],
+      required: ['appName', 'pid', 'path', 'expectedRole', 'expectedLabel', 'expectedCurrentValue', 'text'],
     },
   },
 ];
@@ -4765,19 +4788,30 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'desktop.launch_app' || tool === 'desktop.focus_app') {
+    return {
+      family: 'browser',
+      approvalMode: 'auto',
+      mutatesState: true,
+      externalSideEffect: false,
+      summary: 'Launches or focuses one exact local app through fresh before/after process and foreground proof. This reversible lifecycle action does not require a separate approval; downstream app mutations keep their own policy.',
+    };
+  }
+
   if (tool.startsWith('desktop.')) {
     // Read-only tools (list apps, screen size, screenshot) auto-approve —
     // they observe state, they don't change it. desktop.wait_for_app stays
     // auto/read-only HERE (no HITL change), but it is a temporal
     // synchronization primitive, so getOpenSwanToolParallelPolicy
     // special-cases it into a sequential barrier for parallel dispatch. Every
-    // write path (launch/focus/type/keys/click/open_url/open_path) is
+    // remaining write path (type/keys/click/open_url/open_path) is
     // 'ask' and routes through maybeRequestToolApproval, where
     // toolAutoApproveCategory maps desktop.* to the `desktop_action`
     // auto-approve category and the user's "Remember: auto-approve"
     // choice (RunApprovalBanner / HitlApprovalBanner checkbox) is
     // honored via unifiedApprovalPolicyCore — the pay/delete/login/grant
-    // floor still always asks.
+    // floor still always asks. Exact launch/focus is handled just above as a
+    // reversible auto-authorized lifecycle action with fresh proof.
     const readOnlyTools = new Set([
       'desktop.list_running_apps',
       'desktop.list_installed_apps',
@@ -9900,14 +9934,460 @@ async function executeGuardedNativeSemanticPress(
   }
 }
 
+async function executeGuardedNativeSemanticValue(
+  args: OpenSwanToolExecutionArgs['desktop.set_element_value'],
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<'desktop.set_element_value'>> {
+  type NativeValueDurableSuccess = Extract<
+    DurableComputerAppDispatchResult<NativeSemanticValueExecution>,
+    { ok: true }
+  >;
+  type NativeValueDurableFailure = Extract<
+    DurableComputerAppDispatchResult<NativeSemanticValueExecution>,
+    { ok: false }
+  >;
+  type NativeValueApprovalBlock = Extract<OpenSwanToolApprovalGateResult, { kind: 'blocked' }>;
+
+  if (
+    !(await hasAuthenticatedPersistedOpenSwanCallIdentity('desktop.set_element_value', context))
+    || `${context.runId}:${context.toolUseId}:native-semantic-value-v1`.length > 180
+  ) {
+    return {
+      ok: false,
+      resultsText: 'Native semantic value change stopped before observation because exact authenticated run and provider tool-call identity was unavailable. No field was changed.',
+      completionVerified: false,
+      outcomeUnknown: false,
+    };
+  }
+
+  let approvalReceipt: OpenSwanRuntimeApprovalReceipt | null = null;
+  let approvalBlock: NativeValueApprovalBlock | null = null;
+  let approvalProposal: NativeSemanticValueApprovalProposal | null = null;
+  let approvalArgs: Record<string, unknown> | null = null;
+  let mutationAction: ComputerAppMutationContract | null = null;
+  let mutationAuthorization: ComputerAppMutationAuthorization | null = null;
+  let mutationBeforeEpoch: ComputerAppObservationEpoch | null = null;
+  let successfulDispatch: NativeValueDurableSuccess | null = null;
+  let failedDispatch: NativeValueDurableFailure | null = null;
+  let semanticExecution: NativeSemanticValueExecution | null = null;
+  let latestBridgeFailure: DesktopResult<NativeSemanticValueExecution> | null = null;
+
+  try {
+    const [
+      { executeObservedNativeSemanticValueMutation },
+      desktopBridge,
+    ] = await Promise.all([
+      import('./computerAppAdapter'),
+      import('./desktopBridge'),
+    ]);
+    if (!(await desktopBridge.isDesktopBridgeAvailable())) {
+      return {
+        ok: false,
+        resultsText: 'Desktop bridge offline. Start and pair the local bridge, then re-observe the exact native field before retrying.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      };
+    }
+
+    const deps: NativeSemanticValueDeps = {
+      observeApp: desktopBridge.observeApp,
+      fingerprint: desktopBridge.fingerprintNativeSemanticValue,
+      observeNativeSemanticValueTarget: desktopBridge.observeNativeSemanticValueTarget,
+      approvalGate: async (proposal) => {
+        approvalProposal = proposal;
+        approvalArgs = {
+          approvalSchemaVersion: proposal.schemaVersion,
+          operation: proposal.operation,
+          action: proposal.action,
+          appName: proposal.app,
+          pid: proposal.pid,
+          targetRole: proposal.targetRole,
+          targetFingerprint: proposal.targetFingerprint,
+          currentValueHash: proposal.currentValueHash,
+          requestedValueHash: proposal.requestedValueHash,
+          currentValueLength: proposal.currentValueLength,
+          requestedValueLength: proposal.requestedValueLength,
+          valueClass: proposal.valueClass,
+          overwritesExistingValue: proposal.overwritesExistingValue,
+          evidenceId: proposal.evidenceId,
+          observedAt: proposal.observedAt,
+          indexGeneration: proposal.indexGeneration,
+          approvalRequired: true,
+          risk: proposal.risk,
+        };
+        const gate = await maybeRequestToolApproval(
+          'desktop.set_element_value',
+          approvalArgs,
+          context,
+        );
+        if (gate.kind !== 'allowed') {
+          if (gate.kind === 'blocked') approvalBlock = gate;
+          return {
+            approved: false,
+            reason: gate.kind === 'blocked'
+              ? gate.message
+              : 'The semantic value change requires one genuine exact-call approval receipt.',
+          };
+        }
+        approvalReceipt = gate.receipt;
+        return { approved: true, approvalId: gate.receipt.approvalId };
+      },
+      performNativeSemanticValue: async (dispatchArgs) => {
+        const proposal = approvalProposal;
+        const receipt = approvalReceipt;
+        const exactApprovalArgs = approvalArgs;
+        if (
+          !proposal
+          || !receipt
+          || !exactApprovalArgs
+          || dispatchArgs.approvalId !== receipt.approvalId
+          || dispatchArgs.targetFingerprint !== proposal.targetFingerprint
+        ) {
+          return {
+            ok: false,
+            error: 'Semantic value dispatch refused because its one-shot field target and exact approval were not bound.',
+            errorCode: 'approval_required',
+          };
+        }
+        const freshnessMs = Math.max(
+          1_000,
+          Math.min(120_000, Date.parse(proposal.expiresAt) - Date.parse(proposal.observedAt)),
+        );
+        const beforeEpoch = createComputerAppObservationEpoch({
+          id: proposal.evidenceId,
+          surface: 'desktop',
+          capturedAt: proposal.observedAt,
+          freshnessMs,
+          target: {
+            appName: proposal.app,
+            pid: proposal.pid,
+            accessibilityGeneration: proposal.indexGeneration,
+            accessibilityTargetFingerprint: proposal.targetFingerprint,
+          },
+          evidenceIds: [proposal.evidenceId],
+        });
+        const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(dispatchArgs);
+        if (!toolArgsFingerprint) {
+          return {
+            ok: false,
+            error: 'Semantic value dispatch stopped because cryptographic handler-argument binding was unavailable.',
+            errorCode: 'invalid_input',
+          };
+        }
+        const actionId = `${context.runId}:${context.toolUseId}`;
+        const action: ComputerAppMutationContract = {
+          schemaVersion: 1,
+          actionId,
+          tool: 'desktop.set_element_value',
+          surface: 'desktop',
+          observationEpochId: beforeEpoch.id,
+          expectedTarget: beforeEpoch.target,
+          toolArgsFingerprint,
+          risk: 'medium',
+          approvalRequired: true,
+          idempotencyKey: `${actionId}:native-semantic-value-v1`,
+          verification: {
+            kind: 'accessibility',
+            predicate: 'The exact approved non-secret accessibility field exposes the requested value hash and length after one AX set-value dispatch.',
+            evidenceTools: ['desktop.semantic_value:exact-same-target-value-proof'],
+          },
+          outcomeUnknownPolicy: 'verify_before_retry',
+        };
+        const expectedApprovalKey = buildOpenSwanToolApprovalKey(
+          'desktop.set_element_value',
+          exactApprovalArgs,
+        );
+        const policy = await resolveComputerAppMutationPolicy({
+          action,
+          approvalGate: async (request) => {
+            if (
+              receipt.approvalKey !== expectedApprovalKey
+              || !receipt.approvalId
+              || (receipt.status !== 'approved' && receipt.status !== 'auto_approved')
+            ) {
+              return { decision: 'pending', approvalId: null, approvalKey: request.approvalKey };
+            }
+            return {
+              decision: receipt.status,
+              approvalId: receipt.approvalId,
+              approvalKey: request.approvalKey,
+            };
+          },
+        });
+        const authorization = authorizeComputerAppMutation({ action, policy, epoch: beforeEpoch });
+        mutationAction = action;
+        mutationAuthorization = authorization;
+        mutationBeforeEpoch = beforeEpoch;
+        if (!authorization.allowed) {
+          return {
+            ok: false,
+            error: `Semantic value dispatch stopped before handler entry: ${authorization.blockers
+              .map((blocker) => `${blocker.code}: ${blocker.detail}`)
+              .join(' ') || authorization.summary}`,
+            errorCode: 'approval_required',
+          };
+        }
+        const dispatched = await dispatchDurableComputerAppMutation({
+          action,
+          authorization,
+          approvalId: receipt.approvalId,
+          context,
+          normalizedArgs: dispatchArgs,
+          handler: async (sealedArgs) => {
+            const bridgeResult = await desktopBridge.performNativeSemanticValue({
+              targetId: sealedArgs.targetId,
+              targetFingerprint: sealedArgs.targetFingerprint,
+              approvalId: sealedArgs.approvalId,
+            });
+            if (!bridgeResult.ok || !bridgeResult.data) {
+              latestBridgeFailure = bridgeResult;
+              throw new Error(
+                bridgeResult.error
+                || bridgeResult.recoveryHint
+                || 'Semantic value bridge dispatch did not return exact same-target proof.',
+              );
+            }
+            return bridgeResult.data;
+          },
+        });
+        if (!dispatched.ok) {
+          failedDispatch = dispatched;
+          if (latestBridgeFailure) return latestBridgeFailure;
+          return {
+            ok: false,
+            error: sanitizeErrorForModel(dispatched.error, { context: 'native semantic value durable dispatch' }),
+            errorCode: dispatched.outcomeUnknown ? 'stale_bridge' : 'approval_required',
+          };
+        }
+        successfulDispatch = dispatched;
+        semanticExecution = dispatched.value;
+        return { ok: true, data: dispatched.value };
+      },
+    };
+
+    const adapterResult = await executeObservedNativeSemanticValueMutation(
+      {
+        action: 'set_value',
+        appName: String(args?.appName || ''),
+        expectedPid: Number(args?.pid || 0),
+        targetPath: String(args?.path || ''),
+        expectedRole: String(args?.expectedRole || ''),
+        expectedLabel: String(args?.expectedLabel || ''),
+        expectedCurrentValue: typeof args?.expectedCurrentValue === 'string'
+          ? args.expectedCurrentValue
+          : '',
+        value: typeof args?.text === 'string' ? args.text : '',
+      },
+      deps,
+    );
+
+    let result: OpenSwanToolExecutionResultMap['desktop.set_element_value'] = {
+      ok: adapterResult.ok,
+      resultsText: adapterResult.message,
+      completionVerified: adapterResult.data?.completionVerified === true,
+      outcomeUnknown: adapterResult.data?.outcomeUnknown === true,
+    };
+    let verificationReceipt: ComputerAppVerificationReceipt | null = null;
+    const completedDispatch = successfulDispatch as NativeValueDurableSuccess | null;
+    const durableFailure = failedDispatch as NativeValueDurableFailure | null;
+    const completedExecution = semanticExecution as NativeSemanticValueExecution | null;
+    const completedAction = mutationAction as ComputerAppMutationContract | null;
+    const completedAuthorization = mutationAuthorization as ComputerAppMutationAuthorization | null;
+    const completedBeforeEpoch = mutationBeforeEpoch as ComputerAppObservationEpoch | null;
+    const completedApproval = approvalReceipt as OpenSwanRuntimeApprovalReceipt | null;
+    const completedProposal = approvalProposal as NativeSemanticValueApprovalProposal | null;
+    const blockedApproval = approvalBlock as NativeValueApprovalBlock | null;
+
+    if (
+      completedDispatch
+      && completedExecution
+      && completedAction
+      && completedAuthorization
+      && completedBeforeEpoch
+      && completedApproval
+      && completedProposal
+    ) {
+      const proof = completedExecution.proof;
+      const after = proof.after;
+      if (after) {
+        const afterEpoch = createComputerAppObservationEpoch({
+          id: `${proof.evidenceId}:after`,
+          surface: 'desktop',
+          capturedAt: after.observedAt,
+          freshnessMs: 15_000,
+          target: {
+            appName: after.app,
+            pid: after.pid,
+            accessibilityGeneration: after.indexGeneration,
+            accessibilityTargetFingerprint: after.targetFingerprint || undefined,
+          },
+          evidenceIds: [proof.evidenceId, proof.requestedValueHash],
+        });
+        verificationReceipt = buildComputerAppVerificationReceipt({
+          action: completedAction,
+          authorization: completedAuthorization,
+          dispatchReceipt: completedDispatch.dispatchReceipt,
+          beforeEpoch: completedBeforeEpoch,
+          afterEpoch,
+          predicateSatisfied: (
+            adapterResult.ok
+            && completedExecution.completionVerified === true
+            && completedExecution.outcomeUnknown === false
+            && completedExecution.replayAllowed === false
+            && proof.completionVerified === true
+            && proof.outcomeUnknown === false
+            && proof.replayAllowed === false
+            && proof.mutationAttempted === true
+            && proof.mutationPerformed === true
+            && proof.dispatchAcknowledged === true
+            && proof.dispatchMethod === 'ax_set_value'
+            && proof.diff.kind === 'target_value_changed'
+            && after.targetPresent === true
+            && after.valueCapable === true
+            && after.targetFingerprint === completedProposal.targetFingerprint
+            && after.valueHash === completedProposal.requestedValueHash
+            && after.valueLength === completedProposal.requestedValueLength
+          ),
+          evidenceIds: [proof.evidenceId, proof.requestedValueHash],
+        });
+      }
+      const canComplete = verificationReceipt?.canComplete === true;
+      const durableStateSealed = await finishDurableAgentAction(
+        completedDispatch.lease,
+        canComplete ? 'verified' : 'outcome_unknown',
+        {
+          surface: completedAction.surface,
+          risk: completedAction.risk,
+          approvalId: completedApproval.approvalId,
+          observationEpochId: completedAction.observationEpochId,
+          verificationKind: completedAction.verification.kind,
+          evidenceCount: verificationReceipt?.evidenceIds.length || 0,
+          completionVerified: canComplete,
+          outcomeUnknown: !canComplete,
+          source: 'openswan_tool_runtime',
+        },
+      );
+      const durableWarning = durableStateSealed
+        ? ''
+        : ' Durable finalization acknowledgement was unavailable; do not submit the exact call again.';
+      result = canComplete
+        ? {
+            ok: true,
+            resultsText: `Set and verified the exact approved non-secret field in ${completedProposal.app}.${durableWarning}`,
+            completionVerified: true,
+            outcomeUnknown: false,
+          }
+        : {
+            ok: false,
+            resultsText: `The semantic field change reached the app handler, but exact same-target value proof was not accepted. Treat the outcome as unknown and do not replay it automatically.${durableWarning}`,
+            completionVerified: false,
+            outcomeUnknown: true,
+          };
+    } else if (durableFailure) {
+      result = {
+        ok: false,
+        resultsText: durableFailure.priorState === 'verified'
+          ? 'This exact native field call is already durably verified and was not executed again.'
+          : durableFailure.priorState === 'failed'
+            ? 'This exact native field call is already durably recorded as a pre-dispatch failure and was not executed again.'
+            : durableFailure.outcomeUnknown
+              ? 'The native field call reached the durable dispatch boundary, but its outcome is unknown. Do not replay it; re-observe the field.'
+              : adapterResult.message,
+        completionVerified: false,
+        outcomeUnknown: durableFailure.outcomeUnknown,
+      };
+    }
+
+    if (completedDispatch) {
+      result = attachComputerAppMutationMetadata<'desktop.set_element_value'>(
+        result,
+        completedDispatch.dispatchReceipt,
+        verificationReceipt,
+      );
+    } else if (durableFailure?.dispatchReceipt) {
+      result = attachComputerAppMutationMetadata<'desktop.set_element_value'>(
+        result,
+        durableFailure.dispatchReceipt,
+      );
+    }
+    if (completedApproval) {
+      return attachOpenSwanApprovalReceiptMetadata(
+        'desktop.set_element_value',
+        result,
+        completedApproval,
+        context,
+      );
+    }
+    if (blockedApproval) {
+      return {
+        ...result,
+        ...(blockedApproval.status === 'pending'
+          ? {
+              approvalRequest: {
+                id: blockedApproval.approvalId,
+                required: true,
+                status: blockedApproval.status,
+              },
+            }
+          : {}),
+      } as OpenSwanRuntimeToolResultWithMetadata<'desktop.set_element_value'>;
+    }
+    return result;
+  } catch (error) {
+    const completedDispatch = successfulDispatch as NativeValueDurableSuccess | null;
+    const durableFailure = failedDispatch as NativeValueDurableFailure | null;
+    const completedApproval = approvalReceipt as OpenSwanRuntimeApprovalReceipt | null;
+    let result: OpenSwanToolExecutionResultMap['desktop.set_element_value'] = {
+      ok: false,
+      resultsText: sanitizeErrorForModel(error, { context: 'native semantic value runtime' }),
+      completionVerified: false,
+      outcomeUnknown: Boolean(completedDispatch || durableFailure?.outcomeUnknown),
+    };
+    if (completedDispatch) {
+      result = attachComputerAppMutationMetadata<'desktop.set_element_value'>(
+        result,
+        completedDispatch.dispatchReceipt,
+      );
+    } else if (durableFailure?.dispatchReceipt) {
+      result = attachComputerAppMutationMetadata<'desktop.set_element_value'>(
+        result,
+        durableFailure.dispatchReceipt,
+      );
+    }
+    return completedApproval
+      ? attachOpenSwanApprovalReceiptMetadata(
+          'desktop.set_element_value',
+          result,
+          completedApproval,
+          context,
+        )
+      : result;
+  }
+}
+
 type PreparedGenericNativeUiMutation = {
   tool: GenericNativeUiMutationTool;
   dispatchArgs: OpenSwanToolExecutionArgs[GenericNativeUiMutationTool];
   approvalArgs: Record<string, unknown>;
   guard: GenericNativeUiMutationGuard;
-  observationDeps: GenericNativeUiMutationObservationDeps;
+  observationDeps: GenericNativeUiTransientObservationDeps;
   toolArgsFingerprint: string;
 };
+
+type GenericNativeUiFreshTargetGuardResult =
+  | { ok: true; targetGuard: DesktopNativeUiTargetGuard }
+  | { ok: false; error: string };
+
+/**
+ * Runtime-private extension of the raw-free approval guard adapter. The exact
+ * CGWindow authority is never added to tool args, approval payloads, action
+ * contracts, receipts, or durable metadata. It is collected once more inside
+ * the durable handler and handed directly to the bridge mutation call.
+ */
+type GenericNativeUiTransientObservationDeps =
+  GenericNativeUiMutationObservationDeps & {
+    captureFreshTargetGuard: () => Promise<GenericNativeUiFreshTargetGuardResult>;
+  };
 
 type GenericNativeUiBridgeAck = {
   resultsText: string;
@@ -9926,7 +10406,6 @@ const GENERIC_NATIVE_UI_MUTATION_TOOLS: ReadonlySet<OpenSwanRuntimeToolName> =
     'desktop.mouse_up',
     'desktop.mouse_drag',
     'desktop.mouse_scroll',
-    'desktop.set_element_value',
   ]);
 
 function isGenericNativeUiMutationTool(
@@ -9940,7 +10419,7 @@ function exactGenericNativeUiRuntimeAppName(value: unknown): string | null {
   const appName = value.trim();
   return (
     appName.length > 0
-    && appName.length <= 120
+    && Array.from(appName).length <= 160
     && !/[\u0000-\u001f\u007f]/.test(appName)
   )
     ? appName
@@ -9965,10 +10444,6 @@ function genericNativeUiCoordinatePairs(
     return point ? [point] : null;
   }
   if (tool === 'desktop.mouse_up' || tool === 'desktop.mouse_scroll') {
-    const hasX = typeof args.x === 'number';
-    const hasY = typeof args.y === 'number';
-    if (!hasX && !hasY) return [];
-    if (hasX !== hasY) return null;
     const point = pair(args.x, args.y);
     return point ? [point] : null;
   }
@@ -10003,24 +10478,184 @@ function genericNativeUiCoordinatesFitScreen(
   );
 }
 
+const GENERIC_NATIVE_UI_MAX_PID = 2_147_483_647;
+const GENERIC_NATIVE_UI_MAX_WINDOW_ID = 4_294_967_295;
+
+function exactGenericNativeUiTargetGuard(
+  value: unknown,
+  expectedAppName: string,
+): DesktopNativeUiTargetGuard | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const observation = value as Record<string, unknown>;
+  const resolvedAppName = exactGenericNativeUiRuntimeAppName(
+    observation.resolvedAppName,
+  );
+  const requestedAppName = exactGenericNativeUiRuntimeAppName(
+    observation.requestedAppName,
+  );
+  const appName = exactGenericNativeUiRuntimeAppName(observation.app);
+  const frontmostApp = exactGenericNativeUiRuntimeAppName(
+    observation.frontmostApp,
+  );
+  const pid = observation.pid;
+  const rawWindow = observation.targetWindow;
+  if (
+    resolvedAppName !== expectedAppName
+    || requestedAppName !== expectedAppName
+    || appName !== expectedAppName
+    || frontmostApp !== expectedAppName
+    || observation.processIdentityVersion !== 1
+    || observation.appRunning !== true
+    || observation.frontmost !== true
+    || typeof observation.windowCount !== 'number'
+    || !Number.isSafeInteger(observation.windowCount)
+    || observation.windowCount <= 0
+    || typeof pid !== 'number'
+    || !Number.isSafeInteger(pid)
+    || pid <= 0
+    || pid > GENERIC_NATIVE_UI_MAX_PID
+    || !rawWindow
+    || typeof rawWindow !== 'object'
+    || Array.isArray(rawWindow)
+  ) {
+    return null;
+  }
+  const window = rawWindow as Record<string, unknown>;
+  if (
+    typeof window.id !== 'number'
+    || !Number.isSafeInteger(window.id)
+    || window.id <= 0
+    || window.id > GENERIC_NATIVE_UI_MAX_WINDOW_ID
+    || typeof window.x !== 'number'
+    || !Number.isSafeInteger(window.x)
+    || window.x < -32_768
+    || window.x > 32_768
+    || typeof window.y !== 'number'
+    || !Number.isSafeInteger(window.y)
+    || window.y < -32_768
+    || window.y > 32_768
+    || typeof window.width !== 'number'
+    || !Number.isSafeInteger(window.width)
+    || window.width < 1
+    || window.width > 32_768
+    || typeof window.height !== 'number'
+    || !Number.isSafeInteger(window.height)
+    || window.height < 1
+    || window.height > 32_768
+  ) {
+    return null;
+  }
+  return {
+    appName: expectedAppName,
+    pid,
+    window: {
+      id: window.id,
+      x: window.x,
+      y: window.y,
+      width: window.width,
+      height: window.height,
+    },
+  };
+}
+
+function genericNativeUiCoordinatesFitTargetWindow(
+  tool: GenericNativeUiMutationTool,
+  args: Record<string, unknown>,
+  targetGuard: DesktopNativeUiTargetGuard,
+): boolean {
+  const points = genericNativeUiCoordinatePairs(tool, args);
+  if (!points) return false;
+  if (points.length === 0) return true;
+  const { x, y, width, height } = targetGuard.window;
+  const maxX = x + width;
+  const maxY = y + height;
+  return points.every(([pointX, pointY]) => (
+    pointX >= x
+    && pointY >= y
+    && pointX < maxX
+    && pointY < maxY
+  ));
+}
+
 function createGenericNativeUiObservationDeps(
   tool: GenericNativeUiMutationTool,
   dispatchArgs: OpenSwanToolExecutionArgs[GenericNativeUiMutationTool],
-): GenericNativeUiMutationObservationDeps {
+): GenericNativeUiTransientObservationDeps {
   const family = genericNativeUiMutationFamilyForTool(tool);
   const needsCoordinateProof = family === 'coordinate' || family === 'mouse';
   const sealedArgs = dispatchArgs as unknown as Record<string, unknown>;
+  const expectedAppName = exactGenericNativeUiRuntimeAppName(sealedArgs.appName);
+  let expectedTargetGuardFingerprint: string | null = null;
+  let freshTargetGuardConsumed = false;
+
+  const observeExactTarget = async (): Promise<
+    | {
+        ok: true;
+        data: Record<string, unknown>;
+        targetGuard: DesktopNativeUiTargetGuard;
+        targetGuardFingerprint: string;
+      }
+    | { ok: false; errorCode: string }
+  > => {
+    if (!expectedAppName) return { ok: false, errorCode: 'uncertain_ui_target' };
+    const desktopBridge = await import('./desktopBridge');
+    const observed = await desktopBridge.observeApp({
+      appName: expectedAppName,
+      maxDepth: 1,
+      maxNodes: 1,
+    });
+    if (!observed.ok || !observed.data) {
+      return {
+        ok: false,
+        errorCode: observed.errorCode || 'observation_unavailable',
+      };
+    }
+    const targetGuard = exactGenericNativeUiTargetGuard(
+      observed.data,
+      expectedAppName,
+    );
+    if (!targetGuard) {
+      return { ok: false, errorCode: 'uncertain_ui_target' };
+    }
+    const targetGuardFingerprint = await buildComputerAppToolArgsFingerprintAsync({
+      schemaVersion: 1,
+      kind: 'native_ui_exact_target',
+      ...targetGuard,
+    });
+    if (!targetGuardFingerprint) {
+      return { ok: false, errorCode: 'binding_unavailable' };
+    }
+    if (
+      expectedTargetGuardFingerprint
+      && targetGuardFingerprint !== expectedTargetGuardFingerprint
+    ) {
+      return { ok: false, errorCode: 'stale_observation' };
+    }
+    if (!expectedTargetGuardFingerprint) {
+      expectedTargetGuardFingerprint = targetGuardFingerprint;
+    }
+    return {
+      ok: true,
+      data: observed.data as unknown as Record<string, unknown>,
+      targetGuard,
+      targetGuardFingerprint,
+    };
+  };
+
   return {
     digest: buildComputerAppToolArgsFingerprintAsync,
-    observeFrontmostApp: async (observationArgs) => {
-      const desktopBridge = await import('./desktopBridge');
-      const observed = await desktopBridge.observeApp(observationArgs);
-      if (!observed.ok || !observed.data) return observed;
+    observeFrontmostApp: async () => {
+      const observed = await observeExactTarget();
+      if (!observed.ok) return observed;
       const data: Record<string, unknown> = {
         ...observed.data,
+        // Bind the safe approval surface digest to the exact CGWindow id and
+        // bounds without allowing those raw values to leave this closure.
+        windowTitles: [observed.targetGuardFingerprint],
         observedAt: new Date().toISOString(),
       };
       if (needsCoordinateProof) {
+        const desktopBridge = await import('./desktopBridge');
         const screen = await desktopBridge.getScreenSize();
         if (
           !screen.ok
@@ -10051,6 +10686,35 @@ function createGenericNativeUiObservationDeps(
       }
       return { ok: true, data };
     },
+    captureFreshTargetGuard: async () => {
+      // Consume synchronously before the first await so one authorized handler
+      // can never obtain two native target capabilities, even concurrently.
+      if (freshTargetGuardConsumed) {
+        return {
+          ok: false,
+          error: 'The one-shot exact native target guard was already consumed.',
+        };
+      }
+      freshTargetGuardConsumed = true;
+      const observed = await observeExactTarget();
+      if (!observed.ok) {
+        return {
+          ok: false,
+          error: 'A fresh exact frontmost app/PID/CGWindow/bounds observation was unavailable or drifted.',
+        };
+      }
+      if (!genericNativeUiCoordinatesFitTargetWindow(
+        tool,
+        sealedArgs,
+        observed.targetGuard,
+      )) {
+        return {
+          ok: false,
+          error: 'The approved native coordinates were not inside the freshly observed exact target window.',
+        };
+      }
+      return { ok: true, targetGuard: observed.targetGuard };
+    },
   };
 }
 
@@ -10080,15 +10744,6 @@ async function prepareGuardedGenericNativeUiMutation(
       result: {
         ok: false,
         resultsText: 'The native UI action stopped before observation because an exact appName from desktop.window_state or desktop.observe_app is required. Re-observe the frontmost app and issue a new tool call; do not infer app identity from task text.',
-      },
-    };
-  }
-  if (tool === 'desktop.set_element_value') {
-    return {
-      ok: false,
-      result: {
-        ok: false,
-        resultsText: 'desktop.set_element_value stopped before approval because the generic native lane cannot yet seal a fresh exact accessibility target generation and dotted-path identity through handler entry. Re-observe the field and use another guarded input method; no app action was attempted.',
       },
     };
   }
@@ -10145,22 +10800,30 @@ async function dispatchGenericNativeUiBridgeMutation(
   sealedArgs: ComputerAppSealedMutationArgs<
     OpenSwanToolExecutionArgs[GenericNativeUiMutationTool]
   >,
+  targetGuard: DesktopNativeUiTargetGuard,
 ): Promise<GenericNativeUiBridgeAck> {
   const desktopBridge = await import('./desktopBridge');
   const args = sealedArgs as unknown as Record<string, unknown>;
   let result: DesktopResult<Record<string, unknown>>;
   switch (tool) {
     case 'desktop.type_text':
-      result = await desktopBridge.typeText(String(args.text || '')) as DesktopResult<Record<string, unknown>>;
+      result = await desktopBridge.typeText(
+        String(args.text || ''),
+        targetGuard,
+      ) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.paste_text':
       result = await desktopBridge.pasteText(String(args.text || ''), {
         appName: String(args.appName || ''),
         restoreClipboard: args.restoreClipboard !== false,
+        targetGuard,
       }) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.press_keys':
-      result = await desktopBridge.pressKeys(String(args.combo || '')) as DesktopResult<Record<string, unknown>>;
+      result = await desktopBridge.pressKeys(
+        String(args.combo || ''),
+        targetGuard,
+      ) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.menu_click':
       result = await desktopBridge.clickMenu({
@@ -10168,18 +10831,21 @@ async function dispatchGenericNativeUiBridgeMutation(
         menuPath: Array.isArray(args.menuPath)
           ? args.menuPath.map((part) => String(part))
           : [],
+        targetGuard,
       }) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.click_at':
       result = await desktopBridge.clickAt(
         Number(args.x),
         Number(args.y),
+        targetGuard,
       ) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.mouse_move':
       result = await desktopBridge.mouseMove(
         Number(args.x),
         Number(args.y),
+        targetGuard,
       ) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.mouse_click':
@@ -10188,6 +10854,7 @@ async function dispatchGenericNativeUiBridgeMutation(
         y: Number(args.y),
         button: args.button === 'right' ? 'right' : 'left',
         count: typeof args.count === 'number' ? args.count : undefined,
+        targetGuard,
       }) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.mouse_down':
@@ -10195,14 +10862,15 @@ async function dispatchGenericNativeUiBridgeMutation(
         x: Number(args.x),
         y: Number(args.y),
         button: args.button === 'right' ? 'right' : 'left',
+        targetGuard,
       }) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.mouse_up': {
-      const hasCoords = typeof args.x === 'number' && typeof args.y === 'number';
       result = await desktopBridge.mouseUp({
-        x: hasCoords ? Number(args.x) : undefined,
-        y: hasCoords ? Number(args.y) : undefined,
+        x: Number(args.x),
+        y: Number(args.y),
         button: args.button === 'right' ? 'right' : 'left',
+        targetGuard,
       }) as DesktopResult<Record<string, unknown>>;
       break;
     }
@@ -10215,6 +10883,7 @@ async function dispatchGenericNativeUiBridgeMutation(
         durationMs: typeof args.durationMs === 'number'
           ? args.durationMs
           : undefined,
+        targetGuard,
       }) as DesktopResult<Record<string, unknown>>;
       break;
     case 'desktop.mouse_scroll': {
@@ -10242,17 +10911,10 @@ async function dispatchGenericNativeUiBridgeMutation(
         deltaX: typeof args.deltaX === 'number' ? args.deltaX : undefined,
         x: scrollX,
         y: scrollY,
+        targetGuard,
       }) as DesktopResult<Record<string, unknown>>;
       break;
     }
-    case 'desktop.set_element_value':
-      result = await desktopBridge.setElementValue({
-        appName: String(args.appName || ''),
-        pid: Number(args.pid || 0),
-        path: String(args.path || ''),
-        text: String(args.text || ''),
-      }) as DesktopResult<Record<string, unknown>>;
-      break;
   }
   if (!result.ok) {
     throw new Error(
@@ -10282,8 +10944,6 @@ async function dispatchGenericNativeUiBridgeMutation(
       return { resultsText: 'Completed the approved bounded mouse drag over the exact frontmost app.' };
     case 'desktop.mouse_scroll':
       return { resultsText: 'Sent the approved mouse-wheel input to the exact frontmost app.' };
-    case 'desktop.set_element_value':
-      return { resultsText: `Set the approved accessibility field value (${Number(data.chars || 0)} characters).` };
   }
 }
 
@@ -10343,21 +11003,6 @@ async function executeGuardedGenericNativeUiMutation(
       resultsText: `${entry.message} Re-observe the exact frontmost app and issue a new tool call. No app action was attempted.`,
     };
   }
-  const sealedRecord = prepared.dispatchArgs as unknown as Record<string, unknown>;
-  if (
-    prepared.tool === 'desktop.set_element_value'
-    && (
-      !Number.isSafeInteger(sealedRecord.pid)
-      || Number(sealedRecord.pid) <= 0
-      || entry.epoch.target.pid !== sealedRecord.pid
-    )
-  ) {
-    return {
-      ok: false,
-      resultsText: 'The native UI action stopped at handler entry because the supplied accessibility process did not match the freshly observed approved process. Re-observe the exact app and field, then issue a new tool call. No app action was attempted.',
-    };
-  }
-
   // What SHOULD move in the accessibility tree if this action lands. A tool
   // with no attributable signature returns a null expectation and can never
   // reach `verified` on tree movement alone.
@@ -10426,10 +11071,18 @@ async function executeGuardedGenericNativeUiMutation(
     approvalId: approvalReceipt.approvalId,
     context,
     normalizedArgs: prepared.dispatchArgs,
-    handler: async (sealedArgs) => dispatchGenericNativeUiBridgeMutation(
-      prepared.tool,
-      sealedArgs,
-    ),
+    handler: async (sealedArgs) => {
+      // The raw app/PID/CGWindow/bounds authority is collected only here,
+      // after durable handler entry, and consumed by exactly one immediately
+      // adjacent bridge call. It never becomes part of sealedArgs or metadata.
+      const freshTarget = await prepared.observationDeps.captureFreshTargetGuard();
+      if (!freshTarget.ok) throw new Error(freshTarget.error);
+      return dispatchGenericNativeUiBridgeMutation(
+        prepared.tool,
+        sealedArgs,
+        freshTarget.targetGuard,
+      );
+    },
   });
   if (!dispatched.ok) {
     const result = {
@@ -10589,6 +11242,13 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
     );
     return guardedResult as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
   }
+  if (tool === 'desktop.set_element_value') {
+    const guardedResult = await executeGuardedNativeSemanticValue(
+      runtimeArgs as OpenSwanToolExecutionArgs['desktop.set_element_value'],
+      context,
+    );
+    return guardedResult as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
   let preparedBrowserFill: PreparedGuardedBrowserFill | null = null;
   let preparedBrowserToggle: PreparedGuardedBrowserToggle | null = null;
   let preparedBrowserSelect: PreparedGuardedBrowserSelect | null = null;
@@ -10657,10 +11317,10 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
     ? approvalGate.receipt
     : floorApprovalReceipt;
   if (tool === 'desktop.launch_app' || tool === 'desktop.focus_app') {
-    if (!approvalReceipt || !hasExactOpenSwanRuntimeCallIdentity(tool, context)) {
+    if (!(await hasAuthenticatedPersistedOpenSwanCallIdentity(tool, context))) {
       return {
         ok: false,
-        resultsText: `${tool} stopped before app observation because no genuine exact-call approval receipt and provider tool-call identity were available. No app action was attempted.`,
+        resultsText: `${tool} stopped before app observation because authenticated persisted run and exact provider tool-call identity were unavailable. No app action was attempted.`,
         completionVerified: false,
         outcomeUnknown: false,
       } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
@@ -10669,12 +11329,14 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
       tool,
       runtimeArgs as OpenSwanToolExecutionArgs['desktop.launch_app'] | OpenSwanToolExecutionArgs['desktop.focus_app'],
     );
-    return attachOpenSwanApprovalReceiptMetadata(
-      tool,
-      guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
-      approvalReceipt,
-      context,
-    );
+    return approvalReceipt
+      ? attachOpenSwanApprovalReceiptMetadata(
+          tool,
+          guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
+          approvalReceipt,
+          context,
+        )
+      : guardedResult as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
   }
   if (isGenericNativeUiMutationTool(tool)) {
     if (!preparedGenericNativeUi || !approvalReceipt) {
@@ -13476,7 +14138,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     case 'rooms.list': {
       try {
         const { data, error } = await supabase
-          .from('rooms')
+          .from('project_rooms')
           .select('id, name, status, color, created_at')
           .eq('circle_id', context.circleId)
           .order('created_at', { ascending: false })
@@ -14637,7 +15299,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     case 'desktop.launch_app': {
       return {
         ok: false,
-        resultsText: 'desktop.launch_app is available only through the runtime approval and fresh native-app proof gateway.',
+        resultsText: 'desktop.launch_app is available only through the authenticated typed runtime and fresh native-app proof gateway.',
         completionVerified: false,
         outcomeUnknown: false,
       } as any;
@@ -14645,7 +15307,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     case 'desktop.focus_app': {
       return {
         ok: false,
-        resultsText: 'desktop.focus_app is available only through the runtime approval and fresh native-app proof gateway.',
+        resultsText: 'desktop.focus_app is available only through the authenticated typed runtime and fresh native-app proof gateway.',
         completionVerified: false,
         outcomeUnknown: false,
       } as any;
@@ -16181,7 +16843,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     case 'desktop.set_element_value': {
       return {
         ok: false,
-        resultsText: 'desktop.set_element_value is sealed behind the generic native UI observation, exact app/PID/window approval binding, one-shot handler-entry recheck, and durable dispatch gateway. The raw desktop bridge path cannot dispatch it.',
+        resultsText: 'desktop.set_element_value is sealed behind the exact semantic field/value capability, hash-only approval, one-shot handler-entry recheck, durable dispatch, and exact same-target value-proof gateway. The raw desktop bridge path cannot dispatch it.',
       } as any;
     }
     // ── Memory Save ─────────────────────────────────────────────────────

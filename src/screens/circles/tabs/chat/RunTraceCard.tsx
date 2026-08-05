@@ -32,6 +32,8 @@ interface Props {
    *  OpenSwan Console prefilled with the same task + mode. */
   onRunAgain?: (run: AgentRun) => void;
   accentColor?: string;
+  /** Historical/superseded chat rows stay inspectable but cannot mutate a run. */
+  readOnly?: boolean;
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -61,7 +63,7 @@ const STEP_KIND_GLYPH: Record<string, string> = {
   error:       '⚠',
 };
 
-export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa' }: Props) {
+export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa', readOnly = false }: Props) {
   const [run, setRun] = useState<AgentRun | null>(null);
   const [steps, setSteps] = useState<RunStep[]>([]);
   const [expandedStepIds, setExpandedStepIds] = useState<Set<string>>(new Set());
@@ -245,7 +247,7 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
       </ScrollView>
 
       <View style={s.actionRow}>
-        {isLive ? (
+        {isLive && !readOnly ? (
           <Pressable
             onPress={async () => {
               if (cancelling) return;
@@ -283,7 +285,7 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
             <Text style={s.stopText}>{cancelling ? 'STOPPING…' : '■ STOP'}</Text>
           </Pressable>
         ) : null}
-        {(isFailed || isDone || run.status === 'cancelled') && onRunAgain ? (
+        {!readOnly && (isFailed || isDone || run.status === 'cancelled') && onRunAgain ? (
           <Pressable
             onPress={() => onRunAgain(run)}
             style={({ pressed }) => [

@@ -28,9 +28,12 @@ function capabilityOf(id: string): string {
 
 interface Props {
   items: PreflightBlockerItem[];
-  onConnectBridge: () => void;
-  onOpenComputerUse: () => void;
-  onRetry: () => void;
+  onConnectBridge?: () => void;
+  onOpenComputerUse?: () => void;
+  onRetry?: () => void;
+  /** Keep the capability evidence visible without reviving actions from an
+   *  older/superseded run. */
+  readOnly?: boolean;
   accentColor?: string;
 }
 
@@ -39,6 +42,7 @@ export default function PreflightBlockersCard({
   onConnectBridge,
   onOpenComputerUse,
   onRetry,
+  readOnly = false,
   accentColor = '#f59e0b',
 }: Props) {
   const caps = items.map((item) => capabilityOf(item.id));
@@ -47,9 +51,11 @@ export default function PreflightBlockersCard({
 
   // De-duplicated action chips: at most one per fix surface, plus retry.
   const chips: Array<{ key: string; label: string; onPress: () => void }> = [];
-  if (needsBridge) chips.push({ key: 'bridge', label: 'Connect the bridge', onPress: onConnectBridge });
-  if (needsBrowser) chips.push({ key: 'browser', label: 'Open Computer Use', onPress: onOpenComputerUse });
-  chips.push({ key: 'retry', label: 'Try again', onPress: onRetry });
+  if (!readOnly) {
+    if (needsBridge && onConnectBridge) chips.push({ key: 'bridge', label: 'Connect the bridge', onPress: onConnectBridge });
+    if (needsBrowser && onOpenComputerUse) chips.push({ key: 'browser', label: 'Open Computer Use', onPress: onOpenComputerUse });
+    if (onRetry) chips.push({ key: 'retry', label: 'Try again', onPress: onRetry });
+  }
 
   return (
     <View style={[s.card, { borderColor: accentColor + '40' }]} nativeID="section-chat-preflight-blockers">
@@ -57,7 +63,11 @@ export default function PreflightBlockersCard({
         <Text style={[s.kicker, { color: accentColor }]}>CAPABILITY NEEDED</Text>
         <Text style={s.count}>{items.length} to enable</Text>
       </View>
-      <Text style={s.hint}>This task needs a capability that isn't connected yet. Enable it, then retry:</Text>
+      <Text style={s.hint}>
+        {readOnly
+          ? 'Historical capability snapshot from this earlier run. Its actions are no longer active.'
+          : "This task needs a capability that isn't connected yet. Enable it, then retry:"}
+      </Text>
       <View style={{ gap: 6 }}>
         {items.slice(0, 6).map((item, index) => (
           <View key={item.id || String(index)} style={[s.row, { borderColor: accentColor + '24' }]}>
@@ -69,22 +79,24 @@ export default function PreflightBlockersCard({
           </View>
         ))}
       </View>
-      <View style={s.chipRow}>
-        {chips.map((chip) => (
-          <Pressable
-            key={chip.key}
-            onPress={chip.onPress}
-            style={({ pressed }) => [
-              s.chip,
-              { borderColor: accentColor + '50' },
-              pressed && { backgroundColor: accentColor + '1e' },
-            ]}
-            accessibilityLabel={chip.label}
-          >
-            <Text style={[s.chipText, { color: accentColor }]}>{chip.label}</Text>
-          </Pressable>
-        ))}
-      </View>
+      {chips.length > 0 ? (
+        <View style={s.chipRow}>
+          {chips.map((chip) => (
+            <Pressable
+              key={chip.key}
+              onPress={chip.onPress}
+              style={({ pressed }) => [
+                s.chip,
+                { borderColor: accentColor + '50' },
+                pressed && { backgroundColor: accentColor + '1e' },
+              ]}
+              accessibilityLabel={chip.label}
+            >
+              <Text style={[s.chipText, { color: accentColor }]}>{chip.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }

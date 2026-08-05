@@ -24,6 +24,11 @@ import type { OpenSwanChatMode } from './openswanModePolicy';
 import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
+import {
+  evaluateTaskExecutionSurfaceToolCall,
+  taskExecutionSurfaceAllowsTool,
+  type TaskExecutionSurfaceGuard,
+} from './taskCapabilityProfiles';
 import type { SurfacingSignal } from './proactiveSurfacingCore';
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
@@ -257,9 +262,9 @@ export type SwanBotContext = {
    * Typed SwanBot v2 client-loop context. These are optional so existing text
    * callers remain source-compatible. ComputerTaskRuntime/agentRuntime should
    * supply them when that upstream lane owns a live thread, cancellation
-   * signal, plugin set, or review-mode approval UI. Until the approval gate is
-   * supplied, the typed batch runtime fails closed on user ask-before and
-   * always-confirm floor matches.
+   * signal, plugin set, or review-mode approval UI. Ask-before and
+   * always-confirm matches fail closed unless a surface gate exists or the
+   * exact canonical tool handler owns the durable runtime approval boundary.
    */
   threadId?: string;
   activePluginIds?: string[];
@@ -267,6 +272,14 @@ export type SwanBotContext = {
   toolApprovalGate?: (call: { name: string; input: unknown }) => Promise<'approve' | 'reject'>;
   userConstraints?: ChatComputerConstraintInputs['userConstraints'];
   alwaysConfirmFloor?: ChatComputerConstraintInputs['alwaysConfirmFloor'];
+  /**
+   * Require the canonical in-process typed tool loop for this turn. Computer
+   * app/file tasks set this because the legacy v1 text lane cannot execute the
+   * local desktop catalog and must never become a post-failure fallback.
+   */
+  forceClientToolLoop?: boolean;
+  /** Hard catalog/dispatch ceiling derived from the task capability profile. */
+  executionSurfaceGuard?: TaskExecutionSurfaceGuard;
 };
 
 function getContextAgentSubjectKey(context: SwanBotContext): string | undefined {
@@ -1157,6 +1170,8 @@ type SwanbotV2ClientLoopContext = Pick<
   | 'toolApprovalGate'
   | 'userConstraints'
   | 'alwaysConfirmFloor'
+  | 'forceClientToolLoop'
+  | 'executionSurfaceGuard'
 >;
 
 // ─── Connectivity snapshot for the v2 edge tool gate ─────────────────────────
@@ -1308,9 +1323,17 @@ async function callSwanBotV2(
   // the batch turn runs the client-side `runAgent` loop (swanbotV2BatchRuntime)
   // instead of the swanbot-v2-ai edge round-trip. Placed AFTER the strict-local
   // killswitch above so it covers both paths. Everything heavy is dynamically
-  // imported INSIDE the guard, so flag-OFF turns pay nothing. Fail-open: any
-  // prompt-build failure falls through to today's edge path below.
-  if (isSwanbotV2ClientLoopEnabled()) {
+  // imported INSIDE the guard, so flag-OFF turns pay nothing. A rollout turn's
+  // prompt-build failure falls through to today's edge path below. A computer
+  // turn that explicitly requires this catalog fails visibly instead of
+  // switching to an execution-incapable text lane.
+  // A scoped execution surface must stay in the local typed loop because the
+  // legacy/edge catalogs cannot consume this per-turn ceiling. Treat the scope
+  // itself as a hard local-loop requirement, even if an older caller omitted
+  // forceClientToolLoop.
+  const forceClientToolLoop = clientLoopContext?.forceClientToolLoop === true
+    || clientLoopContext?.executionSurfaceGuard !== undefined;
+  if (forceClientToolLoop || isSwanbotV2ClientLoopEnabled()) {
     try {
       const mode = thinkingLevel === 'fast' ? 'talk' : 'build';
       // Frozen system prompt via the existing chat assembly. The Circle
@@ -1360,10 +1383,21 @@ async function callSwanBotV2(
           toolApprovalGate: clientLoopContext?.toolApprovalGate,
           userConstraints: mergedUserConstraints,
           alwaysConfirmFloor: mergedAlwaysConfirmFloor,
+          executionSurfaceGuard: clientLoopContext?.executionSurfaceGuard,
           onActivity: (row) => emitSwanBotActivity(row.label),
         },
       );
     } catch (err) {
+      if (forceClientToolLoop) {
+        console.warn('[SwanBot/v2] required client-loop startup failed — refusing text-only fallback:', err);
+        return {
+          text: null,
+          bodyError: {
+            code: 'client_tool_loop_unavailable',
+            message: 'The local typed tool loop could not start, so no desktop action was attempted.',
+          },
+        };
+      }
       console.warn('[SwanBot/v2] client-loop prompt build failed — falling back to the edge path:', err);
     }
   }
@@ -3897,15 +3931,18 @@ async function callSwanBotAI(
   // Phase M4 router: the v2 EDGE remains the default; `/v2 off` opts the
   // device back into v1. Inside callSwanBotV2, the device-local typed client
   // loop is a separate explicit canary (`uc_swanbot_v2_client_loop`) that
-  // remains default-off. On any v2 transport failure we fall through to v1, and after 2
-  // consecutive transport failures the session circuit breaker skips v2
-  // entirely until a v2 success, `/v2 on`, or a reload.
+  // remains default-off. Rollout turns fall through to v1 on transport failure,
+  // and after 2 consecutive transport failures the session circuit breaker
+  // skips v2 until a v2 success, `/v2 on`, or a reload. A computer turn that
+  // requires the local catalog bypasses that circuit and never replays in v1.
   // See `docs/SWANBOT_V2_MIGRATION_PLAN.md`.
   try {
     const { isSwanbotV2Enabled, isSwanbotV2CircuitOpen, recordSwanbotV2Outcome, v2OutcomeCountsTowardBreaker } =
       await import('./swanbotRouting');
-    if (isSwanbotV2Enabled()) {
-      if (isSwanbotV2CircuitOpen()) {
+    const forceClientToolLoop = clientLoopContext?.forceClientToolLoop === true
+      || clientLoopContext?.executionSurfaceGuard !== undefined;
+    if (isSwanbotV2Enabled() || forceClientToolLoop) {
+      if (isSwanbotV2CircuitOpen() && !forceClientToolLoop) {
         console.log('[SwanBot] v2 circuit open (repeated transport failures) — skipping v2 this session, using v1.');
       } else {
         let v2: V2CallResult;
@@ -3960,10 +3997,32 @@ async function callSwanBotAI(
             },
           };
         }
+        if (forceClientToolLoop) {
+          return {
+            response: null,
+            error: {
+              code: 'client_tool_loop_unavailable',
+              message: 'The required local typed tool loop returned no result. It was not replayed through the text-only fallback.',
+            },
+          };
+        }
         console.log('[SwanBot] v2 returned null (transport) — falling back to v1.');
       }
     }
   } catch (err) {
+    if (
+      clientLoopContext?.forceClientToolLoop === true
+      || clientLoopContext?.executionSurfaceGuard !== undefined
+    ) {
+      console.warn('[SwanBot] required client-tool-loop routing failed — refusing v1 fallback:', err);
+      return {
+        response: null,
+        error: {
+          code: 'client_tool_loop_unavailable',
+          message: 'The local typed tool loop could not be routed, so no desktop action was attempted.',
+        },
+      };
+    }
     console.warn('[SwanBot] routing check failed — using v1:', err);
   }
   if (shouldBlockExternalAiProvider('anthropic')) {
@@ -5377,6 +5436,7 @@ async function getSwanBotResponseImpl(
             userId: enrichedContext.userId,
             surface: 'main_chat',
             mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
+            executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
             agentSubject: agentSubjectPayload,
           });
           // An incomplete loop with ZERO tool events means the edge call itself
@@ -5438,6 +5498,7 @@ async function getSwanBotResponseImpl(
             userId: enrichedContext.userId,
             surface: 'main_chat',
             mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
+            executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
             // The marketplace flag already made this decision (checked above);
             // don't let the separate stream-escalate seam flag veto it.
             streamEscalateOnToolUse: true,
@@ -5510,6 +5571,8 @@ async function getSwanBotResponseImpl(
         toolApprovalGate: enrichedContext.toolApprovalGate,
         userConstraints: enrichedContext.userConstraints,
         alwaysConfirmFloor: enrichedContext.alwaysConfirmFloor,
+        forceClientToolLoop: enrichedContext.forceClientToolLoop,
+        executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
       },
     );
     const aiResponse = aiResult?.response || null;
@@ -5570,6 +5633,8 @@ async function getSwanBotResponseImpl(
               toolApprovalGate: enrichedContext.toolApprovalGate,
               userConstraints: enrichedContext.userConstraints,
               alwaysConfirmFloor: enrichedContext.alwaysConfirmFloor,
+              forceClientToolLoop: enrichedContext.forceClientToolLoop,
+              executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
             },
           );
           const failoverText = failoverResult?.response || null;
@@ -5843,6 +5908,8 @@ export async function executeToolUseLoop(opts: {
   activeSoulKey?: string;
   activePluginIds?: string[];
   allowedToolNames?: string[];
+  /** Hard per-turn catalog/dispatch ceiling from the task profile. */
+  executionSurfaceGuard?: TaskExecutionSurfaceGuard;
   /**
    * X2 (P46): what the native-deferred-tools catalog spans when the flag is
    * on. 'allowlist' (default whenever `allowedToolNames` is set) keeps the
@@ -5922,7 +5989,11 @@ export async function executeToolUseLoop(opts: {
   const isMutatingTool = (name: string): boolean => {
     try { return getToolParallelPolicy(name, opts.activePluginIds).mutatesState === true; } catch { return false; }
   };
-  const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
+  const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode)
+    .filter((tool: { name: string }) => taskExecutionSurfaceAllowsTool(
+      opts.executionSurfaceGuard,
+      tool.name,
+    ));
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
   }
@@ -5994,6 +6065,10 @@ export async function executeToolUseLoop(opts: {
         opts.surface || 'main_chat',
         opts.mode,
       )
+        .filter((tool: { name: string }) => taskExecutionSurfaceAllowsTool(
+          opts.executionSurfaceGuard,
+          tool.name,
+        ))
         .map((t: { name: string; description: string; input_schema: Record<string, unknown>; input_examples?: Array<Record<string, unknown>> }) => ({
           name: t.name,
           description: t.description,
@@ -6201,13 +6276,23 @@ export async function executeToolUseLoop(opts: {
     // concurrently — a real latency win for gather/research rounds — while any
     // mutation or approval keeps the round sequential to preserve ordering.
     const toolResults: Array<{ type: string; tool_use_id: string; content: string }> = [];
-    const batchPolicies = toolUseBlocks.map((b: any) => getToolParallelPolicy(b.name, opts.activePluginIds));
+    const allToolCallsInsideExecutionSurface = toolUseBlocks.every((block: any) =>
+      evaluateTaskExecutionSurfaceToolCall(
+        opts.executionSurfaceGuard,
+        block.name,
+        block.input,
+      ).allowed,
+    );
+    const batchPolicies = allToolCallsInsideExecutionSurface
+      ? toolUseBlocks.map((b: any) => getToolParallelPolicy(b.name, opts.activePluginIds))
+      : [];
     // QW1: when this turn carries constraint/floor inputs, never pre-dispatch a
     // parallel batch — every block must pass the sequential constraint check
     // BEFORE it runs, so a verb-anchored match can't be executed ahead of the
     // gate. `canParallelizeToolBatch` already bars mutating/side-effect tools;
     // this closes the gap where a read-only tool name matches a floor verb.
-    const canPreDispatchBatch = !enforceConstraints
+    const canPreDispatchBatch = allToolCallsInsideExecutionSurface
+      && !enforceConstraints
       && canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate });
     // Live activity label for the parallel batch (mirrors the v2 pattern
     // above): sink is fail-soft, so this never affects the loop itself.
@@ -6233,6 +6318,30 @@ export async function executeToolUseLoop(opts: {
     let ringTouchedThisRound = false;
     for (let bi = 0; bi < toolUseBlocks.length; bi++) {
       const block = toolUseBlocks[bi];
+      // Defense in depth: the profile ceiling removes blocked tools from the
+      // advertised catalog above, but a malformed/provider-injected tool call
+      // must also be rejected before approval, policy lookup, or dispatch.
+      const executionSurfaceVerdict = evaluateTaskExecutionSurfaceToolCall(
+        opts.executionSurfaceGuard,
+        block.name,
+        block.input,
+      );
+      if (!executionSurfaceVerdict.allowed) {
+        const blockedText = executionSurfaceVerdict.reason;
+        toolEvents.push({
+          tool: String(block.name || 'unknown'),
+          input: block.input,
+          result: blockedText,
+          status: 'blocked' as OpenSwanExecutionStatus,
+          metadata: { execution_surface_guard: opts.executionSurfaceGuard },
+        });
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: blockedText,
+        });
+        continue;
+      }
       // Per-step review gate. The room chat's review mode renders an
       // approval prompt and resolves with the user's decision; YOLO/auto
       // mode just doesn't pass a gate so the loop runs as before.
@@ -6664,6 +6773,8 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
   agentLegacyIds?: string[] | null;
   /** Pre-resolved allow-list (defaults to the pinned core + `tools.search`). */
   allowedToolNames?: string[];
+  /** Hard per-turn catalog/dispatch ceiling from the task profile. */
+  executionSurfaceGuard?: TaskExecutionSurfaceGuard;
   toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
   /**
    * Explicit flag override. When omitted, the live
@@ -6691,6 +6802,7 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
     activeSoulKey: opts.activeSoulKey,
     activePluginIds: opts.activePluginIds,
     allowedToolNames,
+    executionSurfaceGuard: opts.executionSurfaceGuard,
     // This seam's allowlist is the eager PINNED CORE (progressive
     // disclosure), not a containment boundary — X2's whole point here is
     // that the escalated turn can discover the rest of the surface catalog

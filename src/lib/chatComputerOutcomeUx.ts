@@ -4,6 +4,7 @@ import {
   isLowRiskLocalImageExportTask,
 } from './computerTaskPlanner';
 import type { ComputerTaskPhase } from './computerTaskState';
+import type { ComputerTaskReplayPolicy } from './computerTaskOutcome';
 
 export interface ChatComputerOutcomePresentationInput {
   task: string;
@@ -17,6 +18,10 @@ export interface ChatComputerOutcomePresentationInput {
   capabilityBlockers?: string[];
   capabilityPhase?: ComputerTaskPhase | null;
   suppressGenericRecovery?: boolean;
+  approvalCategory?: string | null;
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
 }
 
 export interface ChatComputerOutcomePresentation {
@@ -247,23 +252,42 @@ export function isCompactAppAutomationFailure(
 }
 
 export function isCompactLocalFileAutomationFailure(
-  task: string,
+  _task: string,
   outcomeStatus: string,
   outcomeMessage: string,
   warnings: string[],
 ): boolean {
   if (outcomeStatus === 'completed') return false;
-  const text = [task, outcomeMessage, ...warnings].join('\n');
-  return /\b(?:desktop\.(?:open_path|file_stat|file_search|file_read|file_write_text|file_copy|file_rename|file_trash)|X-UC-File-Session-Token|EACCES|EPERM|ENOENT|operation not permitted|file or folder does not exist|\/Users\/|Desktop bridge open path failed)\b/i.test(text)
-    && /\b(?:file|folder|path|desktop|downloads?|documents?|image|pdf|csv|permission|access|missing|not found|failed|blocked|error)\b/i.test(text);
+  // Classify the FAILURE EVIDENCE, not the requested task or advisory plan.
+  // Photoshop preflight guidance legitimately mentions desktop.file_stat as a
+  // possible source/output check. That mention alone does not mean a file tool
+  // ran, much less failed. Requiring a concrete error on one evidence item also
+  // prevents a tool name in one warning from pairing with "missing" in a later,
+  // unrelated warning after the strings are joined.
+  const evidenceItems = [outcomeMessage, ...warnings]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  const concreteFileFailure = /\b(?:X-UC-File-Session-Token|EACCES|EPERM|ENOENT|file_access_not_granted|file_not_found|path_not_found|ambiguous_file_match|output_conflict|operation not permitted|file or folder does not exist|Desktop bridge open path failed)\b/i;
+  const explicitFileResolutionFailure = /\b(?:multiple matches?|multiple matching paths?|ambiguous (?:file|path)|no matching (?:file|path)|(?:file|folder|path) (?:was )?(?:not found|does not exist))\b/i;
+  const fileToolFailure = /\bdesktop\.(?:open_path|file_stat|file_search|file_read|file_write_text|file_copy|file_rename|file_trash)\b[^\n\r]{0,220}\b(?:failed|error|denied|forbidden|unauthorized|timed out|timeout|multiple matches?|ambiguous|no match)\b/i;
+  const failureBeforeFileTool = /\b(?:failed|error|denied|forbidden|unauthorized|timed out|timeout|multiple matches?|ambiguous|no match)\b[^\n\r]{0,220}\bdesktop\.(?:open_path|file_stat|file_search|file_read|file_write_text|file_copy|file_rename|file_trash)\b/i;
+  return evidenceItems.some((item) => (
+    concreteFileFailure.test(item)
+    || explicitFileResolutionFailure.test(item)
+    || fileToolFailure.test(item)
+    || failureBeforeFileTool.test(item)
+  ));
 }
 
 function localFileAutomationFailureCopy(
-  task: string,
+  _task: string,
   outcomeMessage: string,
   warnings: string[],
 ): { message: string; recoveryStep: string } {
-  const text = [task, outcomeMessage, ...warnings].join('\n');
+  // The failure subtype must also come from observed failure evidence. User
+  // wording such as "open the missing file" must not manufacture ENOENT,
+  // ambiguity, or a permission denial that no tool actually reported.
+  const text = [outcomeMessage, ...warnings].join('\n');
   if (/\b(?:ambiguous|more than one|multiple matches?|multiple matching)\b/i.test(text)) {
     return {
       message: LOCAL_FILE_AMBIGUOUS_FAILURE_MESSAGE,
@@ -304,6 +328,31 @@ export function isCompactGenericBrowserAutomationFailure(
 export function buildChatComputerOutcomePresentation(
   input: ChatComputerOutcomePresentationInput,
 ): ChatComputerOutcomePresentation {
+  const manualVerificationOnly = input.replayPolicy === 'manual_verify_only'
+    && input.mutationDispatched === true;
+  if (manualVerificationOnly) {
+    const creationWasVerified = /\bcreated and verified\b/i.test(input.outcomeMessage);
+    const statusTool = (input.verificationOnlyTools || []).find((tool) => tool === 'desktop.photoshop_document_status');
+    return {
+      warningBlock: '',
+      blockerList: [creationWasVerified
+        ? 'The document mutation completed, but the final foreground check was inconclusive.'
+        : 'The create request crossed the desktop bridge, so repeating it could create a duplicate document.'],
+      shouldRecoverOutcome: false,
+      statePhase: 'blocked',
+      compactUserMessage: creationWasVerified
+        ? 'Photoshop created and verified the requested document, but I could not confirm the final foreground state. I will not create it again automatically.'
+        : 'The Photoshop create request was sent, but its final result is uncertain. I will not send it again because that could create a duplicate document. Check the active Photoshop document once instead.',
+      hideRecoveryDetails: true,
+      hideComputerHandoff: false,
+      hideComputerTaskStatus: false,
+      nextSteps: [statusTool
+        ? 'Check the active document with Photoshop document status; do not run Create again.'
+        : 'Check the active Photoshop document once; do not run Create again.'],
+    };
+  }
+  const awaitingHumanApproval = /^(?:waiting_approval|awaiting_approval|deferred)$/i.test(input.outcomeStatus)
+    && (input.approvalCategory === 'filed' || input.approvalCategory === 'pending');
   const capabilityBlockers = input.capabilityBlockers || [];
   const compactBridgeFailure = isCompactPhotoshopSaveForWebBridgeFailure(
     input.task,
@@ -403,11 +452,16 @@ export function buildChatComputerOutcomePresentation(
     || input.preflightBlockers.length > 0
     || input.groundingBlockers.length > 0;
   const shouldRecoverOutcome = !input.suppressGenericRecovery
+    && !awaitingHumanApproval
     && !compactDirectImageConversionBridgeFailure
     && !compactBridgeFailure
     && hasRecoverableProblem;
   const statePhase = input.capabilityPhase
-    || (compactTechnicalFailure || missingLocalImageExportProof || input.visibleWarnings.length > 0 || input.outcomeStatus !== 'completed' ? 'blocked' : 'completed');
+    || (awaitingHumanApproval
+      ? 'awaiting_approval'
+      : compactTechnicalFailure || missingLocalImageExportProof || input.visibleWarnings.length > 0 || input.outcomeStatus !== 'completed'
+        ? 'blocked'
+        : 'completed');
 
   return {
     warningBlock,
@@ -431,10 +485,12 @@ export function buildChatComputerOutcomePresentation(
         : compactGenericBrowserAutomationFailure
         ? BROWSER_AUTOMATION_FAILURE_MESSAGE
         : compactImageExportSuccess,
-    hideRecoveryDetails: compactTechnicalFailure || Boolean(compactImageExportSuccess) || completedWithoutActionableIssues,
+    hideRecoveryDetails: awaitingHumanApproval || compactTechnicalFailure || Boolean(compactImageExportSuccess) || completedWithoutActionableIssues,
     hideComputerHandoff: compactTechnicalFailure || Boolean(compactImageExportSuccess) || completedWithoutActionableIssues,
     hideComputerTaskStatus: compactTechnicalFailure || Boolean(compactImageExportSuccess) || completedWithoutActionableIssues,
-    nextSteps: compactDirectImageConversionBridgeFailure
+    nextSteps: awaitingHumanApproval
+      ? ['Approve this exact plan to continue automatically.']
+      : compactDirectImageConversionBridgeFailure
       ? [directImageConversionFailureCopyValue?.recoveryStep || DIRECT_IMAGE_CONVERSION_RECONNECT_STEP]
       : compactBridgeFailure
         ? [PHOTOSHOP_SAVE_FOR_WEB_RECONNECT_STEP]

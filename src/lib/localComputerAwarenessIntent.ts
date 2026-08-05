@@ -153,8 +153,8 @@ const MOUSE_DRAG_RE = /^\s*(?:please\s+)?drag(?:\s+(?:the\s+)?(?:mouse|cursor))?
 const MOUSE_MOVE_RE = /^\s*(?:please\s+)?(?:move|hover|position)\s+(?:the\s+)?(?:mouse|cursor)(?:\s+(?:to|at|over))?\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
 const MOUSE_CLICK_RE = /^\s*(?:please\s+)?(?:(right|left)\s+)?(?:(double|single)\s+)?click(?:\s+(?:the\s+)?(?:mouse|cursor))?(?:\s+(?:at|on))?\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
 const MOUSE_DOWN_RE = /^\s*(?:please\s+)?(?:(right|left)\s+)?(?:mouse\s+down|hold(?:\s+(?:the\s+)?(?:mouse|cursor))?(?:\s+down)?)(?:\s+(?:at|on))?\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
-const MOUSE_UP_RE = /^\s*(?:please\s+)?(?:(right|left)\s+)?(?:mouse\s+up|release(?:\s+(?:the\s+)?(?:mouse|cursor))?)(?:(?:\s+(?:at|on))?\s+(\d{1,5})\s*,\s*(\d{1,5}))?\s*[.!?]?\s*$/i;
-const MOUSE_SCROLL_RE = /^\s*(?:please\s+)?scroll\s+(up|down|left|right)(?:\s+(?:by\s+)?(\d{1,5}))?(?:\s+(?:at|on)\s+(\d{1,5})\s*,\s*(\d{1,5}))?\s*[.!?]?\s*$/i;
+const MOUSE_UP_RE = /^\s*(?:please\s+)?(?:(right|left)\s+)?(?:mouse\s+up|release(?:\s+(?:the\s+)?(?:mouse|cursor))?)(?:\s+(?:at|on))?\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
+const MOUSE_SCROLL_RE = /^\s*(?:please\s+)?scroll\s+(up|down|left|right)(?:\s+(?:by\s+)?(\d{1,5}))?\s+(?:at|on)\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
 const DURATION_AMOUNT_PATTERN = String.raw`(?:\d{1,4}(?:\.\d{1,2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|a|an|half)`;
 const TYPE_TEXT_IN_APP_RE = /^\s*(?:please\s+)?(?:type|enter)\s+([\s\S]{1,4000}?)\s+(?:in|into|on)\s+(.+?)(?:\s+(?:app|application|window))?\s*[.!?]?\s*$/i;
 const TYPE_TEXT_FRONTMOST_RE = /^\s*(?:please\s+)?(?:type|enter)\s+([\s\S]{1,4000}?)\s+(?:in|into|on)\s+(?:the\s+)?(?:current|active|frontmost)\s+(?:app|application|window|field|text\s*box|textbox)\s*[.!?]?\s*$/i;
@@ -310,6 +310,12 @@ const WINDOW_RESIZE_RE = /^\s*(?:please\s+)?resize\s+(?:(.+?)\s+)?window\s+(?:to
 const WINDOW_MANAGE_RE = /^\s*(?:please\s+)?(minimi[sz]e|unminimi[sz]e|maximi[sz]e|zoom|raise|focus)\s+(?:(active|frontmost|current)\s+)?(?:(.+?)\s+)?window\s*[.!?]?\s*$/i;
 const LAUNCH_APP_RE = /^\s*(?:please\s+)?(?:open|launch|start|fire\s+up)\s+(.+?)(?:\s+(?:app|application|program))?(?:\s+(?:on|in)\s+(?:my\s+)?(?:computer|mac|desktop))?\s*[.!?]?$/i;
 const COMPUTER_LAUNCH_APP_RE = /^\s*(?:please\s+)?(?:use\s+)?(?:(?:my|the)\s+)?(?:computer|mac|desktop)\s+(?:to\s+)?(?:open|launch|start|fire\s+up)\s+(.+?)(?:\s+(?:app|application|program))?\s*[.!?]?$/i;
+// A generic "start <name>" parser must not turn artifact creation into an app
+// launch. Keep plain app names valid ("start Photoshop", "start Microsoft
+// Project", "start Canvas"), while rejecting creation-shaped targets such as
+// "start a new project 600 x 600". Dedicated new-document parsers or the typed
+// deterministic compiler own those requests.
+const NON_APP_CREATION_TARGET_RE = /^(?:(?:a|an|the)\s+)?(?:new|blank|fresh)\s+(?:project|document|doc|file|canvas|image|composition)\b|^(?:a|an)\s+(?:project|document|doc|file|canvas|image|composition)\b/i;
 const FOCUS_APP_RE = /^\s*(?:please\s+)?(?:focus|switch\s+to|bring\s+(?:up|forward)|bring\s+.+?\s+to\s+(?:front|the\s+front))\s+(.+?)(?:\s+(?:app|application|window))?\s*[.!?]?$/i;
 const BRING_TO_FRONT_RE = /^\s*(?:please\s+)?bring\s+(.+?)\s+to\s+(?:front|the\s+front)\s*[.!?]?$/i;
 const OPEN_URL_RE = /^\s*(?:please\s+)?(?:open|visit|go\s+to|navigate\s+to|launch)\s+(https?:\/\/\S+|mailto:\S+|file:\/\/\S+)\s*$/i;
@@ -3562,26 +3568,26 @@ export function detectLocalComputerAwarenessIntent(message: string): LocalComput
     };
   }
   const mouseUp = text.match(MOUSE_UP_RE);
-  if (mouseUp) {
+  if (mouseUp?.[2] && mouseUp[3]) {
     return {
       route: true,
       kind: 'mouse_up',
       mouseButton: mouseUp[1]?.toLowerCase() === 'right' ? 'right' : 'left',
-      x: mouseUp[2] ? Number(mouseUp[2]) : undefined,
-      y: mouseUp[3] ? Number(mouseUp[3]) : undefined,
+      x: Number(mouseUp[2]),
+      y: Number(mouseUp[3]),
       reason: 'local-mouse-up',
     };
   }
   const mouseScroll = text.match(MOUSE_SCROLL_RE);
-  if (mouseScroll?.[1]) {
+  if (mouseScroll?.[1] && mouseScroll[3] && mouseScroll[4]) {
     const deltas = scrollDeltas(mouseScroll[1], mouseScroll[2]);
     return {
       route: true,
       kind: 'mouse_scroll',
       deltaX: deltas.deltaX,
       deltaY: deltas.deltaY,
-      x: mouseScroll[3] ? Number(mouseScroll[3]) : undefined,
-      y: mouseScroll[4] ? Number(mouseScroll[4]) : undefined,
+      x: Number(mouseScroll[3]),
+      y: Number(mouseScroll[4]),
       reason: 'local-mouse-scroll',
     };
   }
@@ -3897,11 +3903,11 @@ export function detectLocalComputerAwarenessIntent(message: string): LocalComput
   const focusApp = text.match(FOCUS_APP_RE);
   if (focusApp?.[1]) return { route: true, kind: 'focus_app', appQuery: cleanAppQuery(focusApp[1]), reason: 'local-focus-app' };
   const computerLaunchApp = text.match(COMPUTER_LAUNCH_APP_RE);
-  if (computerLaunchApp?.[1] && !looksLikeWebSurface(computerLaunchApp[1]) && !looksLikeLocalFileLaunchTarget(computerLaunchApp[1]) && !/^(?:the\s+)?(?:file|image|photo|picture|document|folder)\b/i.test(computerLaunchApp[1].trim())) {
+  if (computerLaunchApp?.[1] && !looksLikeWebSurface(computerLaunchApp[1]) && !looksLikeLocalFileLaunchTarget(computerLaunchApp[1]) && !/^(?:the\s+)?(?:file|image|photo|picture|document|folder)\b/i.test(computerLaunchApp[1].trim()) && !NON_APP_CREATION_TARGET_RE.test(computerLaunchApp[1].trim())) {
     return { route: true, kind: 'launch_app', appQuery: cleanAppQuery(computerLaunchApp[1]), reason: 'local-launch-app' };
   }
   const launchApp = text.match(LAUNCH_APP_RE);
-  if (launchApp?.[1] && !looksLikeWebSurface(launchApp[1]) && !looksLikeLocalFileLaunchTarget(launchApp[1]) && !/^(?:the\s+)?(?:file|image|photo|picture|document|folder)\b/i.test(launchApp[1].trim())) {
+  if (launchApp?.[1] && !looksLikeWebSurface(launchApp[1]) && !looksLikeLocalFileLaunchTarget(launchApp[1]) && !/^(?:the\s+)?(?:file|image|photo|picture|document|folder)\b/i.test(launchApp[1].trim()) && !NON_APP_CREATION_TARGET_RE.test(launchApp[1].trim())) {
     return { route: true, kind: 'launch_app', appQuery: cleanAppQuery(launchApp[1]), reason: 'local-launch-app' };
   }
   return { route: false, kind: null, reason: 'no-local-awareness-match' };
@@ -4754,13 +4760,11 @@ export function renderLocalComputerAwarenessIntent(intent: LocalComputerAwarenes
     case 'mouse_down':
       return `${intent.mouseButton === 'right' ? 'right ' : ''}mouse down at ${intent.x},${intent.y}`.trim();
     case 'mouse_up':
-      return typeof intent.x === 'number' && typeof intent.y === 'number'
-        ? `${intent.mouseButton === 'right' ? 'right ' : ''}mouse up at ${intent.x},${intent.y}`.trim()
-        : `${intent.mouseButton === 'right' ? 'right ' : ''}mouse up`.trim();
+      return `${intent.mouseButton === 'right' ? 'right ' : ''}mouse up at ${intent.x},${intent.y}`.trim();
     case 'mouse_drag':
       return `drag from ${intent.fromX},${intent.fromY} to ${intent.toX},${intent.toY}`;
     case 'mouse_scroll':
-      return `scroll ${Number(intent.deltaY || 0) < 0 || Number(intent.deltaX || 0) < 0 ? 'up' : 'down'} by ${Math.max(Math.abs(Number(intent.deltaY || 0)), Math.abs(Number(intent.deltaX || 0))) || 520}`;
+      return `scroll ${Number(intent.deltaY || 0) < 0 || Number(intent.deltaX || 0) < 0 ? 'up' : 'down'} by ${Math.max(Math.abs(Number(intent.deltaY || 0)), Math.abs(Number(intent.deltaX || 0))) || 520} at ${intent.x},${intent.y}`;
     case 'wait':
       return `wait ${Math.max(1, Math.round((intent.durationMs || 1000) / 1000))} seconds`;
     case 'wait_for_app':

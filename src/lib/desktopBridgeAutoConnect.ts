@@ -168,7 +168,7 @@ export function renderDesktopBridgeConnectedMessage(
     ? `Browser: ${readiness.browser.contextOpen ? 'ready with an open UC browser session.' : 'ready; opens on first browser task.'}`
     : 'Browser: not ready yet; desktop tasks can still run.';
   const permissionLine = wasPaired && status !== 'started_and_paired'
-    ? 'Pairing token refreshed. Sensitive desktop/browser actions still ask for approval.'
+    ? 'Existing pairing token reused. Sensitive desktop/browser actions still ask for approval.'
     : 'Sensitive desktop/browser actions still ask for approval. First desktop/browser use may trigger macOS permission prompts.';
 
   return [
@@ -184,7 +184,7 @@ async function pairReachableBridge(
   health: DesktopHealth,
   status: Extract<DesktopBridgeAutoConnectStatus, 'ready' | 'paired' | 'started_and_paired'>,
 ): Promise<DesktopBridgeAutoConnectResult> {
-  const { isDesktopBridgePaired, pairDesktopBridge } = await import('./desktopBridge');
+  const { ensureDesktopBridgePaired, isDesktopBridgePaired } = await import('./desktopBridge');
   if (!health.supported) {
     const payload = buildDesktopBridgeRecoveryPayload(
       'unsupported',
@@ -201,7 +201,12 @@ async function pairReachableBridge(
   }
 
   const wasPaired = isDesktopBridgePaired();
-  const paired = await pairDesktopBridge();
+  // Reuse the cached/secondary pairing token when it is still present. A
+  // direct pair call always starts a fresh challenge exchange and produced a
+  // harmless but noisy 428 in the console on every Chat app task. Bridge calls
+  // already repair a stale cached token after a 401, so this keeps recovery
+  // intact without forcing a new challenge up front.
+  const paired = await ensureDesktopBridgePaired();
   if (!paired.ok) {
     const payload = buildDesktopBridgeRecoveryPayload('pair_failed', paired.error || 'unknown error');
     return {

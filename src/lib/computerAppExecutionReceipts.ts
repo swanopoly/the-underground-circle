@@ -224,7 +224,7 @@ export function buildComputerAppExecutionReceiptPromptBlock(
     `Receipt strategy: ${plan.strategy.label} (${plan.strategy.id})`,
     `Required receipt fields: ${plan.requiredFields.join(', ')}`,
     `Persistence targets: ${plan.persistenceTargets.join(', ')}`,
-    `Approval checkpoints: ${plan.strategy.approvalCheckpoints.length ? plan.strategy.approvalCheckpoints.join(' | ') : 'none for read-only work'}`,
+    `Approval checkpoints: ${plan.strategy.approvalCheckpoints.length ? plan.strategy.approvalCheckpoints.join(' | ') : 'none required by this strategy'}`,
     `Recovery policy: ${plan.strategy.recoveryPolicy.join(' | ')}`,
     'Required receipts:',
     ...required.map((template) => `- ${template.id} [${template.surface}]: ${template.instruction}`),

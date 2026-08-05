@@ -251,8 +251,9 @@ function main(): void {
   assert(
     desktopClientSource.includes('requestBridgePairToken')
       && bridgeAuthSource.includes("post({ pairingChallenge: first.json.challenge })")
+      && bridgeAuthSource.includes('(first.status === 200 || first.status === 428)')
       && detectorSource.includes('requestBridgePairToken'),
-    'source: every Claude /desktop/pair caller completes challenge-v1',
+    'source: every Claude /desktop/pair caller completes challenge-v1 across quiet-200 and rolling-428 bridges',
   );
   assert(
     bridgeSource.includes('prepareSupportedExecInvocation(argv, cwd)')

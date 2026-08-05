@@ -1,4 +1,4 @@
-// uc-input-helper - macOS CoreGraphics mouse primitive helper for the UC bridge.
+// uc-input-helper - guarded macOS CoreGraphics input helper for the UC bridge.
 //
 // Usage:
 //   uc-input-helper move --x 120 --y 240
@@ -8,6 +8,8 @@
 //   uc-input-helper drag --from-x 120 --from-y 240 --to-x 600 --to-y 500 [--duration-ms 450]
 //   uc-input-helper scroll --x 120 --y 240 [--delta-x 0] [--delta-y -600]
 //   uc-input-helper window-proof --pid 1234
+//   printf %s "hello" | uc-input-helper type [exact-window expectation flags]
+//   uc-input-helper key --key-code 36 [--modifiers command,shift] [exact-window expectation flags]
 //
 // Every mutating command additionally requires:
 //   --expect-app NAME --expect-pid PID --expect-window-id ID
@@ -38,8 +40,15 @@ func jsonEscape(_ s: String) -> String {
     return "\"\(out)\""
 }
 
-func emitError(_ msg: String) -> Never {
-    print("{\"ok\":false,\"error\":\(jsonEscape(msg))}")
+enum InputHelperErrorCode: String {
+    case invalidRequest = "invalid_request"
+    case uncertainUiTarget = "uncertain_ui_target"
+    case permissionDenied = "permission_denied"
+    case inputDispatchFailed = "input_dispatch_failed"
+}
+
+func emitError(_ msg: String, errorCode: InputHelperErrorCode = .invalidRequest) -> Never {
+    print("{\"ok\":false,\"error\":\(jsonEscape(msg)),\"errorCode\":\(jsonEscape(errorCode.rawValue))}")
     exit(1)
 }
 
@@ -187,10 +196,10 @@ func parseNativeWindowExpectation() -> NativeWindowExpectation {
     let appName = (arg("--expect-app") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     guard
         !appName.isEmpty,
-        appName.count <= 160,
+        appName.unicodeScalars.count <= 160,
         appName.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f })
     else {
-        emitError("--expect-app must be a non-empty bounded process name")
+        emitError("--expect-app must be a non-empty process name of at most 160 Unicode code points without control characters")
     }
     let pid = intArg("--expect-pid", min: 1, max: Int(Int32.max))
     let windowIdValue = intArg("--expect-window-id", min: 1, max: Int(UInt32.max))
@@ -236,6 +245,19 @@ func validateNativeWindowExpectation(
     else {
         return "native target guard rejected app, layer, visibility, or window-bounds drift"
     }
+    guard let frontmostNormalWindow = records.first(where: { record in
+        record.pid == expectation.pid
+            && record.layer == 0
+            && record.onScreen
+            && record.alpha > 0
+            && record.bounds.width >= 1
+            && record.bounds.height >= 1
+    }),
+        frontmostNormalWindow.windowId == expectation.windowId,
+        roundedBounds(frontmostNormalWindow.bounds).equalTo(expectation.bounds)
+    else {
+        return "native target guard rejected frontmost-window substitution"
+    }
     for point in points {
         guard pointIsInsideWindow(point, bounds: expectation.bounds) else {
             return "native target guard rejected a point outside the exact target window"
@@ -264,7 +286,7 @@ func requireNativeWindowExpectation(
     points: [CGPoint]
 ) {
     if let error = validateNativeWindowExpectation(expectation, points: points) {
-        emitError(error)
+        emitError(error, errorCode: .uncertainUiTarget)
     }
 }
 
@@ -308,8 +330,10 @@ func parsedButton() -> MouseButton {
 
 func postMove(to p: CGPoint, expectation: NativeWindowExpectation) {
     requireNativeWindowExpectation(expectation, points: [p])
-    let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)
-    event?.post(tap: .cghidEventTap)
+    guard let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left) else {
+        emitError("could not create mouse move event", errorCode: .inputDispatchFailed)
+    }
+    event.post(tap: .cghidEventTap)
 }
 
 func postClick(at p: CGPoint, button: MouseButton, count: Int, expectation: NativeWindowExpectation) {
@@ -318,18 +342,21 @@ func postClick(at p: CGPoint, button: MouseButton, count: Int, expectation: Nati
     for i in 0..<count {
         requireNativeWindowExpectation(expectation, points: [p])
         let clickState = Int64(min(i + 1, 2))
-        let down = CGEvent(mouseEventSource: nil, mouseType: button.downType, mouseCursorPosition: p, mouseButton: button.cgButton)
-        down?.setIntegerValueField(.mouseEventClickState, value: clickState)
-        down?.post(tap: .cghidEventTap)
+        guard
+            let down = CGEvent(mouseEventSource: nil, mouseType: button.downType, mouseCursorPosition: p, mouseButton: button.cgButton),
+            let up = CGEvent(mouseEventSource: nil, mouseType: button.upType, mouseCursorPosition: p, mouseButton: button.cgButton)
+        else {
+            emitError("could not create mouse click events", errorCode: .inputDispatchFailed)
+        }
+        down.setIntegerValueField(.mouseEventClickState, value: clickState)
+        up.setIntegerValueField(.mouseEventClickState, value: clickState)
+        down.post(tap: .cghidEventTap)
         usleep(35_000)
         if let error = validateNativeWindowExpectation(expectation, points: [p]) {
-            let emergencyUp = CGEvent(mouseEventSource: nil, mouseType: button.upType, mouseCursorPosition: p, mouseButton: button.cgButton)
-            emergencyUp?.post(tap: .cghidEventTap)
-            emitError(error)
+            up.post(tap: .cghidEventTap)
+            emitError(error, errorCode: .uncertainUiTarget)
         }
-        let up = CGEvent(mouseEventSource: nil, mouseType: button.upType, mouseCursorPosition: p, mouseButton: button.cgButton)
-        up?.setIntegerValueField(.mouseEventClickState, value: clickState)
-        up?.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
         usleep(70_000)
     }
 }
@@ -338,14 +365,18 @@ func postMouseDown(at p: CGPoint, button: MouseButton, expectation: NativeWindow
     postMove(to: p, expectation: expectation)
     usleep(25_000)
     requireNativeWindowExpectation(expectation, points: [p])
-    let down = CGEvent(mouseEventSource: nil, mouseType: button.downType, mouseCursorPosition: p, mouseButton: button.cgButton)
-    down?.post(tap: .cghidEventTap)
+    guard let down = CGEvent(mouseEventSource: nil, mouseType: button.downType, mouseCursorPosition: p, mouseButton: button.cgButton) else {
+        emitError("could not create mouse-down event", errorCode: .inputDispatchFailed)
+    }
+    down.post(tap: .cghidEventTap)
 }
 
 func postMouseUp(at p: CGPoint, button: MouseButton, expectation: NativeWindowExpectation) {
     requireNativeWindowExpectation(expectation, points: [p])
-    let up = CGEvent(mouseEventSource: nil, mouseType: button.upType, mouseCursorPosition: p, mouseButton: button.cgButton)
-    up?.post(tap: .cghidEventTap)
+    guard let up = CGEvent(mouseEventSource: nil, mouseType: button.upType, mouseCursorPosition: p, mouseButton: button.cgButton) else {
+        emitError("could not create mouse-up event", errorCode: .inputDispatchFailed)
+    }
+    up.post(tap: .cghidEventTap)
 }
 
 func postDrag(
@@ -365,8 +396,10 @@ func postDrag(
     postMove(to: start, expectation: expectation)
     usleep(35_000)
     requireNativeWindowExpectation(expectation, points: [start])
-    let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left)
-    down?.post(tap: .cghidEventTap)
+    guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left) else {
+        emitError("could not create drag mouse-down event", errorCode: .inputDispatchFailed)
+    }
+    down.post(tap: .cghidEventTap)
 
     let steps = max(8, min(80, durationMs / 12))
     let sleepMicros = UInt32(max(2_000, (durationMs * 1000) / max(steps, 1)))
@@ -379,20 +412,26 @@ func postDrag(
         if let error = validateNativeWindowExpectation(expectation, points: [p]) {
             let emergencyUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: p, mouseButton: .left)
             emergencyUp?.post(tap: .cghidEventTap)
-            emitError(error)
+            emitError(error, errorCode: .uncertainUiTarget)
         }
-        let drag = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left)
-        drag?.post(tap: .cghidEventTap)
+        guard let drag = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left) else {
+            let emergencyUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: p, mouseButton: .left)
+            emergencyUp?.post(tap: .cghidEventTap)
+            emitError("could not create drag event", errorCode: .inputDispatchFailed)
+        }
+        drag.post(tap: .cghidEventTap)
         usleep(sleepMicros)
     }
 
     if let error = validateNativeWindowExpectation(expectation, points: [end]) {
         let emergencyUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left)
         emergencyUp?.post(tap: .cghidEventTap)
-        emitError(error)
+        emitError(error, errorCode: .uncertainUiTarget)
     }
-    let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left)
-    up?.post(tap: .cghidEventTap)
+    guard let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left) else {
+        emitError("could not create drag mouse-up event", errorCode: .inputDispatchFailed)
+    }
+    up.post(tap: .cghidEventTap)
 }
 
 func postScroll(
@@ -404,23 +443,167 @@ func postScroll(
     postMove(to: p, expectation: expectation)
     usleep(20_000)
     requireNativeWindowExpectation(expectation, points: [p])
-    let event = CGEvent(
+    guard let event = CGEvent(
         scrollWheelEvent2Source: nil,
         units: .pixel,
         wheelCount: 2,
         wheel1: Int32(deltaY),
         wheel2: Int32(deltaX),
         wheel3: 0
-    )
-    event?.post(tap: .cghidEventTap)
+    ) else {
+        emitError("could not create scroll event", errorCode: .inputDispatchFailed)
+    }
+    event.post(tap: .cghidEventTap)
+}
+
+enum NativeKeyModifier: String, CaseIterable {
+    case command
+    case shift
+    case option
+    case control
+    case function
+
+    var eventFlag: CGEventFlags {
+        switch self {
+        case .command: return .maskCommand
+        case .shift: return .maskShift
+        case .option: return .maskAlternate
+        case .control: return .maskControl
+        case .function: return .maskSecondaryFn
+        }
+    }
+}
+
+let allowedNativeKeyCodes: Set<Int> = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17,
+    18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
+    34, 35, 36, 37, 38, 40, 43, 45, 46, 47, 48, 49, 50, 51, 53,
+    96, 97, 98, 99, 100, 101, 103, 109, 111, 115, 116, 118, 119, 120,
+    121, 122, 123, 124, 125, 126,
+]
+
+func parsedNativeKeyModifiers() -> [NativeKeyModifier] {
+    let raw = (arg("--modifiers") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    if raw.isEmpty { return [] }
+    let parts = raw.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+    guard parts.count <= 4, parts.allSatisfy({ !$0.isEmpty }) else {
+        emitError("--modifiers must contain at most four comma-separated modifiers")
+    }
+    var seen = Set<NativeKeyModifier>()
+    for part in parts {
+        guard let modifier = NativeKeyModifier(rawValue: part), seen.insert(modifier).inserted else {
+            emitError("--modifiers contains an unsupported or duplicate modifier")
+        }
+    }
+    return NativeKeyModifier.allCases.filter(seen.contains)
+}
+
+func flagsForNativeKeyModifiers(_ modifiers: [NativeKeyModifier]) -> CGEventFlags {
+    modifiers.reduce(into: CGEventFlags()) { flags, modifier in
+        flags.insert(modifier.eventFlag)
+    }
+}
+
+func postGuardedKey(
+    keyCode: Int,
+    modifiers: [NativeKeyModifier],
+    expectation: NativeWindowExpectation
+) {
+    guard allowedNativeKeyCodes.contains(keyCode) else {
+        emitError("--key-code is not in the bounded supported key set")
+    }
+    requireNativeWindowExpectation(expectation, points: [])
+    guard
+        let down = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: true),
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(keyCode), keyDown: false)
+    else {
+        emitError("could not create keyboard events", errorCode: .inputDispatchFailed)
+    }
+    let flags = flagsForNativeKeyModifiers(modifiers)
+    down.flags = flags
+    up.flags = flags
+    down.post(tap: .cghidEventTap)
+    usleep(18_000)
+    if let error = validateNativeWindowExpectation(expectation, points: []) {
+        up.post(tap: .cghidEventTap)
+        emitError(error, errorCode: .uncertainUiTarget)
+    }
+    up.post(tap: .cghidEventTap)
+}
+
+func boundedStdinText() -> String {
+    let maxBytes = 32 * 1024
+    var data = Data()
+    while data.count <= maxBytes {
+        let remaining = maxBytes + 1 - data.count
+        let chunk = FileHandle.standardInput.readData(ofLength: min(4096, remaining))
+        if chunk.isEmpty { break }
+        data.append(chunk)
+    }
+    guard data.count <= maxBytes else {
+        emitError("stdin text exceeds the 32768-byte helper limit")
+    }
+    guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
+        emitError("stdin must contain non-empty UTF-8 text")
+    }
+    guard text.utf16.count <= 4_000 else {
+        emitError("stdin text exceeds the 4000 UTF-16-unit helper limit")
+    }
+    return text
+}
+
+func unicodeInputChunks(_ text: String, maxUtf16Units: Int = 32) -> [String] {
+    var chunks: [String] = []
+    var current = ""
+    var currentUnits = 0
+    for scalar in text.unicodeScalars {
+        let scalarUnits = scalar.value > 0xffff ? 2 : 1
+        if currentUnits + scalarUnits > maxUtf16Units && !current.isEmpty {
+            chunks.append(current)
+            current = ""
+            currentUnits = 0
+        }
+        current.unicodeScalars.append(scalar)
+        currentUnits += scalarUnits
+    }
+    if !current.isEmpty { chunks.append(current) }
+    return chunks
+}
+
+func postGuardedUnicodeText(_ text: String, expectation: NativeWindowExpectation) {
+    let chunks = unicodeInputChunks(text)
+    for chunk in chunks {
+        requireNativeWindowExpectation(expectation, points: [])
+        guard
+            let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+            let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+        else {
+            emitError("could not create Unicode keyboard events", errorCode: .inputDispatchFailed)
+        }
+        let utf16 = Array(chunk.utf16)
+        utf16.withUnsafeBufferPointer { buffer in
+            down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress!)
+        }
+        down.post(tap: .cghidEventTap)
+        usleep(12_000)
+        if let error = validateNativeWindowExpectation(expectation, points: []) {
+            up.post(tap: .cghidEventTap)
+            emitError(error, errorCode: .uncertainUiTarget)
+        }
+        up.post(tap: .cghidEventTap)
+        usleep(4_000)
+    }
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    emitError("usage: uc-input-helper <window-proof|move|click|down|up|drag|scroll> ...")
+    emitError("usage: uc-input-helper <window-proof|move|click|down|up|drag|scroll|type|key> ...")
 }
 
 if !AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt" as CFString: false] as CFDictionary) {
-    emitError("Accessibility permission not granted. System Settings > Privacy & Security > Accessibility > add the bridge/helper.")
+    emitError(
+        "Accessibility permission not granted. System Settings > Privacy & Security > Accessibility > add the bridge/helper.",
+        errorCode: .permissionDenied
+    )
 }
 
 let subcommand = CommandLine.arguments[1]
@@ -429,7 +612,10 @@ switch subcommand {
 case "window-proof":
     let pid = intArg("--pid", min: 1, max: Int(Int32.max))
     guard let proof = exactFrontmostWindowProof(pid: pid) else {
-        emitError("no exact frontmost visible normal window was available for the requested pid")
+        emitError(
+            "no exact frontmost visible normal window was available for the requested pid",
+            errorCode: .uncertainUiTarget
+        )
     }
     let bounds = roundedBounds(proof.bounds)
     emitOk(
@@ -500,6 +686,18 @@ case "scroll":
         expectation: expectation
     )
     emitOk("\"x\":\(x),\"y\":\(y),\"deltaX\":\(deltaX),\"deltaY\":\(deltaY)")
+case "type":
+    let expectation = parseNativeWindowExpectation()
+    let text = boundedStdinText()
+    postGuardedUnicodeText(text, expectation: expectation)
+    emitOk("\"utf16Units\":\(text.utf16.count),\"chunks\":\(unicodeInputChunks(text).count)")
+case "key":
+    let keyCode = intArg("--key-code", min: 0, max: 126)
+    let modifiers = parsedNativeKeyModifiers()
+    let expectation = parseNativeWindowExpectation()
+    postGuardedKey(keyCode: keyCode, modifiers: modifiers, expectation: expectation)
+    let modifierJson = modifiers.map { jsonEscape($0.rawValue) }.joined(separator: ",")
+    emitOk("\"keyCode\":\(keyCode),\"modifiers\":[\(modifierJson)]")
 default:
     emitError("unknown subcommand: \(subcommand)")
 }

@@ -9,6 +9,7 @@
 
 import * as fs from 'node:fs';
 import { execSync } from 'node:child_process';
+import ts from 'typescript';
 
 import {
   parseKeyCombo,
@@ -231,6 +232,90 @@ for (const bad of [
 
 const bridgeSource = fs.readFileSync('scripts/claude-bridge.js', 'utf8');
 const clientSource = fs.readFileSync('src/lib/desktopBridge.ts', 'utf8');
+
+function evaluateClientTypeScriptSlice<T>(source: string, extraExports = ''): T {
+  const output = ts.transpileModule(`${source}\n${extraExports}`, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText;
+  const loaded: { exports: Record<string, unknown> } = { exports: {} };
+  // eslint-disable-next-line no-new-func
+  new Function('module', 'exports', output)(loaded, loaded.exports);
+  return loaded.exports as T;
+}
+
+// Execute the shipped target-guard normalizer in isolation. This locks the
+// JSON trust boundary to the exact ranges accepted by uc-input-helper.swift;
+// numeric strings and values the Swift Int32/UInt32 parser cannot represent
+// must fail before an HTTP mutation request exists.
+{
+  const start = clientSource.indexOf('const DESKTOP_NATIVE_PID_MAX');
+  const end = clientSource.indexOf('function guardedDesktopMutationBody', start);
+  assert(start >= 0 && end > start, 'native guard normalizer source is locatable');
+  const guardModule = evaluateClientTypeScriptSlice<{
+    normalizeDesktopNativeUiTargetGuard: (value: unknown) => unknown;
+  }>(clientSource.slice(start, end));
+  const normalize = guardModule.normalizeDesktopNativeUiTargetGuard;
+  const valid = {
+    appName: 'Éditeur 🎨',
+    pid: 2_147_483_647,
+    window: {
+      id: 4_294_967_295,
+      x: -32_768,
+      y: 32_768,
+      width: 32_768,
+      height: 1,
+    },
+  };
+  assert(Boolean(normalize(valid)), 'native guard accepts exact Swift boundary values and bounded Unicode app name');
+  for (const [name, malformed] of [
+    ['numeric-string pid', { ...valid, pid: '1234' }],
+    ['Int32-overflow pid', { ...valid, pid: 2_147_483_648 }],
+    ['numeric-string window id', { ...valid, window: { ...valid.window, id: '7' } }],
+    ['UInt32-overflow window id', { ...valid, window: { ...valid.window, id: 4_294_967_296 } }],
+    ['numeric-string bound', { ...valid, window: { ...valid.window, x: '0' } }],
+    ['out-of-range negative bound', { ...valid, window: { ...valid.window, x: -32_769 } }],
+    ['out-of-range positive bound', { ...valid, window: { ...valid.window, y: 32_769 } }],
+    ['oversized window width', { ...valid, window: { ...valid.window, width: 32_769 } }],
+    ['fractional window height', { ...valid, window: { ...valid.window, height: 1.5 } }],
+    ['oversized app name', { ...valid, appName: 'A'.repeat(161) }],
+    ['control-character app name', { ...valid, appName: 'Bad\nApp' }],
+  ] as const) {
+    assert(normalize(malformed) === null, `native guard rejects ${name}`);
+  }
+}
+
+// Execute the real non-2xx parser/failure projector. A structured 409 emitted
+// by target drift must retain uncertain_ui_target, while arbitrary bridge body
+// strings cannot mint a trusted DesktopBridgeError discriminant.
+{
+  const start = clientSource.indexOf('function failFromStatus');
+  const end = clientSource.indexOf('async function safeText', start);
+  assert(start >= 0 && end > start, 'HTTP bridge error parser source is locatable');
+  const errorModule = evaluateClientTypeScriptSlice<{
+    failFromStatus: (status: number, bodyText: string) => { errorCode?: string; error?: string; recoveryHint?: string };
+  }>(clientSource.slice(start, end), 'export { failFromStatus };');
+  const guarded409 = errorModule.failFromStatus(409, JSON.stringify({
+    ok: false,
+    error: 'native target guard rejected window-bounds drift',
+    errorCode: 'uncertain_ui_target',
+    recoveryHint: 'Observe the exact app again.',
+  }));
+  assert(guarded409.errorCode === 'uncertain_ui_target', 'HTTP 409 preserves whitelisted uncertain_ui_target code');
+  assert(guarded409.recoveryHint === 'Observe the exact app again.', 'HTTP 409 preserves bounded recovery hint');
+  const untrusted409 = errorModule.failFromStatus(409, JSON.stringify({
+    error: 'opaque conflict',
+    errorCode: 'pretend_everything_succeeded',
+  }));
+  assert(untrusted409.errorCode === 'unknown', 'HTTP 409 rejects unknown structured body code');
+  const helper503 = errorModule.failFromStatus(503, JSON.stringify({
+    error: 'input helper unavailable',
+    errorCode: 'helper_missing',
+  }));
+  assert(helper503.errorCode === 'helper_missing', 'non-2xx parser preserves another whitelisted bridge code');
+}
 
 function extractBridgeFunction<T>(name: string): T {
   const startMarker = `/* UC_SMOKE_EXTRACT_START ${name} */`;

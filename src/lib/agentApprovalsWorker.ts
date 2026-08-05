@@ -50,6 +50,17 @@ export type ApprovalApplyResult =
   | { ok: false; actionType: string | null; error: string };
 
 /**
+ * Approval families whose side effect is owned by a runtime that performs its
+ * own exact one-shot claim immediately before dispatch. `chat.review_comment`
+ * is intentionally excluded: it has a real worker handler below.
+ */
+export function isRuntimeOwnedAgentApprovalActionType(actionType: unknown): boolean {
+  const normalized = String(actionType || '').trim();
+  return normalized.startsWith('scheduled_action.')
+    || (normalized.startsWith('chat.') && normalized !== REVIEW_COMMENT_ACTION_TYPE);
+}
+
+/**
  * Apply a single approved row. Idempotent: re-running on an already-applied
  * or non-approved row short-circuits BEFORE any side-effecting handler runs,
  * so a double-click / resubmit / network retry / sweep race can never
@@ -76,7 +87,7 @@ export async function applyApprovedAction(approvalId: string): Promise<ApprovalA
   // Runtime-owned approvals are consumed by the exact runner immediately
   // before its transport dispatch. The generic UI worker must leave both the
   // one-shot applied_at field and the fingerprinted payload untouched.
-  if (actionType.startsWith('scheduled_action.') || actionType.startsWith('chat.')) {
+  if (isRuntimeOwnedAgentApprovalActionType(actionType)) {
     return {
       ok: true,
       actionType,

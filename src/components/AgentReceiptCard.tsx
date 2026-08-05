@@ -50,6 +50,13 @@ export default function AgentReceiptCard({ receipt, onUndo, onRetry, onOpenProof
   const riskColor = TONE_COLOR[risk.tone] || TONE_COLOR.neutral;
   const verdictColor = TONE_COLOR[verdict.tone] || TONE_COLOR.neutral;
   const approvalColor = TONE_COLOR[approval.tone] || TONE_COLOR.neutral;
+  const showRisk = receipt.riskTier !== null
+    && !(
+      receipt.riskTier === 'read'
+      && (receipt.verdict === 'blocked' || receipt.verdict === 'failed')
+      && receipt.proof.length === 0
+    );
+  const showApproval = receipt.approval.state !== 'not_required';
   const showUndo = receipt.canUndo && typeof onUndo === 'function';
   const showRetry = receipt.canRetry && typeof onRetry === 'function';
 
@@ -59,7 +66,10 @@ export default function AgentReceiptCard({ receipt, onUndo, onRetry, onOpenProof
   };
 
   const summaryLabel =
-    `Receipt: ${receipt.action}. ${risk.label} risk. ${approval.label}. ${verdict.label}.` +
+    `Receipt: ${receipt.action}.` +
+    (showRisk ? ` ${risk.label} risk.` : '') +
+    (showApproval ? ` ${approval.label}.` : '') +
+    ` ${verdict.label}.` +
     (receipt.proof.length ? ` ${receipt.proof.length} proof item${receipt.proof.length === 1 ? '' : 's'}.` : '');
 
   return (
@@ -95,16 +105,22 @@ export default function AgentReceiptCard({ receipt, onUndo, onRetry, onOpenProof
       </Text>
 
       {/* Risk chip + approval line */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: `${riskColor}55`, backgroundColor: `${riskColor}14`, borderRadius: 4, paddingHorizontal: 7, paddingVertical: 3 }}>
-          <Text style={{ fontSize: 10 }}>{risk.icon}</Text>
-          <Text style={{ color: riskColor, fontSize: 10, fontWeight: '700' }}>{risk.label}</Text>
+      {showRisk || showApproval ? (
+        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          {showRisk ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: `${riskColor}55`, backgroundColor: `${riskColor}14`, borderRadius: 4, paddingHorizontal: 7, paddingVertical: 3 }}>
+              <Text style={{ fontSize: 10 }}>{risk.icon}</Text>
+              <Text style={{ color: riskColor, fontSize: 10, fontWeight: '700' }}>{risk.label}</Text>
+            </View>
+          ) : null}
+          {showApproval ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: approvalColor }} />
+              <Text style={{ color: approvalColor, fontSize: 11, fontWeight: '600' }} numberOfLines={1}>{approval.label}</Text>
+            </View>
+          ) : null}
         </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: approvalColor }} />
-          <Text style={{ color: approvalColor, fontSize: 11, fontWeight: '600' }} numberOfLines={1}>{approval.label}</Text>
-        </View>
-      </View>
+      ) : null}
 
       {/* Proof list */}
       {receipt.proof.length > 0 ? (

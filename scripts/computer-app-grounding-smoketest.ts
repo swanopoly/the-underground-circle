@@ -71,7 +71,7 @@ assertGrounding('Tell me all the tabs I have open in Chrome right now', {
   strategy: 'desktop_readonly',
   primarySurface: 'desktop',
   requiredTools: ['desktop.list_browser_tabs', 'desktop.window_state'],
-  promptIncludes: ['Do not substitute Browserbase', 'none for read-only work'],
+  promptIncludes: ['Do not substitute Browserbase', 'none required by this plan'],
 });
 
 assertGrounding('Login to WordPress with my saved vault credentials and draft a post', {
@@ -94,6 +94,40 @@ assertGrounding('Open Photoshop and crop this PSD after I approve desktop contro
   requiredTools: ['desktop.file_stat', 'desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'approvals.request'],
   promptIncludes: ['No localized generative/content-aware edit without a verified selection or mask', 'refreshed Photoshop layer inventory shows requested layer/text/asset changes'],
 });
+
+const blankDocumentGrounding = buildComputerAppGroundingPlan('Open Photoshop and start a new project 600 x 600');
+const blankDocumentGroundingPrompt = buildComputerAppGroundingPromptBlock('Open Photoshop and start a new project 600 x 600') || '';
+assert(blankDocumentGrounding?.strategy.id === 'creative_layout_control', 'blank Photoshop document keeps creative layout strategy');
+assert(
+  JSON.stringify(blankDocumentGrounding?.observationRules.map((rule) => rule.tool))
+    === JSON.stringify(['desktop.photoshop_document_status']),
+  'blank Photoshop document requires only app-native status observation',
+  blankDocumentGrounding?.observationRules.map((rule) => rule.tool).join(', '),
+);
+assert(
+  JSON.stringify(blankDocumentGrounding?.fallbackChain) === JSON.stringify([
+    'desktop.photoshop_document_status',
+    'desktop.launch_app',
+    'desktop.photoshop_document_status',
+    'desktop.photoshop_create_document',
+    'desktop.photoshop_document_status',
+  ]),
+  'blank Photoshop document preserves the exact ordered program',
+  blankDocumentGrounding?.fallbackChain.join(' -> '),
+);
+assert(
+  blankDocumentGrounding?.approvalGates.length === 0,
+  'bounded unsaved Photoshop program needs no redundant approval',
+);
+for (const forbidden of ['desktop.file_search', 'desktop.file_stat', 'desktop.photoshop_layer_inventory', 'desktop.screenshot', 'desktop.read_a11y_tree', 'desktop.menu_click']) {
+  assert(!blankDocumentGroundingPrompt.includes(forbidden), `blank Photoshop grounding omits ${forbidden}`);
+}
+assert(!/destructive pixel edits|flattening|rasterizing|source package/i.test(blankDocumentGroundingPrompt), 'blank Photoshop grounding omits generic destructive/source requirements');
+assert(blankDocumentGroundingPrompt.includes('600x600'), 'blank Photoshop grounding carries exact final dimensions');
+assert(
+  !/canonical tool approval|request approval before final side-effect action/i.test(blankDocumentGroundingPrompt),
+  'blank Photoshop grounding does not manufacture a second per-tool approval',
+);
 
 assertGrounding('Open this InDesign file and make changes for a marketing banner with different layers', {
   strategy: 'creative_layout_control',
@@ -543,7 +577,6 @@ async function runGenericNativeUiMutationObservationGuardSmoke() {
     ['desktop.mouse_up', 'mouse'],
     ['desktop.mouse_drag', 'mouse'],
     ['desktop.mouse_scroll', 'mouse'],
-    ['desktop.set_element_value', 'set_value'],
   ] as const;
   for (const [tool, family] of familyCases) {
     assert(
@@ -554,6 +587,10 @@ async function runGenericNativeUiMutationObservationGuardSmoke() {
   assert(
     genericNativeUiMutationFamilyForTool('desktop.click_element') === null,
     'the existing sealed semantic-press lane is not duplicated by the generic guard',
+  );
+  assert(
+    genericNativeUiMutationFamilyForTool('desktop.set_element_value') === null,
+    'the sealed semantic-value lane is not duplicated by the generic acknowledgement guard',
   );
 
   const makeObservation = (
@@ -614,6 +651,44 @@ async function runGenericNativeUiMutationObservationGuardSmoke() {
     freshnessMs: 5_000,
   });
   assert(prepared.ok, 'generic native guard accepts one exact fresh frontmost observation');
+
+  const maxUnicodeAppName = '界'.repeat(160);
+  const maxUnicodeSequence = makeSequenceDeps(
+    [{
+      ok: true,
+      data: makeObservation({
+        requestedAppName: maxUnicodeAppName,
+        resolvedAppName: maxUnicodeAppName,
+        app: maxUnicodeAppName,
+        frontmostApp: maxUnicodeAppName,
+      }),
+    }],
+    () => baseMs,
+  );
+  const maxUnicodePrepared = await prepareGenericNativeUiMutationGuard({
+    tool: 'desktop.type_text',
+    expectedResolvedAppName: maxUnicodeAppName,
+    toolArgsFingerprint,
+    deps: maxUnicodeSequence.deps,
+  });
+  assert(
+    maxUnicodePrepared.ok,
+    'generic native guard accepts the shared 160-Unicode-code-point app-name boundary',
+  );
+  const overlongAppName = '界'.repeat(161);
+  const overlongSequence = makeSequenceDeps([], () => baseMs);
+  const overlongPrepared = await prepareGenericNativeUiMutationGuard({
+    tool: 'desktop.type_text',
+    expectedResolvedAppName: overlongAppName,
+    toolArgsFingerprint,
+    deps: overlongSequence.deps,
+  });
+  assert(
+    !overlongPrepared.ok
+      && overlongPrepared.errorCode === 'invalid_target_identity'
+      && overlongSequence.observationCalls() === 0,
+    'generic native guard rejects 161-code-point app names before observation',
+  );
   assert(
     happySequence.observationCalls() === 1,
     'pre-approval guard performs exactly one observation call',
@@ -1061,7 +1136,7 @@ async function runGenericNativeUiMutationObservationGuardSmoke() {
     () => baseMs,
   );
   const stale = await prepareGenericNativeUiMutationGuard({
-    tool: 'desktop.set_element_value',
+    tool: 'desktop.type_text',
     expectedResolvedAppName: privateAppName,
     toolArgsFingerprint,
     deps: staleSequence.deps,

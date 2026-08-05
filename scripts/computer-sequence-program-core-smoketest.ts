@@ -21,6 +21,7 @@ function assert(cond: boolean, label: string) {
   const program = compileComputerSequenceProgram('Open Photoshop and start a new project 600 x 600');
   assert(!!program, 'the motivating ask compiles');
   assert(program?.id === 'photoshop_new_document', 'family id pinned');
+  assert(program?.authorization.mode === 'direct_user_request', 'bounded unsaved draft is authorized by the current direct request');
   const tools = (program?.steps || []).map((step) => step.tool);
   assert(tools.join(' → ') === [
     'desktop.photoshop_document_status',
@@ -60,6 +61,16 @@ function assert(cond: boolean, label: string) {
     'start a new project 600 x 600',                         // no app named
     'open illustrator and start a new project 600 x 600',    // wrong app
     'convert this to a 600x600 png in photoshop',            // convert
+    'open photoshop and create a new document 600x600 then save it',
+    'open photoshop and create a new document 600x600 then export it',
+    'open photoshop and create a new document 600x600 and overwrite test.psd',
+    'open photoshop and create a new document 600x600 then delete a layer',
+    'open photoshop and create a new document 600x600 then log in',
+    'open photoshop and create a new document 600x600 then purchase credits',
+    'open photoshop and create a new document 600x600 then add text',
+    'open photoshop and create a new document 600x600 then place an asset',
+    'open photoshop and create a new document 600x600 then rotate it',
+    'open photoshop and create a new document 600x600 then frobnicate it',
     '',                                                      // empty
   ]) {
     assert(compileComputerSequenceProgram(task) === null, `does not compile: "${task || '(empty)'}"`);
@@ -73,6 +84,15 @@ function assert(cond: boolean, label: string) {
   const max = compileComputerSequenceProgram('open photoshop and create a new document 30000 x 30000');
   const createMax = max?.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
   assert(createMax?.args.widthPx === 30000, 'max dimension 30000 accepted');
+  assert(max?.authorization.mode === 'chat_plan_approval', 'resource-heavy exact allocation retains a Chat plan approval');
+  assert(
+    compileComputerSequenceProgram('open photoshop and create a new document 4096 x 4096')?.authorization.mode === 'direct_user_request',
+    '4096x4096 remains inside the direct-request resource bound',
+  );
+  assert(
+    compileComputerSequenceProgram('open photoshop and create a new document 4097 x 4096')?.authorization.mode === 'chat_plan_approval',
+    'one dimension beyond 4096 requires Chat plan approval',
+  );
   assert(compileComputerSequenceProgram('open photoshop and create a new document 30001 x 600') === null, '30001 rejected');
 }
 
@@ -86,6 +106,7 @@ function assert(cond: boolean, label: string) {
   assert(/no active document/i.test(block) && /expected[\s\S]{0,6}starting[\s\S]{0,6}state/i.test(block), 'prompt block neutralizes the no-document blocker');
   assert(/file_search|file_stat/.test(block) && /Do NOT call/.test(block), 'prompt block forbids the noise tools');
   assert(/wait ~10 seconds/i.test(block), 'prompt block carries the cold-start retry rule');
+  assert(/direct command authorizes/i.test(block), 'prompt block records direct-request authority');
   assert(block.length < 2600, `prompt block stays compact (${block.length} chars)`);
 }
 

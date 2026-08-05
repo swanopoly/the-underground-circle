@@ -132,6 +132,11 @@ function summaryForRoute(route: ChatComputerRequestRoute): string {
   const target = targetLabel(route);
   const family = taskFamilyContext(route);
   const targetWithFamily = family ? `${target} ${family}` : target;
+  if (isExactPhotoshopBlankDocumentRoute(route)) {
+    return route.approvalRequired
+      ? 'I found the exact Photoshop blank-document path. After the required resource-allocation approval, I will read Photoshop status, launch it only if needed, create the document, and verify its dimensions.'
+      : 'I found the exact Photoshop blank-document path. I will read Photoshop status, launch it only if needed, create the requested unsaved document immediately with the app-native tool, and verify its dimensions.';
+  }
   switch (route.kind) {
     case 'browser':
       return `I found the browser path for this request. I will inspect the page first, use semantic controls when possible, and stop before any submit, publish, payment, upload, or credential step.`;
@@ -145,6 +150,20 @@ function summaryForRoute(route: ChatComputerRequestRoute): string {
     default:
       return `I found a combined computer path. I will resolve the files, browser, and app state first, then run one verified step at a time.`;
   }
+}
+
+function isExactPhotoshopBlankDocumentRoute(route: ChatComputerRequestRoute): boolean {
+  const pipeline = route.designExecutionPipeline;
+  return pipeline?.appId === 'adobe_photoshop'
+    && pipeline.mutationTools.length === 1
+    && pipeline.mutationTools[0] === 'desktop.photoshop_create_document'
+    && pipeline.requiredToolSequence.includes('desktop.photoshop_document_status')
+    && !pipeline.requiredToolSequence.some((tool) => (
+      tool === 'desktop.file_search'
+      || tool === 'desktop.file_stat'
+      || tool === 'desktop.open_path'
+      || tool === 'desktop.photoshop_layer_inventory'
+    ));
 }
 
 function primaryActionForRoute(route: ChatComputerRequestRoute): ChatComputerRequestNoticeAction | null {
@@ -205,10 +224,13 @@ function effortBadge(autonomy: ChatComputerTaskAutonomy): string {
 }
 
 function buildBadges(route: ChatComputerRequestRoute, autonomy: ChatComputerTaskAutonomy): string[] {
+  const directExactDraft = isExactPhotoshopBlankDocumentRoute(route) && !route.approvalRequired;
   const badges = [
     labelForKind(route.kind),
     effortBadge(autonomy),
-    route.risk === 'safe'
+    directExactDraft
+      ? 'No approval'
+      : route.risk === 'safe'
       ? route.kind === 'desktop_app' || route.kind === 'hybrid'
         ? 'No approval'
         : 'Read-only'
@@ -276,8 +298,11 @@ export function buildChatComputerTaskPlanPreview(
   autonomy?: ChatComputerTaskAutonomy,
 ): ChatComputerTaskPlanPreviewCard {
   const resolvedAutonomy = autonomy ?? buildChatComputerTaskAutonomy(route);
+  const exactPhotoshopBlankDocument = isExactPhotoshopBlankDocumentRoute(route);
   const steps = uniqueCompact(
-    route.actionItems && route.actionItems.length >= 2
+    exactPhotoshopBlankDocument
+      ? route.designExecutionPipeline!.phases.map((phase) => phase.label)
+      : route.actionItems && route.actionItems.length >= 2
       ? route.actionItems.map((item) => item.label)
       : route.designExecutionPipeline
       ? route.designExecutionPipeline.phases.map((phase) => String(phase.id).replace(/_/g, ' '))
@@ -285,18 +310,28 @@ export function buildChatComputerTaskPlanPreview(
     6,
   );
   const surfaces = uniqueCompact(
-    route.surfacePlan
+    exactPhotoshopBlankDocument
+      ? ['Photoshop app-native bridge']
+      : route.surfacePlan
       ? [route.surfacePlan.primarySurface, ...route.surfacePlan.fallbackSurfaces].map((s) => String(s).replace(/_/g, ' '))
       : [labelForKind(route.kind)],
     3,
   );
   const approvalGates = uniqueCompact(
-    [
-      route.approvalRequired ? route.approvalReason : null,
-      ...(route.selectedPipeline?.approvalTriggers || []),
-    ],
+    exactPhotoshopBlankDocument
+      ? [route.approvalRequired ? route.approvalReason : null]
+      : [
+          route.approvalRequired ? route.approvalReason : null,
+          ...(route.selectedPipeline?.approvalTriggers || []),
+        ],
     3,
   );
+  const proof = exactPhotoshopBlankDocument
+    ? uniqueCompact(
+        route.designExecutionPipeline!.phases.find((phase) => phase.id === 'verify_design_output')?.requiredEvidence || [],
+        3,
+      )
+    : uniqueCompact(route.completionProof, 3);
   return {
     visibility: resolvedAutonomy.shouldShowUserNotice ? 'user' : 'hidden',
     target: targetLabel(route),
@@ -304,8 +339,10 @@ export function buildChatComputerTaskPlanPreview(
     surfaces,
     approvalGates,
     constraints: userFacingConstraintLines(route),
-    proof: uniqueCompact(route.completionProof, 3),
-    editHint: 'Reply with changes to adjust this plan before approving.',
+    proof,
+    editHint: route.approvalRequired
+      ? 'Reply with changes to adjust this plan before approving.'
+      : 'Reply with changes to adjust this exact program before it runs.',
   };
 }
 

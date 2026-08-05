@@ -179,7 +179,7 @@ export const CHAT_AUTOMATION_EXECUTOR_COVERAGE_CASES: ChatAutomationExecutorCove
       executionKind: 'run_computer_task',
       routeId: 'browser',
       risk: 'review',
-      approvalRequired: true,
+      approvalRequired: false,
       minConfidence: 0.7,
     },
     userExperienceGoal: 'Send semantic browser tasks through computer-task routing and proof rules.',
@@ -193,7 +193,7 @@ export const CHAT_AUTOMATION_EXECUTOR_COVERAGE_CASES: ChatAutomationExecutorCove
     expected: {
       source: 'plain_chat',
       executionKind: 'run_computer_task',
-      routeId: 'browser',
+      routeId: null,
       risk: 'review',
       approvalRequired: true,
       minConfidence: 0.85,
@@ -209,7 +209,7 @@ export const CHAT_AUTOMATION_EXECUTOR_COVERAGE_CASES: ChatAutomationExecutorCove
     expected: {
       source: 'plain_chat',
       executionKind: 'run_computer_task',
-      routeId: 'browser',
+      routeId: null,
       risk: 'review',
       approvalRequired: true,
       minConfidence: 0.85,
@@ -225,7 +225,7 @@ export const CHAT_AUTOMATION_EXECUTOR_COVERAGE_CASES: ChatAutomationExecutorCove
     expected: {
       source: 'plain_chat',
       executionKind: 'run_computer_task',
-      routeId: 'browser',
+      routeId: null,
       risk: 'review',
       approvalRequired: true,
       minConfidence: 0.85,
@@ -241,7 +241,7 @@ export const CHAT_AUTOMATION_EXECUTOR_COVERAGE_CASES: ChatAutomationExecutorCove
     expected: {
       source: 'plain_chat',
       executionKind: 'run_computer_task',
-      routeId: 'browser',
+      routeId: null,
       risk: 'review',
       approvalRequired: true,
       minConfidence: 0.85,

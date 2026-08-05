@@ -1888,8 +1888,8 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          text: { type: "string", description: "Text to type. ≤4000 chars per call." },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          text: { type: "string", minLength: 1, maxLength: 4000, description: "Text to type. ≤4000 chars per call." },
         },
         required: ["appName", "text"],
       },
@@ -1901,8 +1901,8 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          text: { type: "string", description: "Text to paste. <=20000 chars per call." },
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation; never infer it." },
+          text: { type: "string", minLength: 1, maxLength: 20000, description: "Text to paste. <=20000 chars per call." },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation; never infer it." },
           restoreClipboard: { type: "boolean", description: "Defaults true." },
         },
         required: ["appName", "text"],
@@ -1930,7 +1930,7 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
           combo: { type: "string", description: 'Examples: "Cmd+T", "Cmd+Shift+N", "Return", "Escape".' },
         },
         required: ["appName", "combo"],
@@ -1943,7 +1943,7 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation; never infer it." },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation; never infer it." },
           menuPath: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 6 },
         },
         required: ["appName", "menuPath"],
@@ -2038,13 +2038,13 @@ const TOOLS: ToolDef[] = [
     {
       name: "desktop.click_at",
       description:
-        "Clicks at absolute screen coordinates (x, y). Uses cliclick when installed (reliable), falls back to AppleScript. Call desktop.screen_size first to bound coords.",
+        "Clicks at absolute screen coordinates (x, y) only after the client seals a fresh exact frontmost app/PID/CGWindow/bounds target. Call desktop.screen_size first to bound coords.",
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          x: { type: "integer", minimum: 0, maximum: 20000 },
+          y: { type: "integer", minimum: 0, maximum: 20000 },
         },
         required: ["appName", "x", "y"],
       },
@@ -2055,9 +2055,9 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          x: { type: "integer", minimum: 0, maximum: 20000 },
+          y: { type: "integer", minimum: 0, maximum: 20000 },
         },
         required: ["appName", "x", "y"],
       },
@@ -2068,9 +2068,9 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          x: { type: "integer", minimum: 0, maximum: 20000 },
+          y: { type: "integer", minimum: 0, maximum: 20000 },
           button: { type: "string", enum: ["left", "right"] },
           count: { type: "integer", minimum: 1, maximum: 3 },
         },
@@ -2083,9 +2083,9 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          x: { type: "integer", minimum: 0, maximum: 20000 },
+          y: { type: "integer", minimum: 0, maximum: 20000 },
           button: { type: "string", enum: ["left", "right"] },
         },
         required: ["appName", "x", "y"],
@@ -2093,16 +2093,16 @@ const TOOLS: ToolDef[] = [
     },
     {
       name: "desktop.mouse_up",
-      description: "Releases a held local mouse button, optionally at explicit screen coordinates.",
+      description: "Releases a held local mouse button at explicit screen coordinates inside the freshly observed exact target window.",
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          x: { type: "integer", minimum: 0, maximum: 20000 },
+          y: { type: "integer", minimum: 0, maximum: 20000 },
           button: { type: "string", enum: ["left", "right"] },
         },
-        required: ["appName"],
+        required: ["appName", "x", "y"],
       },
     },
     {
@@ -2111,11 +2111,11 @@ const TOOLS: ToolDef[] = [
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          fromX: { type: "integer", minimum: 0 },
-          fromY: { type: "integer", minimum: 0 },
-          toX: { type: "integer", minimum: 0 },
-          toY: { type: "integer", minimum: 0 },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          fromX: { type: "integer", minimum: 0, maximum: 20000 },
+          fromY: { type: "integer", minimum: 0, maximum: 20000 },
+          toX: { type: "integer", minimum: 0, maximum: 20000 },
+          toY: { type: "integer", minimum: 0, maximum: 20000 },
           durationMs: { type: "integer", minimum: 50, maximum: 5000 },
         },
         required: ["appName", "fromX", "fromY", "toX", "toY"],
@@ -2123,17 +2123,17 @@ const TOOLS: ToolDef[] = [
     },
     {
       name: "desktop.mouse_scroll",
-      description: "Sends a mouse-wheel scroll event through the local input helper.",
+      description: "Sends a mouse-wheel scroll event at explicit screen coordinates inside the freshly observed exact target window.",
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from a fresh client observation." },
-          deltaY: { type: "integer" },
-          deltaX: { type: "integer" },
-          x: { type: "integer", minimum: 0 },
-          y: { type: "integer", minimum: 0 },
+          appName: { type: "string", minLength: 1, maxLength: 160, description: "Exact resolved frontmost app name from a fresh client observation." },
+          deltaY: { type: "integer", minimum: -20000, maximum: 20000 },
+          deltaX: { type: "integer", minimum: -20000, maximum: 20000 },
+          x: { type: "integer", minimum: 0, maximum: 20000 },
+          y: { type: "integer", minimum: 0, maximum: 20000 },
         },
-        required: ["appName"],
+        required: ["appName", "x", "y"],
       },
     },
     {
@@ -2174,16 +2174,20 @@ const TOOLS: ToolDef[] = [
     {
       name: "desktop.set_element_value",
       description:
-        "Sets a native app text field/editable element by `pid` and accessibility-tree `id` from desktop.read_a11y_tree. Prefer this before click+paste when filling named fields in desktop apps.",
+        "Observe-first semantic setter for one exact non-secret native text field. Supply the exact app, PID, dotted path, role, label, and current value from the same fresh desktop.read_a11y_tree observation. The client runtime seals a one-shot target, requires exact hash-bound approval, dispatches once, and accepts completion only from exact same-field requested-value proof. Secure/auth/payment/permission/destructive/modal targets and automatic replay are refused.",
       input_schema: {
         type: "object" as const,
         properties: {
-          appName: { type: "string", description: "Exact resolved frontmost app name from the same fresh accessibility observation." },
+          action: { type: "string", enum: ["set_value"], description: "Only exact semantic set_value is supported." },
+          appName: { type: "string", description: "Exact frontmost app name from the same fresh accessibility observation." },
           pid: { type: "integer", description: "Process id from the read_a11y_tree response." },
           path: { type: "string", description: 'Dotted integer path from read_a11y_tree (e.g. "0.2.1").' },
-          text: { type: "string", description: "Text value to set. <=20000 chars." },
+          expectedRole: { type: "string", description: "Exact accessibility role from the same observation, such as AXTextField." },
+          expectedLabel: { type: "string", description: "Exact bounded label from the same observation." },
+          expectedCurrentValue: { type: "string", maxLength: 20000, description: "Exact current field value from the same observation; kept transient." },
+          text: { type: "string", minLength: 1, maxLength: 20000, description: "Exact requested non-secret value; kept transient and represented by hash/length in receipts." },
         },
-        required: ["appName", "pid", "path", "text"],
+        required: ["appName", "pid", "path", "expectedRole", "expectedLabel", "expectedCurrentValue", "text"],
       },
     },
     // UC-3: browser automation via Playwright + persistent Chrome
@@ -2711,7 +2715,7 @@ async function buildFrozenBlock(
     // Without this guidance the model often fixates on pixel coordinates
     // because screenshots are the most familiar pattern. Making the
     // order explicit cuts token spend + misclicks.
-    "1. For ON-SCREEN app automation, observe with **desktop.read_a11y_tree** first (or the client runtime's **desktop.window_state / desktop.observe_app** when available). Every generic native UI mutation requires the exact resolved frontmost `appName` from that fresh observation; never infer an app name from task text. Use **desktop.click_element** only for its narrow approval-gated low-consequence presentation/help/settings press canary, supplying the exact app/PID/path/role/label from the tree. For named text fields, prefer **desktop.set_element_value** from the same a11y observation before click+paste. Use **desktop.menu_click** before coordinates when the action exists in the app menu. Use **desktop.paste_text** for long/multiline text, and **desktop.mouse_down + desktop.mouse_up** only for held interactions such as dragging handles, painting, selecting, or scrubbing.",
+    "1. For ON-SCREEN app automation, observe with **desktop.read_a11y_tree** first (or the client runtime's **desktop.window_state / desktop.observe_app** when available). Every generic native UI mutation requires the exact resolved frontmost `appName` from that fresh observation; never infer an app name from task text. Use **desktop.click_element** only for its narrow approval-gated low-consequence presentation/help/settings press canary, supplying the exact app/PID/path/role/label from the tree. For one named non-secret text field, prefer **desktop.set_element_value** and supply exact app/PID/path/role/label/current value from the same full observation; its one-shot runtime verifies the requested value by hash and length on the same field. Use **desktop.menu_click** before coordinates when the action exists in the app menu. Use **desktop.paste_text** for long/multiline text only when the semantic setter cannot cover the field and the exact focus target is freshly verified, and **desktop.mouse_down + desktop.mouse_up** only for held interactions such as dragging handles, painting, selecting, or scrubbing.",
     "2. For WEB automation, prefer **browser.dom_snapshot + browser.locator_actionability + browser.set_toggle / browser.select_option / browser.click_role / browser.fill_field** (ARIA-backed selectors, same benefits). Use browser.locator_actionability with fresh browser identity for advisory target certainty; it is read-only and returns only bounded structural checks, but it does not authorize or bind a later mutation. Re-observe after DOM changes and use every mutation path's own approval/proof gate. Use browser.set_toggle for an exact non-consequential checkbox/switch/radio state and browser.select_option for an exact bounded preference on a native single-value HTML select; neither tool submits or navigates. For WordPress/wp-admin or Dealer Inspire work, use **wp.discover_types / wp.list_posts / wp.update_post** for supported REST operations and call **browser.wp_admin_source_intelligence** before wp-admin UI decisions so only bounded redacted admin facts reach the model.",
     "3. Fall back to **desktop.screenshot + desktop.click_at** (vision) only for a reversible low-risk target when the a11y tree omits it after two reads, the app is a canvas/image editor (Photoshop, Figma, games), or an exact path became stale. Never use coordinates to bypass a semantic safety/approval rejection, protected control, or uncertain consequential action. Say out loud that you're switching to vision so the user can audit the fallback.",
     "4. Before any click_at/mouse_move/mouse_click/mouse_down/mouse_up/mouse_drag/mouse_scroll call, always obtain a fresh exact app observation and call desktop.screenshot or desktop.screen_size first. Pass that exact `appName` with the bounded coordinates; never guess either the app or coordinates.",

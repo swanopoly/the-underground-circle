@@ -55,6 +55,17 @@ export type CreateApprovalGateOptions = {
   describe?: (plan: ChatAutomationPlan, ctx: ChatTransportContext) => string;
 };
 
+type ChatApprovalLookupRow = {
+  id: string;
+  status: unknown;
+  resolved_at: unknown;
+  resolved_by: unknown;
+  requested_at: unknown;
+  timeout_seconds: unknown;
+  /** Absent only on the explicitly detected pre-§10b legacy schema. */
+  applied_at?: unknown;
+};
+
 /**
  * Destructive floor for the `'auto'` waiver — the same always-confirm
  * category list as `computerGrantGate.STICKY_FLOOR_CATEGORIES`
@@ -94,6 +105,30 @@ export function resolveAutoApproveWaiver(
 ): 'pass' | 'confirm_required' | 'default' {
   if (decision !== 'auto') return 'default';
   return destructiveFloorCategoryForPlan(plan) ? 'confirm_required' : 'pass';
+}
+
+/**
+ * Some deployed projects still have the original `agent_approvals` table but
+ * have not applied the additive `applied_at` migration yet. PostgREST reports
+ * that drift as either PostgreSQL 42703 or a stale-schema PGRST204 error.
+ *
+ * Keep this predicate deliberately narrow: only a confirmed missing
+ * `agent_approvals.applied_at` column may use the legacy status-CAS claim.
+ * Network, RLS, payload-filter, and all other lookup failures still fail
+ * closed.
+ */
+export function isMissingApprovalAppliedAtColumn(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as Record<string, unknown>;
+  const code = String(record.code ?? '').trim().toUpperCase();
+  const message = [record.message, record.details, record.hint]
+    .map((value) => String(value ?? ''))
+    .join(' ')
+    .toLowerCase();
+  if (!message.includes('applied_at')) return false;
+  if (code === '42703') return true;
+  return code === 'PGRST204'
+    && (message.includes('schema cache') || message.includes('could not find'));
 }
 
 export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): ApprovalGate {
@@ -151,7 +186,7 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
 
     // Look for any existing proposal with the same idempotency key on this
     // circle. If found, branch by status.
-    const { data: existing, error: lookupError } = await supabase
+    const modernLookup = await supabase
       .from('agent_approvals')
       .select('id, status, resolved_at, resolved_by, requested_at, timeout_seconds, applied_at')
       .eq('circle_id', ctx.circleId)
@@ -163,6 +198,33 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
       })
       .order('requested_at', { ascending: false })
       .limit(1);
+
+    let existing = modernLookup.data as ChatApprovalLookupRow[] | null;
+    let lookupError = modernLookup.error;
+    let useLegacyStatusClaim = false;
+
+    if (lookupError && isMissingApprovalAppliedAtColumn(lookupError)) {
+      // Backward-compatible safety path for deployments that have the JSONB
+      // intent binding but not §10b's additive `applied_at` column. The
+      // approved row is consumed with an atomic approved -> consumed status
+      // compare-and-set below. That retains exact SHA/session/scope/timing
+      // binding and one-shot authority without weakening other schema errors.
+      const legacyLookup = await supabase
+        .from('agent_approvals')
+        .select('id, status, resolved_at, resolved_by, requested_at, timeout_seconds')
+        .eq('circle_id', ctx.circleId)
+        .eq('session_key', sessionKey)
+        .eq('action_type', actionType)
+        .contains('payload', {
+          approvalSchemaVersion: 2,
+          approvalIntentFingerprint,
+        })
+        .order('requested_at', { ascending: false })
+        .limit(1);
+      existing = legacyLookup.data as ChatApprovalLookupRow[] | null;
+      lookupError = legacyLookup.error;
+      useLegacyStatusClaim = !lookupError;
+    }
 
     if (lookupError) {
       // Fail closed: can't verify whether an approval exists, so don't run.
@@ -211,7 +273,7 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
         if (expiresAt === null || expiresAt <= Date.now()) {
           previousExpired = true;
           try {
-            await supabase
+            const expireQuery = supabase
               .from('agent_approvals')
               .update({ status: 'expired', resolved_at: new Date().toISOString() })
               .eq('id', top.id)
@@ -222,20 +284,26 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
               .contains('payload', {
                 approvalSchemaVersion: 2,
                 approvalIntentFingerprint,
-              })
-              .is('applied_at', null);
+              });
+            if (useLegacyStatusClaim) await expireQuery;
+            else await expireQuery.is('applied_at', null);
           } catch { /* fail closed below by filing a fresh proposal */ }
-        } else if (top.applied_at) {
+        } else if (!useLegacyStatusClaim && top.applied_at) {
           // An approval authorizes one dispatch only. A completed/ambiguous
           // prior attempt must never be replayed by reusing the same row.
           previousConsumed = true;
         } else {
           // Claim the exact approval before handing control to a transport.
-          // The applied_at CAS is the durable one-shot dispatch boundary:
-          // only one competing client can obtain the authority to proceed.
-          const { data: consumed, error: consumeError } = await supabase
+          // `applied_at` is the preferred durable boundary. Older deployed
+          // schemas atomically transition the same exact approved row to a
+          // terminal `consumed` status instead. Both claims bind the complete
+          // fingerprint, session, resolver, and timing fields and can have
+          // only one winner.
+          const claimBase = supabase
             .from('agent_approvals')
-            .update({ applied_at: new Date().toISOString() })
+            .update(useLegacyStatusClaim
+              ? { status: 'consumed' }
+              : { applied_at: new Date().toISOString() })
             .eq('id', top.id)
             .eq('circle_id', ctx.circleId)
             .eq('session_key', sessionKey)
@@ -248,10 +316,10 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
             .contains('payload', {
               approvalSchemaVersion: 2,
               approvalIntentFingerprint,
-            })
-            .is('applied_at', null)
-            .select('id')
-            .maybeSingle();
+            });
+          const { data: consumed, error: consumeError } = useLegacyStatusClaim
+            ? await claimBase.select('id').maybeSingle()
+            : await claimBase.is('applied_at', null).select('id').maybeSingle();
           if (consumeError) {
             return {
               pass: false,
@@ -297,6 +365,11 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
               : `Claimed one-time approval \`${shortId}\` for this exact action.`,
           };
         }
+      }
+      if (status === 'consumed') {
+        // Legacy schemas without `applied_at` record the one-shot claim as a
+        // terminal status. Never reuse it; file a fresh approval below.
+        previousConsumed = true;
       }
       if (status === 'pending') {
         const expiresAt = resolveApprovalRowExpiresAt(top.requested_at, top.timeout_seconds);

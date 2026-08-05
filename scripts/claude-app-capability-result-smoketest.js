@@ -82,7 +82,7 @@ async function waitForHealth(port, child) {
 
 async function pair(port) {
   const challengeResponse = await requestJson(port, 'POST', '/desktop/pair', {});
-  if (challengeResponse.status !== 428 || !challengeResponse.body?.challenge) {
+  if (challengeResponse.status !== 200 || challengeResponse.body?.code !== 'pairing_challenge_required' || !challengeResponse.body?.challenge) {
     throw new Error(`Pairing challenge failed: ${JSON.stringify(challengeResponse.body)}`);
   }
   const pairResponse = await requestJson(port, 'POST', '/desktop/pair', {

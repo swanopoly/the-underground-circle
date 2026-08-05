@@ -28,6 +28,7 @@
  * Run: npx tsx scripts/review-chat-command-smoketest.ts
  */
 
+import { readFileSync } from 'node:fs';
 import {
   buildReviewPrompt,
   composeReviewCommentBody,
@@ -63,6 +64,10 @@ function expect(condition: unknown, message: string) {
 // ── Fake deps harness (the ReviewDeps test seam) ────────────────────────────
 
 const CTX = { circleId: 'circle-1', userId: 'user-1' };
+const approvalWorkerSource = readFileSync(
+  new URL('../src/lib/agentApprovalsWorker.ts', import.meta.url),
+  'utf8',
+);
 
 const FAKE_FILES: ReviewPrFile[] = [
   { filename: 'src/engine.ts', status: 'modified', additions: 10, deletions: 2 },
@@ -697,6 +702,12 @@ async function main() {
       'oversize body clamped, attribution still survives at the end');
     expect(REVIEW_COMMENT_ACTION_TYPE === 'chat.review_comment',
       'action-type constant pinned (worker dispatch key)');
+    expect(
+      approvalWorkerSource.includes("normalized.startsWith('chat.') && normalized !== REVIEW_COMMENT_ACTION_TYPE")
+        && approvalWorkerSource.includes('if (actionType === REVIEW_COMMENT_ACTION_TYPE)')
+        && !approvalWorkerSource.includes("actionType.startsWith('scheduled_action.') || actionType.startsWith('chat.')"),
+      'runtime-owned chat approvals do not swallow the real chat.review_comment worker handler',
+    );
     pass('worker payload contract: validate + compose (pure, direct import)');
   }
 

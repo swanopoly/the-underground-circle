@@ -139,11 +139,91 @@ assertRoute(
     risk: 'review',
     approvalRequired: true,
     designApp: 'Adobe Photoshop',
-    routeId: 'browser',
+    routeId: null,
     routeDecisionStatus: 'needs_observation',
     minTools: ['desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_export_proof'],
   },
 );
+
+const exactPhotoshopTask = 'Open Photoshop and start a new project 600 x 600';
+const exactPhotoshopRoute = buildChatComputerRequestRoute(exactPhotoshopTask);
+const exactPhotoshopPrompt = buildChatComputerRequestRoutePromptBlock(exactPhotoshopTask) || '';
+const exactPhotoshopTools = exactPhotoshopRoute?.actionItems.map((item) => item.tool) || [];
+const expectedExactPhotoshopTools = [
+  'desktop.photoshop_document_status',
+  'desktop.launch_app',
+  'desktop.photoshop_document_status',
+  'desktop.photoshop_create_document',
+  'desktop.photoshop_document_status',
+];
+if (!exactPhotoshopRoute) {
+  fail('exact Photoshop blank-document request expected a computer route');
+} else if (JSON.stringify(exactPhotoshopTools) !== JSON.stringify(expectedExactPhotoshopTools)) {
+  fail(`exact Photoshop route expected ordered program ${expectedExactPhotoshopTools.join(' -> ')}, got ${exactPhotoshopTools.join(' -> ')}`);
+} else if (exactPhotoshopRoute.actionItems.some((item) => item.requiresApproval)) {
+  fail('exact Photoshop action items must not request a redundant approval for the bounded unsaved draft');
+} else if (exactPhotoshopRoute.approvalRequired || exactPhotoshopRoute.approvalReason) {
+  fail(`exact Photoshop route must run from the current direct request without approval, got ${exactPhotoshopRoute.approvalReason || 'approval required'}`);
+} else if (exactPhotoshopRoute.risk !== 'safe') {
+  fail(`exact bounded unsaved draft expected safe risk, got ${exactPhotoshopRoute.risk}`);
+} else if (JSON.stringify(exactPhotoshopRoute.recommendedTools) !== JSON.stringify([
+  'desktop.photoshop_document_status',
+  'desktop.launch_app',
+  'desktop.photoshop_create_document',
+])) {
+  fail(`exact Photoshop route leaked tools: ${exactPhotoshopRoute.recommendedTools.join(', ')}`);
+} else if (exactPhotoshopRoute.fallbackPipelineIds.length || exactPhotoshopRoute.surfacePlan || exactPhotoshopRoute.appAutomationRouteDecision || exactPhotoshopRoute.appResolution) {
+  fail('exact Photoshop route should not enter generic surface, app-resolution, fallback-pipeline, or capability-route planning');
+} else if (exactPhotoshopRoute.routeId !== null) {
+  fail(`exact Photoshop native program must not carry a browser route id, got ${exactPhotoshopRoute.routeId}`);
+} else if (!exactPhotoshopRoute.designExecutionPipeline?.phases.some((phase) => phase.id === 'prepare_app')) {
+  fail('exact Photoshop route expected a truthful prepare_app phase');
+} else if (exactPhotoshopRoute.designExecutionPipeline?.phases.some((phase) => phase.id === 'resolve_source_package')) {
+  fail('exact Photoshop route must not reuse the false resolve_source_package phase');
+} else if ((exactPhotoshopRoute.designExecutionPipeline?.approvalTools.length || 0) > 0) {
+  fail('exact Photoshop design pipeline must not emit a second approvals.request tool');
+} else if (exactPhotoshopRoute.evidenceContract?.approvalBefore.length !== 0) {
+  fail(`exact Photoshop evidence must have no redundant approval gate, got ${exactPhotoshopRoute.evidenceContract?.approvalBefore.join(' | ') || 'none'}`);
+} else if (!exactPhotoshopRoute.actionItems.some((item) => item.tool === 'desktop.photoshop_create_document')) {
+  fail('exact Photoshop route must expose create_document as the concrete action item');
+} else if (exactPhotoshopRoute.modelOrchestration?.mode !== 'deterministic_local_program'
+  || exactPhotoshopRoute.modelOrchestration.coordinator !== 'chat_plan_then_local_program') {
+  fail(`exact Photoshop route must bypass the AI relay, got ${exactPhotoshopRoute.modelOrchestration?.mode || 'no orchestration'}`);
+} else {
+  const forbiddenExactPlanning = [
+    'desktop.file_search',
+    'desktop.file_stat',
+    'desktop.open_path',
+    'desktop.photoshop_layer_inventory',
+    'desktop.screenshot',
+    'agent.build_app_capability',
+    'resolve_source_package',
+    'Research-backed control surface order required',
+  ];
+  const leaked = forbiddenExactPlanning.filter((value) => exactPhotoshopPrompt.includes(value));
+  if (leaked.length) {
+    fail(`exact Photoshop prompt leaked generic planning: ${leaked.join(', ')}`);
+  } else {
+    pass('exact Photoshop request compiles to one direct-request-authorized status/launch/create/verify program');
+  }
+}
+
+const oversizedPhotoshopRoute = buildChatComputerRequestRoute('Open Photoshop and create a new document 5000 x 5000');
+if (!oversizedPhotoshopRoute?.approvalRequired || !/allocation|approval/i.test(oversizedPhotoshopRoute.approvalReason || '')) {
+  fail(`oversized exact Photoshop allocation must retain approval, got ${oversizedPhotoshopRoute?.approvalReason || 'none'}`);
+} else {
+  pass('oversized exact Photoshop allocation retains one plan approval');
+}
+
+const extraActionPhotoshopRoute = buildChatComputerRequestRoute('Open Photoshop and create a new document 600 x 600 then add text');
+if (!extraActionPhotoshopRoute
+  || extraActionPhotoshopRoute.modelOrchestration?.mode === 'deterministic_local_program'
+  || !extraActionPhotoshopRoute.approvalRequired
+  || extraActionPhotoshopRoute.routeId !== null) {
+  fail('Photoshop request with an appended edit must use the generic gated desktop route without browser ownership');
+} else {
+  pass('Photoshop request with an appended edit cannot inherit exact-program direct authority');
+}
 
 assertRoute(
   'open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png',
@@ -153,7 +233,7 @@ assertRoute(
     pipelineId: 'creative_layout_design',
     risk: 'review',
     approvalRequired: true,
-    routeId: 'browser',
+    routeId: null,
     evidenceTarget: 'Adobe Photoshop',
     minTools: ['desktop.file_search', 'desktop.file_stat', 'desktop.photoshop_document_status', 'desktop.photoshop_export_proof'],
   },
@@ -167,7 +247,7 @@ assertRoute(
     pipelineId: 'local_files',
     risk: 'safe',
     approvalRequired: false,
-    routeId: 'browser',
+    routeId: null,
     evidenceTarget: 'Local files',
     minTools: ['desktop.convert_image', 'desktop.file_search', 'desktop.file_stat'],
   },
@@ -193,6 +273,19 @@ if (!pearsonPngRoute?.actionItems?.some((item) => item.id === 'verify-local-outp
   fail('pearson image conversion should verify output with file_stat action item');
 } else {
   pass('pearson image conversion exposes output verification action item');
+}
+if (
+  pearsonPngRoute?.appResolution
+  || pearsonPngRoute?.recommendedTools.some((tool) => /^(?:browser|browserbase)\./i.test(tool))
+  || pearsonPngRoute?.selectedPipeline.solutionSteps.some((step) => /\bbrowser\b|photoshop\.adobe\.com|photopea/i.test(step))
+) {
+  fail(`pearson image conversion must not carry a browser app fallback (${JSON.stringify({
+    appResolution: pearsonPngRoute?.appResolution?.best,
+    tools: pearsonPngRoute?.recommendedTools,
+    steps: pearsonPngRoute?.selectedPipeline.solutionSteps,
+  })})`);
+} else {
+  pass('pearson image conversion carries no browser app resolution, tool, or focus-stealing fallback');
 }
 
 const pearsonPrompt = buildChatComputerRequestRoutePromptBlock('on the desktop open pearsoncdjr-img in photoshop and save it as a png') || '';
@@ -443,7 +536,7 @@ assertRoute(
     risk: 'review',
     approvalRequired: true,
     routeDecisionStatus: 'needs_observation',
-    evidenceTarget: 'Generic App Navigator',
+    evidenceTarget: 'Any',
     minTools: ['desktop.launch_app', 'desktop.window_state', 'tools.search', 'research.search', 'fetch_url', 'agent.build_app_capability'],
   },
 );
@@ -726,6 +819,296 @@ for (const recallCase of [
   } else {
     fail(`recall: "${recallCase}" should route into the computer path (lost the evidence contract)`);
   }
+}
+
+// Long-tail named apps are a desktop surface constraint, not a hint for the
+// legacy browser command profile. Cover known and invented product names plus
+// the terse "Use <App> and …" phrasing that previously returned null.
+for (const universalDesktopCase of [
+  'Use Blender and create a cube',
+  'Use Affinity Photo and edit this image',
+  'Open Pixelmator Pro and export the image as PNG',
+  'Use Final Cut Pro and trim the video',
+  'In Krita, edit the image and save it',
+  'Use Houdini and render the scene',
+  'Use MotionDeck and split the selected video clip',
+  'Use InviteBoard and invite Jordan to the workspace',
+  'Use AdminNest and authenticate with stored credentials',
+  'Use CRMBridge and connect the account',
+  'Use VLC to turn on subtitles',
+]) {
+  const route = buildChatComputerRequestRoute(universalDesktopCase);
+  const browserToolLeak = route?.recommendedTools.some((tool) => /^browser\.|^capability\.browser/.test(tool));
+  const browserActionLeak = route?.actionItems.some((item) => item.surface === 'browser' || item.tool.startsWith('browser.'));
+  const browserSurfaceLeak = route?.surfacePlan
+    ? [route.surfacePlan.primarySurface, ...route.surfacePlan.fallbackSurfaces].some((surface) => /browser/i.test(surface))
+    : false;
+  if (
+    route?.kind !== 'desktop_app'
+    || route.routeId !== null
+    || route.selectedPipeline.routeId !== null
+    || route.selectedPipeline.category !== 'desktop'
+    || browserToolLeak
+    || browserActionLeak
+    || browserSurfaceLeak
+    || route.appResolution?.best.surface === 'browser'
+  ) {
+    fail(`universal desktop profile: "${universalDesktopCase}" leaked browser ownership (${JSON.stringify({
+      kind: route?.kind,
+      routeId: route?.routeId,
+      pipeline: route?.selectedPipeline?.id,
+      pipelineRouteId: route?.selectedPipeline?.routeId,
+      browserToolLeak,
+      browserActionLeak,
+      browserSurfaceLeak,
+      appSurface: route?.appResolution?.best.surface,
+    })})`);
+  } else {
+    pass(`universal desktop profile stays native: ${universalDesktopCase}`);
+  }
+}
+
+for (const readOnlyDesktopCase of [
+  'Open Blender',
+  'Launch Affinity Photo',
+  'Use Houdini and inspect the project',
+  'Use VLC to read the current track title',
+  'Open R and read the active console output',
+  'Open Music and tell me what is playing',
+  'Open Mail and tell me the unread count',
+  'Open Calculator and tell me the current result',
+]) {
+  const route = buildChatComputerRequestRoute(readOnlyDesktopCase);
+  if (
+    route?.kind !== 'desktop_app'
+    || route.routeId !== null
+    || route.risk !== 'safe'
+    || route.approvalRequired
+    || route.actionItems.some((item) => item.surface === 'approval' || item.tool.startsWith('browser.'))
+  ) {
+    fail(`read-only desktop request should run without mutation approval: ${readOnlyDesktopCase}`);
+  } else {
+    pass(`read-only desktop request has no approval: ${readOnlyDesktopCase}`);
+  }
+}
+
+const aggregateInboxTask = 'Summarize unread emails and prioritize Slack alerts';
+const aggregateInboxRoute = buildChatComputerRequestRoute(aggregateInboxTask);
+const aggregateInboxPlan = buildChatAutomationPlan({ message: aggregateInboxTask });
+if (aggregateInboxRoute) {
+  fail(`aggregate inbox/notification triage must not be captured as one desktop app (${aggregateInboxRoute.selectedPipeline.id})`);
+} else if (
+  aggregateInboxPlan.execution.kind !== 'run_openswan'
+  || aggregateInboxPlan.pipeline?.id !== 'inbox_notifications'
+  || aggregateInboxPlan.risk !== 'review'
+) {
+  fail(`aggregate inbox/notification triage must retain the inbox_notifications OpenSwan pipeline (${JSON.stringify({
+    execution: aggregateInboxPlan.execution.kind,
+    pipeline: aggregateInboxPlan.pipeline?.id,
+    risk: aggregateInboxPlan.risk,
+  })})`);
+} else {
+  pass('aggregate Mail/Slack triage retains the higher-level inbox_notifications OpenSwan pipeline');
+}
+
+for (const readOnlyLocalFileCase of [
+  'Open Preview and report the visible PDF page number',
+  'In Finder, inspect the file size for report.pdf on the Desktop',
+  'Open Finder and show the path of the selected folder in Documents',
+]) {
+  const route = buildChatComputerRequestRoute(readOnlyLocalFileCase);
+  const hasFileNativeSurface = route?.recommendedTools.some((tool) => (
+    tool.startsWith('desktop.file_') || tool === 'desktop.open_path'
+  ));
+  if (
+    route?.kind !== 'local_file'
+    || route.routeId !== null
+    || route.selectedPipeline.routeId !== null
+    || route.risk !== 'safe'
+    || route.approvalRequired
+    || !hasFileNativeSurface
+    || route.recommendedTools.some((tool) => tool.startsWith('browser.'))
+    || route.actionItems.some((item) => item.surface === 'browser' || item.tool.startsWith('browser.'))
+  ) {
+    fail(`read-only Finder/Preview request must stay approval-free and file-native: ${readOnlyLocalFileCase}`);
+  } else {
+    pass(`read-only Finder/Preview request stays approval-free and file-native: ${readOnlyLocalFileCase}`);
+  }
+}
+
+for (const mutationDesktopCase of [
+  'Use Zoom to mute my microphone',
+  'In Excel, set A1 to Hello',
+  'In Word, make the title bold',
+  'Use Figma to toggle the grid',
+]) {
+  const route = buildChatComputerRequestRoute(mutationDesktopCase);
+  if (
+    route?.kind !== 'desktop_app'
+    || route.routeId !== null
+    || route.risk !== 'review'
+    || route.recommendedTools.some((tool) => tool.startsWith('browser.'))
+  ) {
+    fail(`named desktop mutation must retain the review/native profile: ${mutationDesktopCase}`);
+  } else {
+    pass(`named desktop mutation retains review/native profile: ${mutationDesktopCase}`);
+  }
+}
+
+for (const shortNonAppCase of [
+  'Use AI to write a summary',
+  'Use API to fetch the data',
+  'Use it to write a note',
+  'Use on to change this',
+]) {
+  if (buildChatComputerRequestRoute(shortNonAppCase)) {
+    fail(`ordinary short word/acronym must not become an app: ${shortNonAppCase}`);
+  } else {
+    pass(`ordinary short word/acronym stays in plain chat: ${shortNonAppCase}`);
+  }
+}
+
+const finderDownloadsRoute = buildChatComputerRequestRoute('Open Finder and show Downloads');
+if (
+  finderDownloadsRoute?.kind !== 'local_file'
+  || finderDownloadsRoute.routeId !== null
+  || finderDownloadsRoute.selectedPipeline.routeId !== null
+  || finderDownloadsRoute.recommendedTools.some((tool) => /^browser\.|^capability\.browser/.test(tool))
+  || finderDownloadsRoute.actionItems.some((item) => item.surface === 'browser' || item.tool.startsWith('browser.'))
+) {
+  fail(`Finder Downloads must remain browser-free local_file (${JSON.stringify({
+    kind: finderDownloadsRoute?.kind,
+    routeId: finderDownloadsRoute?.routeId,
+    pipelineRouteId: finderDownloadsRoute?.selectedPipeline?.routeId,
+    tools: finderDownloadsRoute?.recommendedTools,
+  })})`);
+} else {
+  pass('Finder Downloads remains browser-free local_file with routeId null');
+}
+
+for (const browserSurfaceCase of [
+  'Use Chrome and go to example.com',
+  'Open Safari and visit acme.com',
+  'Use Google Docs and edit the document',
+  'Visit https://developer.example.com/accessibility and read the API overview',
+]) {
+  const route = buildChatComputerRequestRoute(browserSurfaceCase);
+  if (route?.kind !== 'browser' || route.routeId !== 'browser' || route.selectedPipeline.category !== 'browser') {
+    fail(`explicit browser/web request must keep browser ownership: ${browserSurfaceCase}`);
+  } else {
+    pass(`explicit browser/web request stays browser-only: ${browserSurfaceCase}`);
+  }
+}
+
+const browserbaseExtractionTask = 'Extract product names, prices, and availability from https://example.com/catalog as JSON';
+const browserbaseExtractionRoute = buildChatComputerRequestRoute(browserbaseExtractionTask);
+const browserbaseOpenIndex = browserbaseExtractionRoute?.actionItems.findIndex((item) => item.tool === 'browser.open_url') ?? -1;
+const browserbaseReadIndex = browserbaseExtractionRoute?.actionItems.findIndex((item) => item.tool === 'browser.dom_snapshot') ?? -1;
+if (
+  browserbaseExtractionRoute?.kind !== 'browser'
+  || browserbaseExtractionRoute.routeId !== 'browser'
+  || browserbaseExtractionRoute.selectedPipeline.id !== 'browser_data_retrieval'
+  || browserbaseExtractionRoute.selectedPipeline.category !== 'browser'
+  || browserbaseExtractionRoute.risk !== 'safe'
+  || browserbaseExtractionRoute.approvalRequired
+  || browserbaseOpenIndex < 0
+  || browserbaseReadIndex <= browserbaseOpenIndex
+  || browserbaseExtractionRoute.recommendedTools.some((tool) => tool.startsWith('desktop.'))
+) {
+  fail(`explicit-URL Browserbase extraction must remain safe, browser-only, and executable (${JSON.stringify({
+    kind: browserbaseExtractionRoute?.kind,
+    routeId: browserbaseExtractionRoute?.routeId,
+    pipeline: browserbaseExtractionRoute?.selectedPipeline?.id,
+    risk: browserbaseExtractionRoute?.risk,
+    approval: browserbaseExtractionRoute?.approvalRequired,
+    actions: browserbaseExtractionRoute?.actionItems.map((item) => item.tool),
+  })})`);
+} else {
+  pass('explicit-URL Browserbase extraction stays on the safe browser data-retrieval path');
+}
+
+for (const [browserControlCase, expectedControlTool] of [
+  ['Open https://example.org/docs in the browser and read the heading', 'browser.dom_snapshot'],
+  ['In Chrome, open https://example.com/status and read the headline', 'browser.dom_snapshot'],
+  ['In Safari, navigate to https://example.net/help and list the visible topics', 'browser.dom_snapshot'],
+  ['Visit https://example.com/catalog and click the Documentation link', 'browser.click_role'],
+  ['Go to https://example.org/search and search for release notes', 'browser.fill_field'],
+  ['Open https://example.net/settings in the browser and select Dark mode', 'browser.set_toggle'],
+  ['Navigate to https://example.com/about in Firefox and summarize the page', 'browser.dom_snapshot'],
+  ['Use the browser to open https://example.org/changelog and read the latest entry', 'browser.dom_snapshot'],
+] as const) {
+  const route = buildChatComputerRequestRoute(browserControlCase);
+  const openIndex = route?.actionItems.findIndex((item) => item.tool === 'browser.open_url') ?? -1;
+  const controlIndex = route?.actionItems.findIndex((item) => item.tool === expectedControlTool) ?? -1;
+  const openItem = route?.actionItems[openIndex];
+  if (
+    route?.kind !== 'browser'
+    || route.routeId !== 'browser'
+    || openIndex < 0
+    || controlIndex <= openIndex
+    || openItem?.requiresApproval
+    || route.recommendedTools.some((tool) => tool.startsWith('desktop.'))
+    || route.actionItems.some((item) => item.surface === 'desktop_app')
+  ) {
+    fail(`explicit URL must open first and then execute ${expectedControlTool}: ${browserControlCase}`);
+  } else {
+    pass(`explicit URL opens first and then executes ${expectedControlTool}: ${browserControlCase}`);
+  }
+}
+
+const generatedImageConversionRoute = buildChatComputerRequestRoute('Open Gemini_Generated_Image_lppqo8lppqo8lppq.png from the Desktop and make it a jpg');
+if (
+  generatedImageConversionRoute?.kind !== 'local_file'
+  || !['desktop.file_search', 'desktop.file_stat', 'desktop.convert_image'].every((tool) => generatedImageConversionRoute.recommendedTools.includes(tool))
+) {
+  fail(`filename-led image conversion must stay on the deterministic local-file path (${JSON.stringify({
+    kind: generatedImageConversionRoute?.kind,
+    tools: generatedImageConversionRoute?.recommendedTools,
+  })})`);
+} else {
+  pass('filename-led image conversion stays local_file with search/stat/convert tools');
+}
+
+const recoveryPrefixedBrowserRoute = buildChatComputerRequestRoute('Browser computer use task: Click the submit button');
+if (
+  recoveryPrefixedBrowserRoute?.kind !== 'browser'
+  || recoveryPrefixedBrowserRoute.routeId !== 'browser'
+  || recoveryPrefixedBrowserRoute.selectedPipeline.category !== 'browser'
+  || !recoveryPrefixedBrowserRoute.recommendedTools.some((tool) => tool.startsWith('browser.'))
+  || recoveryPrefixedBrowserRoute.recommendedTools.some((tool) => tool.startsWith('desktop.'))
+) {
+  fail(`recovery-prefixed browser candidate must retain browser evidence/runtime ownership (${JSON.stringify({
+    kind: recoveryPrefixedBrowserRoute?.kind,
+    routeId: recoveryPrefixedBrowserRoute?.routeId,
+    pipeline: recoveryPrefixedBrowserRoute?.selectedPipeline?.id,
+    tools: recoveryPrefixedBrowserRoute?.recommendedTools,
+  })})`);
+} else {
+  pass('recovery-prefixed browser candidate retains browser evidence/runtime ownership');
+}
+
+for (const appQuestion of [
+  'How do I use Blender to render a scene?',
+  'What is Ableton Live?',
+  'Should I use GIMP or Krita?',
+]) {
+  if (buildChatComputerRequestRoute(appQuestion)) {
+    fail(`app guidance question should stay in plain chat: ${appQuestion}`);
+  } else {
+    pass(`app guidance question stays in plain chat: ${appQuestion}`);
+  }
+}
+
+const constrainedNamedAppRoute = buildChatComputerRequestRoute("Use Krita and edit this image, but don't save; ask me before deleting; stop if MFA appears");
+if (
+  constrainedNamedAppRoute?.kind !== 'desktop_app'
+  || !constrainedNamedAppRoute.userConstraints?.forbidden.includes('save')
+  || !constrainedNamedAppRoute.userConstraints.approvalBefore.includes('delete')
+  || !constrainedNamedAppRoute.userConstraints.stopConditions.some((item) => /MFA/i.test(item))
+) {
+  fail('named desktop routing must preserve save/delete/MFA user constraints');
+} else {
+  pass('named desktop routing preserves save/delete/MFA user constraints');
 }
 
 const stagedTransferRecall = buildChatComputerRequestRoute('download the report from the portal, then import it into the spreadsheet app');

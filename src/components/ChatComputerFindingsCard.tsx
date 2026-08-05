@@ -68,7 +68,9 @@ export default function ChatComputerFindingsCard({ findings, accentColor = '#22c
         );
       })}
       <Text style={styles.footer}>
-        Tap an option, or say “book option 2” — the choices are saved with this message, so follow-ups work later too.
+        {onPickOption
+          ? 'Tap an option, or say “book option 2” — the choices are saved with this message, so follow-ups work later too.'
+          : 'Saved options from this earlier run. Start a new request to act on them.'}
       </Text>
     </View>
   );

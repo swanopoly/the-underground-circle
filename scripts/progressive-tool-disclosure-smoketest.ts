@@ -315,7 +315,8 @@ async function main() {
 
   if (failures > 0) {
     console.error(`\n${failures} failure(s)`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log('\nAll progressive-tool-disclosure cases passed.');
 }

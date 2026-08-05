@@ -1,4 +1,5 @@
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
+import type { ComputerTaskReplayPolicy } from './computerTaskOutcome';
 import type { AppAdapterGapContract } from './appAdapterGapContract';
 import type {
   AppAutomationControlSurfaceId,
@@ -67,6 +68,9 @@ export interface ComputerTaskEvidenceRecoveryInput {
   groundingSummary?: string | null;
   preflightSummary?: string | null;
   observations?: ComputerTaskEvidenceRecoveryObservation[];
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
 }
 
 export interface AppCapabilityRecoveryResearch {
@@ -182,6 +186,9 @@ export interface ComputerTaskEvidenceRecoveryContext {
   appFallback?: ComputerTaskRecoveryAppFallback | null;
   /** AR: the user-named app, echoed so consumers can surface intent in copy. */
   namedAppIntent?: string | null;
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
 }
 
 function clean(value: unknown, max = 1_200): string {
@@ -606,6 +613,62 @@ export function diagnoseComputerTaskEvidenceFailure(
   const contract = input.contract || null;
   if (!contract) return null;
   const appRouteDecision = summarizeAppRouteDecision(input.appRouteDecision);
+  const manualVerificationOnly = input.replayPolicy === 'manual_verify_only'
+    && input.mutationDispatched === true;
+  if (manualVerificationOnly) {
+    const verificationOnlyTools = unique(
+      (input.verificationOnlyTools || []).map((tool) => clean(tool, 120)),
+      4,
+    );
+    const tools = verificationOnlyTools.length > 0
+      ? verificationOnlyTools
+      : [/photoshop/i.test(contract.targetName) ? 'desktop.photoshop_document_status' : 'desktop.window_state'];
+    const requiredEvidence = tools.map((tool, index) => requirement(
+      `manual-verification-${index + 1}`,
+      tool,
+      `Read the current ${contract.targetName} state without repeating the dispatched mutation.`,
+      30_000,
+    ));
+    const context: ComputerTaskEvidenceRecoveryContext = {
+      schemaVersion: 1,
+      targetName: contract.targetName,
+      kind: contract.kind,
+      taskFamily: contract.taskFamily,
+      failureArea: 'proof_after',
+      reason: 'The mutation request already crossed the execution boundary, so retrying it could duplicate the user-visible change.',
+      matchedRules: [
+        'Runtime replay policy is manual_verify_only.',
+        'Mutation dispatch was confirmed before proof became inconclusive.',
+      ],
+      requiredFreshEvidence: [`Read current ${contract.targetName} state without mutation.`],
+      requiredEvidence,
+      requiredProof: unique(contract.proofAfter, 5),
+      approvalBoundaries: unique(contract.approvalBefore, 6),
+      failClosedRules: unique([
+        ...contract.failClosedRules,
+        'Do not replay the dispatched mutation; use read-only verification only.',
+      ], 6),
+      appRouteDecision,
+      retryAllowed: false,
+      userActionRequired: false,
+      connectedAgentAllowed: false,
+      recommendedOptionId: 'stop_and_report',
+      resumeInstruction: `Do not retry the original action. Use only ${tools.join(', ')} to inspect the current state, then report what is present.`,
+      replayPolicy: 'manual_verify_only',
+      mutationDispatched: true,
+      verificationOnlyTools: tools,
+      appCapabilityResearch: null,
+      appFallback: null,
+      namedAppIntent: clean(input.namedAppIntent, 100) || null,
+    };
+    return {
+      ...context,
+      evidenceReadiness: evaluateComputerTaskEvidenceRecoveryReadiness({
+        recovery: context,
+        observations: input.observations || [],
+      }),
+    };
+  }
   const text = failureEvidenceTextFromInput(input);
   const area = resolveFailureArea({
     rawArea: classifyFailureArea(text, contract),

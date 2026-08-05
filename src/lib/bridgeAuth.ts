@@ -68,9 +68,11 @@ export function clearCachedBridgeToken(expected?: string | null) {
 
 /**
  * Complete the shared challenge-v1 pairing exchange used by the Claude,
- * Codex, Gemini, and Cursor bridges. A first-response token is still accepted
- * for compatibility with an older bridge process during a rolling local
- * restart; current bridge sources never disclose it before the challenge.
+ * Codex, Gemini, and Cursor bridges. Current Claude returns its expected first
+ * challenge as HTTP 200 so browsers do not log the handshake as a failed
+ * resource; older and rolling-restart bridges may still use HTTP 428. A
+ * first-response token is also accepted for compatibility, but current bridge
+ * sources never disclose it before the challenge.
  */
 export async function requestBridgePairToken(
   url: string,
@@ -93,7 +95,7 @@ export async function requestBridgePairToken(
   const first = await post({});
   let result = first;
   if (
-    first.status === 428
+    (first.status === 200 || first.status === 428)
     && first.json?.code === 'pairing_challenge_required'
     && typeof first.json?.challenge === 'string'
     && /^[a-f0-9]{48}$/i.test(first.json.challenge)

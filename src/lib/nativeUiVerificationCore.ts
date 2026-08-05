@@ -49,7 +49,6 @@ export const MAX_REASON_CHARS = 400;
 const TEXT_ENTRY_TOOLS: readonly GenericNativeUiMutationTool[] = [
   'desktop.type_text',
   'desktop.paste_text',
-  'desktop.set_element_value',
 ];
 
 /**
@@ -65,7 +64,6 @@ const TEXT_ENTRY_TOOLS: readonly GenericNativeUiMutationTool[] = [
 const REQUIRES_VISIBLE_CHANGE: readonly GenericNativeUiMutationTool[] = [
   'desktop.type_text',
   'desktop.paste_text',
-  'desktop.set_element_value',
   'desktop.menu_click',
 ];
 

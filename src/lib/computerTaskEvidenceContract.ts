@@ -6,6 +6,7 @@ import {
 } from './appAutomationControlSurfaces';
 import type { ChatComputerRequestRoute } from './chatComputerRequestRouter';
 import { formatGenericAppTaskFamilyForUser } from './genericAppNavigator';
+import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
 import {
   shouldVerifyOutcome,
   buildVerifierPrompt,
@@ -227,6 +228,61 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
   };
 }
 
+function exactComputerSequenceContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceContract | null {
+  const program = compileComputerSequenceProgram(route.sourceMessage);
+  if (program?.id !== 'photoshop_new_document') return null;
+  const createStep = program.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
+  const widthPx = Number(createStep?.args.widthPx);
+  const heightPx = Number(createStep?.args.heightPx);
+  const sizeLabel = Number.isFinite(widthPx) && Number.isFinite(heightPx)
+    ? `${widthPx}x${heightPx}`
+    : 'requested-size';
+  return {
+    schemaVersion: 1,
+    kind: 'desktop_app',
+    targetName: 'Adobe Photoshop',
+    taskFamily: `from-scratch ${sizeLabel} blank-document creation`,
+    observeBefore: [
+      'read desktop.photoshop_document_status before launch/create; no active document is an expected starting state',
+      'when the first status reports appRunning:false, launch Photoshop once and repeat document status until scriptable',
+    ],
+    actionabilityChecks: [
+      'Photoshop reports appRunning:true before document creation',
+      `desktop.photoshop_create_document receives exactly widthPx=${widthPx} and heightPx=${heightPx}`,
+      'Photoshop creation runs through the dedicated UXP/app API inside its canonical modal execution scope',
+    ],
+    approvalBefore: route.approvalRequired
+      ? [route.approvalReason || `one Chat plan-level approval before dispatching the exact ${sizeLabel} blank-document program`]
+      : [],
+    mutationGuardrails: [
+      'execute only the compiled status -> conditional launch -> status -> create_document -> final status program',
+      'do not add file search/stat/open, source-package, layer-inventory, screenshot, accessibility, menu, keyboard, or coordinate work',
+      route.approvalRequired
+        ? 'the explicit Chat plan approval owns the complete exact program; do not dispatch before it or request a second per-tool approval afterward'
+        : 'the current direct user command authorizes only this new unsaved blank document; saving, exporting, overwriting, deleting, editing existing content, and external actions remain gated',
+    ],
+    proofAfter: [
+      `final desktop.photoshop_document_status reports an active ${sizeLabel} document`,
+      'final app-native status reports the created document name and dimensions',
+    ],
+    failClosedRules: [
+      'Photoshop install, license, login, permission, modal dialog, or missing bridge tool blocks execution',
+      route.approvalRequired
+        ? 'Chat plan-approval rejection or create-document tool failure blocks mutation'
+        : 'create-document tool failure blocks mutation; do not improvise a different control surface',
+      `missing active document or dimensions other than ${sizeLabel} blocks completion`,
+    ],
+    freshEvidenceRequired: [
+      'fresh desktop.photoshop_document_status before a bounded retry',
+      'fresh desktop.photoshop_document_status after document creation',
+    ],
+    sourceRefs: uniqueRefs(baseSourceRefs(route)),
+    userSummary: route.approvalRequired
+      ? `Create one blank ${sizeLabel} Photoshop document with the exact compiled app-native sequence, the explicitly requested Chat approval, and final dimension proof.`
+      : `Create one unsaved blank ${sizeLabel} Photoshop document directly from the user's command, then verify its dimensions with app-native status.`,
+  };
+}
+
 function localFileContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceContract {
   return {
     schemaVersion: 1,
@@ -320,6 +376,8 @@ function buildoutContract(route: ChatComputerRequestRoute): ComputerTaskEvidence
 }
 
 export function buildComputerTaskEvidenceContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceContract {
+  const exactContract = exactComputerSequenceContract(route);
+  if (exactContract) return exactContract;
   if (route.kind === 'browser') return browserContract(route);
   if (route.kind === 'local_file') return localFileContract(route);
   if (route.kind === 'agent_buildout') return buildoutContract(route);
@@ -445,7 +503,7 @@ export function formatComputerTaskEvidenceContractPromptBlock(contract: Computer
     `Summary: ${contract.userSummary}`,
     `Observe before: ${contract.observeBefore.join(' | ')}`,
     `Actionability checks: ${contract.actionabilityChecks.join(' | ')}`,
-    `Approval before: ${contract.approvalBefore.join(' | ') || 'none before read-only work'}`,
+    `Approval before: ${contract.approvalBefore.join(' | ') || 'none required by this exact contract'}`,
     `Mutation guardrails: ${contract.mutationGuardrails.join(' | ')}`,
     `Proof after: ${contract.proofAfter.join(' | ')}`,
     `Fail closed: ${contract.failClosedRules.join(' | ')}`,

@@ -27,6 +27,77 @@ function assertNoTechnicalLeak(value: ReturnType<typeof buildChatComputerOutcome
   assert.doesNotMatch(visibleText(value), pattern, label);
 }
 
+const exactApprovalWait = buildChatComputerOutcomePresentation({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  outcomeStatus: 'waiting_approval',
+  outcomeMessage: 'Filed approval for chat.run_computer_task.',
+  approvalCategory: 'filed',
+  rawWarnings: [],
+  visibleWarnings: [],
+  preflightBlockers: [],
+  preflightWarnings: [],
+  groundingBlockers: [],
+});
+assert.equal(exactApprovalWait.statePhase, 'awaiting_approval', 'filed exact approval remains an awaiting-approval state');
+assert.equal(exactApprovalWait.shouldRecoverOutcome, false, 'filed exact approval does not launch generic failure recovery');
+assert.equal(exactApprovalWait.hideRecoveryDetails, true, 'filed exact approval hides the failure-recovery wall');
+assert.equal(exactApprovalWait.hideComputerHandoff, false, 'filed exact approval keeps the compact task card visible');
+assert.deepEqual(exactApprovalWait.nextSteps, ['Approve this exact plan to continue automatically.']);
+
+const exactApprovalServiceError = buildChatComputerOutcomePresentation({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  outcomeStatus: 'waiting_approval',
+  outcomeMessage: 'Approval lookup failed.',
+  approvalCategory: 'error',
+  rawWarnings: [],
+  visibleWarnings: [],
+  preflightBlockers: [],
+  preflightWarnings: [],
+  groundingBlockers: [],
+});
+assert.equal(exactApprovalServiceError.statePhase, 'blocked', 'approval service errors remain blocked rather than pretending to await a person');
+assert.equal(exactApprovalServiceError.shouldRecoverOutcome, true, 'approval service errors retain bounded recovery');
+
+const exactPostDispatchUnknown = buildChatComputerOutcomePresentation({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  outcomeStatus: 'partial',
+  outcomeMessage: 'The 600x600 Photoshop create request was dispatched, but its result could not be verified. The action will not be replayed automatically.',
+  replayPolicy: 'manual_verify_only',
+  mutationDispatched: true,
+  verificationOnlyTools: ['desktop.photoshop_document_status'],
+  rawWarnings: ['Photoshop document creation outcome is unknown after dispatch; automatic replay is disabled'],
+  visibleWarnings: ['Photoshop document creation outcome is unknown after dispatch; automatic replay is disabled'],
+  preflightBlockers: [],
+  preflightWarnings: [],
+  groundingBlockers: [],
+});
+assert.equal(exactPostDispatchUnknown.shouldRecoverOutcome, false, 'post-dispatch exact mutation cannot become generic retry recovery');
+assert.equal(exactPostDispatchUnknown.hideRecoveryDetails, true, 'post-dispatch exact mutation hides every replay option');
+assert.equal(exactPostDispatchUnknown.hideComputerTaskStatus, false, 'manual-verification-only outcome remains visible after refresh');
+assert.equal(exactPostDispatchUnknown.hideComputerHandoff, false, 'manual-verification-only handoff persists its no-replay contract');
+assert.match(exactPostDispatchUnknown.compactUserMessage || '', /will not send it again|duplicate document/i);
+assert.deepEqual(
+  exactPostDispatchUnknown.nextSteps,
+  ['Check the active document with Photoshop document status; do not run Create again.'],
+  'manual verification permits only read-only Photoshop status',
+);
+
+const textOnlyNoReplayWarning = buildChatComputerOutcomePresentation({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  outcomeStatus: 'partial',
+  outcomeMessage: 'The action will not be replayed automatically.',
+  rawWarnings: ['automatic replay is disabled'],
+  visibleWarnings: ['automatic replay is disabled'],
+  preflightBlockers: [],
+  preflightWarnings: [],
+  groundingBlockers: [],
+});
+assert.equal(
+  textOnlyNoReplayWarning.shouldRecoverOutcome,
+  true,
+  'untrusted warning prose alone cannot forge the structured no-replay policy',
+);
+
 assert(
   isQuietSuccessfulComputerTaskWarning('photoshop_export_proof stale_bridge; used save_for_web_fallback'),
   'successful Save for Web fallback stale warning is quiet',
@@ -340,6 +411,37 @@ assertNoTechnicalLeak(
   failedAppAutomation,
   /desktop\.click_element|a11y_path_stale|AXPath|pid=|\/desktop\/a11y_tree/i,
   'app automation visible copy hides bridge and accessibility internals',
+);
+
+const failedPhotoshopSequenceWithFileAdvisory = buildChatComputerOutcomePresentation({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  outcomeStatus: 'blocked',
+  outcomeMessage: 'The required local typed tool loop returned no result.',
+  rawWarnings: [
+    'Research-backed control surface order required: Use Photoshop UXP DOM/app API before semantic desktop fallback.',
+    'Photoshop document inventory required: Use desktop.file_stat, desktop.open_path, desktop.photoshop_document_status, and desktop.photoshop_layer_inventory before editing an existing source document.',
+  ],
+  visibleWarnings: [],
+  preflightBlockers: [],
+  preflightWarnings: [
+    'Photoshop document inventory required: Use desktop.file_stat before editing an existing source document.',
+  ],
+  groundingBlockers: [],
+});
+
+assert.equal(
+  failedPhotoshopSequenceWithFileAdvisory.compactUserMessage,
+  null,
+  'advisory file_stat text does not fabricate compact local-file failure copy for a fileless Photoshop task',
+);
+assert(
+  !failedPhotoshopSequenceWithFileAdvisory.blockerList.some((blocker) => /local file|folder permission|file search/i.test(blocker)),
+  'advisory file_stat text does not fabricate a local-file blocker',
+);
+assert.equal(
+  failedPhotoshopSequenceWithFileAdvisory.hideRecoveryDetails,
+  false,
+  'the real non-file failure remains available to normal recovery',
 );
 
 const failedLocalFileAutomation = buildChatComputerOutcomePresentation({
