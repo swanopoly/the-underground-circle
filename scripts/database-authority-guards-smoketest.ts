@@ -147,6 +147,16 @@ const continuationSweeperSql = section(
   'CREATE OR REPLACE FUNCTION public.sweep_unsafe_swanbot_continuations()',
   'REVOKE ALL ON FUNCTION public.parse_swanbot_continuation_timestamp(text)',
 );
+const continuationSweepSummarySql = section(
+  continuationSweeperSql,
+  'tool_calls = CASE',
+  'completed_at = v_swept_at',
+);
+const continuationSweepOutcomeMetadataSql = section(
+  continuationSweeperSql,
+  'metadata = (',
+  'FROM candidates AS candidate',
+);
 const continuationOneTimeScrubSql = section(
   continuationPrivacyMigration,
   '-- One-time privacy scrub for every checkpoint on a terminal/non-active row.',
@@ -539,6 +549,50 @@ has(
   "'replayAllowed', false",
   'database-swept continuations explicitly forbid replay',
 );
+has(
+  continuationSweepSummarySql,
+  "WHEN jsonb_typeof(run_row.tool_calls) = 'array'\n            THEN run_row.tool_calls\n          ELSE '[]'::jsonb",
+  'sweep preserves only array-shaped tool summaries and repairs every other shape to an empty array',
+);
+has(
+  continuationSweepSummarySql,
+  'iteration_count = GREATEST(\n          COALESCE(run_row.iteration_count, 1),\n          1\n        )',
+  'sweep repairs missing or non-positive iteration counts to at least one',
+);
+for (const tokenColumn of ['input_tokens', 'output_tokens', 'cached_tokens']) {
+  has(
+    continuationSweepSummarySql,
+    `${tokenColumn} = GREATEST(\n          COALESCE(run_row.${tokenColumn}, 0::bigint),\n          0::bigint\n        )`,
+    `sweep repairs ${tokenColumn} with nonnegative bigint-safe operations`,
+  );
+}
+check(
+  (continuationSweeperSql.match(/SET status = 'failed'/g) || []).length === 1,
+  'the sole sweeper terminalization carries the normalized summary assignment',
+);
+lacks(
+  continuationSweepSummarySql,
+  'abs(',
+  'summary repair avoids minimum-integer overflow through abs',
+);
+lacks(
+  continuationSweepSummarySql,
+  '::numeric',
+  'summary repair stays in integer column types without lossy numeric round trips',
+);
+for (const privateSummaryValue of [
+  'run_row.tool_calls',
+  'run_row.iteration_count',
+  'run_row.input_tokens',
+  'run_row.output_tokens',
+  'run_row.cached_tokens',
+]) {
+  lacks(
+    continuationSweepOutcomeMetadataSql,
+    privateSummaryValue,
+    `sweep outcome metadata does not copy ${privateSummaryValue} values`,
+  );
+}
 has(
   continuationSweeperSql,
   "run_row.final_stop_reason = candidate.final_stop_reason",

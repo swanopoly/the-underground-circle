@@ -12,6 +12,7 @@
  *     bare "constraint"/"floor" — DB errors fall through to unknown), and
  *     provider_5xx only with status-code context (never a standalone number)
  *   - routing fallback becomes VISIBLE servedBy.fallback (never silent)
+ *   - computer-task terminals map from typed status, never failure prose
  *   - recovery options attach non-mutating and bounded
  *   - telemetry summary is compact + bounded
  *
@@ -22,6 +23,7 @@ import {
   buildChatLaneOutcomeTags,
   classifyChatLaneError,
   normalizeAutomationOutcome,
+  normalizeComputerTaskLaneOutcome,
   normalizeCommandResult,
   normalizeConversationalIntentResult,
   normalizeStreamResult,
@@ -31,6 +33,8 @@ import {
   summarizeChatLaneOutcomeForTelemetry,
 } from '../src/lib/chatLaneOutcome';
 import type { ChatFailureRecoveryOption } from '../src/lib/chatFailureRecovery';
+import { readFileSync } from 'node:fs';
+import { createExactPlanApprovalContinuityGate } from '../src/lib/exactPlanApprovalContinuityCore';
 
 let failures = 0;
 function fail(m: string) { failures += 1; console.error('FAIL:', m); }
@@ -38,6 +42,25 @@ function pass(m: string) { console.log('pass:', m); }
 function assert(cond: any, name: string, detail?: string) {
   if (cond) pass(name);
   else fail(`${name}${detail ? ' — ' + detail : ''}`);
+}
+
+function sourceSection(source: string, startMarker: string, endMarker: string, name: string): string {
+  const start = source.indexOf(startMarker);
+  if (start < 0) {
+    fail(`${name} — missing start marker: ${startMarker}`);
+    return '';
+  }
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  if (end < 0) {
+    fail(`${name} — missing end marker: ${endMarker}`);
+    return '';
+  }
+  return source.slice(start, end);
+}
+
+function countOccurrences(source: string, needle: string): number {
+  if (!source || !needle) return 0;
+  return source.split(needle).length - 1;
 }
 
 function main() {
@@ -205,6 +228,384 @@ function main() {
     assert(skippedUnhandled.status === 'skipped', 'case4: unhandled → skipped, not failed');
     const handled = normalizeConversationalIntentResult({ handled: true, message: 'Saved.' });
     assert(handled.status === 'completed' && handled.message === 'Saved.', 'case4: handled → completed');
+  }
+
+  // ─── Case 4b: typed computer-task terminals — prose is never authority ──
+  {
+    const statuses = {
+      completed: 'completed',
+      partial: 'blocked',
+      blocked: 'blocked',
+      needs_input: 'needs_input',
+      waiting_approval: 'deferred',
+      failed: 'failed',
+      cancelled: 'blocked',
+    } as const;
+
+    for (const [computerTaskStatus, expectedLaneStatus] of Object.entries(statuses)) {
+      const outcome = normalizeComputerTaskLaneOutcome({
+        status: computerTaskStatus as keyof typeof statuses,
+        // Deliberately hostile prose: typed status must remain authoritative.
+        message: computerTaskStatus === 'completed'
+          ? 'Approval lookup failed. The plan was not executed.'
+          : 'Everything completed successfully.',
+        data: { computerTaskStatus: 'caller-cannot-override', runId: 'run-ct-1' },
+      });
+      assert(outcome.lane === 'computer_task' && outcome.status === expectedLaneStatus,
+        `case4b: ${computerTaskStatus} → truthful lane status ${expectedLaneStatus}`);
+      assert(outcome.data?.computerTaskStatus === computerTaskStatus,
+        `case4b: ${computerTaskStatus} retains authoritative task status`);
+      assert(outcome.data?.runId === 'run-ct-1',
+        `case4b: ${computerTaskStatus} preserves caller metadata`);
+      assert(outcome.recovery?.retrySideEffectSafe !== true,
+        `case4b: ${computerTaskStatus} is never made retry-safe by prose`);
+    }
+
+    const approval = normalizeComputerTaskLaneOutcome({
+      status: 'waiting_approval',
+      message: 'Approval lookup failed. The plan was not executed; retry when the approval service is available.',
+    });
+    assert(approval.status === 'deferred'
+      && approval.recovery?.reason === 'computer_task_waiting_approval',
+      'case4b: approval wait is deferred/neutral, never a lane failure');
+
+    const complete = normalizeComputerTaskLaneOutcome({
+      status: 'completed',
+      message: 'Created the 600x600 Photoshop document.',
+    });
+    assert(complete.status === 'completed' && complete.recovery === undefined,
+      'case4b: completed task is a clean lane success');
+
+    const manyOptions: ChatFailureRecoveryOption[] = Array.from({ length: 12 }, (_, i) => ({
+      id: `ct-opt-${i}`, label: `Option ${i}`, detail: 'd', actor: 'user', recommended: i === 0,
+      source: 'recovery_policy',
+    }));
+    const bounded = normalizeComputerTaskLaneOutcome({
+      status: 'needs_input',
+      message: 'Choose a document.',
+      recoveryOptions: manyOptions,
+      servedBy: { transport: 'local-desktop-bridge' },
+    });
+    assert(bounded.recoveryOptions.length === 8,
+      'case4b: computer-task recovery options are bounded at 8');
+    assert(bounded.servedBy?.transport === 'local-desktop-bridge',
+      'case4b: computer-task transport is preserved');
+
+  }
+
+  // ─── Case 4c: ChatTab integration — every continuation shares one seam ─
+  {
+    const approvalGate = createExactPlanApprovalContinuityGate();
+    assert(
+      approvalGate.resolve('approval-race', 'rejected').kind === 'queued_before_registration',
+      'case4c: resolution-before-registration is retained instead of dropped',
+    );
+    const reconciledReject = approvalGate.register('approval-race');
+    assert(
+      reconciledReject.kind === 'resolved' && reconciledReject.status === 'rejected',
+      'case4c: later owner registration deterministically receives the early rejection',
+    );
+    assert(
+      approvalGate.register('approval-race').kind === 'duplicate'
+        && approvalGate.resolve('approval-race', 'approved').kind === 'duplicate',
+      'case4c: an early decision is claimed once and conflicting callbacks cannot replay it',
+    );
+    assert(
+      approvalGate.register('approval-live').kind === 'pending'
+        && approvalGate.resolve('approval-live', 'approved').kind === 'ready'
+        && approvalGate.resolve('approval-live', 'approved').kind === 'duplicate',
+      'case4c: registered approval resolution is also first-terminal-wins',
+    );
+
+    const chatTabSource = readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8');
+    const recorderSection = sourceSection(
+      chatTabSource,
+      'async function recordComputerTaskLaneTerminal',
+      'export default function ChatTab',
+      'case4c module-scope recorder',
+    );
+    assert(countOccurrences(chatTabSource, 'async function recordComputerTaskLaneTerminal') === 1
+      && recorderSection.includes('normalizeComputerTaskLaneOutcome({')
+      && recorderSection.includes('recordChatLaneOutcomeNow(laneOutcome)'),
+      'case4c: one module-scope typed recorder is shared by every continuation');
+    assert(!/normalizeThrownError\s*\(\s*['"]computer_task['"]/.test(chatTabSource),
+      'case4c: ChatTab never converts a typed computer-task outcome into a thrown failure');
+    assert(/useComputerUseTask\(\s*circleId,\s*currentUserId \|\| undefined,\s*activeThreadId,\s*\)/.test(chatTabSource),
+      'case4c: cloud task persistence is scoped to the active chat thread and user');
+
+    const recoverySection = sourceSection(
+      chatTabSource,
+      'const startTaskFailureRecovery = async',
+      'setBotTyping(true);',
+      'case4c recovery compatibility',
+    );
+    assert(recoverySection.includes('outcomeStatus?: ComputerTaskOutcomeStatus')
+      && recoverySection.includes("| 'deferred'")
+      && /details\.outcomeStatus\s*===\s*'deferred'[\s\S]{0,100}'waiting_approval'/.test(recoverySection),
+      'case4c: coarse deferred recovery remains a typed waiting-approval terminal');
+
+    const cloudSection = sourceSection(
+      chatTabSource,
+      '// When the Computer Use agent completes (or errors out), post its result',
+      '// addBotMessage intentionally not in deps',
+      'case4c cloud browser terminals',
+    );
+    const cloudCompletedSection = sourceSection(
+      cloudSection,
+      "if (status === 'done' && result)",
+      "} else if (status === 'error' && errorMessage)",
+      'case4c cloud completion',
+    );
+    const cloudErrorSection = cloudSection.slice(cloudSection.indexOf("} else if (status === 'error' && errorMessage)"));
+    assert(countOccurrences(cloudCompletedSection, 'recordComputerTaskLaneTerminal({') === 1
+      && /status:\s*'completed'[\s\S]{0,180}executionKind:\s*'browser_computer_use'/.test(cloudCompletedSection),
+      'case4c: cloud browser completion records exactly one completed terminal');
+    assert(countOccurrences(cloudErrorSection, 'recordComputerTaskLaneTerminal({') === 1
+      && /outcomeStatus\s*===\s*'cancelled'[\s\S]{0,80}\?\s*'cancelled'[\s\S]{0,40}:\s*'failed'/.test(cloudErrorSection)
+      && /status:\s*terminalStatus[\s\S]{0,180}executionKind:\s*'browser_computer_use'/.test(cloudErrorSection),
+      'case4c: cloud browser error uses the hook-owned typed failed-or-cancelled terminal');
+    const cloudCancelSection = sourceSection(
+      cloudErrorSection,
+      "if (terminalStatus === 'cancelled')",
+      'const checkpointRecovery = diagnoseComputerTaskCheckpointFailure',
+      'case4c cloud cancellation',
+    );
+    assert(cloudCancelSection.includes('clearComputerTaskState(circleId, activeThreadId)')
+      && cloudCancelSection.includes("computerTaskStatus: 'cancelled'")
+      && cloudCancelSection.includes('return;')
+      && !cloudCancelSection.includes('startMainChatFailureRecoveryPayload'),
+      'case4c: cloud cancellation clears executing state and exits before failure recovery');
+
+    const localBrowserSection = sourceSection(
+      chatTabSource,
+      'const runLocalComputerExecution = useCallback',
+      'const executeLocalComputerAwarenessRequest',
+      'case4c local browser terminals',
+    );
+    assert(localBrowserSection.includes('localComputerUseAttemptRef.current = attempt')
+      && localBrowserSection.includes('isCurrentAttempt()')
+      && localBrowserSection.includes('{ signal: attempt.controller.signal }')
+      && localBrowserSection.includes('isAuthoritative: isCurrentAttempt')
+      && /if \(!isCurrentAttempt\(\) \|\| result\.cancelled\) return true;/.test(localBrowserSection),
+      'case4c: local execution is abortable and late promises lose mutation authority');
+    assert(localBrowserSection.includes('deriveComputerUseResultOutcomeStatus(result)')
+      && /outcomeStatus === 'waiting_approval'[\s\S]{0,500}status: 'awaiting_approval'/.test(localBrowserSection)
+      && /phase: 'awaiting_approval'[\s\S]{0,80}outcomeStatus: 'waiting_approval'/.test(localBrowserSection),
+      'case4c: a pending local approval pauses instead of failing');
+    const localBlockedSection = sourceSection(
+      localBrowserSection,
+      "if (outcomeStatus === 'blocked')",
+      'const terminalSession: ComputerUseSession',
+      'case4c rejected local prerequisite',
+    );
+    assert(localBlockedSection.includes("status: 'blocked'")
+      && localBlockedSection.includes('finalizeBrowserPlanBlocked(blockedSession, result)')
+      && /phase: 'blocked'[\s\S]{0,80}outcomeStatus: 'blocked'/.test(localBlockedSection)
+      && !localBlockedSection.includes('addRecoverableChatErrorMessage'),
+      'case4c: rejected prerequisite persists and presents as blocked without failure recovery');
+    assert(localBrowserSection.includes('attempt.controller.abort()')
+      && localBrowserSection.includes('clearComputerTaskState(circleId, activeThreadId)')
+      && localBrowserSection.includes('finalizeBrowserPlanCancellation(session)')
+      && /status:\s*'cancelled'[\s\S]{0,180}executionKind:\s*'local_browser_panel'/.test(localBrowserSection),
+      'case4c: local cancellation aborts, clears persistence, and projects a cancelled session');
+
+    const panelSection = sourceSection(
+      chatTabSource,
+      '/* ── Computer-Use Panel (web only) ── */',
+      '<BrowserSessionDrawer',
+      'case4c local browser panel terminals',
+    );
+    const approveOneSection = sourceSection(
+      panelSection,
+      'onApproveAction={(actionId) => {',
+      'onRejectAction={(actionId) => {',
+      'case4c panel approve-one',
+    );
+    const rejectOneSection = sourceSection(
+      panelSection,
+      'onRejectAction={(actionId) => {',
+      'onApproveAll={() => {',
+      'case4c panel reject-one',
+    );
+    const approveAllSection = sourceSection(
+      panelSection,
+      'onApproveAll={() => {',
+      'onPause={() => {',
+      'case4c panel approve-all',
+    );
+    const resumeSection = sourceSection(
+      panelSection,
+      'onResume={() => {',
+      'onCancel={() => {',
+      'case4c panel resume',
+    );
+    const cancelSection = sourceSection(
+      panelSection,
+      'onCancel={() => {',
+      'onOpenSession={() =>',
+      'case4c panel cancel',
+    );
+    assert(!panelSection.includes('executeComputerUsePlan(')
+      && approveAllSection.includes('runLocalComputerExecution(updated')
+      && resumeSection.includes('runLocalComputerExecution(resumed'),
+      'case4c: panel launches execution outside React state updaters through one guarded owner');
+    assert(approveOneSection.includes('const hasPendingDecision =')
+      && approveOneSection.includes('if (!hasPendingDecision)')
+      && approveOneSection.includes('runLocalComputerExecution('),
+      'case4c: approving the final individual step immediately runs the decided plan');
+    assert(rejectOneSection.includes("status: 'rejected' as const")
+      && rejectOneSection.includes('runLocalComputerExecution(rejected'),
+      'case4c: rejecting any individual step immediately enters the blocked executor path');
+    assert(cancelSection.includes('cancelLocalComputerExecution(computerUseSession)')
+      && !cancelSection.includes('recordComputerTaskLaneTerminal({'),
+      'case4c: panel cancel delegates to the aborting typed cancellation owner');
+    const computerUsePanelSource = readFileSync('src/components/computer-use/ComputerUsePanel.tsx', 'utf8');
+    assert(computerUsePanelSource.includes("blocked: 'BLOCKED — REVIEW PLAN'")
+      && computerUsePanelSource.includes("session.status === 'blocked'")
+      && computerUsePanelSource.includes('hasPendingActions && !isTerminal')
+      && /const isActive[\s\S]{0,180}session\.status === 'paused'/.test(computerUsePanelSource),
+      'case4c: blocked local session is terminal review UI, never an executable pending plan');
+    const pauseSection = sourceSection(
+      localBrowserSection,
+      'const pauseLocalComputerExecution = useCallback',
+      'useEffect(() => () => {',
+      'case4c local pause persistence',
+    );
+    assert(pauseSection.includes("status: 'paused'")
+      && pauseSection.includes('setComputerTaskState(null)')
+      && pauseSection.includes('clearComputerTaskState(circleId, activeThreadId)'),
+      'case4c: pause stays cancellable in-memory and cannot reload as stale executing');
+
+    const threadTransitionSection = sourceSection(
+      chatTabSource,
+      'const clearMountedThreadState = useCallback',
+      '// One authoritative load path',
+      'case4c computer-task thread ownership',
+    );
+    assert(threadTransitionSection.includes('localAttempt?.controller.abort()')
+      && threadTransitionSection.includes('setComputerUseSession(null)')
+      && threadTransitionSection.includes('setShowComputerUsePermission(false)')
+      && threadTransitionSection.includes('localComputerUseSessionOwnsThread(computerUseSession)')
+      && threadTransitionSection.includes('Boolean(localComputerUseAttemptRef.current)'),
+      'case4c: local execution and pending permission remain owned by one thread and forced transitions clear them');
+
+    const persistTaskSection = sourceSection(
+      chatTabSource,
+      'const persistComputerTaskState = useCallback',
+      '// D6: acknowledge persisted task notifications',
+      'case4c stable task persistence and hydration',
+    );
+    assert(persistTaskSection.includes('computerTaskStateRef.current?.checkpointRecovery')
+      && persistTaskSection.includes('computerTaskStateRef.current = nextState')
+      && persistTaskSection.includes('}, [activeThreadId, circleId]);')
+      && !persistTaskSection.includes('[activeThreadId, circleId, computerTaskState?.checkpointRecovery]'),
+      'case4c: checkpoint persistence has stable identity and cannot restart its polling effect per save');
+    assert(persistTaskSection.includes("existing?.phase === 'executing'")
+      && persistTaskSection.includes('interruptOrphanedComputerTaskState(existing)')
+      && persistTaskSection.includes('saveComputerTaskState(hydrated)'),
+      'case4c: reload terminalizes an orphaned executing record instead of resurrecting Working state');
+
+    const particleSection = sourceSection(
+      chatTabSource,
+      'function ParticleEffect',
+      '// Loading animation',
+      'case4c particle hook topology',
+    );
+    assert(particleSection.includes('const particlesRef = useRef<Animated.Value[]>([])')
+      && particleSection.includes('new Animated.Value(0)')
+      && !/Array\.from\([^\n]+useRef\(/.test(particleSection)
+      && particleSection.includes('return () => animation.stop()'),
+      'case4c: particle hooks stay top-level and their animation stops on cleanup');
+
+    assert(computerUsePanelSource.includes('const pulse = Animated.loop(')
+      && computerUsePanelSource.includes('pulse.stop()')
+      && computerUsePanelSource.includes('pulseAnim.stopAnimation()')
+      && !computerUsePanelSource.includes("pulse.start(() => {\n          if (session.status === 'executing')"),
+      'case4c: executing pulse has one cancellable owner with no stale recursive status closure');
+
+    const computerUseHookSource = readFileSync('src/lib/useComputerUseTask.ts', 'utf8');
+    assert(computerUseHookSource.includes('const cancelOwnedAttempt = useCallback')
+      && /useEffect\(\(\) => \{[\s\S]{0,140}setState\(EMPTY_STATE\);[\s\S]{0,240}cancelOwnedAttempt\(\);[\s\S]{0,120}persistQuestionResolved\(null\)/.test(computerUseHookSource),
+      'case4c: cloud Computer Use cancels its handle and invalidates callbacks on unmount or thread change');
+
+    const permissionDialogSource = readFileSync('src/components/computer-use/ComputerUsePermissionDialog.tsx', 'utf8');
+    assert(permissionDialogSource.includes('const submittingRef = useRef(false)')
+      && permissionDialogSource.includes('if (submittingRef.current) return;')
+      && permissionDialogSource.includes('submittingRef.current = true;')
+      && permissionDialogSource.includes('disabled={submitting}'),
+      'case4c: permission submission reserves synchronously so double clicks cannot duplicate dispatch');
+
+    const permissionSection = sourceSection(
+      chatTabSource,
+      '/* Computer-Use Permission Dialog (web only) */',
+      '<ComputerUseConsole',
+      'case4c post-approval terminals',
+    );
+    const allowSection = sourceSection(
+      permissionSection,
+      'onAllow={async (permission: ComputerUsePermission) => {',
+      'onDeny={() => {',
+      'case4c post-approval launch',
+    );
+    const denySection = permissionSection.slice(permissionSection.indexOf('onDeny={() => {'));
+    assert(countOccurrences(allowSection, 'recordComputerTaskLaneTerminal({') === 0
+      && /if \(!started\.started\)[\s\S]{0,100}if \(!started\.outcomeStatus\)/.test(allowSection),
+      'case4c: post-approval launch never duplicates a hook-owned terminal');
+    assert(countOccurrences(denySection, 'recordComputerTaskLaneTerminal({') === 1
+      && /status:\s*'cancelled'[\s\S]{0,180}executionKind:\s*'browser_computer_use'/.test(denySection),
+      'case4c: approval denial records exactly one cancelled terminal');
+
+    const exactApprovalSection = sourceSection(
+      chatTabSource,
+      '<HitlApprovalBanner',
+      'onEditAndResend=',
+      'case4c exact plan approval resolution',
+    );
+    assert(exactApprovalSection.includes('canResumeApprovalInMountedChat(approval)')
+      && exactApprovalSection.includes('const canUseReloadFallback = !pending')
+      && exactApprovalSection.includes('scopedExactApprovalCount === 1'),
+      'case4c: live owned approval resolves inline while reload fallback remains fail-closed');
+    const exactTerminalSection = sourceSection(
+      chatTabSource,
+      'const terminalizeExactPlanApproval = async',
+      'const approvalsForAttention =',
+      'case4c exact plan approval terminal owner',
+    );
+    assert(exactTerminalSection.includes("reason === 'rejected' || reason === 'dismissed'")
+      && exactTerminalSection.includes("? 'cancelled'")
+      && exactTerminalSection.includes(": 'blocked'")
+      && exactTerminalSection.includes('clearComputerTaskState(circleId, activeThreadId)')
+      && exactTerminalSection.includes("executionKind: 'exact_plan_approval'")
+      && exactTerminalSection.includes('recordSessionArchiveEvent({')
+      && !exactTerminalSection.includes('startMainChatFailureRecoveryPayload'),
+      'case4c: reject is cancelled and expiry/reload is blocked, with no failure recovery');
+    assert(exactApprovalSection.includes('exactPlanApprovalContinuityGateRef.current.resolve')
+      && exactApprovalSection.includes("resolution.kind === 'queued_before_registration'")
+      && /await pending\.originSettled;[\s\S]{0,900}status === 'rejected'/.test(exactApprovalSection),
+      'case4c: approve and reject share one-shot registration and wait for origin writes');
+    const filingSection = sourceSection(
+      chatTabSource,
+      'let exactApprovalResolutionDuringFiling:',
+      "const prefix = '';",
+      'case4c exact filing registration',
+    );
+    assert(filingSection.includes('registerExactApprovalOwner(')
+      && filingSection.includes('exactPlanApprovalContinuityGateRef.current.register')
+      && filingSection.includes(".select('id, circle_id, session_key, action_type, status, requested_at, timeout_seconds')")
+      && filingSection.includes('if (exactApprovalResolutionDuringFiling)')
+      && filingSection.includes('owner.originSettled.then(async () =>')
+      && filingSection.includes('return { handled: true as const, browser: false as const };'),
+      'case4c: resolution-before-registration reconciles once and skips stale awaiting persistence');
+    const attentionActionSection = sourceSection(
+      chatTabSource,
+      'const handleChatAttentionAction =',
+      '// ─── Room handoff suggestion',
+      'case4c expired approval actions',
+    );
+    assert(attentionActionSection.includes("terminalizeExactPlanApproval(row, 'expired')")
+      && attentionActionSection.includes("terminalizeExactPlanApproval(row, 'dismissed')")
+      && /await terminalizeExactPlanApproval\(row, 'expired'\)[\s\S]{0,900}await sendMessage\(commandText\)/.test(attentionActionSection),
+      'case4c: Ask again and dismiss terminalize the exact expired task before any resend');
   }
 
   // ─── Case 5: structured response — visible fallback, never silent ──────

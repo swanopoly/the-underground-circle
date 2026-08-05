@@ -328,6 +328,22 @@ export function isCompactGenericBrowserAutomationFailure(
 export function buildChatComputerOutcomePresentation(
   input: ChatComputerOutcomePresentationInput,
 ): ChatComputerOutcomePresentation {
+  if (input.outcomeStatus === 'cancelled') {
+    // STOP is a neutral user-directed terminal. It must never inherit warning
+    // prose, recovery suggestions, or a stale handoff from the interrupted
+    // run, and Chat should clear the durable task card.
+    return {
+      warningBlock: '',
+      blockerList: [],
+      shouldRecoverOutcome: false,
+      statePhase: 'blocked',
+      compactUserMessage: 'Stopped.',
+      hideRecoveryDetails: true,
+      hideComputerHandoff: true,
+      hideComputerTaskStatus: true,
+      nextSteps: [],
+    };
+  }
   const manualVerificationOnly = input.replayPolicy === 'manual_verify_only'
     && input.mutationDispatched === true;
   if (manualVerificationOnly) {

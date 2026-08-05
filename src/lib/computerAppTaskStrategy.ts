@@ -11,8 +11,10 @@ import {
 } from './adobeCreativeCloudApps';
 import {
   buildGenericAppNavigatorRouteContext,
+  classifyGenericAppTaskFamily,
   formatProfessionalAppAutonomyPromptBlock,
   formatGenericAppNavigatorPromptBlock,
+  inferGenericAppName,
   shouldUseGenericAppNavigator,
   shouldUseProfessionalAppAutonomy,
 } from './genericAppNavigator';
@@ -191,6 +193,9 @@ function withAdobeCreativeCloudProfile(strategy: ComputerAppTaskStrategy, messag
 function withGenericAppNavigator(strategy: ComputerAppTaskStrategy, message: string): ComputerAppTaskStrategy {
   const navigatorContext = buildGenericAppNavigatorRouteContext(message);
   const navigatorPlan = navigatorContext.plan;
+  const desktopProductWithoutFileWork = /\bdesktop$/i.test(navigatorContext.targetAppName)
+    && classifyGenericAppTaskFamily(message) !== 'file_open_save_export'
+    && !textHasExplicitLocalArtifactScope(message);
   return {
     ...strategy,
     label: navigatorContext.targetAppName === 'Unfamiliar desktop app'
@@ -225,12 +230,15 @@ function withGenericAppNavigator(strategy: ComputerAppTaskStrategy, message: str
     recommendedTools: uniqueStrings([
       ...navigatorPlan.recommendedTools,
       ...strategy.recommendedTools,
-    ]).slice(0, 30),
+    ]).filter((tool) => (
+      !desktopProductWithoutFileWork
+      || (!tool.startsWith('desktop.file_') && tool !== 'desktop.open_path')
+    )).slice(0, 30),
     bridgeRequirements: uniqueStrings([
       'local desktop bridge',
       'macOS Accessibility permission for semantic app control',
       'Screen Recording permission when visual verification is needed',
-      'file read/write grant when local files or outputs are involved',
+      desktopProductWithoutFileWork ? '' : 'file read/write grant when local files or outputs are involved',
       'managed Codex/connected agent session for missing app capability buildout',
       ...strategy.bridgeRequirements,
     ]).slice(0, 14),
@@ -427,10 +435,19 @@ function textMatchesAgentAssetAcquisition(message: string): boolean {
   ) || /\b(download|fetch|get|acquire)\b[\s\S]{0,100}\b(asset|dependency|package|font|image|template|dataset|resource)\b[\s\S]{0,100}\b(codex|agent|terminal)\b/i.test(message);
 }
 
+function textHasExplicitLocalArtifactScope(message: string): boolean {
+  return /(?:^|\s)(?:~\/|\/Users\/|\/[A-Za-z0-9._-]+\/)|\b(downloads?|documents?|files?|folders?|directory|path|local computer|hard drive|finder|desktop folder)\b|\.(pdf|csv|docx?|xlsx?|png|jpe?g|gif|webp|psd|psb|indd|idml|txt|md|json|zip)\b/i.test(String(message || ''));
+}
+
 function textMatchesLocalFileWorkflow(message: string): boolean {
   const text = String(message || '');
   if (textMatchesBrowserFileTransfer(text)) return false;
-  const hasExplicitFileScope = /\b(downloads?|documents?|files?|folders?|directory|path|local computer|hard drive|finder|desktop folder)\b|\.(pdf|csv|docx?|xlsx?|png|jpe?g|gif|webp|psd|psb|indd|idml|txt|md|json|zip)\b/i.test(text);
+  // `Desktop` is also a product suffix. Once the parser has identified a
+  // named app such as Docker Desktop or Microsoft Remote Desktop, a bare
+  // `desktop` token must not turn the request into a local-file workflow.
+  const inferredApp = inferGenericAppName(text);
+  if (inferredApp && /\bdesktop$/i.test(inferredApp)) return false;
+  const hasExplicitFileScope = textHasExplicitLocalArtifactScope(text);
   if (/\b(desktop app|native app|app window|application window|app_adapter|window state)\b/i.test(text) && !hasExplicitFileScope) {
     return false;
   }
@@ -439,6 +456,53 @@ function textMatchesLocalFileWorkflow(message: string): boolean {
     /\b(desktop|downloads?|documents?|files?|folders?|directory|path|local computer|hard drive|finder)\b[\s\S]{0,140}\b(search|find|locate|read|open|scan|list|rename|move|copy|trash|delete|edit|write|save)\b/i.test(text) ||
     /\b\.(pdf|csv|docx?|xlsx?|png|jpe?g|gif|webp|psd|psb|indd|idml|txt|md|json|zip)\b/i.test(text)
   );
+}
+
+function withNamedDesktopReadStrategy(
+  strategy: ComputerAppTaskStrategy,
+  message: string,
+  parsedAppName?: string | null,
+): ComputerAppTaskStrategy {
+  const appName = parsedAppName || inferGenericAppName(message) || 'desktop app';
+  return {
+    ...strategy,
+    label: `${appName} Launch And Read`,
+    summary: `Launch or focus ${appName}, then return only the requested app/window state through read-only app-native or accessibility observations.`,
+    observeFirst: [
+      `desktop.app_reachability for ${appName}`,
+      `desktop.list_running_apps and desktop.window_state for exact ${appName} identity`,
+      `desktop.observe_app or the smallest app-native status read for ${appName}`,
+    ],
+    actionOrder: [
+      `launch ${appName} only when it is not already running`,
+      `focus ${appName} only when the request requires it`,
+      'read the requested status without clicking, typing, changing app state, or accessing local files',
+    ],
+    verificationOrder: [
+      `confirm ${appName} process/window identity`,
+      'return the requested app-native status, accessibility value, or visible window state',
+    ],
+    recoveryPolicy: [
+      'If the app is unavailable, permission-blocked, or not observable, report that exact blocker.',
+      'If the request expands into a mutation or local-file operation, recompute strategy and approval before acting.',
+    ],
+    approvalCheckpoints: [],
+    stopConditions: ['requested app/window state returned', 'target app unavailable', 'read permission missing'],
+    recommendedTools: [
+      'desktop.app_reachability',
+      'desktop.list_running_apps',
+      'desktop.launch_app',
+      'desktop.focus_app',
+      'desktop.wait_for_app',
+      'desktop.window_state',
+      'desktop.observe_app',
+      'desktop.read_a11y_tree',
+      'desktop.menu_inventory',
+      'desktop.screenshot',
+    ],
+    bridgeRequirements: ['local desktop bridge with observation and app lifecycle access'],
+    maxBlindActions: 0,
+  };
 }
 
 function baseStrategy(id: ComputerAppStrategyId): ComputerAppTaskStrategy {
@@ -751,6 +815,15 @@ export function buildComputerAppTaskStrategy(
   if (textMatchesBrowserFileTransfer(text)) {
     const strategy = baseStrategy('browser_file_transfer');
     return textMatchesWordPressWorkflow(text) ? withWordPressAdminWorkflow(strategy, text) : strategy;
+  }
+  const inferredApp = inferGenericAppName(text);
+  if (
+    inferredApp
+    && classifyGenericAppTaskFamily(text, { targetAppName: inferredApp }) === 'launch_or_read'
+    && !textHasExplicitLocalArtifactScope(text)
+    && !/\b(?:any app|figure out|research|what it needs|capability|adapter|by itself)\b/i.test(text)
+  ) {
+    return withNamedDesktopReadStrategy(baseStrategy('desktop_semantic'), text, inferredApp);
   }
   if (textMatchesCreativeLayoutApp(text)) return withDesignAppAutomationPlan(baseStrategy('creative_layout_control'), text);
   if (textMatchesAdobeCreativeCloudApp(text)) return withAdobeCreativeCloudProfile(baseStrategy('adobe_cc_control'), text);

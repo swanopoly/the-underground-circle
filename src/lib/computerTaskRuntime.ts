@@ -77,6 +77,7 @@ import {
 import type { ChatAgentContextPack } from './chatAgentContextPack';
 import { sanitizeUntrustedForModel } from './untrustedContent';
 import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
+import type { ChatComputerDeterministicLifecycleReadProgram } from './chatComputerRequestRouter';
 type ComputerTaskAgentLoopContext = Pick<
   AgentRunRequest,
   | 'threadId'
@@ -260,6 +261,21 @@ function exactSequenceBlockedResult(
   };
 }
 
+function deterministicLocalCancelledResult(
+  execution: ComputerTaskExecutionEnvelope,
+  response = 'The local app task was cancelled before another action was dispatched.',
+  mutationDispatched = false,
+): ComputerTaskRuntimeResult {
+  return {
+    status: 'cancelled',
+    adapterId: 'app_adapter',
+    execution,
+    response,
+    ...(mutationDispatched ? { mutationDispatched: true } : {}),
+    warnings: [],
+  };
+}
+
 function exactSequenceManualVerificationResult(
   execution: ComputerTaskExecutionEnvelope,
   response: string,
@@ -392,7 +408,7 @@ async function executeAuthorizedExactSequenceProgram(input: {
   }
   const stopped = () => signal?.aborted === true;
   if (stopped()) {
-    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before any app action.');
+    return deterministicLocalCancelledResult(execution, 'The Photoshop task was cancelled before any app action.');
   }
 
   const desktop = await import('./desktopBridge');
@@ -421,7 +437,7 @@ async function executeAuthorizedExactSequenceProgram(input: {
     );
   }
   if (stopped()) {
-    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before launch or document creation.');
+    return deterministicLocalCancelledResult(execution, 'The Photoshop task was cancelled before launch or document creation.');
   }
 
   let launched = false;
@@ -454,7 +470,11 @@ async function executeAuthorizedExactSequenceProgram(input: {
     // confirmed.
     for (let attempt = 0; attempt < 4; attempt += 1) {
       if (stopped()) {
-        return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped while waiting for the app to become ready.');
+        return deterministicLocalCancelledResult(
+          execution,
+          'The Photoshop task was cancelled while waiting for the app to become ready; no document was created.',
+          launched,
+        );
       }
       await desktop.waitForApp('Photoshop', 12_000).catch(() => null);
       ready = await desktop.photoshopDocumentStatus({ appName: 'Photoshop' });
@@ -469,7 +489,11 @@ async function executeAuthorizedExactSequenceProgram(input: {
     );
   }
   if (stopped()) {
-    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before document creation.');
+    return deterministicLocalCancelledResult(
+      execution,
+      'The Photoshop task was cancelled before document creation.',
+      launched,
+    );
   }
 
   const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop);
@@ -481,7 +505,11 @@ async function executeAuthorizedExactSequenceProgram(input: {
     );
   }
   if (stopped()) {
-    return exactSequenceBlockedResult(execution, 'The Photoshop task was stopped before document creation.');
+    return deterministicLocalCancelledResult(
+      execution,
+      'The Photoshop task was cancelled before document creation.',
+      launched || foregroundBeforeCreate.refocused,
+    );
   }
 
   let created: Awaited<ReturnType<typeof desktop.photoshopCreateDocument>>;
@@ -541,6 +569,166 @@ async function executeAuthorizedExactSequenceProgram(input: {
     adapterId: 'app_adapter',
     execution,
     response: `Opened Photoshop and created **${actualName || expectedName || 'a new document'}** at **${widthPx} × ${heightPx}px**. Photoshop's final document status verified the active document dimensions.`,
+    warnings: [],
+  };
+}
+
+function lifecycleActivationProofFlag(
+  result: { data?: Record<string, unknown> },
+  key: 'mutationAttempted' | 'outcomeUnknown',
+): boolean {
+  const proof = result.data?.proof;
+  return Boolean(
+    proof
+    && typeof proof === 'object'
+    && !Array.isArray(proof)
+    && (proof as Record<string, unknown>)[key] === true,
+  );
+}
+
+function validDeterministicLifecycleReadProgram(
+  program: ChatComputerDeterministicLifecycleReadProgram | null | undefined,
+): program is ChatComputerDeterministicLifecycleReadProgram {
+  if (
+    program?.id !== 'named_app_lifecycle_read'
+    || program.authorization?.mode !== 'direct_user_request'
+    || !['open_or_launch', 'focus'].includes(program.operation)
+    || !program.targetAppName
+    || !program.dispatchAppName
+    || !/^[A-Za-z0-9 .\-_()]+$/.test(program.dispatchAppName)
+    || program.dispatchAppName.length > 120
+    || !Array.isArray(program.steps)
+  ) return false;
+  const expectedTools = program.operation === 'focus'
+    ? ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']
+    : ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app'];
+  if (program.steps.length !== expectedTools.length) return false;
+  return program.steps.every((step, index) => (
+    step.tool === expectedTools[index]
+    && String(step.args?.appName || '') === program.dispatchAppName
+  ));
+}
+
+/**
+ * Execute a router-compiled strict app open/launch/focus request without an
+ * LLM round trip. The actual action is delegated to the canonical
+ * observe-first native activation adapter so exact target matching, bounded
+ * waits, postcondition proof, and outcome-unknown handling stay shared with
+ * typed OpenSwan desktop.launch_app / desktop.focus_app calls.
+ */
+async function executeAuthorizedDeterministicLifecycleReadProgram(input: {
+  program: ChatComputerDeterministicLifecycleReadProgram;
+  execution: ComputerTaskExecutionEnvelope;
+  signal?: AbortSignal;
+}): Promise<ComputerTaskRuntimeResult> {
+  const { program, execution, signal } = input;
+  if (!validDeterministicLifecycleReadProgram(program)) {
+    return exactSequenceBlockedResult(
+      execution,
+      'The deterministic app lifecycle program was invalid, so no app action was attempted.',
+      ['invalid deterministic lifecycle program'],
+    );
+  }
+  if (signal?.aborted) {
+    return deterministicLocalCancelledResult(execution);
+  }
+
+  const [desktop, { executeObservedNativeAppActivation }] = await Promise.all([
+    import('./desktopBridge'),
+    import('./computerAppAdapter'),
+  ]);
+  if (!(await desktop.isDesktopBridgeAvailable())) {
+    return exactSequenceBlockedResult(
+      execution,
+      `The local desktop bridge is offline, so ${program.targetAppName} was not opened or focused. Restart the local app stack, then retry once.`,
+      ['desktop bridge offline before deterministic app lifecycle dispatch'],
+    );
+  }
+  const pairing = await desktop.ensureDesktopBridgePaired();
+  if (!pairing.ok) {
+    return exactSequenceBlockedResult(
+      execution,
+      `The desktop bridge could not be paired, so ${program.targetAppName} was not opened or focused: ${pairing.error || 'pairing failed'}`,
+      ['desktop bridge pairing failed before deterministic app lifecycle dispatch'],
+    );
+  }
+  if (signal?.aborted) {
+    return deterministicLocalCancelledResult(execution);
+  }
+
+  const deps = {
+    observeApp: desktop.observeApp,
+    launchApp: desktop.launchApp,
+    focusApp: desktop.focusApp,
+    waitForApp: desktop.waitForApp,
+  };
+  let mutationDispatched = false;
+  if (program.operation === 'open_or_launch') {
+    const launch = await executeObservedNativeAppActivation(
+      'launch_app',
+      program.dispatchAppName,
+      deps,
+    );
+    mutationDispatched = lifecycleActivationProofFlag(launch, 'mutationAttempted');
+    if (signal?.aborted) {
+      return deterministicLocalCancelledResult(
+        execution,
+        `The ${program.targetAppName} task was cancelled before foreground verification.`,
+        mutationDispatched,
+      );
+    }
+    if (!launch.ok) {
+      const outcomeUnknown = lifecycleActivationProofFlag(launch, 'outcomeUnknown');
+      return {
+        status: outcomeUnknown ? 'partial' : 'blocked',
+        adapterId: 'app_adapter',
+        execution,
+        response: launch.message,
+        ...(outcomeUnknown ? { replayPolicy: 'manual_verify_only' as const } : {}),
+        ...(mutationDispatched ? { mutationDispatched: true } : {}),
+        verificationOnlyTools: ['desktop.observe_app'],
+        warnings: launch.warnings,
+      };
+    }
+  }
+
+  const focus = await executeObservedNativeAppActivation(
+    'focus_app',
+    program.dispatchAppName,
+    deps,
+  );
+  const focusDispatched = lifecycleActivationProofFlag(focus, 'mutationAttempted');
+  mutationDispatched = mutationDispatched || focusDispatched;
+  if (signal?.aborted) {
+    return deterministicLocalCancelledResult(
+      execution,
+      `The ${program.targetAppName} task was cancelled after the current lifecycle step.`,
+      mutationDispatched,
+    );
+  }
+  if (!focus.ok) {
+    const outcomeUnknown = lifecycleActivationProofFlag(focus, 'outcomeUnknown');
+    return {
+      status: mutationDispatched || outcomeUnknown ? 'partial' : 'blocked',
+      adapterId: 'app_adapter',
+      execution,
+      response: focus.message,
+      ...(outcomeUnknown ? { replayPolicy: 'manual_verify_only' as const } : {}),
+      ...(mutationDispatched ? { mutationDispatched: true } : {}),
+      verificationOnlyTools: ['desktop.observe_app'],
+      warnings: focus.warnings,
+    };
+  }
+
+  const dispatchIdentity = program.dispatchAppName === program.targetAppName
+    ? ''
+    : ` through its local app identity **${program.dispatchAppName}**`;
+  return {
+    status: 'completed',
+    adapterId: 'app_adapter',
+    execution,
+    response: `Opened and focused **${program.targetAppName}**${dispatchIdentity}. Fresh local process and foreground observations verified completion.`,
+    ...(mutationDispatched ? { mutationDispatched: true } : {}),
     warnings: [],
   };
 }
@@ -1468,6 +1656,9 @@ export async function executeComputerTaskWithAgent(args: {
    * local program; generic/model-planned calls never consult it.
    */
   exactSequenceDispatchAuthorized?: boolean;
+  /** Router-compiled strict named-app lifecycle program. When present and
+   * valid, the runtime dispatches it locally without a clarifier or AI relay. */
+  deterministicLifecycleReadProgram?: ChatComputerDeterministicLifecycleReadProgram | null;
   /** Route-level app choice — threads into the complexity plan's dispatch
    *  block so the agent opens the chosen app first (App-choice contract). */
   appResolution?: import('./computerTaskComplexityPlan').ComputerTaskAppChoiceResolution | null;
@@ -1535,7 +1726,7 @@ export async function executeComputerTaskWithAgent(args: {
   // reply re-enters planning with the answers). Shared with the BROWSER lane
   // via runComputerTaskClarifierCheck (P57 parity). Never runs on a
   // buildout-retry pass (the task was already clarified before the gap).
-  if (!readyCapabilityBuildout && !sequenceProgram) {
+  if (!readyCapabilityBuildout && !sequenceProgram && !args.deterministicLifecycleReadProgram) {
     const clarification = await runComputerTaskClarifierCheck({
       task: args.task,
       circleId: args.circleId,
@@ -1608,11 +1799,26 @@ export async function executeComputerTaskWithAgent(args: {
     });
   }
 
+  if (args.deterministicLifecycleReadProgram) {
+    if (execution.preflight.blockers.length > 0) {
+      return exactSequenceBlockedResult(
+        executionForResult,
+        `The deterministic app lifecycle program is blocked before execution: ${execution.preflight.blockers.map((item) => item.label).join('; ')}`,
+        warnings,
+      );
+    }
+    return executeAuthorizedDeterministicLifecycleReadProgram({
+      program: args.deterministicLifecycleReadProgram,
+      execution: executionForResult,
+      signal: args.signal,
+    });
+  }
+
   // Learned per-app facts still gate read-only trace/example context. Generic
-  // deterministic app execution remains intentionally absent: only the
-  // compiler-owned, dispatcher-authorized exact program above may bypass an LLM turn;
-  // every model-planned mutation descends through the authenticated typed
-  // agent loop.
+  // deterministic app mutation execution remains intentionally absent: only
+  // the compiler-owned exact Photoshop program and the strict reversible
+  // launch/focus program above may bypass an LLM turn. Every model-planned
+  // document/UI mutation descends through the authenticated typed agent loop.
   // Attachment task text contains the staged local path and inferred app.
   // Keep both out of learned-facts/action-trace telemetry; the exact task is
   // retained below only in the authenticated agent execution prompt.

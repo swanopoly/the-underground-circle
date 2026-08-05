@@ -9,7 +9,7 @@
  * the agent completes.
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   buildComputerUsePolicyEnvelope,
   startComputerUseAgent,
@@ -31,6 +31,7 @@ import {
 } from './chatComputerHandoffContext';
 import { translateComputerUseErrorMessage } from './chatUserFacingOutcomes';
 import { buildChatComputerUsePolicyInputs } from './chatComputerRequestRouter';
+import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
 
 export type TaskStatus = 'idle' | 'starting' | 'running' | 'done' | 'error';
 
@@ -59,6 +60,8 @@ export interface LiveUsage {
 
 export interface ComputerUseTaskState {
   status: TaskStatus;
+  /** Authoritative task outcome. `status` remains the live-card render state. */
+  outcomeStatus?: ComputerTaskOutcomeStatus | null;
   task: string;
   /** Row id in `computer_use_runs` — used to link to history or run a
    *  follow-up referencing this task. */
@@ -103,6 +106,7 @@ export interface ComputerUseTaskState {
 
 const EMPTY_STATE: ComputerUseTaskState = {
   status: 'idle',
+  outcomeStatus: null,
   task: '',
   runId: null,
   sessionId: null,
@@ -118,6 +122,34 @@ const EMPTY_STATE: ComputerUseTaskState = {
   rawErrorMessage: null,
 };
 
+export interface ComputerUseTaskStartResult {
+  started: boolean;
+  reason?: string;
+  /** Present when this hook already owns the terminal state for the attempt. */
+  outcomeStatus?: Extract<ComputerTaskOutcomeStatus, 'failed' | 'cancelled'> | null;
+}
+
+export type ComputerUseTaskTerminalStatus = Extract<
+  ComputerTaskOutcomeStatus,
+  'completed' | 'failed' | 'cancelled'
+>;
+
+/** Dependency-free first-terminal-wins gate used by every run callback. */
+export function createComputerUseTaskTerminalGate(): {
+  claim: (status: ComputerUseTaskTerminalStatus) => boolean;
+  getStatus: () => ComputerUseTaskTerminalStatus | null;
+} {
+  let status: ComputerUseTaskTerminalStatus | null = null;
+  return {
+    claim(nextStatus) {
+      if (status) return false;
+      status = nextStatus;
+      return true;
+    },
+    getStatus: () => status,
+  };
+}
+
 // Phase 2b (docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md): display policy lives
 // in the chatUserFacingOutcomes owner — classified failures render as plain
 // language + one next action instead of the old strip-jargon-or-generic
@@ -130,6 +162,11 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
   // Synchronous reservation closes the await-creds race: two run() calls in
   // the same render can no longer both pass the empty handle check.
   const startReservationRef = useRef<object | null>(null);
+  // Every callback from the remote loop is scoped to one attempt. Cancelling
+  // or starting a later attempt invalidates older callbacks before they can
+  // publish a contradictory completion/error.
+  const runAttemptRef = useRef<object | null>(null);
+  const terminalGateRef = useRef<ReturnType<typeof createComputerUseTaskTerminalGate> | null>(null);
   // Mirrors the live pendingConfirmation id so terminal callbacks can
   // expire the persisted copy without reading React state.
   const pendingQuestionIdRef = useRef<string | null>(null);
@@ -163,6 +200,34 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
     void resolveComputerTaskPendingQuestionState(circleId, threadId, id, answer);
   }, [circleId, threadId]);
 
+  const cancelOwnedAttempt = useCallback(() => {
+    const terminalGate = terminalGateRef.current;
+    const ownsLiveAttempt = !!terminalGate && terminalGate.claim('cancelled');
+    // Invalidate callbacks and an in-flight credential lookup before either can
+    // publish into a later thread or a remounted hook.
+    startReservationRef.current = null;
+    runAttemptRef.current = null;
+    terminalGateRef.current = null;
+    sessionIdRef.current = null;
+    runIdRef.current = null;
+    if (handleRef.current) {
+      try { handleRef.current.cancel(); } catch {}
+      handleRef.current = null;
+    }
+    return ownsLiveAttempt;
+  }, []);
+
+  // A live AgentHandle is mount- and thread-owned. There is no reattach token
+  // in this hook, so leaving the scope must cancel it and reset the next scope
+  // instead of allowing late callbacks to resurrect an old task.
+  useEffect(() => {
+    setState(EMPTY_STATE);
+    return () => {
+      cancelOwnedAttempt();
+      persistQuestionResolved(null);
+    };
+  }, [cancelOwnedAttempt, circleId, persistQuestionResolved, threadId, userId]);
+
   const run = useCallback(async (
     task: string,
     options?: {
@@ -183,13 +248,20 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       /** Optional short-lived signal from an explicit browser permission UI. */
       preRunBrowserPermission?: ComputerUsePreRunBrowserPermission;
     },
-  ): Promise<{ started: boolean; reason?: string }> => {
+  ): Promise<ComputerUseTaskStartResult> => {
     if (!task.trim()) return { started: false, reason: 'Empty task.' };
     if (handleRef.current || startReservationRef.current) {
       return { started: false, reason: 'Another task is already running.' };
     }
     const startReservation = {};
+    const terminalGate = createComputerUseTaskTerminalGate();
     startReservationRef.current = startReservation;
+    runAttemptRef.current = startReservation;
+    terminalGateRef.current = terminalGate;
+    sessionIdRef.current = null;
+    runIdRef.current = null;
+    setState({ ...EMPTY_STATE, status: 'starting', task });
+    const isCurrentAttempt = () => runAttemptRef.current === startReservation;
     const releaseStartReservation = () => {
       if (startReservationRef.current === startReservation) startReservationRef.current = null;
     };
@@ -200,19 +272,29 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
     } catch {
       const wasCancelled = startReservationRef.current !== startReservation;
       releaseStartReservation();
-      if (wasCancelled) return { started: false, reason: 'Task start was cancelled.' };
+      if (wasCancelled || !isCurrentAttempt()) {
+        return { started: false, reason: 'Task start was cancelled.', outcomeStatus: 'cancelled' };
+      }
       const reason = 'Could not load Computer Use credentials.';
-      setState({ ...EMPTY_STATE, status: 'error', task, errorMessage: reason });
-      return { started: false, reason };
+      if (!terminalGate.claim('failed')) {
+        return { started: false, reason: 'Task start was cancelled.', outcomeStatus: 'cancelled' };
+      }
+      runAttemptRef.current = null;
+      terminalGateRef.current = null;
+      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', task, errorMessage: reason });
+      return { started: false, reason, outcomeStatus: 'failed' };
     }
     if (startReservationRef.current !== startReservation) {
-      return { started: false, reason: 'Task start was cancelled.' };
+      return { started: false, reason: 'Task start was cancelled.', outcomeStatus: 'cancelled' };
     }
     if (!credsResult.ok) {
       releaseStartReservation();
       const reason = 'reason' in credsResult ? credsResult.reason : 'Computer Use credentials are unavailable.';
-      setState({ ...EMPTY_STATE, status: 'error', task, errorMessage: reason });
-      return { started: false, reason };
+      terminalGate.claim('failed');
+      runAttemptRef.current = null;
+      terminalGateRef.current = null;
+      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', task, errorMessage: reason });
+      return { started: false, reason, outcomeStatus: 'failed' };
     }
 
     // 2.5 substitution visibility: consume the edge loop's model coercion
@@ -227,6 +309,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
     setState({
       ...EMPTY_STATE,
       status: 'starting',
+      outcomeStatus: null,
       task,
       modelResolution: modelResolution.substituted ? modelResolution : null,
     });
@@ -254,42 +337,52 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
         }),
         browserbase: credsResult.creds.browserbase,
         onRunStarted: ({ runId }) => {
+          if (!isCurrentAttempt()) return;
           runIdRef.current = runId;
           setState((prev) => ({ ...prev, runId }));
         },
         onSessionStarted: ({ sessionId, liveUrl }) => {
+          if (!isCurrentAttempt()) return;
           sessionIdRef.current = sessionId;
           setState((prev) => ({ ...prev, status: 'running', sessionId, liveUrl }));
         },
         onAction: (info) => {
+          if (!isCurrentAttempt()) return;
           setState((prev) => ({ ...prev, actions: [...prev.actions, { ...info, at: Date.now() }] }));
         },
         onScreenshot: ({ b64, url }) => {
+          if (!isCurrentAttempt()) return;
           setState((prev) => ({ ...prev, screenshots: [...prev.screenshots, { b64, url, at: Date.now() }] }));
         },
         onReasoning: (text) => {
+          if (!isCurrentAttempt()) return;
           if (!text.trim()) return;
           setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
         },
         onSteeringApplied: ({ note }) => {
+          if (!isCurrentAttempt()) return;
           // Steering confirmation rides the reasoning stream the live card
           // already renders — the user sees exactly when their note landed.
           const text = `🧭 Steering applied: ${String(note || '').slice(0, 200)}`;
           setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
         },
         onConfirmationRequired: (info) => {
+          if (!isCurrentAttempt()) return;
           const pending: PendingConfirmation = { ...info, askedAt: Date.now() };
           persistQuestionAsked(pending, { sessionId: sessionIdRef.current, runId: runIdRef.current });
           setState((prev) => ({ ...prev, pendingConfirmation: pending }));
         },
         onConfirmationResolved: () => {
+          if (!isCurrentAttempt()) return;
           persistQuestionResolved('resolved in session');
           setState((prev) => ({ ...prev, pendingConfirmation: null }));
         },
         onUsage: (info) => {
+          if (!isCurrentAttempt()) return;
           setState((prev) => ({ ...prev, usage: info }));
         },
         onPartialResult: ({ summary, iterations, runId }) => {
+          if (!isCurrentAttempt()) return;
           // D8: a bounded stop (timeout/budget/stall) hands back the progress
           // made so far. Populate `result` with the partial summary so the
           // card shows what WAS done; the matching onError that follows sets
@@ -316,6 +409,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
           }));
         },
         onResult: ({ summary, iterations, tokens, findings, extractedData, runId }) => {
+          if (!isCurrentAttempt() || !terminalGate.claim('completed')) return;
           persistQuestionResolved(null); // task finished — expire any open question
           // D6 progressive enhancement: page hidden + permission already
           // granted → native web notification. Silent no-op otherwise.
@@ -327,12 +421,16 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
           setState((prev) => ({
             ...prev,
             status: 'done',
+            outcomeStatus: 'completed',
             runId: runId || prev.runId,
             result: { summary, iterations, tokens, findings: findings ?? null, extractedData: extractedData ?? null },
           }));
+          runAttemptRef.current = null;
+          if (terminalGateRef.current === terminalGate) terminalGateRef.current = null;
           handleRef.current = null;
         },
         onError: (msg) => {
+          if (!isCurrentAttempt() || !terminalGate.claim('failed')) return;
           persistQuestionResolved(null); // task errored — expire any open question
           const visibleError = sanitizeComputerUseErrorMessage(msg);
           fireComputerTaskWebNotification({
@@ -340,19 +438,35 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
             title: 'Computer task failed',
             body: visibleError || task,
           });
-          setState((prev) => ({ ...prev, status: 'error', errorMessage: visibleError, rawErrorMessage: msg }));
+          setState((prev) => ({
+            ...prev,
+            status: 'error',
+            outcomeStatus: 'failed',
+            errorMessage: visibleError,
+            rawErrorMessage: msg,
+          }));
+          runAttemptRef.current = null;
+          if (terminalGateRef.current === terminalGate) terminalGateRef.current = null;
           handleRef.current = null;
         },
       });
     } catch {
       releaseStartReservation();
+      if (!isCurrentAttempt()) {
+        return terminalGate.getStatus() === 'failed'
+          ? { started: false, reason: 'Could not start the Computer Use task.', outcomeStatus: 'failed' }
+          : { started: false, reason: 'Task start was cancelled.', outcomeStatus: 'cancelled' };
+      }
       const reason = 'Could not start the Computer Use task.';
-      setState({ ...EMPTY_STATE, status: 'error', task, errorMessage: reason });
-      return { started: false, reason };
+      terminalGate.claim('failed');
+      runAttemptRef.current = null;
+      if (terminalGateRef.current === terminalGate) terminalGateRef.current = null;
+      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', task, errorMessage: reason });
+      return { started: false, reason, outcomeStatus: 'failed' };
     }
     if (startReservationRef.current !== startReservation) {
       try { startedHandle.cancel(); } catch {}
-      return { started: false, reason: 'Task start was cancelled.' };
+      return { started: false, reason: 'Task start was cancelled.', outcomeStatus: 'cancelled' };
     }
     handleRef.current = startedHandle;
     releaseStartReservation();
@@ -360,17 +474,12 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
   }, [circleId, userId, persistQuestionAsked, persistQuestionResolved]);
 
   const cancel = useCallback(() => {
-    // Invalidate an in-flight credential lookup before it can create a run.
-    startReservationRef.current = null;
-    if (handleRef.current) {
-      try { handleRef.current.cancel(); } catch {}
-      handleRef.current = null;
-    }
+    const ownsLiveAttempt = cancelOwnedAttempt();
     persistQuestionResolved(null); // cancelled — expire any open question
-    setState((prev) => prev.status === 'running' || prev.status === 'starting'
-      ? { ...prev, status: 'error', errorMessage: 'Cancelled by user.' }
+    setState((prev) => ownsLiveAttempt && (prev.status === 'running' || prev.status === 'starting')
+      ? { ...prev, status: 'error', outcomeStatus: 'cancelled', errorMessage: 'Cancelled by user.' }
       : prev);
-  }, [persistQuestionResolved]);
+  }, [cancelOwnedAttempt, persistQuestionResolved]);
 
   const reset = useCallback(() => {
     cancel();

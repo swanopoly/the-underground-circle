@@ -1,5 +1,6 @@
 import {
   buildGenericAppNavigatorRouteContext,
+  classifyGenericAppTaskFamily,
   GENERIC_APP_NAVIGATOR_SOURCE_REFS,
 } from './genericAppNavigator';
 // Type-only — erased at runtime, so this module stays free of the
@@ -180,7 +181,7 @@ export type AppAutomationRouteDecisionStatus =
   | 'needs_connected_agent_buildout';
 
 export interface AppAutomationRouteDecisionOptions {
-  preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName'>>;
+  preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName' | 'taskFamily'>>;
   availableSurfaceIds?: AppAutomationControlSurfaceId[];
   unavailableSurfaceIds?: AppAutomationControlSurfaceId[];
   confirmedRequirements?: string[];
@@ -644,7 +645,7 @@ function candidate(
   };
 }
 
-function detectTarget(task: string, preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName'>>): Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName' | 'taskFamily'> {
+function detectTarget(task: string, preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName' | 'taskFamily'>>): Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName' | 'taskFamily'> {
   if (preferred?.targetId && preferred?.targetName) {
     if (preferred.targetId === 'generic_native_app') {
       const genericContext = buildGenericAppNavigatorRouteContext(task, {
@@ -654,7 +655,9 @@ function detectTarget(task: string, preferred?: Partial<Pick<AppAutomationContro
       return {
         targetId: preferred.targetId,
         targetName: genericContext.targetAppName,
-        taskFamily: genericContext.taskFamilyLabel,
+        taskFamily: genericContext.taskFamily === 'launch_or_read'
+          ? 'app launch/read observation'
+          : genericContext.taskFamilyLabel,
       };
     }
     return {
@@ -674,7 +677,10 @@ function detectTarget(task: string, preferred?: Partial<Pick<AppAutomationContro
     return { targetId: 'adobe_creative_cloud', targetName: preferred?.targetName || 'Adobe Creative Cloud app', taskFamily: taskFamilyFor(task, 'adobe_creative_cloud') };
   }
   if (isEngineeringCadTask(text)) {
-    const targetName = preferred?.targetName || detectCadTargetName(text);
+    const detectedTargetName = detectCadTargetName(text);
+    const targetName = detectedTargetName !== 'Engineering/CAD app'
+      ? detectedTargetName
+      : preferred?.targetName || detectedTargetName;
     return { targetId: 'engineering_cad_app', targetName, taskFamily: taskFamilyFor(task, 'engineering_cad_app') };
   }
   if (/\b(browser|website|web app|chrome|edge|safari|firefox|dom|page)\b/i.test(text)) {
@@ -687,7 +693,9 @@ function detectTarget(task: string, preferred?: Partial<Pick<AppAutomationContro
   return {
     targetId: 'generic_native_app',
     targetName: genericContext.targetAppName,
-    taskFamily: genericContext.taskFamilyLabel,
+    taskFamily: genericContext.taskFamily === 'launch_or_read'
+      ? 'app launch/read observation'
+      : genericContext.taskFamilyLabel,
   };
 }
 
@@ -712,6 +720,9 @@ function detectCadTargetName(text: string): string {
 
 function taskFamilyFor(task: string, targetId: AppAutomationTargetId): string {
   const text = normalize(task);
+  if (targetId !== 'browser_app' && classifyGenericAppTaskFamily(text) === 'launch_or_read') {
+    return 'app launch/read observation';
+  }
   if (targetId === 'adobe_indesign') {
     if (/\b(package|handoff|preflight|links?|fonts?)\b/i.test(text)) return 'layout package/preflight';
     if (/\b(data merge|variable|variants?|csv)\b/i.test(text)) return 'layout data merge';
@@ -739,6 +750,71 @@ function taskFamilyFor(task: string, targetId: AppAutomationTargetId): string {
     return 'engineering/CAD document mutation';
   }
   return 'unfamiliar native app workflow';
+}
+
+function isReadOnlyAppTask(task: string, targetId: AppAutomationTargetId): boolean {
+  return targetId !== 'browser_app' && classifyGenericAppTaskFamily(task) === 'launch_or_read';
+}
+
+function readOnlyAppCandidates(
+  targetId: AppAutomationTargetId,
+  targetName: string,
+): AppAutomationControlSurfaceCandidate[] {
+  const nativeSurface = targetId === 'adobe_photoshop'
+    ? candidate(
+        'adobe_photoshop_uxp_dom',
+        'Photoshop app-native status observation',
+        100,
+        'primary',
+        ['launch/focus readiness', 'active document status', 'read-only Photoshop inventory'],
+        [`exact ${targetName} process/window identity`, 'fresh app-native status observation'],
+        ['the request includes any document, layer, selection, file, save, export, or pixel mutation'],
+        [],
+        [`refreshed ${targetName} app/document status`, 'exact process/window identity'],
+      )
+    : targetId === 'adobe_indesign'
+      ? candidate(
+          'adobe_indesign_uxp_dom',
+          'InDesign app-native status observation',
+          100,
+          'primary',
+          ['launch/focus readiness', 'active document status', 'read-only InDesign inventory'],
+          [`exact ${targetName} process/window identity`, 'fresh app-native status observation'],
+          ['the request includes any document, text, link, file, save, export, or layout mutation'],
+          [],
+          [`refreshed ${targetName} app/document status`, 'exact process/window identity'],
+        )
+      : candidate(
+          'semantic_desktop',
+          'Read-only desktop app lifecycle and observation',
+          100,
+          'primary',
+          ['exact app launch/focus', 'window state', 'read-only accessibility/menu inspection'],
+          [`exact ${targetName} process/window identity`, 'fresh read-only app/window observation'],
+          ['the request includes any click, type, shortcut, field, file, save, export, or other mutation'],
+          [],
+          [`refreshed ${targetName} window state`, 'requested accessibility/menu/status value'],
+        );
+
+  const accessibilityFallback = candidate(
+    'os_accessibility',
+    'Read-only OS accessibility observation',
+    55,
+    'secondary',
+    ['window identity', 'named controls', 'menu inventory', 'read-only visible values'],
+    ['Accessibility permission', `exact ${targetName} process/window identity`, 'fresh accessibility tree'],
+    ['app-native status already answers the request', 'the request includes any input or mutation'],
+    [],
+    [`refreshed ${targetName} accessibility tree`, 'requested value or exact missing permission'],
+  );
+
+  // Source references for these control surfaces carry mutation-era
+  // `mustConfirm` clauses (modal scope, file grants, scripted actions). They
+  // are useful for edits but must not leak into a lifecycle/read decision.
+  return rankCandidates([nativeSurface, accessibilityFallback]).map((surface) => ({
+    ...surface,
+    sourceRefs: [],
+  }));
 }
 
 function photoshopCandidates(task: string): AppAutomationControlSurfaceCandidate[] {
@@ -1221,9 +1297,17 @@ export function listAppAutomationResearchRefs(): AppAutomationResearchRef[] {
 
 export function buildAppAutomationResearchPromptBlock(
   task: string,
-  options: { maxRefs?: number; preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName'>> } = {},
+  options: { maxRefs?: number; preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName' | 'taskFamily'>> } = {},
 ): string {
   const plan = buildAppAutomationControlSurfacePlan(task, options.preferred);
+  if (plan.taskFamily === 'app launch/read observation') {
+    return [
+      '## Read-Only App Observation Contract',
+      `Target: ${plan.targetName}`,
+      'Use only launch, focus, wait, app-native status, window, accessibility, menu inventory, or screenshot reads.',
+      'Do not require file access, mutation approval, vendor research, or connected-agent capability buildout.',
+    ].join('\n');
+  }
   const refs = plan.sourceRefs.slice(0, Math.max(1, options.maxRefs || 8));
   return [
     '## Official App Automation Research',
@@ -1238,7 +1322,13 @@ export function buildAppAutomationResearchPromptBlock(
   ].join('\n');
 }
 
-function candidatesForTarget(targetId: AppAutomationTargetId, task: string): AppAutomationControlSurfaceCandidate[] {
+function candidatesForTarget(
+  targetId: AppAutomationTargetId,
+  targetName: string,
+  task: string,
+  readOnly: boolean,
+): AppAutomationControlSurfaceCandidate[] {
+  if (readOnly) return readOnlyAppCandidates(targetId, targetName);
   switch (targetId) {
     case 'adobe_indesign':
       return indesignCandidates();
@@ -1258,12 +1348,17 @@ function candidatesForTarget(targetId: AppAutomationTargetId, task: string): App
 
 export function buildAppAutomationControlSurfacePlan(
   task: string,
-  preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName'>>,
+  preferred?: Partial<Pick<AppAutomationControlSurfacePlan, 'targetId' | 'targetName' | 'taskFamily'>>,
 ): AppAutomationControlSurfacePlan {
-  const target = detectTarget(task, preferred);
-  const candidates = candidatesForTarget(target.targetId, task);
+  const detectedTarget = detectTarget(task, preferred);
+  const target = preferred?.taskFamily
+    ? { ...detectedTarget, taskFamily: preferred.taskFamily }
+    : detectedTarget;
+  const readOnly = target.taskFamily === 'app launch/read observation'
+    || isReadOnlyAppTask(task, target.targetId);
+  const candidates = candidatesForTarget(target.targetId, target.targetName, task, readOnly);
   const sourceRefs = uniqueRefs(candidates.flatMap((surface) => surface.sourceRefs));
-  const genericNavigator = target.targetId === 'generic_native_app'
+  const genericNavigator = target.targetId === 'generic_native_app' && !readOnly
     ? buildGenericAppNavigatorRouteContext(task, {
         targetAppName: target.targetName,
         fallbackTargetAppName: 'Unfamiliar desktop app',
@@ -1272,55 +1367,83 @@ export function buildAppAutomationControlSurfacePlan(
   return {
     ...target,
     candidates,
-    observeFirst: unique([
-      ...(genericNavigator?.observeFirst || []),
-      'resolve the exact app, active document/window, source files/packages, output destination, and user-approved grants',
-      'collect app-native document/project inventory before any mutation when an app-native surface exists',
-      'collect accessibility/menu/screenshot evidence only after app-native or browser semantic state is insufficient',
-      'record the chosen control surface and why stronger deterministic routes were unavailable',
-    ]),
-    failSafeRules: unique([
-      ...(genericNavigator?.recoveryRules || []),
-      'never edit a document unless active app/document identity matches the staged file or user-selected target',
-      'do not save, export, package, upload, run generated scripts, or perform destructive edits without approval and scoped file grants',
-      'if a semantic target is missing twice, re-observe and delegate a bounded capability buildout instead of escalating to blind coordinates',
-      'use coordinate actions only for a single reversible step with fresh screenshot, screen size, target bounds, and an immediate verification observation',
-      'when app install, license, login, permissions, private files, missing fonts/assets, or API credentials block execution, stop with the exact user action needed',
-    ]),
-    buildoutChecklist: unique([
-      `identify the target as ${target.targetName} and classify the task as ${target.taskFamily}`,
-      ...(genericNavigator?.buildoutTriggers || []),
-      'search existing repo adapters, bridge tools, local intent macros, smokes, and docs before adding a new path',
-      `research official source refs for ${target.targetName} before using examples or blogs`,
-      `confirm source review dates and source types before changing runtime code`,
-      `choose from this control-surface order: ${candidates.map((surface) => surface.label).join(' -> ')}`,
-      'add or update a focused smoke that proves route selection, required observations, approval gates, and verification artifacts',
-      'return source refs, chosen surface, files changed, verification result, and retry plan in the app-capability result contract',
-    ]),
-    promptHints: [
-      `Target app: ${target.targetName}`,
-      `Task family: ${target.taskFamily}`,
-      genericNavigator ? `Generic navigator: ${genericNavigator.targetAppName}; can navigate without adapter: ${genericNavigator.canNavigateWithoutAdapter ? 'yes' : 'no'}; user effort: smallest approval/blocker only` : '',
-      `Preferred surfaces: ${candidates.slice(0, 3).map((surface) => surface.label).join(' -> ')}`,
-      `Official refs reviewed: ${sourceRefs.map((ref) => `${ref.label}${ref.lastReviewedAt ? ` (${ref.lastReviewedAt})` : ''}`).join(' | ') || 'none'}`,
-      `Primary requirements: ${unique(candidates.slice(0, 2).flatMap((surface) => surface.requirements)).slice(0, 8).join(' | ')}`,
-      `Approval before: ${unique(candidates.flatMap((surface) => surface.approvalBefore)).slice(0, 10).join(' | ')}`,
-      `Verification: ${unique(candidates.flatMap((surface) => surface.verification)).slice(0, 10).join(' | ')}`,
-    ].filter(Boolean),
+    observeFirst: readOnly
+      ? unique([
+          `resolve exact ${target.targetName} process/window identity`,
+          `launch or focus ${target.targetName} only when requested or needed for the read`,
+          'collect the smallest app-native status, window-state, accessibility, menu, or screenshot observation that answers the request',
+        ])
+      : unique([
+          ...(genericNavigator?.observeFirst || []),
+          'resolve the exact app, active document/window, source files/packages, output destination, and user-approved grants',
+          'collect app-native document/project inventory before any mutation when an app-native surface exists',
+          'collect accessibility/menu/screenshot evidence only after app-native or browser semantic state is insufficient',
+          'record the chosen control surface and why stronger deterministic routes were unavailable',
+        ]),
+    failSafeRules: readOnly
+      ? unique([
+          'do not click, type, invoke shortcuts, change app state, or access local files on this launch/read route',
+          'if the request expands into a mutation or file operation, stop and recompute routing and approval',
+          'when app install, license, login, permissions, or an unreadable window blocks observation, return the exact blocker',
+        ])
+      : unique([
+          ...(genericNavigator?.recoveryRules || []),
+          'never edit a document unless active app/document identity matches the staged file or user-selected target',
+          'do not save, export, package, upload, run generated scripts, or perform destructive edits without approval and scoped file grants',
+          'if a semantic target is missing twice, re-observe and delegate a bounded capability buildout instead of escalating to blind coordinates',
+          'use coordinate actions only for a single reversible step with fresh screenshot, screen size, target bounds, and an immediate verification observation',
+          'when app install, license, login, permissions, private files, missing fonts/assets, or API credentials block execution, stop with the exact user action needed',
+        ]),
+    buildoutChecklist: readOnly
+      ? unique([
+          `identify the target as ${target.targetName} and classify the task as ${target.taskFamily}`,
+          'use only app lifecycle and read-only observation surfaces',
+          'return the requested state or the exact install, permission, license, login, or observation blocker',
+        ])
+      : unique([
+          `identify the target as ${target.targetName} and classify the task as ${target.taskFamily}`,
+          ...(genericNavigator?.buildoutTriggers || []),
+          'search existing repo adapters, bridge tools, local intent macros, smokes, and docs before adding a new path',
+          `research official source refs for ${target.targetName} before using examples or blogs`,
+          `confirm source review dates and source types before changing runtime code`,
+          `choose from this control-surface order: ${candidates.map((surface) => surface.label).join(' -> ')}`,
+          'add or update a focused smoke that proves route selection, required observations, approval gates, and verification artifacts',
+          'return source refs, chosen surface, files changed, verification result, and retry plan in the app-capability result contract',
+        ]),
+    promptHints: (readOnly
+      ? [
+          `Target app: ${target.targetName}`,
+          `Task family: ${target.taskFamily}`,
+          'Route mode: approval-free app lifecycle and read-only observation',
+          `Preferred read surfaces: ${candidates.slice(0, 3).map((surface) => surface.label).join(' -> ')}`,
+          `Read requirements: ${unique(candidates.slice(0, 2).flatMap((surface) => surface.requirements)).slice(0, 8).join(' | ')}`,
+          `Verification: ${unique(candidates.flatMap((surface) => surface.verification)).slice(0, 10).join(' | ')}`,
+        ]
+      : [
+          `Target app: ${target.targetName}`,
+          `Task family: ${target.taskFamily}`,
+          genericNavigator ? `Generic navigator: ${genericNavigator.targetAppName}; can navigate without adapter: ${genericNavigator.canNavigateWithoutAdapter ? 'yes' : 'no'}; user effort: smallest approval/blocker only` : '',
+          `Preferred surfaces: ${candidates.slice(0, 3).map((surface) => surface.label).join(' -> ')}`,
+          `Official refs reviewed: ${sourceRefs.map((ref) => `${ref.label}${ref.lastReviewedAt ? ` (${ref.lastReviewedAt})` : ''}`).join(' | ') || 'none'}`,
+          `Primary requirements: ${unique(candidates.slice(0, 2).flatMap((surface) => surface.requirements)).slice(0, 8).join(' | ')}`,
+          `Approval before: ${unique(candidates.flatMap((surface) => surface.approvalBefore)).slice(0, 10).join(' | ')}`,
+          `Verification: ${unique(candidates.flatMap((surface) => surface.verification)).slice(0, 10).join(' | ')}`,
+        ]).filter(Boolean),
     sourceRefs: uniqueRefs([...sourceRefs, ...(genericNavigator?.sourceRefs || [])]),
   };
 }
 
 export function buildAppAutomationControlSurfacePromptBlock(task: string): string {
   const plan = buildAppAutomationControlSurfacePlan(task);
+  const readOnly = plan.taskFamily === 'app launch/read observation';
   return [
     '## App Automation Control Surface Plan',
     ...plan.promptHints,
     `Observe first: ${plan.observeFirst.join(' | ')}`,
     `Fail-safe rules: ${plan.failSafeRules.join(' | ')}`,
-    `Buildout checklist: ${plan.buildoutChecklist.join(' | ')}`,
+    `${readOnly ? 'Execution checklist' : 'Buildout checklist'}: ${plan.buildoutChecklist.join(' | ')}`,
     `Source refs: ${plan.sourceRefs.map((ref) => `${ref.label}${ref.lastReviewedAt ? ` (${ref.lastReviewedAt})` : ''} <${ref.url}>`).join(' | ') || 'none'}`,
-    buildAppAutomationResearchPromptBlock(task, { maxRefs: 5 }),
+    readOnly ? '' : buildAppAutomationResearchPromptBlock(task, { maxRefs: 5 }),
   ].join('\n');
 }
 
@@ -1374,6 +1497,12 @@ function buildDecisionNextSteps(status: AppAutomationRouteDecisionStatus, decisi
     ];
   }
   if (status === 'needs_observation') {
+    if (decision.taskFamily === 'app launch/read observation') {
+      return [
+        `Collect fresh read-only app evidence for: ${decision.missingConfirmations.slice(0, 6).join(' | ')}`,
+        'Return the requested app/window state, then stop without clicking, typing, file access, or other mutation.',
+      ];
+    }
     return [
       `Collect fresh evidence for: ${decision.missingConfirmations.slice(0, 6).join(' | ')}`,
       'Recompute the route decision before any mutation, upload, export, save, script, or coordinate action.',

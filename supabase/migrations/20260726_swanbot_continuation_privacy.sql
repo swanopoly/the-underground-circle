@@ -9,9 +9,11 @@
 --      expired continuations are atomically closed and can never replay.
 --   2. The continuation field is removed in the same compare-and-set update.
 --   3. Durable outcome metadata is value-free and uses only stable enums.
---   4. Existing terminal legacy/plaintext checkpoints are scrubbed once when
+--   4. Every swept terminal row repairs its existing run-summary columns to
+--      array/integer-safe shapes without copying values into outcome metadata.
+--   5. Existing terminal legacy/plaintext checkpoints are scrubbed once when
 --      this migration is applied.
---   5. pg_cron repeats the active-row sweep every three minutes when present.
+--   6. pg_cron repeats the active-row sweep every three minutes when present.
 
 -- Parse only the canonical ISO string emitted by Date#toISOString. Returning
 -- NULL (never throwing) lets the validator and sweeper fail closed on hostile
@@ -382,6 +384,27 @@ BEGIN
     UPDATE public.agent_runs AS run_row
     SET status = 'failed',
         final_stop_reason = 'error',
+        tool_calls = CASE
+          WHEN jsonb_typeof(run_row.tool_calls) = 'array'
+            THEN run_row.tool_calls
+          ELSE '[]'::jsonb
+        END,
+        iteration_count = GREATEST(
+          COALESCE(run_row.iteration_count, 1),
+          1
+        ),
+        input_tokens = GREATEST(
+          COALESCE(run_row.input_tokens, 0::bigint),
+          0::bigint
+        ),
+        output_tokens = GREATEST(
+          COALESCE(run_row.output_tokens, 0::bigint),
+          0::bigint
+        ),
+        cached_tokens = GREATEST(
+          COALESCE(run_row.cached_tokens, 0::bigint),
+          0::bigint
+        ),
         completed_at = v_swept_at,
         updated_at = v_swept_at,
         metadata = (

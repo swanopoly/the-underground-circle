@@ -671,6 +671,7 @@ function mapBrowserPlanEventToExecutionStatus(kind: BrowserPlanEvent['kind']): '
       return 'passed';
     case 'failed':
       return 'failed';
+    case 'blocked':
     case 'cancelled':
       return 'blocked';
     default:
@@ -686,6 +687,7 @@ function mapBrowserPlanEventToStepStatus(kind: BrowserPlanEvent['kind']): 'pendi
       return 'running';
     case 'failed':
       return 'failed';
+    case 'blocked':
     case 'cancelled':
       return 'blocked';
     default:

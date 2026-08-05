@@ -1,4 +1,5 @@
 import { isScriptableMacApp } from './scriptableMacApps';
+import { findKnownAppInText, matchKnownApp } from './knownAppShortcuts';
 
 export type GenericAppNavigatorPhaseId =
   | 'identify_app'
@@ -231,11 +232,17 @@ const GENERIC_CANDIDATE_STOP_WORDS = new Set([
   'program',
   'computer',
   'dialog',
+  'document',
+  'documents',
+  'door',
   'modal',
   'popup',
   'prompt',
   'settings',
   'preferences',
+  'my',
+  'your',
+  'our',
   'it',
   'this',
   'that',
@@ -264,7 +271,10 @@ function titleCaseName(value: string): string {
     .join(' ');
 }
 
-function cleanAppNameCandidate(raw: string | undefined): string | null {
+function cleanAppNameCandidate(
+  raw: string | undefined,
+  options: { trusted?: boolean } = {},
+): string | null {
   let value = compactWhitespace(raw || '')
     .replace(/^[\s"'`]+|[\s"'`,.;:]+$/g, '')
     .replace(/^(?:the|a|an)\s+/i, '')
@@ -278,18 +288,228 @@ function cleanAppNameCandidate(raw: string | undefined): string | null {
   if (GENERIC_CANDIDATE_STOP_WORDS.has(first) || GENERIC_CANDIDATE_STOP_WORDS.has(normalized)) return null;
   if (/^\d+(?:\s+\d+)*$/.test(value)) return null;
   if (/^(?:https?:\/\/|www\.)/i.test(value) || /\.[a-z0-9]{2,5}\b/i.test(value)) return null;
-  if (/\b(?:screenshot|desktop|downloads?|documents?|project|workspace|image|photo|pdf|csv|png|jpe?g|psd|indd)\b/i.test(value)) return null;
+  if (/\b(?:screenshot|downloads?|documents?|project|workspace|image|pdf|csv|png|jpe?g|psd|indd)\b/i.test(value)) return null;
+  // `Photo` is also a legitimate product suffix (Affinity Photo). Keep a
+  // bare/local-photo target rejected while preserving a multi-word app name.
+  if (
+    /\bphoto\b/i.test(value)
+    && !options.trusted
+    && !(words.length >= 2 && /\bphoto$/i.test(value))
+  ) return null;
+  // `Desktop` is both a common filesystem location and a legitimate product
+  // suffix (Docker Desktop, Microsoft Remote Desktop). Keep rejecting a bare
+  // Desktop target via the stop-word check above, and only accept it from
+  // inferred text when it is the final token of a multi-word app name. A
+  // caller-supplied targetAppName is already a parsed/trusted app identity and
+  // may contain Desktop in any position.
+  if (
+    /\bdesktop\b/i.test(value)
+    && !options.trusted
+    && !(words.length >= 2 && /\bdesktop$/i.test(value))
+  ) return null;
   return titleCaseName(value);
+}
+
+export interface StrictNamedAppLifecycleIntent {
+  operation: 'open_or_launch' | 'focus';
+  /** User-spoken app phrase, with only articles/app suffixes removed. */
+  appName: string;
+  /** Exact bridge-observed identity used for dispatch when a lowercase long-tail name needs proof. */
+  observedAppName?: string;
+}
+
+export interface StrictNamedAppLifecycleParseOptions {
+  /** Exact installed/running names from the latest bridge-backed app-resolution context. */
+  observedAppNames?: readonly string[] | null;
+}
+
+let refreshedLifecycleAppNames: readonly string[] = [];
+
+/**
+ * Refresh the narrow lowercase long-tail allowlist consumed by preflight.
+ * The router is the owner of bridge freshness and clears this list whenever
+ * the app-resolution context is offline or lacks an authoritative probe.
+ */
+export function setStrictNamedAppLifecycleObservedNames(names: readonly string[] | null | undefined): void {
+  refreshedLifecycleAppNames = Array.isArray(names)
+    ? names.filter((name): name is string => typeof name === 'string' && Boolean(name.trim())).slice(0, 500)
+    : [];
+}
+
+function normalizeObservedAppName(value: string): string {
+  return compactWhitespace(value)
+    .replace(/\.app$/i, '')
+    .trim()
+    .toLowerCase();
+}
+
+function exactObservedAppName(
+  candidate: string,
+  options: StrictNamedAppLifecycleParseOptions,
+): string | null {
+  const names = options.observedAppNames === undefined
+    ? refreshedLifecycleAppNames
+    : options.observedAppNames || [];
+  const normalizedCandidate = normalizeObservedAppName(candidate);
+  if (!normalizedCandidate) return null;
+  for (const rawName of names) {
+    const observed = compactWhitespace(rawName).replace(/\.app$/i, '').trim();
+    if (
+      observed
+      && observed.length <= 120
+      && /^[A-Za-z0-9 .\-_()]+$/.test(observed)
+      && normalizeObservedAppName(observed) === normalizedCandidate
+    ) return observed;
+  }
+  return null;
+}
+
+/**
+ * Remove only the bounded courtesy envelope accepted for direct desktop
+ * commands. This is shared by strict app lifecycle routing and compiler-owned
+ * exact programs so common phrasing cannot drift between preflight and
+ * dispatch. Questions asking what the user should do are deliberately not
+ * commands.
+ */
+export function unwrapDirectDesktopCommand(task: string): string | null {
+  const text = compactWhitespace(task);
+  if (!text || /^(?:should|would|could|can|may|might|will|do)\s+i\b/i.test(text)) return null;
+  const match = text.match(
+    /^(?:please\s+)?(?:(?:(?:can|could|would|will)\s+you(?:\s+please)?(?:\s+to)?|i\s+(?:want|need|would\s+like)\s+you\s+to)\s+)?([\s\S]+)$/i,
+  );
+  if (!match?.[1]) return null;
+  const command = match[1]
+    .replace(/\s*,?\s*please\s*[.!?]*$/i, '')
+    .replace(/[.!?]+$/g, '')
+    .trim();
+  return command || null;
+}
+
+function exactlyNamedKnownApp(candidate: string) {
+  const known = matchKnownApp(candidate);
+  if (!known) return null;
+  const normalized = compactWhitespace(candidate).toLowerCase();
+  const canonicalNames = [known.displayName, known.macLaunchName]
+    .filter(Boolean)
+    .map((name) => compactWhitespace(name || '').toLowerCase());
+  if (canonicalNames.includes(normalized)) return known;
+  // Generic task-noun aliases remain ambiguous even after an "open" verb.
+  // Keep only the small OS-settings spelling users naturally use; ordinary
+  // lowercase phrases such as "task manager" must not become app identities.
+  if (normalized === 'settings') return known;
+  const explicit = findKnownAppInText(candidate);
+  return explicit?.app.id === known.id && normalized === explicit.matchedAlias
+    ? known
+    : null;
+}
+
+function extractNamedAppLifecycleCommand(task: string): {
+  operation: StrictNamedAppLifecycleIntent['operation'];
+  rawCandidate: string;
+} | null {
+  const command = unwrapDirectDesktopCommand(task);
+  if (!command) return null;
+  const direct = command.match(
+    /^(open(?:\s+up)?|launch|start|focus|activate|switch(?:\s+over)?\s+to)\s+(.+)$/i,
+  );
+  if (direct) {
+    return {
+      operation: /^focus$/i.test(direct[1]) ? 'focus' : 'open_or_launch',
+      rawCandidate: direct[2] || '',
+    };
+  }
+  const bringAfter = command.match(
+    /^bring\s+(.+?)\s+(?:to\s+(?:the\s+)?(?:front|foreground|forward)|forward)$/i,
+  );
+  const bringBefore = command.match(/^bring\s+forward\s+(.+)$/i);
+  const rawCandidate = bringAfter?.[1] || bringBefore?.[1] || '';
+  return rawCandidate ? { operation: 'open_or_launch', rawCandidate } : null;
+}
+
+function hasLifecycleFollowUpSyntax(candidate: string): boolean {
+  return /[,;:]/.test(candidate)
+    || /\b(?:and|or|then|also|but|because|while|after|before|once|to)\b/i.test(candidate);
+}
+
+export function hasStrictNamedAppLifecycleCommandShape(task: string): boolean {
+  const extracted = extractNamedAppLifecycleCommand(task);
+  return Boolean(extracted?.rawCandidate && !hasLifecycleFollowUpSyntax(extracted.rawCandidate));
+}
+
+/**
+ * Parse the complete, single-intent lifecycle grammar used by both Chat's
+ * deterministic dispatcher and generic app preflight. The anchored grammar
+ * rejects appended reads/mutations; candidate validation rejects local
+ * artifacts and ordinary nouns before they can become app launch targets.
+ */
+export function parseStrictNamedAppLifecycleIntent(
+  task: string,
+  options: StrictNamedAppLifecycleParseOptions = {},
+): StrictNamedAppLifecycleIntent | null {
+  const extracted = extractNamedAppLifecycleCommand(task);
+  if (!extracted?.rawCandidate) return null;
+  const { operation, rawCandidate } = extracted;
+
+  const appName = compactWhitespace(rawCandidate)
+    .replace(/^[\s"'`]+|[\s"'`]+$/g, '')
+    .replace(/^(?:the|a|an)\s+/i, '')
+    .replace(/\s+(?:app|application|program)$/i, '')
+    .trim();
+  if (!appName) return null;
+  const hasExplicitAppSuffix = /\s+(?:app|application|program)\s*$/i.test(compactWhitespace(rawCandidate));
+
+  // A catalog alias may legitimately contain a connector. Unknown candidates
+  // containing clause syntax are follow-up instructions, never part of this
+  // no-model lifecycle lane.
+  const exactKnownApp = exactlyNamedKnownApp(appName);
+  if (
+    !exactKnownApp
+    && (
+      hasLifecycleFollowUpSyntax(appName)
+    )
+  ) return null;
+  if (!exactKnownApp && !cleanAppNameCandidate(appName)) return null;
+  // Keep the existing ambiguous OS noun suppression even if a noisy process
+  // inventory happens to contain a matching label.
+  if (!exactKnownApp && /^(?:task manager)$/i.test(appName)) return null;
+  const observedAppName = exactKnownApp ? null : exactObservedAppName(appName, options);
+  const looksProductNamed = appName
+    .split(/\s+/)
+    .every((word) => /^[A-Z0-9]/.test(word))
+    || /[a-z][A-Z]|\d/.test(appName);
+  if (!exactKnownApp && !observedAppName && !hasExplicitAppSuffix && !looksProductNamed) return null;
+
+  return { operation, appName, ...(observedAppName ? { observedAppName } : {}) };
 }
 
 function isGenericFallbackAppName(value: string | null | undefined): boolean {
   return /^(?:native desktop app|native desktop|desktop app|unfamiliar desktop app|unfamiliar desktop|generic app navigator|app automation route)$/i.test(compactWhitespace(value || ''));
 }
 
-export function inferGenericAppName(task: string): string | null {
+export function inferGenericAppName(
+  task: string,
+  options: StrictNamedAppLifecycleParseOptions = {},
+): string | null {
   const text = compactWhitespace(task);
   if (!text) return null;
+  const strictLifecycle = parseStrictNamedAppLifecycleIntent(text, options);
+  if (strictLifecycle) {
+    return cleanAppNameCandidate(strictLifecycle.appName, { trusted: true })
+      || exactlyNamedKnownApp(strictLifecycle.appName)?.displayName
+      || strictLifecycle.appName;
+  }
+  if (hasStrictNamedAppLifecycleCommandShape(text)) return null;
+  const knownApp = findKnownAppInText(text);
+  const knownAliasPattern = knownApp
+    ? knownApp.matchedAlias.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+    : null;
+  const hasDirectKnownAppImperative = Boolean(
+    knownApp
+    && knownAliasPattern
+    && new RegExp(`\\b(?:open|launch|focus|switch\\s+to|use|control|drive|automate|take\\s+over)\\s+(?:the\\s+)?${knownAliasPattern}\\b`, 'i').test(text),
+  );
   const patterns = [
+    /\b(?:disconnect|maximize|minimize|pause|play|resume|stop|mute|unmute)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,3}\s+Desktop)(?=\s*[,;:!?.]|\s*$)/i,
     /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4}?)(?:\s+(?:app|application|window|program))?\s+(?:and|then|for|with|to(?=\s+(?:add|create|make|build|edit|change|update|set|fill|enter|type|paste|press|run|open|save|export|render|draw|paint|crop|trim|resize|rotate|record|sync|send|submit|publish|delete|remove|inspect|read)))\b/i,
     /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4})(?:\s+(?:app|application|window|program))?(?=\s*[,;:!?.]|\s*$)/i,
     /\b(?:in|inside|using|with)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9.+#&_-]*(?:\s+[A-Za-z0-9][A-Za-z0-9.+#&_-]*){0,4})(?:\s+(?:app|application|window|program))\b/i,
@@ -301,6 +521,12 @@ export function inferGenericAppName(task: string): string | null {
     const candidate = cleanAppNameCandidate(match?.[1]);
     if (candidate) return candidate;
   }
+  // Preserve an explicit app identity captured from the request whenever the
+  // generic grammar can do so (for example, "Visual Studio Code" should not
+  // be rewritten to the catalog label "VS Code"). The catalog is only the
+  // fallback for valid product names that contain an otherwise ambiguous task
+  // noun, such as "Image Capture".
+  if (knownApp && hasDirectKnownAppImperative) return knownApp.app.displayName;
   return null;
 }
 
@@ -323,16 +549,38 @@ function isReadOnlyGenericAppObservation(task: string): boolean {
   // App launch/focus and read-only file access are allowed here. Any requested
   // mutation or commit keeps its more specific family even when the request
   // also asks to report the result.
-  return !/\b(?:create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|pause|resume|seek|skip|record|configure|apply|rename|replace|overwrite|move|convert|sync|synchronize|delete|remove|erase|wipe|reset|save|export|render|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|authenticate|authorize|grant|connect|link|login|log in|sign in)\b/.test(text);
+  return !/\b(?:create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|disconnect|maximize|minimize|pause|play|resume|seek|skip|record|configure|apply|rename|replace|overwrite|move|convert|sync|synchronize|delete|remove|erase|wipe|reset|save|saving|export|exporting|render|rendering|print|printing|download|downloading|upload|uploading|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|authenticate|authorize|grant|connect|link|login|log in|sign in|unmute)\b/.test(text);
 }
 
-export function classifyGenericAppTaskFamily(task: string): GenericAppNavigatorTaskFamily {
-  const text = String(task || '').toLowerCase();
+export function classifyGenericAppTaskFamily(
+  task: string,
+  options: { targetAppName?: string | null; observedAppNames?: readonly string[] | null } = {},
+): GenericAppNavigatorTaskFamily {
+  if (parseStrictNamedAppLifecycleIntent(task, options)) return 'launch_or_read';
+  const normalized = String(task || '').toLowerCase();
+  const inferredApp = cleanAppNameCandidate(options.targetAppName || '', { trusted: true })
+    || inferGenericAppName(task, options);
+  // Product-name nouns such as `Photo`, `Music`, or `Desktop` describe the
+  // target, not the requested action. Remove the parsed app span before task
+  // family classification so `Launch Affinity Photo` stays launch/read while
+  // `Open Affinity Photo and crop the image` still classifies as a mutation.
+  const inferredPattern = inferredApp
+    ? inferredApp.toLowerCase().split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+    : null;
+  const text = inferredApp
+    ? normalized.replace(new RegExp(`\\b${inferredPattern}\\b`, 'i'), ' ')
+    : normalized;
   if (isReadOnlyGenericAppObservation(text)) {
     return 'launch_or_read';
   }
-  if (/\b(save(?:\s+as)?|export|render|print|download|upload|open file|rename|replace|overwrite|png|jpe?g|pdf|mp4|wav|csv|xlsx?|docx?)\b/.test(text)) {
+  if (/\b(save(?:\s+as)?|saving|export|exporting|render|rendering|print|printing|download|downloading|upload|uploading|open file|rename|replace|overwrite|png|jpe?g|pdf|mp4|wav|csv|xlsx?|docx?)\b/.test(text)) {
     return 'file_open_save_export';
+  }
+  if (/\b(?:pause|play|resume|mute|unmute)\b/.test(text)) {
+    return 'toggle_or_select';
+  }
+  if (/\b(?:disconnect|maximize|minimize|stop)\b/.test(text)) {
+    return 'menu_or_shortcut';
   }
   if (/\b(canvas|image|photo|video|audio|recording|timeline|track|clip|layer|mask|draw|design|paint|crop|retouch|animate|render|model|drum loop)\b/.test(text)) {
     return 'canvas_or_visual_edit';
@@ -344,17 +592,17 @@ export function classifyGenericAppTaskFamily(task: string): GenericAppNavigatorT
     return 'dialog_handling';
   }
   if (
-    /\b(toggle|enable|disable|turn on|turn off|check|uncheck|dropdown|checkbox|radio|mute|unmute|show|hide|lock|unlock)\b/.test(text)
+    /\b(toggle|enable|disable|turn on|turn off|check|uncheck|dropdown|checkbox|radio|mute|unmute|pause|play|resume|show|hide|lock|unlock)\b/.test(text)
     || (/\b(select|choose|pick)\b/.test(text) && !/\bmenu\b/.test(text))
   ) {
     return 'toggle_or_select';
   }
-  if (/\b(click|select|choose|menu|toolbar|preferences?|settings?|shortcut|press|tab|button|dropdown|checkbox|radio)\b/.test(text)) {
+  if (/\b(click|select|choose|menu|toolbar|preferences?|settings?|shortcut|press|tab|button|dropdown|checkbox|radio|disconnect|maximize|minimize)\b/.test(text)) {
     return 'menu_or_shortcut';
   }
   if (
     /\b(open|launch|focus|switch to|inspect|read|summarize|look at|show)\b/.test(text)
-    && !/\b(create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|record|configure|apply|rename|move|convert|sync|synchronize|delete|remove|save|export|upload|send|submit|publish|purchase|buy|pay)\b/.test(text)
+    && !/\b(create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|disconnect|maximize|minimize|pause|play|resume|record|configure|apply|rename|move|convert|sync|synchronize|delete|remove|save|export|upload|send|submit|publish|purchase|buy|pay|unmute)\b/.test(text)
   ) {
     return 'launch_or_read';
   }
@@ -431,9 +679,9 @@ export function buildGenericAppSemanticWorkflow(task: string): GenericAppNavigat
     || (/\b(?:set|update|write|put|replace|search|find)\b/.test(text)
       && /\b(?:field|form|text|input|name|title|description|query|prompt|value|cell|note|message|caption)\b/.test(text))
   );
-  const requestsMenuOrShortcut = /\b(?:menu|shortcut|hotkey|command palette|toolbar|preferences?|settings?|press|keystroke|tab|panel|button)\b/.test(text);
+  const requestsMenuOrShortcut = /\b(?:menu|shortcut|hotkey|command palette|toolbar|preferences?|settings?|press|keystroke|tab|panel|button|disconnect|maximize|minimize|stop)\b/.test(text);
   const requestsToggleOrSelection = (
-    /\b(?:toggle|enable|disable|turn on|turn off|check|uncheck|checkbox|radio|mute|unmute|hide|lock|unlock)\b/.test(text)
+    /\b(?:toggle|enable|disable|turn on|turn off|check|uncheck|checkbox|radio|mute|unmute|pause|play|resume|hide|lock|unlock)\b/.test(text)
     || (!readOnlyObservation && /\bshow\b/.test(text))
     || (/\b(?:select|choose|pick)\b/.test(text) && !/\bmenu\b/.test(text))
   );
@@ -569,7 +817,7 @@ export function buildGenericAppSemanticWorkflow(task: string): GenericAppNavigat
   }
 
   const hasRequestedAction = requested.some((checkpoint) => checkpoint.id !== 'launch_and_inspect');
-  const asksForMutation = /\b(?:create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|record|configure|apply|rename|move|convert|sync|synchronize|delete|remove|erase|wipe|reset|overwrite)\b/.test(text);
+  const asksForMutation = /\b(?:create|make|build|add|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|disconnect|maximize|minimize|pause|play|resume|unmute|record|configure|apply|rename|move|convert|sync|synchronize|delete|remove|erase|wipe|reset|overwrite)\b/.test(text);
   if (!hasRequestedAction && asksForMutation) {
     add(checkpointTemplate(
       'perform_requested_semantic_action',
@@ -654,7 +902,7 @@ export function shouldUseGenericAppNavigator(task: string): boolean {
   // NOT be routed through the unfamiliar-app / buildout path — that's what
   // made "create a note" stall on "unknown app -> needs buildout".
   if (!inferred || isKnownConfiguredAppName(inferred) || isScriptableMacApp(inferred)) return false;
-  return /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over|inspect|read|summarize|report|look at|show|find|search|list|click|select|choose|type|paste|press|fill|enter|write|put|set|toggle|enable|disable|mute|unmute|create|make|build|add|insert|edit|change|update|configure|apply|rename|move|resize|rotate|crop|trim|split|merge|retouch|draw|design|paint|animate|record|render|export|save|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|delete|remove|erase|wipe|reset|convert|sync|synchronize|authenticate|authorize|grant|connect|link|login|log\s+in(?:to)?|sign\s+in(?:to)?|dismiss|confirm|run|start|stop)\b/i.test(text);
+  return /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over|inspect|read|summarize|report|look at|show|find|search|list|click|select|choose|type|paste|press|fill|enter|write|put|set|toggle|enable|disable|mute|unmute|disconnect|maximize|minimize|pause|play|resume|create|make|build|add|insert|edit|change|update|configure|apply|rename|move|resize|rotate|crop|trim|split|merge|retouch|draw|design|paint|animate|record|render|export|save|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|delete|remove|erase|wipe|reset|convert|sync|synchronize|authenticate|authorize|grant|connect|link|login|log\s+in(?:to)?|sign\s+in(?:to)?|dismiss|confirm|run|start|stop)\b/i.test(text);
 }
 
 export function shouldUseProfessionalAppAutonomy(task: string): boolean {
@@ -666,7 +914,7 @@ export function shouldUseProfessionalAppAutonomy(task: string): boolean {
   if (shouldUseGenericAppNavigator(text)) return true;
   const inferred = inferGenericAppName(text);
   const asksToOpenOrDrive = /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\b/i.test(text);
-  const asksForAppAction = /\b(?:inspect|read|summarize|report|look at|show|find|search|list|add|create|make|build|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|record|configure|apply|rename|move|resize|rotate|crop|trim|split|merge|retouch|draw|design|paint|animate|toggle|enable|disable|mute|unmute|export|save|render|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|delete|remove|erase|wipe|reset|convert|sync|synchronize|authenticate|authorize|grant|connect|link|login|log\s+in(?:to)?|sign\s+in(?:to)?|dismiss|confirm)\b/i.test(text);
+  const asksForAppAction = /\b(?:inspect|read|summarize|report|look at|show|find|search|list|add|create|make|build|insert|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|start|stop|disconnect|maximize|minimize|pause|play|resume|record|configure|apply|rename|move|resize|rotate|crop|trim|split|merge|retouch|draw|design|paint|animate|toggle|enable|disable|mute|unmute|export|save|render|print|download|upload|send|email|submit|publish|post|share|invite|purchase|buy|pay|book|schedule|sign|delete|remove|erase|wipe|reset|convert|sync|synchronize|authenticate|authorize|grant|connect|link|login|log\s+in(?:to)?|sign\s+in(?:to)?|dismiss|confirm)\b/i.test(text);
   if (inferred && asksToOpenOrDrive && asksForAppAction) return true;
   return (
     /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\b[\s\S]{0,90}\b(?:app|application|window|program)\b/i.test(text) ||
@@ -679,7 +927,7 @@ export function buildGenericAppNavigatorPlan(
   options: { targetAppName?: string | null } = {},
 ): GenericAppNavigatorPlan {
   const originalRequest = String(task ?? '');
-  const preferredApp = cleanAppNameCandidate(options.targetAppName || '');
+  const preferredApp = cleanAppNameCandidate(options.targetAppName || '', { trusted: true });
   const inferredApp = (
     preferredApp && !isGenericFallbackAppName(preferredApp)
       ? preferredApp
@@ -778,7 +1026,7 @@ export function buildGenericAppNavigatorRouteContext(
   task: string,
   options: { targetAppName?: string | null; fallbackTargetAppName?: string } = {},
 ): GenericAppNavigatorRouteContext {
-  const preferredApp = cleanAppNameCandidate(options.targetAppName || '');
+  const preferredApp = cleanAppNameCandidate(options.targetAppName || '', { trusted: true });
   const inferredApp = preferredApp && !isGenericFallbackAppName(preferredApp)
     ? preferredApp
     : inferGenericAppName(task);

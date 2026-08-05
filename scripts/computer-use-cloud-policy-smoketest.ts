@@ -84,6 +84,30 @@ const core = pureEdgeSandbox.__computerUseCloudPolicyCore as {
   resolveAllowedConfirmationChoice: (storedChoice: string, options: string[]) => string | null;
 };
 
+// Execute the real dependency-free first-terminal-wins gate from the hook.
+// The hook itself imports React/React Native, so compile only the pure seam.
+const terminalGateSource = section(
+  singleHook,
+  'export type ComputerUseTaskTerminalStatus =',
+  '// Phase 2b',
+);
+const terminalGateCompiled = ts.transpileModule(
+  `${terminalGateSource.replace(/\bexport\s+/g, '')}
+  ;(globalThis as any).__computerUseTaskTerminalGate = createComputerUseTaskTerminalGate;`,
+  {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.None,
+    },
+  },
+).outputText;
+const terminalGateSandbox: Record<string, unknown> = {};
+vm.runInNewContext(terminalGateCompiled, terminalGateSandbox);
+const createTerminalGate = terminalGateSandbox.__computerUseTaskTerminalGate as () => {
+  claim: (status: 'completed' | 'failed' | 'cancelled') => boolean;
+  getStatus: () => 'completed' | 'failed' | 'cancelled' | null;
+};
+
 console.log('Action classification');
 {
   const observationActions = new Set(['screenshot', 'wait', 'mouse_move', 'scroll']);
@@ -325,6 +349,33 @@ console.log('Start-race reservations');
   assert(singleHook.includes('startReservationRef.current = null;')
     && singleHook.includes('startedHandle.cancel()'),
   'single-task cancellation invalidates an in-flight start');
+  const cancelledFirst = createTerminalGate();
+  assert(cancelledFirst.claim('cancelled')
+    && !cancelledFirst.claim('completed')
+    && !cancelledFirst.claim('failed')
+    && cancelledFirst.getStatus() === 'cancelled',
+  'real terminal gate keeps cancel authoritative over late completion/error callbacks');
+  const completedFirst = createTerminalGate();
+  assert(completedFirst.claim('completed')
+    && !completedFirst.claim('failed')
+    && !completedFirst.claim('cancelled')
+    && completedFirst.getStatus() === 'completed',
+  'real terminal gate keeps completion authoritative over late error/cancel callbacks');
+  const nextAttempt = createTerminalGate();
+  assert(nextAttempt.claim('failed') && nextAttempt.getStatus() === 'failed',
+    'a new run receives an independent terminal gate');
+  const cancelOwnerStart = singleHook.indexOf('const cancelOwnedAttempt = useCallback');
+  const cancelOwnerEnd = singleHook.indexOf('\n\n  // A live AgentHandle', cancelOwnerStart);
+  const cancelOwner = singleHook.slice(cancelOwnerStart, cancelOwnerEnd);
+  assert(singleHook.includes("!terminalGate.claim('completed')")
+    && singleHook.includes("!terminalGate.claim('failed')")
+    && cancelOwner.includes("terminalGate.claim('cancelled')")
+    && cancelOwner.indexOf("terminalGate.claim('cancelled')")
+      < cancelOwner.indexOf('startReservationRef.current = null;')
+    && singleHook.includes('const ownsLiveAttempt = cancelOwnedAttempt();'),
+  'hook callbacks and cancellation claim one typed terminal before invalidation');
+  assert(/useEffect\(\(\) => \{[\s\S]{0,120}setState\(EMPTY_STATE\);[\s\S]{0,220}cancelOwnedAttempt\(\);[\s\S]{0,120}persistQuestionResolved\(null\)/.test(singleHook),
+    'hook cancels its owned handle and invalidates callbacks on unmount or scope change');
   assert(client.includes('await Promise.resolve();')
     && client.includes('if (cancelled) return;'),
   'transport defers callbacks until callers can store/cancel the returned handle');

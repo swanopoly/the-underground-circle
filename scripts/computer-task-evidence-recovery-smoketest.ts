@@ -134,6 +134,74 @@ assert.equal(
   'captured observation evidence can still classify a genuine CAPTCHA blocker',
 );
 
+const vlcReadRoute = buildChatComputerRequestRoute('Open VLC and read the current track title');
+assert(vlcReadRoute?.evidenceContract, 'read-only VLC route carries evidence contract');
+assert(vlcReadRoute?.appAutomationRouteDecision, 'read-only VLC route carries its app route decision');
+const vlcReadRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: vlcReadRoute.evidenceContract,
+  appRouteDecision: vlcReadRoute.appAutomationRouteDecision,
+  task: 'Open VLC and read the current track title',
+  failureMessage: 'The current track title was unavailable from the fresh accessibility observation.',
+  outcomeStatus: 'blocked',
+  source: 'desktop.read_a11y_tree',
+});
+assert.equal(vlcReadRecovery?.failureArea, 'fresh_evidence', 'read-only VLC failure requests fresh app evidence');
+assert.equal(vlcReadRecovery?.retryAllowed, true, 'read-only VLC failure allows one bounded observation retry');
+assert.equal(vlcReadRecovery?.userActionRequired, false, 'read-only VLC failure does not invent an approval unblock');
+assert.deepEqual(vlcReadRecovery?.approvalBoundaries, [], 'read-only VLC recovery strips mutation-only route approvals');
+assert.deepEqual(vlcReadRecovery?.appRouteDecision?.missingApprovals, [], 'read-only VLC route-decision summary strips mutation-only approvals');
+assert.deepEqual(
+  vlcReadRecovery?.requiredEvidence.map((item) => item.tool),
+  ['desktop.window_state', 'desktop.read_a11y_tree'],
+  'read-only VLC recovery requires exact window plus semantic read evidence only',
+);
+assert.doesNotMatch(
+  [...(vlcReadRecovery?.requiredFreshEvidence || []), ...(vlcReadRecovery?.requiredProof || [])].join(' | '),
+  /file_stat|file search|output|export|save|document mutation|layer inventory/i,
+  'read-only VLC recovery carries no local-file or document-mutation evidence',
+);
+assert(!(vlcReadRecovery?.requiredEvidence || []).some((item) => /browser\.|desktop\.file_|user\.confirm/i.test(item.tool)), 'read-only VLC recovery cannot foreground a browser, inspect files, or request approval');
+
+for (const [request, expectedTarget] of [
+  ['Open Docker Desktop', 'Docker Desktop'],
+  ['Open Microsoft Remote Desktop', 'Microsoft Remote Desktop'],
+] as const) {
+  const productRoute = buildChatComputerRequestRoute(request);
+  assert(productRoute?.evidenceContract, `${request}: product read route carries evidence`);
+  const recovery = diagnoseComputerTaskEvidenceFailure({
+    contract: productRoute.evidenceContract,
+    appRouteDecision: productRoute.appAutomationRouteDecision,
+    task: request,
+    failureMessage: 'The fresh app/window observation did not return the requested state.',
+    outcomeStatus: 'blocked',
+    source: 'desktop.window_state',
+  });
+  assert.equal(recovery?.targetName, expectedTarget, `${request}: exact product identity survives recovery`);
+  assert.equal(recovery?.failureArea, 'fresh_evidence', `${request}: recovery requests fresh observation`);
+  assert.deepEqual(recovery?.approvalBoundaries, [], `${request}: recovery invents no approval`);
+  assert(!(recovery?.requiredEvidence || []).some((item) => /browser\.|desktop\.file_|user\.confirm|build_app_capability/i.test(item.tool)), `${request}: recovery exposes only app-read evidence`);
+  assert.doesNotMatch(
+    [...(recovery?.requiredFreshEvidence || []), ...(recovery?.requiredProof || [])].join(' | '),
+    /file_stat|source file|output|export|save|mutation retry|buildout|research/i,
+    `${request}: recovery has no file/mutation/buildout requirements`,
+  );
+}
+
+const photoshopLaunchRoute = buildChatComputerRequestRoute('Open Photoshop');
+assert(photoshopLaunchRoute?.evidenceContract, 'Photoshop launch-only route carries evidence contract');
+const staleApprovalCopyOnSafeRead = diagnoseComputerTaskEvidenceFailure({
+  contract: photoshopLaunchRoute.evidenceContract,
+  appRouteDecision: photoshopLaunchRoute.appAutomationRouteDecision,
+  task: 'Open Photoshop',
+  failureMessage: 'Approval lookup failed. The plan was not executed; retry when the approval service is available.',
+  outcomeStatus: 'blocked',
+  source: 'chat.run_computer_task',
+});
+assert.notEqual(staleApprovalCopyOnSafeRead?.failureArea, 'approval_boundary', 'stale approval copy cannot turn an approval-free launch into an approval boundary');
+assert.deepEqual(staleApprovalCopyOnSafeRead?.approvalBoundaries, [], 'approval-free Photoshop launch retains no approval boundary during recovery');
+assert((staleApprovalCopyOnSafeRead?.requiredEvidence || []).some((item) => item.tool === 'desktop.photoshop_document_status'), 'Photoshop launch recovery uses app-native status');
+assert(!(staleApprovalCopyOnSafeRead?.requiredEvidence || []).some((item) => item.tool === 'desktop.photoshop_layer_inventory' || item.tool.startsWith('desktop.file_')), 'Photoshop launch recovery omits layer and file evidence');
+
 const photoshopRoute = buildChatComputerRequestRoute('Open Photoshop and update the text layer then export a proof png');
 assert(photoshopRoute?.evidenceContract, 'Photoshop route carries evidence contract');
 assert(photoshopRoute?.appAutomationRouteDecision, 'Photoshop route carries app automation route decision');
@@ -145,6 +213,30 @@ const photoshopRecovery = diagnoseComputerTaskEvidenceFailure({
 assert.equal(photoshopRecovery?.failureArea, 'fresh_evidence', 'Photoshop missing inventory maps to fresh evidence');
 assert(photoshopRecovery?.requiredFreshEvidence.some((item) => /document status|layer inventory/i.test(item)), 'Photoshop recovery asks for refreshed layer inventory');
 assert(photoshopRecovery?.requiredProof.some((item) => /proof artifact|file_stat|Photoshop/i.test(item)), 'Photoshop recovery carries proof-after requirements');
+
+const photoshopExportProofRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: photoshopRoute.evidenceContract,
+  task: 'Update Photoshop text layer and export a proof PNG',
+  failureMessage: 'Final proof receipt was unavailable after the export attempt.',
+  outcomeStatus: 'partial',
+  source: 'desktop.photoshop_export_proof',
+});
+assert.equal(photoshopExportProofRecovery?.failureArea, 'proof_after', 'Photoshop export remains a proof-after failure');
+assert(photoshopExportProofRecovery?.approvalBoundaries.some((item) => /mutation|save|export/i.test(item)), 'Photoshop mutation/export recovery retains approval boundaries');
+assert(photoshopExportProofRecovery?.requiredEvidence.some((item) => item.tool === 'desktop.file_stat'), 'Photoshop export proof recovery retains output file stat');
+
+const zoomMutationRoute = buildChatComputerRequestRoute('Open Zoom and mute my microphone');
+assert(zoomMutationRoute?.evidenceContract, 'non-file Zoom mutation carries evidence contract');
+const zoomProofRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: zoomMutationRoute.evidenceContract,
+  task: 'Mute the microphone in Zoom',
+  failureMessage: 'Final proof receipt could not be confirmed after the control action.',
+  outcomeStatus: 'partial',
+  source: 'desktop.run_applescript',
+});
+assert.equal(zoomProofRecovery?.failureArea, 'proof_after', 'Zoom mutation missing proof is classified as proof-after');
+assert(zoomProofRecovery?.approvalBoundaries.some((item) => /mutation|saving|exporting|deleting/i.test(item)), 'Zoom mutation recovery retains approval policy');
+assert(!zoomProofRecovery?.requiredEvidence.some((item) => item.tool === 'desktop.file_stat'), 'non-file Zoom mutation recovery does not fabricate output file evidence');
 
 const routeObservationRecovery = diagnoseComputerTaskEvidenceFailure({
   contract: photoshopRoute.evidenceContract,

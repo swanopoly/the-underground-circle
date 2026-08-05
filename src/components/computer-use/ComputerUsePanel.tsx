@@ -63,6 +63,8 @@ const SESSION_STATUS_LABELS: Record<string, string> = {
   paused: 'PAUSED',
   completed: 'COMPLETED',
   failed: 'FAILED',
+  blocked: 'BLOCKED — REVIEW PLAN',
+  cancelled: 'CANCELLED',
 };
 
 const PERMISSION_LABELS: Record<ComputerUsePermission, string> = {
@@ -90,8 +92,17 @@ export default function ComputerUsePanel({
 
   // Pulse animation for executing status
   useEffect(() => {
-    if (session.status === 'executing') {
-      const pulse = Animated.sequence([
+    if (session.status !== 'executing') {
+      pulseAnim.stopAnimation();
+      pulseAnim.setValue(1);
+      return;
+    }
+
+    // Animated.loop owns exactly one cancellable animation for this render.
+    // The former recursive completion callback captured an old `executing`
+    // status and could keep restarting after pause, cancel, or unmount.
+    const pulse = Animated.loop(
+      Animated.sequence([
         Animated.timing(pulseAnim, {
           toValue: 1,
           duration: 800,
@@ -102,26 +113,30 @@ export default function ComputerUsePanel({
           duration: 800,
           useNativeDriver: false,
         }),
-      ]);
-      const loop = () => {
-        pulse.start(() => {
-          if (session.status === 'executing') loop();
-        });
-      };
-      loop();
-    } else {
-      pulseAnim.setValue(1);
-    }
-  }, [session.status]);
+      ]),
+    );
+    pulse.start();
+    return () => {
+      pulse.stop();
+      pulseAnim.stopAnimation();
+    };
+  }, [pulseAnim, session.status]);
 
   const sessionColor = session.status === 'executing' ? '#f59e0b'
     : session.status === 'completed' ? '#22c55e'
     : session.status === 'failed' ? '#ef4444'
+    : session.status === 'blocked' ? '#f59e0b'
     : session.status === 'paused' ? '#6f6f6f'
     : accentColor;
 
   const hasPendingActions = session.actions.some(a => a.status === 'pending');
-  const isActive = session.status === 'executing' || session.status === 'awaiting_approval';
+  const isActive = session.status === 'executing'
+    || session.status === 'awaiting_approval'
+    || session.status === 'paused';
+  const isTerminal = session.status === 'completed'
+    || session.status === 'failed'
+    || session.status === 'blocked'
+    || session.status === 'cancelled';
   const completedCount = session.actions.filter(a => a.status === 'completed').length;
   const totalCount = session.actions.length;
   const blockedCount = session.actions.filter(a => !!a.blockedReason).length;
@@ -285,7 +300,7 @@ export default function ComputerUsePanel({
 
       {/* ── Control Bar ── */}
       <View style={styles.controlBar}>
-        {hasPendingActions && (
+        {hasPendingActions && !isTerminal && (
           <Pressable
             onPress={onApproveAll}
             accessibilityRole="button"
@@ -325,7 +340,7 @@ export default function ComputerUsePanel({
             <Text style={[styles.controlButtonText, { color: '#ef4444' }]}>CANCEL</Text>
           </Pressable>
         )}
-        {(session.status === 'completed' || session.status === 'failed') && (
+        {isTerminal && (
           <Pressable
             onPress={onCancel}
             accessibilityRole="button"

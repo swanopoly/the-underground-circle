@@ -35,8 +35,7 @@
  *     error message, and model-visible error feedback (tool_result text in
  *     the loop) is a separate channel this module does not touch.
  *
- * Pure by construction: `import type` only, tsx-loadable, bounded, never
- * throws.
+ * Pure by construction: no I/O, tsx-loadable, bounded, never throws.
  */
 
 import type { ChatAutomationOutcome } from './runChatAutomationPlan';
@@ -45,6 +44,10 @@ import type { StreamChatResult } from './swanbotStream';
 import type { SwanBotStructuredResponse } from './swanbot';
 import type { AdvancedCommandResult } from './advancedChatCommands';
 import type { ConversationalIntentResult } from './conversationalRouter';
+import {
+  mapComputerTaskOutcomeToChatStatus,
+  type ComputerTaskOutcomeStatus,
+} from './computerTaskOutcome';
 
 // ─── The unified shape ──────────────────────────────────────────────────────
 
@@ -209,6 +212,80 @@ export function normalizeAutomationOutcome(outcome: ChatAutomationOutcome): Chat
       ...(outcome.runId ? { runId: outcome.runId } : {}),
       ...(outcome.approvalId ? { approvalId: outcome.approvalId } : {}),
       ...(outcome.warnings?.length ? { warnings: outcome.warnings } : {}),
+    },
+  };
+}
+
+export interface ComputerTaskLaneOutcomeInput {
+  /** Authoritative typed task terminal. Never infer this value from prose. */
+  status: ComputerTaskOutcomeStatus;
+  message?: string | null;
+  recoveryOptions?: ChatFailureRecoveryOption[] | null;
+  servedBy?: ChatLaneServedBy;
+  /** Extra bounded caller metadata. `computerTaskStatus` cannot be overridden. */
+  data?: Record<string, unknown>;
+}
+
+const COMPUTER_TASK_RECOVERY_BY_STATUS: Record<
+  Exclude<ComputerTaskOutcomeStatus, 'completed'>,
+  ChatLaneRecoveryClassification
+> = {
+  partial: {
+    recoverableBy: 'user',
+    retrySideEffectSafe: false,
+    reason: 'computer_task_partial',
+  },
+  blocked: {
+    recoverableBy: 'user',
+    retrySideEffectSafe: false,
+    reason: 'computer_task_blocked',
+  },
+  needs_input: {
+    recoverableBy: 'user',
+    retrySideEffectSafe: false,
+    reason: 'computer_task_needs_input',
+  },
+  waiting_approval: {
+    recoverableBy: 'user',
+    retrySideEffectSafe: false,
+    reason: 'computer_task_waiting_approval',
+  },
+  failed: {
+    recoverableBy: 'user',
+    retrySideEffectSafe: false,
+    reason: 'computer_task_failed',
+  },
+  cancelled: {
+    recoverableBy: 'user',
+    retrySideEffectSafe: false,
+    reason: 'computer_task_cancelled',
+  },
+};
+
+/**
+ * Adapt the richer computer-task terminal contract to the unified chat-lane
+ * envelope. The typed status is the only source of lane truth: message text is
+ * presentation-only and can never turn approval, input, partial, or cancelled
+ * outcomes into hard failures. The original status is always retained because
+ * the chat-lane status union is intentionally coarser.
+ */
+export function normalizeComputerTaskLaneOutcome(
+  input: ComputerTaskLaneOutcomeInput,
+): ChatLaneOutcome {
+  const completed = input.status === 'completed';
+  const recovery = input.status === 'completed'
+    ? undefined
+    : COMPUTER_TASK_RECOVERY_BY_STATUS[input.status];
+  return {
+    lane: 'computer_task',
+    status: mapComputerTaskOutcomeToChatStatus(input.status),
+    message: clipMessage(input.message, completed ? '(done)' : '(computer task did not complete)'),
+    recoveryOptions: input.recoveryOptions?.slice(0, 8) || [],
+    ...(recovery ? { recovery } : {}),
+    ...(input.servedBy ? { servedBy: { ...input.servedBy } } : {}),
+    data: {
+      ...(input.data || {}),
+      computerTaskStatus: input.status,
     },
   };
 }

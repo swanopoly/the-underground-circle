@@ -114,10 +114,11 @@ const normalizationSource = section(
 check(
   normalizationSource.includes('if (!isComputerUseMutationActionType(action.type)) return action')
     && normalizationSource.includes('value: undefined')
-    && normalizationSource.includes(
-      'runtimeHandoff: buildComputerUseMutationRuntimeHandoff(action.type)',
-    ),
-  'every mutation loses its raw value and receives a fresh handoff before persistence',
+    && normalizationSource.includes("const isTerminallyBlocked = action.status === 'rejected' || !!action.blockedReason")
+    && normalizationSource.includes('runtimeHandoff: isTerminallyBlocked')
+    && normalizationSource.includes('? undefined')
+    && normalizationSource.includes(': buildComputerUseMutationRuntimeHandoff(action.type)'),
+  'every mutation loses raw input; active markers get a fresh handoff while rejected markers prepare none',
 );
 check(
   normalizationSource.includes('const value = isComputerUseMutationActionType(actionType)')
@@ -217,12 +218,21 @@ check(
     && planExecutionSource.indexOf(
       'session.actions = session.actions.map(withoutPersistedMutationInput)',
     ) < planExecutionSource.indexOf('for (let i = 0; i < session.actions.length; i += 1)')
+    && planExecutionSource.indexOf('const rejectedIndex = session.actions.findIndex') >= 0
+    && planExecutionSource.indexOf('const rejectedIndex = session.actions.findIndex') < planMutationGuard
     && planMutationGuard >= 0
     && planMutationGuard < planExecutionSource.indexOf(
-      "if (action.status === 'rejected' || action.status === 'completed')",
+      "if (action.status === 'completed')",
     )
     && planMutationGuard < planExecutionSource.indexOf('checkPermission(session, action)'),
-  'executePlan redacts the direct session then stops at the first mutation even when legacy state says approved/completed',
+  'executePlan rejects blocked prerequisites before dispatch, then stops at active mutations even when legacy state says approved/completed',
+);
+check(
+  planExecutionSource.includes('runtimeHandoff: undefined')
+    && planExecutionSource.includes("reason: 'action_rejected'")
+    && planExecutionSource.indexOf('const rejectedIndex = session.actions.findIndex')
+      < planExecutionSource.indexOf('for (let i = 0; i < session.actions.length; i += 1)'),
+  'rejected mutations become typed blocked outcomes before handoff preparation or any action callback',
 );
 check(
   planExecutionSource.includes('const halted = await executeAction(action, session)')

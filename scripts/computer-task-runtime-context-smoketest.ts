@@ -317,6 +317,95 @@ assert.match(
   'only a compiler-owned deterministic sequence receives dispatcher authorization',
 );
 assert.match(
+  chatComputerCall,
+  /deterministicLifecycleReadProgram: computerPlan\.computerRequestRoute\?\.deterministicLifecycleReadProgram \?\? null/,
+  'Chat forwards only the router-compiled strict lifecycle program to the local runtime',
+);
+const nativeAbortOwnerStart = chatSource.lastIndexOf(
+  'computerTaskController = new AbortController();',
+  chatComputerCallStart,
+);
+const nativeAbortOwner = chatSource.slice(nativeAbortOwnerStart, chatComputerCallStart);
+assert(
+  nativeAbortOwnerStart >= 0
+    && nativeAbortOwner.includes('openSwanAbortRef.current = computerTaskController;')
+    && chatComputerCall.includes('signal: computerTaskController.signal'),
+  'STOP exposes the AbortController for every typed native/file executor that receives its signal',
+);
+assert.match(
+  computerRuntimeSource,
+  /!readyCapabilityBuildout && !sequenceProgram && !args\.deterministicLifecycleReadProgram/,
+  'strict lifecycle dispatch bypasses the model-driven clarifier',
+);
+assert.match(
+  computerRuntimeSource,
+  /return executeAuthorizedDeterministicLifecycleReadProgram\(\{[\s\S]{0,220}program: args\.deterministicLifecycleReadProgram/,
+  'strict lifecycle dispatch returns through the local deterministic executor before the agent loop',
+);
+const deterministicLifecycleExecutorStart = computerRuntimeSource.indexOf(
+  'async function executeAuthorizedDeterministicLifecycleReadProgram',
+);
+const deterministicLifecycleExecutorEnd = computerRuntimeSource.indexOf(
+  '/**\n * Detects whether an app-task utterance has follow-up work',
+  deterministicLifecycleExecutorStart,
+);
+assert(deterministicLifecycleExecutorStart >= 0 && deterministicLifecycleExecutorEnd > deterministicLifecycleExecutorStart);
+const deterministicLifecycleExecutorSource = computerRuntimeSource.slice(
+  deterministicLifecycleExecutorStart,
+  deterministicLifecycleExecutorEnd,
+);
+assert.match(
+  deterministicLifecycleExecutorSource,
+  /executeObservedNativeAppActivation\(\s*'launch_app'/,
+  'the deterministic lifecycle executor reuses observe-first launch proof',
+);
+assert.match(
+  deterministicLifecycleExecutorSource,
+  /executeObservedNativeAppActivation\(\s*'focus_app'/,
+  'the deterministic lifecycle executor follows launch with foreground focus proof',
+);
+assert.doesNotMatch(
+  deterministicLifecycleExecutorSource,
+  /executeComputerAppTask\(/,
+  'the strict lifecycle executor never enters the broad generic app executor',
+);
+assert.match(
+  computerRuntimeSource,
+  /if \(stopped\(\)\) \{\s*return deterministicLocalCancelledResult\(execution, 'The Photoshop task was cancelled before any app action\.'/,
+  'an exact local program aborted before mutation returns typed cancelled',
+);
+assert.match(
+  computerRuntimeSource,
+  /cancelled while waiting for the app to become ready; no document was created/,
+  'an exact Photoshop cold-start abort returns typed cancelled before document creation',
+);
+const neutralCancellationBranch = chatSource.indexOf("if (computerTaskStatus === 'cancelled') {");
+const genericOutcomePresentation = chatSource.indexOf(
+  'const outcomePresentation = buildChatComputerOutcomePresentation',
+  neutralCancellationBranch,
+);
+assert(
+  neutralCancellationBranch >= 0
+    && genericOutcomePresentation > neutralCancellationBranch,
+  'Chat handles typed local cancellation before generic blocker/recovery presentation',
+);
+const neutralCancellationSource = chatSource.slice(neutralCancellationBranch, genericOutcomePresentation);
+assert.match(
+  neutralCancellationSource,
+  /recordComputerTaskLaneTerminal\(\{\s*status: 'cancelled'/,
+  'typed local cancellation records a neutral cancelled lane terminal',
+);
+assert.match(
+  neutralCancellationSource,
+  /addBotMessage\('Stopped\.'/,
+  'typed local cancellation renders compact neutral copy',
+);
+assert.doesNotMatch(
+  neutralCancellationSource,
+  /startTaskFailureRecovery|recoveryOptions/,
+  'typed local cancellation cannot create recovery UI or blocked copy',
+);
+assert.match(
   chatSource,
   /run_computer_task: async \(_dispatchedPlan, transportCtx\)/,
   'the real computer transport consumes its dispatcher context',
@@ -475,7 +564,7 @@ assert(
 const sharedComputerDispatch = chatSource.slice(sharedComputerDispatchStart, sharedComputerDispatchEnd);
 assert.match(
   sharedComputerDispatch,
-  /approvalGate: exactSequenceProgram \? chatAutomationApprovalGate : undefined/,
+  /approvalGate: exactSequenceProgram[\s\S]*?chatAutomationApprovalGate\(approvalPlan, approvalContext\)[\s\S]*?registerExactApprovalOwner\([\s\S]*?: undefined/,
   'only a compiler-owned computer program passes through the plan-level HITL gate',
 );
 assert.match(
@@ -493,10 +582,10 @@ assert.match(
   'run_openswan retains the read-only awareness optimization',
 );
 
-assert.match(
-  chatSource,
-  /computerTaskController = new AbortController\(\);[\s\S]*?if \(isSwanbotV2ClientLoopEnabled\(\)\) \{\s*openSwanAbortRef\.current = computerTaskController;/,
-  'native agent execution exposes STOP only when the v2 client loop consumes AbortSignal',
+assert(
+  nativeAbortOwner.includes('openSwanAbortRef.current = computerTaskController;')
+    && chatComputerCall.includes('signal: computerTaskController.signal'),
+  'native execution exposes STOP for the forced typed loop and deterministic local executors',
 );
 assert.match(
   chatSource,
@@ -628,10 +717,22 @@ assert.match(
   /if \(approval\) await onResolved\?\.\(approval, status\)/,
   'the approval banner exposes a post-resolution continuation seam to its host',
 );
+const exactApprovalOwnerStart = chatSource.indexOf('const registerExactApprovalOwner = (');
+const exactApprovalOwnerEnd = chatSource.indexOf('\n\n      const outcome = await dispatchChatAutomationPlan', exactApprovalOwnerStart);
+assert(
+  exactApprovalOwnerStart >= 0 && exactApprovalOwnerEnd > exactApprovalOwnerStart,
+  'Chat defines an exact approval owner registration boundary before dispatch',
+);
+const exactApprovalOwnerBlock = chatSource.slice(exactApprovalOwnerStart, exactApprovalOwnerEnd);
 assert.match(
-  chatSource,
-  /pendingExactPlanApprovalResumesRef\.current\.set\(outcome\.approvalId, \{[\s\S]*task: trimmed,[\s\S]*threadId: activeThreadId \|\| null,[\s\S]*expiresAt:[\s\S]*originSettled: exactApprovalOriginSettled/,
-  'an exact deferred plan keeps only an ephemeral approval-id resume entry for the current thread',
+  exactApprovalOwnerBlock,
+  /pendingExactPlanApprovalResumesRef\.current\.set\(approvalId, \{[\s\S]*task: trimmed,[\s\S]*circleId,[\s\S]*threadId: activeThreadId \|\| null,[\s\S]*expiresAt:[\s\S]*originSettled: exactApprovalOriginSettled/,
+  'an exact deferred plan keeps only an ephemeral approval-id resume entry for the current circle and thread',
+);
+assert.match(
+  exactApprovalOwnerBlock,
+  /exactPlanApprovalContinuityGateRef\.current\.register\(approvalId\)[\s\S]*registration\.kind === 'resolved'[\s\S]*exactApprovalResolutionDuringFiling/,
+  'owner registration reconciles an approval decision that arrived before the filing call settled',
 );
 const exactApprovalResumeStart = chatSource.indexOf('onResolved={async (approval, status) => {');
 const exactApprovalResumeEnd = chatSource.indexOf('\n        onEditAndResend=', exactApprovalResumeStart);
@@ -642,12 +743,12 @@ assert(
 const exactApprovalResumeBlock = chatSource.slice(exactApprovalResumeStart, exactApprovalResumeEnd);
 assert.match(
   exactApprovalResumeBlock,
-  /if \(pending\) pendingExactPlanApprovalResumesRef\.current\.delete\(approval\.id\);/,
-  'the in-memory exact resume token is burned before any continuation dispatch',
+  /exactPlanApprovalContinuityGateRef\.current\.resolve\(approval\.id, status\)[\s\S]*resolution\.kind === 'queued_before_registration'[\s\S]*exactPlanApprovalResolvedRowsRef\.current\.set\(approval\.id, approval\)[\s\S]*resolution\.kind === 'duplicate'/,
+  'the one-shot continuity gate queues an early decision and rejects duplicate continuations',
 );
 assert.match(
   exactApprovalResumeBlock,
-  /approvalActionType === 'chat\.run_computer_task'[\s\S]*approvalActionType\.startsWith\('chat\.run_computer_task\.'\)[\s\S]*!approvalContext\.mounted[\s\S]*pending\.threadId !== approvalContext\.threadId[\s\S]*await pending\.originSettled;[\s\S]*const liveContext = exactApprovalResumeContextRef\.current;[\s\S]*!liveContext\.mounted[\s\S]*liveContext\.generation !== approvalContext\.generation[\s\S]*pending\.threadId !== liveContext\.threadId[\s\S]*await executeSharedComputerTask\(pending\.task\);/,
+  /await pending\.originSettled;[\s\S]*const livePending = pendingExactPlanApprovalResumesRef\.current\.get\(approval\.id\);[\s\S]*const liveContext = exactApprovalResumeContextRef\.current;[\s\S]*livePending !== pending[\s\S]*!liveContext\.mounted[\s\S]*liveContext\.generation !== approvalContext\.generation[\s\S]*pending\.circleId !== liveContext\.circleId[\s\S]*pending\.threadId !== liveContext\.threadId[\s\S]*pendingExactPlanApprovalResumesRef\.current\.delete\(approval\.id\);[\s\S]*status !== 'approved'[\s\S]*await executeSharedComputerTask\(pending\.task\);/,
   'an approved exact plan revalidates its live mount and circle/thread generation after filing settles',
 );
 assert.match(

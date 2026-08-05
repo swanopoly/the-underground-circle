@@ -293,13 +293,25 @@ check(
     edgeSource.includes('deterministicClientToolResultEventId'),
   'resume durably and idempotently writes client tool_call_result events',
 );
+const resultClaimStart = edgeSource.indexOf('async function persistClientContinuationToolResults');
+const resultClaimEnd = edgeSource.indexOf('async function closeUnreadableContinuation', resultClaimStart);
+const resultClaimSource = edgeSource.slice(resultClaimStart, resultClaimEnd);
+const summaryHelperStart = edgeSource.indexOf('function agentRunSummaryFields(args:');
+const summaryHelperEnd = edgeSource.indexOf('function agentRunSummaryFieldsFromRow', summaryHelperStart);
+const summaryHelperSource = edgeSource.slice(summaryHelperStart, summaryHelperEnd);
 check(
-  edgeSource.includes('tool_calls: toolCalls') &&
-    edgeSource.includes('let storedClaimedContinuation: StoredRunContinuationEnvelope') &&
-    edgeSource.includes('storedClaimedContinuation = await buildStoredContinuationEnvelope(') &&
-    edgeSource.includes('continuation: storedClaimedContinuation') &&
-    edgeSource.includes('resumeState: "results_claimed"') &&
-    !edgeSource.includes('sanitizeContinuationForStorage('),
+  resultClaimStart >= 0 &&
+    resultClaimEnd > resultClaimStart &&
+    summaryHelperStart >= 0 &&
+    summaryHelperEnd > summaryHelperStart &&
+    resultClaimSource.includes('...agentRunSummaryFields({') &&
+    resultClaimSource.includes('toolCalls,') &&
+    summaryHelperSource.includes('tool_calls: Array.isArray(args.toolCalls) ? args.toolCalls : []') &&
+    resultClaimSource.includes('let storedClaimedContinuation: StoredRunContinuationEnvelope') &&
+    resultClaimSource.includes('storedClaimedContinuation = await buildStoredContinuationEnvelope(') &&
+    resultClaimSource.includes('continuation: storedClaimedContinuation') &&
+    resultClaimSource.includes('resumeState: "results_claimed"') &&
+    !resultClaimSource.includes('sanitizeContinuationForStorage('),
   'result submission atomically stores the sealed results-claimed continuation and never restores plaintext persistence',
 );
 check(

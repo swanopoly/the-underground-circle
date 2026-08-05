@@ -20,6 +20,8 @@
  * (smoke: scripts/computer-sequence-program-core-smoketest.ts).
  */
 
+import { unwrapDirectDesktopCommand } from './genericAppNavigator';
+
 export interface ComputerSequenceProgramStep {
   tool: string;
   args: Record<string, unknown>;
@@ -129,10 +131,16 @@ function buildPromptBlock(program: Omit<ComputerSequenceProgram, 'promptBlock'>)
 /** Photoshop from-scratch document creation: "open photoshop and start a new
  *  project 600 x 600" and phrasing variants. */
 function compilePhotoshopNewDocument(task: string): ComputerSequenceProgram | null {
-  if (!PHOTOSHOP_RE.test(task)) return null;
-  if (!NEW_DOC_RE.test(task)) return null;
-  if (!hasOnlyExactNewDocumentLanguage(task)) return null;
-  const dims = task.match(DIMENSIONS_RE);
+  const command = unwrapDirectDesktopCommand(task);
+  if (!command) return null;
+  if (!PHOTOSHOP_RE.test(command)) return null;
+  // Dimensions may appear between the creation verb and artifact noun
+  // ("create a 600 x 600 document"). Remove that one bounded value before
+  // matching the same new-document grammar; exact dimensions are parsed and
+  // validated below.
+  if (!NEW_DOC_RE.test(command.replace(DIMENSIONS_RE, ' '))) return null;
+  if (!hasOnlyExactNewDocumentLanguage(command)) return null;
+  const dims = command.match(DIMENSIONS_RE);
   if (!dims) return null;
   const widthPx = clampDimension(dims[1]);
   const heightPx = clampDimension(dims[2]);

@@ -306,6 +306,29 @@ const base: ResolveBestAppContext = { bridgeOnline: true };
   assert(r?.best.reason.includes('web version'), 'named: reason notes the web fallback');
 }
 {
+  const docker = resolveBestAppForTask('Open Docker Desktop', {
+    bridgeOnline: true,
+    installedApps: ['Docker'],
+  });
+  assert(docker?.best.displayName === 'Docker Desktop', 'desktop product: Docker Desktop display identity is preserved');
+  assert(docker?.best.openTarget === 'Docker', 'desktop product: Docker Desktop launches the real macOS app name');
+
+  const microsoftRemoteDesktop = findKnownAppInText('Open Microsoft Remote Desktop');
+  assert(
+    microsoftRemoteDesktop?.app.id === 'microsoft-remote-desktop',
+    'desktop product: exact Microsoft Remote Desktop wins over the generic Screen Sharing alias',
+  );
+  const remoteDesktopPlan = buildAppOpenPlan({
+    appId: microsoftRemoteDesktop!.app.id,
+    displayName: microsoftRemoteDesktop!.app.displayName,
+    openVia: 'desktop_launch',
+    openTarget: microsoftRemoteDesktop!.app.macLaunchName || microsoftRemoteDesktop!.app.displayName,
+    surface: 'desktop',
+    reason: 'smoke exact identity',
+  });
+  assert(remoteDesktopPlan.steps[0]?.input.appName === 'Microsoft Remote Desktop', 'desktop product: exact Remote Desktop launch target survives resolution');
+}
+{
   // installed-list miss → no desktop option even with the bridge online
   const r = resolveBestAppForTask('edit this photo in photoshop', {
     bridgeOnline: true,

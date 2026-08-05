@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   buildChatComputerOutcomePresentation,
   isCompactDirectImageConversionBridgeFailure,
@@ -26,6 +27,41 @@ function visibleText(value: ReturnType<typeof buildChatComputerOutcomePresentati
 function assertNoTechnicalLeak(value: ReturnType<typeof buildChatComputerOutcomePresentation>, pattern: RegExp, label: string) {
   assert.doesNotMatch(visibleText(value), pattern, label);
 }
+
+const cancelledOutcome = buildChatComputerOutcomePresentation({
+  task: 'Open Photoshop and start a new project 600 x 600',
+  outcomeStatus: 'cancelled',
+  outcomeMessage: 'Tool transport failed after STOP.',
+  rawWarnings: ['desktop.launch_app failed', 'retry this action'],
+  visibleWarnings: ['desktop.launch_app failed', 'retry this action'],
+  preflightBlockers: ['Photoshop was not observed'],
+  preflightWarnings: ['Observe before action'],
+  groundingBlockers: ['window state missing'],
+  capabilityBlockers: ['desktop bridge unavailable'],
+  capabilityPhase: 'failed',
+});
+assert.equal(cancelledOutcome.compactUserMessage, 'Stopped.', 'cancelled outcome uses compact neutral copy');
+assert.equal(cancelledOutcome.shouldRecoverOutcome, false, 'cancelled outcome never launches failure recovery');
+assert.equal(cancelledOutcome.hideRecoveryDetails, true, 'cancelled outcome hides recovery details');
+assert.equal(cancelledOutcome.hideComputerHandoff, true, 'cancelled outcome hides stale handoff data');
+assert.equal(cancelledOutcome.hideComputerTaskStatus, true, 'cancelled outcome clears the durable task card');
+assert.deepEqual(cancelledOutcome.blockerList, [], 'cancelled outcome carries no blockers');
+assert.deepEqual(cancelledOutcome.nextSteps, [], 'cancelled outcome proposes no retry');
+assert.equal(cancelledOutcome.warningBlock, '', 'cancelled outcome suppresses warning prose');
+
+const chatTabSource = readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8');
+const cancellationStart = chatTabSource.indexOf("if (computerTaskStatus === 'cancelled')");
+const browserAutoStart = chatTabSource.indexOf('const browserAutoStart =', cancellationStart);
+const cancellationEnd = chatTabSource.indexOf('// WI-1: zero-tap auto-start.', cancellationStart);
+assert(cancellationStart >= 0 && cancellationEnd > cancellationStart, 'Chat has an explicit typed cancellation terminal');
+assert(browserAutoStart > cancellationEnd, 'Chat terminalizes cancellation before any browser-plan auto-start decision');
+const cancellationSection = chatTabSource.slice(cancellationStart, cancellationEnd);
+assert.match(cancellationSection, /setComputerTaskState\(null\)[\s\S]*clearComputerTaskState\(circleId, activeThreadId\)/,
+  'Chat clears in-memory and durable task state on cancellation');
+assert.match(cancellationSection, /status:\s*'cancelled'[\s\S]*addBotMessage\('Stopped\.'/,
+  'Chat records a typed cancelled terminal and concise stop acknowledgement');
+assert.doesNotMatch(cancellationSection, /diagnoseComputerTaskCheckpointFailure|startMainChatFailureRecoveryPayload|recoveryOptions/,
+  'Chat cancellation exits without recovery');
 
 const exactApprovalWait = buildChatComputerOutcomePresentation({
   task: 'Open Photoshop and start a new project 600 x 600',

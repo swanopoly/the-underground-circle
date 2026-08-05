@@ -53,6 +53,24 @@ function assertOpenSwanTools(input: string, expectedTools: string[]) {
   pass(`OpenSwan tools: ${input}`);
 }
 
+function assertNamedDesktopReadStrategy(input: string, expectedName: string) {
+  const strategy = buildComputerAppTaskStrategy(input);
+  const forbidden = strategy?.recommendedTools.filter((tool) => (
+    tool.startsWith('desktop.file_')
+    || /(?:click|set_element|menu_click|type|paste|press_keys|mouse|research|build_app_capability)/i.test(tool)
+  )) || [];
+  if (
+    strategy?.id !== 'desktop_semantic'
+    || !strategy.label.includes(expectedName)
+    || strategy.approvalCheckpoints.length > 0
+    || forbidden.length > 0
+  ) {
+    fail(`${input} should be a strict named-app launch/read strategy (${JSON.stringify({ id: strategy?.id, label: strategy?.label, approvals: strategy?.approvalCheckpoints, forbidden })})`);
+    return;
+  }
+  pass(`strict named desktop launch/read strategy: ${input}`);
+}
+
 assertStrategy('Tell me all the tabs I have open in Chrome right now', 'desktop_readonly', ['desktop.list_browser_tabs']);
 assertStrategy('Extract product prices from https://example.com into JSON', 'browser_semantic', ['browser.dom_snapshot']);
 assertStrategy('Login to WordPress with my saved vault credentials and draft a post', 'credentialed_browser', ['vault.resolve_for_task', 'browser.verification_state']);
@@ -74,6 +92,12 @@ assertStrategy('Open AutoCAD and create a 2D floor plan with two rooms and dimen
 assertStrategy('Open MATLAB and build a Simulink model, run the simulation, and export plots after approval', 'engineering_cad_control', ['desktop.read_a11y_tree', 'desktop.file_stat', 'research.search', 'fetch_url', 'agent.build_app_capability', 'approvals.request']);
 assertStrategy('Use SOLIDWORKS to update this part dimension and export STEP after approval', 'engineering_cad_control', ['desktop.read_a11y_tree', 'desktop.file_stat', 'agent.build_app_capability', 'approvals.request']);
 assertStrategy('Use Ableton Live to create a four-bar drum loop and export it after approval', 'universal_app_control', ['office.list_agents', 'research.search', 'agent.build_app_capability', 'desktop.read_a11y_tree']);
+assertNamedDesktopReadStrategy('Open Photoshop', 'Photoshop');
+assertNamedDesktopReadStrategy('Open Image Capture', 'Image Capture');
+assertNamedDesktopReadStrategy('Open Docker Desktop', 'Docker Desktop');
+assertNamedDesktopReadStrategy('Open Microsoft Remote Desktop', 'Microsoft Remote Desktop');
+assertStrategy('Disconnect Microsoft Remote Desktop', 'universal_app_control', ['desktop.window_state', 'desktop.read_a11y_tree']);
+assertStrategy('Maximize Docker Desktop', 'universal_app_control', ['desktop.window_state', 'desktop.read_a11y_tree']);
 assertStrategy(
   'I want chat to open any app, figure out how to use it by itself, research what it needs, and do the requested task',
   'universal_app_control',

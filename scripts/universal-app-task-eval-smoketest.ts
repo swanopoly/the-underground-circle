@@ -154,7 +154,7 @@ const CORPUS: UniversalAppEvalCase[] = [
     'Open BeatCanvas and adjust the audio track gain',
     'Use MotionDeck and split the selected video clip',
     'Open WaveLab Pro and animate the layer on the timeline',
-    'Launch AudioNest and mute the selected audio track',
+    'Launch AudioNest and adjust the selected audio track volume',
   ]),
   ...cases('canvas_design', 'desktop', 'reversible_local', 'canvas_or_visual_edit', [
     'Open PixelForge and draw a rectangle on the canvas',

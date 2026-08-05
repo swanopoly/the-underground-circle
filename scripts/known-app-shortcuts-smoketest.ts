@@ -8,6 +8,7 @@
 
 import {
   KNOWN_APPS,
+  findKnownAppInText,
   matchKnownApp,
   normaliseAppIntentText,
   renderAppShortcut,
@@ -22,6 +23,18 @@ function assert(cond: unknown, name: string, detail?: string) {
 
 // ─── Registry sanity ──────────────────────────────────────────────────
 assert(KNOWN_APPS.length >= 80, `registry has ≥80 apps (got ${KNOWN_APPS.length})`);
+{
+  const microsoftRemoteDesktop = findKnownAppInText('Open Microsoft Remote Desktop');
+  assert(
+    microsoftRemoteDesktop?.app.id === 'microsoft-remote-desktop',
+    `specific Microsoft Remote Desktop identity beats Screen Sharing alias (got ${microsoftRemoteDesktop?.app.id})`,
+  );
+  const dockerDesktop = findKnownAppInText('Open Docker Desktop');
+  assert(
+    dockerDesktop?.app.displayName === 'Docker Desktop',
+    `Docker Desktop keeps its product identity (got ${dockerDesktop?.app.displayName})`,
+  );
+}
 
 // Built-in + third-party apps the user has installed — exercises
 // common utterances against the matcher so we pin the most-likely

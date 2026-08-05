@@ -11,6 +11,7 @@ import { summarisePlanForTelemetry, buildChatAutomationPlan } from '../src/lib/c
 import { buildChatComputerRequestRoute, buildChatComputerRequestRoutePromptBlock } from '../src/lib/chatComputerRequestRouter';
 import {
   formatComputerTaskEvidenceContractPromptBlock,
+  isReadOnlyDesktopEvidenceContract,
   summarizeComputerTaskEvidenceContract,
 } from '../src/lib/computerTaskEvidenceContract';
 
@@ -53,6 +54,56 @@ assert(!/layer|source file|package|screenshot|export/i.test([
   ...exactBlankDocumentRoute.evidenceContract.freshEvidenceRequired,
 ].join(' ')), 'exact blank-document evidence omits generic edit-file review');
 
+for (const request of [
+  'Open Photoshop',
+  'Open VLC and read the current track title',
+  'Open R and read the active console prompt',
+]) {
+  const readOnlyRoute = buildChatComputerRequestRoute(request);
+  assert(readOnlyRoute?.evidenceContract, `${request}: pure desktop read carries evidence contract`);
+  const contract = readOnlyRoute.evidenceContract;
+  assert.equal(contract.kind, 'desktop_app', `${request}: pure read remains desktop-owned`);
+  assert.equal(contract.taskFamily, 'app inspection', `${request}: pure read uses the canonical app-inspection family`);
+  assert.equal(isReadOnlyDesktopEvidenceContract(contract), true, `${request}: contract is explicitly recognizable as read-only desktop evidence`);
+  assert.deepEqual(contract.approvalBefore, [], `${request}: launch/read has no mutation approval evidence`);
+  assert.doesNotMatch(
+    contract.observeBefore.join(' | '),
+    /staged source|output destination|before mutation|layer\/selection\/mask inventory|text\/link\/font/i,
+    `${request}: observe-before has no file or document-mutation precondition`,
+  );
+  assert.doesNotMatch(
+    contract.proofAfter.join(' | '),
+    /file_stat|exported proof|output artifact|object manifest|post-change|layer inventory/i,
+    `${request}: proof requires only same-app read state`,
+  );
+  assert.doesNotMatch(
+    contract.freshEvidenceRequired.join(' | '),
+    /file_stat|output write|layer inventory|mutation retry/i,
+    `${request}: retry evidence has no file or mutation requirement`,
+  );
+  assert(contract.mutationGuardrails.some((item) => /do not substitute or foreground a browser/i.test(item)), `${request}: desktop read forbids browser foreground fallback`);
+}
+
+for (const [request, expectedTarget] of [
+  ['Open Docker Desktop', 'Docker Desktop'],
+  ['Open Microsoft Remote Desktop', 'Microsoft Remote Desktop'],
+] as const) {
+  const route = buildChatComputerRequestRoute(request);
+  assert(route?.evidenceContract, `${request}: desktop product carries evidence`);
+  assert.equal(route.evidenceContract.targetName, expectedTarget, `${request}: exact product identity reaches evidence`);
+  assert.equal(route.evidenceContract.taskFamily, 'app inspection', `${request}: product launch is read-only`);
+  assert.deepEqual(route.evidenceContract.approvalBefore, [], `${request}: no approval for launch/read`);
+  assert.doesNotMatch(
+    [
+      ...route.evidenceContract.observeBefore,
+      ...route.evidenceContract.proofAfter,
+      ...route.evidenceContract.freshEvidenceRequired,
+    ].join(' | '),
+    /file_stat|source file|output file|output destination|mutation retry/i,
+    `${request}: Desktop suffix does not imply file work`,
+  );
+}
+
 const indesignRoute = buildChatComputerRequestRoute('Open this InDesign file and make changes for a marketing banner with different layers');
 assert(indesignRoute?.evidenceContract, 'InDesign route carries evidence contract');
 assert.equal(indesignRoute.evidenceContract.targetName, 'Adobe InDesign');
@@ -82,6 +133,19 @@ assert.equal(abletonRoute.evidenceContract.targetName, 'Ableton Live');
 assert.equal(abletonRoute.evidenceContract.taskFamily, 'file/save/export work');
 assert(abletonRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes('developer.apple.com')), 'unfamiliar app contract cites Apple accessibility automation');
 assert(abletonRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes('playwright.dev/docs/actionability')), 'unfamiliar app contract cites actionability for hybrid/browser-like surfaces');
+
+const zoomMutationRoute = buildChatComputerRequestRoute('Open Zoom and mute my microphone');
+assert(zoomMutationRoute?.evidenceContract, 'reversible Zoom mutation carries evidence contract');
+assert.equal(isReadOnlyDesktopEvidenceContract(zoomMutationRoute.evidenceContract), false, 'Zoom mutation cannot inherit read-only evidence authority');
+assert(zoomMutationRoute.evidenceContract.approvalBefore.some((item) => /mutation|saving|exporting|deleting/i.test(item)), 'Zoom mutation retains an approval boundary');
+assert(zoomMutationRoute.evidenceContract.actionabilityChecks.some((item) => /target|control/i.test(item)), 'Zoom mutation retains exact-target actionability');
+assert(zoomMutationRoute.evidenceContract.proofAfter.some((item) => /before\/after|screenshot|state/i.test(item)), 'Zoom mutation retains after-state proof');
+assert.doesNotMatch(zoomMutationRoute.evidenceContract.freshEvidenceRequired.join(' | '), /file_stat|output writes/i, 'non-file Zoom mutation does not fabricate output-file evidence');
+
+assert.equal(isReadOnlyDesktopEvidenceContract(photoshopRoute.evidenceContract), false, 'Photoshop edit/export contract remains mutating');
+assert(photoshopRoute.evidenceContract.approvalBefore.some((item) => /document mutation/i.test(item)), 'Photoshop edit/export retains document-mutation approval');
+assert(photoshopRoute.evidenceContract.proofAfter.some((item) => /file_stat/i.test(item)), 'Photoshop export retains output file proof');
+assert(photoshopRoute.evidenceContract.freshEvidenceRequired.some((item) => /file_stat/i.test(item)), 'Photoshop export retains fresh output evidence');
 
 const fileRoute = buildChatComputerRequestRoute('Search files in Downloads for invoice');
 assert(fileRoute?.evidenceContract, 'local file route carries evidence contract');

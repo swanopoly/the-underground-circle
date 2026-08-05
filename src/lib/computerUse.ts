@@ -29,6 +29,7 @@ import {
   renderBrowserTree,
   screenshot as localBrowserScreenshot,
 } from './browserBridge';
+import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
 
 export type ComputerUsePermission = 'none' | 'ask_every_time' | 'ask_for_new_sites' | 'trusted';
 export type ComputerUseBackend = 'playwright_bridge' | 'browserbase_stagehand';
@@ -103,7 +104,7 @@ export interface ComputerUseSession {
   intent?: BrowserTaskIntent;
   permission: ComputerUsePermission;
   actions: BrowserAction[];
-  status: 'planning' | 'awaiting_approval' | 'executing' | 'paused' | 'completed' | 'failed';
+  status: 'planning' | 'awaiting_approval' | 'executing' | 'paused' | 'completed' | 'failed' | 'blocked' | 'cancelled';
   currentUrl?: string;
   startedAt: string;
   approvedDomains: string[];
@@ -122,6 +123,10 @@ export interface ComputerUseSession {
 
 export interface ComputerUseResult {
   success: boolean;
+  /** Explicit neutral stop; never adapt this to a failed task. */
+  cancelled?: boolean;
+  /** Explicit fail-closed stop; later actions require review/replan. */
+  blocked?: { reason: 'action_rejected'; index: number; actionId: string; description: string };
   message: string;
   screenshotUrl?: string;
   actions: BrowserAction[];
@@ -136,6 +141,15 @@ export interface ComputerUseResult {
    * pause message (terminal-pending, never a silent partial run).
    */
   pendingApproval?: { index: number; actionId: string; description: string };
+}
+
+export function deriveComputerUseResultOutcomeStatus(
+  result: Pick<ComputerUseResult, 'success' | 'cancelled' | 'blocked' | 'pendingApproval'>,
+): Extract<ComputerTaskOutcomeStatus, 'completed' | 'waiting_approval' | 'failed' | 'blocked' | 'cancelled'> {
+  if (result.cancelled) return 'cancelled';
+  if (result.pendingApproval) return 'waiting_approval';
+  if (result.blocked) return 'blocked';
+  return result.success ? 'completed' : 'failed';
 }
 
 export interface ComputerUsePlanSummary {
@@ -164,7 +178,7 @@ export interface BrowserPlanCardData {
   backendPreference?: BrowserAutomationBackendPreference;
   requiresApproval: boolean;
   recommendedPermission?: ComputerUsePermission;
-  status: 'planned' | 'approval_requested' | 'launched' | 'completed' | 'failed';
+  status: 'planned' | 'approval_requested' | 'launched' | 'completed' | 'failed' | 'blocked' | 'cancelled';
   launchedAt?: string;
   completedAt?: string;
   backendSessionId?: string;
@@ -180,6 +194,7 @@ export type BrowserPlanEventKind =
   | 'launched'
   | 'completed'
   | 'failed'
+  | 'blocked'
   | 'opened_live_session'
   | 'cancelled';
 
@@ -505,13 +520,18 @@ function optionalPlanText(value: unknown): string | undefined {
 
 function withoutPersistedMutationInput(action: BrowserAction): BrowserAction {
   if (!isComputerUseMutationActionType(action.type)) return action;
+  const isTerminallyBlocked = action.status === 'rejected' || !!action.blockedReason;
   return {
     ...action,
     // A legacy value can be a password, token, typed draft, option, or key
     // sequence. The typed runtime must re-derive it from the current user turn
     // or vault; a plan card/session must never become a secret-bearing relay.
     value: undefined,
-    runtimeHandoff: buildComputerUseMutationRuntimeHandoff(action.type),
+    // A rejected/blocked prerequisite is already terminal. Do not prepare a
+    // mutation handoff for something the user or safety policy declined.
+    runtimeHandoff: isTerminallyBlocked
+      ? undefined
+      : buildComputerUseMutationRuntimeHandoff(action.type),
   };
 }
 
@@ -907,6 +927,7 @@ export async function takeScreenshot(session?: ComputerUseSession): Promise<stri
 export async function executeAction(
   action: BrowserAction,
   session?: ComputerUseSession,
+  options?: { signal?: AbortSignal },
 ): Promise<BrowserAction> {
   const safeAction = withoutPersistedMutationInput(action);
   const updated: BrowserAction = {
@@ -963,7 +984,7 @@ export async function executeAction(
         }
         case 'wait': {
           const ms = parseInt(action.value || '1000', 10);
-          await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
+          if (!await waitForComputerUseDelay(Math.min(ms, 10000), options?.signal)) return updated;
           break;
         }
         default:
@@ -996,7 +1017,7 @@ export async function executeAction(
         }
         case 'wait': {
           const ms = parseInt(action.value || '1000', 10);
-          await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
+          if (!await waitForComputerUseDelay(Math.min(ms, 10000), options?.signal)) return updated;
           break;
         }
         default:
@@ -1013,6 +1034,23 @@ export async function executeAction(
   }
 
   return updated;
+}
+
+function waitForComputerUseDelay(ms: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(completed);
+    };
+    const onAbort = () => finish(false);
+    const timeoutId = setTimeout(() => finish(true), Math.max(0, ms));
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export function checkPermission(
@@ -1038,7 +1076,8 @@ export function checkPermission(
 
 export async function executePlan(
   session: ComputerUseSession,
-  onActionComplete: (action: BrowserAction, index: number) => void
+  onActionComplete: (action: BrowserAction, index: number) => void,
+  options?: { signal?: AbortSignal },
 ): Promise<ComputerUseResult> {
   const results: BrowserAction[] = [];
   let lastScreenshot: string | undefined;
@@ -1047,7 +1086,58 @@ export async function executePlan(
   // path can expose the session.
   session.actions = session.actions.map(withoutPersistedMutationInput);
 
+  const cancelledResult = (fromIndex = results.length): ComputerUseResult => ({
+    success: false,
+    cancelled: true,
+    message: 'Cancelled by user.',
+    screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
+    actions: [
+      ...results,
+      ...session.actions.slice(Math.max(0, fromIndex)).map(withoutPersistedMutationInput),
+    ],
+    currentUrl: session.currentUrl,
+    backendSessionId: session.backendSessionId,
+    backendLiveUrl: session.backendLiveUrl,
+  });
+
+  if (options?.signal?.aborted) return cancelledResult(0);
+
+  // A declined or safety-blocked prerequisite invalidates the whole plan,
+  // regardless of its position. Find it before entering any earlier action so
+  // a rejected later step cannot leave the UI paused on an unrelated prior
+  // approval or perform observation/backend work first.
+  const rejectedIndex = session.actions.findIndex((action) => (
+    action.status === 'rejected' || !!action.blockedReason
+  ));
+  if (rejectedIndex >= 0) {
+    const action = session.actions[rejectedIndex];
+    const halted: BrowserAction = {
+      ...action,
+      status: 'rejected',
+      runtimeHandoff: undefined,
+    };
+    const blockedActions = session.actions.map((candidate, index) => (
+      index === rejectedIndex ? halted : withoutPersistedMutationInput(candidate)
+    ));
+    return {
+      success: false,
+      message: `Stopped at step ${rejectedIndex + 1}: ${action.blockedReason || `${action.description || action.type} was rejected.`} Later steps were not executed; review or replan before continuing.`,
+      screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
+      actions: blockedActions,
+      currentUrl: session.currentUrl,
+      backendSessionId: session.backendSessionId,
+      backendLiveUrl: session.backendLiveUrl,
+      blocked: {
+        reason: 'action_rejected',
+        index: rejectedIndex,
+        actionId: action.id,
+        description: action.description,
+      },
+    };
+  }
+
   for (let i = 0; i < session.actions.length; i += 1) {
+    if (options?.signal?.aborted) return cancelledResult(i);
     const action = session.actions[i];
 
     if (isComputerUseMutationActionType(action.type)) {
@@ -1055,6 +1145,7 @@ export async function executePlan(
       // it approved or completed. executeAction rebuilds a fresh, non-secret
       // handoff and returns before all observation/backend I/O.
       const halted = await executeAction(action, session);
+      if (options?.signal?.aborted) return cancelledResult(i);
       results.push(halted);
       results.push(
         ...session.actions.slice(i + 1).map(withoutPersistedMutationInput),
@@ -1071,19 +1162,8 @@ export async function executePlan(
       };
     }
 
-    if (action.status === 'rejected' || action.status === 'completed') {
+    if (action.status === 'completed') {
       results.push(action);
-      if (action.blockedReason) {
-        return {
-          success: false,
-          message: action.blockedReason,
-          screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
-          actions: results,
-          currentUrl: session.currentUrl,
-          backendSessionId: session.backendSessionId,
-          backendLiveUrl: session.backendLiveUrl,
-        };
-      }
       continue;
     }
 
@@ -1111,7 +1191,8 @@ export async function executePlan(
       };
     }
 
-    const result = await executeAction(action, session);
+    const result = await executeAction(action, session, options);
+    if (options?.signal?.aborted) return cancelledResult(i);
     results.push(result);
     onActionComplete(result, i);
 
@@ -1131,10 +1212,11 @@ export async function executePlan(
       };
     }
 
-    await new Promise(resolve => setTimeout(resolve, 500));
+    const delayCompleted = await waitForComputerUseDelay(500, options?.signal);
+    if (!delayCompleted || options?.signal?.aborted) return cancelledResult(i + 1);
   }
 
-  const allCompleted = results.every(a => a.status === 'completed' || a.status === 'rejected');
+  const allCompleted = results.every(a => a.status === 'completed');
   const outputs = results
     .filter(a => a.output)
     .map((a, index) => `Output ${index + 1} (${a.type}):\n${String(a.output).slice(0, 4000)}`);
@@ -1268,7 +1350,21 @@ export function toBrowserSessionRecord(
   session: ComputerUseSession,
   result?: ComputerUseResult | { success: boolean },
 ): BrowserSessionRecord {
-  const isTerminal = !!result;
+  const projectedStatus: ComputerUseSession['status'] = !result
+    ? session.status
+    : ('cancelled' in result && result.cancelled)
+      ? 'cancelled'
+      : ('pendingApproval' in result && result.pendingApproval)
+        ? 'awaiting_approval'
+        : ('blocked' in result && result.blocked)
+          ? 'blocked'
+        : result.success
+          ? 'completed'
+          : 'failed';
+  const isTerminal = projectedStatus === 'completed'
+    || projectedStatus === 'failed'
+    || projectedStatus === 'blocked'
+    || projectedStatus === 'cancelled';
   return {
     id: session.backendSessionId || session.id,
     planId: session.sourcePlanId,
@@ -1278,9 +1374,7 @@ export function toBrowserSessionRecord(
     backendLabel: session.backendLabel,
     backendDetails: session.backendDetails,
     backendPreference: session.backendPreference,
-    status: isTerminal
-      ? (result.success ? 'completed' : 'failed')
-      : session.status,
+    status: projectedStatus,
     startedAt: session.startedAt,
     completedAt: isTerminal ? new Date().toISOString() : undefined,
     currentUrl: session.currentUrl,

@@ -37,6 +37,24 @@ assert(photoshopPlan.sourceRefs.some((ref) => ref.label.includes('executeAsModal
 assert(photoshopPlan.sourceRefs.every((ref) => ref.sourceType?.startsWith('official_')));
 assert(photoshopPlan.sourceRefs.every((ref) => ref.lastReviewedAt === '2026-05-29'));
 
+for (const [request, expectedTarget] of [
+  ['Open Photoshop', 'Adobe Photoshop'],
+  ['Open Image Capture', 'Image Capture'],
+  ['Open Docker Desktop', 'Docker Desktop'],
+  ['Open Microsoft Remote Desktop', 'Microsoft Remote Desktop'],
+] as const) {
+  const readPlan = buildAppAutomationControlSurfacePlan(request);
+  const readDecision = buildAppAutomationRouteDecision(request);
+  assert.equal(readPlan.targetName, expectedTarget, `${request}: exact target identity`);
+  assert.equal(readPlan.taskFamily, 'app launch/read observation', `${request}: read-only task family`);
+  assert(readPlan.candidates.every((surface) => surface.approvalBefore.length === 0), `${request}: read candidates need no approval`);
+  assert(!readPlan.candidates.some((surface) => /connected_agent|screenshot_coordinate|vendor_script/.test(surface.id)), `${request}: no buildout/research/coordinate candidate`);
+  assert.doesNotMatch(readPlan.buildoutChecklist.join(' | '), /research|adapter|smoke|runtime code/i, `${request}: no buildout requirements`);
+  assert.equal(readDecision.targetName, expectedTarget, `${request}: route decision keeps exact target`);
+  assert.equal(readDecision.approvalBefore.length, 0, `${request}: route decision has no mutation approval`);
+  assert(readDecision.nextSteps.every((step) => !/before any mutation|buildout|research/i.test(step)), `${request}: read decision has clean next steps`);
+}
+
 const photoshopDecision = buildAppAutomationRouteDecision(photoshopTask, {
   confirmedRequirements: [
     'Photoshop installed and licensed',
@@ -128,7 +146,7 @@ assert(autocadPlan.sourceRefs.some((ref) => ref.url.includes('aps.autodesk.com/d
 assert(autocadPlan.failSafeRules.some((rule) => rule.includes('coordinate actions only')));
 assert(autocadPlan.promptHints.some((hint) => hint.includes('Official refs reviewed')));
 
-const autodeskAiPlan = buildAppAutomationControlSurfacePlan('Use Autodesk MCP servers and Autodesk Assistant in Fusion to inspect the design and suggest a manufacturing-ready feature workflow.');
+const autodeskAiPlan = buildAppAutomationControlSurfacePlan('Use Autodesk MCP servers and Autodesk Assistant in Fusion to create a manufacturing-ready feature, then verify the design.');
 assert.equal(autodeskAiPlan.targetId, 'engineering_cad_app');
 assert.equal(autodeskAiPlan.candidates[0]?.id, 'autodesk_ai_mcp_assistant');
 assert(autodeskAiPlan.sourceRefs.some((ref) => ref.label.includes('Autodesk Assistant')));

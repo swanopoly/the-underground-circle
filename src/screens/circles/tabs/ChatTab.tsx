@@ -39,7 +39,6 @@ import {
   type SwanBotStructuredResponse,
   tryHandleLocalSwanBotCommand,
 } from '../../../lib/swanbot';
-import { isSwanbotV2ClientLoopEnabled } from '../../../lib/swanbotV2ClientLoopFlag';
 import type { WalletInfo, CryptoChain } from '../../../lib/crypto';
 import {
   getCircleDiscordConfig, getCachedChannels, getChannelMessages,
@@ -135,11 +134,13 @@ import {
   createSessionFromBrowserPlan,
   planActions as planComputerUseActions,
   executePlan as executeComputerUsePlan,
+  deriveComputerUseResultOutcomeStatus,
   describeComputerUsePlan,
   toBrowserPlanCardData,
   type BrowserPlanCardData,
   type BrowserPlanEvent,
   type BrowserSessionRecord,
+  type ComputerUseResult,
   type ComputerUseSession,
   type ComputerUsePermission,
   type BrowserAction,
@@ -275,6 +276,7 @@ import { compileComputerSequenceProgram } from '../../../lib/computerSequencePro
 import { UNIFIED_CONVERSATIONAL_INTENT_TYPES } from '../../../lib/chatConversationalCutoverParity';
 import { buildChatAutomationPlanPreview, type ChatAutomationPlanPreview } from '../../../lib/chatAutomationPlanPreview';
 import { createHitlApprovalGate } from '../../../lib/chatApprovalGate';
+import { createExactPlanApprovalContinuityGate } from '../../../lib/exactPlanApprovalContinuityCore';
 import { recallForClarification, reconstructClarificationAnswer } from '../../../lib/chatGapFill';
 import { analyzeBuildBrief } from '../../../lib/buildBriefQuality';
 import {
@@ -509,7 +511,7 @@ import {
   savePendingBotMessage,
   type PendingBotMessageRecord,
 } from '../../../lib/pendingBotMessages';
-import { useAgentApprovals } from '../../../services/hitlService';
+import { useAgentApprovals, type AgentApproval } from '../../../services/hitlService';
 
 const OpenSwanConsole = React.lazy(() => import('../../../components/openswan/OpenSwanConsole'));
 const ComputerUseLiveCard = React.lazy(() => import('../../../components/ComputerUseLiveCard'));
@@ -1337,8 +1339,14 @@ function FloatingEmoji({ emoji, onComplete }: { emoji: string; onComplete: () =>
 }
 
 function ParticleEffect({ x, y, color, onComplete }: { x: number; y: number; color: string; onComplete: () => void }) {
-  const particles = Array.from({ length: 8 }, (_, i) => useRef(new Animated.Value(0)).current);
+  const particlesRef = useRef<Animated.Value[]>([]);
+  if (particlesRef.current.length === 0) {
+    particlesRef.current = Array.from({ length: 8 }, () => new Animated.Value(0));
+  }
+  const particles = particlesRef.current;
   const fadeAnim = useRef(new Animated.Value(1)).current;
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     const animations = particles.map((anim, i) => {
@@ -1351,7 +1359,7 @@ function ParticleEffect({ x, y, color, onComplete }: { x: number; y: number; col
       });
     });
 
-    Animated.parallel([
+    const animation = Animated.parallel([
       ...animations,
       Animated.sequence([
         Animated.delay(500),
@@ -1361,8 +1369,12 @@ function ParticleEffect({ x, y, color, onComplete }: { x: number; y: number; col
           useNativeDriver: true,
         }),
       ]),
-    ]).start(onComplete);
-  }, []);
+    ]);
+    animation.start(({ finished }) => {
+      if (finished) onCompleteRef.current();
+    });
+    return () => animation.stop();
+  }, [fadeAnim, particles]);
 
   return (
     <View style={[styles.particleContainer, { top: y, left: x }]}>
@@ -1493,6 +1505,90 @@ function describeChatAutomationApproval(agentName: string, plan: ChatAutomationP
   const commandLine = command ? `: "${command.slice(0, 140)}"` : '';
   const reason = plan.approval.required && plan.approval.reason ? ` ${plan.approval.reason}` : '';
   return `Approve ${agentName} to run ${plan.execution.kind}${route}${commandLine}.${reason}`.trim();
+}
+
+/**
+ * Record the authoritative computer-task terminal independently from the
+ * presentation copy. This lives at module scope so native, cloud-browser,
+ * local-browser, approval, and panel continuations all share one typed lane
+ * boundary instead of leaving lane health stuck on a preview/deferred state.
+ */
+async function recordComputerTaskLaneTerminal(details: {
+  status: ComputerTaskOutcomeStatus;
+  message?: string | null;
+  executionKind?: string | null;
+  runId?: string | null;
+  replayPolicy?: 'normal' | 'manual_verify_only';
+  mutationDispatched?: boolean;
+  isAuthoritative?: () => boolean;
+}): Promise<string[]> {
+  try {
+    if (details.isAuthoritative && !details.isAuthoritative()) return [];
+    const {
+      normalizeComputerTaskLaneOutcome,
+      buildChatLaneOutcomeTags,
+      summarizeChatLaneOutcomeForTelemetry,
+    } = await import('../../../lib/chatLaneOutcome');
+    const laneOutcome = normalizeComputerTaskLaneOutcome({
+      status: details.status,
+      message: details.message,
+      data: {
+        executionKind: details.executionKind || 'run_computer_task',
+        ...(details.runId ? { runId: details.runId } : {}),
+        replayPolicy: details.replayPolicy || 'normal',
+        mutationDispatched: details.mutationDispatched === true,
+      },
+    });
+    let laneTags = buildChatLaneOutcomeTags(laneOutcome);
+    console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
+    const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
+      await import('../../../lib/chatLaneHealthRegistry');
+    if (details.isAuthoritative && !details.isAuthoritative()) return [];
+    recordChatLaneOutcomeNow(laneOutcome);
+    laneTags = [...laneTags, ...buildChatLaneHealthTags('computer_task', Date.now())];
+    return laneTags;
+  } catch {
+    return [];
+  }
+}
+
+interface LocalComputerUseAttempt {
+  id: string;
+  sessionId: string;
+  controller: AbortController;
+}
+
+function localComputerUseSessionOwnsThread(session: ComputerUseSession | null): boolean {
+  return !!session && (
+    session.status === 'planning'
+    || session.status === 'awaiting_approval'
+    || session.status === 'executing'
+    || session.status === 'paused'
+  );
+}
+
+function interruptOrphanedComputerTaskState(record: ComputerTaskStateRecord): ComputerTaskStateRecord {
+  if (record.phase !== 'executing') return record;
+  const blocker = 'The live task connection ended during refresh, so completion was not verified.';
+  return {
+    ...record,
+    phase: 'blocked',
+    currentStep: 'Refresh the app or browser state before retrying',
+    steps: record.steps.map((step) => step.status === 'active'
+      ? { ...step, status: 'blocked' as const }
+      : step),
+    blockers: Array.from(new Set([blocker, ...record.blockers])).slice(0, 5),
+    nextSteps: Array.from(new Set([
+      'Refresh the current app or browser observation, then retry once.',
+      ...record.nextSteps,
+    ])).slice(0, 5),
+    // The mounted hook has no backend reattach token. Retaining these values
+    // would make the console advertise a resume action it cannot perform.
+    sessionId: null,
+    liveUrl: null,
+    outcomeStatus: 'blocked',
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleId: string; accentColor?: string }) {
@@ -1776,8 +1872,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // opaque approval id, so approving the card can resume it immediately
   // without persisting raw task text in the approval row. The gate still
   // recomputes and atomically consumes the exact plan fingerprint. Remaining
-  // limitation: this local continuation does not survive a tab refresh or an
-  // approval resolved exclusively from another member's client.
+  // limitation: execution resume does not survive a tab refresh or an
+  // approval resolved exclusively from another member's client. Resolution
+  // still terminalizes the durable waiting task below, so it cannot remain
+  // stuck in awaiting_approval after rejection, expiry, or refresh.
   const pendingExactPlanApprovalResumesRef = useRef(new Map<string, {
     task: string;
     circleId: string;
@@ -1785,6 +1883,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     expiresAt: number;
     originSettled: Promise<void>;
   }>());
+  const exactPlanApprovalTerminalIdsRef = useRef(new Set<string>());
+  const exactPlanApprovalContinuityGateRef = useRef(createExactPlanApprovalContinuityGate());
+  const exactPlanApprovalResolvedRowsRef = useRef(new Map<string, AgentApproval>());
+  const terminalizeExactPlanApprovalRef = useRef<(
+    approval: AgentApproval,
+    reason: 'rejected' | 'expired' | 'dismissed' | 'reload',
+  ) => Promise<boolean>>(async () => false);
   // Approval resolution can race the filing turn's final UI writes. Track the
   // committed Chat context independently of the callback closure so a resume
   // approved in one thread cannot dispatch after navigation or unmount. The
@@ -1814,6 +1919,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     };
   }, [activeThreadId, circleId]);
   useEffect(() => {
+    exactPlanApprovalTerminalIdsRef.current.clear();
+    exactPlanApprovalContinuityGateRef.current.clear();
+    exactPlanApprovalResolvedRowsRef.current.clear();
     for (const [approvalId, pending] of pendingExactPlanApprovalResumesRef.current) {
       if (pending.circleId !== circleId || pending.threadId !== (activeThreadId || null)) {
         pendingExactPlanApprovalResumesRef.current.delete(approvalId);
@@ -1931,6 +2039,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // browser plan, recorded as "used" only when the plan actually launches.
   const [pendingComputerUseStickyScopeId, setPendingComputerUseStickyScopeId] = useState<string | null>(null);
   const [computerTaskState, setComputerTaskState] = useState<ComputerTaskStateRecord | null>(null);
+  // Persistence callbacks need the prior checkpoint for recovery comparison,
+  // but callback identity must not follow the freshly compacted object. A ref
+  // keeps the latest value without retriggering polling effects on every save.
+  const computerTaskStateRef = useRef<ComputerTaskStateRecord | null>(null);
+  computerTaskStateRef.current = computerTaskState;
   // Wave-2 task→app resolution: the last route's app choice, kept so a
   // follow-up "use Pixelmator instead" can record a category preference.
   const lastAppResolutionRef = useRef<import('../../../lib/chatComputerRequestRouter').ChatComputerAppResolution | null>(null);
@@ -1963,12 +2076,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // Real Computer Use agent (cost-capped Claude + Browserbase via edge function). The
   // permission dialog's Allow handler hands a task to this hook, which
   // streams reasoning/actions/screenshots into ComputerUseLiveCard below.
-  const computerUseTask = useComputerUseTask(circleId);
+  const computerUseTask = useComputerUseTask(
+    circleId,
+    currentUserId || undefined,
+    activeThreadId,
+  );
+  const liveComputerUseTaskStateRef = useRef(computerUseTask.state);
+  liveComputerUseTaskStateRef.current = computerUseTask.state;
   const agentMonitorTask = useMemo(
-    () => buildAgentMonitorTaskFromComputerUseState(computerUseTask.state, { sourceLabel: 'SwanBot' }),
+    () => computerUseTask.state.outcomeStatus === 'cancelled'
+      ? null
+      : buildAgentMonitorTaskFromComputerUseState(computerUseTask.state, { sourceLabel: 'SwanBot' }),
     [computerUseTask.state],
   );
   const computerUsePostedKeyRef = useRef<string | null>(null);
+  const localComputerUseAttemptRef = useRef<LocalComputerUseAttempt | null>(null);
   // Idempotency key for the mirrored mid-run confirmation chat bubble so a
   // single pay/book confirmation posts exactly once (StrictMode-safe).
   const computerConfirmPostedKeyRef = useRef<string | null>(null);
@@ -2090,7 +2212,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     startsNewActiveRun?: boolean;
   }) => {
     const checkpointRecovery = args.checkpointRecoveryIsNew
-      ? markComputerTaskCheckpointRecoveryObserved(computerTaskState?.checkpointRecovery || null, args.checkpointRecovery || null, args.checkpointRecoveryObservations || [])
+      ? markComputerTaskCheckpointRecoveryObserved(computerTaskStateRef.current?.checkpointRecovery || null, args.checkpointRecovery || null, args.checkpointRecoveryObservations || [])
       : compactComputerTaskCheckpointRecovery(args.checkpointRecovery || null);
     const checkpointNextAction = checkpointRecovery?.retryPolicy?.nextAction || checkpointRecovery?.safeNextStep;
     const capabilityStepLabel = args.capabilityBuildout?.status === 'approval_required'
@@ -2165,20 +2287,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       { resultSummary: args.resultSummary || null },
     );
     nextState.notifications = appendComputerTaskNotification(notificationsToCarry, notification);
-    setComputerTaskState(nextState);
+    const mountedScope = activeThreadScopeRef.current;
+    if (mountedScope.circleId === nextState.circleId && mountedScope.threadId === nextState.threadId) {
+      computerTaskStateRef.current = nextState;
+      setComputerTaskState(nextState);
+    }
     // Best-effort persistence (UI recovery convenience, not task-critical): on
     // native, storage is AsyncStorage directly and setItem can reject (I/O
     // pressure / oversized row). Swallow it here so a persist failure can never
     // unwind out of the caller's pre-try preamble and strand the typing
     // indicator (executeSharedComputerTask sets botTyping before its try/finally).
     await saveComputerTaskState(nextState).catch(() => {});
-  }, [activeThreadId, circleId, computerTaskState?.checkpointRecovery]);
+  }, [activeThreadId, circleId]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const existing = await loadComputerTaskState(circleId, activeThreadId).catch(() => null);
-      if (!cancelled) setComputerTaskState(existing);
+      if (cancelled) return;
+      const liveStatus = liveComputerUseTaskStateRef.current.status;
+      const hasMountedExecutor = liveStatus === 'starting'
+        || liveStatus === 'running'
+        || Boolean(localComputerUseAttemptRef.current);
+      const hydrated = existing?.phase === 'executing' && !hasMountedExecutor
+        ? interruptOrphanedComputerTaskState(existing)
+        : existing;
+      computerTaskStateRef.current = hydrated;
+      setComputerTaskState(hydrated);
+      if (hydrated && hydrated !== existing) {
+        // Persist the interruption once so another refresh cannot resurrect a
+        // fake Working/resumable card without a live execution owner.
+        void saveComputerTaskState(hydrated).catch(() => {});
+      }
     })();
     return () => { cancelled = true; };
   }, [activeThreadId, circleId]);
@@ -2925,7 +3065,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const startTaskFailureRecovery = async (details: {
       failureMessage: string;
       failureStack?: string | null;
-      outcomeStatus?: string | null;
+      outcomeStatus?: ComputerTaskOutcomeStatus | 'completed_with_warnings' | 'deferred' | 'skipped' | null;
       executionKind?: string | null;
       runId?: string | null;
       planSummary?: string | null;
@@ -2951,10 +3091,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         preflightSummary: details.preflightSummary,
         complexityPlan: details.complexityPlan || execution.complexityPlan,
       });
-      // W5/X1 (P45): every computer-task terminal (all three call sites
-      // funnel here) is classified through the unified lane boundary and the
-      // two-axis signal rides the recovery archive tags. Telemetry only —
-      // the evidence-recovery flow stays authoritative.
+      // Recovery terminals are classified through the same typed lane
+      // boundary used by completion, approval, and browser continuation paths.
+      // Telemetry only — the evidence-recovery flow stays authoritative.
       let laneTags: string[] = [];
       // Local-console diagnostic: the compact user-facing copy deliberately
       // hides the raw failure, which makes "why did this block?" undebuggable
@@ -2968,18 +3107,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           routeStatus: (details.appRouteDecision as any)?.status || null,
         }));
       } catch {}
-      try {
-        const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
-          await import('../../../lib/chatLaneOutcome');
-        const laneOutcome = normalizeThrownError('computer_task', details.failureMessage);
-        laneTags = buildChatLaneOutcomeTags(laneOutcome);
-        console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
-        // X7 (P48): registry + degradation-scope tags.
-        const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
-          await import('../../../lib/chatLaneHealthRegistry');
-        recordChatLaneOutcomeNow(laneOutcome);
-        laneTags = [...laneTags, ...buildChatLaneHealthTags('computer_task', Date.now())];
-      } catch {}
+      const typedOutcomeStatus = normalizeComputerTaskOutcomeStatus(details.outcomeStatus)
+        || (details.outcomeStatus === 'completed_with_warnings'
+          ? 'partial'
+          : details.outcomeStatus === 'deferred'
+            ? 'waiting_approval'
+            : details.outcomeStatus === 'skipped'
+              ? 'blocked'
+            : 'failed');
+      laneTags = await recordComputerTaskLaneTerminal({
+        status: typedOutcomeStatus,
+        message: details.failureMessage,
+        executionKind: details.executionKind,
+        runId: details.runId,
+        replayPolicy: details.replayPolicy,
+        mutationDispatched: details.mutationDispatched,
+      });
       return startMainChatFailureRecoveryPayload({
         task: trimmed,
         failureMessage: details.failureMessage,
@@ -3149,6 +3292,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return { handled: true as const, browser: false as const };
       }
 
+      let exactApprovalResolutionDuringFiling: {
+        approvalId: string;
+        status: 'approved' | 'rejected' | 'expired';
+      } | null = null;
+      const registerExactApprovalOwner = (
+        approvalId: string,
+        expiresAtValue: unknown,
+      ) => {
+        if (!exactSequenceProgram || !approvalId) return;
+        const now = Date.now();
+        const reportedExpiry = Number(expiresAtValue);
+        if (!pendingExactPlanApprovalResumesRef.current.has(approvalId)) {
+          pendingExactPlanApprovalResumesRef.current.set(approvalId, {
+            task: trimmed,
+            circleId,
+            threadId: activeThreadId || null,
+            expiresAt: Number.isFinite(reportedExpiry) && reportedExpiry > now
+              ? reportedExpiry
+              : now + 15 * 60 * 1000,
+            originSettled: exactApprovalOriginSettled,
+          });
+        }
+        const registration = exactPlanApprovalContinuityGateRef.current.register(approvalId);
+        if (registration.kind === 'resolved') {
+          exactApprovalResolutionDuringFiling = {
+            approvalId,
+            status: registration.status,
+          };
+        }
+      };
+
       const outcome = await dispatchChatAutomationPlan(computerPlan, {
         ctx: {
           circleId,
@@ -3166,7 +3340,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         // the bounded unsaved draft, or one approval when the compiler marks a
         // resource-heavy allocation. Generic/model-planned computer work keeps
         // its existing per-tool exact approval boundaries.
-        approvalGate: exactSequenceProgram ? chatAutomationApprovalGate : undefined,
+        approvalGate: exactSequenceProgram
+          ? async (approvalPlan, approvalContext) => {
+              const gateResult = await chatAutomationApprovalGate(approvalPlan, approvalContext);
+              if (
+                !gateResult.pass
+                && gateResult.deferred.approvalId
+                && (gateResult.deferred.category === 'filed' || gateResult.deferred.category === 'pending')
+              ) {
+                // Register the owner before dispatchChatAutomationPlan returns.
+                // A realtime resolution that beat this callback is reconciled
+                // by the one-shot continuity gate instead of being lost.
+                registerExactApprovalOwner(
+                  gateResult.deferred.approvalId,
+                  gateResult.deferred.expiresAt,
+                );
+              }
+              return gateResult;
+            }
+          : undefined,
         handlers: {
           run_computer_task: async (_dispatchedPlan, transportCtx) => {
             if (execution.entrypoint === 'browser_runtime') {
@@ -3288,11 +3480,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // intentionally NOT adapted into a generic per-tool approval gate,
             // so non-exact ask-before/floor matches remain closed.
             computerTaskController = new AbortController();
-            // The legacy edge batch lane does not consume AbortSignal. Expose
-            // STOP only when the SwanBot v2 client loop can honor it.
-            if (isSwanbotV2ClientLoopEnabled()) {
-              openSwanAbortRef.current = computerTaskController;
-            }
+            // executeComputerTaskWithAgent forces the typed client tool loop
+            // and forwards this signal; exact and strict lifecycle programs
+            // consume the same signal locally. Every dispatched native/file
+            // task on this path therefore gets one real STOP handle.
+            openSwanAbortRef.current = computerTaskController;
             const result = await executeComputerTaskWithAgent({
               task: trimmed,
               circleId,
@@ -3314,6 +3506,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               alwaysConfirmFloor: computerPlan.computerRequestRoute?.alwaysConfirmFloor ?? undefined,
               agentContextPack: transportCtx.agentContextPack,
               exactSequenceDispatchAuthorized: Boolean(exactSequenceProgram),
+              deterministicLifecycleReadProgram: computerPlan.computerRequestRoute?.deterministicLifecycleReadProgram ?? null,
               // Wave-2 app choice: thread the route's resolution so the
               // dispatch block carries the App-choice contract (open the
               // chosen app first, verify frontmost, one named fallback).
@@ -3418,18 +3611,115 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       ) {
         const now = Date.now();
         for (const [approvalId, pending] of pendingExactPlanApprovalResumesRef.current) {
-          if (pending.expiresAt <= now) pendingExactPlanApprovalResumesRef.current.delete(approvalId);
+          if (pending.expiresAt <= now) {
+            pendingExactPlanApprovalResumesRef.current.delete(approvalId);
+            exactPlanApprovalContinuityGateRef.current.forget(approvalId);
+          }
         }
-        const reportedExpiry = Number(outcome.data?.approvalExpiresAt);
-        pendingExactPlanApprovalResumesRef.current.set(outcome.approvalId, {
-          task: trimmed,
-          circleId,
-          threadId: activeThreadId || null,
-          expiresAt: Number.isFinite(reportedExpiry) && reportedExpiry > now
-            ? reportedExpiry
-            : now + 15 * 60 * 1000,
-          originSettled: exactApprovalOriginSettled,
-        });
+        // Defensive post-dispatch registration covers custom gates that did
+        // not invoke the wrapper above. The one-shot gate makes the duplicate
+        // registration harmless and surfaces a resolution that arrived first.
+        registerExactApprovalOwner(outcome.approvalId, outcome.data?.approvalExpiresAt);
+
+        // A different surface can resolve the freshly filed row before this
+        // dispatch promise returns, which produces no Chat-local onResolved
+        // callback. Re-read this exact scoped id after owner registration so
+        // approved/rejected/expired authority cannot be stranded as a fake
+        // durable wait.
+        if (!exactApprovalResolutionDuringFiling) {
+          const { data: latestApproval } = await supabase
+            .from('agent_approvals')
+            .select('id, circle_id, session_key, action_type, status, requested_at, timeout_seconds')
+            .eq('id', outcome.approvalId)
+            .eq('circle_id', circleId)
+            .eq('session_key', chatAutomationApprovalSessionKey)
+            .maybeSingle();
+          const latestStatus = String(latestApproval?.status || '');
+          if (latestStatus === 'approved' || latestStatus === 'rejected') {
+            const reconciled = exactPlanApprovalContinuityGateRef.current.resolve(
+              outcome.approvalId,
+              latestStatus,
+            );
+            if (reconciled.kind === 'ready') {
+              exactApprovalResolutionDuringFiling = {
+                approvalId: outcome.approvalId,
+                status: reconciled.status,
+              };
+              exactPlanApprovalResolvedRowsRef.current.set(outcome.approvalId, {
+                ...latestApproval,
+                agent_name: 'OpenSwan',
+                description: 'Exact computer plan approval',
+                payload: {},
+              } as AgentApproval);
+            }
+          } else if (latestStatus === 'expired') {
+            exactApprovalResolutionDuringFiling = {
+              approvalId: outcome.approvalId,
+              status: 'expired',
+            };
+            exactPlanApprovalResolvedRowsRef.current.set(outcome.approvalId, {
+              ...latestApproval,
+              agent_name: 'OpenSwan',
+              description: 'Exact computer plan approval',
+              payload: {},
+            } as AgentApproval);
+          }
+        }
+
+        if (exactApprovalResolutionDuringFiling) {
+          const earlyResolution = exactApprovalResolutionDuringFiling as {
+            approvalId: string;
+            status: 'approved' | 'rejected' | 'expired';
+          };
+          const owner = pendingExactPlanApprovalResumesRef.current.get(earlyResolution.approvalId);
+          const approval = exactPlanApprovalResolvedRowsRef.current.get(earlyResolution.approvalId) || {
+            id: earlyResolution.approvalId,
+            circle_id: circleId,
+            session_key: chatAutomationApprovalSessionKey,
+            agent_name: 'OpenSwan',
+            action_type: 'chat.run_computer_task',
+            description: 'Exact computer plan approval',
+            payload: {},
+            status: earlyResolution.status,
+            requested_at: new Date().toISOString(),
+            timeout_seconds: 15 * 60,
+          } satisfies AgentApproval;
+          exactPlanApprovalResolvedRowsRef.current.delete(earlyResolution.approvalId);
+          const approvalContext = { ...exactApprovalResumeContextRef.current };
+          if (owner) {
+            void owner.originSettled.then(async () => {
+              const liveContext = exactApprovalResumeContextRef.current;
+              if (
+                !liveContext.mounted
+                || liveContext.generation !== approvalContext.generation
+                || owner.circleId !== liveContext.circleId
+                || owner.threadId !== liveContext.threadId
+                || pendingExactPlanApprovalResumesRef.current.get(approval.id) !== owner
+              ) {
+                if (pendingExactPlanApprovalResumesRef.current.get(approval.id) === owner) {
+                  pendingExactPlanApprovalResumesRef.current.delete(approval.id);
+                }
+                return;
+              }
+              if (earlyResolution.status === 'rejected' || earlyResolution.status === 'expired') {
+                await terminalizeExactPlanApprovalRef.current(
+                  approval,
+                  earlyResolution.status === 'rejected' ? 'rejected' : 'expired',
+                );
+                return;
+              }
+              if (owner.expiresAt <= Date.now()) {
+                await terminalizeExactPlanApprovalRef.current(approval, 'expired');
+                return;
+              }
+              pendingExactPlanApprovalResumesRef.current.delete(approval.id);
+              await executeSharedComputerTask(owner.task);
+            });
+          }
+          // The original filing turn must not persist or present an
+          // awaiting-approval state after that exact row was already decided.
+          return { handled: true as const, browser: false as const };
+        }
       }
 
       const prefix = '';
@@ -3521,6 +3811,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           computerTaskStatus: computerTaskStatus || 'needs_input',
           quickReplies: ['Proceed'],
         });
+        await recordComputerTaskLaneTerminal({
+          status: 'needs_input',
+          message: outcome.message,
+          executionKind: outcome.executionKind,
+          runId: outcome.runId || null,
+        });
         return { handled: true as const, browser: false };
       }
       const outcomeGroundingTrace = outcome.data?.groundingTrace as any;
@@ -3579,6 +3875,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const handoffBlock = formatChatComputerHandoffForMessage(handoffContext);
       let shouldShowPendingHandoff = Boolean(handoff);
       let shouldClearPendingHandoff = false;
+      if (computerTaskStatus === 'cancelled') {
+        // Cancellation wins before browser-plan auto-start/manual-approval
+        // routing. A cancelled transport may still carry stale plan metadata;
+        // that data can never resurrect the run or trigger recovery.
+        setComputerTaskState(null);
+        await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+        await recordComputerTaskLaneTerminal({
+          status: 'cancelled',
+          message: 'Stopped.',
+          executionKind: outcome.executionKind,
+          runId: outcome.runId || null,
+          replayPolicy,
+          mutationDispatched,
+        });
+        recordSessionArchiveEvent({
+          kind: 'computer_task',
+          summary: `Computer task cancelled: ${trimmed}`,
+          touched: handoffContext.touched,
+          metadata: {
+            computerTaskStatus: 'cancelled',
+            adapterId,
+            runId: outcome.runId || null,
+          },
+        });
+        addBotMessage('Stopped.', undefined, {
+          runId: outcome.runId || null,
+          computerTaskStatus: 'cancelled',
+          source: computerTaskSource,
+        });
+        return { handled: true as const, browser: false };
+      }
       // WI-1: zero-tap auto-start. A plain-web browser route with no login/
       // delete/grant floor and no "ask me first" constraint launches without
       // the permission dialog. The pay/book floor (route.alwaysConfirmFloor may
@@ -3639,9 +3966,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           alwaysConfirmCategories: autoPolicy.alwaysConfirmCategories,
         });
         if (!autoStarted.started) {
-          addBotMessage('**Computer Use** could not start. Check the connection and try again.', undefined, {
-            source: computerTaskSource,
-          });
+          // Credential/start failures and cancellations are hook-owned typed
+          // terminals. Only surface a caller-owned rejection (for example an
+          // already-running task) here; never record the same terminal twice.
+          if (!autoStarted.outcomeStatus) {
+            addBotMessage('**Computer Use** could not start. Check the connection and try again.', undefined, {
+              source: computerTaskSource,
+            });
+          }
         } else {
           // WI-1: the run has already launched, so surface it as launched (not
           // "APPROVAL REQUIRED"). Override on both the posted card and the
@@ -3657,6 +3989,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return { handled: true as const, browser: !!browserPlan, autoStarted: true as const };
       }
       if (browserPlan && browserActions) {
+        await recordComputerTaskLaneTerminal({
+          status: 'waiting_approval',
+          message: visibleOutcomeMessage || outcome.message,
+          executionKind: outcome.executionKind,
+          runId: outcome.runId || null,
+        });
         setPendingComputerUseTask(trimmed);
         setPendingComputerUsePlan(browserPlan);
         setPendingComputerUseActions(browserActions);
@@ -3833,9 +4171,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 ? `Computer task awaiting approval: ${trimmed}`
                 : computerTaskStatus === 'needs_input'
                   ? `Computer task needs input: ${trimmed}`
-                  : computerTaskStatus === 'cancelled'
-                    ? `Computer task cancelled: ${trimmed}`
-                    : computerTaskStatus === 'failed'
+                  : computerTaskStatus === 'failed'
                       ? `Computer task failed: ${trimmed}`
                       : `Computer task blocked: ${trimmed}`;
         recordSessionArchiveEvent({
@@ -3881,6 +4217,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               mutationDispatched,
               verificationOnlyTools,
             });
+        } else {
+          await recordComputerTaskLaneTerminal({
+            status: computerTaskStatus
+              || (outcome.status === 'completed'
+                ? 'completed'
+                : outcome.status === 'skipped'
+                  ? 'blocked'
+                  : 'failed'),
+            message: visibleOutcomeMessage || outcome.message,
+            executionKind: outcome.executionKind,
+            runId: outcome.runId || null,
+            replayPolicy,
+            mutationDispatched,
+          });
         }
         const userVisibleOutcome = outcomePresentation.compactUserMessage
           ? outcomePresentation.compactUserMessage
@@ -4470,6 +4820,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }, [activeThreadId, attachments, input, persistDraftForThread, stagedFiles]);
 
   const clearMountedThreadState = useCallback(() => {
+    const localAttempt = localComputerUseAttemptRef.current;
+    localComputerUseAttemptRef.current = null;
+    localAttempt?.controller.abort();
     setMessages([]);
     messagesRef.current = [];
     setInput('');
@@ -4480,6 +4833,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setExpandedCategory(null);
     setAttachments([]);
     setStagedFiles([]);
+    setShowComputerUsePermission(false);
+    setPendingComputerUseTask('');
+    setPendingComputerUseActions([]);
+    setPendingComputerUsePlan(null);
+    setPendingComputerUseGrantSummary('');
+    setPendingComputerUseApprovalSummary('');
+    setPendingComputerUseGrantIds([]);
+    setPendingComputerUseOrigin(null);
+    setPendingComputerUseStickyScopeId(null);
+    setComputerUseSession(null);
+    computerTaskStateRef.current = null;
+    setComputerTaskState(null);
     setOlderMessagesState({ loading: false, hasMore: true, error: null });
   }, []);
 
@@ -4489,7 +4854,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const taskOwnsMountedThread = botTyping
       || runStatus === 'running'
       || computerUseTask.state.status === 'starting'
-      || computerUseTask.state.status === 'running';
+      || computerUseTask.state.status === 'running'
+      || localComputerUseSessionOwnsThread(computerUseSession)
+      || Boolean(localComputerUseAttemptRef.current)
+      || (showComputerUsePermission && pendingComputerUseActions.length > 0);
     const uploadOwnsMountedThread = stagedFiles.some((file) => file.uploading || (!file.attachment && !file.error));
     if (!options?.force && nextThreadId !== activeThreadId && uploadOwnsMountedThread) {
       setThreadNavigationNotice('Wait for the current file upload to finish before switching conversations.');
@@ -4513,10 +4881,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     botTyping,
     circleId,
     clearMountedThreadState,
+    computerUseSession,
     computerUseTask.state.status,
+    pendingComputerUseActions.length,
     runStatus,
     saveMountedComposerSession,
     stagedFiles,
+    showComputerUsePermission,
     threadLoadState.status,
   ]);
 
@@ -4673,7 +5044,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       && (botTyping
         || runStatus === 'running'
         || computerUseTask.state.status === 'starting'
-        || computerUseTask.state.status === 'running')
+        || computerUseTask.state.status === 'running'
+        || localComputerUseSessionOwnsThread(computerUseSession)
+        || Boolean(localComputerUseAttemptRef.current)
+        || (showComputerUsePermission && pendingComputerUseActions.length > 0))
     ) {
       setThreadNavigationNotice('Finish or stop the running task before deleting this conversation.');
       return;
@@ -4726,9 +5100,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     botTyping,
     circleId,
     clearMountedThreadState,
+    computerUseSession,
     computerUseTask.state.status,
     currentUserId,
+    pendingComputerUseActions.length,
     runStatus,
+    showComputerUsePermission,
     stagedFiles,
     transitionToThread,
   ]);
@@ -6714,8 +7091,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // to chat once. Deduped via a ref keyed on runId so React StrictMode
   // double-invocation doesn't double-post.
   useEffect(() => {
-    const { status, result, errorMessage, runId, sessionId, task } = computerUseTask.state;
+    const { status, outcomeStatus, result, errorMessage, runId, sessionId, task } = computerUseTask.state;
     if (status === 'idle' || status === 'starting' || status === 'running') {
+      // Every fresh attempt gets a fresh terminal-dedupe namespace, including
+      // booking continuations that may reuse the same task/session identity.
+      if (status === 'idle' || status === 'starting') computerUsePostedKeyRef.current = null;
       if ((status === 'starting' || status === 'running') && task) {
         void persistComputerTaskState({
           task,
@@ -6736,13 +7116,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           checkpointRecovery: computerTaskState?.checkpointRecovery || null,
         });
       }
-      if (status === 'idle') computerUsePostedKeyRef.current = null;
       return;
     }
     if (status === 'done' && result) {
       const key = `done::${runId || sessionId || task}`;
       if (computerUsePostedKeyRef.current === key) return;
       computerUsePostedKeyRef.current = key;
+      void recordComputerTaskLaneTerminal({
+        status: 'completed',
+        message: result.summary,
+        executionKind: 'browser_computer_use',
+        runId: runId || sessionId || null,
+      });
       void persistComputerTaskState({
         task,
         taskKind: 'browser_task',
@@ -6854,9 +7239,39 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         );
       })();
     } else if (status === 'error' && errorMessage) {
-      const key = `err::${task}::${errorMessage.slice(0, 80)}`;
+      const terminalStatus: ComputerTaskOutcomeStatus = outcomeStatus === 'cancelled'
+        ? 'cancelled'
+        : 'failed';
+      const key = `${terminalStatus}::${runId || sessionId || task}::${errorMessage.slice(0, 80)}`;
       if (computerUsePostedKeyRef.current === key) return;
       computerUsePostedKeyRef.current = key;
+      void recordComputerTaskLaneTerminal({
+        status: terminalStatus,
+        message: errorMessage,
+        executionKind: 'browser_computer_use',
+        runId: runId || sessionId || null,
+      });
+      if (terminalStatus === 'cancelled') {
+        // Cancellation is a neutral, user-directed stop. Clear the durable
+        // executing card and do not create a failed recovery run.
+        setComputerTaskState(null);
+        void clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+        recordSessionArchiveEvent({
+          kind: 'computer_task',
+          summary: `Computer task cancelled: ${task || 'Browser computer task'}`,
+          touched: ['surface:computer_use', task ? `computer_task:${task}` : ''].filter(Boolean),
+          metadata: {
+            computerTaskStatus: 'cancelled',
+            runId: runId || null,
+            sessionId: sessionId || null,
+          },
+        });
+        addBotMessage('**Computer Use** stopped. No further actions will run.', undefined, {
+          computerTaskStatus: 'cancelled',
+          runId: runId || null,
+        });
+        return;
+      }
       const checkpointRecovery = diagnoseComputerTaskCheckpointFailure({
         task: task || 'Browser computer task',
         failureMessage: errorMessage,
@@ -6920,7 +7335,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // addBotMessage intentionally not in deps — it's recreated every render,
   // and the ref-based dedupe above guarantees one post per terminal state.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [computerUseTask.state.status, computerUseTask.state.result, computerUseTask.state.errorMessage, computerUseTask.state.runId, computerUseTask.state.sessionId, computerUseTask.state.task, computerUseTask.state.liveUrl, pendingComputerUseGrantIds, pendingComputerUseGrantSummary, persistComputerTaskState, recordSessionArchiveError, recordSessionArchiveEvent, startMainChatFailureRecoveryPayload]);
+  }, [computerUseTask.state.status, computerUseTask.state.outcomeStatus, computerUseTask.state.result, computerUseTask.state.errorMessage, computerUseTask.state.runId, computerUseTask.state.sessionId, computerUseTask.state.task, computerUseTask.state.liveUrl, pendingComputerUseGrantIds, pendingComputerUseGrantSummary, persistComputerTaskState, recordSessionArchiveError, recordSessionArchiveEvent, startMainChatFailureRecoveryPayload]);
 
   const updateBotMessage = (
     messageId: string,
@@ -7321,6 +7736,378 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     );
   }, [appendBrowserPlanEvent, applyBrowserPlanPatch, upsertBrowserSessionArtifacts, upsertBrowserSessionRecord]);
 
+  const finalizeBrowserPlanCancellation = useCallback((session: ComputerUseSession) => {
+    if (!session.sourceMessageId || !session.sourcePlanId) return;
+    const cancelledSession: ComputerUseSession = { ...session, status: 'cancelled' };
+    const cancelledResult = {
+      success: false,
+      cancelled: true,
+      message: 'Cancelled by user.',
+      actions: session.actions,
+      backendSessionId: session.backendSessionId,
+      backendLiveUrl: session.backendLiveUrl,
+    };
+    // The plan card, append-only event, and browser-session record all carry the
+    // truthful cancelled terminal without misclassifying it as failed.
+    applyBrowserPlanPatch(session.sourceMessageId, session.sourcePlanId, {
+      status: 'cancelled',
+      completedAt: new Date().toISOString(),
+      backendSessionId: session.backendSessionId,
+      backendLiveUrl: session.backendLiveUrl,
+    }, session.sourceRunId);
+    appendBrowserPlanEvent(session.sourceMessageId, {
+      id: `${session.sourcePlanId}:cancelled:${Date.now()}`,
+      planId: session.sourcePlanId,
+      kind: 'cancelled',
+      at: new Date().toISOString(),
+      summary: 'Browser plan cancelled by the user',
+      backend: session.backend,
+      backendLabel: session.backendLabel,
+      backendSessionId: session.backendSessionId,
+      backendLiveUrl: session.backendLiveUrl,
+    }, session.sourceRunId);
+    const record = toBrowserSessionRecord(cancelledSession, cancelledResult);
+    upsertBrowserSessionRecord(session.sourceMessageId, record, session.sourceRunId);
+    upsertBrowserSessionArtifacts(session.sourceMessageId, record, session.sourceRunId);
+  }, [appendBrowserPlanEvent, applyBrowserPlanPatch, upsertBrowserSessionArtifacts, upsertBrowserSessionRecord]);
+
+  const finalizeBrowserPlanWaitingApproval = useCallback((
+    session: ComputerUseSession,
+    result: ComputerUseResult,
+  ) => {
+    if (!session.sourceMessageId || !session.sourcePlanId || !result.pendingApproval) return;
+    appendBrowserPlanEvent(session.sourceMessageId, {
+      id: `${session.sourcePlanId}:approval_requested:${result.pendingApproval.actionId}`,
+      planId: session.sourcePlanId,
+      kind: 'approval_requested',
+      at: new Date().toISOString(),
+      summary: `Browser plan paused for approval at step ${result.pendingApproval.index + 1}`,
+      backend: session.backend,
+      backendLabel: session.backendLabel,
+      backendSessionId: result.backendSessionId || session.backendSessionId,
+      backendLiveUrl: result.backendLiveUrl || session.backendLiveUrl,
+    }, session.sourceRunId);
+    const record = toBrowserSessionRecord(session, result);
+    upsertBrowserSessionRecord(session.sourceMessageId, record, session.sourceRunId);
+    upsertBrowserSessionArtifacts(session.sourceMessageId, record, session.sourceRunId);
+  }, [appendBrowserPlanEvent, upsertBrowserSessionArtifacts, upsertBrowserSessionRecord]);
+
+  const finalizeBrowserPlanBlocked = useCallback((
+    session: ComputerUseSession,
+    result: ComputerUseResult,
+  ) => {
+    if (!session.sourceMessageId || !session.sourcePlanId || !result.blocked) return;
+    applyBrowserPlanPatch(session.sourceMessageId, session.sourcePlanId, {
+      status: 'blocked',
+      completedAt: new Date().toISOString(),
+      backendSessionId: result.backendSessionId || session.backendSessionId,
+      backendLiveUrl: result.backendLiveUrl || session.backendLiveUrl,
+    }, session.sourceRunId);
+    appendBrowserPlanEvent(session.sourceMessageId, {
+      id: `${session.sourcePlanId}:blocked:${result.blocked.actionId}`,
+      planId: session.sourcePlanId,
+      kind: 'blocked',
+      at: new Date().toISOString(),
+      summary: `Browser plan stopped at rejected step ${result.blocked.index + 1}; later steps were not executed`,
+      backend: session.backend,
+      backendLabel: session.backendLabel,
+      backendSessionId: result.backendSessionId || session.backendSessionId,
+      backendLiveUrl: result.backendLiveUrl || session.backendLiveUrl,
+    }, session.sourceRunId);
+    const record = toBrowserSessionRecord(session, result);
+    upsertBrowserSessionRecord(session.sourceMessageId, record, session.sourceRunId);
+    upsertBrowserSessionArtifacts(session.sourceMessageId, record, session.sourceRunId);
+  }, [appendBrowserPlanEvent, applyBrowserPlanPatch, upsertBrowserSessionArtifacts, upsertBrowserSessionRecord]);
+
+  const runLocalComputerExecution = useCallback(async (
+    runnable: ComputerUseSession,
+    options: {
+      executionKind: 'local_browser_plan' | 'local_browser_panel';
+      markLaunched?: boolean;
+      announceStart?: boolean;
+    },
+  ): Promise<boolean> => {
+    const inFlight = localComputerUseAttemptRef.current;
+    if (inFlight && !inFlight.controller.signal.aborted) {
+      addBotMessage('**Computer Use** already has a local browser run in progress.', undefined, { localOnly: true });
+      return false;
+    }
+
+    const attempt: LocalComputerUseAttempt = {
+      id: `local-computer-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      sessionId: runnable.id,
+      controller: new AbortController(),
+    };
+    localComputerUseAttemptRef.current = attempt;
+    const isCurrentAttempt = () => localComputerUseAttemptRef.current?.id === attempt.id
+      && !attempt.controller.signal.aborted;
+    const runId = runnable.sourceRunId || runnable.id;
+    const executingSession: ComputerUseSession = { ...runnable, status: 'executing' };
+    setComputerUseSession(executingSession);
+    if (options.markLaunched) finalizeBrowserPlanFromSession(executingSession);
+    if (options.announceStart) addBotMessage(`**Computer Use** running locally — ${runnable.task}`);
+
+    try {
+      const result = await executeComputerUsePlan(executingSession, (completedAction, idx) => {
+        if (!isCurrentAttempt()) return;
+        setComputerUseSession((current) => {
+          if (!current || current.id !== runnable.id || !isCurrentAttempt()) return current;
+          const nextActions = [...current.actions];
+          nextActions[idx] = completedAction;
+          return { ...current, actions: nextActions };
+        });
+      }, { signal: attempt.controller.signal });
+
+      // Cancellation/pause invalidates the attempt synchronously. The promise
+      // may still settle after an underlying bridge call, but it has no state,
+      // archive, lane, or recovery authority after invalidation.
+      if (!isCurrentAttempt() || result.cancelled) return true;
+      const outcomeStatus = deriveComputerUseResultOutcomeStatus(result);
+
+      if (outcomeStatus === 'waiting_approval') {
+        const waitingSession: ComputerUseSession = {
+          ...executingSession,
+          status: 'awaiting_approval',
+          actions: result.actions,
+          currentUrl: result.currentUrl || executingSession.currentUrl,
+          backendSessionId: result.backendSessionId || executingSession.backendSessionId,
+          backendLiveUrl: result.backendLiveUrl || executingSession.backendLiveUrl,
+        };
+        finalizeBrowserPlanWaitingApproval(waitingSession, result);
+        await persistComputerTaskState({
+          task: runnable.task,
+          taskKind: 'browser_task',
+          taskLabel: 'Browser task',
+          phase: 'awaiting_approval',
+          outcomeStatus: 'waiting_approval',
+          adapterId: 'browser_adapter',
+          runId,
+          sessionId: result.backendSessionId || runnable.id,
+          liveUrl: result.backendLiveUrl || runnable.backendLiveUrl || null,
+          nextSteps: ['Approve the pending browser action', 'Resume the local browser run'],
+        });
+        if (!isCurrentAttempt()) {
+          await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+          return true;
+        }
+        await recordComputerTaskLaneTerminal({
+          status: 'waiting_approval',
+          message: result.message,
+          executionKind: options.executionKind,
+          runId,
+          isAuthoritative: isCurrentAttempt,
+        });
+        if (!isCurrentAttempt()) return true;
+        setComputerUseSession(waitingSession);
+        addBotMessage(`**Computer Use** paused for approval. ${result.message}`, undefined, {
+          localOnly: true,
+          computerTaskStatus: 'waiting_approval',
+        });
+        return true;
+      }
+
+      if (outcomeStatus === 'blocked') {
+        const blockedSession: ComputerUseSession = {
+          ...executingSession,
+          status: 'blocked',
+          actions: result.actions,
+          currentUrl: result.currentUrl || executingSession.currentUrl,
+          backendSessionId: result.backendSessionId || executingSession.backendSessionId,
+          backendLiveUrl: result.backendLiveUrl || executingSession.backendLiveUrl,
+        };
+        setComputerUseSession(blockedSession);
+        finalizeBrowserPlanBlocked(blockedSession, result);
+        await persistComputerTaskState({
+          task: runnable.task,
+          taskKind: 'browser_task',
+          taskLabel: 'Browser task',
+          phase: 'blocked',
+          outcomeStatus: 'blocked',
+          adapterId: 'browser_adapter',
+          blockers: [result.message],
+          runId,
+          sessionId: result.backendSessionId || runnable.id,
+          liveUrl: result.backendLiveUrl || runnable.backendLiveUrl || null,
+          nextSteps: ['Review the rejected step', 'Replan before running later actions'],
+          resultSummary: result.message,
+        });
+        if (!isCurrentAttempt()) {
+          await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+          return true;
+        }
+        await recordComputerTaskLaneTerminal({
+          status: 'blocked',
+          message: result.message,
+          executionKind: options.executionKind,
+          runId,
+          isAuthoritative: isCurrentAttempt,
+        });
+        if (!isCurrentAttempt()) return true;
+        addBotMessage(`**Computer Use** stopped at a rejected step. Later actions were not run. Review or replan before continuing.`, undefined, {
+          localOnly: true,
+          computerTaskStatus: 'blocked',
+        });
+        return true;
+      }
+
+      const terminalSession: ComputerUseSession = {
+        ...executingSession,
+        status: outcomeStatus === 'completed' ? 'completed' : 'failed',
+        actions: result.actions,
+        currentUrl: result.currentUrl || executingSession.currentUrl,
+        backendSessionId: result.backendSessionId || executingSession.backendSessionId,
+        backendLiveUrl: result.backendLiveUrl || executingSession.backendLiveUrl,
+      };
+      setComputerUseSession(terminalSession);
+      finalizeBrowserPlanFromSession(terminalSession, result);
+      await persistComputerTaskState({
+        task: runnable.task,
+        taskKind: 'browser_task',
+        taskLabel: 'Browser task',
+        phase: outcomeStatus === 'completed' ? 'completed' : 'failed',
+        outcomeStatus: outcomeStatus,
+        adapterId: 'browser_adapter',
+        blockers: outcomeStatus === 'failed' ? [result.message] : [],
+        runId,
+        sessionId: result.backendSessionId || runnable.id,
+        liveUrl: result.backendLiveUrl || runnable.backendLiveUrl || null,
+        nextSteps: [],
+        resultSummary: result.message,
+      });
+      if (!isCurrentAttempt()) {
+        await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+        return true;
+      }
+      await recordComputerTaskLaneTerminal({
+        status: outcomeStatus,
+        message: result.message,
+        executionKind: options.executionKind,
+        runId,
+        isAuthoritative: isCurrentAttempt,
+      });
+      if (outcomeStatus === 'completed') {
+        addBotMessage(`**Computer Use** completed locally: ${result.message}`);
+      } else {
+        await addRecoverableChatErrorMessage({
+          title: '**Computer Use** failed locally',
+          task: runnable.task,
+          error: result.message,
+          executionKind: options.executionKind,
+          source: `${options.executionKind}_failed`,
+          touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${runnable.task}`],
+          messageSource: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_local_browser_plan_error',
+            selectedModel,
+            effectiveModel: 'local-browser-plan',
+          },
+        });
+      }
+      return true;
+    } catch (error: any) {
+      if (!isCurrentAttempt()) return true;
+      const failedSession: ComputerUseSession = { ...executingSession, status: 'failed' };
+      setComputerUseSession(failedSession);
+      finalizeBrowserPlanFromSession(failedSession, { success: false });
+      await persistComputerTaskState({
+        task: runnable.task,
+        taskKind: 'browser_task',
+        taskLabel: 'Browser task',
+        phase: 'failed',
+        outcomeStatus: 'failed',
+        adapterId: 'browser_adapter',
+        blockers: [error?.message || 'Local browser plan failed.'],
+        runId,
+        sessionId: runnable.backendSessionId || runnable.id,
+        liveUrl: runnable.backendLiveUrl || null,
+      });
+      if (!isCurrentAttempt()) {
+        await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+        return true;
+      }
+      await recordComputerTaskLaneTerminal({
+        status: 'failed',
+        message: error?.message || 'Local browser plan failed.',
+        executionKind: options.executionKind,
+        runId,
+        isAuthoritative: isCurrentAttempt,
+      });
+      await addRecoverableChatErrorMessage({
+        title: '**Computer Use** failed locally',
+        task: runnable.task,
+        error,
+        executionKind: options.executionKind,
+        source: `${options.executionKind}_exception`,
+        touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${runnable.task}`],
+        messageSource: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_local_browser_plan_error',
+          selectedModel,
+          effectiveModel: 'local-browser-plan',
+        },
+      });
+      return true;
+    } finally {
+      if (localComputerUseAttemptRef.current?.id === attempt.id) {
+        localComputerUseAttemptRef.current = null;
+      }
+    }
+  }, [activeThreadId, addBotMessage, addRecoverableChatErrorMessage, circleId, finalizeBrowserPlanBlocked, finalizeBrowserPlanFromSession, finalizeBrowserPlanWaitingApproval, persistComputerTaskState, selectedModel]);
+
+  const cancelLocalComputerExecution = useCallback((session: ComputerUseSession) => {
+    if (session.status === 'completed' || session.status === 'failed' || session.status === 'blocked' || session.status === 'cancelled') {
+      setComputerUseSession(null);
+      return;
+    }
+    const attempt = localComputerUseAttemptRef.current;
+    if (attempt?.sessionId === session.id) {
+      localComputerUseAttemptRef.current = null;
+      attempt.controller.abort();
+    }
+    finalizeBrowserPlanCancellation(session);
+    void recordComputerTaskLaneTerminal({
+      status: 'cancelled',
+      message: 'Cancelled by user.',
+      executionKind: 'local_browser_panel',
+      runId: session.sourceRunId || session.id,
+    });
+    setComputerUseSession(null);
+    setComputerTaskState(null);
+    void clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+    recordSessionArchiveEvent({
+      kind: 'computer_task',
+      summary: `Computer task cancelled: ${session.task}`,
+      touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${session.task}`],
+      metadata: { computerTaskStatus: 'cancelled', runId: session.sourceRunId || session.id },
+    });
+    addBotMessage('**Computer Use** stopped. No further actions will run.', undefined, {
+      localOnly: true,
+      computerTaskStatus: 'cancelled',
+    });
+  }, [activeThreadId, circleId, finalizeBrowserPlanCancellation, recordSessionArchiveEvent]);
+
+  const pauseLocalComputerExecution = useCallback((session: ComputerUseSession) => {
+    const attempt = localComputerUseAttemptRef.current;
+    if (attempt?.sessionId === session.id) {
+      localComputerUseAttemptRef.current = null;
+      attempt.controller.abort();
+    }
+    setComputerUseSession((current) => current?.id === session.id
+      ? { ...current, status: 'paused' }
+      : current);
+    // There is no cross-reload continuation token for this in-memory local
+    // executor. Remove the durable "executing" card so refresh cannot claim a
+    // run is still active; the mounted panel remains resumable or cancellable.
+    setComputerTaskState(null);
+    void clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+  }, [activeThreadId, circleId]);
+
+  useEffect(() => () => {
+    const attempt = localComputerUseAttemptRef.current;
+    localComputerUseAttemptRef.current = null;
+    attempt?.controller.abort();
+  }, [activeThreadId, circleId]);
+
   const runLocalBrowserPlan = useCallback(async (
     plan: BrowserPlanCardData,
     permission: ComputerUsePermission,
@@ -7343,72 +8130,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
       : session;
 
-    setComputerUseSession(runnable);
-
     if (!autoRun) {
+      setComputerUseSession(runnable);
       addBotMessage('**Computer Use** staged locally. Approve each browser action in the Computer Use panel to run without launching the cloud agent.');
       return;
     }
 
-    finalizeBrowserPlanFromSession(runnable);
-    addBotMessage(`**Computer Use** running locally — ${plan.task}`);
-    try {
-      const result = await executeComputerUsePlan(runnable, (completedAction, idx) => {
-        setComputerUseSession((current) => {
-          if (!current) return current;
-          const nextActions = [...current.actions];
-          nextActions[idx] = completedAction;
-          return { ...current, actions: nextActions };
-        });
-      });
-      const completedSession: ComputerUseSession = {
-        ...runnable,
-        status: result.success ? 'completed' : 'failed',
-        actions: result.actions,
-        currentUrl: result.currentUrl || runnable.currentUrl,
-        backendSessionId: result.backendSessionId || runnable.backendSessionId,
-        backendLiveUrl: result.backendLiveUrl || runnable.backendLiveUrl,
-      };
-      setComputerUseSession(completedSession);
-      finalizeBrowserPlanFromSession(completedSession, result);
-      if (result.success) {
-        addBotMessage(`**Computer Use** completed locally: ${result.message}`);
-      } else {
-        await addRecoverableChatErrorMessage({
-          title: '**Computer Use** failed locally',
-          task: plan.task,
-          error: result.message,
-          executionKind: 'local_browser_plan',
-          source: 'local_browser_plan_failed',
-          touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${plan.task}`],
-          messageSource: {
-            actor: 'OpenSwan',
-            surface: 'main_chat_local_browser_plan_error',
-            selectedModel,
-            effectiveModel: 'local-browser-plan',
-          },
-        });
-      }
-    } catch (error: any) {
-      const failedSession: ComputerUseSession = { ...runnable, status: 'failed' };
-      setComputerUseSession(failedSession);
-      finalizeBrowserPlanFromSession(failedSession, { success: false });
-      await addRecoverableChatErrorMessage({
-        title: '**Computer Use** failed locally',
-        task: plan.task,
-        error,
-        executionKind: 'local_browser_plan',
-        source: 'local_browser_plan_exception',
-        touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${plan.task}`],
-        messageSource: {
-          actor: 'OpenSwan',
-          surface: 'main_chat_local_browser_plan_error',
-          selectedModel,
-          effectiveModel: 'local-browser-plan',
-        },
-      });
-    }
-  }, [addBotMessage, addRecoverableChatErrorMessage, agentName, circleId, finalizeBrowserPlanFromSession, selectedModel]);
+    await runLocalComputerExecution(runnable, {
+      executionKind: 'local_browser_plan',
+      markLaunched: true,
+      announceStart: true,
+    });
+  }, [addBotMessage, agentName, circleId, runLocalComputerExecution]);
 
   const executeLocalComputerAwarenessRequest = async (message: string): Promise<boolean> => {
     const intent = detectLocalComputerAwarenessIntent(message);
@@ -7798,6 +8531,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const followupPolicy = buildChatComputerUsePolicyInputs(followup.task, {
             booking: true,
           });
+          computerUsePostedKeyRef.current = null;
           const started = await computerUseTask.run(followup.task, {
             sessionId: followup.sessionId ?? undefined,
             booking: true,
@@ -7806,7 +8540,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             alwaysConfirmCategories: followupPolicy.alwaysConfirmCategories,
           });
           if (!started.started) {
-            addBotMessage('I could not continue that booking run. The browser session may have expired — say "book" again to start fresh.', undefined, { localOnly: true });
+            if (!started.outcomeStatus) {
+              addBotMessage('I could not continue that booking run. The browser session may have expired — say "book" again to start fresh.', undefined, { localOnly: true });
+            }
           } else {
             addBotMessage('Continuing the booking run — live view', undefined, {
               localOnly: true,
@@ -13482,6 +14218,105 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!isExactComputerApproval(approval)) return true;
     return pendingExactPlanApprovalResumesRef.current.has(approval.id);
   };
+  const isExactApprovalScopedToMountedChat = (approval: (typeof pendingHitlApprovals)[number]): boolean => (
+    isExactComputerApproval(approval)
+    && approval.circle_id === circleId
+    && approval.session_key === chatAutomationApprovalSessionKey
+  );
+  const scopedExactApprovalCount = pendingHitlApprovals.filter(isExactApprovalScopedToMountedChat).length;
+  const terminalizeExactPlanApproval = async (
+    approval: (typeof pendingHitlApprovals)[number],
+    reason: 'rejected' | 'expired' | 'dismissed' | 'reload',
+  ): Promise<boolean> => {
+    if (!isExactApprovalScopedToMountedChat(approval)) return false;
+    const pending = pendingExactPlanApprovalResumesRef.current.get(approval.id);
+    const pendingMatchesMountedChat = !!pending
+      && pending.circleId === circleId
+      && pending.threadId === (activeThreadId || null);
+    const durableWaitingTask = computerTaskState?.phase === 'awaiting_approval'
+      && computerTaskState.outcomeStatus === 'waiting_approval'
+      ? computerTaskState
+      : null;
+    // After reload the durable task has no approval id. Correlate it only
+    // when exactly one exact approval belongs to this mounted thread. A live
+    // in-memory entry is already correlated by the opaque approval id.
+    const canUseReloadFallback = !pending
+      && !!durableWaitingTask
+      && scopedExactApprovalCount === 1;
+    const terminalTask = pendingMatchesMountedChat
+      ? pending!.task
+      : canUseReloadFallback
+        ? durableWaitingTask!.task
+        : null;
+    if (!terminalTask || exactPlanApprovalTerminalIdsRef.current.has(approval.id)) return false;
+
+    exactPlanApprovalTerminalIdsRef.current.add(approval.id);
+    if (pendingMatchesMountedChat) {
+      pendingExactPlanApprovalResumesRef.current.delete(approval.id);
+    }
+    const terminalStatus: ComputerTaskOutcomeStatus = reason === 'rejected' || reason === 'dismissed'
+      ? 'cancelled'
+      : 'blocked';
+    const terminalMessage = reason === 'rejected'
+      ? 'The desktop plan was declined. Nothing was executed.'
+      : reason === 'dismissed'
+        ? 'The expired desktop plan was dismissed. Nothing was executed.'
+        : reason === 'reload'
+          ? 'The exact desktop plan could not resume after Chat refreshed. Nothing was executed; resend the task to create a fresh plan.'
+          : 'The desktop plan expired. Nothing was executed; resend the task to create a fresh plan.';
+
+    if (terminalStatus === 'cancelled') {
+      setComputerTaskState(null);
+      await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+    } else {
+      await persistComputerTaskState({
+        task: terminalTask,
+        taskKind: durableWaitingTask?.taskKind || 'computer_task',
+        taskLabel: durableWaitingTask?.taskLabel || 'Computer task',
+        phase: 'blocked',
+        outcomeStatus: 'blocked',
+        adapterId: durableWaitingTask?.adapterId || null,
+        blockers: [terminalMessage],
+        nextSteps: ['Resend the task to create a fresh exact plan'],
+        grantedAccess: durableWaitingTask?.grantedAccess || [],
+        accessPlan: durableWaitingTask?.accessPlan || null,
+        runId: durableWaitingTask?.runId || null,
+        sessionId: durableWaitingTask?.sessionId || null,
+        liveUrl: durableWaitingTask?.liveUrl || null,
+        grounding: durableWaitingTask?.grounding || null,
+        capabilityBuildout: durableWaitingTask?.capabilityBuildout || null,
+        complexity: durableWaitingTask?.complexity || null,
+      });
+    }
+    if (runStatus === 'waiting_approval') {
+      setRunStatus('idle');
+      setCurrentRunStep('');
+    }
+    await recordComputerTaskLaneTerminal({
+      status: terminalStatus,
+      message: terminalMessage,
+      executionKind: 'exact_plan_approval',
+      runId: durableWaitingTask?.runId || null,
+    });
+    recordSessionArchiveEvent({
+      kind: 'computer_task',
+      summary: terminalStatus === 'cancelled'
+        ? `Computer task cancelled after exact-plan ${reason}: ${terminalTask}`
+        : `Computer task blocked after exact-plan ${reason}: ${terminalTask}`,
+      touched: ['surface:computer_use', `computer_task:${terminalTask}`, `approval:${approval.id}`],
+      metadata: {
+        computerTaskStatus: terminalStatus,
+        approvalId: approval.id,
+        approvalTerminalReason: reason,
+      },
+    });
+    addBotMessage(terminalMessage, undefined, {
+      localOnly: true,
+      computerTaskStatus: terminalStatus,
+    });
+    return true;
+  };
+  terminalizeExactPlanApprovalRef.current = terminalizeExactPlanApproval;
   const approvalsForAttention = pendingHitlApprovals.map((approval) => (
     isExactComputerApproval(approval)
       ? { ...approval, resumable: canResumeApprovalInMountedChat(approval) }
@@ -13528,6 +14363,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }, [chatAttentionActive]);
   const handleChatAttentionAction = (item: ChatAttentionItem, action: ChatAttentionAction) => {
     if (action.kind === 'dismiss') {
+      if (item.kind === 'approval_expired') {
+        const row = pendingHitlApprovals.find((approval) => approval.id === item.refId);
+        if (row && isExactComputerApproval(row)) {
+          void terminalizeExactPlanApproval(row, 'dismissed');
+        }
+      }
       if (item.kind === 'clarification_waiting') {
         pendingClarificationRef.current.delete(activeThreadId || 'main');
         persistPendingClarifications();
@@ -13536,21 +14377,48 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
     if (action.kind === 'refile_approval') {
-      // Re-run the original request. The approval gate flips the stale row
-      // to `expired` and files a fresh proposal with an explicit
-      // "your earlier approval expired" message.
       const row = pendingHitlApprovals.find((approval) => approval.id === item.refId);
-      const commandText = (row?.payload as Record<string, any> | undefined)?.plan?.commandText;
+      const registeredTask = row
+        ? pendingExactPlanApprovalResumesRef.current.get(row.id)?.task
+        : null;
+      const durableTask = row
+        && isExactApprovalScopedToMountedChat(row)
+        && scopedExactApprovalCount === 1
+        && computerTaskState?.phase === 'awaiting_approval'
+        && computerTaskState.outcomeStatus === 'waiting_approval'
+        ? computerTaskState.task
+        : null;
+      const commandText = (row?.payload as Record<string, any> | undefined)?.plan?.commandText
+        || registeredTask
+        || durableTask;
       setDismissedAttentionIds((prev) => new Set(prev).add(item.id));
-      if (typeof commandText === 'string' && commandText.trim()) {
-        void sendMessage(commandText);
-      } else {
-        addBotMessage(
-          'That approval expired and I could not recover the original request — please resend it and I will file a fresh approval.',
-          undefined,
-          { localOnly: true },
-        );
-      }
+      void (async () => {
+        // End the old exact attempt before asking the approval gate to file a
+        // fresh one. This ordering prevents reload/expiry from leaving two
+        // durable tasks that both claim to be awaiting approval.
+        if (row && isExactComputerApproval(row)) {
+          const terminalized = await terminalizeExactPlanApproval(row, 'expired');
+          if (!terminalized) {
+            addBotMessage(
+              'I could not safely match that expired desktop approval to this chat. Please resend the task here to create a fresh plan.',
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+        }
+        // The approval gate flips the stale row to `expired` and files a
+        // fresh proposal with an explicit earlier-approval-expired message.
+        if (typeof commandText === 'string' && commandText.trim()) {
+          await sendMessage(commandText);
+        } else {
+          addBotMessage(
+            'That approval expired and I could not recover the original request — please resend it and I will file a fresh approval.',
+            undefined,
+            { localOnly: true },
+          );
+        }
+      })();
       return;
     }
     if (action.kind === 'cancel_task' && item.kind === 'task_question_waiting') {
@@ -14693,101 +15561,56 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         <ComputerUsePanel
           session={computerUseSession}
           onApproveAction={(actionId) => {
-            setComputerUseSession(prev => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                actions: prev.actions.map(a =>
-                  a.id === actionId ? { ...a, status: 'approved' as const } : a
-                ),
-              };
-            });
+            const updated: ComputerUseSession = {
+              ...computerUseSession,
+              actions: computerUseSession.actions.map(a =>
+                a.id === actionId ? { ...a, status: 'approved' as const } : a
+              ),
+            };
+            const hasPendingDecision = updated.actions.some((action) => action.status === 'pending');
+            setComputerUseSession(updated);
+            if (!hasPendingDecision) {
+              void runLocalComputerExecution(
+                { ...updated, status: 'executing' },
+                { executionKind: 'local_browser_panel' },
+              );
+            }
           }}
           onRejectAction={(actionId) => {
-            setComputerUseSession(prev => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                actions: prev.actions.map(a =>
-                  a.id === actionId ? { ...a, status: 'rejected' as const } : a
-                ),
-              };
-            });
+            const rejected: ComputerUseSession = {
+              ...computerUseSession,
+              status: 'executing',
+              actions: computerUseSession.actions.map(a =>
+                a.id === actionId ? { ...a, status: 'rejected' as const } : a
+              ),
+            };
+            setComputerUseSession(rejected);
+            // executePlan preflights all rejected prerequisites before any
+            // action dispatch, so this immediately becomes a truthful blocked
+            // terminal even when earlier steps are still pending.
+            void runLocalComputerExecution(rejected, { executionKind: 'local_browser_panel' });
           }}
           onApproveAll={() => {
-            setComputerUseSession(prev => {
-              if (!prev) return prev;
-              const updated = {
-                ...prev,
-                actions: prev.actions.map(a =>
-                  a.status === 'pending' ? { ...a, status: 'approved' as const } : a
-                ),
-                status: 'executing' as const,
-              };
-              // Start execution
-              executeComputerUsePlan(updated, (completedAction, idx) => {
-                setComputerUseSession(s => {
-                  if (!s) return s;
-                  const newActions = [...s.actions];
-                  newActions[idx] = completedAction;
-                  return { ...s, actions: newActions };
-                });
-              }).then(result => {
-                setComputerUseSession(s => s ? {
-                  ...s,
-                  status: result.success ? 'completed' : 'failed',
-                  actions: result.actions,
-                  currentUrl: result.currentUrl || s.currentUrl,
-                  backendSessionId: result.backendSessionId || s.backendSessionId,
-                  backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
-                } : s);
-                finalizeBrowserPlanFromSession(updated, result);
-                addBotMessage(result.success
-                  ? `**Computer Use** completed: ${result.message}`
-                  : '**Computer Use** could not complete that browser task. Technical details were saved for recovery.');
-              }).catch(() => {
-                setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
-                finalizeBrowserPlanFromSession(updated, { success: false });
-              });
-              return updated;
-            });
+            const updated: ComputerUseSession = {
+              ...computerUseSession,
+              actions: computerUseSession.actions.map(a =>
+                a.status === 'pending' ? { ...a, status: 'approved' as const } : a
+              ),
+              status: 'executing',
+            };
+            setComputerUseSession(updated);
+            void runLocalComputerExecution(updated, { executionKind: 'local_browser_panel' });
           }}
           onPause={() => {
-            setComputerUseSession(prev => prev ? { ...prev, status: 'paused' } : prev);
+            pauseLocalComputerExecution(computerUseSession);
           }}
           onResume={() => {
-            setComputerUseSession(prev => {
-              if (!prev) return prev;
-              const resumed = { ...prev, status: 'executing' as const };
-              executeComputerUsePlan(resumed, (completedAction, idx) => {
-                setComputerUseSession(s => {
-                  if (!s) return s;
-                  const newActions = [...s.actions];
-                  newActions[idx] = completedAction;
-                  return { ...s, actions: newActions };
-                });
-              }).then(result => {
-                setComputerUseSession(s => s ? {
-                  ...s,
-                  status: result.success ? 'completed' : 'failed',
-                  actions: result.actions,
-                  currentUrl: result.currentUrl || s.currentUrl,
-                  backendSessionId: result.backendSessionId || s.backendSessionId,
-                  backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
-                } : s);
-                finalizeBrowserPlanFromSession(resumed, result);
-                addBotMessage(result.success
-                  ? `**Computer Use** completed: ${result.message}`
-                  : '**Computer Use** could not complete that browser task. Technical details were saved for recovery.');
-              }).catch(() => {
-                setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
-                finalizeBrowserPlanFromSession(resumed, { success: false });
-              });
-              return resumed;
-            });
+            const resumed: ComputerUseSession = { ...computerUseSession, status: 'executing' };
+            setComputerUseSession(resumed);
+            void runLocalComputerExecution(resumed, { executionKind: 'local_browser_panel' });
           }}
           onCancel={() => {
-            setComputerUseSession(null);
+            cancelLocalComputerExecution(computerUseSession);
           }}
           onOpenSession={() => handleOpenBrowserSession({
             planId: computerUseSession.sourcePlanId || computerUseSession.id,
@@ -14828,7 +15651,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           backendLabel: session.backendLabel,
           backendDetails: session.backendDetails,
           requiresApproval: false,
-          status: session.status === 'completed' ? 'completed' : session.status === 'failed' ? 'failed' : 'launched',
+          status: session.status === 'completed'
+            ? 'completed'
+            : session.status === 'failed'
+              ? 'failed'
+              : session.status === 'blocked'
+                ? 'blocked'
+                : session.status === 'cancelled'
+                  ? 'cancelled'
+                  : 'launched',
           launchedAt: session.startedAt,
           completedAt: session.completedAt,
           backendSessionId: session.backendSessionId,
@@ -14906,12 +15737,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               alwaysConfirmCategories: taskPolicy.alwaysConfirmCategories,
             });
             if (!started.started) {
-              addBotMessage('**Computer Use** could not start. Check the connection and try again.');
+              if (!started.outcomeStatus) {
+                addBotMessage('**Computer Use** could not start. Check the connection and try again.');
+              }
               return;
             }
             addBotMessage(`**Computer Use** starting — ${taskToRun}`);
           }}
           onDeny={() => {
+            void recordComputerTaskLaneTerminal({
+              status: 'cancelled',
+              message: 'Computer Use approval was declined.',
+              executionKind: 'browser_computer_use',
+              runId: pendingComputerUseOrigin?.runId || pendingComputerUsePlan?.planId || null,
+            });
             setShowComputerUsePermission(false);
             setComputerTaskState(null);
             void clearComputerTaskState(circleId, activeThreadId).catch(() => {});
@@ -15119,8 +15958,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           bar, in-memory bus instead of the DB channel. Hidden while a
           computer task owns the bar above. Guidance-only; the typed loop's
           approval gates are untouched. A controller is exposed here only for
-          loops that consume AbortSignal: OpenSwan session turns, or native
-          computer turns when the SwanBot v2 client-loop canary is enabled. */}
+          loops that consume AbortSignal: OpenSwan session turns and strict
+          local native-app/file executors, independent of the v2 canary. */}
       {botTyping
         && runStatus === 'running'
         && !!activeThreadId
@@ -15197,30 +16036,75 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         onResolved={async (approval, status) => {
           const pending = pendingExactPlanApprovalResumesRef.current.get(approval.id);
           const approvalContext = exactApprovalResumeContextRef.current;
-          const approvalActionType = String(approval.action_type || '');
-          const exactComputerApproval = approvalActionType === 'chat.run_computer_task'
-            || approvalActionType.startsWith('chat.run_computer_task.');
-          // Delete before dispatch so a double click or callback retry cannot
-          // launch a second local executor. The approval gate's one-shot CAS
-          // remains the durable cross-client boundary.
-          if (pending) pendingExactPlanApprovalResumesRef.current.delete(approval.id);
-          if (
-            status !== 'approved'
-            || !pending
-            || !exactComputerApproval
-            || !approvalContext.mounted
-            || pending.circleId !== approvalContext.circleId
-            || pending.threadId !== approvalContext.threadId
-            || pending.expiresAt <= Date.now()
-          ) return;
+          const exactComputerApproval = isExactComputerApproval(approval);
+          const scopedExactApproval = isExactApprovalScopedToMountedChat(approval);
+          const pendingMatchesMountedChat = !!pending
+            && pending.circleId === circleId
+            && pending.threadId === (activeThreadId || null);
+          const durableWaitingTask = computerTaskState?.phase === 'awaiting_approval'
+            && computerTaskState.outcomeStatus === 'waiting_approval'
+            ? computerTaskState
+            : null;
+          const canUseReloadFallback = !pending
+            && scopedExactApproval
+            && !!durableWaitingTask
+            && scopedExactApprovalCount === 1;
+          const approvalExpired = !isApprovalRowLive(
+            approval.requested_at,
+            approval.timeout_seconds,
+            Date.now(),
+          ) || (pendingMatchesMountedChat && pending!.expiresAt <= Date.now());
+          if (!exactComputerApproval || !scopedExactApproval) return;
+
+          // A reload has no in-memory origin promise. Its single exact scoped
+          // durable task is already settled, so resolve it directly and never
+          // attempt an unsafe auto-resume.
+          if (canUseReloadFallback) {
+            await terminalizeExactPlanApproval(
+              approval,
+              status === 'rejected' ? 'rejected' : 'reload',
+            );
+            return;
+          }
+
+          const resolution = exactPlanApprovalContinuityGateRef.current.resolve(approval.id, status);
+          if (resolution.kind === 'queued_before_registration') {
+            // The approval row became actionable before the filing await
+            // registered its owner. Retain the value-free row only until that
+            // owner arrives; registration reconciles it exactly once.
+            exactPlanApprovalResolvedRowsRef.current.set(approval.id, approval);
+            return;
+          }
+          if (resolution.kind === 'duplicate' || !pendingMatchesMountedChat || !pending) return;
+
+          // Both approve and reject wait for the filing turn's final writes.
+          // Otherwise an early rejection can clear state and then be clobbered
+          // back to awaiting_approval by the origin invocation.
           await pending.originSettled;
+          const livePending = pendingExactPlanApprovalResumesRef.current.get(approval.id);
           const liveContext = exactApprovalResumeContextRef.current;
           if (
-            !liveContext.mounted
+            livePending !== pending
+            || !liveContext.mounted
             || liveContext.generation !== approvalContext.generation
             || pending.circleId !== liveContext.circleId
             || pending.threadId !== liveContext.threadId
-            || pending.expiresAt <= Date.now()
+          ) return;
+
+          if (status === 'rejected' || approvalExpired || pending.expiresAt <= Date.now()) {
+            await terminalizeExactPlanApproval(
+              approval,
+              status === 'rejected' ? 'rejected' : 'expired',
+            );
+            return;
+          }
+          // Delete before dispatch so a double click or callback retry cannot
+          // launch a second local executor. The approval gate's one-shot CAS
+          // remains the durable cross-client boundary.
+          pendingExactPlanApprovalResumesRef.current.delete(approval.id);
+          if (
+            status !== 'approved'
+            || !approvalContext.mounted
           ) return;
           await executeSharedComputerTask(pending.task);
         }}
