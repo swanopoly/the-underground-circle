@@ -1,4 +1,4 @@
-# Plan Document Audit — 2026-04-15
+# Plan Document Audit — 2026-04-15 (status notes refreshed 2026-07-13)
 
 This file is now the canonical audit of the repo's planning documents.
 It replaces the older feature-status snapshot that had gone stale.
@@ -20,11 +20,14 @@ These are still useful, still referenced, or still govern unfinished work:
   - still relevant because the builder is only partially complete
 - `docs/AGENT_MEMORY_GOD_PLAN.md`
   - still referenced directly from memory/runtime code
-  - remains the canonical memory architecture plan
+  - remains the canonical memory architecture doc, but its §1 gap table is
+    historical — every listed gap except live-builder capture shipped by
+    2026-04-18 (see the shipped-status note inside the doc)
 - `docs/SOULS_SPIRITS_SKILLS_ROADMAP.md`
   - still referenced from SOUL/spirit docs and still unfinished
 - `docs/OPENSWAN_SUBAGENT_ARCHITECTURE_PLAN.md`
-  - still relevant for delegated-run/runtime work
+  - substantially shipped (`subagentCapabilities.ts` + registry consumption);
+    keep as design rationale, not as an open backlog
 - `docs/OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md`
   - still relevant for typed runtime / verification / workspace work
 

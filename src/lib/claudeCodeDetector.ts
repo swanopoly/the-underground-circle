@@ -14,7 +14,13 @@ import { promoteExternalAgentSessionKnowledge } from './memoryService';
 import { deriveSessionStatus, clampToDbStatus, type AgentStatus } from './officeAgents';
 import { saveAgentUserAccountMemories, type AgentSessionForMemory } from './agentSessionMemory';
 
-import { cacheBridgeToken, ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import {
+  bridgeAuthHeaders,
+  cacheBridgeToken,
+  ensureBridgeToken,
+  fetchBridgeAuthenticated,
+  requestBridgePairToken,
+} from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 
 const BRIDGE_PORT = 7778;
@@ -27,18 +33,14 @@ async function pairClaudeBridge(bridgeUrl: string): Promise<string | null> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`${bridgeUrl}/desktop/pair`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    const token = typeof data?.token === 'string' ? data.token : null;
-    if (token) cacheBridgeToken(token);
-    return token;
+    try {
+      const paired = await requestBridgePairToken(`${bridgeUrl}/desktop/pair`, controller.signal);
+      if (!paired.ok || !paired.token) return null;
+      cacheBridgeToken(paired.token);
+      return paired.token;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return null;
   }
@@ -67,6 +69,8 @@ export interface ClaudeCodeSession {
   // Rich live context
   lastUserMessage?: string;
   lastAssistantText?: string;
+  /** Bounded strict APP_CAPABILITY_* receipt extracted by the bridge. */
+  appCapabilityResultText?: string;
   recentToolCalls?: Array<{ tool: string; file: string; ts: string }>;
   activeFiles?: string[];
   currentToolName?: string;
@@ -155,8 +159,7 @@ export async function fetchClaudeCodeSessions(): Promise<ClaudeCodeSession[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -194,7 +197,7 @@ export class ClaudeCodePoller {
   }
 }
 
-// ── Execute shell command via bridge ─────────────────────────────────────────
+// ── Execute a fixed read-only diagnostic via bridge ─────────────────────────
 
 export async function execBridgeCommand(
   command: string,
@@ -204,10 +207,9 @@ export async function execBridgeCommand(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/exec`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/diagnostics`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command }),
       signal: controller.signal,
     });
@@ -384,12 +386,16 @@ export async function publishClaudeCodeAgent(
   }
 
   if (result.agent) {
+    // Count MAIN sessions only — `sessions` now includes live subagents,
+    // so `sessionCount` (total) would over-report. updateClaudeCodeAgentStatus
+    // overwrites this label with the subagent-aware one on the next poll.
+    const activeCount = sessions ? mainSessions.length : sessionCount;
     await supabase
       .from('circle_office_agents')
       .update({
         status: 'idle',
-        current_task: sessionCount > 0
-          ? `${sessionCount} session(s) active`
+        current_task: activeCount > 0
+          ? `${activeCount} session(s) active`
           : 'Bridge connected',
         last_active_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -493,6 +499,8 @@ export interface ClaudeCodeLaunchRequest {
   projectDir?: string;
   model?: string;
   permissionMode?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk' | 'plan' | string;
+  /** Launch each session in its own git worktree (fail-open to the shared cwd). */
+  useWorktree?: boolean;
   circleId?: string;
   userId?: string;
 }
@@ -529,12 +537,13 @@ export async function launchClaudeCodeSessions(input: ClaudeCodeLaunchRequest): 
       projectDir: input.projectDir,
       model: input.model,
       permissionMode: input.permissionMode,
+      useWorktree: input.useWorktree,
     });
     const postLaunch = async (token: string | null) => {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 60_000);
       try {
-        return await fetch(`${bridgeUrl}/launch`, {
+        return await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
           body,
@@ -645,8 +654,7 @@ export async function fetchCrossSessionContext(): Promise<CrossSessionContext | 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/context`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/context`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return null;
     return await res.json();

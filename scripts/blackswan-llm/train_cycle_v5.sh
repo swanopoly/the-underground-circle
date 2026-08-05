@@ -17,6 +17,7 @@
 #   ./train_cycle_v5.sh --skip-train      # data prep + skip training
 #   ./train_cycle_v5.sh --skip-push       # don't upload to HF
 #   ./train_cycle_v5.sh --iters=2500      # override training iters
+#   ./train_cycle_v5.sh --base-model=mlx-community/Qwen3.5-9B-4bit
 #   ./train_cycle_v5.sh --deploy-ollama   # also deploy locally to Ollama
 #
 # Environment:
@@ -24,6 +25,11 @@
 #   SUPABASE_SERVICE_ROLE_KEY     required for --skip-export=false
 #   HF_TOKEN                      required for --skip-push=false
 #   ANTHROPIC_API_KEY             optional, used by synthetic generators
+#   BLACKSWAN_EVAL_GATE           eval gate mode: block (default) | warn | off
+#   BLACKSWAN_EVAL_TOLERANCE      allowed relative loss regression vs the
+#                                 last good cycle (default 0.05 = +5%)
+#   BLACKSWAN_EVAL_BATCHES        held-out batches to score, -1 = full set
+#                                 (default 400)
 # ─────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -37,8 +43,19 @@ SKIP_PUSH=false
 DEPLOY_OLLAMA=false
 ITERS=1500
 SYNTHETIC_COUNT=0   # set >0 to call the synthetic generator
+BASE_MODEL="mlx-community/Qwen3.5-4B-4bit"
+DEFAULT_UPLOAD_BASE_MODEL="mlx-community/Qwen3.5-4B-4bit"
+MLX_CONFIG="mlx_lora_v5_config.yaml"
 LOG_DIR="${HOME}/.blackswan-train/log"
 LOG_FILE="${LOG_DIR}/cycle-$(date +%Y%m%d-%H%M%S).log"
+
+# Eval gate (Step 7.5): score the fused model on the held-out set before it
+# is allowed to ship. See CONTINUOUS_TRAINING.md ("Eval gate").
+EVAL_GATE_MODE="${BLACKSWAN_EVAL_GATE:-block}"       # block | warn | off
+EVAL_TOLERANCE="${BLACKSWAN_EVAL_TOLERANCE:-0.05}"   # allowed relative loss increase
+EVAL_BATCHES="${BLACKSWAN_EVAL_BATCHES:-400}"        # -1 = entire held-out set
+EVAL_BASELINE_FILE="${HOME}/.blackswan-train/last_good_eval.json"
+UPLOAD_ALLOWED=true   # flipped to false when the eval gate blocks
 
 for arg in "$@"; do
   case $arg in
@@ -48,8 +65,50 @@ for arg in "$@"; do
     --deploy-ollama)      DEPLOY_OLLAMA=true ;;
     --iters=*)            ITERS="${arg#*=}" ;;
     --synthetic=*)        SYNTHETIC_COUNT="${arg#*=}" ;;
+    --base-model=*)       BASE_MODEL="${arg#*=}" ;;
   esac
 done
+
+# --- BEGIN eval-gate decision logic (self-contained so it can be extracted
+# --- and tested standalone; no globals, no side effects) ---------------------
+# Compare a freshly measured eval loss against the last-good baseline file.
+#   usage:  blackswan_eval_gate_decision <mode> <new_loss> <baseline_file> <tolerance>
+#   stdout: "OFF" | "BOOTSTRAP baseline=none" | "PASS baseline=<x>"
+#           | "WARN baseline=<x>" | "BLOCK baseline=<x>"
+#   exit:   1 only for BLOCK, 0 otherwise.
+# Verdicts (lower loss = better):
+#   OFF        mode=off — caller should skip eval entirely
+#   BOOTSTRAP  no readable baseline — record this run's metric and allow upload
+#   PASS       new_loss <= baseline * (1 + tolerance) — allow upload, update baseline
+#   WARN       regression, but mode=warn — allow upload, keep the old baseline
+#   BLOCK      regression and mode=block — skip upload + endpoint refresh
+blackswan_eval_gate_decision() {
+    local mode="$1" new_loss="$2" baseline_file="$3" tolerance="$4"
+    if [ "${mode}" = "off" ]; then
+        echo "OFF"
+        return 0
+    fi
+    local baseline=""
+    if [ -f "${baseline_file}" ]; then
+        baseline="$(sed -n 's/.*"metric"[[:space:]]*:[[:space:]]*\([0-9][0-9.eE+-]*\).*/\1/p' "${baseline_file}" | head -n1)"
+    fi
+    if [ -z "${baseline}" ]; then
+        echo "BOOTSTRAP baseline=none"
+        return 0
+    fi
+    if awk -v n="${new_loss}" -v b="${baseline}" -v t="${tolerance}" \
+        'BEGIN { exit !(n + 0 <= b * (1 + t)) }'; then
+        echo "PASS baseline=${baseline}"
+        return 0
+    fi
+    if [ "${mode}" = "warn" ]; then
+        echo "WARN baseline=${baseline}"
+        return 0
+    fi
+    echo "BLOCK baseline=${baseline}"
+    return 1
+}
+# --- END eval-gate decision logic --------------------------------------------
 
 mkdir -p "${LOG_DIR}"
 exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -67,7 +126,15 @@ echo "  skip-push:      ${SKIP_PUSH}"
 echo "  deploy-ollama:  ${DEPLOY_OLLAMA}"
 echo "  iters:          ${ITERS}"
 echo "  synthetic:      ${SYNTHETIC_COUNT}"
+echo "  base-model:     ${BASE_MODEL}"
+echo "  eval-gate:      ${EVAL_GATE_MODE} (tolerance=${EVAL_TOLERANCE}, batches=${EVAL_BATCHES})"
 echo
+
+if [ "${BASE_MODEL}" != "${DEFAULT_UPLOAD_BASE_MODEL}" ] && [ "${SKIP_PUSH}" = false ]; then
+    echo "ERROR: Push/upload conversion currently supports ${DEFAULT_UPLOAD_BASE_MODEL} only."
+    echo "  Re-run with --skip-push for ${BASE_MODEL}, then update fuse_and_upload_v5.py before publishing."
+    exit 1
+fi
 
 # ─── Python env ────────────────────────────────────────────────────────
 if [ ! -d "${SCRIPT_DIR}/.venv" ]; then
@@ -99,6 +166,28 @@ else
     echo
 fi
 
+# ─── Step 1.5: Agent tool-trace flywheel (P63) ─────────────────────────
+# Exports real agent tool-use runs (agent_runs/agent_run_events, prefers
+# the training_safe_* views), scores trajectories, and converts the top
+# half into ShareGPT tool examples that Step 4's prepare merges via the
+# `tool_traces` source tag. Failure-tolerant: a missing view / export
+# error must never kill the weekly cycle.
+if [ "${SKIP_EXPORT}" = false ]; then
+    echo "═══ Step 1.5: Export agent tool traces ══════════════════════"
+    "${PYTHON}" export_tool_traces.py \
+        || echo "  tool-trace export failed — continuing without fresh traces"
+    echo
+fi
+if [ -f raw_data/tool_traces.jsonl ]; then
+    echo "═══ Step 1.6: Score + convert tool traces → ShareGPT ════════"
+    "${PYTHON}" score_trajectories.py --top-fraction 0.5
+    "${PYTHON}" convert_tool_traces.py --input raw_data/tool_traces_top.jsonl
+    echo
+else
+    echo "═══ Step 1.6: Skipped (no raw_data/tool_traces.jsonl) ═══════"
+    echo
+fi
+
 # ─── Step 2: Convert app data to ShareGPT ──────────────────────────────
 echo "═══ Step 2: Convert app data → ShareGPT ═════════════════════"
 "${PYTHON}" convert_app_data.py
@@ -123,42 +212,26 @@ echo "═══ Step 4: Prepare merged training dataset ════════
 "${PYTHON}" prepare_dataset_v4.py
 echo
 
-# ─── Step 5: Convert to MLX format ─────────────────────────────────────
-# The latest lora_v2 trained from training_data/mlx_format/ — we need
-# to keep that directory in sync with whatever prepare_dataset_v4
-# emitted into train_v4.jsonl / eval_v4.jsonl.
-echo "═══ Step 5: Build MLX training shards ═══════════════════════"
-mkdir -p training_data/mlx_format
-# mlx-lm.lora expects {prompt, completion} or chat-format JSONL.
-# prepare_dataset_v4.py writes chat format already, so we just symlink
-# (or copy if symlinks don't survive train run).
-cp -f training_data/train_v4.jsonl training_data/mlx_format/train.jsonl
-cp -f training_data/eval_v4.jsonl  training_data/mlx_format/valid.jsonl
-echo "  train: $(wc -l < training_data/mlx_format/train.jsonl) lines"
-echo "  valid: $(wc -l < training_data/mlx_format/valid.jsonl) lines"
+# ─── Step 5: Convert to current MLX message format ─────────────────────
+# Current mlx-lm expects OpenAI-style {"messages": [...]} records, not
+# ShareGPT {"conversations": [...]} turns.
+echo "═══ Step 5: Build MLX message training shards ═══════════════"
+"${PYTHON}" convert_mlx_messages.py
+echo "  train: $(wc -l < training_data/mlx_messages/train.jsonl) lines"
+echo "  valid: $(wc -l < training_data/mlx_messages/valid.jsonl) lines"
 echo
 
 # ─── Step 6: Train the LoRA ────────────────────────────────────────────
 if [ "${SKIP_TRAIN}" = false ]; then
-    echo "═══ Step 6: Train LoRA on Qwen3.5-4B-4bit ═══════════════════"
-    BASE_MODEL="mlx-community/Qwen3.5-4B-4bit"
+    echo "═══ Step 6: Train LoRA on ${BASE_MODEL} ═══════════════════"
     ADAPTER_OUT="models/v5/lora_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "${ADAPTER_OUT}"
 
     "${PYTHON}" -m mlx_lm lora \
+        -c "${MLX_CONFIG}" \
         --model "${BASE_MODEL}" \
-        --train \
-        --data training_data/mlx_format \
-        --fine-tune-type lora \
-        --num-layers 16 \
-        --batch-size 1 \
+        --data training_data/mlx_messages \
         --iters "${ITERS}" \
-        --learning-rate 1e-4 \
-        --max-seq-length 512 \
-        --steps-per-report 25 \
-        --steps-per-eval 100 \
-        --grad-checkpoint \
-        --lora-parameters '{"rank": 16, "scale": 1.0, "dropout": 0.0}' \
         --adapter-path "${ADAPTER_OUT}"
     echo "  Adapter saved to ${ADAPTER_OUT}"
 
@@ -176,15 +249,124 @@ fi
 if [ "${SKIP_TRAIN}" = false ] || [ "${SKIP_PUSH}" = false ]; then
     echo "═══ Step 7: Fuse adapter → fused HF model ═══════════════════"
     "${PYTHON}" -m mlx_lm fuse \
-        --model "mlx-community/Qwen3.5-4B-4bit" \
+        --model "${BASE_MODEL}" \
         --adapter-path models/v5/lora_v2 \
         --save-path models/v5/fused \
-        --hf-path models/v5/fused_hf
+        --dequantize
+    echo
+fi
+
+# ─── Step 7.5: Eval gate — score the fused model before it can ship ────
+# Measures held-out test loss on the freshly fused model and compares it
+# against the last shipped-good cycle (~/.blackswan-train/last_good_eval.json).
+# A regression beyond EVAL_TOLERANCE blocks Steps 8/8.5 when the mode is
+# 'block'. Infrastructure problems (missing eval data, missing fused model,
+# eval crash, unparseable output) FAIL OPEN with a loud warning so a broken
+# gate can never wedge the weekly cycle. See CONTINUOUS_TRAINING.md.
+if [ "${SKIP_PUSH}" = true ]; then
+    echo "═══ Step 7.5: Eval gate skipped (--skip-push: nothing to protect) ═"
+    echo
+elif [ "${EVAL_GATE_MODE}" = "off" ]; then
+    echo "═══ Step 7.5: Eval gate disabled (BLACKSWAN_EVAL_GATE=off) ══"
+    echo
+else
+    echo "═══ Step 7.5: Eval gate (mode=${EVAL_GATE_MODE}, tolerance=${EVAL_TOLERANCE}) ═"
+    GATE_METRIC=""
+    EVAL_SRC="training_data/mlx_messages/valid.jsonl"
+    EVAL_DATA_DIR="training_data/mlx_eval_gate"
+    if [ ! -f "${EVAL_SRC}" ]; then
+        echo "  WARNING: ${EVAL_SRC} missing — cannot evaluate."
+        echo "  EVAL GATE FAILING OPEN: upload will proceed UNVERIFIED."
+    elif [ ! -d models/v5/fused ]; then
+        echo "  WARNING: models/v5/fused missing — nothing to evaluate."
+        echo "  EVAL GATE FAILING OPEN: upload will proceed UNVERIFIED."
+    else
+        # mlx_lm expects a data dir containing test.jsonl for --test mode;
+        # stage the held-out set under a dedicated dir so nothing else is
+        # affected. --adapter-path "" scores the fused model as-is (the
+        # exact artifact Step 8 uploads), no adapter re-applied on top.
+        mkdir -p "${EVAL_DATA_DIR}"
+        cp -f "${EVAL_SRC}" "${EVAL_DATA_DIR}/test.jsonl"
+        EVAL_LOG="$(mktemp -t blackswan-eval-gate)"
+        echo "  Scoring fused model on $(wc -l < "${EVAL_DATA_DIR}/test.jsonl" | tr -d ' ') held-out examples"
+        echo "  (test-batches=${EVAL_BATCHES}, batch-size=1, max-seq-length=2048)"
+        if "${PYTHON}" -m mlx_lm lora \
+            --model models/v5/fused \
+            --adapter-path "" \
+            --data "${EVAL_DATA_DIR}" \
+            --test \
+            --test-batches "${EVAL_BATCHES}" \
+            --batch-size 1 \
+            --max-seq-length 2048 2>&1 | tee "${EVAL_LOG}"; then
+            GATE_METRIC="$(sed -n 's/.*Test loss \([0-9][0-9.]*\).*/\1/p' "${EVAL_LOG}" | tail -n1)"
+        fi
+        rm -f "${EVAL_LOG}"
+
+        if [ -z "${GATE_METRIC}" ]; then
+            echo "  WARNING: eval run failed or produced no 'Test loss' line."
+            echo "  EVAL GATE FAILING OPEN: upload will proceed UNVERIFIED (this is"
+            echo "  an eval-infrastructure failure, not a model verdict — fix the gate)."
+        else
+            VERDICT_LINE="$(blackswan_eval_gate_decision "${EVAL_GATE_MODE}" "${GATE_METRIC}" "${EVAL_BASELINE_FILE}" "${EVAL_TOLERANCE}" || true)"
+            VERDICT="${VERDICT_LINE%% *}"
+            echo "  held-out test loss: ${GATE_METRIC}  ->  verdict: ${VERDICT_LINE}"
+            case "${VERDICT}" in
+                BOOTSTRAP|PASS)
+                    if [ "${VERDICT}" = "BOOTSTRAP" ]; then
+                        echo "  No baseline yet — recording this cycle as the first baseline."
+                    fi
+                    GATE_METRIC="${GATE_METRIC}" \
+                    EVAL_BASELINE_FILE="${EVAL_BASELINE_FILE}" \
+                    ADAPTER_DIR="${ADAPTER_OUT:-models/v5/lora_v2}" \
+                    "${PYTHON}" - <<'PYEOF'
+import json, os, time
+path = os.environ["EVAL_BASELINE_FILE"]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+payload = {
+    "metric": float(os.environ["GATE_METRIC"]),
+    "metric_name": "fused_test_loss",
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "adapter_dir": os.environ.get("ADAPTER_DIR", ""),
+    "model_dir": "models/v5/fused",
+}
+with open(path, "w") as f:
+    json.dump(payload, f, indent=2)
+    f.write("\n")
+print(f"  Baseline updated: {path} (metric={payload['metric']})")
+PYEOF
+                    ;;
+                WARN)
+                    echo "  !! EVAL REGRESSION beyond tolerance, but BLACKSWAN_EVAL_GATE=warn:"
+                    echo "  !! upload proceeds anyway; baseline NOT updated."
+                    ;;
+                BLOCK)
+                    UPLOAD_ALLOWED=false
+                    echo "  !! EVAL REGRESSION beyond tolerance — upload and endpoint"
+                    echo "  !! refresh will be SKIPPED. Baseline NOT updated."
+                    ;;
+                *)
+                    echo "  WARNING: unexpected gate verdict '${VERDICT_LINE}'."
+                    echo "  EVAL GATE FAILING OPEN: upload will proceed UNVERIFIED."
+                    ;;
+            esac
+        fi
+    fi
     echo
 fi
 
 # ─── Step 8: Push to Hugging Face ──────────────────────────────────────
-if [ "${SKIP_PUSH}" = false ]; then
+if [ "${SKIP_PUSH}" = false ] && [ "${UPLOAD_ALLOWED}" = false ]; then
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║   EVAL GATE BLOCKED THIS UPLOAD                          ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "═══ Step 8: SKIPPED — eval gate blocked the upload ══════════"
+    echo "  The fused model regressed beyond BLACKSWAN_EVAL_TOLERANCE vs"
+    echo "  ${EVAL_BASELINE_FILE}."
+    echo "  The HF repo and inference endpoint keep serving last week's weights."
+    echo "  To inspect: see the eval numbers in Step 7.5 above."
+    echo "  To ship anyway: BLACKSWAN_EVAL_GATE=warn ./train_cycle_v5.sh --skip-export --skip-train"
+    echo
+elif [ "${SKIP_PUSH}" = false ]; then
     echo "═══ Step 8: Push to huggingface.co/cswan801/BlackSwan-v5 ════"
     if [ -z "${HF_TOKEN:-}" ]; then
         echo "  HF_TOKEN missing — skipping push (set HF_TOKEN env var to enable)."
@@ -204,7 +386,11 @@ fi
 # chats with stale weights even though HF has the fresh ones. No-op
 # when HF_ENDPOINT_NAME isn't set (i.e., the team hasn't paid for an
 # endpoint and is fine with the public Inference API).
-if [ "${SKIP_PUSH}" = false ]; then
+if [ "${SKIP_PUSH}" = false ] && [ "${UPLOAD_ALLOWED}" = false ]; then
+    echo "═══ Step 8.5: SKIPPED — eval gate blocked the upload ════════"
+    echo "  Endpoint keeps serving the previous (last good) revision."
+    echo
+elif [ "${SKIP_PUSH}" = false ]; then
     echo "═══ Step 8.5: Refresh HF Inference Endpoint ═════════════════"
     if [ -z "${HF_TOKEN:-}" ] || [ -z "${HF_ENDPOINT_NAME:-}" ]; then
         echo "  HF_ENDPOINT_NAME or HF_TOKEN missing — skipping endpoint update."
@@ -262,8 +448,19 @@ fi
 echo
 
 # ─── Done ──────────────────────────────────────────────────────────────
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║   ✅  BlackSwan retrain cycle complete                   ║"
-echo "║   $(date -u +%Y-%m-%dT%H:%M:%SZ)                         ║"
-echo "╚══════════════════════════════════════════════════════════╝"
+# NOTE: a gate-blocked cycle still exits 0 (on purpose — launchd should not
+# flag it as a failed run; the SKIPPED-UPLOAD banners above are the signal).
+if [ "${UPLOAD_ALLOWED}" = true ]; then
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║   ✅  BlackSwan retrain cycle complete                   ║"
+    echo "║   $(date -u +%Y-%m-%dT%H:%M:%SZ)                         ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+else
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║   !!  CYCLE COMPLETE — UPLOAD SKIPPED BY EVAL GATE       ║"
+    echo "║   $(date -u +%Y-%m-%dT%H:%M:%SZ)                         ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "The trained adapter is on disk but was NOT published. Exit code is 0"
+    echo "so launchd does not flag the run; see Step 7.5 above for the numbers."
+fi
 echo "Full log: ${LOG_FILE}"

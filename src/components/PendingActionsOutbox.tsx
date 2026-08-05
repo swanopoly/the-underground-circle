@@ -26,10 +26,11 @@ export default function PendingActionsOutbox({ circleId, maxHeight = 320 }: Prop
   const { actions, loading } = usePendingActions(circleId);
 
   const buckets = useMemo(() => {
+    const outcomeUnknown = actions.filter(a => a.status === 'outcome_unknown');
     const failed = actions.filter(a => a.status === 'failed');
     const running = actions.filter(a => a.status === 'running');
     const pending = actions.filter(a => a.status === 'pending');
-    return { failed, running, pending };
+    return { outcomeUnknown, failed, running, pending };
   }, [actions]);
 
   if (loading && actions.length === 0) {
@@ -58,6 +59,11 @@ export default function PendingActionsOutbox({ circleId, maxHeight = 320 }: Prop
         </Text>
       ) : (
         <ScrollView style={{ maxHeight }} contentContainerStyle={{ paddingVertical: 4 }}>
+          {buckets.outcomeUnknown.length > 0 && (
+            <Section title="VERIFY — OUTCOME UNKNOWN" tone="#f59e0b">
+              {buckets.outcomeUnknown.map(a => <ActionRow key={a.id} action={a} />)}
+            </Section>
+          )}
           {buckets.failed.length > 0 && (
             <Section title="FAILED — tap retry" tone="#ef4444">
               {buckets.failed.map(a => <ActionRow key={a.id} action={a} />)}
@@ -91,7 +97,13 @@ function Section({ title, tone, children }: { title: string; tone: string; child
 function ActionRow({ action }: { action: ScheduledAction }) {
   const summary = describeAction(action);
   const when = formatWhen(action.scheduled_for);
-  const badgeColor = action.status === 'failed' ? '#ef4444'
+  const statusMessage = action.status === 'outcome_unknown'
+    ? 'This may have completed. Verify the destination before creating a new action; automatic replay is disabled.'
+    : action.status === 'failed'
+      ? 'Blocked before dispatch. Review the action, then retry to request fresh approval.'
+      : null;
+  const badgeColor = action.status === 'outcome_unknown' ? '#f59e0b'
+    : action.status === 'failed' ? '#ef4444'
     : action.status === 'running' ? '#22d3ee'
     : '#a3a3a3';
 
@@ -108,15 +120,20 @@ function ActionRow({ action }: { action: ScheduledAction }) {
           <Text style={styles.rowWhen}>{when}</Text>
         </View>
         <Text style={styles.rowSummary} numberOfLines={2}>{summary}</Text>
-        {action.error && (
-          <Text style={styles.rowError} numberOfLines={1}>✗ {action.error}</Text>
+        {statusMessage && (
+          <Text
+            style={action.status === 'outcome_unknown' ? styles.rowWarning : styles.rowError}
+            numberOfLines={3}
+          >
+            {action.status === 'outcome_unknown' ? '⚠ ' : '✗ '}{statusMessage}
+          </Text>
         )}
       </View>
 
       <View style={styles.rowActions}>
         {canCancel && (
           <Pressable
-            onPress={async () => { try { await cancelAction(action.id); } catch (err) { console.warn('[Outbox] cancel', err); } }}
+            onPress={async () => { try { await cancelAction(action.id); } catch { console.warn('[Outbox] cancel_failed'); } }}
             style={styles.rowBtn}
           >
             <Text style={styles.rowBtnText}>CANCEL</Text>
@@ -124,7 +141,7 @@ function ActionRow({ action }: { action: ScheduledAction }) {
         )}
         {canRetry && (
           <Pressable
-            onPress={async () => { try { await retryAction(action.id); } catch (err) { console.warn('[Outbox] retry', err); } }}
+            onPress={async () => { try { await retryAction(action.id); } catch { console.warn('[Outbox] retry_failed'); } }}
             style={[styles.rowBtn, styles.rowBtnPrimary]}
           >
             <Text style={[styles.rowBtnText, styles.rowBtnTextPrimary]}>RETRY</Text>
@@ -212,6 +229,7 @@ const styles = StyleSheet.create({
   rowWhen: { color: '#606075', fontSize: 10, fontFamily: 'monospace' },
   rowSummary: { color: '#d6d6e1', fontSize: 12, lineHeight: 16 },
   rowError: { color: '#ef4444', fontSize: 11, fontFamily: 'monospace' },
+  rowWarning: { color: '#f59e0b', fontSize: 11, lineHeight: 15, fontFamily: 'monospace' },
   rowActions: { flexDirection: 'row', gap: 4 },
   rowBtn: {
     paddingHorizontal: 8,

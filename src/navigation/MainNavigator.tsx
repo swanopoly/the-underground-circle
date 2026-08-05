@@ -64,7 +64,7 @@ export default function MainNavigator() {
     <Stack.Navigator
       screenOptions={{
         headerShown: false,
-        contentStyle: { backgroundColor: '#000000' },
+        contentStyle: { backgroundColor: '#0A0A0A' },
       }}
     >
       <Stack.Screen name="CirclesList" component={CirclesScreen} />
@@ -107,7 +107,7 @@ export default function MainNavigator() {
 const styles = StyleSheet.create({
   fallback: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#0A0A0A',
     alignItems: 'center',
     justifyContent: 'center',
   },

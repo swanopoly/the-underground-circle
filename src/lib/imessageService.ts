@@ -143,10 +143,58 @@ export async function clearConfig(): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════════════════
 //  BLUEBUBBLES (iMessage)
 // ═══════════════════════════════════════════════════════════════════════════════
+//
+// AUTH-MODEL DECISION (A8 security backlog):
+//   The BlueBubbles server REST API authenticates ONLY via a query parameter —
+//   the server password passed as `?password=` / `?guid=` / `?token=` (all three
+//   are aliases for the same value). See the official docs:
+//   https://docs.bluebubbles.app/server/developer-guides/rest-api-and-webhooks
+//   The core server does NOT accept an Authorization header or a body field for
+//   auth (header names like `x-password`/`x-guid` exist only in some 3rd-party
+//   webhook *receivers*, not the server we call here). Moving the password to a
+//   header would therefore BREAK a working integration, so we keep it in the
+//   query string as the API requires.
+//
+//   The residual exposure is logs/referrer for a localhost/LAN BlueBubbles
+//   server. We contain it: `bbUrl` is the ONLY place the password-bearing URL
+//   is built, `bbFetch` never lets a raw URL escape in a thrown error (the
+//   low-level fetch/`undici` can embed the full URL in its message), and any
+//   URL we might surface is run through `redactBbUrl` first. No caller should
+//   log the return of `bbUrl`.
+
+/** Query-param names BlueBubbles treats as the auth secret (all aliases). */
+const BB_SECRET_PARAMS = ['password', 'guid', 'token'] as const;
+
+/**
+ * Strip the BlueBubbles auth secret from any URL-or-string so it can never land
+ * in a log, error banner, or referrer. Fail-open on parse errors by falling
+ * back to a regex scrub, and never throws.
+ */
+export function redactBbUrl(value: unknown): string {
+  const raw = typeof value === 'string' ? value : value == null ? '' : String(value);
+  if (!raw) return raw;
+  try {
+    const url = new URL(raw);
+    let touched = false;
+    for (const key of BB_SECRET_PARAMS) {
+      if (url.searchParams.has(key)) {
+        url.searchParams.set(key, 'REDACTED');
+        touched = true;
+      }
+    }
+    if (touched) return url.toString();
+  } catch {
+    /* not a full URL — fall through to the regex scrub below */
+  }
+  // Regex fallback covers relative URLs and non-URL strings that still carry a
+  // `password=`/`guid=`/`token=` pair.
+  return raw.replace(/\b(password|guid|token)=[^&#\s]*/gi, '$1=REDACTED');
+}
 
 function bbUrl(cfg: PlatformConfig, path: string, params?: Record<string, string>): string {
   const base = (cfg.bbServerUrl || '').replace(/\/+$/, '');
   const url = new URL(`${base}${path}`);
+  // Required by the BlueBubbles API (query-param auth only — see note above).
   url.searchParams.set('password', cfg.bbPassword || '');
   if (params) for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   return url.toString();
@@ -156,14 +204,26 @@ async function bbFetch<T>(cfg: PlatformConfig, path: string, opts?: {
   method?: string; body?: any; params?: Record<string, string>;
 }): Promise<T> {
   const url = bbUrl(cfg, path, opts?.params);
-  const res = await fetch(url, {
-    method: opts?.method || 'GET',
-    headers: opts?.body ? { 'Content-Type': 'application/json' } : undefined,
-    body: opts?.body ? JSON.stringify(opts.body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: opts?.method || 'GET',
+      headers: opts?.body ? { 'Content-Type': 'application/json' } : undefined,
+      body: opts?.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (e: any) {
+    // Low-level fetch failures (DNS/TLS/network) can embed the full request URL
+    // — which carries the password — in the thrown message. Redact before it
+    // can bubble to a caller's error banner or log. Fail-VISIBLE: we still
+    // report the failure, just without the secret-bearing URL.
+    const detail = redactBbUrl(e?.message || 'network error');
+    throw new Error(`BlueBubbles request failed: ${detail}`);
+  }
   if (!res.ok) throw new Error(`BlueBubbles ${res.status}`);
   const json = await res.json();
-  if (json.status && json.status >= 400) throw new Error(json.message || 'API error');
+  // Never echo `json.message` verbatim — the server may reflect the request URL
+  // (incl. the password) back in its error text.
+  if (json.status && json.status >= 400) throw new Error(redactBbUrl(json.message || 'API error'));
   return json.data as T;
 }
 

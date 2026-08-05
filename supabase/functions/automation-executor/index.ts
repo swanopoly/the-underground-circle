@@ -41,7 +41,10 @@ const CLAUDE_MODEL_MAP: Record<string, string> = {
   "claude-haiku-4-5": "claude-haiku-4-5",
   "claude-sonnet":  "claude-sonnet-4-6",
   "claude-sonnet-4-6": "claude-sonnet-4-6",
-  "claude-opus":    "claude-opus-4-7",
+  "claude-fable":   "claude-fable-5",
+  "claude-fable-5": "claude-fable-5",
+  "claude-opus":    "claude-opus-4-8",
+  "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
   "claude-opus-4-6": "claude-opus-4-6",
 };
@@ -55,7 +58,7 @@ const DEFAULT_MODEL_ID = CLAUDE_MODEL_MAP[DEFAULT_MODEL_KEY];
 // Premium models require an explicit opt-in flag on the automation row. If
 // a caller tries to use one without the flag, we silently downgrade to
 // Haiku so a typo in the automation config can't nuke the spend budget.
-const PREMIUM_MODEL_IDS = new Set(["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7"]);
+const PREMIUM_MODEL_IDS = new Set(["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-fable-5"]);
 
 interface AIResult {
   text: string;
@@ -648,6 +651,303 @@ interface ParsedRoomFileAction {
   content?: string;   // file content (required for create/update)
 }
 
+type AutomationMutationAuthorization = {
+  actionId: string;
+  approvalId: string;
+};
+
+type DurableMutationIdentity = {
+  userId: string;
+  circleId: string;
+  runId: string;
+  automationId: string;
+  tool: "automation.room_file_action";
+  toolUseId: string;
+  actionId: string;
+  toolArgsFingerprint: string;
+  contractFingerprint: string;
+  idempotencyKey: string;
+};
+
+type MutationExecutionContext = {
+  userSupabase: any | null;
+  serviceSupabase: any;
+  userId: string | null;
+  circleId: string;
+  runId: string;
+  automationId: string;
+  authorizations: AutomationMutationAuthorization[];
+  markDispatched: () => void;
+};
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BOUNDED_ACTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
+const AUTOMATION_MUTATION_AUTHORIZATION_MAX_AGE_MS = 15 * 60 * 1000;
+
+function compactSafeText(value: unknown, maxLength = 240): string {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function redactAutomationText(value: unknown, maxLength = 3000): string {
+  let text = String(value ?? "");
+  text = text.replace(
+    /\[FILE_ACTIONS\][\s\S]*?\[\/FILE_ACTIONS\]/gi,
+    "[FILE_MUTATION_REDACTED]",
+  );
+  text = text.replace(
+    /FILE_ACTION:\s*(?:create|update|delete)[^\n]*(?:\n```[\s\S]*?```)?/gi,
+    "[FILE_MUTATION_REDACTED]",
+  );
+  text = text
+    .replace(
+      /(?:bearer\s+)[a-z0-9._~+/-]+|(?:sk|ghp|github_pat|xox[baprs])[-_][a-z0-9_-]{8,}/gi,
+      "[SECRET_REDACTED]",
+    )
+    .replace(
+      /((?:api|access|refresh|session)[ _-]?(?:key|token)|password|passcode|secret|credential)\s*[:=]\s*\S+/gi,
+      "$1=[SECRET_REDACTED]",
+    );
+  return text.slice(0, maxLength);
+}
+
+function sanitizeAutomationError(value: unknown): string {
+  const raw = value instanceof Error ? value.message : String(value ?? "");
+  return compactSafeText(
+    redactAutomationText(raw, 500)
+      .replace(/(?:\/[A-Za-z0-9._~ -]+){2,}/g, "[PATH_REDACTED]")
+      .replace(/[A-Za-z]:\\(?:[^\\\s]+\\)+[^\\\s]*/g, "[PATH_REDACTED]")
+      .replace(/https?:\/\/\S+/gi, "[URL_REDACTED]"),
+    240,
+  ) || "automation_execution_failed";
+}
+
+function parseMutationAuthorizations(
+  value: unknown,
+): AutomationMutationAuthorization[] {
+  if (!Array.isArray(value) || value.length > 32) return [];
+  const seen = new Set<string>();
+  const output: AutomationMutationAuthorization[] = [];
+  for (const item of value) {
+    if (!isPlainObject(item)) continue;
+    const actionId = compactSafeText(item.actionId, 180);
+    const approvalId = compactSafeText(item.approvalId, 64).toLowerCase();
+    if (
+      !BOUNDED_ACTION_ID_PATTERN.test(actionId)
+      || !UUID_PATTERN.test(approvalId)
+      || seen.has(actionId)
+    ) {
+      continue;
+    }
+    seen.add(actionId);
+    output.push({ actionId, approvalId });
+  }
+  return output;
+}
+
+async function sha256Fingerprint(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return `args-v2:sha256:${Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+async function resolveCircleRoomId(
+  supabase: any,
+  circleId: string,
+  roomReference: string,
+): Promise<string | null> {
+  const query = supabase
+    .from("circle_rooms")
+    .select("id")
+    .eq("circle_id", circleId)
+    .eq("is_active", true);
+  const { data, error } = UUID_PATTERN.test(roomReference)
+    ? await query.eq("id", roomReference.toLowerCase()).maybeSingle()
+    : await query.ilike("name", roomReference).maybeSingle();
+  if (error || !data || !UUID_PATTERN.test(String(data.id || ""))) return null;
+  return String(data.id).toLowerCase();
+}
+
+async function buildRoomFileMutationIdentity(input: {
+  execution: MutationExecutionContext;
+  action: ParsedRoomFileAction;
+  actionIndex: number;
+  roomId: string;
+  targetExistedBefore: boolean;
+}): Promise<DurableMutationIdentity> {
+  const actionId = `room-file-${input.actionIndex + 1}`;
+  const contentFingerprint = await sha256Fingerprint(input.action.content || "");
+  const toolArgsFingerprint = await sha256Fingerprint(JSON.stringify({
+    schemaVersion: 1,
+    automationId: input.execution.automationId,
+    runId: input.execution.runId,
+    actionId,
+    action: input.action.action,
+    roomId: input.roomId,
+    file: input.action.file,
+    folder: input.action.folder || "/",
+    language: input.action.language || "",
+    contentFingerprint,
+    targetExistedBefore: input.targetExistedBefore,
+  }));
+  const contractFingerprint = await sha256Fingerprint(
+    "automation.room_file_action:contract:v1:one_write:fresh_room_and_file_verification",
+  );
+  return {
+    userId: input.execution.userId || "",
+    circleId: input.execution.circleId,
+    runId: input.execution.runId,
+    automationId: input.execution.automationId,
+    tool: "automation.room_file_action",
+    toolUseId: `automation-file-${input.actionIndex + 1}`,
+    actionId,
+    toolArgsFingerprint,
+    contractFingerprint,
+    idempotencyKey:
+      `automation:${input.execution.automationId}:${input.execution.runId}:${actionId}`,
+  };
+}
+
+function actionCallRpcArgs(identity: DurableMutationIdentity) {
+  return {
+    p_user_id: identity.userId,
+    p_circle_id: identity.circleId,
+    p_run_id: identity.runId,
+    p_tool_name: identity.tool,
+    p_tool_use_id: identity.toolUseId,
+    p_action_id: identity.actionId,
+    p_tool_args_fingerprint: identity.toolArgsFingerprint,
+    p_contract_fingerprint: identity.contractFingerprint,
+    p_idempotency_key: identity.idempotencyKey,
+  };
+}
+
+function validateExactMutationApprovalRecord(
+  approval: unknown,
+  identity: DurableMutationIdentity,
+  now = Date.now(),
+): string | null {
+  if (!isPlainObject(approval)) return "authority_not_live";
+  if (
+    approval.id === undefined
+    || approval.run_id !== identity.runId
+    || approval.circle_id !== identity.circleId
+    || approval.approval_kind !== "file_write"
+    || approval.status !== "approved"
+    || !approval.resolved_by
+    || !approval.resolved_at
+  ) {
+    return "authority_not_live";
+  }
+  const resolvedAt = Date.parse(String(approval.resolved_at));
+  const requestedAt = Date.parse(String(approval.requested_at));
+  const timeoutMs = Math.min(
+    Math.max(Number(approval.timeout_seconds || 300), 15),
+    900,
+  ) * 1000;
+  if (
+    !Number.isFinite(resolvedAt)
+    || !Number.isFinite(requestedAt)
+    || resolvedAt < requestedAt
+    || resolvedAt > now
+    || now - resolvedAt > AUTOMATION_MUTATION_AUTHORIZATION_MAX_AGE_MS
+    || resolvedAt > requestedAt + timeoutMs
+  ) {
+    return "authority_expired";
+  }
+  const payload = isPlainObject(approval.payload) ? approval.payload : {};
+  if (
+    payload.authorizationVersion !== 1
+    || payload.automationId !== identity.automationId
+    || payload.runId !== identity.runId
+    || payload.actionId !== identity.actionId
+    || payload.tool !== identity.tool
+    || payload.toolArgsFingerprint !== identity.toolArgsFingerprint
+    || payload.contractFingerprint !== identity.contractFingerprint
+    || payload.consumedByActionId
+  ) {
+    return "authority_identity_mismatch";
+  }
+  return null;
+}
+
+async function consumeExactMutationApproval(
+  execution: MutationExecutionContext,
+  identity: DurableMutationIdentity,
+): Promise<{ ok: true; approvalId: string } | { ok: false; code: string }> {
+  if (!execution.userSupabase || !execution.userId) {
+    return { ok: false, code: "interactive_authority_required" };
+  }
+  const supplied = execution.authorizations.find(
+    (authorization) => authorization.actionId === identity.actionId,
+  );
+  if (!supplied) return { ok: false, code: "exact_authority_required" };
+
+  const { data: approval, error } = await execution.serviceSupabase
+    .from("agent_run_approvals")
+    .select(
+      "id,run_id,circle_id,approval_kind,status,resolved_by,resolved_at,requested_at,timeout_seconds,payload",
+    )
+    .eq("id", supplied.approvalId)
+    .eq("run_id", identity.runId)
+    .eq("circle_id", identity.circleId)
+    .eq("approval_kind", "file_write")
+    .eq("status", "approved")
+    .maybeSingle();
+  const now = Date.now();
+  const approvalError = error
+    ? "authority_not_live"
+    : validateExactMutationApprovalRecord(approval, identity, now);
+  if (approvalError) return { ok: false, code: approvalError };
+  const approvalRecord = approval as Record<string, unknown>;
+  const { data: resolverMembership, error: resolverMembershipError } =
+    await execution.serviceSupabase
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", identity.circleId)
+      .eq("user_id", approvalRecord.resolved_by)
+      .maybeSingle();
+  if (resolverMembershipError || !resolverMembership) {
+    return { ok: false, code: "authority_resolver_not_member" };
+  }
+
+  const consumedPayload = {
+    authorizationVersion: 1,
+    automationId: identity.automationId,
+    runId: identity.runId,
+    actionId: identity.actionId,
+    tool: identity.tool,
+    toolArgsFingerprint: identity.toolArgsFingerprint,
+    contractFingerprint: identity.contractFingerprint,
+    consumedByActionId: identity.actionId,
+    consumedAt: new Date(now).toISOString(),
+    redacted: true,
+  };
+  const { data: consumed, error: consumeError } = await execution.serviceSupabase
+    .from("agent_run_approvals")
+    .update({ payload: consumedPayload })
+    .eq("id", supplied.approvalId)
+    .eq("status", "approved")
+    .eq("payload->>automationId", identity.automationId)
+    .eq("payload->>runId", identity.runId)
+    .eq("payload->>actionId", identity.actionId)
+    .eq("payload->>toolArgsFingerprint", identity.toolArgsFingerprint)
+    .is("payload->>consumedByActionId", null)
+    .select("id");
+  if (consumeError || !Array.isArray(consumed) || consumed.length !== 1) {
+    return { ok: false, code: "authority_already_consumed" };
+  }
+  return { ok: true, approvalId: supplied.approvalId };
+}
+
 /**
  * Parse room file actions from AI response text.
  * Supports [FILE_ACTIONS]...[/FILE_ACTIONS] JSON blocks and
@@ -662,14 +962,25 @@ function parseRoomFileActions(aiText: string): ParsedRoomFileAction[] {
     try {
       const parsed = JSON.parse(blockMatch[1]);
       const items = Array.isArray(parsed) ? parsed : [parsed];
-      for (const item of items) {
-        if (item.action && item.room && item.file) {
+      for (const item of items.slice(0, 16)) {
+        if (
+          isPlainObject(item)
+          && (item.action === "create" || item.action === "update" || item.action === "delete")
+          && typeof item.room === "string"
+          && typeof item.file === "string"
+          && (item.content === undefined || typeof item.content === "string")
+          && (!item.content || item.content.length <= 1_000_000)
+        ) {
           actions.push({
             action: item.action,
             room: item.room,
             file: item.file,
-            folder: item.folder || "/",
-            language: item.language || item.file_type || "",
+            folder: typeof item.folder === "string" ? item.folder : "/",
+            language: typeof item.language === "string"
+              ? item.language
+              : typeof item.file_type === "string"
+                ? item.file_type
+                : "",
             content: item.content || "",
           });
         }
@@ -725,160 +1036,306 @@ const LANG_TO_EXT: Record<string, string> = {
   ruby: "ruby", php: "php", swift: "swift", kotlin: "kotlin",
 };
 
+type SanitizedAgentSubjectMetadata = {
+  agentSubjectKey?: string;
+  agentDisplayName?: string;
+  agentDbId?: string;
+  agentProvider?: string;
+  agentSessionKey?: string;
+  agentSpiritId?: string;
+  legacyAgentIds: string[];
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedString(value: unknown, maxLength = 180): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
+}
+
+function boundedStringArray(value: unknown, maxItems = 16, maxLength = 180): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    const str = boundedString(item, maxLength);
+    if (!str || seen.has(str)) continue;
+    seen.add(str);
+    out.push(str);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function sanitizeAgentSubjectMetadata(input: unknown): SanitizedAgentSubjectMetadata | null {
+  if (!isPlainObject(input)) return null;
+  const agentSubjectKey = boundedString(input.agentSubjectKey);
+  const agentDisplayName = boundedString(input.agentDisplayName);
+  const legacyAgentIds = boundedStringArray(input.legacyAgentIds);
+  const out: SanitizedAgentSubjectMetadata = { legacyAgentIds };
+  const optionalFields: Array<[keyof Omit<SanitizedAgentSubjectMetadata, "legacyAgentIds">, unknown, number]> = [
+    ["agentSubjectKey", agentSubjectKey, 180],
+    ["agentDisplayName", agentDisplayName, 180],
+    ["agentDbId", input.agentDbId, 180],
+    ["agentProvider", input.agentProvider, 80],
+    ["agentSessionKey", input.agentSessionKey, 180],
+    ["agentSpiritId", input.agentSpiritId, 180],
+  ];
+  for (const [key, value, maxLength] of optionalFields) {
+    const str = typeof value === "string" ? boundedString(value, maxLength) : value;
+    if (typeof str === "string") out[key] = str;
+  }
+  return out.agentSubjectKey || out.agentDisplayName || out.legacyAgentIds.length > 0 ? out : null;
+}
+
+function readSavedAgentSubjectMetadata(automation: Record<string, unknown>): SanitizedAgentSubjectMetadata | null {
+  const eventConfig = isPlainObject(automation.event_config) ? automation.event_config : {};
+  return sanitizeAgentSubjectMetadata(eventConfig.agentSubjectMetadata)
+    || sanitizeAgentSubjectMetadata(eventConfig.agentSubject)
+    || sanitizeAgentSubjectMetadata(eventConfig.agent_subject_metadata);
+}
+
+function agentSubjectMetadataFields(
+  agentSubjectMetadata?: SanitizedAgentSubjectMetadata | null,
+): Record<string, unknown> {
+  if (!agentSubjectMetadata) return {};
+  return {
+    agentSubject: agentSubjectMetadata,
+    agentSubjectKey: agentSubjectMetadata.agentSubjectKey,
+    targetAgentSubjectKey: agentSubjectMetadata.agentSubjectKey,
+    targetAgentName: agentSubjectMetadata.agentDisplayName,
+    targetAgentDbId: agentSubjectMetadata.agentDbId,
+    targetAgentLegacyIds: agentSubjectMetadata.legacyAgentIds,
+  };
+}
+
+function withAgentSubjectMetadata<T extends Record<string, unknown>>(
+  metadata: T,
+  agentSubjectMetadata?: SanitizedAgentSubjectMetadata | null,
+): T & Record<string, unknown> {
+  return {
+    ...metadata,
+    ...agentSubjectMetadataFields(agentSubjectMetadata),
+  };
+}
+
 /**
  * Execute parsed room file actions against the database.
  * Returns a summary of what was done.
  */
 async function executeRoomFileActions(
-  supabase: any,
-  circleId: string,
+  execution: MutationExecutionContext,
   actions: ParsedRoomFileAction[],
-  agentName: string,
 ): Promise<string[]> {
   const results: string[] = [];
 
-  for (const act of actions) {
+  for (const [actionIndex, act] of actions.entries()) {
     try {
-      // Resolve room name → room ID
-      let roomId = act.room;
-      if (!act.room.match(/^[0-9a-f-]{36}$/i)) {
-        const { data: room } = await supabase
-          .from("circle_rooms")
-          .select("id")
-          .eq("circle_id", circleId)
-          .ilike("name", act.room)
-          .eq("is_active", true)
-          .single();
-        if (!room) {
-          results.push(`⚠ Room "${act.room}" not found — skipped ${act.action} ${act.file}`);
-          continue;
-        }
-        roomId = room.id;
+      // UUIDs and names take the same circle-bound lookup path. A raw UUID is
+      // never trusted as a room id, which closes cross-circle target injection.
+      const roomId = await resolveCircleRoomId(
+        execution.serviceSupabase,
+        execution.circleId,
+        act.room,
+      );
+      if (!roomId) {
+        results.push(`blocked:room_target_unavailable:action_${actionIndex + 1}`);
+        continue;
       }
 
       const folder = act.folder || "/";
       const fileType = act.language
         ? (LANG_TO_EXT[act.language.toLowerCase()] || act.language)
         : (act.file.includes(".") ? act.file.split(".").pop() || "text" : "text");
+      if (
+        !act.file
+        || act.file.length > 240
+        || folder.length > 500
+        || /[\u0000-\u001f\u007f-\u009f]/.test(`${act.file}${folder}`)
+      ) {
+        results.push(`blocked:invalid_file_target:action_${actionIndex + 1}`);
+        continue;
+      }
 
-      if (act.action === "create") {
-        if (!act.content) {
-          results.push(`⚠ Cannot create "${act.file}" — no content provided`);
-          continue;
-        }
-        // Check if file already exists (upsert)
-        const { data: existing } = await supabase
+      if ((act.action === "create" || act.action === "update") && !act.content) {
+        results.push(`blocked:missing_file_content:action_${actionIndex + 1}`);
+        continue;
+      }
+
+      // Fresh target observation occurs before authority consumption and the
+      // durable dispatch claim. Update/delete never silently become create.
+      const { data: existing, error: existingError } =
+        await execution.serviceSupabase
           .from("room_files")
-          .select("id")
+          .select("id,room_id,name,folder,is_deleted")
           .eq("room_id", roomId)
           .eq("name", act.file)
           .eq("folder", folder)
           .eq("is_deleted", false)
           .maybeSingle();
+      if (existingError) {
+        results.push(`blocked:target_observation_failed:action_${actionIndex + 1}`);
+        continue;
+      }
+      if ((act.action === "update" || act.action === "delete") && !existing) {
+        results.push(`blocked:target_not_found:action_${actionIndex + 1}`);
+        continue;
+      }
 
-        if (existing) {
-          // Update existing file
-          await supabase.from("room_files")
-            .update({
-              content: act.content,
-              size_bytes: act.content.length,
-              file_type: fileType,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", existing.id);
-          results.push(`✓ Updated existing file "${act.file}" in room "${act.room}" (${act.content.length} bytes)`);
-        } else {
-          await supabase.from("room_files").insert({
-            room_id: roomId,
-            name: act.file,
-            folder,
-            file_type: fileType,
-            content: act.content,
-            size_bytes: act.content.length,
-          });
-          results.push(`✓ Created file "${act.file}" in room "${act.room}" (${act.content.length} bytes)`);
-        }
+      const identity = await buildRoomFileMutationIdentity({
+        execution,
+        action: act,
+        actionIndex,
+        roomId,
+        targetExistedBefore: Boolean(existing),
+      });
+      const authority = await consumeExactMutationApproval(execution, identity);
+      if (!authority.ok) {
+        results.push(`blocked:${authority.code}:action_${actionIndex + 1}`);
+        continue;
+      }
 
-        // Post a message to the room about the file action
-        await supabase.from("room_messages").insert({
-          room_id: roomId,
-          agent_name: agentName,
-          content: `📝 ${existing ? "Updated" : "Created"} file: ${folder === "/" ? "" : folder + "/"}${act.file}`,
-          message_type: "system",
-          metadata: { automation_file_action: true, action: act.action, file: act.file },
+      const rpcIdentity = actionCallRpcArgs(identity);
+      const { data: claim, error: claimError } = await execution.userSupabase.rpc(
+        "claim_agent_action_call",
+        {
+          ...rpcIdentity,
+          p_metadata: {
+            surface: "file",
+            risk: act.action === "delete" ? "critical" : "high",
+            approvalId: authority.approvalId,
+            redacted: true,
+          },
+          p_ttl_seconds: 120,
+        },
+      );
+      if (
+        claimError
+        || !isPlainObject(claim)
+        || claim.ok !== true
+        || claim.disposition !== "claimed"
+        || claim.state !== "claimed"
+        || claim.attemptCount !== 1
+        || typeof claim.claimToken !== "string"
+        || !UUID_PATTERN.test(claim.claimToken)
+      ) {
+        results.push(`blocked:durable_claim_refused:action_${actionIndex + 1}`);
+        continue;
+      }
+
+      // The ledger moves to dispatched immediately before exactly one target
+      // write. A competing/stale claimant cannot enter this branch.
+      const { data: started, error: startError } =
+        await execution.userSupabase.rpc("start_agent_action_call", {
+          ...rpcIdentity,
+          p_claim_token: claim.claimToken,
         });
+      if (
+        startError
+        || !isPlainObject(started)
+        || started.ok !== true
+        || started.disposition !== "started"
+        || started.state !== "dispatched"
+      ) {
+        results.push(`blocked:durable_start_refused:action_${actionIndex + 1}`);
+        continue;
+      }
 
-      } else if (act.action === "update") {
-        if (!act.content) {
-          results.push(`⚠ Cannot update "${act.file}" — no content provided`);
-          continue;
-        }
-        const { data: updated } = await supabase.from("room_files")
+      execution.markDispatched();
+      let mutationError: unknown = null;
+      let mutationTargetId = existing?.id || null;
+      if (act.action === "delete") {
+        const { error } = await execution.serviceSupabase
+          .from("room_files")
+          .update({ is_deleted: true, updated_at: new Date().toISOString() })
+          .eq("id", existing.id)
+          .eq("room_id", roomId)
+          .eq("is_deleted", false);
+        mutationError = error;
+      } else if (existing) {
+        const { error } = await execution.serviceSupabase
+          .from("room_files")
           .update({
             content: act.content,
-            size_bytes: act.content.length,
+            size_bytes: act.content!.length,
             file_type: fileType,
             updated_at: new Date().toISOString(),
           })
+          .eq("id", existing.id)
           .eq("room_id", roomId)
-          .eq("name", act.file)
-          .eq("is_deleted", false)
-          .select("id")
-          .maybeSingle();
-
-        if (updated) {
-          results.push(`✓ Updated file "${act.file}" in room "${act.room}" (${act.content.length} bytes)`);
-          await supabase.from("room_messages").insert({
-            room_id: roomId,
-            agent_name: agentName,
-            content: `📝 Updated file: ${folder === "/" ? "" : folder + "/"}${act.file}`,
-            message_type: "system",
-            metadata: { automation_file_action: true, action: "update", file: act.file },
-          });
-        } else {
-          // File doesn't exist — create it
-          await supabase.from("room_files").insert({
+          .eq("is_deleted", false);
+        mutationError = error;
+      } else {
+        const { data: inserted, error } = await execution.serviceSupabase
+          .from("room_files")
+          .insert({
             room_id: roomId,
             name: act.file,
             folder,
             file_type: fileType,
             content: act.content,
-            size_bytes: act.content.length,
-          });
-          results.push(`✓ File "${act.file}" didn't exist — created in room "${act.room}" (${act.content.length} bytes)`);
-          await supabase.from("room_messages").insert({
-            room_id: roomId,
-            agent_name: agentName,
-            content: `📝 Created file: ${folder === "/" ? "" : folder + "/"}${act.file}`,
-            message_type: "system",
-            metadata: { automation_file_action: true, action: "create", file: act.file },
-          });
-        }
-
-      } else if (act.action === "delete") {
-        const { data: deleted } = await supabase.from("room_files")
-          .update({ is_deleted: true, updated_at: new Date().toISOString() })
-          .eq("room_id", roomId)
-          .eq("name", act.file)
-          .eq("is_deleted", false)
+            size_bytes: act.content!.length,
+          })
           .select("id")
-          .maybeSingle();
+          .single();
+        mutationTargetId = inserted?.id || null;
+        mutationError = error;
+      }
 
-        if (deleted) {
-          results.push(`✓ Deleted file "${act.file}" from room "${act.room}"`);
-          await supabase.from("room_messages").insert({
-            room_id: roomId,
-            agent_name: agentName,
-            content: `🗑️ Deleted file: ${folder === "/" ? "" : folder + "/"}${act.file}`,
-            message_type: "system",
-            metadata: { automation_file_action: true, action: "delete", file: act.file },
-          });
-        } else {
-          results.push(`⚠ File "${act.file}" not found in room "${act.room}" — skip delete`);
+      let verified = false;
+      if (!mutationError && UUID_PATTERN.test(String(mutationTargetId || ""))) {
+        const { data: after, error: afterError } =
+          await execution.serviceSupabase
+            .from("room_files")
+            .select("id,room_id,name,folder,file_type,content,size_bytes,is_deleted")
+            .eq("id", mutationTargetId)
+            .eq("room_id", roomId)
+            .single();
+        if (!afterError && after) {
+          verified = act.action === "delete"
+            ? after.is_deleted === true
+            : after.is_deleted === false
+              && after.content === act.content
+              && Number(after.size_bytes) === act.content!.length
+              && after.file_type === fileType;
         }
       }
+
+      const finalState = verified ? "verified" : "outcome_unknown";
+      const { data: finished, error: finishError } =
+        await execution.userSupabase.rpc("finish_agent_action_call", {
+          ...rpcIdentity,
+          p_claim_token: claim.claimToken,
+          p_final_state: finalState,
+          p_metadata: {
+            surface: "file",
+            risk: act.action === "delete" ? "critical" : "high",
+            approvalId: authority.approvalId,
+            verificationKind: "artifact",
+            completionVerified: verified,
+            outcomeUnknown: !verified,
+            redacted: true,
+          },
+        });
+      const finishConfirmed = !finishError
+        && isPlainObject(finished)
+        && finished.ok === true
+        && (finished.disposition === "finished"
+          || finished.disposition === "already_finished")
+        && finished.state === finalState;
+      results.push(
+        verified && finishConfirmed
+          ? `verified:file_mutation:action_${actionIndex + 1}`
+          : `outcome_unknown:file_mutation:action_${actionIndex + 1}`,
+      );
     } catch (err: any) {
-      results.push(`❌ Failed to ${act.action} "${act.file}": ${err.message}`);
+      // No target, content, path, database error, or model value crosses this
+      // result boundary. The outer retry guard is driven by markDispatched().
+      results.push(`blocked:mutation_guard_error:action_${actionIndex + 1}`);
     }
   }
 
@@ -895,6 +1352,7 @@ async function routeOutput(
   text: string,
   webhookUrl?: string,
   automationName?: string,
+  agentSubjectMetadata?: SanitizedAgentSubjectMetadata | null,
 ) {
   // Skip output if AI said SKIP
   if (text.trim() === "SKIP") return;
@@ -920,6 +1378,10 @@ async function routeOutput(
         title: `Automation: ${automationName || "Task"}`,
         body: text.slice(0, 2000),
         status: "completed",
+        metadata: withAgentSubjectMetadata({
+          automation_name: automationName || null,
+          source: "automation",
+        }, agentSubjectMetadata),
       });
       break;
 
@@ -991,24 +1453,22 @@ async function routeOutput(
       if (outputTarget.startsWith("room:")) {
         const roomRef = outputTarget.slice(5);
         try {
-          // Try as UUID first, then as name
-          let roomId = roomRef;
-          if (!roomRef.match(/^[0-9a-f-]{36}$/i)) {
-            const { data: room } = await supabase
-              .from("circle_rooms")
-              .select("id")
-              .eq("circle_id", circleId)
-              .ilike("name", roomRef)
-              .eq("is_active", true)
-              .single();
-            if (room) roomId = room.id;
+          // A UUID is only a reference, never authority. Names and UUIDs are
+          // both resolved through the same active-circle ownership query.
+          const roomId = await resolveCircleRoomId(supabase, circleId, roomRef);
+          if (!roomId) {
+            console.warn("Room output target unavailable");
+            break;
           }
           await supabase.from("room_messages").insert({
             room_id: roomId,
             agent_name: agentName,
             content: text,
             message_type: "agent_output",
-            metadata: { automation: automationName, source: "automation" },
+            metadata: withAgentSubjectMetadata(
+              { automation: automationName, source: "automation" },
+              agentSubjectMetadata,
+            ),
           });
         } catch (e) {
           console.warn(`Room output failed for ${outputTarget}:`, e);
@@ -1164,14 +1624,21 @@ interface AutomationRequest {
   automationId: string;
   circleId: string;
   triggerSource: "schedule" | "event" | "manual" | "retry";
+  /**
+   * Exact pre-created unified agent run. Required for any mutation authority:
+   * its matching agent_run_approvals rows are the only accepted grants.
+   */
+  runId?: string;
+  mutationAuthorizations?: unknown;
   triggeredBy?: string;
   eventPayload?: any;
   retryCount?: number;
   dryRun?: boolean; // If true, run AI but don't route output or create tasks
+  agentSubject?: unknown;
+  agentSubjectMetadata?: unknown;
 }
 
 const MAX_RETRIES = 2;
-const RETRY_DELAY_MS = 30_000; // 30 seconds
 
 // Global kill switch for cron-fired / trigger-fired Claude traffic.
 // Set AUTONOMOUS_AI_PAUSED=1 in Supabase Edge Functions secrets to stop
@@ -1215,10 +1682,44 @@ Deno.serve(async (req: Request) => {
   try {
     const body: AutomationRequest = await req.json();
     const { automationId, circleId, triggerSource, eventPayload, retryCount = 0, dryRun = false } = body;
+    const requestedRunId = typeof body.runId === "string"
+      ? body.runId.trim().toLowerCase()
+      : "";
+    const mutationAuthorizations = parseMutationAuthorizations(
+      body.mutationAuthorizations,
+    );
     const triggeredBy = authedUser?.id ?? body.triggeredBy ?? null;
+    const requestAgentSubjectMetadata = sanitizeAgentSubjectMetadata(body.agentSubject)
+      || sanitizeAgentSubjectMetadata(body.agentSubjectMetadata);
 
     if (!automationId || !circleId) {
       return jsonResponse({ error: "Missing automationId or circleId" }, 400);
+    }
+    if (!UUID_PATTERN.test(automationId) || !UUID_PATTERN.test(circleId)) {
+      return errResponse(400, "invalid_identity", "Invalid automation identity");
+    }
+    if (body.runId !== undefined && !UUID_PATTERN.test(requestedRunId)) {
+      return errResponse(400, "invalid_run_identity", "Invalid exact automation run identity");
+    }
+    if (
+      body.mutationAuthorizations !== undefined
+      && (
+        !Array.isArray(body.mutationAuthorizations)
+        || mutationAuthorizations.length !== body.mutationAuthorizations.length
+      )
+    ) {
+      return errResponse(
+        400,
+        "invalid_mutation_authority",
+        "Mutation authority entries must carry one exact action and approval identity",
+      );
+    }
+    if (mutationAuthorizations.length > 0 && (!authedUser || !requestedRunId)) {
+      return errResponse(
+        403,
+        "interactive_authority_required",
+        "Exact mutation authority requires an authenticated manual run",
+      );
     }
 
     if (!isServiceCaller && triggerSource !== "manual") {
@@ -1234,6 +1735,39 @@ Deno.serve(async (req: Request) => {
         .maybeSingle();
       if (membershipError || !membership) {
         return errResponse(403, "forbidden", "You are not a member of this circle");
+      }
+    }
+
+    let userSupabase: any | null = null;
+    if (authedUser && requestedRunId) {
+      const authorizationHeader = req.headers.get("Authorization") || "";
+      const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
+      if (!authorizationHeader || !anonKey) {
+        return errResponse(
+          503,
+          "mutation_ledger_unavailable",
+          "The authenticated mutation ledger is unavailable",
+        );
+      }
+      userSupabase = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        anonKey,
+        { global: { headers: { Authorization: authorizationHeader } } },
+      );
+      const { data: exactRun, error: exactRunError } = await supabase
+        .from("agent_runs")
+        .select("id,circle_id,user_id,status")
+        .eq("id", requestedRunId)
+        .eq("circle_id", circleId)
+        .eq("user_id", authedUser.id)
+        .in("status", ["planning", "running", "waiting_approval"])
+        .maybeSingle();
+      if (exactRunError || !exactRun) {
+        return errResponse(
+          403,
+          "run_identity_mismatch",
+          "The exact authorized run is unavailable",
+        );
       }
     }
 
@@ -1256,26 +1790,57 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Automation is disabled" }, 400);
     }
 
+    const agentSubjectMetadata = requestAgentSubjectMetadata || readSavedAgentSubjectMetadata(automation);
+    const initialInputContext = agentSubjectMetadataFields(agentSubjectMetadata);
+
     // 2. Create run record
-    const { data: run } = await supabase
+    const { data: run, error: runInsertError } = await supabase
       .from("automation_runs")
       .insert({
+        ...(requestedRunId ? { id: requestedRunId } : {}),
         automation_id: automationId,
         circle_id: circleId,
         status: "running",
         trigger_source: triggerSource,
         triggered_by: triggeredBy || null,
+        ...(agentSubjectMetadata ? { input_context: initialInputContext } : {}),
       })
       .select("id")
       .single();
 
     const runId = run?.id;
+    if (runInsertError || !runId) {
+      return errResponse(
+        requestedRunId ? 409 : 503,
+        requestedRunId ? "run_already_used" : "run_create_failed",
+        requestedRunId
+          ? "The exact automation run identity has already been used"
+          : "The automation run could not be created",
+      );
+    }
+    if (requestedRunId) {
+      await supabase
+        .from("agent_runs")
+        .update({
+          status: "running",
+          started_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", requestedRunId)
+        .eq("circle_id", circleId)
+        .eq("user_id", authedUser!.id)
+        .in("status", ["planning", "waiting_approval", "running"]);
+    }
     const startTime = Date.now();
     const logSteps: string[] = [];
+    let externalMutationMayHaveDispatched = false;
+    let mutationBlockedNoRetry = false;
 
     // Helper to log a step and update the run record in realtime
     const logStep = async (step: string) => {
-      logSteps.push(`[${((Date.now() - startTime) / 1000).toFixed(1)}s] ${step}`);
+      logSteps.push(
+        `[${((Date.now() - startTime) / 1000).toFixed(1)}s] ${redactAutomationText(step, 500)}`,
+      );
       if (runId) {
         await supabase
           .from("automation_runs")
@@ -1329,7 +1894,7 @@ Deno.serve(async (req: Request) => {
 
             if (!dryRun) {
               const noActivityTarget = automation.output_target || "chat";
-              await routeOutput(supabase, noActivityTarget, circleId, automation.agent || "BlackSwan", noActivityMsg, automation.webhook_url, automation.name);
+              await routeOutput(supabase, noActivityTarget, circleId, automation.agent || "BlackSwan", noActivityMsg, automation.webhook_url, automation.name, agentSubjectMetadata);
               await supabase.from("agent_activity").insert({
                 circle_id: circleId,
                 agent_name: automation.agent || "BlackSwan",
@@ -1339,7 +1904,10 @@ Deno.serve(async (req: Request) => {
                 title: `🤖 ${automation.name}`,
                 body: noActivityMsg,
                 status: "completed",
-                metadata: { automation_id: automationId, run_id: runId, github_events: 0 },
+                metadata: withAgentSubjectMetadata(
+                  { automation_id: automationId, run_id: runId, github_events: 0 },
+                  agentSubjectMetadata,
+                ),
               });
             }
 
@@ -1351,6 +1919,10 @@ Deno.serve(async (req: Request) => {
                 completed_at: new Date().toISOString(),
                 duration_ms: Date.now() - startTime,
                 error_message: logSteps.join("\n"),
+                input_context: {
+                  ...initialInputContext,
+                  log: logSteps,
+                },
               }).eq("id", runId);
             }
             return new Response(
@@ -1412,7 +1984,7 @@ Deno.serve(async (req: Request) => {
 
             if (!dryRun) {
               const target = automation.output_target || "chat";
-              await routeOutput(supabase, target, circleId, automation.agent || "BlackSwan", skipMsg, automation.webhook_url, automation.name);
+              await routeOutput(supabase, target, circleId, automation.agent || "BlackSwan", skipMsg, automation.webhook_url, automation.name, agentSubjectMetadata);
               await supabase.from("agent_activity").insert({
                 circle_id: circleId,
                 agent_name: automation.agent || "BlackSwan",
@@ -1422,7 +1994,10 @@ Deno.serve(async (req: Request) => {
                 title: `🤖 ${automation.name}`,
                 body: skipMsg,
                 status: "completed",
-                metadata: { automation_id: automationId, run_id: runId, inactive_count: 0 },
+                metadata: withAgentSubjectMetadata(
+                  { automation_id: automationId, run_id: runId, inactive_count: 0 },
+                  agentSubjectMetadata,
+                ),
               });
             }
 
@@ -1433,6 +2008,10 @@ Deno.serve(async (req: Request) => {
                 completed_at: new Date().toISOString(),
                 duration_ms: Date.now() - startTime,
                 error_message: logSteps.join("\n"),
+                input_context: {
+                  ...initialInputContext,
+                  log: logSteps,
+                },
               }).eq("id", runId);
             }
             return new Response(
@@ -1484,6 +2063,10 @@ Deno.serve(async (req: Request) => {
                 completed_at: new Date().toISOString(),
                 duration_ms: Date.now() - startTime,
                 error_message: logSteps.join("\n"),
+                input_context: {
+                  ...initialInputContext,
+                  log: logSteps,
+                },
               }).eq("id", runId);
             }
             return new Response(
@@ -1595,7 +2178,11 @@ Deno.serve(async (req: Request) => {
         roomFileInstructions = `
 
 ## Room File Operations
-You have FULL ACCESS to create, update, and delete files in project rooms. When your task requires modifying files, include file actions in your response using one of these formats:
+You may PROPOSE create, update, and delete operations for project-room files.
+The executor will run a proposed operation only when a human-approved,
+single-use durable grant matches this exact run, action, target, value digest,
+and contract. Model output is never authorization. When the task calls for a
+file change, use one of these formats:
 
 **Format 1 — JSON block (preferred for multiple files):**
 [FILE_ACTIONS]
@@ -1617,7 +2204,7 @@ Rules:
 - For "update", provide the COMPLETE new file content (not a diff)
 - For "create", the file is auto-created if it doesn't exist, or updated if it does
 - For "delete", the file is soft-deleted
-- A system message is posted to the room for each file operation
+- An operation without matching live authority is safely blocked
 - You can see the current file contents in the Room sections below
 `;
       }
@@ -1719,13 +2306,17 @@ ${contextString}`;
         userId: automation.created_by || null,
         source: "automation-executor",
         aiResult,
-        metadata: { automation_id: automation.id, automation_name: automation.name, trigger_type: automation.trigger_type },
+        metadata: withAgentSubjectMetadata(
+          { automation_id: automation.id, automation_name: automation.name, trigger_type: automation.trigger_type },
+          agentSubjectMetadata,
+        ),
       });
 
       // 6a-gh. Mark GitHub events as processed (if github_summary)
       if (isGitHubSummary && (context as any)._githubEventIds?.length > 0 && !dryRun) {
         try {
           const eventIds: string[] = (context as any)._githubEventIds;
+          externalMutationMayHaveDispatched = true;
           await supabase
             .from("circle_github_events")
             .update({ processed: true, processed_at: new Date().toISOString() })
@@ -1740,6 +2331,7 @@ ${contextString}`;
       if (isDeployFailure && (context as any)._deployFailureIds?.length > 0 && !dryRun) {
         try {
           const eventIds: string[] = (context as any)._deployFailureIds;
+          externalMutationMayHaveDispatched = true;
           await supabase
             .from("circle_github_events")
             .update({ processed: true, processed_at: new Date().toISOString() })
@@ -1761,6 +2353,7 @@ ${contextString}`;
               const targetUserId = action.userId || context.wallets?.[0]?.id;
               if (!targetUserId) continue;
 
+              externalMutationMayHaveDispatched = true;
               await supabase.from("trading_pending_actions").insert({
                 user_id: targetUserId,
                 circle_id: circleId,
@@ -1774,13 +2367,21 @@ ${contextString}`;
                 reason: action.reason || `Proposed by ${automation.name}`,
                 proposed_by: automation.agent || "BlackSwan",
                 source: automation.name?.toLowerCase().includes("dca") ? "dca" : "automation",
-                metadata: { automation_id: automationId, run_id: runId, raw: action },
+                metadata: withAgentSubjectMetadata(
+                  {
+                    automation_id: automationId,
+                    run_id: runId,
+                    action_type: action.actionType || "swap",
+                    redacted: true,
+                  },
+                  agentSubjectMetadata,
+                ),
               });
             }
             await logStep(`✓ ${tradeActions.length} trade action(s) queued for user approval`);
           }
-        } catch (tradeErr: any) {
-          await logStep(`⚠ Trade action parsing failed: ${tradeErr.message}`);
+        } catch {
+          await logStep("⚠ Trade action parsing failed: redacted");
         }
       }
 
@@ -1790,25 +2391,45 @@ ${contextString}`;
         try {
           const fileActions = parseRoomFileActions(aiResult.text);
           if (fileActions.length > 0) {
-            await logStep(`📁 Found ${fileActions.length} file action(s) — executing...`);
+            await logStep(`📁 Found ${fileActions.length} proposed file action(s)`);
             if (dryRun) {
-              await logStep(`🧪 DRY RUN — skipping file operations: ${fileActions.map(a => `${a.action} ${a.file}`).join(", ")}`);
-              roomFileResults = fileActions.map(a => `🧪 [dry-run] Would ${a.action} "${a.file}" in room "${a.room}"`);
+              await logStep("🧪 DRY RUN — file mutation targets and values redacted");
+              roomFileResults = fileActions.map(
+                (_, index) => `dry_run:file_mutation:action_${index + 1}`,
+              );
             } else {
               roomFileResults = await executeRoomFileActions(
-                supabase,
-                circleId,
+                {
+                  userSupabase,
+                  serviceSupabase: supabase,
+                  userId: authedUser?.id || null,
+                  circleId,
+                  runId,
+                  automationId,
+                  authorizations: mutationAuthorizations,
+                  markDispatched: () => {
+                    externalMutationMayHaveDispatched = true;
+                  },
+                },
                 fileActions,
-                automation.agent || "BlackSwan",
               );
               for (const r of roomFileResults) {
                 await logStep(r);
               }
+              if (roomFileResults.some((result) => result.startsWith("outcome_unknown:"))) {
+                throw new Error("file_mutation_outcome_unknown");
+              }
+              if (roomFileResults.some((result) => result.startsWith("blocked:"))) {
+                mutationBlockedNoRetry = true;
+                throw new Error("file_mutation_authority_or_contract_blocked");
+              }
             }
           }
         } catch (fileErr: any) {
-          await logStep(`⚠ Room file action parsing/execution failed: ${fileErr.message}`);
-          roomFileResults = [`❌ File action error: ${fileErr.message}`];
+          const code = sanitizeAutomationError(fileErr);
+          await logStep(`⚠ Room file action blocked: ${code}`);
+          roomFileResults = [`blocked:file_mutation:${code}`];
+          if (externalMutationMayHaveDispatched) throw fileErr;
         }
       }
 
@@ -1819,15 +2440,17 @@ ${contextString}`;
       } else {
         if (outputTarget !== "silent") {
           await logStep(`⏳ Routing output → ${outputTarget}...`);
+          externalMutationMayHaveDispatched = true;
         }
         await routeOutput(
           supabase,
           outputTarget,
           circleId,
           automation.agent || "BlackSwan",
-          aiResult.text,
+          redactAutomationText(aiResult.text, 8000),
           automation.webhook_url,
           automation.name,
+          agentSubjectMetadata,
         );
         if (outputTarget !== "silent") {
           await logStep(`✓ Output delivered to ${outputTarget}`);
@@ -1836,7 +2459,8 @@ ${contextString}`;
 
       // 8. Log to agent_activity (skip for dry runs)
       if (!dryRun) {
-      const activityBody = `**${automation.name}** (${triggerSource})\n\n${aiResult.text.slice(0, 1500)}\n\n_${aiResult.totalTokens} tokens · ${modelId} · $${aiResult.estimatedCost.toFixed(4)}_`;
+      const activityBody = `**${automation.name}** (${triggerSource})\n\n${redactAutomationText(aiResult.text, 1500)}\n\n_${aiResult.totalTokens} tokens · ${modelId} · $${aiResult.estimatedCost.toFixed(4)}_`;
+      externalMutationMayHaveDispatched = true;
       await supabase.from("agent_activity").insert({
         circle_id: circleId,
         agent_name: automation.agent || "BlackSwan",
@@ -1846,7 +2470,7 @@ ${contextString}`;
         title: `🤖 ${automation.name}`,
         body: activityBody.slice(0, 2000),
         status: "completed",
-        metadata: {
+        metadata: withAgentSubjectMetadata({
           automation_id: automationId,
           run_id: runId,
           model: modelId,
@@ -1854,7 +2478,7 @@ ${contextString}`;
           cost: aiResult.estimatedCost,
           trigger: triggerSource,
           output_target: outputTarget,
-        },
+        }, agentSubjectMetadata),
       });
       } // end if (!dryRun)
 
@@ -1865,6 +2489,7 @@ ${contextString}`;
 
       // Build rich input_context with everything the agent saw and did
       const richContext: Record<string, any> = {
+        ...initialInputContext,
         // Execution trace
         log: logSteps,
         // Circle info
@@ -1922,52 +2547,39 @@ ${contextString}`;
           current_count: g.current_count || 0,
         })),
         // Rooms
-        rooms: (context.rooms || []).map((r: any) => ({
-          name: r.name,
+        rooms: (context.rooms || []).map((r: any, roomIndex: number) => ({
+          roomIndex: roomIndex + 1,
           language: r.language,
-          description: (r.description || '').slice(0, 60),
           fileCount: (context.roomFiles || []).filter((f: any) => f.room_id === r.id).length,
-          files: (context.roomFiles || []).filter((f: any) => f.room_id === r.id).map((f: any) => ({
-            name: f.name,
-            folder: f.folder,
-            fileType: f.file_type,
-            sizeBytes: f.size_bytes,
-            hasContent: f._hasContent || false,
-          })),
+          fileTypes: Array.from(new Set(
+            (context.roomFiles || [])
+              .filter((f: any) => f.room_id === r.id)
+              .map((f: any) => compactSafeText(f.file_type, 40))
+              .filter(Boolean),
+          )).slice(0, 12),
           recentMessages: (context.roomMessages || []).filter((m: any) => m.room_id === r.id).length,
         })),
         // Room file actions executed
         roomFileActions: roomFileResults.length > 0 ? roomFileResults : null,
         // Trading data
-        wallets: (context.wallets || []).map((w: any) => ({
-          name: w.display_name,
-          address: w.wallet_address_sol,
-          portfolioUsd: w.portfolio_value_usd ? Number(w.portfolio_value_usd) : null,
-        })),
+        walletCount: (context.wallets || []).length,
         tradingAlerts: (context.tradingAlerts || []).length,
         dcaConfigs: (context.dcaConfigs || []).length,
         recentTrades: (context.recentTrades || []).slice(0, 5).map((t: any) => ({
           action: t.action,
           status: t.status,
-          inputAmount: t.input_amount,
-          outputAmount: t.output_amount,
         })),
         // AI configuration
         spirit: automation.spirit || null,
-        spiritPrompt: automation.spirit_prompt ? automation.spirit_prompt.slice(0, 500) + '...' : null,
-        systemPrompt: systemPrompt.slice(0, 3000),
-        userPrompt: resolvedPrompt,
+        promptMaterialRedacted: true,
         // Token breakdown
         inputTokens: aiResult.inputTokens,
         outputTokens: aiResult.outputTokens,
         totalTokens: aiResult.totalTokens,
-        // Full context that was sent to the AI
-        contextString: contextString.slice(0, 3000),
-        // Event trigger data (if applicable)
-        eventPayload: eventPayload ? JSON.stringify(eventPayload).slice(0, 1000) : null,
+        eventPayloadPresent: Boolean(eventPayload),
         // Output routing
         outputTarget: outputTarget,
-        webhookUrl: automation.webhook_url || null,
+        webhookConfigured: Boolean(automation.webhook_url),
         agent: automation.agent || 'BlackSwan',
         dryRun: dryRun || false,
         memoryNotes: memoryNotes.length > 0 ? memoryNotes.map((n: any) => n.title) : [],
@@ -1979,8 +2591,8 @@ ${contextString}`;
           status: "completed",
           completed_at: completedAt,
           duration_ms: durationMs,
-          output_text: aiResult.text,
-          prompt_used: resolvedPrompt,
+          output_text: redactAutomationText(aiResult.text, 8000),
+          prompt_used: "[PROMPT_REDACTED]",
           token_count: aiResult.totalTokens,
           model_used: aiResult.model,
           estimated_cost: aiResult.estimatedCost,
@@ -1989,6 +2601,18 @@ ${contextString}`;
           error_message: null,
         })
         .eq("id", runId);
+      if (requestedRunId) {
+        await supabase
+          .from("agent_runs")
+          .update({
+            status: "completed",
+            completed_at: completedAt,
+            updated_at: completedAt,
+          })
+          .eq("id", requestedRunId)
+          .eq("circle_id", circleId)
+          .eq("user_id", authedUser!.id);
+      }
 
       // 10. Update automation metadata
       // Note: For scheduled triggers, pg_cron already updates last_run_at, run_count, and next_run_at.
@@ -2039,13 +2663,14 @@ ${contextString}`;
           todayCheckIns: context.todayCheckIns,
           openTasks: context.openTasks,
           completedTasks: context.completedTasks,
-          aiOutput: aiResult.text,
-          resolvedPrompt,
-          systemPrompt,
+          aiOutput: redactAutomationText(aiResult.text, 8000),
+          resolvedPrompt: "[PROMPT_REDACTED]",
+          systemPrompt: "[SYSTEM_PROMPT_REDACTED]",
           logSteps,
           completedAt,
         });
-        const { data: newTask } = await supabase.from("tasks").insert({
+        externalMutationMayHaveDispatched = true;
+        await supabase.from("tasks").insert({
           circle_id: circleId,
           created_by: taskCreator,
           title: reportTask.title,
@@ -2054,16 +2679,7 @@ ${contextString}`;
           status: "done",
           completed_at: completedAt,
           position: 99999,
-        }).select("id").single();
-
-        // Add the full AI output as a comment on the task
-        if (newTask?.id) {
-          await supabase.from("task_comments").insert({
-            task_id: newTask.id,
-            user_id: taskCreator,
-            content: `[AUTOMATION_REPORT]\n\n--- AI FULL OUTPUT ---\n${aiResult.text}\n\n--- PROMPT SENT ---\n${resolvedPrompt}\n\n--- SYSTEM PROMPT ---\n${systemPrompt}`,
-          });
-        }
+        });
         await logStep("✓ Report task created");
       }
 
@@ -2075,7 +2691,8 @@ ${contextString}`;
     } catch (execErr: any) {
       // Update run as failed with detailed log
       const durationMs = Date.now() - startTime;
-      logSteps.push(`[${(durationMs / 1000).toFixed(1)}s] ❌ Failed: ${execErr.message}`);
+      const safeError = sanitizeAutomationError(execErr);
+      logSteps.push(`[${(durationMs / 1000).toFixed(1)}s] ❌ Failed: ${safeError}`);
 
       if (runId) {
         await supabase
@@ -2084,10 +2701,32 @@ ${contextString}`;
             status: "failed",
             completed_at: new Date().toISOString(),
             duration_ms: durationMs,
-            error_message: execErr.message,
-            input_context: { log: logSteps },
+            error_message: safeError,
+            input_context: {
+              ...initialInputContext,
+              log: logSteps,
+            },
           })
           .eq("id", runId);
+      }
+      if (requestedRunId) {
+        const completedAt = new Date().toISOString();
+        await supabase
+          .from("agent_runs")
+          .update({
+            status: "failed",
+            completed_at: completedAt,
+            updated_at: completedAt,
+            metadata: {
+              automationId,
+              outcomeUnknown: externalMutationMayHaveDispatched,
+              errorCode: safeError,
+              redacted: true,
+            },
+          })
+          .eq("id", requestedRunId)
+          .eq("circle_id", circleId)
+          .eq("user_id", authedUser!.id);
       }
 
       // Log failure to activity feed
@@ -2098,15 +2737,18 @@ ${contextString}`;
         source_detail: `automation:${automation.name}`,
         activity_type: "task_completed",
         title: `🤖 ${automation.name}`,
-        body: `❌ Failed: ${execErr.message}\n\n${logSteps.join("\n")}`.slice(0, 2000),
+        body: `❌ Failed: ${safeError}\n\n${logSteps.join("\n")}`.slice(0, 2000),
         status: "failed",
-        metadata: { automation_id: automationId, run_id: runId, trigger: triggerSource },
+        metadata: withAgentSubjectMetadata(
+          { automation_id: automationId, run_id: runId, trigger: triggerSource },
+          agentSubjectMetadata,
+        ),
       });
 
       // Update automation last_error
       await supabase
         .from("circle_automations")
-        .update({ last_error: execErr.message, last_run_at: new Date().toISOString() })
+        .update({ last_error: safeError, last_run_at: new Date().toISOString() })
         .eq("id", automationId);
 
       // Create failure report task
@@ -2119,7 +2761,7 @@ ${contextString}`;
           `AUTOMATION FAILED: ${automation.name}`,
           `${"=".repeat(50)}`,
           `Status: FAILED`,
-          `Error: ${execErr.message}`,
+          `Error: ${safeError}`,
           `Trigger: ${triggerSource}`,
           `Failed at: ${dateLabel} at ${timeLabel} ET`,
           `Duration: ${(durationMs / 1000).toFixed(1)}s`,
@@ -2144,7 +2786,12 @@ ${contextString}`;
       // Retry logic: dispatch retry immediately via pg_net (fire-and-forget)
       // Using pg_net instead of setTimeout because Deno edge functions
       // terminate after response — setTimeout would never fire.
-      if (retryCount < MAX_RETRIES) {
+      if (
+        retryCount < MAX_RETRIES
+        && !externalMutationMayHaveDispatched
+        && !mutationBlockedNoRetry
+        && !requestedRunId
+      ) {
         const nextRetry = retryCount + 1;
         console.log(`Dispatching retry ${nextRetry}/${MAX_RETRIES} for automation ${automationId}`);
         try {
@@ -2157,9 +2804,9 @@ ${contextString}`;
             p_event_payload: eventPayload ? JSON.stringify(eventPayload) : null,
             p_retry_count: nextRetry,
           });
-        } catch (retryErr) {
+        } catch {
           // Fallback: fire-and-forget fetch (best-effort, may not complete)
-          console.error(`Retry dispatch failed, trying direct fetch:`, retryErr);
+          console.warn("[automation-executor] retry RPC unavailable; trying bounded direct retry");
           const supabaseUrl = Deno.env.get("SUPABASE_URL");
           const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
           if (supabaseUrl && serviceKey) {
@@ -2172,6 +2819,8 @@ ${contextString}`;
               body: JSON.stringify({
                 automationId, circleId, triggerSource: "retry",
                 triggeredBy, eventPayload, retryCount: nextRetry,
+                agentSubject: agentSubjectMetadata || undefined,
+                agentSubjectMetadata: agentSubjectMetadata || undefined,
               }),
             }).catch(() => {});
           }
@@ -2182,9 +2831,10 @@ ${contextString}`;
     }
 
   } catch (err: any) {
-    console.error("automation-executor error:", err);
+    const safeError = sanitizeAutomationError(err);
+    console.error("[automation-executor] request failed:", safeError);
     return new Response(
-      JSON.stringify({ error: err.message }),
+      JSON.stringify({ error: safeError }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }

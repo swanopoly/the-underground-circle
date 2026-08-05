@@ -17,6 +17,7 @@ import {
   logClaudeUsage,
   type UsageBreakdown,
 } from "../_claude/anthropic.ts";
+import { errResponse, isServiceRoleRequest } from "../_shared/edge.ts";
 
 const HEARTBEAT_MODEL = "claude-haiku-4-5";
 
@@ -24,6 +25,20 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
+function envFlag(name: string, fallback = false): boolean {
+  const raw = (Deno.env.get(name) || "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function heartbeatAgentEnabled(): boolean {
+  if (envFlag("AUTONOMOUS_AI_PAUSED")) return false;
+  if (envFlag("HEARTBEAT_AGENT_PAUSED")) return false;
+  // Cost guard: after the Anthropic spend investigation, heartbeat is
+  // opt-in only. Set HEARTBEAT_AGENT_ENABLED=true to re-enable this cron.
+  return envFlag("HEARTBEAT_AGENT_ENABLED", false);
+}
 
 // ─── Tool Definitions (same as swanbot-ai) ──────────────────────────────────
 
@@ -486,6 +501,38 @@ What needs attention? Take action if needed, or say "All clear." if everything i
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  if (req.method === "GET") {
+    return new Response(
+      JSON.stringify({
+        service: "heartbeat-agent",
+        status: heartbeatAgentEnabled() ? "enabled" : "paused",
+        enabled: heartbeatAgentEnabled(),
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  // Cron-only run path: the heartbeat drives cross-circle reads/writes and
+  // Anthropic spend on the service-role client. pg_cron already calls this
+  // with Bearer <service_role_key>; block anon/user callers so they cannot
+  // trigger heartbeat runs against arbitrary circles.
+  if (!isServiceRoleRequest(req)) {
+    return errResponse(401, "unauthorized", "heartbeat-agent requires service-role authorization");
+  }
+
+  if (!heartbeatAgentEnabled()) {
+    return new Response(
+      JSON.stringify({
+        skipped: true,
+        service: "heartbeat-agent",
+        reason: "heartbeat_agent_paused",
+        enabled: false,
+        message: "Heartbeat agent is paused. Set HEARTBEAT_AGENT_ENABLED=true to re-enable scheduled Anthropic usage.",
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   try {

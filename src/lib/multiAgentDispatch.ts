@@ -41,6 +41,16 @@ export interface MultiAgentAvailableAgent {
   model?: string | null;
 }
 
+export interface MultiAgentDeploymentIntent {
+  bounded: true;
+  strategy: MultiAgentStrategy;
+  maxTargets: number;
+  targetIds: string[];
+  truncatedCount: number;
+  requestedScope: string;
+  modelPolicy: 'agent_select_from_connected_providers';
+}
+
 export interface MultiAgentOrchestrationPlan {
   kind: 'dispatch' | 'help';
   prompt: string;
@@ -50,6 +60,7 @@ export interface MultiAgentOrchestrationPlan {
   strategy: MultiAgentStrategy;
   truncatedCount: number;
   reason?: string;
+  deploymentIntent?: MultiAgentDeploymentIntent;
 }
 
 export interface MultiAgentRunResult {
@@ -109,6 +120,16 @@ const MAX_MULTI_AGENT_TARGETS = 12;
 const MAX_ROUNDTABLE_TARGETS = 5;
 const MAX_SEQUENTIAL_TARGETS = 8;
 const MAX_DEBATE_TARGETS = 6;
+
+function maxTargetsForStrategy(strategy: MultiAgentStrategy): number {
+  return strategy === 'roundtable'
+    ? MAX_ROUNDTABLE_TARGETS
+    : strategy === 'sequential'
+      ? MAX_SEQUENTIAL_TARGETS
+      : strategy === 'debate'
+        ? MAX_DEBATE_TARGETS
+        : MAX_MULTI_AGENT_TARGETS;
+}
 
 function normalizeAlias(value: string): string {
   return String(value || '')
@@ -254,13 +275,7 @@ function capTargets(
   targets: MultiAgentAvailableAgent[],
   strategy: MultiAgentStrategy,
 ): { targets: MultiAgentAvailableAgent[]; truncatedCount: number } {
-  const cap = strategy === 'roundtable'
-    ? MAX_ROUNDTABLE_TARGETS
-    : strategy === 'sequential'
-      ? MAX_SEQUENTIAL_TARGETS
-      : strategy === 'debate'
-        ? MAX_DEBATE_TARGETS
-        : MAX_MULTI_AGENT_TARGETS;
+  const cap = maxTargetsForStrategy(strategy);
   const usable = uniqueAgents(targets).filter(isUsableAgent);
   return {
     targets: usable.slice(0, cap),
@@ -290,6 +305,8 @@ function makeDispatchPlan(input: {
     };
   }
   const capped = capTargets(input.agents, strategy);
+  const targetIds = capped.targets.map(agent => agent.id);
+  const targetNames = capped.targets.map(agent => agent.name);
   if (capped.targets.length < 2) {
     return {
       kind: 'help',
@@ -305,12 +322,21 @@ function makeDispatchPlan(input: {
   return {
     kind: 'dispatch',
     prompt,
-    targetIds: capped.targets.map(agent => agent.id),
-    targetNames: capped.targets.map(agent => agent.name),
+    targetIds,
+    targetNames,
     targetDescription: input.targetDescription,
     strategy,
     truncatedCount: capped.truncatedCount,
     reason: input.reason,
+    deploymentIntent: {
+      bounded: true,
+      strategy,
+      maxTargets: maxTargetsForStrategy(strategy),
+      targetIds,
+      truncatedCount: capped.truncatedCount,
+      requestedScope: input.targetDescription,
+      modelPolicy: 'agent_select_from_connected_providers',
+    },
   };
 }
 
@@ -441,6 +467,26 @@ function parseNaturalMultiAgent(
   raw: string,
   agents: MultiAgentAvailableAgent[],
 ): MultiAgentOrchestrationPlan | null {
+  const trailingMaxFanout = raw.match(/^([\s\S]+?)\s+(?:and\s+)?(?:use|deploy|spawn|run|assign|with|using|have|put)\s+as\s+many\s+agents?(?:\s+work\s+on\s+(?:it|this))?\s+as\s+possible\.?$/i);
+  if (trailingMaxFanout) {
+    return makeDispatchPlan({
+      agents: agents.filter(isActiveAgent),
+      prompt: trailingMaxFanout[1],
+      strategy: 'parallel',
+      targetDescription: 'as many active agents as possible',
+    });
+  }
+
+  const leadingMaxFanout = raw.match(/^(?:please\s+)?(?:use|deploy|spawn|run|assign|have|put)\s+(?:as\s+many|all|multiple|parallel)\s+agents?(?:\s+as\s+possible)?(?:\s+(?:to|for|on|with|:))?\s+([\s\S]+)$/i);
+  if (leadingMaxFanout) {
+    return makeDispatchPlan({
+      agents: agents.filter(isActiveAgent),
+      prompt: leadingMaxFanout[1],
+      strategy: 'parallel',
+      targetDescription: 'as many active agents as possible',
+    });
+  }
+
   const roundtable = raw.match(/^(?:run\s+)?(?:a\s+)?(?:multi-agent\s+)?roundtable(?:\s+with\s+agents?)?(?:\s+about|\s+on|\s+for|:)\s+([\s\S]+)$/i);
   if (roundtable) {
     return makeDispatchPlan({
@@ -546,6 +592,7 @@ export function formatMultiAgentHelp(agents: MultiAgentAvailableAgent[], reason?
     '- `/sequence all <task>`',
     '- `/debate all <question>`',
     '- Natural language: `ask all agents to <task>`',
+    '- Natural language: `use as many agents as possible to <task>`',
     '',
     `Available agents (${available.length}):`,
     roster,

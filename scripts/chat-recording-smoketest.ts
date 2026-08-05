@@ -37,7 +37,20 @@ import {
   stopRecording,
 } from '../src/lib/chatRecording';
 // eslint-disable-next-line import/first
-import { findInTree } from '../src/lib/recordingChatCommands';
+import {
+  executeRecordingCommand,
+  findInTree,
+} from '../src/lib/recordingChatCommands';
+// eslint-disable-next-line import/first
+import {
+  collectChatSessionArchiveRecoveryReliabilityTouched,
+  deriveChatSessionArchiveRecoveryRecommendations,
+  summarizeChatSessionArchiveRecoveryReliability,
+} from '../src/lib/chatSessionArchiveRecovery';
+// eslint-disable-next-line import/first
+import {
+  formatChatSessionArchiveRecommendationPromptLines,
+} from '../src/lib/chatSessionArchivePrompt';
 
 // ─── Runner ──────────────────────────────────────────────────────────
 let failures = 0;
@@ -51,7 +64,7 @@ function resetStore() {
   (globalThis as any).localStorage.clear();
 }
 
-function main() {
+async function main() {
   // ─── Slug ───────────────────────────────────────────────────────
   assert(slugifyRecordingName('Open Zoom') === 'open-zoom', 'slug: words');
   assert(slugifyRecordingName('  Close the deal!  ') === 'close-the-deal', 'slug: trim + strip !');
@@ -61,6 +74,7 @@ function main() {
 
   // ─── isRecordable ──────────────────────────────────────────────
   assert(isRecordable('desktop.launch_app'), 'recordable: desktop.launch_app');
+  assert(isRecordable('desktop.set_element_value'), 'recordable: desktop.set_element_value');
   assert(isRecordable('browser.click_role'), 'recordable: browser.click_role');
   assert(!isRecordable('desktop.read_a11y_tree'), 'recordable: read_a11y_tree excluded (read-only)');
   assert(!isRecordable('desktop.screenshot'), 'recordable: screenshot excluded (verification only)');
@@ -181,6 +195,168 @@ function main() {
     assert(plan.note?.includes('Join meeting'), 'plan: note mentions label');
   }
 
+  // ─── set_element_value: semantic override via _target ──────────
+  {
+    const step = buildStep({
+      tool: 'desktop.set_element_value',
+      input: { pid: 1234, path: '0.0.1.0.11', text: 'hello@example.com' },
+      result: { ok: true },
+      a11yTarget: { role: 'AXTextField', label: 'Email', app: 'TextEdit' },
+    });
+    assert(step.outcome.summary === 'Set "Email" to 17 chars', 'append: set field summary has target + char count');
+    const plan = planReplayStep(step);
+    assert(plan.tool === 'desktop.set_element_value', 'plan: set_element_value kept');
+    assert((plan.input as any)._target.label === 'Email', 'plan: set target carried');
+    assert((plan.input as any).text === 'hello@example.com', 'plan: set text carried');
+    assert(plan.note?.includes('Email'), 'plan: set note mentions label');
+  }
+
+  // ─── /replay complete-plan mutation preflight ──────────────────
+  resetStore();
+  startRecording({ name: 'mixed replay', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'browser.dom_snapshot',
+    input: { maxNodes: 50 },
+    result: { ok: true },
+  }));
+  appendStep(buildStep({
+    tool: 'browser.fill_field',
+    input: { name: 'Draft', text: 'must not run' },
+    result: { ok: true },
+  }));
+  stopRecording({ description: 'read then mutate' });
+  {
+    const fired: Array<{ tool: string; input: Record<string, unknown> }> = [];
+    const outcome = await executeRecordingCommand('/replay mixed replay', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async (call) => {
+        fired.push(call);
+        return { ok: true };
+      },
+    });
+    assert(fired.length === 0, 'replay preflight: read-then-mutate plan dispatches zero tools');
+    assert(
+      outcome?.runtimeHandoff?.executable === false
+        && outcome.runtimeHandoff.kind === 'openswan_typed_runtime_plan'
+        && outcome.runtimeHandoff.reasonCode === 'sealed_runtime_identity_and_approval_required',
+      'replay preflight: mixed plan returns a structured non-executable OpenSwan handoff',
+    );
+    assert(
+      outcome?.runtimeHandoff?.blockedTools.includes('browser.fill_field')
+        && outcome.runtimeHandoff.totalSteps === 2
+        && outcome.runtimeHandoff.blockedStepCount === 1,
+      'replay preflight: handoff identifies the blocked mutation without recording arguments',
+    );
+    const serializedHandoff = JSON.stringify(outcome?.runtimeHandoff || {});
+    assert(
+      outcome?.runtimeHandoff?.requiredContext.includes('persisted_agent_run_id') === true
+        && outcome.runtimeHandoff.requiredContext.includes('provider_tool_use_id')
+        && outcome.runtimeHandoff.requiredContext.includes('fresh_observation')
+        && outcome.runtimeHandoff.requiredContext.includes('exact_openswan_runtime_approval')
+        && !serializedHandoff.includes('must not run')
+        && !serializedHandoff.includes('"runId"')
+        && !serializedHandoff.includes('"toolUseId"')
+        && !serializedHandoff.includes('"approvalId"'),
+      'replay preflight: handoff names requirements without copying inputs or fabricating runtime identities',
+    );
+    assert(
+      outcome?.message.includes('fresh authenticated Chat/OpenSwan run')
+        && outcome.message.includes('persisted run identity')
+        && outcome.message.includes('approve each exact mutating tool call')
+        && outcome.message.includes('zero replay steps were executed'),
+      'replay preflight: user message names the fresh-run, observation, and exact-approval recovery',
+    );
+  }
+
+  resetStore();
+  startRecording({ name: 'semantic replay', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'desktop.click_element',
+    input: { pid: 1234, path: '0.0.1' },
+    result: { ok: true },
+    a11yTarget: { role: 'AXButton', label: 'Continue', app: 'Example' },
+  }));
+  stopRecording({ description: 'semantic mutation' });
+  {
+    const fired: string[] = [];
+    const outcome = await executeRecordingCommand('/replay semantic replay', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async (call) => {
+        fired.push(call.tool);
+        return { ok: true };
+      },
+    });
+    assert(
+      fired.length === 0,
+      'replay preflight: semantic mutation cannot run its a11y re-discovery read',
+    );
+    assert(
+      outcome?.runtimeHandoff?.blockedTools.includes('desktop.click_element') === true,
+      'replay preflight: semantic mutation is handed to the typed runtime',
+    );
+  }
+
+  resetStore();
+  startRecording({ name: 'future mutation', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'desktop.future_mutation',
+    input: { arbitrary: true },
+    result: { ok: true },
+  }));
+  stopRecording({ description: 'future unknown desktop mutation' });
+  {
+    let fireCount = 0;
+    const outcome = await executeRecordingCommand('/replay future mutation', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async () => {
+        fireCount += 1;
+        return { ok: true };
+      },
+    });
+    assert(
+      fireCount === 0
+        && outcome?.runtimeHandoff?.blockedTools.includes('desktop.future_mutation') === true,
+      'replay preflight: future unknown desktop tools fail closed with zero dispatches',
+    );
+  }
+
+  resetStore();
+  startRecording({ name: 'read only', circleId: 'c1', userId: 'u1' });
+  appendStep(buildStep({
+    tool: 'desktop.window_state',
+    input: {},
+    result: { ok: true },
+  }));
+  appendStep(buildStep({
+    tool: 'browser.dom_snapshot',
+    input: { maxNodes: 25 },
+    result: { ok: true },
+  }));
+  stopRecording({ description: 'observations only' });
+  {
+    const fired: string[] = [];
+    const outcome = await executeRecordingCommand('/replay read only', {
+      circleId: 'c1',
+      userId: 'u1',
+      fireTool: async (call) => {
+        fired.push(call.tool);
+        return { ok: true };
+      },
+    });
+    assert(
+      fired.join(',') === 'desktop.window_state,browser.dom_snapshot',
+      'replay preflight: allowlisted read-only observations replay in order',
+    );
+    assert(
+      !outcome?.runtimeHandoff
+        && outcome?.message.includes('All 2 steps replayed successfully.'),
+      'replay preflight: read-only plan completes without a mutation handoff',
+    );
+  }
+
   // ─── findInTree ─────────────────────────────────────────────────
   const treeText = [
     '[0] AXApplication "Safari"',
@@ -222,6 +398,112 @@ function main() {
   // Fractional seconds floor correctly
   assert(formatElapsedSec(12.9) === '12s', 'elapsed: fractional floored');
 
+  // ─── Session archive recovery reliability ─────────────────────
+  {
+    const recoveryReliability = {
+      surfaceKind: 'desktop_app',
+      targetName: 'Universal App Control',
+      taskFamily: 'desktop_workflow',
+      failureArea: 'fresh_evidence',
+      retryAllowed: true,
+      userActionRequired: false,
+      connectedAgentAllowed: true,
+      recommendedOptionId: 'retry_with_fresh_evidence',
+      readinessStatus: 'missing',
+      nextEvidenceTools: ['desktop.window_state', 'desktop.read_a11y_tree'],
+      requiredEvidenceTools: ['desktop.window_state'],
+      requiredFreshEvidence: ['active window state'],
+      requiredProof: ['post-action screenshot'],
+      approvalBoundaries: ['no destructive app changes without approval'],
+      failClosedRules: ['stop after repeated stale evidence'],
+      routeDecisionStatus: 'route_ready',
+      routeDecisionSurface: 'desktop_app',
+      selectedRecoveryOptionId: 'retry_with_fresh_evidence',
+      verificationCommands: ['npm run smoke:desktop-runtime-wiring'],
+    };
+    const summaries = summarizeChatSessionArchiveRecoveryReliability(recoveryReliability);
+    const touched = collectChatSessionArchiveRecoveryReliabilityTouched(recoveryReliability);
+    assert(
+      summaries[0]?.includes('Desktop App recovery'),
+      'archive: recovery reliability summary stored',
+    );
+    assert(
+      summaries[0]?.includes('desktop.window_state'),
+      'archive: recovery reliability summary includes evidence tool',
+    );
+    assert(
+      touched.includes('recovery_surface:desktop_app'),
+      'archive: recovery reliability touched surface stored',
+    );
+    assert(
+      touched.includes('recovery_tool:desktop.window_state'),
+      'archive: recovery evidence tool touch stored',
+    );
+    assert(
+      touched.includes('recovery_option:retry_with_fresh_evidence'),
+      'archive: selected recovery option touch stored',
+    );
+    const recoveryRecommendations = deriveChatSessionArchiveRecoveryRecommendations({
+      threadId: 't1',
+      messages: [
+        {
+          messageId: 'm-recovery-1',
+          content: 'Desktop task failed.',
+          timestamp: 1,
+          recoveryReliabilitySummaries: summaries,
+          touched,
+        },
+        {
+          messageId: 'm-recovery-2',
+          content: 'Desktop task failed again.',
+          timestamp: 2,
+          recoveryReliabilitySummaries: summaries,
+          touched,
+        },
+      ],
+    });
+    assert(
+      recoveryRecommendations[0]?.kind === 'recovery_pattern',
+      'archive: repeated recovery reliability becomes recommendation',
+    );
+    assert(
+      recoveryRecommendations[0]?.content.includes('desktop.window_state'),
+      'archive: recovery recommendation preserves evidence tool',
+    );
+    assert(
+      deriveChatSessionArchiveRecoveryRecommendations({
+        threadId: 't1',
+        messages: [
+          {
+            messageId: 'm-recovery-1',
+            recoveryReliabilitySummaries: summaries,
+            touched,
+          },
+          {
+            messageId: 'm-recovery-2',
+            recoveryReliabilitySummaries: summaries,
+            touched,
+          },
+        ],
+        handledRecommendationIds: { [recoveryRecommendations[0]?.id || 'missing']: { status: 'dismissed' } },
+      }).length === 0,
+      'archive: handled recovery recommendation stays hidden',
+    );
+    const promptLines = formatChatSessionArchiveRecommendationPromptLines(recoveryRecommendations, 1);
+    assert(
+      promptLines.some((line) => line.includes('Reusable archive patterns')),
+      'archive: recovery recommendation prompt section is formatted',
+    );
+    assert(
+      promptLines.some((line) => line.includes('Evidence tools: desktop.window_state')),
+      'archive: prompt section prioritizes evidence tools',
+    );
+    assert(
+      promptLines.some((line) => line.includes('Readiness: missing')),
+      'archive: prompt section includes readiness state',
+    );
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} chat-recording smoke-test failure(s)`);
     process.exit(1);
@@ -229,4 +511,7 @@ function main() {
   console.log('\nAll chat-recording smoke cases passed.');
 }
 
-main();
+main().catch((error) => {
+  console.error('chat-recording smoke-test crashed:', error);
+  process.exit(1);
+});

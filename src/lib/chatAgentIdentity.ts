@@ -8,6 +8,7 @@ export {
   readPersistedChatBotMetadata,
   stripPersistedChatBotPrefix,
   type PersistedChatBotMetadata,
+  type PersistedChatRecoveryReliabilitySummary,
 } from './persistedChatMetadata';
 
 export const CHAT_AGENT_STORAGE_KEY = 'uc_agent_name';

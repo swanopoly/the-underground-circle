@@ -6,3 +6,7 @@ __pycache__/
 *.pyc
 *.log
 .DS_Store
+
+# root-owned pre-P63 export backup (private app data — never commit)
+raw_data_rootowned_bak_*/
+__pycache___rootowned_bak/

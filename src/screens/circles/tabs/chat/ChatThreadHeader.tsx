@@ -7,7 +7,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import {
   type CircleChatThread,
   type CircleChatThreadMember,
@@ -19,12 +19,24 @@ import {
   removeThreadMember,
   renameThread,
 } from '../../../../lib/circleChatThreads';
-import { SESSION_DELEGATION_MODE_OPTIONS, SESSION_PROFILE_OPTIONS, type SessionCodingProfile, type SessionDelegationMode } from '../../../../lib/chatSessionProfile';
+import type { SessionCodingProfile, SessionDelegationMode } from '../../../../lib/chatSessionProfile';
 import { supabase } from '../../../../lib/supabase';
 import OpenSwanServiceMenu from './OpenSwanServiceMenu';
 import SkillAdminPanel from './SkillAdminPanel';
 import { soulKeyForProfile } from '../../../../lib/serviceProfileSouls';
 import { copyToClipboard } from '../../../../lib/dataExport';
+
+function confirmThreadAction(title: string, message: string, confirmLabel: string): Promise<boolean> {
+  if (Platform.OS === 'web') {
+    return Promise.resolve(typeof window !== 'undefined' && window.confirm(message));
+  }
+  return new Promise((resolve) => {
+    Alert.alert(title, message, [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: confirmLabel, style: 'destructive', onPress: () => resolve(true) },
+    ]);
+  });
+}
 
 interface Props {
   threadId: string | null;
@@ -40,19 +52,36 @@ interface Props {
   onRetryOpenSwanGateway?: (() => void | Promise<void>) | undefined;
   refreshToken?: number;
   onThreadUpdated?: () => void;
-  selectedModel?: string;
   sessionProfile?: SessionCodingProfile;
   delegationMode?: SessionDelegationMode;
   onSessionProfileChange?: (profile: SessionCodingProfile) => void;
   onDelegationModeChange?: (mode: SessionDelegationMode) => void;
   onOpenControlPanel?: () => void;
   onOpenRunHistory?: () => void;
+  /**
+   * Open another thread in the chat surface (plan §4b) — used by the
+   * lineage chip to jump to the parent this thread continues.
+   */
+  onOpenThread?: (threadId: string) => void;
 }
 
 interface CircleMemberOption {
   id: string;
   display_name: string | null;
   username: string | null;
+}
+
+// React Native Pressable is already keyboard-operable on supported native
+// surfaces. Pin an explicit tab stop only on web so these controls remain
+// reachable if react-native-web's implicit Pressable behavior changes.
+const WEB_BUTTON_FOCUS_PROPS = Platform.OS === 'web'
+  ? ({ focusable: true, tabIndex: 0 } as any)
+  : {};
+
+function webDescriptiveLabel(label: string, hint: string): Record<string, unknown> {
+  return Platform.OS === 'web'
+    ? ({ 'aria-label': `${label}. ${hint}` } as any)
+    : {};
 }
 
 export default function ChatThreadHeader({
@@ -64,13 +93,13 @@ export default function ChatThreadHeader({
   onRetryOpenSwanGateway,
   refreshToken = 0,
   onThreadUpdated,
-  selectedModel = 'auto',
   sessionProfile = 'senior',
   delegationMode = 'auto',
   onSessionProfileChange,
   onDelegationModeChange,
   onOpenControlPanel,
   onOpenRunHistory,
+  onOpenThread,
 }: Props) {
   const [thread, setThread] = useState<CircleChatThread | null>(null);
   const [members, setMembers] = useState<CircleChatThreadMember[]>([]);
@@ -85,6 +114,11 @@ export default function ChatThreadHeader({
 
   useEffect(() => {
     if (!threadId) { setThread(null); setMembers([]); return; }
+    // Never leave the previous thread's controls/title on screen while the
+    // newly selected thread is resolving. The compact service bar below is
+    // the safe loading/error fallback and remains useful for recovery.
+    setThread(null);
+    setMembers([]);
     let cancelled = false;
     Promise.all([getThread(threadId), listThreadMembers(threadId)])
       .then(([t, ms]) => {
@@ -96,22 +130,97 @@ export default function ChatThreadHeader({
     return () => { cancelled = true; };
   }, [threadId, refreshToken]);
 
-  if (!thread) return null;
+  const servicePanels = (
+    <>
+      <OpenSwanServiceMenu
+        visible={showServiceMenu}
+        sessionProfile={sessionProfile}
+        delegationMode={delegationMode}
+        onSessionProfileChange={(p) => onSessionProfileChange?.(p)}
+        onDelegationModeChange={(m) => onDelegationModeChange?.(m)}
+        onOpenControlPanel={onOpenControlPanel}
+        onOpenSkills={() => setShowSkills(true)}
+        onOpenRunHistory={onOpenRunHistory}
+        onClose={() => setShowServiceMenu(false)}
+      />
+
+      <SkillAdminPanel
+        visible={showSkills}
+        circleId={circleId}
+        soulKey={soulKeyForProfile(sessionProfile)}
+        userId={currentUserId || ''}
+        onClose={() => setShowSkills(false)}
+      />
+    </>
+  );
+
+  const compactServiceBar = (
+    <View style={[styles.bar, styles.circleBar]}>
+      <View style={styles.circleControlCopy}>
+        <Text style={styles.circleControlTitle}>OpenSwan controls</Text>
+        <Text style={styles.circleControlHint} numberOfLines={1}>
+          Agents, modes, models, approvals & recovery
+        </Text>
+      </View>
+      <View style={styles.actions}>
+        <Pressable
+          {...WEB_BUTTON_FOCUS_PROPS}
+          {...webDescriptiveLabel(
+            'Open OpenSwan service controls',
+            'Choose mode and crew, or continue to agent, model, approval, and tool settings.',
+          )}
+          onPress={() => setShowServiceMenu(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Open OpenSwan service controls"
+          accessibilityHint="Choose mode and crew, or continue to agent, model, approval, and tool settings."
+          style={({ hovered, pressed, focused }: any) => [
+            styles.serviceActionBtn,
+            hovered && { borderColor: '#f59e0b', backgroundColor: '#241708' },
+            pressed && { transform: [{ scale: 0.97 }] },
+            focused && Platform.OS === 'web' && styles.keyboardFocus,
+            Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+          ]}
+        >
+          <Text style={styles.serviceActionText}>OPEN</Text>
+        </Pressable>
+        {onOpenRunHistory ? (
+          <Pressable
+            {...WEB_BUTTON_FOCUS_PROPS}
+            {...webDescriptiveLabel(
+              'Open OpenSwan runs and recovery',
+              'Review active, completed, or blocked runs and available recovery actions.',
+            )}
+            onPress={onOpenRunHistory}
+            accessibilityRole="button"
+            accessibilityLabel="Open OpenSwan runs and recovery"
+            accessibilityHint="Review active, completed, or blocked runs and available recovery actions."
+            style={({ hovered, pressed, focused }: any) => [
+              styles.actionBtnGhost,
+              hovered && { borderColor: '#38bdf8', backgroundColor: '#0b2030' },
+              pressed && { transform: [{ scale: 0.97 }] },
+              focused && Platform.OS === 'web' && styles.keyboardFocus,
+              Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+            ]}
+          >
+            <Text style={styles.actionBtnGhostText}>RUNS</Text>
+          </Pressable>
+        ) : null}
+      </View>
+      {servicePanels}
+    </View>
+  );
+
+  const isCircleThread = thread?.visibility === 'circle';
+  if (!thread || isCircleThread) return compactServiceBar;
 
   const isOwner = !!currentUserId && thread.created_by === currentUserId;
-  const isCircleThread = thread.visibility === 'circle';
+
   const visibilityLabel =
-    thread.visibility === 'circle' ? 'CIRCLE'
-    : thread.visibility === 'shared' ? `SHARED · ${members.length}`
+    thread.visibility === 'shared' ? `SHARED · ${members.length}`
     : 'PRIVATE';
   const visibilityTone =
-    thread.visibility === 'circle' ? '#f59e0b'
-    : thread.visibility === 'shared' ? '#f59e0b'
+    thread.visibility === 'shared' ? '#f59e0b'
     : '#94a3b8';
-  const currentProfile = SESSION_PROFILE_OPTIONS.find(option => option.id === sessionProfile) || SESSION_PROFILE_OPTIONS[0];
-  const currentDelegationMode = SESSION_DELEGATION_MODE_OPTIONS.find(option => option.id === delegationMode) || SESSION_DELEGATION_MODE_OPTIONS[0];
-  const isAllAuto = currentProfile.id === 'auto' && currentDelegationMode.id === 'auto';
-
   const handleSaveTitle = async () => {
     const next = draftTitle.trim();
     if (!next || next === thread.title) { setEditing(false); return; }
@@ -150,26 +259,48 @@ export default function ChatThreadHeader({
         )}
         <View style={styles.metaRow}>
           <Text style={[styles.badge, { color: visibilityTone, borderColor: visibilityTone }]}>{visibilityLabel}</Text>
+          {thread.parent_thread_id ? (
+            /* Plan §4b: lineage was tracked in the DB but invisible — a
+               compressed/forked thread now says so and can jump back. */
+            <Pressable
+              onPress={onOpenThread ? () => onOpenThread(thread.parent_thread_id!) : undefined}
+              disabled={!onOpenThread}
+            >
+              <Text style={[styles.badge, { color: '#38bdf8', borderColor: '#38bdf8' }]}>
+                ↳ CONTINUES EARLIER THREAD{onOpenThread ? ' · OPEN' : ''}
+              </Text>
+            </Pressable>
+          ) : null}
           {openswanGatewayNotice ? (
             <View style={styles.gatewayNoticeWrap}>
               <Text style={styles.gatewayNotice} numberOfLines={1}>
                 {openswanGatewayNotice.message}
               </Text>
-              <Pressable onPress={() => setShowServiceMenu(true)} style={styles.gatewayActionBtn}>
+              <Pressable
+                {...WEB_BUTTON_FOCUS_PROPS}
+                onPress={() => setShowServiceMenu(true)}
+                accessibilityRole="button"
+                accessibilityLabel="Open OpenSwan service controls"
+                style={styles.gatewayActionBtn}
+              >
                 <Text style={styles.gatewayActionText}>SERVICE</Text>
               </Pressable>
               <Pressable
+                {...WEB_BUTTON_FOCUS_PROPS}
                 onPress={async () => {
                   const ok = await copyToClipboard(openswanGatewayNotice.fixCommand || 'openswan gateway start');
                   setCopiedGatewayCmd(ok);
                   if (ok) setTimeout(() => setCopiedGatewayCmd(false), 1800);
                 }}
+                accessibilityRole="button"
+                accessibilityLabel={copiedGatewayCmd ? 'OpenSwan fix command copied' : 'Copy OpenSwan gateway fix command'}
                 style={styles.gatewayActionBtn}
               >
                 <Text style={styles.gatewayActionText}>{copiedGatewayCmd ? 'COPIED' : (openswanGatewayNotice.fixLabel || 'COPY FIX')}</Text>
               </Pressable>
               {onRetryOpenSwanGateway ? (
                 <Pressable
+                  {...WEB_BUTTON_FOCUS_PROPS}
                   disabled={retryingGateway}
                   onPress={async () => {
                     try {
@@ -179,6 +310,9 @@ export default function ChatThreadHeader({
                       setRetryingGateway(false);
                     }
                   }}
+                  accessibilityRole="button"
+                  accessibilityLabel={retryingGateway ? 'Retrying local OpenSwan gateway' : 'Retry local OpenSwan gateway'}
+                  accessibilityState={{ disabled: retryingGateway, busy: retryingGateway }}
                   style={[styles.gatewayActionBtn, retryingGateway && styles.gatewayActionBtnDisabled]}
                 >
                   <Text style={styles.gatewayActionText}>{retryingGateway ? 'RETRYING…' : 'RETRY LOCAL'}</Text>
@@ -186,6 +320,7 @@ export default function ChatThreadHeader({
               ) : null}
               {onDisableOpenSwanGateway ? (
                 <Pressable
+                  {...WEB_BUTTON_FOCUS_PROPS}
                   disabled={disablingGateway}
                   onPress={async () => {
                     try {
@@ -195,6 +330,9 @@ export default function ChatThreadHeader({
                       setDisablingGateway(false);
                     }
                   }}
+                  accessibilityRole="button"
+                  accessibilityLabel={disablingGateway ? 'Disabling local OpenSwan gateway' : 'Disable local OpenSwan gateway'}
+                  accessibilityState={{ disabled: disablingGateway, busy: disablingGateway }}
                   style={[styles.gatewayActionBtn, disablingGateway && styles.gatewayActionBtnDisabled]}
                 >
                   <Text style={styles.gatewayActionText}>{disablingGateway ? 'DISABLING…' : 'DISABLE LOCAL'}</Text>
@@ -202,37 +340,66 @@ export default function ChatThreadHeader({
               ) : null}
             </View>
           ) : null}
-          {(onSessionProfileChange || onDelegationModeChange) && (
-            <Pressable onPress={() => setShowServiceMenu(true)} style={styles.serviceBtn}>
-              {isAllAuto ? (
-                <Text style={[styles.serviceBtnTag, { color: '#f59e0b' }]}>Auto ▾</Text>
-              ) : (
-                <>
-                  <Text style={[styles.serviceBtnTag, { color: currentProfile.color }]}>{currentProfile.shortLabel}</Text>
-                  <Text style={styles.serviceBtnSep}>·</Text>
-                  <Text style={[styles.serviceBtnTag, { color: currentDelegationMode.color }]}>{currentDelegationMode.shortLabel}</Text>
-                  <Text style={styles.serviceBtnCaret}>▾</Text>
-                </>
-              )}
-            </Pressable>
-          )}
         </View>
       </View>
 
       <View style={styles.actions}>
-        {!isCircleThread && (
-          <Pressable onPress={onOpenRunHistory} style={styles.actionBtnGhost}>
+        <Pressable
+          {...WEB_BUTTON_FOCUS_PROPS}
+          {...webDescriptiveLabel(
+            'Open OpenSwan service controls',
+            'Choose mode and crew, or continue to agent, model, approval, and tool settings.',
+          )}
+          onPress={() => setShowServiceMenu(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Open OpenSwan service controls"
+          accessibilityHint="Choose mode and crew, or continue to agent, model, approval, and tool settings."
+          style={({ hovered, pressed, focused }: any) => [
+            styles.serviceActionBtn,
+            hovered && { borderColor: '#f59e0b', backgroundColor: '#241708' },
+            pressed && { transform: [{ scale: 0.97 }] },
+            focused && Platform.OS === 'web' && styles.keyboardFocus,
+            Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+          ]}
+        >
+          <Text style={styles.serviceActionText}>OPENSWAN</Text>
+        </Pressable>
+        {onOpenRunHistory ? (
+          <Pressable
+            {...WEB_BUTTON_FOCUS_PROPS}
+            {...webDescriptiveLabel(
+              'Open OpenSwan runs and recovery',
+              'Review active, completed, or blocked runs and available recovery actions.',
+            )}
+            onPress={onOpenRunHistory}
+            accessibilityRole="button"
+            accessibilityLabel="Open OpenSwan runs and recovery"
+            accessibilityHint="Review active, completed, or blocked runs and available recovery actions."
+            style={({ hovered, pressed, focused }: any) => [
+              styles.actionBtnGhost,
+              hovered && { borderColor: '#38bdf8', backgroundColor: '#0b2030' },
+              pressed && { transform: [{ scale: 0.97 }] },
+              focused && Platform.OS === 'web' && styles.keyboardFocus,
+              Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+            ]}
+          >
             <Text style={styles.actionBtnGhostText}>RUNS</Text>
           </Pressable>
-        )}
+        ) : null}
         {!isCircleThread && (
-          <Pressable onPress={() => setShowInvite(true)} style={styles.actionBtn}>
+          <Pressable onPress={() => setShowInvite(true)} style={styles.actionBtn} accessibilityRole="button" accessibilityLabel={isOwner ? 'Invite members to this conversation' : 'View conversation members'}>
             <Text style={styles.actionBtnText}>{isOwner ? '+ INVITE' : 'MEMBERS'}</Text>
           </Pressable>
         )}
         {!isCircleThread && isOwner && (
           <Pressable
             onPress={async () => {
+              const confirmed = await confirmThreadAction(
+                'Archive conversation?',
+                'Archive this conversation? It will disappear from the Chat sidebar.',
+                'Archive',
+              );
+              if (!confirmed) return;
               try {
                 await archiveThread(thread.id);
               } catch (err) {
@@ -241,6 +408,8 @@ export default function ChatThreadHeader({
                 onThreadUpdated?.();
               }
             }}
+            accessibilityRole="button"
+            accessibilityLabel={`Archive ${thread.title}`}
             style={styles.actionBtnGhost}
           >
             <Text style={styles.actionBtnGhostText}>ARCHIVE</Text>
@@ -248,24 +417,7 @@ export default function ChatThreadHeader({
         )}
       </View>
 
-      <OpenSwanServiceMenu
-        visible={showServiceMenu}
-        sessionProfile={sessionProfile}
-        delegationMode={delegationMode}
-        onSessionProfileChange={(p) => onSessionProfileChange?.(p)}
-        onDelegationModeChange={(m) => onDelegationModeChange?.(m)}
-        onOpenControlPanel={onOpenControlPanel}
-        onOpenSkills={() => setShowSkills(true)}
-        onClose={() => setShowServiceMenu(false)}
-      />
-
-      <SkillAdminPanel
-        visible={showSkills}
-        circleId={circleId}
-        soulKey={soulKeyForProfile(sessionProfile)}
-        userId={currentUserId || ''}
-        onClose={() => setShowSkills(false)}
-      />
+      {servicePanels}
 
       {showInvite && (
         <InviteToThreadModal
@@ -277,6 +429,7 @@ export default function ChatThreadHeader({
           onClose={() => setShowInvite(false)}
           onMembersChanged={async () => {
             try { setMembers(await listThreadMembers(thread.id)); } catch {}
+            finally { onThreadUpdated?.(); }
           }}
         />
       )}
@@ -331,12 +484,26 @@ function InviteToThreadModal({
   });
 
   return (
-    <Modal transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={modalStyles.scrim} onPress={onClose}>
-        <Pressable style={modalStyles.card} onPress={(e) => e.stopPropagation()}>
+    <Modal
+      transparent
+      animationType="fade"
+      accessibilityLabel={isOwner ? 'Invite members to this Chat thread' : 'Chat thread members'}
+      onRequestClose={onClose}
+    >
+      <View style={modalStyles.scrim}>
+        <View accessibilityViewIsModal style={modalStyles.card}>
           <View style={modalStyles.header}>
             <Text style={modalStyles.title}>{isOwner ? 'Invite to this thread' : 'Thread members'}</Text>
-            <Pressable onPress={onClose} style={modalStyles.closeBtn}>
+            <Pressable
+              {...WEB_BUTTON_FOCUS_PROPS}
+              onPress={onClose}
+              accessibilityRole="button"
+              accessibilityLabel="Close thread members dialog"
+              style={({ focused }: any) => [
+                modalStyles.closeBtn,
+                focused && Platform.OS === 'web' && styles.keyboardFocus,
+              ]}
+            >
               <Text style={modalStyles.closeBtnText}>×</Text>
             </Pressable>
           </View>
@@ -361,6 +528,8 @@ function InviteToThreadModal({
                         finally { setBusy(false); }
                       }}
                       style={modalStyles.smallBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove ${m.display_name || m.username || 'member'} from this conversation`}
                     >
                       <Text style={modalStyles.smallBtnText}>REMOVE</Text>
                     </Pressable>
@@ -368,12 +537,20 @@ function InviteToThreadModal({
                   {(!isOwner && m.user_id === currentUserId) && (
                     <Pressable
                       onPress={async () => {
+                        const confirmed = await confirmThreadAction(
+                          'Leave conversation?',
+                          'Leave this shared conversation? You may need another invitation to return.',
+                          'Leave',
+                        );
+                        if (!confirmed) return;
                         setBusy(true);
                         try { await leaveThread(threadId); onMembersChanged(); onClose(); }
                         catch (err) { console.warn('[InviteToThreadModal] leave failed:', err); }
                         finally { setBusy(false); }
                       }}
                       style={modalStyles.smallBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel="Leave this conversation"
                     >
                       <Text style={modalStyles.smallBtnText}>LEAVE</Text>
                     </Pressable>
@@ -417,8 +594,14 @@ function InviteToThreadModal({
               </ScrollView>
             </View>
           )}
-        </Pressable>
-      </Pressable>
+        </View>
+        <View
+          accessible={false}
+          style={modalStyles.dismissBackdrop}
+          onStartShouldSetResponder={() => true}
+          onResponderRelease={onClose}
+        />
+      </View>
     </Modal>
   );
 }
@@ -429,6 +612,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 8, gap: 12,
     borderBottomWidth: 1, borderBottomColor: '#1a1a28',
     backgroundColor: '#050810',
+  },
+  circleBar: {
+    minHeight: 48,
+    flexWrap: 'wrap',
+  },
+  circleControlCopy: {
+    flex: 1,
+    minWidth: 180,
+    gap: 2,
+  },
+  circleControlTitle: {
+    color: '#f59e0b',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+  },
+  circleControlHint: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '700',
   },
   titleColumn: { flex: 1, gap: 2 },
   title: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
@@ -475,17 +679,16 @@ const styles = StyleSheet.create({
   },
   metaModel: { color: '#64748b', fontSize: 10, fontWeight: '700' },
   metaModelMuted: { color: '#475569', fontSize: 10, fontWeight: '700' },
-  serviceBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 8, paddingVertical: 4,
-    borderRadius: 6, borderWidth: 1, borderColor: '#1e293b',
-    backgroundColor: '#0b1220',
+  actions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 },
+  serviceActionBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    backgroundColor: '#17110a',
   },
-  serviceBtnLabel: { color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' },
-  serviceBtnTag: { fontSize: 9, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
-  serviceBtnSep: { color: '#475569', fontSize: 9, fontWeight: '900' },
-  serviceBtnCaret: { color: '#64748b', fontSize: 9, fontWeight: '900' },
-  actions: { flexDirection: 'row', gap: 6 },
+  serviceActionText: { color: '#f59e0b', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   actionBtn: {
     paddingHorizontal: 10, paddingVertical: 6,
     borderRadius: 6, borderWidth: 1, borderColor: '#22d3ee',
@@ -498,6 +701,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#0f172a',
   },
   actionBtnGhostText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
+  keyboardFocus: Platform.OS === 'web' ? ({
+    outlineColor: '#f8fafc',
+    outlineOffset: 2,
+    outlineStyle: 'solid',
+    outlineWidth: 2,
+  } as any) : {},
 });
 
 const modalStyles = StyleSheet.create({
@@ -508,7 +717,11 @@ const modalStyles = StyleSheet.create({
   card: {
     width: '100%', maxWidth: 480, borderRadius: 14,
     backgroundColor: '#0a0f1c', borderWidth: 1, borderColor: '#1e293b',
-    padding: 16, gap: 16,
+    padding: 16, gap: 16, zIndex: 1,
+  },
+  dismissBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 0,
   },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   title: { color: '#f8fafc', fontSize: 16, fontWeight: '800' },

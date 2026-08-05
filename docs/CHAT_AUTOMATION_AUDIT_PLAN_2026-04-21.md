@@ -33,7 +33,7 @@ As of the latest pass:
 
 - [chatAutomationPlanner.ts](/Users/cswanson/the-underground-circle/src/lib/chatAutomationPlanner.ts) is now the canonical classification layer for chat input.
 - [runChatAutomationPlan.ts](/Users/cswanson/the-underground-circle/src/lib/runChatAutomationPlan.ts) is now the canonical dispatch contract for shared chat transports.
-- [ChatTab.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/ChatTab.tsx) now consumes that planner for normalized route/source decisions, command-audit shaping, planned dispatch for stable route families (`help`, `mission`, `summary`, `room`, `browser`, `github`, `wordpress`, `schedule`, `build_page`, `hf_tools`, `search`, `memory`, `governance`), explicit `run_openswan` mode routing, the shared plain-chat transport, active conversational build discovery continuation, and the main `open_modal` quick-action cases.
+- [ChatTab.tsx](/Users/cswanson/the-underground-circle/src/screens/circles/tabs/ChatTab.tsx) now consumes that planner for normalized route/source decisions, command-audit shaping, planned dispatch for stable route families (`help`, `mission`, `summary`, `room`, `browser`, `github`, `wordpress`, `schedule`, `build_page`, `hf_tools`, `search`, `memory`, `governance`), active conversational build discovery continuation, and the main `open_modal` quick-action cases. Terminal `run_plain_chat` / `run_openswan` is classified and smoke-guarded, but the live streaming/batch model body remains the final Phase 1b cutover.
 - Execution is still fragmented across legacy handlers, which means this plan has started but is not complete.
 
 So Phase 1a is materially in progress:
@@ -42,8 +42,7 @@ So Phase 1a is materially in progress:
 - one shared dispatch contract exists
 - chat is beginning to read from it
 - several stable and high-value route families now execute through a planned dispatcher
-- the plain conversational chat path now also runs through a shared handler
-- explicit OpenSwan mode now also runs through the shared dispatcher/observer path
+- the plain conversational chat and explicit OpenSwan terminal paths now have shared transport/policy guardrails, with live ChatTab execution migration still pending
 - conversational build follow-up streaming now also runs through the shared dispatcher/observer path
 - the main `open_modal` quick-action flows now also run through the shared dispatcher path
 - actual handler execution still needs to migrate fully behind that plan

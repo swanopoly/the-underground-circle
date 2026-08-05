@@ -2,6 +2,7 @@
 // Proposals, voting, polls, and pinned messages for circles
 
 import { supabase } from './supabase';
+import { safeGetUser } from './authSession';
 import { Proposal, ProposalVote, VoteSummary, PinnedMessage, ProposalType } from '../types';
 
 // ─── Proposals ──────────────────────────────────────────────────────
@@ -16,7 +17,7 @@ export async function createProposal(params: {
   quorumPct?: number;
   passPct?: number;
 }): Promise<{ ok: boolean; proposal?: Proposal; error?: string }> {
-  const { data: { user } } = await supabase.auth.getUser();
+  const { value: user } = await safeGetUser();
   if (!user) return { ok: false, error: 'Not logged in' };
 
   const expiresAt = params.expiresInHours
@@ -107,7 +108,7 @@ export async function getProposal(proposalId: string): Promise<Proposal | null> 
 }
 
 export async function castVote(proposalId: string, vote: string): Promise<{ ok: boolean; error?: string }> {
-  const { data: { user } } = await supabase.auth.getUser();
+  const { value: user } = await safeGetUser();
   if (!user) return { ok: false, error: 'Not logged in' };
 
   // Check if proposal is still active
@@ -177,7 +178,7 @@ function computeVoteSummary(votes: ProposalVote[], proposal: any, memberCount: n
 // ─── Pinned Messages ────────────────────────────────────────────────
 
 export async function pinMessage(circleId: string, messageId: string): Promise<{ ok: boolean; error?: string }> {
-  const { data: { user } } = await supabase.auth.getUser();
+  const { value: user } = await safeGetUser();
   if (!user) return { ok: false, error: 'Not logged in' };
 
   const { error } = await supabase.from('pinned_messages').insert({

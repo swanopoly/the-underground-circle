@@ -13,11 +13,28 @@
  */
 
 import { getBridgeUrl } from './bridgeEnvironment';
+import { getDesktopBridgeToken, ensureDesktopBridgePaired } from './desktopBridge';
 
 const BRIDGE_PORT = 7778;
 
 function getCredentialBridgeUrl(): string | null {
   return getBridgeUrl(BRIDGE_PORT);
+}
+
+/**
+ * Builds the JSON headers plus the desktop-bridge auth token. The /secrets
+ * endpoint is token-gated (401 without it), so every credential fetch must
+ * attach `X-UC-Desktop-Token`. Reuses the cached token, auto-pairing once if
+ * needed — no new pairing logic. Returns null when the bridge cannot be paired.
+ */
+async function buildSecretsHeaders(): Promise<Record<string, string> | null> {
+  let token = getDesktopBridgeToken();
+  if (!token) {
+    const ensured = await ensureDesktopBridgePaired();
+    if (ensured.ok && ensured.data?.token) token = ensured.data.token;
+  }
+  if (!token) return null;
+  return { 'Content-Type': 'application/json', 'X-UC-Desktop-Token': token };
 }
 
 export interface CredentialFields {
@@ -33,10 +50,14 @@ export async function getCredentials(opts: {
   if (!bridgeUrl) {
     return { ok: false, fields: {}, error: 'Credential bridge unavailable in this environment.' };
   }
+  const headers = await buildSecretsHeaders();
+  if (!headers) {
+    return { ok: false, fields: {}, error: 'Desktop bridge not paired. Pair first to fetch credentials.' };
+  }
   try {
     const res = await fetch(`${bridgeUrl}/secrets`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(opts),
       signal: AbortSignal.timeout(15000),
     });
@@ -57,10 +78,12 @@ export async function getCredentials(opts: {
 export async function readSecret(uri: string): Promise<string | null> {
   const bridgeUrl = getCredentialBridgeUrl();
   if (!bridgeUrl) return null;
+  const headers = await buildSecretsHeaders();
+  if (!headers) return null;
   try {
     const res = await fetch(`${bridgeUrl}/secrets`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ uri }),
       signal: AbortSignal.timeout(15000),
     });
@@ -74,10 +97,12 @@ export async function readSecret(uri: string): Promise<string | null> {
 export async function isOnePasswordAvailable(): Promise<boolean> {
   const bridgeUrl = getCredentialBridgeUrl();
   if (!bridgeUrl) return false;
+  const headers = await buildSecretsHeaders();
+  if (!headers) return false;
   try {
     const res = await fetch(`${bridgeUrl}/secrets`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ item: '__health_check__' }),
       signal: AbortSignal.timeout(5000),
     });

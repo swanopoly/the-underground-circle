@@ -40,8 +40,9 @@ export interface TeamsChannelMapping {
 
 // ─── Config ──────────────────────────────────────────────────────────
 
-const TEAMS_CLIENT_ID = process.env.EXPO_PUBLIC_TEAMS_CLIENT_ID || '';
-const TEAMS_SCOPES = 'ChannelMessage.Send Channel.ReadBasic.All Team.ReadBasic.All';
+// Teams client_id + scopes now live in the teams-auth edge function, which
+// mints the authorize URL + a server-stored CSRF state bound to the verified
+// caller (org admin / circle creator). A client-built state was forgeable.
 
 // ─── Connection ─────────────────────────────────────────────────────
 
@@ -79,14 +80,29 @@ export async function getTeamsConfigByOrg(orgId: string): Promise<TeamsConnectio
   return data;
 }
 
-export function initiateTeamsOAuth(circleId?: string, orgId?: string) {
-  const state = btoa(JSON.stringify({ circleId, orgId }));
+export async function initiateTeamsOAuth(circleId?: string, orgId?: string): Promise<{ error?: string }> {
   const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-  const redirectUri = `${supabaseUrl}/functions/v1/teams-auth`;
-
-  const oauthUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${TEAMS_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(TEAMS_SCOPES)}&state=${state}`;
-
-  Linking.openURL(oauthUrl);
+  // The authorize URL + its CSRF state are minted server-side, bound to the
+  // verified caller (org admin / circle creator). A client-built btoa(JSON)
+  // state was forgeable → Teams-bot-to-victim binding (advisory, 2nd sweep).
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return { error: 'Not signed in' };
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/teams-auth`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ circleId, orgId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) return { error: data.error || `Failed to start Teams OAuth (${res.status})` };
+    if (data.url) Linking.openURL(data.url);
+    return {};
+  } catch (e: any) {
+    return { error: e?.message || 'Failed to start Teams OAuth' };
+  }
 }
 
 export async function disconnectTeams(connectionId: string): Promise<{ error?: string }> {

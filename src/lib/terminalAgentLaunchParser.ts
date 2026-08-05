@@ -1,4 +1,4 @@
-export type TerminalAgentProvider = 'claude-code' | 'codex' | 'gemini';
+export type TerminalAgentProvider = 'claude-code' | 'codex' | 'gemini' | 'cursor';
 
 export type TerminalAgentLaunchResult = {
   ok: boolean;
@@ -51,6 +51,11 @@ const PROVIDER_META: Record<TerminalAgentProvider, { label: string; namePrefix: 
     namePrefix: 'Gemini CLI',
     aliases: [/\bgemini\s+cli\b/i, /\bgemini\b/i],
   },
+  cursor: {
+    label: 'Cursor Composer',
+    namePrefix: 'Cursor Composer',
+    aliases: [/\bcursor\s+composer\b/i, /\bcursor\s+agent\b/i, /\bcursor\b/i],
+  },
 };
 
 export interface TerminalAgentLaunchPlan {
@@ -61,7 +66,22 @@ export interface TerminalAgentLaunchPlan {
   names: string[];
   usedDefaultPrompts: boolean;
   basePrompt?: string;
+  /**
+   * Launch each session in its own git worktree. Set when the user asks for
+   * isolation ("isolated", "worktree", "sandboxed", "its own branch"). Never
+   * set for cursor (GUI injection can't be worktree-isolated).
+   */
+  useWorktree: boolean;
   raw: string;
+}
+
+// Phrases that signal the user wants each agent isolated in its own worktree.
+// "branch"/"isolated" are constrained to session-context to avoid matching a
+// task prompt that merely mentions those words.
+const WORKTREE_INTENT_RE = /\b(worktree|work\s*tree|sandbox(?:ed)?|(?:its|their)\s+own\s+(?:branch|worktree|checkout|copy)|separate\s+(?:branch|worktree|checkout)|isolated(?:\s+\w+){0,2}\s+(?:sessions?|agents?|terminals?|windows?|worktrees?|branch|checkout|copy|workspace))\b/i;
+
+function detectWorktreeIntent(message: string): boolean {
+  return WORKTREE_INTENT_RE.test(message);
 }
 
 function clampCount(value: number): number {
@@ -86,7 +106,7 @@ function detectProvider(message: string): TerminalAgentProvider | null {
 
 function extractCount(message: string): number {
   const numericPatterns = [
-    /\b(\d{1,2})\s+(?:separate|seperate|different|individual)?\s*(?:claude\s+code|codex|gemini\s+cli|gemini)?\s*(?:sessions?|agents?|terminals?|windows?)\b/i,
+    /\b(\d{1,2})\s+(?:separate|seperate|different|individual)?\s*(?:claude\s+code|codex|gemini\s+cli|gemini|cursor\s+composer|cursor)?\s*(?:sessions?|agents?|terminals?|windows?)\b/i,
     /\b(?:sessions?|agents?|terminals?|windows?)\s*[x*]?\s*(\d{1,2})\b/i,
   ];
   for (const pattern of numericPatterns) {
@@ -95,7 +115,7 @@ function extractCount(message: string): number {
   }
 
   const words = Object.keys(NUMBER_WORDS).join('|');
-  const wordPattern = new RegExp(`\\b(${words})\\s+(?:separate|seperate|different|individual)?\\s*(?:claude\\s+code|codex|gemini\\s+cli|gemini)?\\s*(?:sessions?|agents?|terminals?|windows?)\\b`, 'i');
+  const wordPattern = new RegExp(`\\b(${words})\\s+(?:separate|seperate|different|individual)?\\s*(?:claude\\s+code|codex|gemini\\s+cli|gemini|cursor\\s+composer|cursor)?\\s*(?:sessions?|agents?|terminals?|windows?)\\b`, 'i');
   const wordMatch = message.match(wordPattern);
   if (wordMatch) return clampCount(NUMBER_WORDS[wordMatch[1].toLowerCase()]);
 
@@ -181,6 +201,8 @@ export function parseTerminalAgentLaunchRequest(message: string): TerminalAgentL
   const count = clampCount(Math.max(extractCount(raw), promptList.length || 0));
   const basePrompt = promptList.length > 0 ? '' : extractBasePrompt(raw);
   const built = buildPrompts(meta.label, count, promptList, basePrompt);
+  // Cursor is GUI-injection — it can't be worktree-isolated, so never claim it.
+  const useWorktree = provider !== 'cursor' && detectWorktreeIntent(raw);
 
   return {
     provider,
@@ -190,6 +212,7 @@ export function parseTerminalAgentLaunchRequest(message: string): TerminalAgentL
     names: Array.from({ length: count }, (_, i) => count === 1 ? meta.label : `${meta.namePrefix} #${i + 1}`),
     usedDefaultPrompts: built.usedDefaultPrompts,
     basePrompt: basePrompt || undefined,
+    useWorktree,
     raw,
   };
 }
@@ -201,7 +224,13 @@ export function formatTerminalAgentLaunchResponse(plan: TerminalAgentLaunchPlan,
       `I could not start the ${plan.providerLabel} terminal sessions: ${detail}`,
       '',
       'Make sure the matching local bridge is running:',
-      plan.provider === 'claude-code' ? '`npm run bridge`' : plan.provider === 'codex' ? '`npm run bridge:codex`' : '`node scripts/gemini-bridge.js`',
+      plan.provider === 'claude-code'
+        ? '`npm run bridge`'
+        : plan.provider === 'codex'
+          ? '`npm run bridge:codex`'
+          : plan.provider === 'cursor'
+            ? '`npm run bridge:cursor`'
+            : '`npm run bridge:gemini`',
     ].join('\n');
   }
 
@@ -212,6 +241,9 @@ export function formatTerminalAgentLaunchResponse(plan: TerminalAgentLaunchPlan,
   ];
 
   if (result.projectDir) lines.push(`Project: ${result.projectDir}`);
+  if (plan.useWorktree) {
+    lines.push('Each session runs in its own isolated git worktree (`.openswan-worktrees/`), so edits stay off the shared tree.');
+  }
   if (plan.usedDefaultPrompts) {
     lines.push('No individual prompts were included, so I sent standby prompts. Use `with prompts:` to give each session its own task.');
   } else {

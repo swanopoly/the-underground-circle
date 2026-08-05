@@ -21,9 +21,27 @@
  * `canDelegate` returns a decision. The `redactSubagentOutput` helper
  * trims a full transcript to the summary payload the parent receives.
  *
- * Exported for the (future) subagentRegistry migration that moves
- * off `runOpenSwanRuntimeToolLoop` onto `agentExecutionCore`.
+ * O3 (2026-06): the subagentRegistry migration landed. The typed-core
+ * child loop wrapper (`runSubagentTypedCoreLoop`), the uniform summary
+ * builders (`buildSubagentLoopSummary` / `buildSubagentParentSummary`),
+ * the child-run persistence options builder
+ * (`buildSubagentChildRunOptions`), and the escape-hatch flag
+ * (`isSubagentTypedCoreEnabled`) live at the bottom of this file so the
+ * delegation smokes can pin the REAL production composition with a mock
+ * provider (subagentRegistry itself imports supabase → react-native and
+ * is not tsx-loadable). The only value import is `agentExecutionCore`,
+ * which is itself a pure smoke-tested module — this file stays free of
+ * Supabase clients and timers.
  */
+
+import { runAgent } from './agentExecutionCore';
+import type {
+  AgentEvent,
+  AgentProvider,
+  AgentRoundCompleteHook,
+  AgentRunResult,
+  AgentToolDefinition,
+} from './agentExecutionCore';
 
 export const MAX_DELEGATION_DEPTH = 2;
 export const MAX_CONCURRENT_DELEGATIONS_PER_CIRCLE = 3;
@@ -31,6 +49,7 @@ export const MAX_CONCURRENT_DELEGATIONS_PER_CIRCLE = 3;
 export type DelegationGateReason =
   | 'depth_exceeded'
   | 'concurrency_exceeded'
+  | 'spend_limit_exceeded'
   | 'invalid_input'
   | 'ok';
 
@@ -55,6 +74,21 @@ export interface DelegationRequest {
   /** For debug logs + Run Ledger — does not affect the gate decision. */
   circleId?: string;
   parentRunId?: string;
+  /** O3: requested specialist role (e.g. 'coder'). Debug/ledger context
+   *  only — the decision stays a pure depth/concurrency function. */
+  requestedRole?: string;
+  /** O3: short preview of the delegated task text. Debug/ledger only. */
+  taskPreview?: string;
+  /** O4: the circle's model spend over the last 24h in USD (from
+   *  `claude_api_usage` via `get_claude_usage_summary`). Omit/null when
+   *  telemetry is unavailable — the spend check is then SKIPPED (budget
+   *  guard fails open; depth/concurrency still apply). */
+  dailySpendUsd?: number | null;
+  /** O4: the most restrictive `agent_controls.spending_limit_daily`
+   *  configured on the circle, in USD. Omit/null when no control row
+   *  exists — no limit is enforced. An explicit 0 means "no delegation
+   *  budget" and blocks every spawn. */
+  dailySpendLimitUsd?: number | null;
 }
 
 /**
@@ -87,6 +121,25 @@ export function canDelegate(req: DelegationRequest): DelegationGateDecision {
       ok: false,
       reason: 'concurrency_exceeded',
       detail: `${req.inFlight} delegations already running for this circle — cap is ${MAX_CONCURRENT_DELEGATIONS_PER_CIRCLE}`,
+      remainingSlots: 0,
+    };
+  }
+
+  // O4: daily spend limit. Enforced only when BOTH numbers are present —
+  // a failed telemetry read or an unconfigured circle never blocks
+  // delegation (budget guard, not a security gate). `spend >= limit`
+  // means an explicit limit of 0 blocks every spawn.
+  const spend = req.dailySpendUsd;
+  const limit = req.dailySpendLimitUsd;
+  if (
+    typeof spend === 'number' && Number.isFinite(spend) && spend >= 0
+    && typeof limit === 'number' && Number.isFinite(limit) && limit >= 0
+    && spend >= limit
+  ) {
+    return {
+      ok: false,
+      reason: 'spend_limit_exceeded',
+      detail: `circle spent $${spend.toFixed(2)} of its $${limit.toFixed(2)} daily limit — no new subagents until spend resets; continue in-line instead`,
       remainingSlots: 0,
     };
   }
@@ -191,4 +244,260 @@ export function serializeSubagentSummaryForParent(payload: SubagentSummaryPayloa
       },
     },
   });
+}
+
+// ─── O3: typed-core child loop ───────────────────────────────────────
+//
+// subagentRegistry's child execution moved off the legacy
+// `executeToolUseLoop` (swanbot.ts) onto `agentExecutionCore.runAgent`,
+// the same migration O1 did for the parent session runtime. The pure
+// composition lives HERE so the delegation smokes can run the real
+// production loop against a mock provider; subagentRegistry only
+// assembles the impure dependencies (bridge tools, swanbot-ai edge
+// provider, run persistence, observation dispatch) and injects them.
+
+export const SUBAGENT_TYPED_CORE_FLAG = 'uc_subagent_typed_core';
+
+/**
+ * O3 cutover switch — a MANUAL revert lever only, never an auto-fallback
+ * (flipping paths mid-run would risk double-executing tools). Defaults ON.
+ * Web: `localStorage.setItem('uc_subagent_typed_core', '0')` reverts the
+ * next delegation to the legacy `executeToolUseLoop`; remove the key (or
+ * set '1') to re-enable. Native has no localStorage — the try/catch
+ * leaves the default. Mirrors O1's `uc_openswan_typed_core` lever.
+ */
+export function isSubagentTypedCoreEnabled(): boolean {
+  try {
+    const store = (globalThis as { localStorage?: { getItem?: (k: string) => string | null } }).localStorage;
+    const value = store?.getItem?.(SUBAGENT_TYPED_CORE_FLAG);
+    if (value === '0' || value === 'false' || value === 'off') return false;
+  } catch { /* storage unavailable (native) → default ON */ }
+  return true;
+}
+
+export type SubagentToolCallRecord = {
+  name: string;
+  ok: boolean;
+  durationMs: number;
+};
+
+export type SubagentTypedCoreLoopArgs = {
+  /** The fully composed specialist prompt (system prompt rides the provider). */
+  userMessage: string;
+  /** Already-wrapped tool definitions — the caller owns tool scoping, so a
+   *  child can never gain a wider surface than the caller advertised. */
+  tools: AgentToolDefinition[];
+  provider: AgentProvider;
+  /** Child round cap. subagentRegistry passes the legacy MAX_TOOL_ROUNDS. */
+  maxIterations: number;
+  session?: Record<string, unknown>;
+  /** Event sink — chain `createPersistedRun(...).onEvent` here so child
+   *  events land in agent_run_events. Errors are swallowed. */
+  onEvent?: (event: AgentEvent) => void;
+  /** Round-boundary nudge hook (legacy reliability-nudge parity). */
+  onRoundComplete?: AgentRoundCompleteHook;
+};
+
+export type SubagentTypedCoreLoopOutcome = {
+  runResult: AgentRunResult;
+  /** One record per model-requested dispatch (auto-observe reads excluded —
+   *  unlike the legacy event list, this is the accurate tool_call count). */
+  toolCalls: SubagentToolCallRecord[];
+  /** Aggregated across every turn; undefined when the provider reported
+   *  none (legacy-loop parity: it reported no usage at all). `total`
+   *  includes cache read/creation tokens, matching the O1 accumulator.
+   *  GAP-2: `cache_read_tokens` / `cache_creation_tokens` carry the split so
+   *  the delegated-usage rollup in the session runtime preserves the
+   *  cache-discipline ratio (additive alongside total_tokens). */
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+  };
+};
+
+/**
+ * Runs one subagent child turn on the typed core. Thin by design: tool
+ * dispatch order, approval semantics (the legacy child path had NO
+ * approval gate — none is added here), and event mapping all come from
+ * `runAgent` + the caller's wrapped tools. Collects the two things the
+ * summary-only contract needs that the legacy result shape lacked:
+ * accurate tool-call records and aggregated token usage.
+ */
+export async function runSubagentTypedCoreLoop(
+  args: SubagentTypedCoreLoopArgs,
+): Promise<SubagentTypedCoreLoopOutcome> {
+  const toolCalls: SubagentToolCallRecord[] = [];
+  // GAP-2: track cache reads vs creation separately (not just an aggregate)
+  // so the split survives into the delegated-usage rollup.
+  const usageAcc = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, saw: false };
+
+  const runResult = await runAgent({
+    initialMessages: [{ role: 'user', content: args.userMessage }],
+    tools: args.tools,
+    provider: args.provider,
+    maxIterations: Math.max(1, args.maxIterations),
+    // Legacy child loop only parallelized all-read-only rounds; sequential
+    // dispatch is the safe superset of that ordering (same call O1 made).
+    parallelToolConcurrency: 1,
+    session: args.session,
+    onRoundComplete: args.onRoundComplete,
+    onEvent: (event) => {
+      if (event.kind === 'tool_call_result') {
+        toolCalls.push({
+          name: event.toolName,
+          ok: event.result.ok,
+          durationMs: event.durationMs,
+        });
+      } else if (event.kind === 'turn_end' && event.usage) {
+        usageAcc.saw = true;
+        usageAcc.input += event.usage.input_tokens || 0;
+        usageAcc.output += event.usage.output_tokens || 0;
+        usageAcc.cacheRead += event.usage.cache_read_input_tokens || 0;
+        usageAcc.cacheCreation += event.usage.cache_creation_input_tokens || 0;
+      }
+      try { args.onEvent?.(event); } catch { /* persistence is best-effort */ }
+    },
+  });
+
+  return {
+    runResult,
+    toolCalls,
+    usage: usageAcc.saw
+      ? {
+          input_tokens: usageAcc.input,
+          output_tokens: usageAcc.output,
+          total_tokens: usageAcc.input + usageAcc.output + usageAcc.cacheRead + usageAcc.cacheCreation,
+          cache_read_tokens: usageAcc.cacheRead,
+          cache_creation_tokens: usageAcc.cacheCreation,
+        }
+      : undefined,
+  };
+}
+
+/**
+ * Builds the redacted summary payload from a finished child loop. Used by
+ * BOTH the typed and the legacy escape-hatch path in subagentRegistry so
+ * the parent contract stays uniform: `completedCleanly: false` (cap hit /
+ * edge failure) maps to a non-end_turn stop reason → `completed: false`,
+ * and usage flows into the token fields when the loop reported it.
+ */
+export function buildSubagentLoopSummary(args: {
+  /** The child's FINAL user-facing text (incl. any cap-limit note). */
+  finalText: string;
+  toolCalls: Array<{ name: string; ok?: boolean }>;
+  completedCleanly: boolean;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}): SubagentSummaryPayload {
+  const transcript: SubagentTranscript = {
+    finalText: args.finalText,
+    toolCalls: args.toolCalls.map((call) => ({
+      name: call.name,
+      input: undefined,
+      ok: call.ok,
+    })),
+    stopReason: args.completedCleanly ? 'end_turn' : 'max_tokens',
+    ...(args.usage
+      && (typeof args.usage.input_tokens === 'number' || typeof args.usage.output_tokens === 'number')
+      ? {
+          usage: {
+            ...(typeof args.usage.input_tokens === 'number' ? { input_tokens: args.usage.input_tokens } : {}),
+            ...(typeof args.usage.output_tokens === 'number' ? { output_tokens: args.usage.output_tokens } : {}),
+          },
+        }
+      : {}),
+  };
+  return redactSubagentOutput(transcript);
+}
+
+// ─── O3: parent-visible summary contract ─────────────────────────────
+
+export type SubagentParentStatus = 'completed' | 'incomplete' | 'blocked' | 'failed';
+
+/**
+ * The ONLY shape parent-turn composers should inject into the parent's
+ * context for a delegation. The child's full transcript/response never
+ * rides this object — it stays on the child's run row for the ledger.
+ */
+export interface SubagentParentSummary {
+  /** Redacted digest (`redactSubagentOutput` output — bounded, with a
+   *  `...` truncation marker when capped). */
+  summary: string;
+  status: SubagentParentStatus;
+  /** Child run id, when persistence succeeded. */
+  runId?: string;
+  /** null = the loop reported no usage (legacy path), never fabricated 0. */
+  tokens: { input: number | null; output: number | null };
+  toolCallCount: number;
+}
+
+export function buildSubagentParentSummary(args: {
+  payload: SubagentSummaryPayload;
+  status: SubagentParentStatus;
+  runId?: string;
+}): SubagentParentSummary {
+  return {
+    summary: args.payload.summary,
+    status: args.status,
+    ...(args.runId ? { runId: args.runId } : {}),
+    tokens: {
+      input: typeof args.payload.inputTokens === 'number' ? args.payload.inputTokens : null,
+      output: typeof args.payload.outputTokens === 'number' ? args.payload.outputTokens : null,
+    },
+    toolCallCount: args.payload.toolCallCount,
+  };
+}
+
+// ─── O3: child run persistence options ───────────────────────────────
+
+/**
+ * Shapes the `createPersistedRun(...)` options for a child delegation run
+ * so the parentRunId linkage + delegation-depth stamp can't drift between
+ * call sites (and so the smoke can pin them without importing supabase).
+ * `delegatedToRole` rides metadata because `createPersistedRun` has no
+ * `delegatedTo` passthrough; subagentRegistry backfills the column
+ * best-effort after creation.
+ */
+export function buildSubagentChildRunOptions<S extends string>(args: {
+  circleId: string;
+  userId: string;
+  surface: S;
+  subagentRole: string;
+  subagentDisplayName: string;
+  task: string;
+  model?: string;
+  roomId?: string;
+  parentRunId?: string;
+  /** The PROPOSED child depth (parent depth + 1) — same value the gate saw. */
+  delegationDepth: number;
+  runtimePlanVersion?: string | number;
+}): {
+  circleId: string;
+  userId: string;
+  surface: S;
+  title: string;
+  mode: string;
+  model?: string;
+  roomId?: string;
+  parentRunId?: string;
+  metadata: Record<string, unknown>;
+} {
+  return {
+    circleId: args.circleId,
+    userId: args.userId,
+    surface: args.surface,
+    // Legacy title format preserved (run-list UI groups on it).
+    title: `${args.subagentDisplayName}: ${args.task.slice(0, 80)}`,
+    mode: args.subagentRole,
+    ...(args.model ? { model: args.model } : {}),
+    ...(args.roomId ? { roomId: args.roomId } : {}),
+    ...(args.parentRunId ? { parentRunId: args.parentRunId } : {}),
+    metadata: {
+      ...(args.runtimePlanVersion !== undefined ? { runtimePlanVersion: args.runtimePlanVersion } : {}),
+      delegationDepth: args.delegationDepth,
+      delegatedToRole: args.subagentRole,
+    },
+  };
 }

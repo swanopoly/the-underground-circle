@@ -7,6 +7,13 @@ import { supabase } from './supabase';
 import { CircleOfficeAgent, BLACKSWAN_AGENT_ID } from './circleOffice';
 import { loadBudgetConfig, checkHardLimit } from './budgetAlerts';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
+import {
+  buildAgentRuntimeSubject,
+  isUuidLike,
+  type AgentRuntimeSubject,
+  type AgentRuntimeSubjectMetadata,
+} from './agentRuntimeSubject';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,6 +24,12 @@ export interface InvocationRequest {
   senderId?: string;
   targetAgentId?: string;
   targetAgentName: string;
+  agentSubjectKey?: string;
+  agentDbId?: string | null;
+  agentSessionKey?: string | null;
+  agentLegacyIds?: string[];
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
+  targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   promptName?: string;
   promptLabel?: string;
   model?: string | null;
@@ -40,28 +53,131 @@ export interface AgentInvocationResult {
   tokens?: TokenBreakdown;
 }
 
+export interface OfficeInvocationClaim {
+  responseId: string;
+  messageId: string;
+  circleId: string;
+  senderId: string;
+  command: string;
+  targetAgentId: string | null;
+  targetAgentIds: string[] | null;
+  targetAgentName: string;
+  model: string | null;
+  agentId: string | null;
+  agentSubjectKey: string;
+  agentName: string;
+}
+
 // ─── DB: Create response row (atomic) ───────────────────────────────────────
 
 export async function invokeAgent(
-  messageId: string,
-  agentId: string,
-  agentName: string
-): Promise<string | null> {
+  req: InvocationRequest,
+  agent: CircleOfficeAgent,
+): Promise<OfficeInvocationClaim | null> {
   try {
+    const blackSwan = isBlackSwanAgent(agent);
+    const durableAgentId = !blackSwan && isUuidLike(agent.id) ? agent.id : null;
+    if (!blackSwan && !durableAgentId) return null;
+
     const { data, error } = await supabase.rpc('invoke_agent', {
-      p_message_id: messageId,
-      p_agent_id: agentId,
-      p_agent_name: agentName,
+      p_message_id: req.messageId,
+      p_circle_id: req.circleId,
+      p_expected_command_text: req.command,
+      p_agent_id: durableAgentId,
     });
 
     if (error) {
-      console.error('[agentInvocation] invoke_agent RPC failed:', error);
+      console.error('[agentInvocation] office_claim_failed');
       return null;
     }
 
-    return data as string;
-  } catch (err) {
-    console.error('[agentInvocation] invokeAgent error:', err);
+    const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | null;
+    const responseId = String(row?.response_id || '');
+    const messageId = String(row?.canonical_message_id || '');
+    const circleId = String(row?.canonical_circle_id || '');
+    const senderId = String(row?.canonical_sender_id || '');
+    const command = typeof row?.canonical_command_text === 'string'
+      ? row.canonical_command_text
+      : '';
+    const canonicalAgentId = typeof row?.canonical_agent_id === 'string'
+      ? row.canonical_agent_id
+      : null;
+    const agentSubjectKey = String(row?.canonical_agent_subject_key || '');
+    const agentName = String(row?.canonical_agent_name || '');
+    const targetAgentId = typeof row?.canonical_target_agent_id === 'string'
+      ? row.canonical_target_agent_id
+      : null;
+    const rawTargetAgentIds = Array.isArray(row?.canonical_target_agent_ids)
+      ? row.canonical_target_agent_ids
+      : null;
+    const targetAgentIds = rawTargetAgentIds
+      ? rawTargetAgentIds.map(id => String(id)).filter(isUuidLike)
+      : null;
+    const targetAgentName = typeof row?.canonical_target_agent_name === 'string'
+      ? row.canonical_target_agent_name
+      : '';
+    const normalizedTargetName = targetAgentName.trim().toLowerCase();
+    const canonicalScopeMatches = blackSwan
+      ? (
+          targetAgentId === null
+          && (
+            normalizedTargetName === 'all'
+            || normalizedTargetName === '@all'
+            || normalizedTargetName === 'blackswan'
+            || normalizedTargetName === '@blackswan'
+            || normalizedTargetName === 'swan'
+            || normalizedTargetName === '@swan'
+            || normalizedTargetName.includes('blackswan')
+            || normalizedTargetName.includes('@swan')
+          )
+        )
+      : (
+          targetAgentId === durableAgentId
+          || targetAgentIds?.includes(durableAgentId!) === true
+          || (
+            targetAgentId === null
+            && (targetAgentIds?.length || 0) === 0
+            && (normalizedTargetName === 'all' || normalizedTargetName === '@all')
+          )
+        );
+    if (
+      row?.claim_disposition !== 'claimed'
+      || !isUuidLike(responseId)
+      || !isUuidLike(senderId)
+      || messageId !== req.messageId
+      || circleId !== req.circleId
+      || command !== req.command
+      || (req.senderId && senderId !== req.senderId)
+      || (!blackSwan && canonicalAgentId !== durableAgentId)
+      || (blackSwan && canonicalAgentId !== null)
+      || agentSubjectKey !== (
+        blackSwan ? 'blackswan' : `office-agent:${durableAgentId}`
+      )
+      || !agentName
+      || !targetAgentName
+      || (rawTargetAgentIds !== null && targetAgentIds?.length !== rawTargetAgentIds.length)
+      || !canonicalScopeMatches
+    ) {
+      console.error('[agentInvocation] office_claim_rejected');
+      return null;
+    }
+
+    return {
+      responseId,
+      messageId,
+      circleId,
+      senderId,
+      command,
+      targetAgentId,
+      targetAgentIds,
+      targetAgentName,
+      model: typeof row?.canonical_model === 'string' ? row.canonical_model : null,
+      agentId: canonicalAgentId,
+      agentSubjectKey,
+      agentName,
+    };
+  } catch {
+    console.error('[agentInvocation] office_claim_exception');
     return null;
   }
 }
@@ -78,7 +194,7 @@ export async function streamResponse(
   tokens?: TokenBreakdown
 ): Promise<boolean> {
   try {
-    const { error } = await supabase.rpc('stream_response', {
+    const { data, error } = await supabase.rpc('stream_response', {
       p_response_id: responseId,
       p_text: text,
       p_status: status,
@@ -91,14 +207,14 @@ export async function streamResponse(
       p_cache_read_tokens: tokens?.cacheReadTokens ?? 0,
     });
 
-    if (error) {
-      console.error('[agentInvocation] stream_response failed:', error);
+    if (error || data !== true) {
+      console.error('[agentInvocation] office_response_update_failed');
       return false;
     }
 
     return true;
-  } catch (err) {
-    console.error('[agentInvocation] streamResponse error:', err);
+  } catch {
+    console.error('[agentInvocation] office_response_update_exception');
     return false;
   }
 }
@@ -107,18 +223,18 @@ export async function streamResponse(
 
 export async function markMessageDone(messageId: string): Promise<boolean> {
   try {
-    const { error } = await supabase.rpc('mark_message_done', {
+    const { data, error } = await supabase.rpc('mark_message_done', {
       p_message_id: messageId,
     });
 
     if (error) {
-      console.error('[agentInvocation] mark_message_done failed:', error);
+      console.error('[agentInvocation] office_completion_failed');
       return false;
     }
 
-    return true;
-  } catch (err) {
-    console.error('[agentInvocation] markMessageDone error:', err);
+    return data === true;
+  } catch {
+    console.error('[agentInvocation] office_completion_exception');
     return false;
   }
 }
@@ -129,12 +245,136 @@ function isBlackSwanAgent(agent: CircleOfficeAgent): boolean {
   return agent.provider === 'blackswan' || agent.id === BLACKSWAN_AGENT_ID;
 }
 
+function uniqueSubjectIds(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function cleanTargetAgentDisplayName(value: string | null | undefined): string | null {
+  const cleaned = String(value || '').trim().replace(/^@+/, '').trim();
+  if (!cleaned || cleaned.toLowerCase() === 'all') return null;
+  return cleaned;
+}
+
+function buildInvocationAgentSubject(agent: CircleOfficeAgent, req: InvocationRequest): AgentRuntimeSubject {
+  const displayName = cleanTargetAgentDisplayName(req.targetAgentName) || agent.name || 'Agent';
+  const base = buildAgentRuntimeSubject({
+    id: req.targetAgentId || agent.id,
+    name: displayName,
+    providerType: agent.provider as any,
+    spirit: agent.spirit,
+  }, {
+    dbAgentId: req.agentDbId || (isUuidLike(agent.id) ? agent.id : null),
+  });
+  const supplied = findSubjectMetadataForAgent(req, agent);
+  const subjectKey = supplied?.agentSubjectKey || req.agentSubjectKey || base.subjectKey;
+  const dbAgentId = supplied?.agentDbId ?? req.agentDbId ?? base.dbAgentId;
+  const sessionKey = supplied?.agentSessionKey ?? req.agentSessionKey ?? base.sessionKey;
+  const legacyIds = uniqueSubjectIds([
+    ...base.legacyIds,
+    ...(supplied?.legacyAgentIds || []),
+    ...(req.agentLegacyIds || []),
+  ]).filter(alias => alias !== subjectKey);
+  const metadata: AgentRuntimeSubjectMetadata = {
+    ...base.metadata,
+    ...supplied,
+    agentSubjectKey: subjectKey,
+    agentDisplayName: supplied?.agentDisplayName || displayName,
+    agentDbId: dbAgentId,
+    agentProvider: supplied?.agentProvider ?? base.providerType,
+    agentSessionKey: sessionKey,
+    agentSpiritId: supplied?.agentSpiritId ?? base.spiritId,
+    legacyAgentIds: legacyIds,
+  };
+  const aliases = uniqueSubjectIds([
+    subjectKey,
+    dbAgentId,
+    sessionKey,
+    agent.id,
+    req.targetAgentId,
+    displayName,
+    ...base.memoryAgentAliases,
+    ...legacyIds,
+  ]);
+  return {
+    ...base,
+    displayName,
+    subjectKey,
+    dbAgentId,
+    sessionKey,
+    memoryAgentId: subjectKey,
+    runAgentId: subjectKey,
+    memoryAgentAliases: aliases,
+    runAgentAliases: aliases,
+    legacyIds,
+    metadata,
+  };
+}
+
+function buildInvocationSwanBotContext(subject: AgentRuntimeSubject) {
+  return {
+    agentId: subject.subjectKey,
+    agentName: subject.displayName,
+    agentSubjectKey: subject.subjectKey,
+    agentDbId: subject.dbAgentId,
+    agentSessionKey: subject.sessionKey,
+    agentLegacyIds: subject.legacyIds,
+    agentSubjectMetadata: subject.metadata,
+  };
+}
+
+function normalizeSubjectLookupValue(value: string | null | undefined): string | null {
+  const normalized = String(value || '').trim().replace(/^@+/, '').trim().toLowerCase();
+  return normalized || null;
+}
+
+function metadataMatchesAgent(subject: AgentRuntimeSubjectMetadata, agent: CircleOfficeAgent): boolean {
+  const agentLookups = new Set(
+    uniqueSubjectIds([
+      agent.id,
+      agent.name,
+      isUuidLike(agent.id) ? agent.id : null,
+    ]).map(value => normalizeSubjectLookupValue(value)).filter(Boolean)
+  );
+  const subjectLookups = uniqueSubjectIds([
+    subject.agentSubjectKey,
+    subject.agentDbId,
+    subject.agentSessionKey,
+    subject.agentDisplayName,
+    ...subject.legacyAgentIds,
+  ]).map(value => normalizeSubjectLookupValue(value)).filter(Boolean);
+  return subjectLookups.some(value => agentLookups.has(value));
+}
+
+function findSubjectMetadataForAgent(
+  req: InvocationRequest,
+  agent: CircleOfficeAgent,
+): AgentRuntimeSubjectMetadata | undefined {
+  if (req.agentSubjectMetadata && metadataMatchesAgent(req.agentSubjectMetadata, agent)) {
+    return req.agentSubjectMetadata;
+  }
+  return (req.targetAgentSubjects || []).find(subject => metadataMatchesAgent(subject, agent));
+}
+
+function buildPerAgentInvocationRequest(
+  req: InvocationRequest,
+  agent: CircleOfficeAgent,
+): InvocationRequest {
+  const agentSubjectMetadata = findSubjectMetadataForAgent(req, agent);
+  return {
+    ...req,
+    targetAgentId: agent.id,
+    targetAgentName: `@${agent.name}`,
+    ...(agentSubjectMetadata ? { agentSubjectMetadata } : {}),
+  };
+}
+
 async function invokeBlackSwan(
   command: string,
   circleId: string,
   senderId: string,
   model?: string | null,
   targetAgentName?: string,
+  agentSubject?: AgentRuntimeSubjectMetadata | null,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
   if (shouldBlockExternalAiProvider('anthropic')) {
@@ -149,7 +389,17 @@ async function invokeBlackSwan(
 
   try {
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      body: { message: command, circleId, userId: senderId, model: cleanModel || null, targetAgentName: targetAgentName || undefined },
+      body: {
+        message: command,
+        circleId,
+        userId: senderId,
+        model: cleanModel || null,
+        targetAgentName: agentSubject?.agentDisplayName || targetAgentName || undefined,
+        targetAgentSubjectKey: agentSubject?.agentSubjectKey,
+        targetAgentDbId: agentSubject?.agentDbId || undefined,
+        targetAgentLegacyIds: agentSubject?.legacyAgentIds,
+        agentSubject: agentSubject || undefined,
+      },
     });
 
     const latencyMs = Date.now() - start;
@@ -186,7 +436,7 @@ async function invokeBlackSwan(
   }
 }
 
-// ─── Claude Code: Invoke via local bridge POST /exec ────────────────────────
+// ─── Claude Code: Invoke via structured local bridge POST /spawn ───────────
 
 function isClaudeCodeAgent(agent: CircleOfficeAgent): boolean {
   return agent.provider === 'claude-code';
@@ -206,10 +456,10 @@ async function invokeClaudeCode(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
 
-    const response = await fetch(`${bridgeUrl}/exec`, {
+    const response = await fetchBridgeAuthenticated(`${bridgeUrl}/spawn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
+      body: JSON.stringify({ task: command, useWorktree: false }),
       signal: controller.signal,
     });
 
@@ -228,13 +478,14 @@ async function invokeClaudeCode(
     if (!data.ok) {
       return {
         success: false,
-        error: data.error || `Command failed with exit code ${data.code}`,
+        error: data.error || data.message || 'Claude Code task could not be started',
       };
     }
 
-    const responseText = (data.stdout || '').trim()
-      || (data.stderr || '').trim()
-      || 'Command executed (no output)';
+    const spawned = Array.isArray(data.results) ? data.results.find((item: any) => item?.ok) : null;
+    const responseText = spawned?.spawnId
+      ? `Claude Code task started (handle ${spawned.spawnId}).`
+      : (data.message || 'Claude Code task started.');
 
     const tokenCount = estimateTokens(command, responseText);
 
@@ -270,7 +521,7 @@ async function invokeGeminiCli(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
 
-    const response = await fetch(`${bridgeUrl}/send`, {
+    const response = await fetchBridgeAuthenticated(`${bridgeUrl}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command }),
@@ -648,7 +899,7 @@ async function createAgentTask(
       .single();
 
     if (error) {
-      console.warn('[agentInvocation] Failed to create agent task:', error.message);
+      console.warn('[agentInvocation] task_tracking_create_failed');
       return null;
     }
     return data?.id || null;
@@ -711,8 +962,13 @@ async function completeAgentTask(
   } catch {}
 }
 
-// Module-level map: messageId → taskId (for linking command → response)
+// Module-level map: responseId → taskId. A message can fan out to several
+// agents, so messageId alone would let parallel completions steal each other's
+// tracking task.
 const pendingAgentTasks = new Map<string, string>();
+const OFFICE_PROVIDER_FAILURE = 'Agent invocation failed (provider_error).';
+const OFFICE_RUNTIME_FAILURE = 'Agent invocation failed (runtime_error).';
+const OFFICE_PERSISTENCE_FAILURE = 'Agent response could not be persisted safely.';
 
 // ─── Invoke & Stream: Main entry point ──────────────────────────────────────
 
@@ -751,14 +1007,16 @@ export async function invokeDirect(
         return { success: false, error: blocked };
       }
     }
-  } catch (e) {
-    console.warn('[agentInvocation] Direct budget check failed, proceeding:', e);
+  } catch {
+    console.warn('[agentInvocation] direct_budget_check_unavailable');
   }
 
   const blackSwan = isBlackSwanAgent(agent);
   const claudeCode = isClaudeCodeAgent(agent);
   const geminiCli = isGeminiCliAgent(agent);
   const byoLLM = isBYOLLMAgent(agent);
+  const agentSubject = buildInvocationAgentSubject(agent, req);
+  const swanBotContext = buildInvocationSwanBotContext(agentSubject);
 
   const resolvedUrl = agent.gatewayUrl || gatewayUrl;
   if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM) {
@@ -783,7 +1041,7 @@ export async function invokeDirect(
         const geminiResult = await getSwanBotResponse(req.command, {
           userId: req.senderId || req.messageId,
           circleId: req.circleId,
-          agentId: agent.id,
+          ...swanBotContext,
         });
         return {
           success: true,
@@ -795,7 +1053,7 @@ export async function invokeDirect(
         return { success: false, error: `Gemini fallback failed: ${err.message}` };
       }
     }
-    return invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agent.name);
+    return invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agentSubject.displayName, agentSubject.metadata);
   }
 
   if (claudeCode) {
@@ -849,8 +1107,8 @@ export async function invokeAndStream(
         return { success: false, error: blocked };
       }
     }
-  } catch (e) {
-    console.warn('[agentInvocation] Budget check failed, proceeding:', e);
+  } catch {
+    console.warn('[agentInvocation] budget_check_unavailable');
   }
 
   // Detect agent type for routing
@@ -881,117 +1139,153 @@ export async function invokeAndStream(
     };
   }
 
-  const via = blackSwan ? 'swanbot-ai' : claudeCode ? `bridge:${resolvedUrl}` : geminiCli ? `gemini-bridge:${resolvedUrl}` : byoLLM ? `llm-proxy:${agent.provider}` : resolvedUrl;
-  console.log(`[agentInvocation] Starting: ${agent.name} ← "${req.command}" via ${via}`);
-
-  // Step 0: Create a tracking task for this prompt
-  const taskId = await createAgentTask(
-    req.circleId,
-    req.senderId || req.messageId,
-    agent.name,
-    req.command,
-    req.messageId,
-    req.model,
-  );
-  if (taskId) pendingAgentTasks.set(req.messageId, taskId);
-
-  // Step 1: Create response row
-  const responseId = await invokeAgent(req.messageId, agent.id, agent.name);
-  if (!responseId) {
-    console.error(`[agentInvocation] Failed to create response row for ${agent.name}`);
+  // The Realtime envelope and local request are only a wake-up hint. Atomically
+  // claim the durable row, then execute only the command, scope, sender, model,
+  // and agent identity returned by the database.
+  const claim = await invokeAgent(req, agent);
+  if (!claim) {
+    console.error('[agentInvocation] office_claim_unavailable');
     return {
       success: false,
-      error: 'Failed to create response row',
+      error: 'Office invocation could not be claimed safely.',
     };
   }
 
-  console.log(`[agentInvocation] Response row created: ${responseId}`);
+  const responseId = claim.responseId;
+  const canonicalAgent: CircleOfficeAgent = {
+    ...agent,
+    name: claim.agentName,
+  };
+  const canonicalReq: InvocationRequest = {
+    messageId: claim.messageId,
+    circleId: claim.circleId,
+    command: claim.command,
+    senderId: claim.senderId,
+    targetAgentId: claim.agentId || BLACKSWAN_AGENT_ID,
+    targetAgentName: `@${claim.agentName}`,
+    agentSubjectKey: claim.agentSubjectKey,
+    agentDbId: claim.agentId,
+    agentSessionKey: null,
+    agentLegacyIds: [],
+    agentSubjectMetadata: undefined,
+    targetAgentSubjects: null,
+    promptName: undefined,
+    promptLabel: undefined,
+    model: claim.model,
+  };
+  const agentSubject = buildInvocationAgentSubject(canonicalAgent, canonicalReq);
+  const swanBotContext = buildInvocationSwanBotContext(agentSubject);
+  console.log('[agentInvocation] office_claimed');
+
+  // Create the tracking task only after the durable command is claimed.
+  const taskId = await createAgentTask(
+    canonicalReq.circleId,
+    canonicalReq.senderId!,
+    canonicalAgent.name,
+    canonicalReq.command,
+    canonicalReq.messageId,
+    canonicalReq.model,
+  );
+  if (taskId) pendingAgentTasks.set(responseId, taskId);
 
   try {
-    // Step 1b: Resolve prompt if referenced
-    let promptVersionId: string | undefined;
-    if (req.promptName) {
-      try {
-        const { getPrompt } = await import('./promptManager');
-        const compiled = await getPrompt(req.promptName, req.promptLabel || 'production', {}, req.circleId);
-        if (compiled) {
-          promptVersionId = compiled.versionId;
-          console.log(`[agentInvocation] Resolved prompt: ${req.promptName} v${compiled.version} (${compiled.label})`);
-        }
-      } catch (e) {
-        console.warn('[agentInvocation] Prompt resolution failed:', e);
-      }
-    }
-
-    // Step 2: Call agent (route by provider type)
+    // Call the selected provider with canonical durable inputs.
     let result: AgentInvocationResult;
 
     if (blackSwan) {
-      if (req.model === 'gemini-flash') {
+      if (canonicalReq.model === 'gemini-flash') {
         // Gemini selected — use client-side Gemini path (edge fn only has Anthropic key)
-        console.log(`[agentInvocation] Invoking Gemini client-side for BlackSwan`);
+        console.log('[agentInvocation] provider_route_gemini_client');
         const geminiStart = Date.now();
         try {
           const { getSwanBotResponse } = await import('./swanbot');
-          const geminiResult = await getSwanBotResponse(req.command, {
-            userId: req.senderId || req.messageId,
-            circleId: req.circleId,
-            agentId: agent.id,
+          const geminiResult = await getSwanBotResponse(canonicalReq.command, {
+            userId: canonicalReq.senderId!,
+            circleId: canonicalReq.circleId,
+            ...swanBotContext,
           });
           result = {
             success: true,
             responseText: geminiResult,
-            tokenCount: estimateTokens(req.command, geminiResult),
+            tokenCount: estimateTokens(canonicalReq.command, geminiResult),
             latencyMs: Date.now() - geminiStart,
           };
-        } catch (err: any) {
-          result = { success: false, error: `Gemini fallback failed: ${err.message}` };
+        } catch {
+          result = { success: false, error: OFFICE_PROVIDER_FAILURE };
         }
       } else {
-        console.log(`[agentInvocation] Invoking BlackSwan via swanbot-ai edge function (model: ${req.model || 'auto'}, agent: ${agent.name})`);
-        result = await invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agent.name);
+        console.log('[agentInvocation] provider_route_blackswan');
+        result = await invokeBlackSwan(
+          canonicalReq.command,
+          canonicalReq.circleId,
+          canonicalReq.senderId!,
+          canonicalReq.model,
+          agentSubject.displayName,
+          agentSubject.metadata,
+        );
       }
     } else if (claudeCode) {
-      console.log(`[agentInvocation] Invoking Claude Code via bridge: ${resolvedUrl}/exec`);
-      result = await invokeClaudeCode(req.command, resolvedUrl);
+      console.log('[agentInvocation] provider_route_claude_code');
+      result = await invokeClaudeCode(canonicalReq.command, resolvedUrl);
     } else if (geminiCli) {
       const geminiUrl = resolvedUrl || 'http://localhost:7780';
-      console.log(`[agentInvocation] Invoking Gemini CLI via bridge: ${geminiUrl}/send`);
-      result = await invokeGeminiCli(req.command, geminiUrl);
+      console.log('[agentInvocation] provider_route_gemini_cli');
+      result = await invokeGeminiCli(canonicalReq.command, geminiUrl);
     } else if (byoLLM) {
-      console.log(`[agentInvocation] Invoking BYO LLM: ${agent.provider} (model: ${req.model || 'default'})`);
-      result = await invokeBYOLLM(req.command, agent.provider, req.model, req.circleId, req.senderId);
+      console.log('[agentInvocation] provider_route_byo_llm');
+      result = await invokeBYOLLM(
+        canonicalReq.command,
+        canonicalAgent.provider,
+        canonicalReq.model,
+        canonicalReq.circleId,
+        canonicalReq.senderId,
+      );
     } else {
-      console.log(`[agentInvocation] Invoking gateway: ${resolvedUrl}/tools/invoke`);
+      console.log('[agentInvocation] provider_route_openswan_gateway');
       result = await callOpenSwanAgent(
-        req.command,
-        agent.id,
-        agent.name,
+        canonicalReq.command,
+        canonicalAgent.id,
+        canonicalAgent.name,
         resolvedUrl!,
-        30000,  // 30 second timeout
-        req.model,
+        30000,
+        canonicalReq.model,
         authToken
       );
     }
 
     if (!result.success) {
-      console.error(`[agentInvocation] Agent error: ${result.error}`);
-      await streamResponse(responseId, result.error || 'Invocation failed', 'error');
-      // Mark task as failed
-      const failedTaskId = pendingAgentTasks.get(req.messageId);
+      console.error('[agentInvocation] provider_error');
+      const persisted = await streamResponse(
+        responseId,
+        OFFICE_PROVIDER_FAILURE,
+        'error',
+      );
+      if (persisted) await markMessageDone(canonicalReq.messageId);
+      const failedTaskId = pendingAgentTasks.get(responseId);
       if (failedTaskId) {
-        pendingAgentTasks.delete(req.messageId);
+        pendingAgentTasks.delete(responseId);
         completeAgentTask(
-          failedTaskId, agent.name, req.command,
-          result.error, 0, undefined, undefined, false, req.messageId,
+          failedTaskId,
+          canonicalAgent.name,
+          canonicalReq.command,
+          OFFICE_PROVIDER_FAILURE,
+          0,
+          undefined,
+          undefined,
+          false,
+          canonicalReq.messageId,
         ).catch(() => {});
       }
-      return result;
+      return {
+        success: false,
+        responseId,
+        error: OFFICE_PROVIDER_FAILURE,
+      };
     }
 
-    console.log(`[agentInvocation] Agent responded: ${result.tokenCount} tokens, ${result.latencyMs}ms latency`);
+    console.log('[agentInvocation] provider_completed');
 
-    // Step 3: Stream final response with token breakdown
+    // Persist the final response before allowing message completion.
     const updated = await streamResponse(
       responseId,
       result.responseText || '',
@@ -1001,19 +1295,46 @@ export async function invokeAndStream(
       result.model,
       result.tokens
     );
+    if (!updated) {
+      const failedTaskId = pendingAgentTasks.get(responseId);
+      if (failedTaskId) {
+        pendingAgentTasks.delete(responseId);
+        completeAgentTask(
+          failedTaskId,
+          canonicalAgent.name,
+          canonicalReq.command,
+          OFFICE_PERSISTENCE_FAILURE,
+          0,
+          undefined,
+          undefined,
+          false,
+          canonicalReq.messageId,
+        ).catch(() => {});
+      }
+      return {
+        success: false,
+        responseId,
+        error: OFFICE_PERSISTENCE_FAILURE,
+      };
+    }
 
-    // Step 4: Mark message complete
-    await markMessageDone(req.messageId);
-    console.log(`[agentInvocation] Complete: ${agent.name}`);
+    await markMessageDone(canonicalReq.messageId);
+    console.log('[agentInvocation] office_response_completed');
 
-    // Step 5: Complete the tracking task
-    const completedTaskId = pendingAgentTasks.get(req.messageId);
+    const completedTaskId = pendingAgentTasks.get(responseId);
     if (completedTaskId) {
-      pendingAgentTasks.delete(req.messageId);
+      pendingAgentTasks.delete(responseId);
       completeAgentTask(
-        completedTaskId, agent.name, req.command,
-        result.responseText, result.tokenCount || 0, result.latencyMs,
-        result.model, true, req.messageId, result.tokens,
+        completedTaskId,
+        canonicalAgent.name,
+        canonicalReq.command,
+        result.responseText,
+        result.tokenCount || 0,
+        result.latencyMs,
+        result.model,
+        true,
+        canonicalReq.messageId,
+        result.tokens,
       ).catch(() => {});
     }
 
@@ -1024,23 +1345,35 @@ export async function invokeAndStream(
       tokenCount: result.tokenCount,
       latencyMs: result.latencyMs,
     };
-  } catch (err: any) {
-    console.error(`[agentInvocation] Exception: ${err.message}`);
-    await streamResponse(responseId, `Error: ${err.message}`, 'error');
+  } catch {
+    console.error('[agentInvocation] runtime_error');
+    const persisted = await streamResponse(
+      responseId,
+      OFFICE_RUNTIME_FAILURE,
+      'error',
+    );
+    if (persisted) await markMessageDone(canonicalReq.messageId);
 
-    // Mark task as failed
-    const failedTaskId = pendingAgentTasks.get(req.messageId);
+    const failedTaskId = pendingAgentTasks.get(responseId);
     if (failedTaskId) {
-      pendingAgentTasks.delete(req.messageId);
+      pendingAgentTasks.delete(responseId);
       completeAgentTask(
-        failedTaskId, agent.name, req.command,
-        err.message, 0, undefined, undefined, false, req.messageId,
+        failedTaskId,
+        canonicalAgent.name,
+        canonicalReq.command,
+        OFFICE_RUNTIME_FAILURE,
+        0,
+        undefined,
+        undefined,
+        false,
+        canonicalReq.messageId,
       ).catch(() => {});
     }
 
     return {
       success: false,
-      error: err.message,
+      responseId,
+      error: OFFICE_RUNTIME_FAILURE,
     };
   }
 }
@@ -1066,11 +1399,7 @@ export async function invokeAllAgents(
   // Invoke all in parallel
   const promises = onlineAgents.map(agent =>
     invokeAndStream(
-      {
-        ...req,
-        targetAgentId: agent.id,
-        targetAgentName: `@${agent.name}`,
-      },
+      buildPerAgentInvocationRequest(req, agent),
       agent,
       gatewayUrl,
       authToken
@@ -1103,11 +1432,7 @@ export async function invokeSelectedAgents(
 
   const promises = selectedAgents.map(agent =>
     invokeAndStream(
-      {
-        ...req,
-        targetAgentId: agent.id,
-        targetAgentName: `@${agent.name}`,
-      },
+      buildPerAgentInvocationRequest(req, agent),
       agent,
       gatewayUrl,
       authToken

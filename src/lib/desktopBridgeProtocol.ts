@@ -13,14 +13,57 @@ export type DesktopBridgeError =
   | 'not_paired'
   | 'origin_blocked'
   | 'app_not_found'
+  | 'path_not_found'
   | 'permission_denied'
+  | 'file_access_not_granted'
   | 'platform_unsupported'
   | 'invalid_input'
   | 'timeout'
+  | 'human_verification_required'
+  | 'browser_bridge_offline'
+  | 'browser_dialog_blocked'
+  | 'browser_identity_required'
+  | 'browser_identity_mismatch'
+  | 'browser_target_required'
+  | 'browser_target_mismatch'
+  | 'browser_target_expired'
+  | 'browser_target_replayed'
+  | 'browser_target_revoked'
+  | 'browser_target_unknown'
+  | 'browser_target_capacity'
+  | 'browser_fill_canary_blocked'
+  | 'browser_fill_verification_failed'
+  | 'browser_toggle_canary_blocked'
+  | 'browser_toggle_verification_failed'
+  | 'selector_not_found'
+  | 'uncertain_ui_target'
+  | 'auth_required'
+  | 'token_rejected'
+  | 'file_not_found'
+  | 'ambiguous_file_match'
+  | 'output_conflict'
+  | 'missing_permission'
+  | 'network_error'
+  | 'server_error'
+  | 'path_not_allowed'
+  | 'stale_bridge'
   // UC-1: returned when the Swift AX helper binary isn't compiled yet.
   // Callers should either prompt the user to rebuild (npm run bridge)
   // or fall back to vision-grounded tools (screenshot + click_at).
   | 'helper_missing'
+  // Browser locator (role+name/selector) resolved to more than one
+  // element and no explicit `nth` disambiguator was provided. The
+  // result carries `matches` + `candidates` so the model can pick one.
+  | 'ambiguous_locator'
+  // Client-side pre-mutation check found a CAPTCHA/MFA/human-check on
+  // the current page. Pause and hand the gate to the user — never bypass.
+  | 'verification_gate'
+  // The AX tree came back empty twice (one bounded retry already
+  // happened). Fall back to the screenshot + coordinate path.
+  | 'a11y_tree_empty'
+  // The app's current PID no longer matches the PID the tree was read
+  // from — element paths are stale. Re-read the tree before acting.
+  | 'a11y_path_stale'
   | 'unknown';
 
 export interface DesktopHealth {
@@ -34,6 +77,8 @@ export interface DesktopResult<T = unknown> {
   ok: boolean;
   error?: string;
   errorCode?: DesktopBridgeError;
+  recoveryHint?: string;
+  requiredEvidence?: string[];
   data?: T;
 }
 
@@ -54,7 +99,12 @@ export const DESKTOP_MODIFIERS = new Set([
 export const DESKTOP_NAMED_KEYS = new Set([
   'return', 'enter', 'tab', 'space', 'delete', 'escape', 'esc',
   'left', 'right', 'down', 'up',
+  'home', 'end', 'pageup', 'pagedown', 'page-up', 'page-down',
   'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+]);
+
+export const DESKTOP_PUNCTUATION_KEYS = new Set([
+  ',', '.', '-', '=', '`', '[', ']',
 ]);
 
 export function parseKeyCombo(combo: string): { ok: true; modifiers: string[]; key: string } | { ok: false; error: string } {
@@ -74,7 +124,8 @@ export function parseKeyCombo(combo: string): { ok: true; modifiers: string[]; k
   const lowerKey = key.toLowerCase();
   const isNamed = DESKTOP_NAMED_KEYS.has(lowerKey);
   const isChar = /^[a-zA-Z0-9]$/.test(key);
-  if (!isNamed && !isChar) return { ok: false, error: `unknown key "${key}"` };
+  const isPunctuation = DESKTOP_PUNCTUATION_KEYS.has(key);
+  if (!isNamed && !isChar && !isPunctuation) return { ok: false, error: `unknown key "${key}"` };
   return { ok: true, modifiers, key };
 }
 

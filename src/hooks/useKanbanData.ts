@@ -1058,12 +1058,31 @@ export function useKanbanData(circleId: string): KanbanData {
       mode: fields.mode || null,
       position: maxPos + 1,
     };
+    if (fields.mission_id) payload.mission_id = fields.mission_id;
     let insertResult = await supabase.from('tasks').insert(payload).select('id').single();
-    if (insertResult.error && payload.completion_policy && String(insertResult.error.message || '').includes('completion_policy')) {
-      completionPolicySupportRef.current = false;
-      delete payload.completion_policy;
-      insertResult = await supabase.from('tasks').insert(payload).select('id').single();
-    } else if (!insertResult.error && payload.completion_policy) {
+    if (insertResult.error) {
+      // A circle's prod DB may be missing EITHER completion_policy or mission_id
+      // (or BOTH, when neither migration is applied). PostgREST/Postgres names
+      // only one missing column per error, so peel them one-per-error with a
+      // small bounded loop (cap 2 retries / 3 inserts total) — stripping, never
+      // reassigning, whichever optional column the CURRENT error names — so a
+      // mission-linked create still succeeds unlinked when both are absent.
+      for (let attempt = 0; attempt < 2 && insertResult.error; attempt++) {
+        const insertErrorMessage = String(insertResult.error.message || '');
+        let strippedColumn = false;
+        if (payload.completion_policy && insertErrorMessage.includes('completion_policy')) {
+          completionPolicySupportRef.current = false;
+          delete payload.completion_policy;
+          strippedColumn = true;
+        }
+        if (payload.mission_id && insertErrorMessage.includes('mission_id')) {
+          delete payload.mission_id;
+          strippedColumn = true;
+        }
+        if (!strippedColumn) break;
+        insertResult = await supabase.from('tasks').insert(payload).select('id').single();
+      }
+    } else if (payload.completion_policy) {
       completionPolicySupportRef.current = true;
     }
 
@@ -1714,6 +1733,52 @@ export function useKanbanData(circleId: string): KanbanData {
         ownership_updated_at: ownershipPayload?.ownership_updated_at || null,
         completed_at: new Date().toISOString(),
       });
+      // Accountability (proof-of-work): make this completed agent run visible to
+      // the team in the Feed. buildRunProofPublication composes the secret-safe
+      // run-proof card + git references into a proof_of_work row (Feed proof lane)
+      // and a realtime agent_activity row. Best-effort / non-fatal — mirrors the
+      // resume-snapshot write below; a failure never affects task completion.
+      void (async () => {
+        try {
+          const { buildRunProofPublication } = await import('../lib/agentRunProofPublisherCore');
+          const { addProofOfWork } = await import('../lib/missions');
+          const { logActivity } = await import('../services/agentActivityLogger');
+          const pub = buildRunProofPublication({
+            runId: openSwanPayload?.runId,
+            taskId: task.id,
+            toolsUsed: openSwanPayload?.toolEvents,
+            toolEvents: openSwanPayload?.toolEvents,
+            filesTouched: attachments.map((a: any) => a.name),
+            verification: openSwanPayload?.verificationResults,
+            stopReason: (parsed.output as any)?.stop_reason,
+            durationMs,
+            outputSummary: parsed.output.summary || deliverable.slice(0, 240),
+            deliverable,
+            attachments,
+            nowMs: Date.now(),
+          });
+          await addProofOfWork({
+            circle_id: task.circle_id,
+            user_id: currentUserId || undefined,
+            agent_name: targetAgentName,
+            mission_id: (task as any).mission_id,
+            pow_type: (pub.proofRow as any).pow_type,
+            title: String((pub.proofRow as any).title || `Agent run: ${task.title}`),
+            detail: pub.proofRow,
+          });
+          // The publisher's activityRow defaults to 'task_completed' on any
+          // non-failed run, but a plan-mode / partial run finished WITHOUT
+          // completing the task — only emit the tallied completion activity when
+          // the task actually completed (or the run failed). The durable
+          // proof_of_work row above still rides the Feed for every run's visibility.
+          const taskActuallyCompleted = completionGatePassed || parsed.output.mark_complete === true;
+          if (taskActuallyCompleted || (pub.activityRow as any).activity_type === 'task_failed') {
+            await logActivity({ circle_id: task.circle_id, agent_name: targetAgentName, ...(pub.activityRow as any) });
+          }
+        } catch (e) {
+          console.warn('[runAgentOnTask] proof-of-work publish failed (non-fatal):', e);
+        }
+      })();
       if (taskRunId) {
         saveTaskRunResumeSnapshot({
           taskRunId,

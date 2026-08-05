@@ -68,6 +68,20 @@ function main() {
     assert(r.detail?.includes('Terminal'), 'type_text: app in detail');
   }
 
+  // ─── desktop.set_element_value → named native field ─────────────
+  {
+    const r = renderApprovalAction({
+      tool: 'desktop.set_element_value',
+      app: 'TextEdit',
+      role: 'AXTextField',
+      label: 'Email',
+      text: 'foo@example.com',
+    }, 'x');
+    assert(r.headline.includes('Set field in'), 'set_element_value: verb');
+    assert(r.headline.includes('**Email**'), 'set_element_value: label shown');
+    assert(r.detail?.includes('TextEdit'), 'set_element_value: app in detail');
+  }
+
   // ─── desktop.press_keys → combo shown ───────────────────────────
   {
     const r = renderApprovalAction({
@@ -131,6 +145,23 @@ function main() {
     }, 'x');
     assert(r.headline.includes('**Merge pull request**'), 'click_role: label bolded');
     assert(r.detail?.includes('on github.com'), 'click_role: host in detail');
+  }
+
+  // ─── Custom API write approval — method/path and connector shown ───
+  {
+    const r = renderApprovalAction({
+      tool: 'custom_api.request',
+      args: {
+        method: 'POST',
+        path: '/orders',
+        apiName: 'Dealer CRM',
+        body: { status: 'ready' },
+      },
+    }, 'x');
+    assert(r.headline.includes('Call'), 'custom_api.request: Call verb');
+    assert(r.headline.includes('**POST /orders**'), 'custom_api.request: method/path shown');
+    assert(r.detail?.includes('Dealer CRM'), 'custom_api.request: connector shown');
+    assert(r.detail?.includes('request body'), 'custom_api.request: request body flagged');
   }
 
   // ─── browser.fill_field — text clipped ──────────────────────────

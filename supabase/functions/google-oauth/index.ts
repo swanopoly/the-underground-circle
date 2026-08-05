@@ -9,6 +9,9 @@
 //   ?action=authorize  — returns Google consent URL with narrowed scopes
 //   ?action=callback   — exchanges code for tokens, stores in DB
 //   ?action=status     — returns {connected, email, scopes, expires_at}
+//   ?action=token      — returns a VALID access token, refreshing via the
+//                        stored refresh_token when expired (never returns
+//                        the refresh_token itself)
 //   ?action=revoke     — hits Google's revoke endpoint + deletes row
 //
 // Env required:
@@ -26,6 +29,8 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Max-Age": "86400",
 };
 
 // The post-callback redirect. Must match whatever the client expects to
@@ -255,6 +260,89 @@ async function handleStatus(req: Request): Promise<Response> {
   });
 }
 
+// ─── Action: token ──────────────────────────────────────────────────────
+// The durability route (P14): client tools (docs.create_document etc.) hold
+// only the ~1h access_token; this refreshes-and-returns so a connection made
+// weeks ago still works. The refresh_token NEVER leaves this function.
+
+async function handleToken(req: Request): Promise<Response> {
+  const userId = await getAuthedUser(req);
+  if (!userId) return jsonResponse({ error: "Unauthenticated" }, 401);
+
+  const supabase = getServiceClient();
+  const { data: creds } = await supabase
+    .from("user_google_credentials")
+    .select("access_token, refresh_token, expires_at, scopes")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (!creds) return jsonResponse({ error: "not_connected" }, 404);
+
+  // Still fresh (2-minute safety margin)? Return the cached token as-is.
+  const expiresAtMs = creds.expires_at ? new Date(creds.expires_at).getTime() : 0;
+  if (creds.access_token && expiresAtMs - Date.now() > 2 * 60 * 1000) {
+    return jsonResponse({
+      access_token: creds.access_token,
+      expires_at: creds.expires_at,
+      scopes: creds.scopes || [],
+      refreshed: false,
+    });
+  }
+
+  if (!creds.refresh_token) {
+    return jsonResponse({ error: "reconnect_required" }, 401);
+  }
+
+  const clientId = Deno.env.get("GOOGLE_OAUTH_CLIENT_ID");
+  const clientSecret = Deno.env.get("GOOGLE_OAUTH_CLIENT_SECRET");
+  if (!clientId || !clientSecret) {
+    return jsonResponse({ error: "Google OAuth not configured" }, 500);
+  }
+
+  const refreshRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: creds.refresh_token,
+      grant_type: "refresh_token",
+    }),
+  });
+
+  if (!refreshRes.ok) {
+    const errText = await refreshRes.text();
+    console.error("Google token refresh failed:", errText.slice(0, 400));
+    // invalid_grant = revoked/expired consent — the user must reconnect.
+    // Keep the row (revoke is the user's explicit action, not ours).
+    const reconnect = /invalid_grant/i.test(errText);
+    return jsonResponse(
+      { error: reconnect ? "reconnect_required" : "refresh_failed" },
+      reconnect ? 401 : 502,
+    );
+  }
+
+  const tokens = await refreshRes.json();
+  // Shape: { access_token, expires_in, scope, token_type } — refresh grants
+  // do NOT return a new refresh_token unless rotation is enabled.
+  const expiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+  await supabase
+    .from("user_google_credentials")
+    .update({
+      access_token: tokens.access_token,
+      expires_at: expiresAt,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("user_id", userId);
+
+  return jsonResponse({
+    access_token: tokens.access_token,
+    expires_at: expiresAt,
+    scopes: creds.scopes || [],
+    refreshed: true,
+  });
+}
+
 // ─── Action: revoke ─────────────────────────────────────────────────────
 
 async function handleRevoke(req: Request): Promise<Response> {
@@ -296,9 +384,10 @@ Deno.serve(async (req: Request) => {
       case "authorize": return await handleAuthorize(req, url);
       case "callback":  return await handleCallback(url);
       case "status":    return await handleStatus(req);
+      case "token":     return await handleToken(req);
       case "revoke":    return await handleRevoke(req);
       default:
-        return jsonResponse({ error: "Unknown action. Use ?action=authorize|callback|status|revoke" }, 400);
+        return jsonResponse({ error: "Unknown action. Use ?action=authorize|callback|status|revoke|token" }, 400);
     }
   } catch (err: any) {
     console.error("google-oauth error:", err);

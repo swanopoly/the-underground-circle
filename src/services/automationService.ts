@@ -7,6 +7,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
+import type { AgentRuntimeSubjectMetadata } from '../lib/agentRuntimeSubject';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,11 @@ export interface CreateAutomationInput {
   templateId?: string;
   spirit?: string;
   spiritPrompt?: string;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+}
+
+export interface AutomationExecutionOptions {
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
 }
 
 // ─── Row mappers ─────────────────────────────────────────────────────────────
@@ -179,6 +185,9 @@ export async function createAutomation(input: CreateAutomationInput): Promise<{ 
   if (!auth.user) return { error: 'Not authenticated' };
 
   const nextRun = input.triggerType === 'schedule' ? computeNextRun(input.cronExpression) : null;
+  const eventConfig = input.agentSubjectMetadata
+    ? { ...(input.eventConfig || {}), agentSubjectMetadata: input.agentSubjectMetadata }
+    : (input.eventConfig || {});
 
   const { data, error } = await supabase
     .from('circle_automations')
@@ -190,7 +199,7 @@ export async function createAutomation(input: CreateAutomationInput): Promise<{ 
       icon: input.icon || '⚡',
       trigger_type: input.triggerType,
       cron_expression: input.cronExpression || null,
-      event_config: input.eventConfig || {},
+      event_config: eventConfig,
       agent: input.agent || 'BlackSwan',
       prompt: input.prompt,
       model: input.model || 'claude-haiku',
@@ -290,7 +299,33 @@ export async function toggleAutomation(id: string, enabled: boolean): Promise<{ 
 
 // ─── Trigger execution ──────────────────────────────────────────────────────
 
-export async function triggerAutomation(id: string, circleId: string): Promise<{ runId?: string; error?: string }> {
+function buildAutomationExecutorBody(args: {
+  automationId: string;
+  circleId: string;
+  triggerSource: TriggerType;
+  triggeredBy?: string | null;
+  dryRun?: boolean;
+  options?: AutomationExecutionOptions;
+}): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    automationId: args.automationId,
+    circleId: args.circleId,
+    triggerSource: args.triggerSource,
+    triggeredBy: args.triggeredBy,
+  };
+  if (args.dryRun) body.dryRun = true;
+  if (args.options?.agentSubjectMetadata) {
+    body.agentSubject = args.options.agentSubjectMetadata;
+    body.agentSubjectMetadata = args.options.agentSubjectMetadata;
+  }
+  return body;
+}
+
+export async function triggerAutomation(
+  id: string,
+  circleId: string,
+  options: AutomationExecutionOptions = {},
+): Promise<{ runId?: string; error?: string }> {
   // Refresh session to get a fresh access token — avoids 401 from expired JWT
   const { data: refreshed } = await supabase.auth.refreshSession();
   const accessToken = refreshed?.session?.access_token;
@@ -312,12 +347,13 @@ export async function triggerAutomation(id: string, circleId: string): Promise<{
         'Authorization': `Bearer ${accessToken}`,
         'apikey': anonKey,
       },
-      body: JSON.stringify({
+      body: JSON.stringify(buildAutomationExecutorBody({
         automationId: id,
         circleId,
         triggerSource: 'manual',
         triggeredBy: userId,
-      }),
+        options,
+      })),
     });
 
     if (!res.ok) {
@@ -333,7 +369,11 @@ export async function triggerAutomation(id: string, circleId: string): Promise<{
 }
 
 /** Test/dry-run an automation — runs AI but doesn't route output or create tasks */
-export async function testAutomation(id: string, circleId: string): Promise<{ runId?: string; error?: string }> {
+export async function testAutomation(
+  id: string,
+  circleId: string,
+  options: AutomationExecutionOptions = {},
+): Promise<{ runId?: string; error?: string }> {
   const { data: refreshed } = await supabase.auth.refreshSession();
   const accessToken = refreshed?.session?.access_token;
   const userId = refreshed?.user?.id;
@@ -350,13 +390,14 @@ export async function testAutomation(id: string, circleId: string): Promise<{ ru
         'Authorization': `Bearer ${accessToken}`,
         'apikey': anonKey,
       },
-      body: JSON.stringify({
+      body: JSON.stringify(buildAutomationExecutorBody({
         automationId: id,
         circleId,
         triggerSource: 'manual',
         triggeredBy: userId,
         dryRun: true,
-      }),
+        options,
+      })),
     });
     if (!res.ok) {
       const text = await res.text();

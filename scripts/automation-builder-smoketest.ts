@@ -6,7 +6,9 @@
  * Run: `npx tsx scripts/automation-builder-smoketest.ts`
  */
 import {
+  buildAutomationProposalInsertRow,
   parseAutomationRequest,
+  parseComputerTaskSchedule,
   looksLikeAutomationRequest,
 } from '../src/lib/automationChatParser';
 
@@ -154,6 +156,106 @@ for (const neg of negatives) {
   const p = parseAutomationRequest(neg);
   if (p === null) ok(`"${neg.slice(0, 30)}..." → null`);
   else fail(`"${neg}" should NOT parse but did`, p);
+}
+
+// ─── parseComputerTaskSchedule (D7b) ─────────────────────────────────────
+
+console.log('\nparseComputerTaskSchedule');
+
+{
+  const task = 'log into portal.acme.com, download the latest invoices, and rename them by date';
+
+  // Day + time phrase → weekly cron, verbatim task prompt, chat output.
+  const friday = parseComputerTaskSchedule({ task, schedulePhrase: 'friday at 9am', taskLabel: 'Invoice download' });
+  if (!friday) fail('schedule: friday phrase should parse', null);
+  else {
+    if (friday.triggerType !== 'schedule' || !friday.cronExpression) fail('schedule: friday → cron schedule', friday);
+    else if (!/\* \* 5$/.test(friday.cronExpression)) fail('schedule: friday → dow 5', friday.cronExpression);
+    else ok(`friday at 9am → ${friday.cronExpression}`);
+    if (!friday.prompt.includes(task)) fail('schedule: prompt carries task verbatim', friday.prompt);
+    else ok('prompt carries the exact task text');
+    if (friday.name !== 'Run: Invoice download') fail('schedule: name from label', friday.name);
+    else ok('name derived from task label');
+    if (friday.outputTarget !== 'chat') fail('schedule: reports into chat', friday.outputTarget);
+    else ok('output target is chat');
+  }
+
+  // "every friday..." with redundant "every" from the user → still parses.
+  const everyPrefixed = parseComputerTaskSchedule({ task, schedulePhrase: 'every friday at 9am' });
+  if (!everyPrefixed) fail('schedule: redundant "every" prefix tolerated', null);
+  else ok('redundant "every" prefix tolerated');
+
+  // Plain cadence word → m2 grammar.
+  const weekly = parseComputerTaskSchedule({ task, schedulePhrase: 'weekly' });
+  if (!weekly || weekly.cronExpression !== '0 9 * * 1') fail('schedule: weekly → monday 9am cron', weekly?.cronExpression);
+  else ok('weekly → 0 9 * * 1');
+
+  // Garbage cadence → null (UI shows guidance instead of filing junk).
+  if (parseComputerTaskSchedule({ task, schedulePhrase: 'whenever vibes are good' }) !== null) {
+    fail('schedule: unparseable cadence → null', null);
+  } else ok('unparseable cadence → null');
+
+  // Empty task → null.
+  if (parseComputerTaskSchedule({ task: '', schedulePhrase: 'weekly' }) !== null) {
+    fail('schedule: empty task → null', null);
+  } else ok('empty task → null');
+}
+
+// ─── buildAutomationProposalInsertRow ────────────────────────────────────
+
+console.log('\nbuildAutomationProposalInsertRow');
+
+{
+  const proposal = parseAutomationRequest('every Friday at 5pm post a weekly summary');
+  const subject = {
+    agentSubjectKey: 'blackswan',
+    agentDisplayName: 'OpenSwan',
+    agentDbId: null,
+    agentSessionKey: 'blackswan',
+    legacyAgentIds: ['default::blackswan', 'openswan:main_chat'],
+  };
+  if (!proposal) {
+    fail('subject metadata row: proposal should parse', null);
+  } else {
+    const row = buildAutomationProposalInsertRow({
+      proposal,
+      circleId: 'circle-1',
+      userId: 'user-1',
+      agentSubjectMetadata: subject,
+    }) as any;
+    if (row.circle_id !== 'circle-1' || row.created_by !== 'user-1') fail('subject metadata row preserves owner ids', row);
+    else ok('subject metadata row preserves owner ids');
+    if (row.event_config?.agentSubjectMetadata?.agentSubjectKey !== 'blackswan') fail('subject metadata row stores canonical subject', row.event_config);
+    else ok('subject metadata row stores canonical subject');
+    if (row.agent !== 'OpenSwan') fail('subject metadata row uses subject display name', row);
+    else ok('subject metadata row uses subject display name');
+  }
+}
+
+{
+  const proposal = parseAutomationRequest('when someone pushes to github post a summary');
+  const subject = {
+    agentSubjectKey: 'scout',
+    agentDisplayName: 'Scout',
+    legacyAgentIds: ['local::scout'],
+  };
+  if (!proposal) {
+    fail('event metadata row: proposal should parse', null);
+  } else {
+    const row = buildAutomationProposalInsertRow({
+      proposal,
+      circleId: 'circle-1',
+      userId: 'user-1',
+      agentSubjectMetadata: subject,
+    }) as any;
+    if (row.event_config?.table !== proposal.eventConfig?.table || row.event_config?.event !== proposal.eventConfig?.event) {
+      fail('event metadata row preserves event config', row.event_config);
+    } else ok('event metadata row preserves event config');
+    if (row.event_config?.agentSubjectMetadata?.legacyAgentIds?.[0] !== 'local::scout') fail('event metadata row stores legacy aliases', row.event_config);
+    else ok('event metadata row stores legacy aliases');
+    if (row.agent !== 'Scout') fail('event metadata row uses selected subject display name', row);
+    else ok('event metadata row uses selected subject display name');
+  }
 }
 
 console.log('\n' + (failures > 0 ? `FAILED — ${failures} assertion(s)` : 'PASSED — all assertions ok'));

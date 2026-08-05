@@ -9,7 +9,8 @@ import {
   type OpenSwanSkillResolution,
 } from './openswanSkillResolution';
 import type { OpenSwanChatMode } from './openswanModePolicy';
-import { listLibrarySkills, type LibrarySkillMetadata } from './skillLibrary';
+import { listLibrarySkills } from './skillLibrary';
+import { renderLibrarySkillsBlock } from './librarySkillGateCore';
 
 export type { OpenSwanResolvedSkill, OpenSwanSkillResolution } from './openswanSkillResolution';
 
@@ -61,7 +62,7 @@ export async function resolveOpenSwanSkills(args: {
       })
     : { skills: [], promptBlock: '' };
 
-  const libraryBlock = formatLibrarySkillsBlock(librarySkills, args.query);
+  const libraryBlock = renderLibrarySkillsBlock(librarySkills, args.query);
   const combined = [personaResolution.promptBlock, libraryBlock]
     .filter((block) => block && block.trim().length > 0)
     .join('\n\n');
@@ -70,53 +71,4 @@ export async function resolveOpenSwanSkills(args: {
     skills: personaResolution.skills,
     promptBlock: combined,
   };
-}
-
-/**
- * Renders SKILL.md library metadata as a compact section for prompt
- * injection. Up to 20 skills listed; ranked by:
- *   1. Tag overlap with lowercased query words (highest signal).
- *   2. Description word overlap.
- *   3. Alphabetical fallback.
- *
- * Zero-skill circles get an empty string so the block is elided cleanly.
- */
-function formatLibrarySkillsBlock(skills: LibrarySkillMetadata[], query: string): string {
-  if (skills.length === 0) return '';
-  const terms = query
-    .toLowerCase()
-    .split(/\W+/)
-    .filter((t) => t.length >= 3);
-
-  const scored = skills
-    .map((s) => {
-      let score = 0;
-      for (const term of terms) {
-        for (const tag of s.tags) {
-          if (tag.toLowerCase().includes(term)) score += 3;
-        }
-        if (s.description.toLowerCase().includes(term)) score += 1;
-        if (s.name.toLowerCase().includes(term)) score += 2;
-      }
-      // Boost skills used successfully before — usageCount + successCount as
-      // light weight. Stays bounded so a rarely-relevant skill with 100 uses
-      // doesn't drown out a new skill that actually matches the query.
-      score += Math.min(2, (s.successCount || 0) / Math.max(1, s.usageCount || 1));
-      return { s, score };
-    })
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return a.s.name.localeCompare(b.s.name);
-    })
-    .slice(0, 20);
-
-  const lines = [
-    '## SKILL.md Library',
-    'Circle-authored procedures. Call `viewLibrarySkill(name)` for the full body (procedure / pitfalls / verification) when one looks relevant.',
-  ];
-  for (const { s } of scored) {
-    const tagTail = s.tags.length > 0 ? ` [${s.tags.join(', ')}]` : '';
-    lines.push(`- ${s.name} (v${s.version})${tagTail}: ${s.description}`);
-  }
-  return lines.join('\n');
 }

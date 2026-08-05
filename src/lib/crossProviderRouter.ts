@@ -23,6 +23,7 @@
  */
 
 import type { LLMProvider } from './llmProviders';
+import { excludeCoolingProviders } from './providerHealthRegistry';
 
 /**
  * Logical model IDs map across providers. Each entry lists the
@@ -109,6 +110,19 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
     anthropic: 'claude-sonnet-4-6',
     openrouter: 'anthropic/claude-sonnet-4-6',
   },
+  // ── Claude Fable / Opus current tier ─ Anthropic native + OR ──────
+  'claude-fable-5': {
+    anthropic: 'claude-fable-5',
+    openrouter: 'anthropic/claude-fable-5',
+  },
+  'claude-opus-4-8': {
+    anthropic: 'claude-opus-4-8',
+    openrouter: 'anthropic/claude-opus-4-8',
+  },
+  'claude-opus-4-7': {
+    anthropic: 'claude-opus-4-7',
+    openrouter: 'anthropic/claude-opus-4-7',
+  },
   // ── Claude Opus 4.6 ─ Anthropic native + OR ───────────────────────
   'claude-opus-4-6': {
     anthropic: 'claude-opus-4-6',
@@ -120,11 +134,55 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
     openrouter: 'anthropic/claude-haiku-4-5',
   },
   // ── GPT-4o ─ OpenAI native + OR passthrough ───────────────────────
+  'gpt-5.5-pro': {
+    openai: 'gpt-5.5-pro',
+    openrouter: 'openai/gpt-5.5-pro',
+  },
+  'gpt-5.5': {
+    openai: 'gpt-5.5',
+    openrouter: 'openai/gpt-5.5',
+  },
+  'gpt-5.4': {
+    openai: 'gpt-5.4',
+    openrouter: 'openai/gpt-5.4',
+  },
+  'gpt-5.4-mini': {
+    openai: 'gpt-5.4-mini',
+    openrouter: 'openai/gpt-5.4-mini',
+  },
+  'gpt-5.4-nano': {
+    openai: 'gpt-5.4-nano',
+    openrouter: 'openai/gpt-5.4-nano',
+  },
   'gpt-4o': {
     openai: 'gpt-4o',
     openrouter: 'openai/gpt-4o',
   },
+  'gpt-4.1': {
+    openai: 'gpt-4.1',
+    openrouter: 'openai/gpt-4.1',
+  },
+  'gpt-4.1-mini': {
+    openai: 'gpt-4.1-mini',
+    openrouter: 'openai/gpt-4.1-mini',
+  },
+  'gpt-4.1-nano': {
+    openai: 'gpt-4.1-nano',
+    openrouter: 'openai/gpt-4.1-nano',
+  },
   // ── Gemini 2.5 Pro ─ OR-only today (no native Google in llm-proxy) ─
+  'gemini-3.5-flash': {
+    openrouter: 'google/gemini-3.5-flash',
+    google_ai: 'gemini-3.5-flash',
+  },
+  'gemini-3.1-pro-preview': {
+    openrouter: 'google/gemini-3.1-pro-preview',
+    google_ai: 'gemini-3.1-pro-preview',
+  },
+  'gemini-3.1-flash-lite': {
+    openrouter: 'google/gemini-3.1-flash-lite',
+    google_ai: 'gemini-3.1-flash-lite',
+  },
   'gemini-2.5-pro': {
     openrouter: 'google/gemini-2.5-pro',
     google_ai: 'gemini-2.5-pro',
@@ -134,6 +192,10 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
     openrouter: 'google/gemini-2.5-flash',
     google_ai: 'gemini-2.5-flash',
   },
+  'gemini-2.5-flash-lite': {
+    openrouter: 'google/gemini-2.5-flash-lite',
+    google_ai: 'gemini-2.5-flash-lite',
+  },
   'deepseek-reasoner': {
     deepseek: 'deepseek-reasoner',
     openrouter: 'deepseek/deepseek-r1',
@@ -142,6 +204,22 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
   'command-r-plus': {
     cohere: 'command-r-plus',
     openrouter: 'cohere/command-r-plus',
+  },
+  'sonar-deep-research': {
+    perplexity: 'sonar-deep-research',
+    openrouter: 'perplexity/sonar-deep-research',
+  },
+  'sonar-reasoning-pro': {
+    perplexity: 'sonar-reasoning-pro',
+    openrouter: 'perplexity/sonar-reasoning-pro',
+  },
+  'sonar-pro': {
+    perplexity: 'sonar-pro',
+    openrouter: 'perplexity/sonar-pro',
+  },
+  'sonar': {
+    perplexity: 'sonar',
+    openrouter: 'perplexity/sonar',
   },
   // ── OpenRouter auto-router (OR-only by definition) ────────────────
   'openrouter-auto': {
@@ -163,12 +241,32 @@ export function findAliasKey(modelId: string): string | null {
 
   // Soft mapping — the chat composer sometimes uses friendlier ids.
   const norm = id.toLowerCase();
+  if (norm === 'claude-fable-5' || norm === 'claude-fable') return 'claude-fable-5';
+  if (norm === 'claude-opus-4-8')           return 'claude-opus-4-8';
+  if (norm === 'claude-opus-4-7')           return 'claude-opus-4-7';
   if (norm === 'claude-opus-4-6')           return 'claude-opus-4-6';
   if (norm === 'claude-sonnet-4-6')         return 'claude-sonnet-4-6';
   if (norm.startsWith('claude-haiku'))      return 'claude-haiku-4-5';
+  if (norm === 'gpt-5.5-pro')               return 'gpt-5.5-pro';
+  if (norm === 'gpt-5.5')                   return 'gpt-5.5';
+  if (norm === 'gpt-5.4')                   return 'gpt-5.4';
+  if (norm === 'gpt-5.4-mini')              return 'gpt-5.4-mini';
+  if (norm === 'gpt-5.4-nano')              return 'gpt-5.4-nano';
+  if (norm === 'gpt-4.1')                   return 'gpt-4.1';
+  if (norm === 'gpt-4.1-mini')              return 'gpt-4.1-mini';
+  if (norm === 'gpt-4.1-nano')              return 'gpt-4.1-nano';
   if (norm.startsWith('gpt-4o'))            return 'gpt-4o';
-  if (norm.includes('gemini') && norm.includes('flash')) return 'gemini-2.5-flash';
+  if (norm === 'gemini-3.5-flash') return 'gemini-3.5-flash';
+  if (norm === 'gemini-3.1-pro' || norm === 'gemini-3.1-pro-preview') return 'gemini-3.1-pro-preview';
+  if (norm === 'gemini-3.1-flash-lite') return 'gemini-3.1-flash-lite';
+  if (norm === 'gemini-2.5-flash-lite') return 'gemini-2.5-flash-lite';
+  if (norm.includes('gemini') && norm.includes('flash-lite')) return norm.includes('3.1') ? 'gemini-3.1-flash-lite' : 'gemini-2.5-flash-lite';
+  if (norm.includes('gemini') && norm.includes('flash')) return norm.includes('3.5') ? 'gemini-3.5-flash' : 'gemini-2.5-flash';
   if (norm.includes('gemini') && norm.includes('pro'))   return 'gemini-2.5-pro';
+  if (norm === 'sonar-deep-research')       return 'sonar-deep-research';
+  if (norm === 'sonar-reasoning-pro')       return 'sonar-reasoning-pro';
+  if (norm === 'sonar-pro')                 return 'sonar-pro';
+  if (norm === 'sonar')                     return 'sonar';
   if (norm.includes('llama-3.3') && norm.includes('70b')) return 'llama-3.3-70b';
   if (norm.includes('llama-3.1') && norm.includes('8b'))  return 'llama-3.1-8b';
   if (norm.includes('mistral-large'))        return 'mistral-large';
@@ -199,7 +297,42 @@ export interface RouteResolutionOptions {
   /** When true, prefer the free-tier identifier over the paid one
    *  even when both are available. Useful for free-tier users. */
   preferFree?: boolean;
+  /** PRE-SELECTION health awareness. When set, providers that recently
+   *  failed with a health-class error (rate-limit / overload / transient)
+   *  are pushed to the BACK of the try order for this turn via
+   *  `providerHealthRegistry.excludeCoolingProviders`. This only changes
+   *  ORDER — no provider is dropped and no error is suppressed
+   *  (fail-visible; see the note on `resolveProviderRoutes`).
+   *
+   *  Inject `nowMs` for deterministic behavior in tests. Omit in
+   *  production to disable health-aware reordering (routes resolve in
+   *  the plain preference order, exactly as before). Pass `healthNowMs`
+   *  to opt in; callers that want live behavior pass `Date.now()`. */
+  healthNowMs?: number;
+  /** Optional cooldown window override (ms) forwarded to the health
+   *  registry. Defaults to the registry's 30s window. */
+  healthCooldownMs?: number;
 }
+
+/** Re-export the health recorder so the router's runtime consumer
+ *  (`universalInvoke.executeRouteChain`) can log per-route outcomes
+ *  from one import site. Wiring is a single line at the observe point
+ *  (see the fail-visible note on `resolveProviderRoutes`):
+ *
+ *    // on success:  recordProviderOutcomeNow(route.provider, { ok: true });
+ *    // on failure:  recordProviderOutcomeNow(route.provider,
+ *    //                { ok: false, errorClass: classifyProviderError(err) });
+ *
+ *  Recording never changes what the caller does with the error — the
+ *  error is STILL surfaced. It only updates health for the NEXT turn. */
+export {
+  recordProviderOutcome,
+  recordProviderOutcomeNow,
+  classifyProviderError,
+  isProviderCoolingDown,
+  excludeCoolingProviders,
+} from './providerHealthRegistry';
+export type { ProviderErrorClass, ProviderOutcome } from './providerHealthRegistry';
 
 const DEFAULT_PREFERENCE: Array<ProviderRoute['provider']> = [
   'ollama',
@@ -258,6 +391,20 @@ function providerFromModelPrefix(modelId: string): LLMProvider | null {
  *     unified shape so the caller doesn't need branching code.
  *   - Free-tier preference → if `preferFree=true` and the alias has
  *     `openrouterFree`, that route is inserted first.
+ *   - Health-aware PRE-selection → when `opts.healthNowMs` is set, a
+ *     provider that recently failed with a health-class error (rate
+ *     limit / overload / transient) is moved to the BACK of the try
+ *     order for this turn. See the fail-visible note below.
+ *
+ * ─── FAIL-VISIBLE (house invariant) ─────────────────────────────────
+ * The health reordering here is PRE-selection only: it picks a
+ * healthier provider ORDER *before* the request goes out. It never
+ * removes a provider (so the try list can't reach zero because of
+ * health — worst case the order is unchanged) and it does NOT catch,
+ * swallow, retry, or hide any error. The router's runtime consumer
+ * (`universalInvoke.executeRouteChain`) still surfaces the last error
+ * exactly as before; this only influences the ORDER it walks. Do NOT
+ * turn this into silent mid-request failover.
  */
 export function resolveProviderRoutes(
   modelId: string,
@@ -266,7 +413,18 @@ export function resolveProviderRoutes(
   const aliasKey = findAliasKey(modelId);
   const aliases = aliasKey ? MODEL_ALIASES[aliasKey] : null;
   const routes: ProviderRoute[] = [];
-  const preference = opts.prefer || DEFAULT_PREFERENCE;
+  const basePreference = opts.prefer || DEFAULT_PREFERENCE;
+  // PRE-selection: if the caller opted in with a clock, push
+  // cooling-down providers to the back of the preference order. This
+  // reorders FUTURE attempts only — nothing is dropped, no error is
+  // suppressed (fail-visible; see the note above).
+  const preference = typeof opts.healthNowMs === 'number'
+    ? excludeCoolingProviders(
+        basePreference,
+        opts.healthNowMs,
+        { cooldownMs: opts.healthCooldownMs },
+      ).ordered
+    : basePreference;
 
   // Without an alias entry we fall back to direct routing — assume
   // the caller passed a provider-native id and try OR as a hopeful

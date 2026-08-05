@@ -8,6 +8,7 @@ import {
   createMission,
   updateMission,
   updateMissionTask,
+  addProofOfWork,
   missionProgress,
   formatDeadline,
   isOverdue,
@@ -15,10 +16,44 @@ import {
   MissionTask,
 } from './missions';
 import { buildChatSlashHelpMessage } from './chatSlashCommands';
+import {
+  buildMissionCreatedProofTitle,
+  buildProofOriginDetail,
+} from './chatProofReceipts';
 
 interface CommandContext {
   circleId: string;
   userId: string;
+  /**
+   * Originating chat thread, when the command came from main chat. Stamped
+   * onto a `proof_of_work` row at creation so task dispatches can post
+   * receipts back to this conversation (Phase 3c of
+   * docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md).
+   */
+  threadId?: string | null;
+}
+
+/**
+ * Fire-and-forget origin stamp: a `manual` proof row recording that the
+ * mission started in chat. `missionAgentDispatch` reads this stamp to route
+ * task receipts back to the thread. A failed stamp never fails creation.
+ */
+async function stampMissionChatOrigin(
+  ctx: CommandContext,
+  missionId: string,
+  missionTitle: string,
+): Promise<void> {
+  if (!ctx.threadId) return;
+  try {
+    await addProofOfWork({
+      circle_id: ctx.circleId,
+      mission_id: missionId,
+      user_id: ctx.userId,
+      pow_type: 'manual',
+      title: buildMissionCreatedProofTitle(missionTitle),
+      detail: buildProofOriginDetail(ctx.threadId),
+    });
+  } catch { /* stamp is best-effort */ }
 }
 
 interface CommandResult {
@@ -155,7 +190,11 @@ export async function executeMissionCommand(
     if (!title) return { message: 'Usage: `/mission quickcreate <title>`', success: false };
     const { mission, error } = await createMission(ctx.circleId, ctx.userId, title);
     if (error) return { message: `Failed to create mission: ${error}`, success: false };
-    return { message: `Mission created: **${mission!.title}**\nOpen the Missions tab to add tasks and set a deadline.`, success: true };
+    await stampMissionChatOrigin(ctx, mission!.id, mission!.title);
+    return {
+      message: `Mission created: **${mission!.title}**\nOpen the Missions tab to add tasks and set a deadline.${ctx.threadId ? ' Task receipts will post back to this conversation.' : ''}`,
+      success: true,
+    };
   }
 
   // /mission complete — mark most recent active mission as complete
@@ -187,7 +226,11 @@ export async function executeMissionCommand(
   // Default: treat as create
   const { mission, error } = await createMission(ctx.circleId, ctx.userId, args);
   if (error) return { message: `Failed: ${error}`, success: false };
-  return { message: `Mission created: **${mission!.title}**\nOpen the Missions tab to add tasks.`, success: true };
+  await stampMissionChatOrigin(ctx, mission!.id, mission!.title);
+  return {
+    message: `Mission created: **${mission!.title}**\nOpen the Missions tab to add tasks.${ctx.threadId ? ' Task receipts will post back to this conversation.' : ''}`,
+    success: true,
+  };
 }
 
 /** Generate a formatted mission status report */

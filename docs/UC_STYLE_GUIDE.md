@@ -4,6 +4,12 @@
 > The app should feel modern and lived-in, not monochrome-terminal and not pixel-gimmick.
 > Indigo `#6366f1` remains the primary accent, with slate/blue surfaces doing most of the visual work.
 
+For product design, page structure, accessibility, responsive behavior,
+performance, and agent-facing review standards, read
+[`DESIGN_AGENT_BEST_PRACTICES.md`](./DESIGN_AGENT_BEST_PRACTICES.md) and
+[`MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md`](./MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md)
+with this token guide.
+
 ---
 
 ## Core Principles

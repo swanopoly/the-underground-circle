@@ -11,12 +11,14 @@ Usage:
 import os
 import json
 import sys
+import shutil
 import requests
 from pathlib import Path
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 OUTPUT_DIR = Path(__file__).parent / "raw_data"
+STAGING_DIR = Path(__file__).parent / f".raw_data_export_tmp_{os.getpid()}"
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -26,7 +28,11 @@ HEADERS = {
 }
 
 
-def fetch_table(table_name, select="*", order=None, limit=50000):
+class ExportError(RuntimeError):
+    pass
+
+
+def fetch_table(table_name, select="*", order=None, limit=50000, optional=False):
     """Paginated fetch from Supabase REST API."""
     all_rows = []
     offset = 0
@@ -38,10 +44,15 @@ def fetch_table(table_name, select="*", order=None, limit=50000):
         if order:
             params["order"] = order
 
-        resp = requests.get(url, headers=HEADERS, params=params)
+        try:
+            resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+        except requests.RequestException as exc:
+            raise ExportError(f"{table_name} request failed: {exc}") from exc
         if resp.status_code != 200:
-            print(f"  WARNING: {table_name} returned {resp.status_code}: {resp.text[:200]}")
-            break
+            if optional and resp.status_code == 404:
+                print(f"  optional source missing ({resp.status_code}); skipping.", end=" ")
+                return []
+            raise ExportError(f"{table_name} returned {resp.status_code}: {resp.text[:300]}")
 
         rows = resp.json()
         if not rows:
@@ -118,9 +129,10 @@ TABLES = {
     "session_tags": {
         "select": "id,circle_id,session_id,tag,category,created_at",
         "order": "created_at.asc",
+        "optional": True,
     },
     "goals": {
-        "select": "id,user_id,circle_id,title,description,status,target_date,created_at",
+        "select": "id,circle_id,name,description,status,assigned_agent_ids,target_count,created_by,created_at,updated_at,auto_task_count,auto_task_frequency,last_auto_task_at",
         "order": "created_at.asc",
     },
     "circle_office_agents": {
@@ -162,6 +174,27 @@ TABLES = {
         "select": "id,circle_id,created_by,name,description,trigger_type,cron_expression,enabled,last_run_at,last_error,template_id,created_at,updated_at",
         "order": "created_at.asc",
     },
+    # ── P63: agent tool-trace flywheel (added 2026-07-10) ──
+    # Real agent tool-use runs — the richest app data we have. Exported
+    # ONLY through the training_safe views (see the TRAINING_SAFE_VIEWS
+    # remap below and migration 20260710_training_safe_agent_runs.sql):
+    # the views apply opt-out filtering, expose completed runs only, and
+    # alias agent_run_events.at → created_at (the raw table has no
+    # created_at column). `optional` keeps exports green until that SQL
+    # is applied in prod — a 404 on the view is skipped, never a hard
+    # fail. The ShareGPT conversion of these rows is owned by the tool-
+    # trace pipeline (export_tool_traces.py → score_trajectories.py →
+    # convert_tool_traces.py), not convert_app_data.py.
+    "agent_runs": {
+        "select": "id,circle_id,surface,title,goal,mode,model,provider,status,created_at,completed_at",
+        "order": "created_at.asc",
+        "optional": True,
+    },
+    "agent_run_events": {
+        "select": "run_id,kind,payload,created_at",
+        "order": "created_at.asc",
+        "optional": True,
+    },
 }
 
 
@@ -170,7 +203,9 @@ def main():
         print("ERROR: Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.")
         sys.exit(1)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if STAGING_DIR.exists():
+        shutil.rmtree(STAGING_DIR)
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
     total_rows = 0
 
     # Use training-safe views when available (respects user opt-out)
@@ -187,22 +222,41 @@ def main():
         "proof_of_work":         "training_safe_proof_of_work",
         "circle_github_events":  "training_safe_github_events",
         "circle_automations":    "training_safe_automations",
+        # P63 tool-trace flywheel — see 20260710_training_safe_agent_runs.sql.
+        # These two must NEVER fall back to the raw tables here: the raw
+        # tables carry user_id and skip opt-out, and raw agent_run_events
+        # has `at` instead of created_at. Their TABLES entries are marked
+        # optional, so a missing view 404s and is skipped cleanly.
+        "agent_runs":            "training_safe_agent_runs",
+        "agent_run_events":      "training_safe_agent_run_events",
     }
 
     print(f"Exporting from {SUPABASE_URL}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"Using privacy-safe views where available\n")
 
-    for table_name, config in TABLES.items():
-        # Use training-safe view if available (filters opted-out users)
-        source = TRAINING_SAFE_VIEWS.get(table_name, table_name)
-        print(f"  {table_name} (via {source})...", end=" ", flush=True)
-        rows = fetch_table(source, **config)
-        output_path = OUTPUT_DIR / f"{table_name}.json"
-        with open(output_path, "w") as f:
-            json.dump(rows, f, indent=2, default=str)
-        print(f"{len(rows)} rows")
-        total_rows += len(rows)
+    try:
+        for table_name, config in TABLES.items():
+            # Use training-safe view if available (filters opted-out users)
+            source = TRAINING_SAFE_VIEWS.get(table_name, table_name)
+            print(f"  {table_name} (via {source})...", end=" ", flush=True)
+            rows = fetch_table(source, **config)
+            output_path = STAGING_DIR / f"{table_name}.json"
+            with open(output_path, "w") as f:
+                json.dump(rows, f, indent=2, default=str)
+            print(f"{len(rows)} rows")
+            total_rows += len(rows)
+    except Exception:
+        shutil.rmtree(STAGING_DIR, ignore_errors=True)
+        raise
+
+    if total_rows <= 0:
+        shutil.rmtree(STAGING_DIR, ignore_errors=True)
+        raise ExportError("Export returned zero total rows; refusing to replace raw_data.")
+
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR)
+    STAGING_DIR.rename(OUTPUT_DIR)
 
     print(f"\nDone! {total_rows} total rows across {len(TABLES)} tables.")
 

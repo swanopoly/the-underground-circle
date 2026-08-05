@@ -11,6 +11,7 @@ import {
   promoteAgentMemoriesToSharedPatterns,
 } from './memoryService';
 import { buildTaskOwnershipClaim } from './circleIntegrations';
+import { deriveMemoryLookupIds } from './memoryLookupKeyCore';
 
 // ---------------------------------------------------------------------------
 // 1. createInitialTaskRunSteps
@@ -218,6 +219,15 @@ export async function buildTaskExecutionMemoryBrief(opts: {
   profileKey?: string;
   agentId?: string;
   agentName?: string;
+  /**
+   * Prior write keys for this agent subject (`memoryAgentAliases`). Optional:
+   * callers that only know an agent id still get the derived identity/legacy
+   * aliases below, because the subject key rotates on publish/reconnect and a
+   * read under the live key alone loses the agent's earlier memories.
+   */
+  agentAliases?: string[];
+  agentSessionKey?: string | null;
+  agentDbId?: string | null;
 }): Promise<string> {
   const sections: string[] = [];
   const profile = opts.profileKey ? getTaskCapabilityProfile(opts.profileKey) : undefined;
@@ -281,10 +291,18 @@ export async function buildTaskExecutionMemoryBrief(opts: {
 
   try {
     if (opts.agentId) {
+      const agentLookupIds = deriveMemoryLookupIds({
+        agentId: opts.agentId,
+        agentName: opts.agentName,
+        sessionKey: opts.agentSessionKey,
+        dbAgentId: opts.agentDbId,
+        agentAliases: opts.agentAliases,
+      });
       const relevantAgentMemories = await retrieveAgentMemories({
         circleId: opts.circleId,
         userId: opts.userId,
         agentId: opts.agentId,
+        agentAliases: agentLookupIds,
         agentName: opts.agentName,
         types: ['agent_task_completion', 'agent_task_blocker'],
         limit: 4,

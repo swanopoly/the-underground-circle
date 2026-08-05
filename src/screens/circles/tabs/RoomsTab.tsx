@@ -52,6 +52,10 @@ import {
 } from '../../../lib/openswanVerificationRuntime';
 import { appendRunToolEvent, mergeRunMetadata } from '../../../lib/agentRunSystem';
 import { buildRunMetadataSummaryProps, readRunBrowserPlanEvents } from '../../../lib/runMetadataSummary';
+import { describeRoomTaskInvokeError, describeRoomTaskResult, describeRoomTaskSchedule, describeRoomTaskType } from '../../../lib/roomTaskResultCore';
+import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
+import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
+import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
 import RoomFileTree from '../../../components/rooms/RoomFileTree.web';
 import type { RoomFileEntry } from '../../../components/rooms/roomTreeAdapter';
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -800,6 +804,26 @@ function LegacyRoomsTab({ circleId, accentColor }: Props) {
             <Pressable onPress={() => setShowCreate(true)} style={[s.emptyBtn,{backgroundColor:accentColor}]}>
               <Text style={s.emptyBtnText}>Create First Room</Text>
             </Pressable>
+            <View style={{ marginTop: 20, width: '100%' }}>
+              <SuggestedTaskChips
+                suggestions={getEmptyStateSuggestions('rooms')}
+                onPick={(action: EmptyStateSuggestionAction) => {
+                  // "Create a project room" is an `open` ROOMS action — we ARE
+                  // Rooms, so open the create modal in-surface.
+                  if (action.kind === 'open') { setShowCreate(true); return; }
+                  // /room list + /room files are chat commands — seed, then switch.
+                  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                    const seed = buildComposerSeedDetail(action.value);
+                    try {
+                      if (seed) window.dispatchEvent(new CustomEvent(SEED_EVENT_NAME, { detail: seed }));
+                      window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } }));
+                    } catch {}
+                  }
+                }}
+                accentColor={accentColor}
+                nativeID="section-rooms-empty-suggestions"
+              />
+            </View>
           </View>
         ) : (
           <View style={[s.grid, isMobile && s.gridMobile]}>
@@ -6874,6 +6898,7 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
   const [taskType, setTaskType] = useState<string>('general');
   const [loading, setLoading] = useState(true);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
+  const [runError, setRunError] = useState<{ taskId: string; headline: string; detail: string } | null>(null);
 
   const fetchTasks = useCallback(() => {
     supabase.from('room_tasks').select('*').eq('room_id', roomId).order('created_at')
@@ -6949,8 +6974,9 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
 
   const runTask = async (task: RoomTask) => {
     setRunningTaskId(task.id);
+    setRunError(null);
     try {
-      await supabase.functions.invoke('room-task-executor', {
+      const { error } = await supabase.functions.invoke('room-task-executor', {
         body: {
           taskId: task.id,
           roomId,
@@ -6960,9 +6986,18 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
           taskName: task.name,
         },
       });
+      if (error) {
+        // invoke does not throw on non-2xx; body rides on error.context (Response).
+        let body: unknown;
+        try { body = await (error as any).context?.clone?.().json?.(); } catch { body = undefined; }
+        const summary = describeRoomTaskInvokeError(error, body);
+        setRunError({ taskId: task.id, headline: summary.headline, detail: summary.detail });
+      }
       fetchTasks();
     } catch (err) {
       console.error('Run task error:', err);
+      const summary = describeRoomTaskInvokeError(err);
+      setRunError({ taskId: task.id, headline: summary.headline, detail: summary.detail });
     } finally {
       setRunningTaskId(null);
     }
@@ -6998,10 +7033,18 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
                   style={[panelTabSt.miniTab, sel && { backgroundColor: accentColor + '20', borderColor: accentColor + '60' },
                     !sel && { backgroundColor: '#0d0d0d', borderColor: '#222' }]}>
                   <Text style={[{ color: '#666', fontSize: 10 }, sel && { color: accentColor }]}>{tt.emoji} {tt.label}</Text>
+                  {!describeRoomTaskType(tt.key).executes && (
+                    <Text style={{ color: sel ? accentColor + '99' : '#555', fontSize: 8, marginTop: 1 }}>advisory only</Text>
+                  )}
                 </Pressable>
               );
             })}
           </View>
+          {!describeRoomTaskType(taskType).executes && (
+            <Text style={{ color: '#f59e0b', fontSize: 10, marginBottom: 6 }}>
+              {describeRoomTaskType(taskType).advisoryNote}
+            </Text>
+          )}
 
           <Text style={[s.label, { marginTop: 8 }]}>Schedule</Text>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginBottom: 6 }}>
@@ -7014,6 +7057,11 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
           </View>
           <TextInput style={s.input} value={schedule} onChangeText={setSchedule}
             placeholder="cron expr or 'once'" placeholderTextColor="#555" autoCapitalize="none" />
+          {describeRoomTaskSchedule(schedule).warning && (
+            <Text style={{ color: '#f59e0b', fontSize: 10, marginTop: 4, marginBottom: 2 }}>
+              {describeRoomTaskSchedule(schedule).warning}
+            </Text>
+          )}
 
           <TextInput style={[s.input, { marginTop: 6 }]} value={agent} onChangeText={setAgent}
             placeholder="Agent name (optional)" placeholderTextColor="#555" />
@@ -7042,9 +7090,9 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
           const isRunning = runningTaskId === task.id || task.status === 'running';
           const statusDotColor = isRunning ? '#f59e0b' : task.status === 'done' ? '#22c55e'
             : task.status === 'error' ? '#ef4444' : task.enabled ? '#3b82f6' : '#6f6f6f';
-          const resultPreview = task.lastResult?.preview
-            || task.lastResult?.error
-            || (task.lastResult ? JSON.stringify(task.lastResult).slice(0, 120) : null);
+          const resultSummary = task.lastResult != null || task.status === 'running' || task.status === 'error'
+            ? describeRoomTaskResult({ taskType: task.taskType, lastResult: task.lastResult, status: task.status })
+            : null;
           return (
             <View key={task.id} style={[panelTabSt.serviceRow, { opacity: task.enabled ? 1 : 0.5 }]}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
@@ -7054,7 +7102,7 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
                   <Text style={{ color: '#888', fontSize: 9, fontWeight: '700' }}>{tt.emoji} {tt.label}</Text>
                 </View>
                 <View style={panelTabSt.typeBadge}>
-                  <Text style={{ color: '#888', fontSize: 9, fontWeight: '700' }}>{task.schedule}</Text>
+                  <Text style={{ color: '#888', fontSize: 9, fontWeight: '700' }}>{describeRoomTaskSchedule(task.schedule).label}</Text>
                 </View>
               </View>
               <Text style={{ color: '#666', fontSize: 11, marginBottom: 4 }} numberOfLines={2}>{task.prompt}</Text>
@@ -7062,11 +7110,16 @@ function TasksPanel({ roomId, accentColor }: { roomId: string; accentColor: stri
                 {'\u2192'} {task.agent}
                 {task.status !== 'idle' && <Text style={{ color: statusDotColor }}> {'\u00B7'} {task.status.toUpperCase()}</Text>}
               </Text>
-              {resultPreview && (
+              {runError?.taskId === task.id && (
+                <Text style={{ color: '#ef4444', fontSize: 10, marginBottom: 4, fontFamily: MONO }} numberOfLines={3}>
+                  {runError.headline} {'\u2014'} {runError.detail}
+                </Text>
+              )}
+              {resultSummary && (
                 <View style={{ backgroundColor: '#0a0a0a', borderRadius: 12, padding: 8, marginBottom: 6,
-                  borderWidth: 1, borderColor: task.lastResult?.error ? '#ffffff15' : '#161616' }}>
-                  <Text style={{ color: task.lastResult?.error ? '#ef4444' : '#888', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>
-                    {resultPreview}
+                  borderWidth: 1, borderColor: resultSummary.tone === 'warn' ? '#ffffff15' : '#161616' }}>
+                  <Text style={{ color: resultSummary.tone === 'warn' ? '#f59e0b' : resultSummary.tone === 'ok' ? '#888' : '#666', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>
+                    {resultSummary.headline}{resultSummary.detail ? ` \u2014 ${resultSummary.detail}` : ''}{resultSummary.jumpToChat ? '  \u2192 room chat' : ''}
                   </Text>
                   {task.lastRun && (
                     <Text style={{ color: '#555', fontSize: 9, marginTop: 3, fontFamily: MONO }}>

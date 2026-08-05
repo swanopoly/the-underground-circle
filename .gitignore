@@ -69,3 +69,14 @@ scripts/bin/uc-ax-helper.dSYM/
 docs/traces/
 
 .openswan-worktrees/
+
+# Local Remember runtime artifacts; keep curated .remember docs/assets tracked.
+.remember/logs/
+.remember/tmp/
+.playwright-mcp/
+
+# Multi-agent coordination: the advisory file-lease registry is ephemeral,
+# per-clone local state. Committing it would create merge conflicts on the very
+# lock file meant to prevent conflicts. See docs/MULTI_AGENT_FILE_COORDINATION.md.
+.uc/
+.claude/

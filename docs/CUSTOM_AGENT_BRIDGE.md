@@ -46,10 +46,13 @@ For agents not running on the same machine as the browser:
 - expose the bridge on a reachable URL
 - or tunnel it with Cloudflare / ngrok / similar
 - then use that public URL in the Office setup wizard
+- for the bundled Claude/Codex/Cursor/Gemini bridges, also restart the server
+  with `UC_BRIDGE_ALLOWED_HOSTS=<exact tunnel host[:port]>` and
+  `UC_BRIDGE_ALLOWED_ORIGINS=<exact browser origin>`; a public URL alone is not
+  authorization
 
 ## Notes
 
 - `localhost` only works when the app is running on the same machine as the bridge.
 - Hosted web needs a public bridge URL for remote agents.
 - Custom bridges do not need to pretend to be OpenSwan unless they want rich Office features.
-

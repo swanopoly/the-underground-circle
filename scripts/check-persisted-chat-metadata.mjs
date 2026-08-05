@@ -45,6 +45,7 @@ import {
   readMessageMemoryRefs,
   readMessageMemoryRecommendations,
   readMessageResearchRefs,
+  readMessageRecoveryOptions,
   readMessageWikiRefs,
   readPersistedChatBotMessageFields,
 } from '../src/lib/messageMetadataReaders';
@@ -64,6 +65,7 @@ const persisted = formatPersistedChatBotMessage('OpenSwan', 'Research complete',
   browserPlans: [{ planId: 'plan-1', task: 'Compare pricing', actions: [], backend: 'browserbase_stagehand', backendLabel: 'Browserbase', requiresApproval: true, status: 'planned' }],
   browserPlanEvents: [{ id: 'evt-1', kind: 'planned', summary: 'Plan created', planId: 'plan-1', at: '2026-01-01T00:00:00.000Z' }],
   browserSessions: [{ id: 'sess-1', planId: 'plan-1', task: 'Compare pricing', backend: 'browserbase_stagehand', backendLabel: 'Browserbase', status: 'executing', startedAt: '2026-01-01T00:00:00.000Z', actions: [] }],
+  recoveryOptions: [{ id: 'retry_with_fresh_evidence', label: 'Retry after fresh evidence', detail: 'Refresh browser evidence before retrying.', actor: 'openswan', recommended: true, source: 'checkpoint_guard' }],
   commandDecisions: [{ routeId: 'browser', source: 'slash', input: 'use browser', commandText: '/browser plan pricing', decidedAt: '2026-01-01T00:00:00.000Z' }],
   observedEval: {
     mode: 'research',
@@ -75,6 +77,9 @@ const persisted = formatPersistedChatBotMessage('OpenSwan', 'Research complete',
     verification: { planned: 2, executed: 2, passed: 2, failed: 0, manualRequired: 0, blocked: 0, coverageRatio: 1 },
     artifacts: { total: 2, durable: 1, kinds: ['code_patch', 'research_brief'] },
     tools: { total: 2, failed: 0, manualRequired: 0, blocked: 0 },
+    responseQuality: { score: 90, met: ['answered'], missed: [] },
+    modeSignals: [{ key: 'research', label: 'Research', score: 92 }],
+    skillSignals: [{ key: 'code_patch', label: 'Code patch', score: 88, source: 'artifact' }],
     blockers: [],
     strengths: ['2 verification check(s) passed'],
   },
@@ -94,6 +99,7 @@ if (readMessageExecutionStream(metadata).length !== 1) failures.push('execution 
 if (readMessageBrowserPlans(metadata).length !== 1) failures.push('browser plans should survive persisted metadata round-trip');
 if (readMessageBrowserPlanEvents(metadata).length !== 1) failures.push('browser plan events should survive persisted metadata round-trip');
 if (readMessageBrowserSessions(metadata).length !== 1) failures.push('browser sessions should survive persisted metadata round-trip');
+if (readMessageRecoveryOptions(metadata).length !== 1) failures.push('recovery options should survive persisted metadata round-trip');
 if ((metadata.commandDecisions || []).length !== 1) failures.push('command decisions should survive persisted metadata round-trip');
 if ((metadata.observedEval?.score || 0) !== 91) failures.push('observed eval should survive persisted metadata round-trip');
 

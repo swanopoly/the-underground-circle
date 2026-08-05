@@ -1,0 +1,33 @@
+model: mlx-community/Qwen3.5-4B-4bit
+train: true
+data: training_data/mlx_format
+fine_tune_type: lora
+num_layers: 16
+# batch_size 1 + grad_checkpoint is already the low-memory configuration.
+# Memory assumption: the 48GB M4 Pro training machine. Measured peak was
+# 11.3GB at max_seq_length 512; at 2048 the activation share grows roughly
+# 3-4x (estimated ~25-35GB peak), which fits 48GB but with less headroom.
+# If a cycle OOMs or swaps hard, batch_size cannot go below 1 — instead
+# lower max_seq_length to 1024 or reduce num_layers.
+batch_size: 1
+iters: 1500
+learning_rate: 1e-4
+# 512 -> 2048 (2026-07): cycle logs were full of truncation warnings —
+# multi-turn and agent-trace examples up to ~3387 tokens were being cut to
+# 512, so the model was learning chopped-off endings for exactly the long
+# examples that matter most. 2048 covers the bulk of the corpus; the rare
+# >2048 example still truncates (mlx_lm logs a warning when it does).
+#
+# TEMPORARY 2048 -> 1024 workaround used for the 2026-07-15/16 manual
+# cycle (2 consecutive OOM aborts at 2048 under heavy concurrent memory
+# pressure). That cycle completed successfully and shipped; restored to
+# the documented 2048 default here. If OOM recurs under similar memory
+# pressure, drop this back to 1024 again (or free up memory first).
+max_seq_length: 2048
+steps_per_report: 25
+steps_per_eval: 100
+grad_checkpoint: true
+lora_parameters:
+  rank: 16
+  scale: 1.0
+  dropout: 0.0

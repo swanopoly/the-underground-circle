@@ -33,7 +33,7 @@ const MENU_ENTRIES: MenuEntry[] = [
   { label: 'Friends',       icon: '⁘', flatIcon: 'friends',       screen: 'Friends' },
   { label: 'Organizations', icon: '▣', flatIcon: 'organizations', screen: 'OrgList' },
   { label: 'Schools',       icon: '△', flatIcon: 'schools',       screen: 'Schools' },
-  { label: 'AI Wiki',       icon: '◈', flatIcon: 'wiki',          screen: 'Wiki' },
+  { label: 'Wiki', icon: '◈', flatIcon: 'wiki',         screen: 'Wiki' },
   'divider',
   { label: 'Agents',        icon: '⬡', flatIcon: 'agents',        screen: 'Agents' },
   { label: 'Marketplace',   icon: '🛍', flatIcon: 'integrations',  screen: 'Integrations' },
@@ -499,7 +499,7 @@ function AnimatedMenuItem({
 const styles = StyleSheet.create({
   header: {
     height: 48,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
     borderBottomWidth: 1,
     borderBottomColor: '#21262d',
     flexDirection: 'row',

@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { buildIntegrationSaveHealthState } from './integrationHealthBadgeCore';
 
 export type CircleIntegrationProvider =
   | 'browserbase'
@@ -14,6 +15,7 @@ export type CircleIntegrationProvider =
   | 'airtop'
   | 'skyvern'
   | 'browser_use'
+  | 'custom_api'
   | 'aws'
   | 'braintrust'
   | 'cloudflare'
@@ -213,6 +215,88 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       { key: 'searchLang', label: 'Search Language', placeholder: 'en' },
     ],
     validationHints: ['Paste your Brave Search API subscription token. Chat uses it server-side through the search_web tool; the key is never sent to the browser prompt.'],
+  },
+  custom_api: {
+    provider: 'custom_api',
+    label: 'Custom API',
+    description: 'Connect any REST or HTTP API so chat, SwanBot, and OpenSwan can plan against it, discover safe docs/metadata, and request approval before side-effect calls.',
+    capabilityFlags: ['custom_api', 'api_connector', 'read_data', 'write_data', 'automation_action', 'agent_tool'],
+    requiredSecretKeys: [],
+    optionalSecretKeys: ['api_key', 'bearer_token', 'basic_username', 'basic_password', 'webhook_secret'],
+    metadataFields: [
+      { key: 'apiName', label: 'API Name', placeholder: 'Acme CRM', required: true },
+      { key: 'baseUrl', label: 'Base URL', placeholder: 'https://api.example.com', required: true },
+      { key: 'apiDocsUrl', label: 'API Docs URL', placeholder: 'https://docs.example.com', required: false },
+      { key: 'defaultEndpoint', label: 'Default Endpoint', placeholder: '/v1/customers', required: false },
+      { key: 'defaultMethod', label: 'Default Method', placeholder: 'GET', required: false },
+      { key: 'allowedMethods', label: 'Allowed Methods', placeholder: 'GET, POST', required: false },
+      { key: 'authScheme', label: 'Auth Scheme', placeholder: 'bearer, x-api-key, basic, or none', required: false },
+      { key: 'apiKeyHeaderName', label: 'API Key Header Name', placeholder: 'x-api-key', required: false },
+      { key: 'defaultAction', label: 'Primary Agent Task', placeholder: 'Create customer records', required: false },
+      { key: 'toolNamespace', label: 'Tool Namespace', placeholder: 'acme_crm', required: false },
+      { key: 'dataBoundary', label: 'Data Boundary', placeholder: 'Only customer support tickets', required: false },
+      { key: 'rateLimitPolicy', label: 'Rate Limit / Safety Notes', placeholder: 'Max 20 calls per minute', required: false },
+    ],
+    validationHints: [
+      'Start read-only: add base URL and docs first, then add credentials only when write actions are approved.',
+      'Keep API keys in secret fields; prompt context only receives endpoint, docs, and capability metadata.',
+      'Write, delete, publish, billing, and customer-impacting calls must route through approval before execution.',
+    ],
+  },
+  // ── Team messaging (outbound via incoming webhooks) ──
+  // These providers previously only "tracked the connection" and could not
+  // post anything. The `incoming_webhook_url` secret lets an agent post a
+  // completion summary / approval request / alert to the team's channel
+  // through the guarded, approval-gated `messaging.notify` tool +
+  // `messaging-notify` edge function (server-side secret injection, private-
+  // host block, no secret leak — mirrors the custom_api.request pattern).
+  slack: {
+    provider: 'slack',
+    label: 'Slack',
+    description: 'Post agent completion summaries, approval requests, and alerts to a Slack channel via an incoming webhook. Approval-gated and server-side only — the webhook URL never reaches the model or the browser.',
+    capabilityFlags: ['messaging', 'post_channel_message', 'team_notifications', 'agent_tool'],
+    requiredSecretKeys: ['incoming_webhook_url'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Acme HQ', required: false },
+      { key: 'defaultChannel', label: 'Default Channel', placeholder: '#team-updates', required: false },
+    ],
+    validationHints: [
+      'Paste a Slack Incoming Webhook URL (Slack → Apps → Incoming Webhooks → Add to a channel). It looks like https://hooks.slack.com/services/T…/B…/….',
+      'The webhook is stored as a secret and injected server-side; posting a message is approval-gated as an external side effect.',
+    ],
+  },
+  discord: {
+    provider: 'discord',
+    label: 'Discord',
+    description: 'Post agent completion summaries, approval requests, and alerts to a Discord channel via a channel webhook. Approval-gated and server-side only — the webhook URL never reaches the model or the browser.',
+    capabilityFlags: ['messaging', 'post_channel_message', 'team_notifications', 'agent_tool'],
+    requiredSecretKeys: ['incoming_webhook_url'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'serverName', label: 'Server Name', placeholder: 'Acme Guild', required: false },
+      { key: 'defaultChannel', label: 'Default Channel', placeholder: '#alerts', required: false },
+    ],
+    validationHints: [
+      'Paste a Discord Webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). It looks like https://discord.com/api/webhooks/…/….',
+      'The webhook is stored as a secret and injected server-side; posting a message is approval-gated as an external side effect.',
+    ],
+  },
+  teams: {
+    provider: 'teams',
+    label: 'Microsoft Teams',
+    description: 'Post agent completion summaries, approval requests, and alerts to a Microsoft Teams channel via an incoming webhook. Approval-gated and server-side only — the webhook URL never reaches the model or the browser.',
+    capabilityFlags: ['messaging', 'post_channel_message', 'team_notifications', 'agent_tool'],
+    requiredSecretKeys: ['incoming_webhook_url'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'teamName', label: 'Team Name', placeholder: 'Engineering', required: false },
+      { key: 'defaultChannel', label: 'Default Channel', placeholder: 'Deploys', required: false },
+    ],
+    validationHints: [
+      'Paste a Teams Incoming Webhook URL (channel → … → Connectors → Incoming Webhook → Configure). It looks like https://<tenant>.webhook.office.com/webhookb2/….',
+      'The webhook is stored as a secret and injected server-side; posting a message is approval-gated as an external side effect.',
+    ],
   },
   apify: {
     provider: 'apify',
@@ -1290,7 +1374,7 @@ export async function getCircleIntegrationSecretValues(integrationId: string): P
 export async function getInstalledIntegrationProviders(circleId: string): Promise<CircleIntegrationProvider[]> {
   const integrations = await listCircleIntegrations(circleId);
   return integrations
-    .filter(item => item.is_active !== false && item.status !== 'disabled')
+    .filter(isIntegrationUsableForCapability)
     .map(item => item.provider);
 }
 
@@ -1298,9 +1382,15 @@ export async function getCircleIntegrationCapabilities(circleId: string): Promis
   const integrations = await listCircleIntegrations(circleId);
   return Array.from(new Set(
     integrations
-      .filter(item => item.is_active !== false && item.status !== 'disabled')
+      .filter(isIntegrationUsableForCapability)
       .flatMap(item => item.capability_flags || []),
   ));
+}
+
+function isIntegrationUsableForCapability(item: Pick<CircleIntegrationRecord, 'provider' | 'status' | 'is_active'>): boolean {
+  if (item.is_active === false || item.status === 'disabled') return false;
+  if (item.provider === 'custom_api') return item.status === 'connected';
+  return true;
 }
 
 const CONNECTOR_PROVIDER_ALIASES: Record<string, CircleIntegrationProvider[]> = {
@@ -1363,6 +1453,15 @@ const CONNECTOR_PROVIDER_ALIASES: Record<string, CircleIntegrationProvider[]> = 
   'meta-ads': ['meta_ads'],
   google_ads: ['google_ads'],
   meta_ads: ['meta_ads'],
+  api: ['custom_api'],
+  custom_api: ['custom_api'],
+  'custom-api': ['custom_api'],
+  http_api: ['custom_api'],
+  'http-api': ['custom_api'],
+  rest_api: ['custom_api'],
+  'rest-api': ['custom_api'],
+  webhook: ['custom_api'],
+  endpoint: ['custom_api'],
 };
 
 export async function getMissingConnectorRequirements(
@@ -1583,6 +1682,29 @@ export function getProviderSpecificIntegrationWarnings(
       }
       break;
     }
+    case 'custom_api': {
+      const baseUrl = read('baseUrl');
+      const defaultMethod = read('defaultMethod');
+      const allowedMethods = read('allowedMethods');
+      if (baseUrl && !/^https:\/\/[^\s/$.?#].[^\s]*$/i.test(baseUrl)) {
+        warnings.push('Base URL should be a full HTTPS URL like https://api.example.com.');
+      }
+      if (defaultMethod && !/^(GET|POST|PUT|PATCH|DELETE)$/i.test(defaultMethod)) {
+        warnings.push('Default method should be GET, POST, PUT, PATCH, or DELETE.');
+      }
+      if (allowedMethods && !allowedMethods.split(',').every(method => /^(GET|POST|PUT|PATCH|DELETE)$/i.test(method.trim()))) {
+        warnings.push('Allowed methods should be a comma-separated list of GET, POST, PUT, PATCH, or DELETE.');
+      }
+      const authScheme = read('authScheme');
+      if (authScheme && !/^(bearer|x-api-key|basic|none)$/i.test(authScheme)) {
+        warnings.push('Auth scheme should be bearer, x-api-key, basic, or none.');
+      }
+      const apiKeyHeaderName = read('apiKeyHeaderName');
+      if (apiKeyHeaderName && !/^[A-Za-z0-9-]{1,64}$/.test(apiKeyHeaderName)) {
+        warnings.push('API key header name should use only letters, numbers, and hyphens.');
+      }
+      break;
+    }
     case 'launchdarkly': {
       const workspaceName = read('workspaceName');
       if (!workspaceName) {
@@ -1705,6 +1827,12 @@ export function inferTaskIntegrationRequirements(task: {
     requiredConnectors.add('brave');
     requiredCapabilities.add('web_search');
     requiredCapabilities.add('current_research');
+  }
+  if (/custom api|api connector|rest api|http api|external api|third[- ]party api|connect .* api|webhook endpoint|api integration/i.test(text)) {
+    requiredConnectors.add('custom_api');
+    requiredCapabilities.add('custom_api');
+    requiredCapabilities.add('api_connector');
+    requiredCapabilities.add('agent_tool');
   }
   if (/browser automation|browser session|web automation|computer use|website task|login flow|form fill|click|navigate|qa flow|ui test/i.test(text)) {
     requiredConnectors.add('browserbase');
@@ -1884,7 +2012,32 @@ export async function connectGenericCircleIntegration(opts: {
       validationMessage = probe.message;
     }
   }
+  if (opts.provider === 'custom_api' && definition) {
+    const metadata = opts.metadata || {};
+    const missingMetadataFields = (definition.metadataFields || [])
+      .filter(field => field.required !== false)
+      .map(field => field.key)
+      .filter(key => !String(metadata[key] || '').trim());
+    const providerWarnings = getProviderSpecificIntegrationWarnings({ provider: opts.provider, metadata });
+    if (missingMetadataFields.length > 0 || providerWarnings.length > 0) {
+      initialStatus = 'degraded';
+      validationMessage = [
+        missingMetadataFields.length ? `Missing metadata: ${missingMetadataFields.join(', ')}` : '',
+        ...providerWarnings,
+      ].filter(Boolean).join(' | ');
+    }
+  }
 
+  // A successful (re-)save must explicitly write the healthy state:
+  // `upsertCircleIntegration` MERGES metadata with the existing row, so simply
+  // omitting `last_validation_error` would preserve a stale error forever
+  // while status silently reset to 'connected'. The pure helper returns
+  // `{ last_validation_error: null }` on success (clearing the stale error
+  // through the merge) and a sanitized bounded error + 'degraded' on failure.
+  const saveHealth = buildIntegrationSaveHealthState({
+    status: initialStatus,
+    validationMessage,
+  });
   const integration = await upsertCircleIntegration({
     circleId: opts.circleId,
     provider: opts.provider,
@@ -1892,10 +2045,10 @@ export async function connectGenericCircleIntegration(opts: {
     description: opts.description || definition?.description || null || undefined,
     metadata: {
       ...(opts.metadata || {}),
-      ...(validationMessage ? { last_validation_error: validationMessage } : {}),
+      ...saveHealth.metadataPatch,
     },
     capabilityFlags: definition?.capabilityFlags || [],
-    status: initialStatus,
+    status: saveHealth.status,
   });
 
   if (!integration) return null;

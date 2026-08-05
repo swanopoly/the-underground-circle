@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { CirclePlan, PlanStep, PlanStatus } from '../types/kanban';
 import { inferTaskIntegrationRequirements } from '../lib/circleIntegrations';
+import { useResilientSubscription } from './useResilientSubscription';
 
 function buildPlanMarketplaceContext(fields: {
   title?: string | null;
@@ -61,17 +62,27 @@ export function usePlans(circleId: string) {
     }
   }, [circleId]);
 
+  // Initial fetch. The resilient subscription below only backfills on
+  // reconnect/silent-staleness — it deliberately does not fire on first
+  // subscribe — so the initial load stays here.
   useEffect(() => {
     fetchPlans();
+  }, [fetchPlans]);
 
-    const channelId = `circle_plans:${circleId}:${Math.random().toString(36).slice(2, 10)}`;
-    const channel = supabase
-      .channel(channelId)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_plans', filter: `circle_id=eq.${circleId}` }, fetchPlans)
-      .subscribe((status, err) => { if (err) console.error('[usePlans] realtime error:', err); });
-
-    return () => { supabase.removeChannel(channel); };
-  }, [circleId, fetchPlans]);
+  // Realtime with automatic reconnect + silent-staleness catch-up. A STABLE
+  // channelName (not the old per-mount random id, which leaked a fresh channel
+  // name every cycle) lets a reconnect reuse one channel.
+  useResilientSubscription({
+    channelName: `circle_plans:${circleId}`,
+    setup: (channel) =>
+      channel.on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'circle_plans', filter: `circle_id=eq.${circleId}` },
+        fetchPlans,
+      ),
+    onEvent: fetchPlans,
+    enabled: !!circleId,
+  });
 
   const createPlan = async (fields: Partial<CirclePlan>) => {
     const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));

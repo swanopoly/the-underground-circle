@@ -6,6 +6,9 @@ import {
   type CircleIntegrationProvider,
 } from './circleIntegrations';
 import { getBridgeUrl } from './bridgeEnvironment';
+import { isAgentBridgeCapabilityReady } from './computerCapabilityReadiness';
+
+export { isAgentBridgeCapabilityReady } from './computerCapabilityReadiness';
 
 export type ComputerCapabilityId =
   | 'browser_automation'
@@ -36,6 +39,11 @@ export interface ComputerCapabilityAudit {
   activeMcpServerCount: number;
   activeMcpToolCount: number;
 }
+
+type DesktopBridgeProbe = {
+  supported: boolean;
+  tools: string[];
+};
 
 function normalizeText(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase();
@@ -82,16 +90,15 @@ function hasCapability(capabilities: string[], capability: string): boolean {
 }
 
 /**
- * Probe the local desktop bridge with a short timeout. Returns true
- * when /desktop/health responds with `supported: true` — i.e. we can
- * actually launch / focus / type / read the AX tree on this machine.
- * Any failure (timeout, DNS, network) returns false without throwing
- * so the audit stays non-blocking.
+ * Probe the local desktop bridge with a short timeout. Returns the advertised
+ * tool list when /desktop/health responds with `supported: true`, otherwise
+ * null. Any failure (timeout, DNS, network) returns null without throwing so
+ * the audit stays non-blocking.
  */
-async function probeDesktopBridge(): Promise<boolean> {
-  if (typeof fetch === 'undefined') return false;
+async function probeDesktopBridge(): Promise<DesktopBridgeProbe | null> {
+  if (typeof fetch === 'undefined') return null;
   const base = getBridgeUrl(7778);
-  if (!base) return false;
+  if (!base) return null;
   try {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), 500) : null;
@@ -100,10 +107,14 @@ async function probeDesktopBridge(): Promise<boolean> {
       signal: controller?.signal,
     });
     if (timer) clearTimeout(timer);
-    if (!res.ok) return false;
-    const json = (await res.json()) as { ok?: boolean; supported?: boolean };
-    return !!json?.supported;
-  } catch { return false; }
+    if (!res.ok) return null;
+    const json = (await res.json()) as { ok?: boolean; supported?: boolean; tools?: unknown };
+    if (!json?.supported) return null;
+    return {
+      supported: true,
+      tools: Array.isArray(json.tools) ? json.tools.map(String) : [],
+    };
+  } catch { return null; }
 }
 
 function summarizeSources(parts: Array<string | null | undefined>): string[] {
@@ -122,12 +133,12 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
   // /desktop/health was reporting launch/focus/type/keys/a11y_tree.
   // Probing here (unauthenticated health endpoint) stays cheap and
   // never blocks — a 500ms timeout falls through to "no bridge".
-  const [connections, integrationProviders, integrationCapabilities, mcpServers, bridgeAlive] = await Promise.all([
+  const [connections, integrationProviders, integrationCapabilities, mcpServers, bridgeProbe] = await Promise.all([
     loadConnections().catch(() => [] as AgentConnection[]),
     getInstalledIntegrationProviders(circleId).catch(() => [] as CircleIntegrationProvider[]),
     getCircleIntegrationCapabilities(circleId).catch(() => [] as string[]),
     listMcpServers(circleId).catch(() => []),
-    probeDesktopBridge().catch(() => false),
+    probeDesktopBridge().catch(() => null),
   ]);
 
   const mcpTools = mcpServers.length > 0
@@ -137,6 +148,18 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
   const enabledConnections = connections.filter((conn) => conn.enabled);
   const filesystemTools = mcpTools.filter(isFilesystemTool);
   const appTools = mcpTools.filter(isDesktopOrAppTool);
+  const bridgeAlive = !!bridgeProbe?.supported;
+  const bridgeTools = new Set((bridgeProbe?.tools || []).map((tool) => tool.toLowerCase()));
+  const bridgeHasFileSearch = bridgeAlive && (bridgeTools.has('file_search') || bridgeTools.has('file_list'));
+  const bridgeHasFileRead = bridgeAlive && (bridgeTools.has('file_read') || bridgeTools.has('file_stat'));
+  const bridgeHasFileWrite = bridgeAlive && (
+    bridgeTools.has('file_write')
+    || bridgeTools.has('file_rename')
+    || bridgeTools.has('file_write_text')
+    || bridgeTools.has('file_copy')
+    || bridgeTools.has('file_trash')
+    || bridgeTools.has('file_mkdir')
+  );
 
   const browserAvailable =
     hasCapability(integrationCapabilities, 'web_automation') ||
@@ -146,8 +169,29 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     integrationProviders.includes('browserbase') ? 'integration: Browserbase' : null,
   ]);
 
-  const bridgeSources = enabledConnections.map((conn) => `bridge: ${conn.provider}`);
+  // The live local bridge (claude-bridge.js on :7778) IS an agent bridge —
+  // it's the Claude Code / Codex transport that serves the desktop endpoints.
+  // So a successful health probe satisfies `agent_bridges` even when the
+  // persisted connection store is empty (auto-connected bridges aren't always
+  // written there). Without this, `agent_bridges` audited 'missing' while the
+  // bridge was demonstrably alive — blocking unknown-app tasks (e.g. "create a
+  // Notes note") with a phantom "Agent bridges missing" preflight.
+  const agentBridgesReady = isAgentBridgeCapabilityReady({
+    enabledConnectionCount: enabledConnections.length,
+    bridgeAlive,
+  });
+  const bridgeSources = summarizeSources([
+    ...enabledConnections.map((conn) => `bridge: ${conn.provider}`),
+    bridgeAlive && enabledConnections.length === 0 ? 'desktop bridge: localhost:7778 (live health probe)' : null,
+  ]);
   const fileSources = summarizeSources([
+    bridgeHasFileSearch || bridgeHasFileRead || bridgeHasFileWrite
+      ? `desktop bridge: ${[
+          bridgeHasFileSearch ? 'file_search' : null,
+          bridgeHasFileRead ? 'file_read/file_stat' : null,
+          bridgeHasFileWrite ? 'file_write' : null,
+        ].filter(Boolean).join('/')}`
+      : null,
     filesystemTools.length > 0 ? `mcp tools: ${filesystemTools.length} filesystem tool${filesystemTools.length === 1 ? '' : 's'}` : null,
     enabledConnections.some((conn) => conn.provider === 'openswan') ? 'bridge: openswan' : null,
   ]);
@@ -156,7 +200,7 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     appTools.length > 0 ? `mcp tools: ${appTools.length} app/desktop tool${appTools.length === 1 ? '' : 's'}` : null,
     integrationProviders.length > 0 ? `integrations: ${integrationProviders.length}` : null,
     enabledConnections.length > 0 ? `bridges: ${enabledConnections.length}` : null,
-    bridgeAlive ? 'desktop bridge: launch/focus/type/keys/a11y_tree' : null,
+    bridgeAlive ? 'desktop bridge: launch/focus/type/paste/keys/menu/mouse/a11y_tree' : null,
   ]);
 
   const findings: ComputerCapabilityFinding[] = [
@@ -183,21 +227,25 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     {
       id: 'file_search',
       label: 'File search',
-      status: filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
-      detail: filesystemTools.length > 0
+      status: bridgeHasFileSearch || filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 || bridgeAlive ? 'partial' : 'missing',
+      detail: bridgeHasFileSearch
+        ? 'The local desktop bridge exposes scoped file search/list endpoints for approved local folders.'
+        : filesystemTools.length > 0
         ? 'Filesystem-oriented MCP tools are available for locating files/content.'
-        : enabledConnections.length > 0
+        : enabledConnections.length > 0 || bridgeAlive
           ? 'Bridges exist, but no canonical filesystem toolset is visible yet.'
           : 'No filesystem capability source is active yet.',
       sources: fileSources,
     },
     {
       id: 'file_read',
-      label: 'File read access',
-      status: filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 ? 'partial' : 'missing',
-      detail: filesystemTools.length > 0
+	      label: 'File read access',
+	      status: bridgeHasFileRead || filesystemTools.length > 0 ? 'ready' : enabledConnections.length > 0 || bridgeAlive ? 'partial' : 'missing',
+	      detail: bridgeHasFileRead
+	        ? 'The local desktop bridge exposes scoped file-read and metadata endpoints that the runtime can prepare automatically.'
+        : filesystemTools.length > 0
         ? 'The circle can likely read granted files through MCP filesystem tools.'
-        : enabledConnections.length > 0
+        : enabledConnections.length > 0 || bridgeAlive
           ? 'A bridge may support file access, but there is no canonical read contract yet.'
           : 'No file-read surface is discoverable yet.',
       sources: fileSources,
@@ -205,8 +253,12 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     {
       id: 'file_write',
       label: 'File write access',
-      status: toolMatches({ name: filesystemTools.map((tool) => tool.name).join(' '), description: filesystemTools.map((tool) => tool.description || '').join(' ') }, ['write file', 'edit file', 'save file']) ? 'partial' : 'missing',
-      detail: toolMatches({ name: filesystemTools.map((tool) => tool.name).join(' '), description: filesystemTools.map((tool) => tool.description || '').join(' ') }, ['write file', 'edit file', 'save file'])
+      status: bridgeHasFileWrite
+        ? 'ready'
+        : toolMatches({ name: filesystemTools.map((tool) => tool.name).join(' '), description: filesystemTools.map((tool) => tool.description || '').join(' ') }, ['write file', 'edit file', 'save file']) ? 'partial' : 'missing',
+	      detail: bridgeHasFileWrite
+	        ? 'The local desktop bridge exposes scoped file-write, rename, copy, folder-create, and move-to-Trash endpoints that the runtime can prepare automatically.'
+        : toolMatches({ name: filesystemTools.map((tool) => tool.name).join(' '), description: filesystemTools.map((tool) => tool.description || '').join(' ') }, ['write file', 'edit file', 'save file'])
         ? 'Some filesystem tooling suggests write/edit support, but write scopes are not normalized yet.'
         : 'Write-capable file access is not yet modeled as a trusted computer capability.',
       sources: fileSources,
@@ -221,7 +273,7 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
             ? 'partial'
             : 'missing',
       detail: bridgeAlive
-        ? 'Desktop bridge is live on localhost:7778 — launch/focus/type/keys/a11y_tree/click_element are all available.'
+        ? 'Desktop bridge is live on localhost:7778 — launch/focus/type/paste/keys/menu/mouse/a11y_tree/click_element/set_element_value are all available.'
         : appTools.length > 0 || integrationProviders.length > 0
           ? 'The circle has app-level capability sources through MCP tools and/or installed integrations.'
           : enabledConnections.length > 0
@@ -232,10 +284,12 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     {
       id: 'agent_bridges',
       label: 'Agent bridges',
-      status: enabledConnections.length > 0 ? 'ready' : 'missing',
+      status: agentBridgesReady ? 'ready' : 'missing',
       detail: enabledConnections.length > 0
         ? 'Local or remote agent bridges are enabled and can extend what the circle can do.'
-        : 'No enabled agent bridges are visible.',
+        : bridgeAlive
+          ? 'The live local bridge on localhost:7778 (Claude Code / Codex transport) is reachable and can run agent tasks.'
+          : 'No enabled agent bridges are visible.',
       sources: bridgeSources,
     },
     {
@@ -247,7 +301,7 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
           ? 'partial'
           : 'missing',
       detail: bridgeAlive
-        ? 'The local desktop bridge exposes native launch/focus/type/keys + AX tree reads and semantic clicks — first-class native control on this machine.'
+        ? 'The local desktop bridge exposes native launch/focus/type/paste/keys/menu actions, mouse movement/click/hold/release/drag/scroll, AX tree reads, semantic clicks, and direct AX field value setting — first-class native control on this machine.'
         : appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer']))
           ? 'There are early signals of desktop-oriented tools, but native app control is not yet a mature first-class runtime.'
           : 'Native desktop control is not yet a real canonical capability in the app.',

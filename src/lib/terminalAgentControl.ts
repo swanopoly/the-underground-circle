@@ -1,9 +1,9 @@
-import { bridgeAuthHeaders, ensureBridgeToken } from './bridgeAuth';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 import { sendTerminalAgentSessionMessage } from './bridgeTaskDispatcher';
 import { loadAgentIdentities, type TerminalAgentOfficeConfig } from './agentIdentity';
 
-export type TerminalAgentControlProvider = 'claude-code' | 'codex' | 'gemini';
+export type TerminalAgentControlProvider = 'claude-code' | 'codex' | 'gemini' | 'cursor';
 
 export type TerminalAgentControlSession = {
   provider: TerminalAgentControlProvider;
@@ -24,6 +24,7 @@ const PROVIDERS: Array<{ provider: TerminalAgentControlProvider; label: string; 
   { provider: 'claude-code', label: 'Claude Code', port: 7778 },
   { provider: 'codex', label: 'Codex', port: 7779 },
   { provider: 'gemini', label: 'Gemini CLI', port: 7780 },
+  { provider: 'cursor', label: 'Cursor Composer', port: 7781 },
 ];
 
 function displayNameFor(providerLabel: string, raw: any, index: number, total: number): string {
@@ -38,9 +39,7 @@ async function fetchProviderSessions(provider: typeof PROVIDERS[number]): Promis
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, {
-      headers: bridgeAuthHeaders(token),
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -170,7 +169,7 @@ function parseSendIntent(message: string): { target: string; body: string } | nu
   if (slashColon && !isPluralTarget(slashColon[1])) return { target: slashColon[1].trim(), body: slashColon[2].trim() };
 
   const tell = raw.match(/^(?:tell|ask)\s+(.+?)\s+to\s+([\s\S]+)$/i);
-  if (tell && !isPluralTarget(tell[1]) && /\b(?:codex|claude|gemini|cli|agent|session|#\d+)\b/i.test(tell[1])) {
+  if (tell && !isPluralTarget(tell[1]) && /\b(?:codex|claude|gemini|cursor|composer|cli|agent|session|#\d+)\b/i.test(tell[1])) {
     return { target: tell[1].trim(), body: tell[2].trim() };
   }
 
@@ -184,7 +183,7 @@ function isStatusIntent(message: string): boolean {
   const raw = String(message || '').trim();
   if (/^\/(?:agents|terminals|terminal-agents)$/i.test(raw)) return true;
   return /\b(?:what|show|list|status|summarize)\b/i.test(raw)
-    && /\b(?:agents?|terminal sessions?|codex|claude code|gemini cli)\b/i.test(raw)
+    && /\b(?:agents?|terminal sessions?|codex|claude code|gemini cli|cursor|composer)\b/i.test(raw)
     && /\b(?:doing|running|open|status|sessions?|working on)\b/i.test(raw);
 }
 

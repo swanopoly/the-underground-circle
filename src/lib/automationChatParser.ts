@@ -10,6 +10,8 @@
  * helper) and by ChatTab's automation intercept.
  */
 
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+
 export interface AutomationProposal {
   triggerType: 'schedule' | 'event';
   cronExpression?: string;
@@ -21,6 +23,38 @@ export interface AutomationProposal {
   outputTarget: 'activity' | 'chat' | 'silent';
   agent: string;
   confidence: number;
+}
+
+export function buildAutomationProposalInsertRow(opts: {
+  proposal: AutomationProposal;
+  circleId: string;
+  userId: string;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+}): Record<string, unknown> {
+  const { proposal, circleId, userId, agentSubjectMetadata } = opts;
+  const agentDisplayName = String(agentSubjectMetadata?.agentDisplayName || '').trim();
+  const eventConfig = agentSubjectMetadata
+    ? { ...(proposal.eventConfig || {}), agentSubjectMetadata }
+    : proposal.eventConfig;
+  const row: Record<string, unknown> = {
+    circle_id: circleId,
+    created_by: userId,
+    name: proposal.name,
+    description: proposal.description,
+    icon: '⚡',
+    trigger_type: proposal.triggerType,
+    agent: agentDisplayName || proposal.agent,
+    prompt: proposal.prompt,
+    output_target: proposal.outputTarget,
+    enabled: true,
+  };
+  if (proposal.triggerType === 'schedule' && proposal.cronExpression) {
+    row.cron_expression = proposal.cronExpression;
+  }
+  if (eventConfig) {
+    row.event_config = eventConfig;
+  }
+  return row;
 }
 
 const DAYS: Record<string, number> = {
@@ -178,6 +212,42 @@ export function parseAutomationRequest(input: string): AutomationProposal | null
   }
 
   return null;
+}
+
+/**
+ * Schedule a known computer task on a recurring cadence (D7b — "that
+ * worked, run it every Friday"). The user supplies just the cadence
+ * phrase ("friday at 9am", "day at 8am", "weekly"); the task text is
+ * already known from the completed run. Reuses the existing cadence
+ * grammar by composing a synthetic request, then overrides name/prompt so
+ * the ORIGINAL task text survives verbatim — the derived prompt heuristics
+ * are for loose chat phrasing, not for an exact task we already trust.
+ */
+export function parseComputerTaskSchedule(args: {
+  task: string;
+  schedulePhrase: string;
+  taskLabel?: string | null;
+}): AutomationProposal | null {
+  const task = String(args.task || '').replace(/\s+/g, ' ').trim();
+  const phrase = String(args.schedulePhrase || '').replace(/\s+/g, ' ').trim()
+    .replace(/^every\s+/i, '');
+  if (!task || !phrase) return null;
+
+  // Two compositions cover the grammar: "every <phrase> run <task>" (day /
+  // time / interval forms) and "<phrase> run <task>" (daily/weekly/etc.).
+  const parsed = parseAutomationRequest(`every ${phrase} run ${task}`)
+    || parseAutomationRequest(`${phrase} run ${task}`);
+  if (!parsed || parsed.triggerType !== 'schedule') return null;
+
+  const label = String(args.taskLabel || '').trim() || task.slice(0, 50);
+  return {
+    ...parsed,
+    name: `Run: ${label}`.slice(0, 60),
+    description: `${parsed.scheduleSummary || 'On schedule'} — re-run the computer task.`,
+    prompt: `Run this computer task exactly as written: ${task}`,
+    outputTarget: 'chat',
+    confidence: Math.max(parsed.confidence, 0.85),
+  };
 }
 
 function inferEventConfig(eventDesc: string): { table: string; event: 'INSERT' | 'UPDATE' | 'DELETE' } | null {

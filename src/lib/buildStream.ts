@@ -13,6 +13,7 @@
  */
 
 import { supabase } from './supabase';
+import { getFreshAccessToken } from './authSession';
 
 export type BuildStreamEvent =
   | { kind: 'delta'; text: string }
@@ -40,8 +41,9 @@ function resolveFnUrl(): string {
  * caller drives iteration with `for await`.
  */
 export async function* streamBuildPage(opts: StreamOpts): AsyncGenerator<BuildStreamEvent, void, void> {
-  const { data: session } = await supabase.auth.getSession();
-  const accessToken = session?.session?.access_token;
+  // getFreshAccessToken never throws (returns null on any auth error) and
+  // refreshes a near-expiry token — safe for this stream entry point (P67/#101).
+  const accessToken = await getFreshAccessToken();
 
   const res = await fetch(resolveFnUrl(), {
     method: 'POST',

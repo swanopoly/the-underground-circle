@@ -2,6 +2,11 @@ import {
   classifyBrowserbaseWorkflow,
   type BrowserbaseWorkflowIntent,
 } from './browserbaseWorkflowIntent';
+import {
+  buildAutomationVerificationSafetyNotes,
+  detectAutomationVerificationGate,
+  type AutomationVerificationGate,
+} from './desktopAutomationSafety';
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s)]+/gi;
 const DOMAIN_PATTERN = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
@@ -23,6 +28,7 @@ export interface BrowserTaskIntent {
   safetyNotes: string[];
   entitySummary: string;
   browserbaseWorkflow: BrowserbaseWorkflowIntent;
+  verificationGate?: AutomationVerificationGate;
 }
 
 function normalizeDomain(value: string): string | null {
@@ -52,6 +58,7 @@ export function analyzeBrowserTask(task: string): BrowserTaskIntent {
   const normalizedTask = task.trim();
   const lower = normalizedTask.toLowerCase();
   const browserbaseWorkflow = classifyBrowserbaseWorkflow(normalizedTask);
+  const verificationGate = detectAutomationVerificationGate(normalizedTask) || undefined;
   const startUrls = unique((normalizedTask.match(URL_PATTERN) || []).map((value) => value.trim()));
   const domainMentions = unique((normalizedTask.match(DOMAIN_PATTERN) || []).map(normalizeDomain));
   const allowedDomains = unique([
@@ -74,7 +81,7 @@ export function analyzeBrowserTask(task: string): BrowserTaskIntent {
   else if (readOnlyPattern.test(lower)) mode = 'read_only';
 
   let risk: BrowserTaskRisk = 'medium';
-  if (mode === 'transactional' || requiresLogin) risk = 'high';
+  if (mode === 'transactional' || requiresLogin || verificationGate) risk = 'high';
   else if (mode === 'read_only' || mode === 'extract') risk = allowedDomains.length <= 2 ? 'low' : 'medium';
 
   const completionCriteria: string[] = [];
@@ -107,6 +114,10 @@ export function analyzeBrowserTask(task: string): BrowserTaskIntent {
   if (requiresLogin) {
     safetyNotes.push('This task may require authentication or access to sensitive account data.');
   }
+  if (verificationGate) {
+    completionCriteria.push('Pause and ask the user to complete bot or human verification manually if it appears');
+    safetyNotes.push(...buildAutomationVerificationSafetyNotes(normalizedTask));
+  }
   completionCriteria.push(...browserbaseWorkflow.completionCriteria);
   safetyNotes.push(...browserbaseWorkflow.safetyNotes);
   if (allowedDomains.length > 0) {
@@ -136,5 +147,6 @@ export function analyzeBrowserTask(task: string): BrowserTaskIntent {
     safetyNotes,
     entitySummary: summarizeEntities(startUrls, allowedDomains, requiresLogin, hasSideEffects),
     browserbaseWorkflow,
+    verificationGate,
   };
 }

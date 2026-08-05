@@ -1,6 +1,6 @@
 # General Wiki Index
 
-Last updated: 2026-04-08
+Last updated: 2026-06-22
 
 ## Purpose
 
@@ -50,6 +50,20 @@ These are time-bound reports that capture what is current:
 - [agent-memory-ui-and-compaction-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-ui-and-compaction-2026-04-08.md)
 - [semantic-memory-retrieval-and-privacy-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/semantic-memory-retrieval-and-privacy-2026-04-08.md)
 - [agent-memory-review-notes-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-review-notes-2026-04-08.md)
+- [chat-and-task-automation-deep-research-2026-06-22.md](/Users/cswanson/the-underground-circle/docs/wiki/chat-and-task-automation-deep-research-2026-06-22.md)
+- [agentic-computer-app-automation-2026-05-29.md](/Users/cswanson/the-underground-circle/docs/wiki/agentic-computer-app-automation-2026-05-29.md)
+- [agent-tool-contracts-and-evals-2026-05-29.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-tool-contracts-and-evals-2026-05-29.md)
+- [nikola-tesla-projects-planetary-impact-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md)
+- [nikola-tesla-systems-buildout-roadmap-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md)
+- [nikola-tesla-motor-efficiency-audit-kit-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-motor-efficiency-audit-kit-2026-06-01.md)
+- [nikola-tesla-claim-triage-and-source-checker-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-claim-triage-and-source-checker-2026-06-01.md)
+- [nikola-tesla-systems-lab-school-path-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-systems-lab-school-path-2026-06-01.md)
+- [all-cancers-research-atlas-2026-06-08.md](/Users/cswanson/the-underground-circle/docs/wiki/all-cancers-research-atlas-2026-06-08.md)
+- [cancer-screening-prevention-and-risk-guide-2026-06-08.md](/Users/cswanson/the-underground-circle/docs/wiki/cancer-screening-prevention-and-risk-guide-2026-06-08.md)
+- [cancer-diagnosis-staging-biomarkers-and-treatment-guide-2026-06-08.md](/Users/cswanson/the-underground-circle/docs/wiki/cancer-diagnosis-staging-biomarkers-and-treatment-guide-2026-06-08.md)
+- [cancer-clinical-trials-and-care-navigation-2026-06-08.md](/Users/cswanson/the-underground-circle/docs/wiki/cancer-clinical-trials-and-care-navigation-2026-06-08.md)
+- [cancer-decision-support-and-self-advocacy-toolkit-2026-06-08.md](/Users/cswanson/the-underground-circle/docs/wiki/cancer-decision-support-and-self-advocacy-toolkit-2026-06-08.md)
+- [cancer-quality-of-life-financial-and-survivorship-guide-2026-06-08.md](/Users/cswanson/the-underground-circle/docs/wiki/cancer-quality-of-life-financial-and-survivorship-guide-2026-06-08.md)
 - [open-model-deployment-economics-2026-04-07.md](/Users/cswanson/the-underground-circle/docs/wiki/open-model-deployment-economics-2026-04-07.md)
 - [ai-regulation-and-policy-tracker-2026-04-07.md](/Users/cswanson/the-underground-circle/docs/wiki/ai-regulation-and-policy-tracker-2026-04-07.md)
 
@@ -65,6 +79,7 @@ These govern how future research gets added:
 
 - AI
 - Design
+- Health + Biotech
 
 ### Planned next
 
@@ -76,6 +91,19 @@ These govern how future research gets added:
 - Sales and partnerships
 - Security and trust
 - Education and learning systems
+
+## Health + biotech section map
+
+Health content must keep a hard boundary between education and care decisions. The wiki can organize official sources, explain terms, compare evidence quality, and help users prepare questions. It must not diagnose, prescribe, or tell users to start, stop, delay, or change medical care.
+
+Current cancer cluster:
+
+- [All Cancers Research Atlas](/Users/cswanson/the-underground-circle/docs/wiki/all-cancers-research-atlas-2026-06-08.md): taxonomy, major cancer families, and safe research questions.
+- [Cancer Screening, Prevention, And Risk Guide](/Users/cswanson/the-underground-circle/docs/wiki/cancer-screening-prevention-and-risk-guide-2026-06-08.md): prevention levers, screening lanes, symptoms, and agent guardrails.
+- [Cancer Diagnosis, Staging, Biomarkers, And Treatment Guide](/Users/cswanson/the-underground-circle/docs/wiki/cancer-diagnosis-staging-biomarkers-and-treatment-guide-2026-06-08.md): staging, pathology, biomarkers, treatment families, and evidence checks.
+- [Cancer Clinical Trials And Care Navigation](/Users/cswanson/the-underground-circle/docs/wiki/cancer-clinical-trials-and-care-navigation-2026-06-08.md): records checklist, trial concepts, credible sources, and misinformation guardrails.
+- [Cancer Decision Support And Self-Advocacy Toolkit](/Users/cswanson/the-underground-circle/docs/wiki/cancer-decision-support-and-self-advocacy-toolkit-2026-06-08.md): shared decision-making, second opinions, option comparison, values worksheets, and appointment questions.
+- [Cancer Quality Of Life, Financial, And Survivorship Guide](/Users/cswanson/the-underground-circle/docs/wiki/cancer-quality-of-life-financial-and-survivorship-guide-2026-06-08.md): side effects, palliative care, costs, caregiver planning, records, and survivorship.
 
 ## AI section map
 

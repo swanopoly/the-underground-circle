@@ -56,8 +56,6 @@ export type AnthropicProviderOptions = {
    *   ]
    */
   system?: string | AnthropicSystemBlock[];
-  /** Default temperature. Default 0.7. */
-  temperature?: number;
   /** Optional extra fetch options (e.g. signal). */
   fetch?: typeof fetch;
 };
@@ -78,7 +76,6 @@ export function createAnthropicProvider(opts: AnthropicProviderOptions): AgentPr
     apiVersion = DEFAULT_API_VERSION,
     baseUrl = DEFAULT_BASE_URL,
     system,
-    temperature = 0.7,
     fetch: fetchImpl = fetch,
   } = opts;
 
@@ -92,7 +89,6 @@ export function createAnthropicProvider(opts: AnthropicProviderOptions): AgentPr
       const body: Record<string, unknown> = {
         model,
         max_tokens: maxTokens,
-        temperature,
         messages: messages
           // Anthropic doesn't accept role=system in the messages array — that
           // moves into the top-level `system` field below.
@@ -155,6 +151,8 @@ function toolsToAnthropic(tools: AgentToolDefinition[]) {
     name: t.name,
     description: t.description,
     input_schema: t.input_schema,
+    // X4 (P47): forward curated input_examples when present (GA, no header).
+    ...(t.input_examples ? { input_examples: t.input_examples } : {}),
   }));
 }
 

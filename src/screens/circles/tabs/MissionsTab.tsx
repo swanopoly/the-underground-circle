@@ -55,7 +55,10 @@ import MissionTimeline from '../../../components/MissionTimeline';
 import MissionHistoryPanel from '../../../components/MissionHistoryPanel';
 import BlockBriefEditor, { blocksFromText, blocksToPlainText, extractAllMentionsFromBlocks, type Block } from '../../../components/BlockBriefEditor';
 import MentionText from '../../../components/MentionText';
+import AgentRunProofDetail from '../../../components/feed/AgentRunProofDetail';
 import { persistMentions } from '../../../lib/mentions';
+import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
+import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 
 interface Props {
   circleId: string;
@@ -376,6 +379,24 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
   // Notion-style view toggle for the mission pane: list vs timeline (gantt).
   const [missionView, setMissionView] = useState<'list' | 'timeline'>('list');
 
+  // Empty-state suggestion chips — turn the "No missions yet" void into an
+  // obvious next action. seed_command mission/task openers are handled
+  // in-surface via the existing create modal; `open` targets navigate via the
+  // existing uc:switch-tab event (goals live in the FEED tab).
+  const emptyStateSuggestions = React.useMemo(() => getEmptyStateSuggestions('missions'), []);
+  const handleSuggestionPick = useCallback((action: EmptyStateSuggestionAction) => {
+    if (action.kind === 'open') {
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: action.value } })); } catch {}
+      }
+      return;
+    }
+    // seed_command: both /mission create and /task new open the same in-surface
+    // create modal — no chat round-trip needed for the mission surface.
+    setCreatePrefillTitle('');
+    setShowCreate(true);
+  }, []);
+
   const [analytics, setAnalytics] = useState<{ completionRate: number; completedTasks: number; totalTasks: number; overdueCount: number } | null>(null);
 
   useEffect(() => {
@@ -642,6 +663,14 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
               >
                 <Text style={styles.createBtnText}>CREATE YOUR FIRST MISSION</Text>
               </Pressable>
+              <View style={{ marginTop: GRID.lg, width: '100%' }}>
+                <SuggestedTaskChips
+                  suggestions={emptyStateSuggestions}
+                  onPick={handleSuggestionPick}
+                  accentColor={accentColor}
+                  nativeID="section-missions-empty-suggestions"
+                />
+              </View>
             </View>
           );
         })()}
@@ -702,6 +731,7 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
                 </View>
                 <View style={styles.proofContent}>
                   <MentionText content={entry.title} style={styles.proofTitle} />
+                  {entry.pow_type === 'agent_run' && <AgentRunProofDetail detail={entry.detail} />}
                   <Text style={styles.proofTime}>{timeAgo(entry.created_at)}</Text>
                   {/* Render structured blocks (from the expanded proof
                       editor) as a read-only preview directly below the

@@ -1,16 +1,17 @@
 /**
  * skill-subfile-smoketest — CA-8i. Pins the safe-relpath validator
- * and (inlined) MIME inference used by the new write_file /
- * remove_file actions in `manageLibrarySkill`. Real end-to-end
+ * and (inlined) MIME inference used by the write_file / remove_file
+ * actions of the `skills.manage` catalog tool. Real end-to-end
  * apply is exercised manually against a live circle since it needs
  * Supabase RLS + an actual approval row.
  *
  * Run: npm run smoke:skill-subfile
  */
 
-// Can't import directly from src/lib/agentTools/manageLibrarySkill —
-// that file side-effect-registers the tool at module load time which
-// drags in the supabase client. Mirror the pure helpers here; the
+// Can't import directly from src/lib/openswanToolRuntime (home of
+// `skills.manage` since the O2 agentTools-registry retirement) — that
+// module drags in the supabase client at load time. Mirror the pure
+// helpers (`isSafeSkillRelpath` / `inferSkillFileMimeType`) here; the
 // shape MUST stay in lockstep.
 function isSafeSkillRelpath(raw: string | undefined): boolean {
   if (typeof raw !== 'string' || raw.length === 0 || raw.length > 200) return false;

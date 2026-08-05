@@ -33,8 +33,9 @@ export interface SlackChannelMapping {
 
 // ─── Config ─────────────────────────────────────────────────────────
 
-const SLACK_CLIENT_ID = process.env.EXPO_PUBLIC_SLACK_CLIENT_ID || '';
-const SLACK_SCOPES = 'chat:write,channels:read,channels:history,commands,users:read,app_mentions:read';
+// Slack client_id + scopes now live in the slack-oauth edge function, which
+// mints the authorize URL + a server-stored CSRF state bound to the verified
+// caller (advisory #3). A client-built state was forgeable.
 
 // ─── Connection ─────────────────────────────────────────────────────
 
@@ -73,14 +74,29 @@ export async function getSlackConfigByOrg(orgId: string): Promise<SlackConnectio
   return data;
 }
 
-export function initiateSlackOAuth(circleId?: string, orgId?: string) {
-  const state = btoa(JSON.stringify({ circleId, orgId }));
+export async function initiateSlackOAuth(circleId?: string, orgId?: string): Promise<{ error?: string }> {
   const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-  const redirectUri = `${supabaseUrl}/functions/v1/slack-oauth`;
-
-  const oauthUrl = `https://slack.com/oauth/v2/authorize?client_id=${SLACK_CLIENT_ID}&scope=${SLACK_SCOPES}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
-
-  Linking.openURL(oauthUrl);
+  // The authorize URL and its CSRF state must be minted server-side, bound to
+  // the verified caller and a circle they belong to (advisory #3). A
+  // client-built btoa(JSON) state was forgeable → workspace-to-victim binding.
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return { error: 'Not signed in' };
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/slack-oauth`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ circleId, orgId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) return { error: data.error || `Failed to start Slack OAuth (${res.status})` };
+    if (data.url) Linking.openURL(data.url);
+    return {};
+  } catch (e: any) {
+    return { error: e?.message || 'Failed to start Slack OAuth' };
+  }
 }
 
 export async function disconnectSlack(connectionId: string): Promise<{ error?: string }> {

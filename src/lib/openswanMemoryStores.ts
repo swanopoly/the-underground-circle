@@ -1,6 +1,8 @@
 import { supabase } from './supabase';
 import { loadMemories, type MemoryEntry } from './agentRunSystem';
 import { buildPromptMemoryBundle, loadStartupMemory, type PromptMemoryReference } from './memoryService';
+import { filterNovelAgainstAnchors } from './memoryNoveltyFilterCore';
+import { formatProvenanceSuffix } from './memoryProvenanceCore';
 import { loadUserMemory } from './userMemory';
 
 export type OpenSwanMemoryStores = {
@@ -38,20 +40,41 @@ function formatUserProfile(memories: MemoryEntry[], dedupAgainst?: string): stri
   // verbatim in the user-authored notes block. Two sources writing the
   // same fact (user notes + inferred profile) burns tokens and risks the
   // model treating near-duplicates as separate signals.
-  const normalizedDedup = dedupAgainst
-    ? dedupAgainst.toLowerCase().replace(/\s+/g, ' ')
-    : null;
-  const deduped = normalizedDedup
-    ? ranked.filter((memory) => {
-        const needle = memory.content.slice(0, 40).toLowerCase().replace(/\s+/g, ' ').trim();
-        if (needle.length < 12) return true; // too short to be a reliable dedup match
-        return !normalizedDedup.includes(needle);
-      })
+  // Anchor-relative novelty: drop a profile row whose fact is already present in the
+  // always-included user-notes anchor blob (dedupAgainst). Supersedes the brittle
+  // 40-char-prefix substring check — filterNovelAgainstAnchors explodes the blob into
+  // anchor lines and matches on normalized content, so it catches near-duplicates the
+  // prefix scan missed. Fail-open + information-preserving: every dropped row's fact
+  // still lives in the notes anchor, so nothing leaves the prompt. chainAcceptedCandidates
+  // is off — anchor-only novelty; item-vs-item ranking stays with the rank core.
+  const deduped = dedupAgainst
+    ? (() => {
+        const verdict = filterNovelAgainstAnchors(
+          ranked.map((memory, i) => ({
+            id: String(i),
+            text: `${memory.title}: ${memory.content}`,
+            source: memory.memory_kind,
+          })),
+          dedupAgainst,
+          { chainAcceptedCandidates: false },
+        );
+        const keptIds = new Set(verdict.keep.map((k) => k.id));
+        return ranked.filter((_, i) => keptIds.has(String(i)));
+      })()
     : ranked;
   if (deduped.length === 0) return '';
+  // Provenance is suffix-only: the legacy line text stays byte-identical and
+  // we append ` [as of … · src:… · #…]` only when the row carries signal.
+  const now = Date.now();
   return `## User Profile\n${
     deduped
-      .map((memory) => `- [${memory.memory_kind}] ${memory.title}: ${memory.content.slice(0, 180)}`)
+      .map((memory) => {
+        const suffix = formatProvenanceSuffix(
+          { source: memory.source_surface, updatedAtMs: memory.updated_at || memory.created_at, id: memory.id },
+          now,
+        );
+        return `- [${memory.memory_kind}] ${memory.title}: ${memory.content.slice(0, 180)}${suffix ? ' ' + suffix : ''}`;
+      })
       .join('\n')
   }`;
 }
@@ -68,6 +91,7 @@ async function formatRuntimeMemory(args: {
   userId: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
 }): Promise<string> {
   const scopes = args.agentId
     ? ['circle', 'room', 'session', 'agent'] as const
@@ -79,6 +103,7 @@ async function formatRuntimeMemory(args: {
     userId: args.userId,
     roomId: args.roomId,
     agentId: args.agentId,
+    agentAliases: args.agentAliases,
     scopes: [...scopes],
     limit: 24,
   }))
@@ -114,17 +139,27 @@ async function formatRuntimeMemory(args: {
     session: memories.filter((memory) => memory.scope === 'session').slice(0, 3),
   };
 
+  // Suffix-only provenance: legacy `- title: content.slice(0,180)` text stays
+  // byte-identical; ` [as of … · src:… · #…]` is appended only when present.
+  const provenance = (memory: MemoryEntry): string => {
+    const suffix = formatProvenanceSuffix(
+      { source: memory.source_surface, updatedAtMs: memory.updated_at || memory.created_at, id: memory.id },
+      now,
+    );
+    return suffix ? ' ' + suffix : '';
+  };
+
   if (grouped.circle.length > 0) {
-    sections.push(`## Circle Runtime Memory\n${grouped.circle.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Circle Runtime Memory\n${grouped.circle.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
   if (grouped.room.length > 0) {
-    sections.push(`## Room Runtime Memory\n${grouped.room.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Room Runtime Memory\n${grouped.room.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
   if (grouped.agent.length > 0) {
-    sections.push(`## Agent Runtime Memory\n${grouped.agent.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Agent Runtime Memory\n${grouped.agent.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
   if (grouped.session.length > 0) {
-    sections.push(`## Session Runtime Memory\n${grouped.session.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Session Runtime Memory\n${grouped.session.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
 
   const startup = await loadStartupMemory({
@@ -146,6 +181,7 @@ export async function buildOpenSwanMemoryStores(args: {
   query: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
   agentName?: string;
   spiritId?: string | null;
   surface?: string;
@@ -181,6 +217,7 @@ export async function buildOpenSwanMemoryStores(args: {
       userId: args.userId,
       roomId: args.roomId,
       agentId: args.agentId,
+      agentAliases: args.agentAliases,
     }),
     buildPromptMemoryBundle({
       circleId: args.circleId,
@@ -223,4 +260,3 @@ export async function buildOpenSwanMemoryStores(args: {
     references: promptBundle.references,
   };
 }
-

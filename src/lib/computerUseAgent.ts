@@ -23,6 +23,113 @@ import { shouldBlockExternalAiProvider, getStrictLocalAiModeMessage } from './pr
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 
+export const COMPUTER_USE_POLICY_SCHEMA_VERSION = 1 as const;
+
+export type ComputerUseExecutionMode = 'interactive' | 'scheduled_observation';
+export type ComputerUsePolicySource = 'chat' | 'queue' | 'watch';
+export type ComputerUseAlwaysConfirmCategory =
+  | 'browser_mutation'
+  | 'opaque_target'
+  | 'credentials'
+  | 'external_side_effect';
+
+/**
+ * A short-lived signal from an explicit pre-run browser permission surface.
+ *
+ * The native Anthropic computer tool currently addresses click/type targets
+ * by coordinates or focus, so the edge still treats those targets as opaque
+ * and asks live. This signal is intentionally narrow: it may only support
+ * future low-consequence actions with a server-verifiable semantic target.
+ */
+export interface ComputerUsePreRunBrowserPermission {
+  kind: 'explicit_user_grant';
+  grantId: string;
+  scope: 'low_consequence_browser';
+  issuedAt: string;
+  expiresAt: string;
+}
+
+/**
+ * Bounded policy context carried with every cloud Computer Use run.
+ * It is authorization context, not prose for the model to reinterpret.
+ */
+export interface ComputerUsePolicyEnvelope {
+  schemaVersion: typeof COMPUTER_USE_POLICY_SCHEMA_VERSION;
+  executionMode: ComputerUseExecutionMode;
+  source: ComputerUsePolicySource;
+  userConstraints: string[];
+  alwaysConfirmCategories: ComputerUseAlwaysConfirmCategory[];
+  preRunBrowserPermission?: ComputerUsePreRunBrowserPermission;
+}
+
+const MAX_POLICY_CONSTRAINTS = 8;
+const MAX_POLICY_CONSTRAINT_CHARS = 160;
+const MAX_PRE_RUN_GRANT_MS = 30 * 60 * 1000;
+
+function boundPolicyConstraints(values?: readonly string[]): string[] {
+  const bounded: string[] = [];
+  for (const value of values || []) {
+    const trimmed = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!trimmed || bounded.includes(trimmed)) continue;
+    bounded.push(trimmed.slice(0, MAX_POLICY_CONSTRAINT_CHARS));
+    if (bounded.length >= MAX_POLICY_CONSTRAINTS) break;
+  }
+  return bounded;
+}
+
+function isCurrentBoundedPermission(
+  value: ComputerUsePreRunBrowserPermission | null | undefined,
+  nowMs: number,
+): value is ComputerUsePreRunBrowserPermission {
+  if (!value || value.kind !== 'explicit_user_grant' || value.scope !== 'low_consequence_browser') {
+    return false;
+  }
+  const grantId = String(value.grantId || '').trim();
+  const issuedAt = Date.parse(value.issuedAt);
+  const expiresAt = Date.parse(value.expiresAt);
+  return grantId.length >= 8
+    && grantId.length <= 128
+    && Number.isFinite(issuedAt)
+    && Number.isFinite(expiresAt)
+    && issuedAt <= nowMs + 60_000
+    && expiresAt > nowMs
+    && expiresAt - issuedAt > 0
+    && expiresAt - issuedAt <= MAX_PRE_RUN_GRANT_MS;
+}
+
+export function buildComputerUsePolicyEnvelope(args: {
+  executionMode: ComputerUseExecutionMode;
+  source: ComputerUsePolicySource;
+  userConstraints?: readonly string[];
+  alwaysConfirmCategories?: readonly ComputerUseAlwaysConfirmCategory[];
+  preRunBrowserPermission?: ComputerUsePreRunBrowserPermission | null;
+  nowMs?: number;
+}): ComputerUsePolicyEnvelope {
+  const allowedCategories = new Set<ComputerUseAlwaysConfirmCategory>([
+    'browser_mutation',
+    'opaque_target',
+    'credentials',
+    'external_side_effect',
+  ]);
+  const alwaysConfirmCategories = Array.from(new Set(args.alwaysConfirmCategories || []))
+    .filter((category): category is ComputerUseAlwaysConfirmCategory => allowedCategories.has(category))
+    .slice(0, 4);
+  const envelope: ComputerUsePolicyEnvelope = {
+    schemaVersion: COMPUTER_USE_POLICY_SCHEMA_VERSION,
+    executionMode: args.executionMode,
+    source: args.source,
+    userConstraints: boundPolicyConstraints(args.userConstraints),
+    alwaysConfirmCategories,
+  };
+  if (isCurrentBoundedPermission(args.preRunBrowserPermission, args.nowMs ?? Date.now())) {
+    envelope.preRunBrowserPermission = {
+      ...args.preRunBrowserPermission,
+      grantId: args.preRunBrowserPermission.grantId.trim(),
+    };
+  }
+  return envelope;
+}
+
 export interface ComputerUseAgentOpts {
   task: string;
   circleId: string;
@@ -32,6 +139,15 @@ export interface ComputerUseAgentOpts {
   browserbase: { apiKey: string; projectId: string; region?: string };
   maxIterations?: number;
   maxTokensBudget?: number;
+  /** Max USD cost for this run. Omit to defer to the circle setting / the
+   *  edge default (booking-class runs default higher when `booking` is set). */
+  maxCostUsd?: number;
+  /** Booking-class flag. When true, the edge loop raises the run caps
+   *  (iterations/tokens/cost/wall-clock) so a multi-leg checkout can finish.
+   *  Non-booking runs are unchanged. */
+  booking?: boolean;
+  /** Required fail-closed execution context for the cloud action gateway. */
+  policy: ComputerUsePolicyEnvelope;
   onRunStarted?: (info: { runId: string }) => void;
   onSessionStarted?: (info: { sessionId: string; liveUrl: string }) => void;
   /** Fired when the agent pauses for user approval via the `ask_user`
@@ -47,6 +163,10 @@ export interface ComputerUseAgentOpts {
   /** Fired once the confirmation row is resolved (user picked, or the
    *  server timed out). Client should clear the pending card. */
   onConfirmationResolved?: (info: { id: string | null; choice: string }) => void;
+  /** Mid-run steering note accepted by the loop (plan §4e/§5a) — fires when
+   *  the note is injected at an iteration boundary, so the UI can show
+   *  exactly when the user's guidance landed. */
+  onSteeringApplied?: (info: { note: string }) => void;
   /** Running token / cost ticker. Fires once per Claude turn. The client
    *  uses it to show a live ticker so users know roughly how much the
    *  task has cost so far. `inputTokens` is the *total* input-side count
@@ -63,6 +183,10 @@ export interface ComputerUseAgentOpts {
     estimatedCost: number;
   }) => void;
   onAction?: (info: { tool: string; input: any }) => void;
+  /** Fired before run_started when the edge loop substitutes the requested
+   *  model for the Sonnet computer-use pin, so the UI can say "running on X
+   *  (your model plans/verifies)" instead of substituting silently. */
+  onModelResolved?: (info: { requestedModel: string; resolvedModel: string; reason: string }) => void;
   onScreenshot?: (info: { b64: string; url?: string }) => void;
   onReasoning?: (text: string) => void;
   onResult?: (info: {
@@ -87,6 +211,23 @@ export interface ComputerUseAgentOpts {
     }> | null;
     extractedData?: unknown | null;
   }) => void;
+  /**
+   * Fired when the run stops on a bounded limit (timeout, token budget,
+   * cost cap, stall) BEFORE the matching onError. Carries the progress
+   * made so far plus the live session link, so a stopped run hands back
+   * something checkable instead of just an error string (D8).
+   */
+  onPartialResult?: (info: {
+    stopReason: string;
+    message: string;
+    summary: string;
+    progress: Array<{ iter: number; tool: string; detail: string }>;
+    lastReasoning: string | null;
+    iterations: number;
+    sessionId: string;
+    liveUrl: string;
+    runId?: string | null;
+  }) => void;
   onError: (message: string) => void;
 }
 
@@ -99,6 +240,10 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
   let cancelled = false;
 
   (async () => {
+    // Let the caller store the returned handle before any terminal callback
+    // can fire (strict-local mode can reject synchronously otherwise).
+    await Promise.resolve();
+    if (cancelled) return;
     if (shouldBlockExternalAiProvider('anthropic')) {
       opts.onError(getStrictLocalAiModeMessage('anthropic'));
       return;
@@ -124,6 +269,9 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
           browserbase: opts.browserbase,
           maxIterations: opts.maxIterations,
           maxTokensBudget: opts.maxTokensBudget,
+          maxCostUsd: opts.maxCostUsd,
+          booking: opts.booking,
+          policy: opts.policy,
         }),
         signal: controller.signal,
       });
@@ -166,14 +314,17 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
           try { parsed = JSON.parse(data); } catch { continue; }
           switch (event) {
             case 'run_started':             opts.onRunStarted?.(parsed); break;
+            case 'model_resolved':          opts.onModelResolved?.(parsed); break;
             case 'session_started':         opts.onSessionStarted?.(parsed); break;
             case 'action':                  opts.onAction?.(parsed); break;
             case 'screenshot':              opts.onScreenshot?.(parsed); break;
             case 'reasoning':               opts.onReasoning?.(parsed?.text || ''); break;
             case 'result':                  opts.onResult?.(parsed); break;
+            case 'partial_result':          opts.onPartialResult?.(parsed); break;
             case 'error':                   opts.onError(parsed?.message || 'agent error'); break;
             case 'confirmation_required':   opts.onConfirmationRequired?.(parsed); break;
             case 'confirmation_resolved':   opts.onConfirmationResolved?.(parsed); break;
+            case 'steering_applied':        opts.onSteeringApplied?.(parsed); break;
             case 'usage':                   opts.onUsage?.(parsed); break;
             // Heartbeat is a keepalive — no callback needed, just drop it.
             case 'heartbeat':               break;

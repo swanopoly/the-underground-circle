@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  The Underground Circle — scheduled system health check.
+
+  Runs `scripts/auto-test-cycle.mjs`, which reports DELTAS against a stored
+  baseline rather than absolute state: newly failing suites, typecheck errors
+  attributed per file, and production invariants that flipped PASS→WARN/FAIL.
+  A failure that was already there is reported as "known" and does not trip the
+  alarm — the point is to notice the hour something breaks, not to re-report a
+  months-old failure until everyone ignores the whole thing.
+
+  Install:
+    cp scripts/launchd/com.underground.autotest.plist \
+       ~/Library/LaunchAgents/com.underground.autotest.plist
+    launchctl load ~/Library/LaunchAgents/com.underground.autotest.plist
+
+  Manual trigger (useful right after installing):
+    launchctl kickstart -k gui/$UID/com.underground.autotest
+
+  Disable:
+    launchctl unload ~/Library/LaunchAgents/com.underground.autotest.plist
+
+  Schedule: daily at 04:30 local. Deliberately AFTER the BlackSwan weekly
+  trainer's 03:00 Sunday slot so the two never contend for the machine — the
+  trainer is CPU-heavy and a squeezed test run produces noisy timeouts.
+
+  Reports land in ops-records/auto-test/ (latest.json + baseline.json).
+  Console output goes to the log paths below; check those first when the
+  exit code says regression.
+
+  SECRETS: none in this file. The production-invariant leg uses the Supabase
+  CLI's own stored login. If the CLI is logged out the cycle still runs and
+  simply reports the invariant leg as unreadable rather than failing — a
+  logged-out CLI is an ops problem, not a code regression.
+-->
+<dict>
+  <key>Label</key>
+  <string>com.underground.autotest</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-l</string>
+    <string>-c</string>
+    <string>cd "$HOME/the-underground-circle" &amp;&amp; node scripts/auto-test-cycle.mjs</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <!-- Never run on load: installing the agent should not kick off a ~10 minute
+       cycle in the middle of whatever the machine is doing. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/uc-autotest.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/uc-autotest.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/cswanson/the-underground-circle</string>
+
+  <!-- The cycle spawns bounded-concurrency tsx workers; keep it out of the way
+       of interactive work if it overlaps a wake. -->
+  <key>Nice</key>
+  <integer>5</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

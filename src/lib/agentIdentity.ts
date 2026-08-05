@@ -10,8 +10,11 @@
 
 import { storage } from './storage';
 import { supabase } from './supabase';
-import { OfficeAgent } from './officeAgents';
+import type { OfficeAgent } from './officeAgents';
 import { DEFAULT_APPEARANCE, type AgentAppearance } from './officeConfig';
+import { getAgentIdentityKey, type AgentIdentityKeyInput } from './agentIdentityKey';
+
+export { getAgentIdentityKey } from './agentIdentityKey';
 
 const STORAGE_KEY_AGENT_IDENTITY = '@agent_identity_store';
 const TERMINAL_CONFIG_TAG_PREFIX = 'uc_terminal_config:';
@@ -70,22 +73,7 @@ export interface AgentIdentity {
   soulTraits?: Record<string, number>; // Trait strengths (local cache)
 }
 
-type AgentIdentityLike = Pick<OfficeAgent, 'id' | 'name'> & { sessionKey?: string } & Partial<OfficeAgent>;
-
-export function getAgentIdentityKey(agent: AgentIdentityLike | null | undefined): string {
-  if (!agent) return '';
-  if (agent.sessionKey?.trim()) return agent.sessionKey.trim();
-  if (typeof agent.id === 'string' && agent.id.trim()) {
-    if (agent.id.startsWith('provider-main::')) {
-      return `provider-main:${agent.id.split('::')[1] || agent.id}`;
-    }
-    if (agent.id.includes('::')) {
-      return agent.id.split('::')[1] || agent.id;
-    }
-    return agent.id;
-  }
-  return agent.name?.trim() || '';
-}
+type AgentIdentityLike = AgentIdentityKeyInput & Partial<OfficeAgent>;
 
 export function getAgentIdentityByAgent(
   identities: Map<string, AgentIdentity>,

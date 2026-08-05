@@ -6,6 +6,7 @@ import ThoughtBubble from '../../../../components/ThoughtBubble';
 import { ThoughtBubble as ThoughtData, generateThoughtBubble } from '../../../../lib/agentMessaging';
 import { animLoop } from '../../../../lib/animationHelpers';
 import { getSpiritById } from '../../../../lib/agentSpirits';
+import type { OfficeDeskAccountabilityPlaque, OfficeDeskPlaqueTone } from '../../../../lib/officeOpsBoard';
 
 // ─── Agent Reputation ────────────────────────────────────────────────────────
 
@@ -13,6 +14,12 @@ type ReputationTier = 'S' | 'A' | 'B' | 'C' | 'D';
 
 const REPUTATION_COLORS: Record<ReputationTier, string> = {
   S: '#fbbf24', A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#6b7280',
+};
+
+/** Desk-plaque tone → colour. Mirrors OfficeAgentAccountabilityLine's palette
+ *  so the mobile card and the desktop floor read the same. */
+const PLAQUE_TONE_COLORS: Record<OfficeDeskPlaqueTone, string> = {
+  good: '#22c55e', danger: '#ef4444', warn: '#f59e0b', neutral: '#6b7280',
 };
 
 function getAgentReputation(turns: number, tokens: number, costToday?: number): { tier: ReputationTier; color: string } {
@@ -45,13 +52,29 @@ interface Props {
   turns?: number;    // total turns/messages processed
   tokens?: number;   // total tokens used
   onAutomate?: (taskText: string) => void; // inline task assignment
+  /** 24h outcome counts + fail-visible bridge note for the desk plaque.
+   *  Built by buildOfficeDeskAccountabilityPlaque (officeOpsBoard). */
+  plaque?: OfficeDeskAccountabilityPlaque;
+  /** Per-agent level breakdown from buildOfficeAgentXp. When present, `xp` /
+   *  `xpNext` are that agent's own cumulative build XP and the bar fills over
+   *  the CURRENT level instead of over an absolute total. Omitted by the
+   *  customize-panel previews, which keep the plain xp/xpNext behaviour. */
+  xpLevel?: number;
+  xpIntoLevel?: number;
+  xpLevelSpan?: number;
+  xpMaxed?: boolean;
 }
 
-function PixelAgentInner({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate }: Props) {
+function PixelAgentInner({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate, plaque, xpLevel, xpIntoLevel, xpLevelSpan, xpMaxed = false }: Props) {
   // Performance mode: disable expensive animations when many agents are on the floor
   // 1-3 agents: full animations | 4-6: reduced | 7+: minimal (static sprites with blinking only)
   const reducedMotion = totalAgents >= 4;
   const minimalMotion = totalAgents >= 7;
+
+  // True when the caller drives the bar from this agent's OWN build XP
+  // (buildOfficeAgentXp) rather than a shared/absolute total. Gates the
+  // duplicate XP floats below.
+  const perAgentXp = typeof xpLevel === 'number' && xpLevel > 0;
 
   const a = appearance || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
 
@@ -262,6 +285,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   }, [agent.status, minimalMotion]);
 
 
+
   // Crowd factor: more agents → smaller movements, longer gaps
   // 1 agent = full intensity, 5+ agents = ~40% intensity, 10+ = ~25%
   const crowd = Math.max(0.25, 1 / Math.sqrt(totalAgents));
@@ -269,6 +293,78 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   const legAmp = Math.round(1.5 * crowd * 10) / 10;
   const gapMin = Math.round(6000 / crowd); // 6s at 1 agent, ~13s at 5, ~24s at 10
   const gapRange = Math.round(8000 / crowd);
+
+  // Idle life — bob / breathe / sway / look.
+  //
+  // These four Animated.Values were declared and consumed by the render tree
+  // (drop shadow scale, ambient particles, body scaleX, head offset) but no
+  // loop ever started them, so every sprite sat frozen at its rest value. This
+  // is the one driver for all four, tiered so a full floor stays cheap:
+  //   offline            → everything parked at rest (a dead agent shouldn't breathe)
+  //   minimal   (7+)     → breathe only (one value, one interpolation)
+  //   reduced   (4-6)    → breathe + bob
+  //   full      (1-3)    → breathe + bob + sway + idle look
+  // Working agents breathe/bob faster — the floor should read "busy" at a glance.
+  useEffect(() => {
+    const parked: Array<[Animated.Value, number]> = [
+      [bobAnim, 0], [breatheAnim, 1], [swayAnim, 0], [lookAnim, 0],
+    ];
+    if (agent.status === 'offline') {
+      parked.forEach(([value, rest]) => value.setValue(rest));
+      return;
+    }
+
+    const working = agent.status === 'active' || agent.status === 'building';
+    const breathMs = working ? 1100 : 2200;
+    const loops: ReturnType<typeof animLoop>[] = [];
+
+    loops.push(animLoop(() => Animated.sequence([
+      Animated.timing(breatheAnim, { toValue: 1.035, duration: breathMs, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      Animated.timing(breatheAnim, { toValue: 1, duration: breathMs, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+    ])));
+
+    if (!minimalMotion) {
+      // bobAnim's consumers interpolate over [-8, 0]; stay inside that range.
+      const bobTo = -(working ? 4 : 2.5) * crowd - 1;
+      const bobMs = working ? 700 : 1500;
+      loops.push(animLoop(() => Animated.sequence([
+        Animated.timing(bobAnim, { toValue: bobTo, duration: bobMs, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(bobAnim, { toValue: 0, duration: bobMs, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ])));
+    } else {
+      bobAnim.setValue(0);
+    }
+
+    if (!reducedMotion) {
+      const swayTo = 1.2 * crowd;
+      loops.push(animLoop(() => Animated.sequence([
+        Animated.timing(swayAnim, { toValue: swayTo, duration: 2600, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        Animated.timing(swayAnim, { toValue: -swayTo, duration: 2600, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+      ])));
+      // Head glance — only while idle; a building agent keeps its eyes down.
+      if (!working) {
+        loops.push(animLoop(() => Animated.sequence([
+          Animated.delay(2500),
+          Animated.timing(lookAnim, { toValue: 0.6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.delay(1800),
+          Animated.timing(lookAnim, { toValue: -0.6, duration: 900, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+          Animated.delay(1800),
+          Animated.timing(lookAnim, { toValue: 0, duration: 700, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
+        ])));
+      } else {
+        lookAnim.setValue(0);
+      }
+    } else {
+      swayAnim.setValue(0);
+      lookAnim.setValue(0);
+    }
+
+    loops.forEach((loop) => loop.start());
+    return () => {
+      loops.forEach((loop) => loop.stop());
+      parked.forEach(([value, rest]) => value.setValue(rest));
+    };
+  }, [agent.status, minimalMotion, reducedMotion, crowd]);
 
   // Limb fidget — disabled in reduced motion mode
   useEffect(() => {
@@ -317,7 +413,10 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     };
     const startDelay = setTimeout(doFidget, 3000 + Math.random() * gapRange);
     return () => { stopped = true; clearTimeout(startDelay); };
-  }, []);
+    // Same fix as the pet loops: the amplitudes/gaps are crowd-derived, so the
+    // effect has to re-arm when the crowd changes instead of pinning the values
+    // captured on first mount.
+  }, [reducedMotion, armAmp, legAmp, gapMin, gapRange]);
 
   // Automate Me button — show when selected or idle
   useEffect(() => {
@@ -332,8 +431,16 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     return () => { if (automateTimerRef.current) clearTimeout(automateTimerRef.current); };
   }, [agent.status, onAutomate, showAutomateInput, selected]);
 
-  // Aura animations — always on (visual identity)
+  // Which optional cosmetics this agent actually renders. The aura/pet driver
+  // loops below are JS-driven (useNativeDriver: false) and never settle, so
+  // running them for an agent whose aura/pet is 'none' burns a frame budget on
+  // values nothing reads — and the floor renders up to 16 desks at once.
+  const hasAura = (a.aura || 'none') !== 'none';
+  const hasPet = (a.pet || 'none') !== 'none';
+
+  // Aura animations — visual identity, but only for agents that HAVE an aura.
   useEffect(() => {
+    if (!hasAura) return;
     const flickerLoop = animLoop(() => Animated.sequence([
         Animated.timing(auraFlicker, { toValue: 1, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraFlicker, { toValue: 0.4, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -357,11 +464,12 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     rotateLoop.start();
     driftLoop.start();
     return () => { flickerLoop.stop(); pulseLoop.stop(); rotateLoop.stop(); driftLoop.stop(); };
-  }, []);
+  }, [hasAura]);
 
-  // Pet animations — disabled in reduced motion (heavy recursive timers)
+  // Pet animations — disabled in reduced motion (heavy recursive timers), and
+  // skipped entirely for agents with no pet (nothing consumes these values).
   useEffect(() => {
-    if (reducedMotion) return;
+    if (reducedMotion || !hasPet) return;
     let stopped = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const pBounce = Math.round(2 * crowd * 10) / 10; // 2px at 1, ~0.9 at 5, ~0.5 at 10
@@ -438,7 +546,10 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     timers.push(setTimeout(doCrawl, 4000 + Math.random() * pGapRange));
 
     return () => { stopped = true; timers.forEach(t => clearTimeout(t)); };
-  }, []);
+    // `crowd` (and the amplitudes derived from it) changes only when the floor's
+    // agent count changes; re-arming then is the point — the old deps were `[]`,
+    // so a floor that filled up kept animating at 1-agent amplitude forever.
+  }, [reducedMotion, hasPet, crowd]);
 
   // Mood indicator — reacts to agent activity
   const moodTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -579,7 +690,9 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       const delta = turns - lastTurns.current;
       if (delta > 0) {
         spawnFloat(`+${delta} MSG`, '#38bdf8');
-        if (agent.status === 'active' || agent.status === 'building') {
+        // Suppressed under per-agent XP: the `+N XP` float in section 5 is
+        // the same gain, and the bar it fills is now the same currency.
+        if (!perAgentXp && (agent.status === 'active' || agent.status === 'building')) {
           spawnFloat(`+${getBuildXpGain(delta, 0)} BUILD XP`, '#fbbf24', 140);
         }
         // Turn milestones
@@ -601,7 +714,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       if (delta > 50) {
         const k = Math.round(delta / 1000);
         spawnFloat(k > 0 ? `+${k}K TKN` : `+${delta} TKN`, '#34d399', 200);
-        if (agent.status === 'active' || agent.status === 'building') {
+        if (!perAgentXp && (agent.status === 'active' || agent.status === 'building')) {
           spawnFloat(`+${getBuildXpGain(0, delta)} BUILD XP`, '#fbbf24', 300);
         }
         // Token milestones
@@ -2040,8 +2153,47 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
           })()}
         </View>
 
-        {/* XP bar */}
-        <XPBar xp={xp} xpNext={xpNext} color={agent.color} />
+        {/* Accountability plaque — 24h ✓/✗ outcomes + the fail-visible bridge
+            note. The floor used to show only liveliness (status dot, XP, bob),
+            never whether the work actually landed. */}
+        {plaque?.visible ? (
+          <View
+            style={[
+              styles.plaque,
+              {
+                borderColor: PLAQUE_TONE_COLORS[plaque.tone] + '55',
+                backgroundColor: PLAQUE_TONE_COLORS[plaque.tone] + '18',
+                paddingHorizontal: 3 * scale,
+                paddingVertical: 0.5 * scale,
+              },
+            ]}
+            {...(Platform.OS === 'web' && plaque.detail ? { title: plaque.detail } as any : {})}
+          >
+            {plaque.counts ? (
+              <Text style={[styles.plaqueCounts, { color: PLAQUE_TONE_COLORS[plaque.tone], fontSize: 6.5 * scale }]}>
+                {plaque.counts}
+              </Text>
+            ) : null}
+            {plaque.note ? (
+              <Text
+                style={[styles.plaqueNote, { fontSize: 6 * scale, marginLeft: plaque.counts ? 3 * scale : 0 }]}
+                numberOfLines={1}
+              >
+                ⚠️ {plaque.note}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+
+        {/* XP bar — fills over the CURRENT level when the caller supplies a
+            per-agent breakdown, otherwise over the raw xp/xpNext pair. */}
+        <XPBar
+          xp={xpIntoLevel ?? xp}
+          xpNext={xpLevelSpan ?? xpNext}
+          level={xpLevel}
+          maxed={xpMaxed}
+          color={agent.color}
+        />
 
         {/* Automate Me button */}
         {showAutomateButton && onAutomate && (
@@ -2057,7 +2209,14 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   );
 }
 
-// Memoize to prevent re-renders when parent state changes but agent props are unchanged
+// Memoize to prevent re-renders when parent state changes but agent props are unchanged.
+//
+// The compared set IS the component's input contract: any `agent` field an
+// effect reads must be listed, or that effect silently never fires. `costToday`
+// and `activity` were missing, which killed two whole features — the cost
+// floats ("-$0.003", "$1 MILESTONE!") and the 🔥 cost-spike mood never
+// appeared, and the build-activity floats ("SCANNING…", "OPTIMIZING…") only
+// landed when an unrelated compared field happened to change in the same tick.
 const PixelAgent = memo(PixelAgentInner, (prev, next) => {
   return (
     prev.agent.id === next.agent.id &&
@@ -2065,6 +2224,16 @@ const PixelAgent = memo(PixelAgentInner, (prev, next) => {
     prev.agent.name === next.agent.name &&
     prev.agent.turns === next.agent.turns &&
     prev.agent.tokensUsed === next.agent.tokensUsed &&
+    prev.agent.costToday === next.agent.costToday &&
+    prev.agent.activity === next.agent.activity &&
+    prev.agent.color === next.agent.color &&
+    prev.plaque?.counts === next.plaque?.counts &&
+    prev.plaque?.tone === next.plaque?.tone &&
+    prev.plaque?.note === next.plaque?.note &&
+    prev.xpLevel === next.xpLevel &&
+    prev.xpIntoLevel === next.xpIntoLevel &&
+    prev.xpLevelSpan === next.xpLevelSpan &&
+    prev.xpMaxed === next.xpMaxed &&
     prev.selected === next.selected &&
     prev.dancing === next.dancing &&
     prev.appearance === next.appearance &&
@@ -2134,23 +2303,35 @@ function ConfettiBurst() {
 
 // ── XP BAR ───────────────────────────────────────────────────────────────
 
-function XPBar({ xp, xpNext, color }: { xp: number; xpNext: number; color: string }) {
+function XPBar({ xp, xpNext, color, level, maxed = false }: {
+  xp: number; xpNext: number; color: string;
+  /** 1-based level. When supplied the bar reads as per-level progress. */
+  level?: number;
+  /** True only at the XP ceiling — the rainbow "MAX" state. */
+  maxed?: boolean;
+}) {
   const pct = Math.min(100, xpNext > 0 ? Math.round((xp / xpNext) * 100) : 0);
-  const isFull = pct >= 100;
+  const hasLevel = typeof level === 'number' && level > 0;
+  // With a level breakdown, a 100% bar just means "about to level up" — the
+  // rainbow MAX treatment is reserved for the real ceiling. Without one, keep
+  // the original meaning so the customize-panel previews are unchanged.
+  const isFull = hasLevel ? maxed : pct >= 100;
 
-  // Pulse glow animation always running
+  // Pulse glow animation — the glow only renders when the bar has progress, so
+  // an agent that has never worked shouldn't be driving a loop for it.
   const pulseAnim = useRef(new Animated.Value(0)).current;
   // Rainbow shift for full bar (web only via CSS, native via hue cycle)
   const rainbowAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (pct <= 0) { pulseAnim.setValue(0); return; }
     const loop = animLoop(() => Animated.sequence([
         Animated.timing(pulseAnim, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
         Animated.timing(pulseAnim, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
       ]));
     loop.start();
     return () => loop.stop();
-  }, []);
+  }, [pct > 0]);
 
   useEffect(() => {
     if (!isFull) return;
@@ -2230,7 +2411,7 @@ function XPBar({ xp, xpNext, color }: { xp: number; xpNext: number; color: strin
         </View>
         {/* XP label */}
         <Text style={[xpStyles.label, isFull && xpStyles.labelFull]}>
-          {isFull ? '✦ MAX ✦' : `${pct}%`}
+          {isFull ? '✦ MAX ✦' : hasLevel ? `L${level} ${pct}%` : `${pct}%`}
         </Text>
       </View>
     );
@@ -2248,7 +2429,7 @@ function XPBar({ xp, xpNext, color }: { xp: number; xpNext: number; color: strin
         )}
       </View>
       <Text style={[xpStyles.label, isFull && xpStyles.labelFull]}>
-        {isFull ? '✦ MAX ✦' : `${pct}%`}
+        {isFull ? '✦ MAX ✦' : hasLevel ? `L${level} ${pct}%` : `${pct}%`}
       </Text>
     </View>
   );
@@ -2890,6 +3071,24 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontFamily: 'monospace',
     letterSpacing: 0.3,
+  },
+  plaque: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    marginTop: 1,
+    maxWidth: 96,
+    borderWidth: 1,
+    borderRadius: 3,
+  },
+  plaqueCounts: {
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    letterSpacing: 0.3,
+  },
+  plaqueNote: {
+    color: '#f59e0b',
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    flexShrink: 1,
   },
   // Ground spotlight
   groundSpotlight: {

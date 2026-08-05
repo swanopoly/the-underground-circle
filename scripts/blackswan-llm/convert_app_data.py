@@ -9,10 +9,64 @@ Output: training_data/app_data.jsonl
 """
 
 import json
+import os
+import re
+import sys
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 
 RAW_DIR = Path(__file__).parent / "raw_data"
 OUTPUT = Path(__file__).parent / "training_data" / "app_data.jsonl"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+SESSION_GAP = timedelta(minutes=30)
+MAX_DOC_CHARS = 5200
+MIN_DOC_CHARS = 220
+
+CHAT_META_RE = re.compile(r"\[\[UC_CHAT_META\]\].*$", re.DOTALL)
+OPEN_SWAN_PREFIX_RE = re.compile(
+    r"^\s*(?:🦢\s*)?(?:\*\*)?(?:OpenSwan|BlackSwan|SwanBot)(?:\*\*)?\s*:\s*",
+    re.IGNORECASE,
+)
+THINKING_RE = re.compile(r"^\s*(?:Thinking Process|Thought Process|Reasoning)\s*:\s*", re.IGNORECASE)
+
+LOCAL_DOC_PATHS = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS_ROADMAP.md",
+    "docs/UC_APP_STACK_REFERENCE.md",
+    "docs/CODING_AGENT_BEST_PRACTICES.md",
+    "docs/TYPESCRIPT_AGENT_BEST_PRACTICES.md",
+    "docs/DESIGN_AGENT_BEST_PRACTICES.md",
+    "docs/MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md",
+    "docs/AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE.md",
+    "docs/AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE.md",
+    "docs/UC_APP_TASK_RELIABILITY_ARCHITECTURE.md",
+    "docs/SWANBOT_OPENSWAN_CHAT_BUILDOUT_2026-06-24.md",
+    "docs/CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md",
+    "docs/SWANBOT_V2_MIGRATION_PLAN.md",
+    "docs/OPENROUTER_INTEGRATION_RESEARCH_2026-05-06.md",
+    "docs/page-audits/chat-tab.md",
+    "docs/page-audits/rooms-tab.md",
+    "docs/page-audits/swanbot-screen.md",
+    "docs/page-audits/wiki-screen.md",
+]
+
+PRODUCT_LOGIC_PATHS = [
+    "src/lib/blackswanRouting.ts",
+    "src/lib/chatAutomationPlanner.ts",
+    "src/lib/runChatAutomationPlan.ts",
+    "src/lib/swanbot.ts",
+    "src/lib/serviceProfileSouls.ts",
+    "src/lib/crossProviderRouter.ts",
+    "src/lib/universalInvoke.ts",
+    "src/lib/agentExecutionCore.ts",
+    "src/lib/openswanToolRuntime.ts",
+    "src/lib/chatComputerRequestRouter.ts",
+    "src/lib/computerTaskEvidenceContract.ts",
+    "src/lib/appAutomationControlSurfaces.ts",
+]
 
 BLACKSWAN_SYSTEM = """You are BlackSwan — an AI accountability partner embedded in The Underground Circle, a productivity and accountability app for serious builders.
 
@@ -26,6 +80,119 @@ def load_json(name):
     if not path.exists():
         return []
     return json.loads(path.read_text())
+
+
+def make_example(source, conversations, **meta):
+    """Attach source metadata without changing the ShareGPT turn shape."""
+    return {
+        "conversations": conversations,
+        "metadata": {
+            "source": source,
+            **{k: v for k, v in meta.items() if v is not None and v != ""},
+        },
+    }
+
+
+def tag_examples(source, examples):
+    tagged = []
+    for ex in examples:
+        copy = dict(ex)
+        metadata = dict(copy.get("metadata") or {})
+        metadata.setdefault("source", source)
+        copy["metadata"] = metadata
+        tagged.append(copy)
+    return tagged
+
+
+def parse_time(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def clean_chat_content(value):
+    text = (value or "").replace("\x00", "").strip()
+    if not text:
+        return ""
+    text = CHAT_META_RE.sub("", text).strip()
+    text = OPEN_SWAN_PREFIX_RE.sub("", text).strip()
+    text = THINKING_RE.sub("", text).strip()
+    if text.lower() in {"[deleted]", "(deleted)", "deleted", "message deleted"}:
+        return ""
+    return text
+
+
+def merge_same_role(turns, role, content):
+    if not content:
+        return
+    if turns and turns[-1]["from"] == role:
+        turns[-1]["value"] = f"{turns[-1]['value']}\n{content}"
+    else:
+        turns.append({"from": role, "value": content})
+
+
+def valid_conversation(turns):
+    return (
+        len(turns) >= 3
+        and any(t.get("from") == "human" for t in turns)
+        and any(t.get("from") == "gpt" for t in turns)
+    )
+
+
+def split_sessions(rows):
+    sessions = []
+    current = []
+    for row in rows:
+        if current:
+            prev_t = parse_time(current[-1].get("created_at"))
+            curr_t = parse_time(row.get("created_at"))
+            if prev_t and curr_t and (curr_t - prev_t) > SESSION_GAP:
+                sessions.append(current)
+                current = []
+        current.append(row)
+    if current:
+        sessions.append(current)
+    return sessions
+
+
+def chunk_text(text, max_chars=MAX_DOC_CHARS, min_chars=MIN_DOC_CHARS):
+    text = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
+    if len(text) <= max_chars:
+        return [text] if len(text) >= min_chars else []
+
+    chunks = []
+    current = []
+    current_len = 0
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) > max_chars:
+            if current and current_len >= min_chars:
+                chunks.append("\n\n".join(current))
+            current, current_len = [], 0
+            for start in range(0, len(para), max_chars):
+                part = para[start:start + max_chars].strip()
+                if len(part) >= min_chars:
+                    chunks.append(part)
+            continue
+        if current and current_len + len(para) + 2 > max_chars:
+            if current_len >= min_chars:
+                chunks.append("\n\n".join(current))
+            current, current_len = [], 0
+        current.append(para)
+        current_len += len(para) + 2
+    if current and current_len >= min_chars:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+def doc_title(path, fallback="Underground Circle reference"):
+    stem = path.stem.replace("-", " ").replace("_", " ").strip()
+    return stem.title() if stem else fallback
 
 
 def convert_terminal_pairs():
@@ -124,6 +291,68 @@ def convert_check_ins():
     return examples
 
 
+def convert_messages():
+    """Convert main circle chat rows into multi-turn and adjacent Q/A examples."""
+    msgs = load_json("messages")
+    examples = []
+
+    grouped = {}
+    for msg in msgs:
+        content = clean_chat_content(msg.get("content"))
+        if not content:
+            continue
+        key = msg.get("thread_id") or msg.get("circle_id") or "main"
+        row = dict(msg)
+        row["_clean_content"] = content
+        grouped.setdefault(key, []).append(row)
+
+    for key, rows in grouped.items():
+        rows.sort(key=lambda m: m.get("created_at") or "")
+        for session_index, session in enumerate(split_sessions(rows)):
+            turns = [{"from": "system", "value": BLACKSWAN_SYSTEM}]
+            for msg in session:
+                role = "gpt" if msg.get("is_bot") else "human"
+                merge_same_role(turns, role, msg["_clean_content"])
+            if valid_conversation(turns):
+                examples.append(make_example(
+                    "messages_session",
+                    turns,
+                    group_id=key,
+                    session_index=session_index,
+                    row_count=len(session),
+                ))
+
+            # Short adjacent prompt/response examples make the fine-tune
+            # learn real app replies even when the full thread is noisy.
+            for i, msg in enumerate(session):
+                if msg.get("is_bot"):
+                    continue
+                reply_parts = []
+                for nxt in session[i + 1:]:
+                    if not nxt.get("is_bot"):
+                        break
+                    reply = nxt.get("_clean_content") or ""
+                    if reply:
+                        reply_parts.append(reply)
+                    if len(reply_parts) >= 2:
+                        break
+                reply_text = "\n".join(reply_parts).strip()
+                if len(reply_text) < 10:
+                    continue
+                examples.append(make_example(
+                    "messages_adjacent_pair",
+                    [
+                        {"from": "system", "value": BLACKSWAN_SYSTEM},
+                        {"from": "human", "value": msg["_clean_content"]},
+                        {"from": "gpt", "value": reply_text},
+                    ],
+                    group_id=key,
+                    message_id=msg.get("id"),
+                ))
+
+    return examples
+
+
 def convert_room_messages():
     """Convert room chat messages into conversation examples."""
     msgs = load_json("room_messages")
@@ -138,17 +367,59 @@ def convert_room_messages():
         rooms[rid].append(m)
 
     for rid, room_msgs in rooms.items():
-        # Filter to chat messages with content
-        chats = [m for m in room_msgs if m.get("message_type") == "chat" and m.get("content")]
-        if len(chats) < 2:
+        room_msgs.sort(key=lambda m: m.get("created_at") or "")
+        chats = []
+        for msg in room_msgs:
+            mtype = msg.get("message_type") or "chat"
+            if mtype not in ("chat", "agent_output", "system"):
+                continue
+            content = clean_chat_content(msg.get("content"))
+            if not content:
+                continue
+            row = dict(msg)
+            row["_clean_content"] = content
+            chats.append(row)
+
+        if not chats:
             continue
-        # Build conversation
-        turns = [{"from": "system", "value": BLACKSWAN_SYSTEM}]
-        for m in chats:
-            role = "gpt" if m.get("agent_name") else "human"
-            turns.append({"from": role, "value": m["content"].strip()})
-        if len(turns) >= 3:
-            examples.append({"conversations": turns})
+
+        for session_index, session in enumerate(split_sessions(chats)):
+            turns = [{"from": "system", "value": BLACKSWAN_SYSTEM}]
+            for msg in session:
+                role = "gpt" if msg.get("agent_name") or msg.get("message_type") in ("agent_output", "system") else "human"
+                merge_same_role(turns, role, msg["_clean_content"])
+            if valid_conversation(turns):
+                examples.append(make_example(
+                    "room_messages_session",
+                    turns,
+                    room_id=rid,
+                    session_index=session_index,
+                    row_count=len(session),
+                ))
+                continue
+
+            # Some room rows are only saved agent outputs. They are still
+            # valuable for teaching BlackSwan the app's room/status voice.
+            for msg in session:
+                if not (msg.get("agent_name") or msg.get("message_type") in ("agent_output", "system")):
+                    continue
+                content = msg["_clean_content"]
+                if len(content) < 30:
+                    continue
+                prompt = "Summarize the latest room agent update."
+                if msg.get("message_type") == "system":
+                    prompt = "Give me the room status summary."
+                examples.append(make_example(
+                    "room_agent_output",
+                    [
+                        {"from": "system", "value": BLACKSWAN_SYSTEM},
+                        {"from": "human", "value": prompt},
+                        {"from": "gpt", "value": content},
+                    ],
+                    room_id=rid,
+                    message_id=msg.get("id"),
+                    message_type=msg.get("message_type"),
+                ))
 
     return examples
 
@@ -444,46 +715,208 @@ def convert_automations():
     return examples
 
 
+def convert_circle_context():
+    """Convert circle descriptions and memory into app-grounding examples."""
+    circles = load_json("circles")
+    memories = load_json("circle_memory")
+    examples = []
+
+    memories_by_circle = {}
+    for item in memories:
+        cid = item.get("circle_id")
+        content = (item.get("content") or "").strip()
+        if cid and content:
+            memories_by_circle.setdefault(cid, []).append(item)
+
+    for circle in circles:
+        cid = circle.get("id")
+        name = (circle.get("name") or "this circle").strip()
+        parts = []
+        for label, key in (("Description", "description"), ("Vibe", "vibe"), ("Rules", "rules")):
+            value = circle.get(key)
+            if isinstance(value, (list, dict)):
+                value = json.dumps(value, ensure_ascii=False)
+            value = (value or "").strip()
+            if value:
+                parts.append(f"{label}: {value}")
+        for mem in sorted(memories_by_circle.get(cid, []), key=lambda m: m.get("created_at") or "")[-3:]:
+            parts.append(f"Memory: {mem.get('content', '').strip()}")
+        if not parts:
+            continue
+        examples.append(make_example(
+            "circle_context",
+            [
+                {"from": "system", "value": BLACKSWAN_SYSTEM},
+                {"from": "human", "value": f"What should you remember about {name}?"},
+                {"from": "gpt", "value": "\n".join(parts)},
+            ],
+            circle_id=cid,
+        ))
+
+    return examples
+
+
+def markdown_sections(text):
+    """Return (heading, body) markdown sections with headings kept in the body."""
+    sections = []
+    heading = ""
+    current = []
+    for line in text.splitlines():
+        if line.startswith("#") and line.lstrip("#").strip():
+            if current:
+                sections.append((heading, "\n".join(current).strip()))
+            heading = line.lstrip("#").strip()
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append((heading, "\n".join(current).strip()))
+    return sections
+
+
+def iter_doc_paths():
+    seen = set()
+    for rel in LOCAL_DOC_PATHS:
+        path = REPO_ROOT / rel
+        if path.exists() and path not in seen:
+            seen.add(path)
+            yield path
+    for path in sorted((REPO_ROOT / "docs" / "wiki").glob("*.md")):
+        if path.exists() and path not in seen:
+            seen.add(path)
+            yield path
+
+
+def convert_local_docs():
+    """Convert app docs, wiki articles, and design/runtime standards."""
+    examples = []
+    for path in iter_doc_paths():
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if not text.strip():
+            continue
+        per_file = 0
+        for heading, section in markdown_sections(text):
+            if per_file >= 3:
+                break
+            section = section.strip()
+            if len(section) < MIN_DOC_CHARS:
+                continue
+            for chunk in chunk_text(section):
+                if per_file >= 3:
+                    break
+                title = heading or doc_title(path)
+                prompt = f"What should BlackSwan know from {title}?"
+                if rel.startswith("docs/wiki/"):
+                    prompt = f"Teach me the useful points from the wiki note: {title}."
+                elif "DESIGN" in rel or "STYLE" in rel:
+                    prompt = f"What design guidance matters from {title}?"
+                elif "AGENT" in rel or "SwanBot" in title or "OpenSwan" in title:
+                    prompt = f"What agent-runtime guidance matters from {title}?"
+                examples.append(make_example(
+                    "local_docs",
+                    [
+                        {"from": "system", "value": BLACKSWAN_SYSTEM},
+                        {"from": "human", "value": prompt},
+                        {"from": "gpt", "value": chunk},
+                    ],
+                    path=rel,
+                    heading=title,
+                ))
+                per_file += 1
+    return examples
+
+
+def convert_product_logic():
+    """Convert selected app runtime source files into grounded reference examples."""
+    examples = []
+    for rel in PRODUCT_LOGIC_PATHS:
+        path = REPO_ROOT / rel
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        text = text.strip()
+        if len(text) < MIN_DOC_CHARS:
+            continue
+        for index, chunk in enumerate(chunk_text(text[:24000], max_chars=4800, min_chars=500)[:2]):
+            examples.append(make_example(
+                "product_logic",
+                [
+                    {"from": "system", "value": BLACKSWAN_SYSTEM},
+                    {"from": "human", "value": f"What does `{rel}` control in The Underground Circle?"},
+                    {"from": "gpt", "value": f"Reference from `{rel}`:\n\n```typescript\n{chunk}\n```"},
+                ],
+                path=rel,
+                chunk_index=index,
+            ))
+    return examples
+
+
 def main():
     all_examples = []
+    source_counts = Counter()
+
+    def add(label, source, examples):
+        tagged = tag_examples(source, examples)
+        print(f"{label}: {len(tagged)}")
+        all_examples.extend(tagged)
+        source_counts.update(ex.get("metadata", {}).get("source", "unknown") for ex in tagged)
 
     terminal = convert_terminal_pairs()
-    print(f"Terminal command/response pairs: {len(terminal)}")
-    all_examples.extend(terminal)
+    add("Terminal command/response pairs", "terminal_pairs", terminal)
 
     activity = convert_agent_activity()
-    print(f"Agent activity examples: {len(activity)}")
-    all_examples.extend(activity)
+    add("Agent activity examples", "agent_activity", activity)
 
     tasks = convert_tasks()
-    print(f"Task examples: {len(tasks)}")
-    all_examples.extend(tasks)
+    add("Task examples", "tasks", tasks)
 
     check_ins = convert_check_ins()
-    print(f"Check-in examples: {len(check_ins)}")
-    all_examples.extend(check_ins)
+    add("Check-in examples", "check_ins", check_ins)
+
+    messages = convert_messages()
+    add("Main chat examples", "messages", messages)
 
     room = convert_room_messages()
-    print(f"Room conversation examples: {len(room)}")
-    all_examples.extend(room)
+    add("Room conversation examples", "room_messages", room)
 
     missions = convert_missions()
-    print(f"Mission examples: {len(missions)}")
-    all_examples.extend(missions)
+    add("Mission examples", "missions", missions)
 
     pow_examples = convert_proof_of_work()
-    print(f"Proof-of-work examples: {len(pow_examples)}")
-    all_examples.extend(pow_examples)
+    add("Proof-of-work examples", "proof_of_work", pow_examples)
 
     gh_examples = convert_github_events()
-    print(f"GitHub event examples: {len(gh_examples)}")
-    all_examples.extend(gh_examples)
+    add("GitHub event examples", "github_events", gh_examples)
 
     auto_examples = convert_automations()
-    print(f"Automation examples: {len(auto_examples)}")
-    all_examples.extend(auto_examples)
+    add("Automation examples", "automations", auto_examples)
+
+    circle_context = convert_circle_context()
+    add("Circle context examples", "circle_context", circle_context)
+
+    local_docs = convert_local_docs()
+    add("Local docs/wiki/design examples", "local_docs", local_docs)
+
+    product_logic = convert_product_logic()
+    add("Product logic examples", "product_logic", product_logic)
 
     print(f"\nTotal app training examples: {len(all_examples)}")
+    print("Source mix:")
+    for source, count in source_counts.most_common():
+        print(f"  {source}: {count}")
+    if not all_examples and os.environ.get("ALLOW_EMPTY_APP_DATA") != "1":
+        print(
+            "ERROR: No app training examples were generated. "
+            "Fix the Supabase export or set ALLOW_EMPTY_APP_DATA=1 for a public-only run."
+        )
+        sys.exit(1)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT, "w") as f:

@@ -1,5 +1,12 @@
 # OpenSwan Sub-Agent Architecture Plan
 
+> **Status (2026-07-13): substantially SHIPPED.** `src/lib/subagentCapabilities.ts`
+> exists and exports `SubagentCapabilityProfile` / `listSubagentCapabilities` /
+> `getSubagentCapability`; `src/lib/subagentRegistry.ts` consumes it
+> (`capabilityToProfile`) and uses `Promise.allSettled` for partial-failure
+> handling. Read this doc as design rationale/history, not as an open backlog —
+> "Current Problems" below describes the pre-2026 state.
+
 ## Goal
 
 Turn OpenSwan sub-agents from prompt-only specialist labels into real capability-backed workers with:

@@ -16,6 +16,11 @@ import {
   type OpenSwanToolSurface,
 } from '../openswanToolRuntime';
 import type { OpenSwanExecutionStatus } from '../openswanExecution';
+import {
+  buildDesignAppRuntimeToolCaptureMetadata,
+  withDesignAppRuntimeCaptureMetadata,
+} from '../designAppRuntimeManifest';
+import { buildEngineeringToolCaptureMetadata } from '../engineeringRuntimeCaptureCore';
 
 export const MAX_TOOL_ROUNDS = 5;
 
@@ -23,6 +28,10 @@ export interface OpenSwanToolDef {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  /** X4 (P47): curated, schema-validated example inputs (Anthropic
+   *  `input_examples`, GA) — attached at the catalog chokepoint for the
+   *  gnarliest schemas; absent for most tools. */
+  input_examples?: Array<Record<string, unknown>>;
 }
 
 export interface ToolContext {
@@ -53,6 +62,16 @@ export function getToolDefinitions(
   );
 }
 
+/** Minimal read/mutation policy for a tool — used to decide if a round of
+ *  tools can be dispatched concurrently (see toolBatchParallelism). */
+export function getToolParallelPolicy(
+  name: string,
+  activePluginIds?: string[],
+): { mutatesState: boolean; externalSideEffect: boolean; approvalMode: string } {
+  const p = getOpenSwanToolPolicy(name as OpenSwanRuntimeToolName, activePluginIds);
+  return { mutatesState: p.mutatesState, externalSideEffect: p.externalSideEffect, approvalMode: p.approvalMode };
+}
+
 export async function dispatchTool(
   name: string,
   input: Record<string, unknown>,
@@ -76,10 +95,15 @@ export async function dispatchToolDetailed(
     const text = formatOpenSwanRuntimeToolResult(name as OpenSwanRuntimeToolName, result as any);
     const policy = getOpenSwanToolPolicy(name as OpenSwanRuntimeToolName, ctx.activePluginIds);
     const approvalRequest = (result as any).approvalRequest || null;
+    const capture = buildDesignAppRuntimeToolCaptureMetadata(name, result, input);
+    const engineeringCapture = buildEngineeringToolCaptureMetadata(name, result, input);
     const metadata = {
-      ...(name === 'browser.plan_task' ? { browserPlan: (result as any).plan || null } : {}),
-      toolPolicy: policy,
-      approvalRequest,
+      ...withDesignAppRuntimeCaptureMetadata({
+        ...(name === 'browser.plan_task' ? { browserPlan: (result as any).plan || null } : {}),
+        toolPolicy: policy,
+        approvalRequest,
+      }, capture),
+      ...(engineeringCapture || {}),
     };
     const status: OpenSwanExecutionStatus = approvalRequest
       ? 'manual_required'

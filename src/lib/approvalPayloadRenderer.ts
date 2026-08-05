@@ -36,6 +36,10 @@ export interface ApprovalPayload {
   x?: number;
   y?: number;
   path?: string;
+  method?: string;
+  endpoint?: string;
+  apiName?: string;
+  toolNamespace?: string;
   [key: string]: unknown;
 }
 
@@ -59,14 +63,24 @@ function toolAction(tool: string): { verb: string; target: 'app' | 'browser' | '
     case 'desktop.focus_app':  return { verb: 'Focus', target: 'app' };
     case 'desktop.click_element':
     case 'desktop.click_at':   return { verb: 'Click', target: 'app' };
+    case 'desktop.set_element_value': return { verb: 'Set field in', target: 'app' };
+    case 'desktop.mouse_click': return { verb: 'Mouse click in', target: 'app' };
+    case 'desktop.mouse_down': return { verb: 'Hold mouse in', target: 'app' };
+    case 'desktop.mouse_up': return { verb: 'Release mouse in', target: 'app' };
+    case 'desktop.mouse_drag': return { verb: 'Drag in', target: 'app' };
+    case 'desktop.mouse_scroll': return { verb: 'Scroll in', target: 'app' };
     case 'desktop.type_text':  return { verb: 'Type into', target: 'app' };
+    case 'desktop.paste_text': return { verb: 'Paste into', target: 'app' };
     case 'desktop.press_keys': return { verb: 'Press keys in', target: 'app' };
+    case 'desktop.menu_click': return { verb: 'Click menu in', target: 'app' };
     case 'desktop.open_url':   return { verb: 'Open', target: 'browser' };
     case 'desktop.open_path':  return { verb: 'Open', target: 'file' };
     case 'browser.open_url':   return { verb: 'Navigate to', target: 'browser' };
     case 'browser.click_role': return { verb: 'Click', target: 'browser' };
+    case 'browser.set_toggle': return { verb: 'Set toggle in', target: 'browser' };
     case 'browser.fill_field': return { verb: 'Fill', target: 'browser' };
     case 'browser.press_key':  return { verb: 'Press', target: 'browser' };
+    case 'custom_api.request': return { verb: 'Call', target: 'generic' };
     default: return { verb: tool.replace(/[_.]/g, ' '), target: 'generic' };
   }
 }
@@ -79,6 +93,19 @@ export function renderApprovalAction(
   if (!p || typeof p !== 'object' || !p.tool) {
     // No structured payload — banner will keep showing the raw title.
     return { headline: fallbackTitle };
+  }
+
+  const args = p.args && typeof p.args === 'object' ? p.args as Record<string, unknown> : {};
+  if (p.tool === 'custom_api.request') {
+    const method = String(p.method || args.method || 'REQUEST').toUpperCase();
+    const endpoint = String(p.endpoint || args.path || '').trim();
+    const apiName = String(p.apiName || args.apiName || args.toolNamespace || p.toolNamespace || 'Custom API').trim();
+    const headline = endpoint
+      ? `Call **${method} ${truncate(endpoint, 72)}**`
+      : `Call **${method} Custom API**`;
+    const details = [`using ${truncate(apiName, 60)}`];
+    if (args.body !== undefined) details.push('with request body');
+    return { headline, detail: details.join(' · ') };
   }
 
   const { verb, target } = toolAction(p.tool);

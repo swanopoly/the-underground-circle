@@ -3,6 +3,10 @@ import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from '
 import { getOpenSwanExecutionStatusLabel } from '../../lib/openswanExecution';
 import { buildOpenSwanExecutionStream } from '../../lib/openswanExecution';
 import type { SwanBotStructuredArtifact } from '../../lib/swanbot';
+// LOCKSTEP(src/lib/tableArtifact.ts): kind:'table' artifacts carry raw CSV in
+// `content`; parse/serialize rules live in tableArtifact.ts (swanbot upgrades
+// csv code fences to this kind).
+import { parseCsvText, tableToCsv, type ParsedTable } from '../../lib/tableArtifact';
 import { resolveSessionCodingProfile, type SessionCodingProfile } from '../../lib/chatSessionProfile';
 import { buildOpenSwanTaskPlan } from '../../lib/openswanTaskPlanner';
 import { executeOpenSwanTool, type OpenSwanToolEvent } from '../../lib/openswanToolRuntime';
@@ -59,6 +63,7 @@ function inferArtifactFileName(artifact: SwanBotStructuredArtifact): string {
   const title = (artifact.title || 'generated-file').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'generated-file';
   const language = String(artifact.metadata?.language || '').toLowerCase();
   if (artifact.kind === 'webpage') return 'index.html';
+  if (artifact.kind === 'table' || language === 'csv') return `${title}.csv`;
   if (language.includes('tsx') || language.includes('react')) return `${title}.tsx`;
   if (language.includes('typescript') || language === 'ts') return `${title}.ts`;
   if (language.includes('javascript') || language === 'js') return `${title}.js`;
@@ -75,6 +80,142 @@ function renderCodeLines(content: string) {
       <Text style={styles.codeLine}>{line || ' '}</Text>
     </View>
   ));
+}
+
+// Same download mechanism as the webpage "Download HTML" action: Blob →
+// object URL → anchor click. Web-only (guarded at every call site).
+function downloadTextFile(fileName: string, mimeType: string, content: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function tableDownloadFileName(artifact: SwanBotStructuredArtifact): string {
+  const base = (artifact.title || '')
+    .replace(/\s+/g, '-')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '')
+    .replace(/^[-.]+|[-.]+$/g, '');
+  return `${base || 'table'}.csv`;
+}
+
+function describeTableDimensions(table: ParsedTable): string {
+  const sourceRows = table.sourceRowCount ?? table.rows.length;
+  const sourceCols = table.sourceColCount ?? table.headers.length;
+  const truncated = sourceRows > table.rows.length || sourceCols > table.headers.length;
+  const base = `${sourceRows} row${sourceRows === 1 ? '' : 's'} × ${sourceCols} col${sourceCols === 1 ? '' : 's'}`;
+  return truncated ? `${base} — showing first ${table.rows.length}×${table.headers.length}` : base;
+}
+
+/**
+ * kind:'table' body — real grid (styled header, zebra rows, horizontal
+ * scroll, pinned header with vertical scroll for long tables) plus a
+ * row/col caption and a "Download CSV" action. Unparseable content never
+ * renders blank: it falls back to the code-style frame with the raw text.
+ */
+function TableArtifactBody({
+  artifact,
+  accentColor,
+  workspaceActionLabel,
+  showWorkspaceAction,
+  onWorkspaceAction,
+}: {
+  artifact: SwanBotStructuredArtifact;
+  accentColor: string;
+  workspaceActionLabel: string;
+  showWorkspaceAction: boolean;
+  onWorkspaceAction: () => void;
+}) {
+  const content = artifact.content || '';
+  const table = useMemo(() => parseCsvText(content), [content]);
+
+  const handleDownloadCsv = () => {
+    // Round-trip through the parser for clean quoting; fall back to the raw
+    // content when it never parsed.
+    downloadTextFile(tableDownloadFileName(artifact), 'text/csv', table ? tableToCsv(table) : content);
+  };
+
+  const actions = (
+    <View style={styles.webActions}>
+      {Platform.OS === 'web' ? (
+        <Pressable onPress={handleDownloadCsv} style={styles.actionButton}>
+          <Text style={styles.actionButtonText}>Download CSV</Text>
+        </Pressable>
+      ) : null}
+      {showWorkspaceAction ? (
+        <Pressable onPress={onWorkspaceAction} style={styles.actionButton}>
+          <Text style={styles.actionButtonText}>{workspaceActionLabel}</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+
+  if (!table) {
+    // CSV that fails to parse still shows as text — never a blank card.
+    return (
+      <View>
+        <View style={styles.codeFrame}>
+          <View style={styles.codeFrameHeader}>
+            <View style={styles.codeFrameDots}>
+              <View style={[styles.codeFrameDot, { backgroundColor: '#ef4444' }]} />
+              <View style={[styles.codeFrameDot, { backgroundColor: '#f59e0b' }]} />
+              <View style={[styles.codeFrameDot, { backgroundColor: '#22c55e' }]} />
+            </View>
+            <Text style={styles.codeFrameFile}>{inferArtifactFileName(artifact)}</Text>
+            <Text style={[styles.codeFrameLang, { color: accentColor }]}>CSV</Text>
+          </View>
+          <ScrollView horizontal style={styles.codeScroll} contentContainerStyle={styles.codeScrollContent}>
+            <View style={styles.codeBlock}>
+              {renderCodeLines(content)}
+            </View>
+          </ScrollView>
+        </View>
+        {actions}
+      </View>
+    );
+  }
+
+  return (
+    <View>
+      <View style={styles.tableFrame}>
+        <ScrollView horizontal style={styles.tableScroll} contentContainerStyle={styles.tableScrollContent}>
+          <View>
+            <View style={[styles.tableRow, styles.tableHeaderRow]}>
+              {table.headers.map((header, colIndex) => (
+                <Text
+                  key={`h-${colIndex}`}
+                  style={[styles.tableCell, styles.tableHeaderCell, { color: accentColor }]}
+                  numberOfLines={1}
+                >
+                  {header || ' '}
+                </Text>
+              ))}
+            </View>
+            <ScrollView style={styles.tableBodyScroll} nestedScrollEnabled>
+              {table.rows.map((row, rowIndex) => (
+                <View
+                  key={`r-${rowIndex}`}
+                  style={[styles.tableRow, rowIndex % 2 === 1 && styles.tableRowZebra]}
+                >
+                  {row.map((cell, colIndex) => (
+                    <Text key={`c-${rowIndex}-${colIndex}`} style={styles.tableCell} numberOfLines={1}>
+                      {cell || ' '}
+                    </Text>
+                  ))}
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        </ScrollView>
+      </View>
+      <Text style={styles.tableCaption}>{describeTableDimensions(table)}</Text>
+      {actions}
+    </View>
+  );
 }
 
 export default function ChatArtifacts({ artifacts, accentColor, circleId, sessionProfile = 'senior', runId, onRunLedgerUpdate, roomContext }: ChatArtifactsProps) {
@@ -239,7 +380,7 @@ export default function ChatArtifacts({ artifacts, accentColor, circleId, sessio
           <View style={styles.header}>
             <View style={[styles.kindChip, { borderColor: `${accentColor}40`, backgroundColor: `${accentColor}12` }]}>
               <Text style={[styles.kindChipText, { color: accentColor }]}>
-                {artifact.kind === 'image' ? 'IMG' : artifact.kind === 'webpage' ? 'WEB' : artifact.kind === 'code' ? '</>' : artifact.kind === 'audio' ? 'AUD' : 'TXT'}
+                {artifact.kind === 'image' ? 'IMG' : artifact.kind === 'webpage' ? 'WEB' : artifact.kind === 'code' ? '</>' : artifact.kind === 'table' ? 'TBL' : artifact.kind === 'audio' ? 'AUD' : 'TXT'}
               </Text>
             </View>
             <Text style={[styles.title, { color: accentColor, flex: 1 }]} numberOfLines={1}>
@@ -373,7 +514,17 @@ export default function ChatArtifacts({ artifacts, accentColor, circleId, sessio
             </View>
           ) : null}
 
-          {artifact.kind !== 'image' && artifact.kind !== 'code' && artifact.kind !== 'webpage' && artifact.content ? (
+          {artifact.kind === 'table' && artifact.content ? (
+            <TableArtifactBody
+              artifact={artifact}
+              accentColor={accentColor}
+              workspaceActionLabel={actionLabel}
+              showWorkspaceAction={canCreateWorkspace(artifact) && (Boolean(roomContext) || Boolean(circleId))}
+              onWorkspaceAction={createdTarget ? handleOpenWorkspace : handleCreateWorkspace}
+            />
+          ) : null}
+
+          {artifact.kind !== 'image' && artifact.kind !== 'code' && artifact.kind !== 'webpage' && artifact.kind !== 'table' && artifact.content ? (
             <View>
               <Text style={styles.textContent}>{artifact.content}</Text>
               {canCreateWorkspace(artifact) ? (
@@ -494,6 +645,54 @@ const styles = StyleSheet.create({
   },
   codeScrollContent: {
     minWidth: '100%',
+  },
+  tableFrame: {
+    borderWidth: 1,
+    borderColor: '#22304a',
+    borderRadius: 10,
+    overflow: 'hidden',
+    backgroundColor: '#08101a',
+  },
+  tableScroll: {
+    maxHeight: 300,
+  },
+  tableScrollContent: {
+    minWidth: '100%',
+  },
+  tableBodyScroll: {
+    maxHeight: 252,
+  },
+  tableRow: {
+    flexDirection: 'row',
+  },
+  tableHeaderRow: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#22304a',
+    backgroundColor: '#0d1624',
+  },
+  tableRowZebra: {
+    backgroundColor: '#0d0d16',
+  },
+  tableCell: {
+    width: 120,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    color: '#d6d6e4',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  tableHeaderCell: {
+    fontWeight: '800',
+    fontSize: 10,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  tableCaption: {
+    color: '#8d8da3',
+    fontSize: 9,
+    marginTop: 4,
+    marginBottom: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   codeFrame: {
     borderWidth: 1,

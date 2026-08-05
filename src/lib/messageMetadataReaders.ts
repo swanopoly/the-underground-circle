@@ -1,4 +1,6 @@
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
+import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
+import type { ChatComputerHandoffMetadata } from './chatComputerHandoffContext';
 import type { ChatCommandDecision } from './chatCommandRegistry';
 import type { OpenSwanMemoryRecommendation, PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
@@ -6,7 +8,7 @@ import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import type { ResearchDocumentReference } from './researchControl';
 import type { SwanBotStructuredArtifact } from './swanbot';
 import type { WikiArticleReference } from './wikiData';
-import { readPersistedChatBotMetadata, type PersistedChatBotMetadata } from './persistedChatMetadata';
+import { readPersistedChatBotMetadata, type PersistedChatBotMetadata, type PersistedChatRecoveryOption } from './persistedChatMetadata';
 
 type UnknownMetadata = Record<string, unknown> | null | undefined;
 
@@ -55,6 +57,20 @@ export function readMessageBrowserSessions(metadata: UnknownMetadata): BrowserSe
   return readArray<BrowserSessionRecord>(metadata?.browserSessions);
 }
 
+export function readMessageRecoveryOptions(metadata: UnknownMetadata): PersistedChatRecoveryOption[] {
+  return readArray<PersistedChatRecoveryOption>(metadata?.recoveryOptions);
+}
+
+export function readMessageComputerHandoff(metadata: UnknownMetadata): ChatComputerHandoffMetadata | undefined {
+  const value = metadata?.computerHandoff;
+  return value && typeof value === 'object' ? value as ChatComputerHandoffMetadata : undefined;
+}
+
+export function readMessageChatAutomationPlanPreview(metadata: UnknownMetadata): ChatAutomationPlanPreview | undefined {
+  const value = metadata?.chatAutomationPlanPreview;
+  return value && typeof value === 'object' ? value as ChatAutomationPlanPreview : undefined;
+}
+
 export function readPersistedChatBotMessageFields(content: string | null | undefined): PersistedChatBotMetadata {
   return readPersistedChatBotMetadata(content) || {};
 }
@@ -70,6 +86,9 @@ export type HydratedPersistedBotFields = {
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
+  recoveryOptions?: PersistedChatRecoveryOption[];
+  computerHandoff?: ChatComputerHandoffMetadata;
+  chatAutomationPlanPreview?: ChatAutomationPlanPreview;
   commandDecisions?: ChatCommandDecision[];
   modeOutcomeSummary?: {
     headline: string;
@@ -94,6 +113,9 @@ export function buildHydratedPersistedBotFields(
     browserPlans: metadata.browserPlans || undefined,
     browserPlanEvents: metadata.browserPlanEvents || undefined,
     browserSessions: metadata.browserSessions || undefined,
+    recoveryOptions: metadata.recoveryOptions || undefined,
+    computerHandoff: metadata.computerHandoff || undefined,
+    chatAutomationPlanPreview: metadata.chatAutomationPlanPreview || undefined,
     commandDecisions: metadata.commandDecisions || undefined,
     modeOutcomeSummary: metadata.modeOutcomeSummary?.headline ? {
       headline: metadata.modeOutcomeSummary.headline,

@@ -15,7 +15,13 @@ import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
-import { cacheBridgeToken, ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import {
+  bridgeAuthHeaders,
+  cacheBridgeToken,
+  ensureBridgeToken,
+  fetchBridgeAuthenticated,
+  requestBridgePairToken,
+} from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 
 const BRIDGE_PORT = 7780;
@@ -28,18 +34,14 @@ async function pairGeminiBridge(bridgeUrl: string): Promise<string | null> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`${bridgeUrl}/pair`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    const token = typeof data?.token === 'string' ? data.token : null;
-    if (token) cacheBridgeToken(token);
-    return token;
+    try {
+      const paired = await requestBridgePairToken(`${bridgeUrl}/pair`, controller.signal);
+      if (!paired.ok || !paired.token) return null;
+      cacheBridgeToken(paired.token);
+      return paired.token;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return null;
   }
@@ -85,8 +87,7 @@ export async function detectGeminiCliBridge(): Promise<boolean> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     // Check sessions endpoint — only detect if actual sessions exist
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -103,8 +104,7 @@ export async function fetchGeminiCliSessions(): Promise<GeminiCliSession[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -153,10 +153,9 @@ export async function execGeminiCliCommand(
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/send`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/send`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command, sessionId }),
       signal: controller.signal,
     });
@@ -360,6 +359,8 @@ export interface GeminiCliLaunchRequest {
   projectDir?: string;
   model?: string;
   yolo?: boolean;
+  /** Launch each session in its own git worktree (fail-open to the shared cwd). */
+  useWorktree?: boolean;
   circleId?: string;
   userId?: string;
 }
@@ -396,12 +397,13 @@ export async function launchGeminiCliSessions(input: GeminiCliLaunchRequest): Pr
       projectDir: input.projectDir,
       model: input.model,
       yolo: input.yolo,
+      useWorktree: input.useWorktree,
     });
     const postLaunch = async (token: string | null) => {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 60_000);
       try {
-        return await fetch(`${bridgeUrl}/launch`, {
+        return await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
           body,

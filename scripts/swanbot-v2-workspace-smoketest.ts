@@ -19,7 +19,9 @@
  */
 
 // ─── Helpers (mirrors of the real ones) ─────────────────────────────
-const ALLOWED_KINDS = ['summary', 'image', 'translation', 'classification', 'vision', 'audio', 'code', 'webpage'];
+// LOCKSTEP(src/lib/swanbot.ts normalizeArtifact allowlist): includes 'table'
+// since P14 (CSV artifacts upgrade to downloadable tables).
+const ALLOWED_KINDS = ['summary', 'image', 'translation', 'classification', 'vision', 'audio', 'code', 'webpage', 'table'];
 
 function normalizeArtifact(raw: unknown): any | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -152,6 +154,7 @@ async function main() {
   assert(normalizeArtifact('str') === null, 'normalizeArtifact: string rejected');
   assert(normalizeArtifact({ kind: 'code' }) === null, 'normalizeArtifact: missing title rejected');
   assert(normalizeArtifact({ kind: 'evil', title: 't' }) === null, 'normalizeArtifact: unknown kind rejected');
+  assert(normalizeArtifact({ kind: 'table', title: 'Bills', content: 'a,b\n1,2' })?.kind === 'table', 'normalizeArtifact: table kind accepted (P14 lockstep)');
   assert(normalizeArtifact({ kind: 'code', title: '' }) === null, 'normalizeArtifact: empty title rejected');
   {
     const ok = normalizeArtifact({ kind: 'code', title: 'Landing Page', content: 'html', url: null, metadata: { lang: 'html' } });

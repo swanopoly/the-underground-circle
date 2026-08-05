@@ -45,6 +45,12 @@ import MemberCardModal from '../../../components/MemberCardModal';
 import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
 import MissionsTab from './MissionsTab';
 import { useMissions, useMissionDetail, missionProgress, isOverdue, type Mission } from '../../../lib/missions';
+import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
+import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
+import { classifyRunFreshness, runEmptyStateModel, freshnessRank } from '../../../lib/runFreshnessCore';
+import NeedsAttentionPanel from '../../../components/feed/NeedsAttentionPanel';
+import { buildNeedsAttention } from '../../../lib/accountabilityNagCore';
+import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -264,6 +270,27 @@ function HuggingSwanPanel({ circleId }: { circleId: string }) {
               </View>
             ))}
           </View>
+          {/* Actionable next steps. These map to real chat commands
+              (/create, /watch, /review, /imagine) that all live in the Chat
+              surface: seed the composer with the command, then navigate
+              there via the existing uc:switch-tab event. */}
+          <View style={{ marginTop: 14, width: '100%' }}>
+            <SuggestedTaskChips
+              suggestions={getEmptyStateSuggestions('feed')}
+              onPick={(action: EmptyStateSuggestionAction) => {
+                // Every feed suggestion is a chat command; seed the composer, then open Chat.
+                if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                  const seed = action.kind === 'seed_command' ? buildComposerSeedDetail(action.value) : null;
+                  try {
+                    if (seed) window.dispatchEvent(new CustomEvent(SEED_EVENT_NAME, { detail: seed }));
+                    window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } }));
+                  } catch {}
+                }
+              }}
+              accentColor="#a5b4fc"
+              nativeID="section-feed-empty-suggestions"
+            />
+          </View>
         </View>
       ) : (
         <ScrollView style={hs.list} showsVerticalScrollIndicator={false}>
@@ -375,28 +402,64 @@ function ActiveRunsWidget({ circleId }: { circleId: string }) {
     return () => clearInterval(interval);
   }, [circleId]);
 
-  if (runs.length === 0) return null;
-
   const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
-  const statusColors: Record<string, string> = { running: '#22c55e', planning: '#6366f1', queued: '#606075', waiting_approval: '#f59e0b', paused: '#f59e0b' };
+
+  // Shared freshness → colour so Feed paints the identical dot/label that Chat
+  // and Office do from one `agent_runs` row (runFreshnessCore is the one brain).
+  const freshnessColors: Record<string, string> = {
+    live: '#22c55e',
+    recent: '#6366f1',
+    idle: '#f59e0b',
+    stale: '#ef4444',
+    done: '#606075',
+    unknown: '#606075',
+  };
+
+  // Finding 2: a just-finished run or a momentary poll gap must NOT blank the
+  // widget via `return null`. Render an explicit "no active runs" affordance.
+  const emptyState = runEmptyStateModel({ hasRuns: runs.length, loading: false, error: null });
+  if (emptyState.kind !== 'has_data') {
+    return (
+      <View style={{ marginBottom: 12 }}>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO, marginBottom: 6 }}>ACTIVE RUNS ({runs.length})</Text>
+        <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO }}>{emptyState.message}</Text>
+      </View>
+    );
+  }
+
+  // Classify each run once, then order most-alive → over via the shared rank.
+  const nowMs = Date.now();
+  const rankedRuns = runs
+    .map((run: any) => ({
+      run,
+      fresh: classifyRunFreshness({
+        status: run.status,
+        updatedAtMs: Date.parse(run.updated_at || run.completed_at || run.started_at || run.created_at),
+        nowMs,
+      }),
+    }))
+    .sort((a, b) => freshnessRank(a.fresh.freshness) - freshnessRank(b.fresh.freshness));
 
   return (
     <View style={{ marginBottom: 12 }}>
       <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO, marginBottom: 6 }}>ACTIVE RUNS ({runs.length})</Text>
-      {runs.map((run: any) => (
-        <View key={run.id} style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: (statusColors[run.status] || '#1a1a28') + '40', borderRadius: 2, padding: 8, marginBottom: 4 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: statusColors[run.status] || '#606075' }} />
-            <Text style={{ color: '#f0f0f5', fontSize: 10, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled'}</Text>
-            <Text style={{ color: statusColors[run.status] || '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
+      {rankedRuns.map(({ run, fresh }) => {
+        const dotColor = freshnessColors[fresh.freshness] || '#606075';
+        return (
+          <View key={run.id} style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: dotColor + '40', borderRadius: 2, padding: 8, marginBottom: 4 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: dotColor }} />
+              <Text style={{ color: '#f0f0f5', fontSize: 10, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled'}</Text>
+              <Text style={{ color: dotColor, fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{fresh.label}</Text>
+            </View>
+            <View style={{ flexDirection: 'row', gap: 6, marginTop: 2 }}>
+              <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.surface}</Text>
+              {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO }}>{run.delegated_to}</Text>}
+              {run.mode !== 'talk' && <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO }}>{run.mode}</Text>}
+            </View>
           </View>
-          <View style={{ flexDirection: 'row', gap: 6, marginTop: 2 }}>
-            <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.surface}</Text>
-            {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO }}>{run.delegated_to}</Text>}
-            {run.mode !== 'talk' && <Text style={{ color: '#606075', fontSize: 8, fontFamily: MONO }}>{run.mode}</Text>}
-          </View>
-        </View>
-      ))}
+        );
+      })}
     </View>
   );
 }
@@ -987,6 +1050,19 @@ export default function FeedTab({
     return { total: allTasks.length, completed, inProgress, overdue, dueToday, completedThisWeek };
   }, [kanban.tasksByColumn]);
 
+  // Needs-attention ranking (overdue/breached/stalled/blocked) composed from
+  // the SLA + priority cores; renders under the Orchestra panel.
+  const needsAttention = useMemo(() => {
+    const allTasks = Object.values(kanban.tasksByColumn).flat();
+    return buildNeedsAttention({ nowMs: Date.now(), tasks: allTasks, missions: allMissions });
+  }, [kanban.tasksByColumn, allMissions]);
+
+  const handleNeedsAttentionAction = useCallback((item: { taskId?: string }) => {
+    if (!item.taskId) return;
+    const t = Object.values(kanban.tasksByColumn).flat().find(x => x.id === item.taskId);
+    if (t) setDetailTask(t);
+  }, [kanban.tasksByColumn]);
+
   const goalFilteredTasksByColumn = useMemo(() => {
     if (!filteredGoalId) return kanban.tasksByColumn;
     const filtered = {} as TasksByColumn;
@@ -1071,6 +1147,7 @@ export default function FeedTab({
         <AgentTopBar agents={orchestraAgents} />
         {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
         <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
+        <NeedsAttentionPanel items={needsAttention} onAction={handleNeedsAttentionAction} />
         <TaskSearchBar
           searchText={searchText}
           onSearchChange={setSearchText}
@@ -1272,6 +1349,7 @@ export default function FeedTab({
       <AgentTopBar agents={orchestraAgents} />
       {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
       <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
+      <NeedsAttentionPanel items={needsAttention} onAction={handleNeedsAttentionAction} />
 
       {/* Collapsible search bar — click to expand, / key also opens */}
       {searchExpanded ? (

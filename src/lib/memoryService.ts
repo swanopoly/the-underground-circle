@@ -9,11 +9,52 @@
  */
 
 import { supabase } from './supabase';
+import { fitCandidatesToBudget } from './contextBudgetFitCore';
+import {
+  clampSectionText,
+  computeKeywordCoverage,
+  mergeRetrievalCandidates,
+  planMemoryBundleSections,
+  selectRetrievalCandidates,
+  MEMORY_BUNDLE_BUDGET_CHARS,
+  MEMORY_BUNDLE_SECTIONS,
+  SEMANTIC_RPC_MATCH_THRESHOLD,
+  type MemoryMatchSource,
+} from './memoryRetrievalPolicyCore';
 import {
   loadMemories, saveMemory,
   type MemoryScope, type MemoryKind, type MemoryEntry,
 } from './agentRunSystem';
+import {
+  buildRememberTitle,
+  inferExplicitMemoryKey,
+  inferRememberKind,
+  normalizeRememberContent,
+  pickDuplicateMemory,
+  slugifyMemoryKey,
+  RESPONSE_STANDARD_DEFAULT_CONTENT,
+  RESPONSE_STANDARD_MEMORY_KEY,
+  RESPONSE_STANDARD_MEMORY_TITLE,
+} from './memoryDedupeCore';
 import { decideSoulMemoryRouting, getAgentSoulInfo, getMemorySoulKey } from './agentSoulMemory';
+import { wrapUntrusted } from './untrustedContent';
+import { annotateUntrustedHeading, type UntrustedHeadingScanSummary } from './untrustedScanAnnotate';
+
+/**
+ * Fire-and-forget embed-on-write.
+ *
+ * DYNAMIC import on purpose: `memoryEmbeddings` → `privacyMode` → `react-native`,
+ * and this module is transitively imported by tsx-loaded smoke tests, which
+ * cannot load react-native. A static top-level import here breaks every one of
+ * them (it broke `smoke:agent-runtime` exactly this way). `memoryService`
+ * already used a dynamic import of this module for the same reason.
+ */
+function queueMemoryEmbeddingSafe(memoryId: string, title?: string | null, content?: string | null): void {
+  if (!memoryId) return;
+  void import('./memoryEmbeddings')
+    .then(({ queueMemoryEmbedding }) => queueMemoryEmbedding({ memoryId, title, content }))
+    .catch(() => { /* embedding must never affect the write */ });
+}
 
 export type MemoryNamespace =
   | 'startup_bundle'
@@ -26,6 +67,11 @@ export type MemoryNamespace =
   | 'external_agent_user_context';
 
 export type AgentMemoryPromotionKind = 'success' | 'blocker';
+
+function uniqueMemoryIds(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+}
+
 export type PromptMemoryReference = {
   id: string;
   title: string;
@@ -265,13 +311,17 @@ export async function loadStartupMemory(opts: {
   userId: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
 }): Promise<string> {
+  const agentLookupIds = uniqueMemoryIds([opts.agentId, ...(opts.agentAliases || [])]);
+  const agentLookupSet = new Set(agentLookupIds);
   const allMemories = await loadMemories({
     circleId: opts.circleId,
     roomId: opts.roomId,
     agentId: opts.agentId,
+    agentAliases: opts.agentAliases,
     userId: opts.userId,
-    scopes: opts.agentId ? ['circle', 'room', 'user', 'session', 'agent'] : ['circle', 'room', 'user', 'session'],
+    scopes: agentLookupIds.length > 0 ? ['circle', 'room', 'user', 'session', 'agent'] : ['circle', 'room', 'user', 'session'],
     limit: 40,
   });
 
@@ -291,7 +341,7 @@ export async function loadStartupMemory(opts: {
     : null;
   const activeSoulKey = soulInfo?.soulKey || null;
   const agentPrivate = startupMemories
-    .filter(m => m.scope === 'agent' && (!opts.agentId || m.agent_id === opts.agentId))
+    .filter(m => m.scope === 'agent' && (agentLookupSet.size === 0 || agentLookupSet.has(String(m.agent_id || ''))))
     .sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime())
     .sort((a, b) => {
       const aSoul = getMemorySoulKey(a);
@@ -459,7 +509,19 @@ export function formatSoulWisdomBlock(entry: SoulWisdomEntry | null): string {
   const dateStr = entry.generatedAt ? new Date(entry.generatedAt).toISOString().slice(0, 10) : '';
   const sourceSuffix = entry.sourceKind === 'synthesized' ? ' • distilled from active memory' : '';
   const header = `## ${title} wisdom in this circle${dateStr ? ` (updated ${dateStr})` : ''}${sourceSuffix}`;
-  return `${header}\n${entry.body.trim()}`;
+  // Wisdom bodies are distilled from circle memories (member/model-authored)
+  // — untrusted (rule 5). wrapUntrusted fences + strips any embedded fence
+  // markers so the body can't break out of the fence. The advisory injection
+  // scan escalates the heading (compact summary only — never body text) when
+  // the distilled body carries hijack-style wording; unflagged stays byte-
+  // identical. Covers both the SwanBot wisdom loader and the bundle path.
+  const ann = annotateUntrustedHeading(entry.body, header);
+  if (ann.flagged) {
+    console.warn('[memoryService] soul wisdom body carries injection-style wording:', {
+      seam: 'soul_wisdom', level: ann.scan.level, kinds: ann.scan.kinds,
+    });
+  }
+  return wrapUntrusted(entry.body, { heading: ann.heading });
 }
 
 async function synthesizeSoulWisdomFromMemories(opts: {
@@ -725,7 +787,13 @@ export interface RetrievedMemory {
   memory_kind: string;
   scope: string;
   importance: number;
-  similarity: number;    // raw cosine similarity
+  /** Source-normalized relevance 0..1: raw cosine for semantic rows, the
+   *  discounted lexical-coverage proxy for keyword-fallback rows. Read
+   *  `match_source` before treating this as a cosine distance. */
+  similarity: number;
+  /** Which retrieval branch produced this row. Keyword rows are lexical-only
+   *  evidence and are deliberately scored on a lower ceiling. */
+  match_source?: MemoryMatchSource;
   score: number;         // post-boost final ranking score
   soul_role?: 'primary' | 'shared' | 'reference' | null;
   task_fit?: 'core' | 'supporting' | 'background' | null;
@@ -741,13 +809,83 @@ const TURN_RETRIEVAL_DEFAULTS = {
   candidatePoolSize: 40,
   finalCount: 12,
   budgetChars: 1500,
-  recencyHalfLifeDays: 30,
+  // Recency half-life, the pinned boost, and the relevance floors now live in
+  // memoryRetrievalPolicyCore — a knob here that the scorer no longer reads is
+  // exactly the class of dead config this pass was fixing.
   soulPrimaryBoost: 0.25,
   soulSharedBoost: 0.10,
   agentCoreBoost: 0.05,
-  pinnedBoost: 0.12,
   importanceBonus: 0.15,      // multiplier × importance (0..1)
 };
+
+// Max query terms sent to the ILIKE fallback's or() filter.
+const KEYWORD_FALLBACK_MAX_TERMS = 6;
+
+/** Separator between memory-bundle sections; its cost is charged to the budget. */
+const BUNDLE_SECTION_JOINER = '\n\n';
+
+/** One candidate row on its way through the turn-retrieval scorer. */
+type TurnRetrievalCandidate = {
+  id: string;
+  title: string;
+  content: string;
+  memory_kind: string;
+  scope: string;
+  importance: number;
+  similarity: number;
+  matchSource: MemoryMatchSource;
+  keywordCoverage?: number;
+  keywordTitleHit?: boolean;
+  pinned?: boolean;
+  metadata: Record<string, unknown>;
+};
+
+/**
+ * ILIKE candidate fetch over the salient query terms.
+ *
+ * Runs on EVERY turn alongside semantic search rather than as an `else` on it:
+ * `match_memories` filters `embedding IS NOT NULL`, so without this union every
+ * un-embedded memory in a partially-embedded circle is unreachable. Returns []
+ * on any failure — retrieval degrades, it never throws into the prompt build.
+ */
+async function fetchKeywordMemoryCandidates(opts: {
+  circleId: string;
+  terms: string[];
+  limit: number;
+}): Promise<any[]> {
+  if (!opts.circleId || !Array.isArray(opts.terms) || opts.terms.length === 0) return [];
+  // Hard sanitize: terms reach a PostgREST or() filter, where `,`/`(`/`)`
+  // rewrite the filter itself and `%`/`\`/control chars distort the ILIKE
+  // pattern or inflate the URL. Callers pre-clean, but untrusted quoted
+  // content has reached this boundary before — enforce here, fail-safe.
+  const safeTerms = Array.from(new Set(
+    opts.terms
+      .map(term => String(term || '').replace(/[(),%\\]/g, ' ').replace(/[\x00-\x1f\x7f]+/g, ' ').trim().slice(0, 48).trim())
+      .filter(term => term.length >= 3),
+  )).slice(0, KEYWORD_FALLBACK_MAX_TERMS);
+  if (safeTerms.length === 0) return [];
+  const orFilter = safeTerms
+    .map(term => `title.ilike.%${term}%,content.ilike.%${term}%`)
+    .join(',');
+  try {
+    const { data, error } = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', opts.circleId)
+      .eq('is_active', true)
+      .or(orFilter)
+      .order('updated_at', { ascending: false })
+      .limit(opts.limit);
+    if (error) {
+      console.warn('[memoryService] keyword memory search failed:', error.message);
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    console.warn('[memoryService] keyword memory search threw:', err);
+    return [];
+  }
+}
 
 const ARCHIVE_PASSIVE_RETRIEVAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const ARCHIVE_PASSIVE_RETRIEVAL_BIAS = 0.18;
@@ -819,20 +957,77 @@ export async function retrieveForTurn(opts: {
   budgetChars?: number;
   candidatePoolSize?: number;
   finalCount?: number;
-}): Promise<{ memories: RetrievedMemory[]; formatted: string }> {
+}): Promise<{
+  memories: RetrievedMemory[];
+  formatted: string;
+  /** Advisory injection-scan summary for the recalled block (ephemeral v1 —
+   *  not persisted; compact {level,score,kinds} only, never spans/excerpts). */
+  injectionScan?: UntrustedHeadingScanSummary;
+}> {
   const cfg = { ...TURN_RETRIEVAL_DEFAULTS, ...opts };
   if (!opts.queryText?.trim() || !opts.circleId) {
     return { memories: [], formatted: '' };
   }
 
-  // Step 1 — embed + candidate search via the Phase 1 semantic RPC
+  // Step 1 — the two retrieval branches run TOGETHER, not as fallback/else.
+  //
+  // `match_memories` filters `embedding IS NOT NULL`, so it can only ever see
+  // rows that have already been embedded. The ILIKE branch used to be gated on
+  // the semantic branch returning NOTHING — which meant that the moment ONE
+  // memory in a circle got embedded, every un-embedded row became permanently
+  // unreachable, silently and with no error anywhere. They are unioned now
+  // (deduped by id, semantic evidence winning a collision) and fired in
+  // parallel, so the reachability fix costs no added turn latency.
+  const searchTerms = extractSearchTerms(opts.queryText.toLowerCase())
+    .map(term => term.replace(/[(),]/g, ' ').trim())  // strip PostgREST or() metachars
+    .filter(Boolean)
+    .slice(0, KEYWORD_FALLBACK_MAX_TERMS);
+
   const { semanticSearchMemories } = await import('./memoryEmbeddings');
-  const candidates = await semanticSearchMemories({
-    queryText: opts.queryText,
-    circleId: opts.circleId,
-    limit: cfg.candidatePoolSize,
-    matchThreshold: 0, // let every match through; we rank ourselves
+  const [semanticRows, keywordRows] = await Promise.all([
+    semanticSearchMemories({
+      queryText: opts.queryText,
+      circleId: opts.circleId,
+      limit: cfg.candidatePoolSize,
+      // Prune obvious noise in Postgres instead of over the wire. This is the
+      // LOWEST floor any candidate could face (a pinned row, which buys relief
+      // off the floor); the real admissibility decision stays in
+      // memoryRetrievalPolicyCore so boosts still get their say above it.
+      matchThreshold: SEMANTIC_RPC_MATCH_THRESHOLD,
+    }).catch((err: unknown) => {
+      console.warn('[memoryService] semantic memory search failed:', err);
+      return [];
+    }),
+    fetchKeywordMemoryCandidates({
+      circleId: opts.circleId,
+      terms: searchTerms,
+      limit: cfg.candidatePoolSize,
+    }),
+  ]);
+
+  const semanticCandidates: TurnRetrievalCandidate[] = (semanticRows || []).map((row: any) => ({
+    ...row,
+    matchSource: 'semantic' as const,
+  }));
+  const keywordCandidates: TurnRetrievalCandidate[] = (keywordRows || []).map((row: any) => {
+    const coverage = computeKeywordCoverage(searchTerms, row?.title, row?.content);
+    return {
+      ...mapMemoryEntry(row),
+      pinned: row?.pinned === true,
+      // No cosine number exists for a lexical hit. The policy core derives the
+      // relevance from `keywordCoverage` on its own (lower) ceiling — the old
+      // flat synthetic 0.5 ranked lexical noise above real semantic recall.
+      similarity: 0,
+      matchSource: 'keyword' as const,
+      keywordCoverage: coverage.coverage,
+      keywordTitleHit: coverage.titleHit,
+    } as unknown as TurnRetrievalCandidate;
   });
+
+  const candidates = mergeRetrievalCandidates<TurnRetrievalCandidate>(
+    semanticCandidates,
+    keywordCandidates,
+  );
   if (candidates.length === 0) return { memories: [], formatted: '' };
 
   // Step 2 — load soul-link rows for the candidate set in one round-trip.
@@ -907,11 +1102,20 @@ export async function retrieveForTurn(opts: {
     }
   } catch { /* no eval rows just means neutral helpfulness */ }
 
-  // Step 3 — score each candidate
+  // Step 3 — score + floor-filter each candidate through the pure policy core.
+  //
+  // memoryRetrievalPolicyCore owns relevance normalization (raw cosine for
+  // semantic rows, a DISCOUNTED lexical-coverage proxy for keyword rows — they
+  // used to be stamped with a flat synthetic 0.5 that outranked most genuine
+  // cosine matches), the pinned boost (previously dead — the column never
+  // reached this code), the importance/helpfulness/archive adjustments, the
+  // recency decay, and the two relevance floors. Without a floor, the top-N
+  // nearest neighbours of a totally unrelated question still filled the memory
+  // block on a small circle. Soul affinity and task affinity are computed here
+  // (they need the round-trips above) and handed in as plain numbers.
   const now = Date.now();
-  const halfLifeMs = cfg.recencyHalfLifeDays * 24 * 60 * 60 * 1000;
 
-  const scored: RetrievedMemory[] = candidates.map(c => {
+  const enriched = candidates.map(c => {
     const links = linksByMemoryId.get(c.id) || [];
     let soulBoost = 0;
     let soulRole: RetrievedMemory['soul_role'] = null;
@@ -930,60 +1134,100 @@ export async function retrieveForTurn(opts: {
       }
     }
 
-    // Soft recency decay — half-life 30 days, floor at 0.6 so old-but-
-    // high-similarity memories aren't effectively banned.
-    const timestamp = (c as any).updated_at || (c as any).created_at || now;
-    const ageMs = Math.max(0, now - new Date(timestamp).getTime());
-    const recencyFactor = Math.exp(-Math.LN2 * (ageMs / halfLifeMs));
-
-    const importanceBonus = (c.importance || 0) * cfg.importanceBonus;
-    const pinnedBoost = (c as any).pinned ? cfg.pinnedBoost : 0;
     const helpfulness = helpfulnessByMemoryId.get(c.id) ?? null;
-    const helpfulnessAdjustment = helpfulness == null ? 0 : (helpfulness - 0.5) * 0.24;
     const isArchiveDerived = typeof c.metadata?.source === 'string'
       && (c.metadata.source === 'thread_archive_match' || c.metadata.source === 'thread_archive_recommendation');
     const archivePassive = isArchiveDerived ? (archivePassiveByMemoryId.get(c.id) ?? null) : null;
-    const archivePassiveAdjustment = archivePassive == null ? 0 : (archivePassive - 0.5) * ARCHIVE_PASSIVE_RETRIEVAL_BIAS;
     const taskAffinity = scoreMemoryTaskAffinity(c, opts.taskKind, opts.profile);
-    const baseScore = c.similarity + soulBoost + pinnedBoost + importanceBonus + helpfulnessAdjustment + archivePassiveAdjustment + taskAffinity.score;
-    const finalScore = baseScore * (0.6 + 0.4 * recencyFactor);
+    const rawTimestamp = (c as any).updated_at || (c as any).created_at || null;
+    const timestampMs = rawTimestamp ? new Date(rawTimestamp).getTime() : now;
 
     return {
+      candidate: c,
+      soulRole,
+      taskAffinity,
+      helpfulness,
+      archivePassive,
+      signals: {
+        id: c.id,
+        matchSource: c.matchSource,
+        similarity: c.similarity,
+        keywordCoverage: c.keywordCoverage,
+        keywordTitleHit: c.keywordTitleHit,
+        pinned: (c as any).pinned === true,
+        importance: c.importance,
+        soulBoost,
+        taskAffinity: taskAffinity.score,
+        helpfulness,
+        archivePassive,
+        timestampMs: Number.isFinite(timestampMs) ? timestampMs : now,
+      },
+    };
+  });
+
+  const selection = selectRetrievalCandidates(enriched.map(e => e.signals), {
+    nowMs: now,
+    finalCount: cfg.finalCount,
+  });
+  if (selection.keep.length === 0) {
+    // Recall nothing rather than pad the prompt with near-misses. Logged at
+    // info so "why did it forget?" is answerable without reading the ranker.
+    if (selection.rejected.belowRelevanceFloor > 0 || selection.rejected.belowScoreFloor > 0) {
+      console.info('[memoryService] retrieveForTurn: no candidate cleared the relevance floor', selection.rejected);
+    }
+    return { memories: [], formatted: '' };
+  }
+
+  // `selection.keep` is already floor-filtered, score-desc, and finalCount-capped.
+  const enrichedById = new Map(enriched.map(e => [e.signals.id, e]));
+  const scored: RetrievedMemory[] = selection.keep.flatMap((s) => {
+    const e = enrichedById.get(s.id);
+    if (!e) return [];
+    const c = e.candidate;
+    const archivePassive = e.archivePassive;
+    return [{
       id: c.id,
       title: c.title,
       content: c.content,
       memory_kind: c.memory_kind,
       scope: c.scope,
       importance: c.importance,
-      similarity: c.similarity,
-      score: Number.isFinite(finalScore) ? finalScore : c.similarity,
-      pinned: !!(c as any).pinned,
-      helpfulness,
+      similarity: s.relevance,
+      match_source: s.matchSource,
+      score: s.score,
+      pinned: s.pinned,
+      helpfulness: e.helpfulness,
       archivePassiveScore: archivePassive,
       archiveBias: archivePassive == null ? null : archivePassive >= 0.65 ? 'boosted' : archivePassive <= 0.35 ? 'suppressed' : 'neutral',
-      soul_role: soulRole,
-      task_fit: taskAffinity.fit,
+      soul_role: e.soulRole,
+      task_fit: e.taskAffinity.fit,
       reason: buildRetrievedMemoryReason({
-        similarity: c.similarity,
-        soulRole,
-        taskReason: taskAffinity.reason,
+        similarity: s.relevance,
+        matchSource: s.matchSource,
+        pinned: s.pinned,
+        soulRole: e.soulRole,
+        taskReason: e.taskAffinity.reason,
         retrievalMode: (c as any).retrieval_mode || null,
       }),
       metadata: c.metadata || {},
-    };
+    } as RetrievedMemory];
   });
 
-  scored.sort((a, b) => b.score - a.score);
-
-  // Step 4 — enforce finalCount AND budgetChars (first one to bite wins)
-  const kept: RetrievedMemory[] = [];
-  let used = 0;
-  for (const mem of scored.slice(0, cfg.finalCount)) {
-    const line = `- [${mem.memory_kind}] ${mem.title}: ${mem.content}\n`;
-    if (used + line.length > cfg.budgetChars) break;
-    kept.push(mem);
-    used += line.length;
-  }
+  // Step 4 — enforce budgetChars over the floor-cleared set. Density-greedy fit
+  // (value = score, cost = rendered chars) instead of stop-at-first-overflow: the old
+  // `break` let one large early memory STARVE every smaller high-value memory after it.
+  // fitCandidatesToBudget skips the overflowing item and keeps packing, so a later small
+  // high-score memory still lands. Selection is by value-density; presentation stays
+  // score-desc (we map the kept ids back onto the already-sorted `scored`).
+  const budgetCandidates = scored.map((mem) => ({
+    id: mem.id,
+    source: mem.memory_kind,
+    tokens: `- [${mem.memory_kind}] ${mem.title}: ${mem.content}\n`.length,
+    value: mem.score,
+  }));
+  const fit = fitCandidatesToBudget(budgetCandidates, cfg.budgetChars);
+  const keptIds = new Set(fit.keep.map((k) => k.id));
+  const kept: RetrievedMemory[] = scored.filter((mem) => keptIds.has(mem.id));
   if (kept.length === 0) return { memories: [], formatted: '' };
 
   // Step 5 — log access (best-effort; prompt build doesn't wait on it)
@@ -1010,9 +1254,21 @@ export async function retrieveForTurn(opts: {
     const reason = m.reason ? ` (${m.reason})` : '';
     return `- [${m.memory_kind}] ${m.title}: ${m.content}${reason}`;
   }).join('\n');
-  const formatted = `${header}\n${body}`;
+  // Retrieved memory is untrusted (rule 5): a circle member or an external
+  // source may have written content into it. wrapUntrusted fences it (so the
+  // model treats recalled text as data) and strips embedded fence markers so
+  // a member's memory can't break out. Header stays outside the fence. The
+  // advisory injection scan escalates that header when the recalled block
+  // carries hijack-style wording (unflagged → byte-identical header).
+  const ann = annotateUntrustedHeading(body, header);
+  if (ann.flagged) {
+    console.warn('[memoryService] retrieveForTurn recalled injection-style wording:', {
+      seam: 'turn_retrieval', level: ann.scan.level, kinds: ann.scan.kinds,
+    });
+  }
+  const formatted = body.trim() ? wrapUntrusted(body, { heading: ann.heading }) : '';
 
-  return { memories: kept, formatted };
+  return { memories: kept, formatted, injectionScan: ann.scan };
 }
 
 export async function retrieveSoulMemories(opts: {
@@ -1063,6 +1319,7 @@ export async function buildPromptMemoryBundle(opts: {
   query: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
   agentName?: string;
   spiritId?: string | null;
   surface?: string;
@@ -1091,6 +1348,7 @@ export async function buildPromptMemoryBundle(opts: {
       userId: opts.userId,
       roomId: opts.roomId,
       agentId: opts.agentId,
+      agentAliases: opts.agentAliases,
     }),
     resolvedSoulKey
       ? loadSoulWisdomWithFallback({
@@ -1127,6 +1385,7 @@ export async function buildPromptMemoryBundle(opts: {
           circleId: opts.circleId,
           userId: opts.userId,
           agentId: opts.agentId,
+          agentAliases: opts.agentAliases,
           agentName: opts.agentName,
           soulKey: resolvedSoulKey || undefined,
           query: opts.query,
@@ -1231,16 +1490,45 @@ export async function buildPromptMemoryBundle(opts: {
       return `- [${ref.scope}/${ref.memoryKind}]${soulTag} ${ref.title}: ${ref.matchReason || 'supporting memory'}`;
     });
 
-  const sections = [
-    startupContext,
-    soulWisdom ? formatSoulWisdomBlock(soulWisdom) : '',
-    externalAgentKnowledge.block,
-    rankedTurnLines.length > 0 ? `## Relevant Working Memory\n${rankedTurnLines.join('\n')}` : '',
-    supportingLines.length > 0 ? `## Supporting Memory\n${supportingLines.join('\n')}` : '',
-  ].filter(Boolean);
+  const bundleSections = [
+    { id: MEMORY_BUNDLE_SECTIONS.startup, text: startupContext || '' },
+    { id: MEMORY_BUNDLE_SECTIONS.soulWisdom, text: soulWisdom ? formatSoulWisdomBlock(soulWisdom) : '' },
+    { id: MEMORY_BUNDLE_SECTIONS.externalAgents, text: externalAgentKnowledge.block || '' },
+    {
+      id: MEMORY_BUNDLE_SECTIONS.relevantTurn,
+      text: rankedTurnLines.length > 0 ? `## Relevant Working Memory\n${rankedTurnLines.join('\n')}` : '',
+    },
+    {
+      id: MEMORY_BUNDLE_SECTIONS.supporting,
+      text: supportingLines.length > 0 ? `## Supporting Memory\n${supportingLines.join('\n')}` : '',
+    },
+  ].filter((section) => section.text.length > 0);
+
+  // Budget the bundle by SECTION VALUE instead of tail-slicing the joined string.
+  // The old `.slice(0, 5000)` truncated in presentation order, so the query-ranked
+  // section — 4th of 5 — was cut FIRST: the memories retrieved BECAUSE they match
+  // this turn were the ones bulky always-on startup/wisdom text threw away. The
+  // knapsack reserves a slot for the query-ranked section (and for startup, which
+  // carries standing instructions) and caps every section's share of the budget.
+  const bundlePlan = planMemoryBundleSections(
+    bundleSections.map((section) => ({
+      id: section.id,
+      chars: section.text.length + BUNDLE_SECTION_JOINER.length,
+    })),
+    MEMORY_BUNDLE_BUDGET_CHARS,
+  );
+  const bundlePlanById = new Map(bundlePlan.sections.map((section) => [section.id, section]));
 
   return {
-    memoryContext: sections.join('\n\n').slice(0, 5000),
+    memoryContext: bundleSections
+      .map((section) => {
+        const slot = bundlePlanById.get(section.id);
+        if (!slot || !slot.keep) return '';
+        if (!slot.truncated) return section.text;
+        return clampSectionText(section.text, Math.max(0, slot.maxChars - BUNDLE_SECTION_JOINER.length));
+      })
+      .filter(Boolean)
+      .join(BUNDLE_SECTION_JOINER),
     references: Array.from(references.values()).slice(0, opts.limit || 8),
   };
 }
@@ -1388,6 +1676,10 @@ async function upsertExternalKnowledgeMemory(opts: {
         updated_at,
       })
       .eq('id', existing.id);
+    // Re-embed: this UPDATE replaced title/content, so the row's stored
+    // vector now describes the OLD text and semantic recall would match
+    // on wording the user already corrected.
+    queueMemoryEmbeddingSafe(existing.id, existing.title, opts.content);
     if (error) return null;
     return mapMemoryEntry({
       ...existing,
@@ -1554,6 +1846,51 @@ export async function promoteExternalAgentSessionKnowledge(opts: {
   }
 }
 
+/**
+ * Load agent-scope memories for one SOUL, WITHOUT an agent id.
+ *
+ * Why this exists: both spirit readers below used to call
+ * `loadMemories({ scopes: ['agent'] })` with no `agentId`/`agentAliases`. That
+ * path gates on `agentLookupIds.length > 0` (agentRunSystem), so the agent query
+ * never ran — and `scopes:['agent']` also excludes the shared-scope branch — so
+ * BOTH functions returned `[]` unconditionally. SoulMemoryScreen was permanently
+ * empty and the ChatTab SOUL influence cards never rendered.
+ *
+ * Their callers only ever hold a `spiritId`, never an agent, so demanding an
+ * agent id would have been the wrong shape. A soul IS the selector here: filter
+ * on the `metadata.soul_key` mirror that the write path already stamps
+ * (agentSoulMemory.getMemorySoulKey reads the same field), scoped to this
+ * circle + owner. Owner scoping is preserved because agent-scope rows are
+ * written `visibility:'private'` with a `user_id`.
+ */
+async function loadSoulScopedAgentMemories(
+  circleId: string,
+  userId: string,
+  soulKey: string,
+  limit: number,
+): Promise<MemoryEntry[]> {
+  try {
+    const { data, error } = await supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('circle_id', circleId)
+      .eq('scope', 'agent')
+      .eq('is_active', true)
+      .eq('user_id', userId)
+      .contains('metadata', { soul_key: soulKey })
+      .order('updated_at', { ascending: false })
+      .limit(Math.max(1, Math.min(500, limit)));
+    if (error) {
+      console.warn('[memoryService] soul-scoped memory load failed:', error.message);
+      return [];
+    }
+    return (data || []).map(mapMemoryEntry);
+  } catch (err) {
+    console.warn('[memoryService] soul-scoped memory load threw:', err);
+    return [];
+  }
+}
+
 export async function getLatestSpiritMemoryReferences(opts: {
   circleId: string;
   userId: string;
@@ -1563,12 +1900,12 @@ export async function getLatestSpiritMemoryReferences(opts: {
   const soulKey = opts.spiritId ? `soul:${opts.spiritId}` : null;
   if (!soulKey) return [];
 
-  const memories = await loadMemories({
-    circleId: opts.circleId,
-    userId: opts.userId,
-    scopes: ['agent'],
-    limit: Math.max(8, (opts.limit || 4) * 4),
-  });
+  const memories = await loadSoulScopedAgentMemories(
+    opts.circleId,
+    opts.userId,
+    soulKey,
+    Math.max(8, (opts.limit || 4) * 4),
+  );
 
   return memories
     .filter((mem) => getMemorySoulKey(mem) === soulKey && mem.is_active !== false)
@@ -1603,12 +1940,12 @@ export async function getSpiritMemoryEntries(opts: {
   const soulKey = opts.spiritId ? `soul:${opts.spiritId}` : null;
   if (!soulKey) return [];
 
-  const memories = await loadMemories({
-    circleId: opts.circleId,
-    userId: opts.userId,
-    scopes: ['agent'],
-    limit: Math.max(24, (opts.limit || 12) * 5),
-  });
+  const memories = await loadSoulScopedAgentMemories(
+    opts.circleId,
+    opts.userId,
+    soulKey,
+    Math.max(24, (opts.limit || 12) * 5),
+  );
 
   const query = opts.query?.trim().toLowerCase() || '';
   return memories
@@ -1640,6 +1977,10 @@ export async function captureOpenSwanOutcomeMemory(opts: {
   response: string;
   artifacts?: Array<{ kind: string; title: string }>;
   verificationResults?: Array<{ ok: boolean; summary: string }>;
+  /** The run that produced this outcome. */
+  sourceRunId?: string;
+  /** The real originating surface (e.g. 'openswan_session'). */
+  sourceSurface?: string;
 }): Promise<void> {
   const failedChecks = (opts.verificationResults || []).filter((result) => !result.ok);
   const kind: AgentMemoryPromotionKind = failedChecks.length > 0 ? 'blocker' : 'success';
@@ -1673,6 +2014,8 @@ export async function captureOpenSwanOutcomeMemory(opts: {
       : 'OpenSwan blocker pattern captured from a verification failure.',
     namespace,
     sourceType: 'run',
+    sourceRunId: opts.sourceRunId,
+    sourceSurface: opts.sourceSurface,
     currentSoulKey: opts.spiritId ? `soul:${opts.spiritId}` : null,
   });
 
@@ -2108,119 +2451,13 @@ export async function saveCompactedSession(
   }
 }
 
-// ── Memory Evaluation ───────────────────────────────────────────────────────
-
-/**
- * Simple evaluator: should this memory be kept, updated, or discarded?
- */
-export function evaluateMemoryCandidate(
-  candidate: { kind: string; title: string; content: string },
-  existing: MemoryEntry[],
-): 'save' | 'update' | 'skip' {
-  // Too short to be useful
-  if (candidate.content.length < 10) return 'skip';
-  // Too generic
-  if (/^(yes|no|ok|sure|thanks|got it)$/i.test(candidate.content.trim())) return 'skip';
-
-  // Check for contradiction with existing
-  const titleLower = candidate.title.toLowerCase();
-  const match = existing.find(e => {
-    const t = e.title.toLowerCase();
-    return t === titleLower || t.includes(titleLower) || titleLower.includes(t);
-  });
-
-  if (match) {
-    // Content changed → update
-    if (match.content.toLowerCase() !== candidate.content.toLowerCase()) return 'update';
-    // Same content → skip
-    return 'skip';
-  }
-
-  return 'save';
-}
-
-function normalizeRememberContent(content: string): string {
-  return content
-    .trim()
-    .replace(/^["']+|["']+$/g, '')
-    .replace(/\s+/g, ' ');
-}
-
-function inferRememberKind(content: string): MemoryKind {
-  const lower = content.toLowerCase();
-
-  if (
-    /\b(always|never|treat every request|optimi[sz]e for|reason thoroughly|think step-by-step|consider tradeoffs|provide comprehensive analysis)\b/.test(lower) ||
-    /\bhow i want you\b/.test(lower)
-  ) {
-    return 'instruction';
-  }
-
-  if (
-    /\b(i prefer|i like|i want|my preference|prefer)\b/.test(lower)
-  ) {
-    return 'preference';
-  }
-
-  if (/\b(decided|decision|we use|our stack|project uses)\b/.test(lower)) {
-    return 'decision';
-  }
-
-  return 'fact';
-}
-
-function buildRememberTitle(content: string, kind: MemoryKind): string {
-  const lower = content.toLowerCase();
-
-  if (
-    /\b(reason thoroughly|think step-by-step|consider tradeoffs|comprehensive analysis)\b/.test(lower)
-  ) {
-    return 'Response Standard: Deep Thorough Reasoning';
-  }
-
-  if (kind === 'instruction') return `Instruction: ${content.slice(0, 44)}`.trim();
-  if (kind === 'preference') return `Preference: ${content.slice(0, 45)}`.trim();
-  if (kind === 'decision') return `Decision: ${content.slice(0, 47)}`.trim();
-  return content.slice(0, 60).replace(/\n/g, ' ');
-}
-
-function slugifyMemoryKey(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 64) || 'memory';
-}
-
-function inferExplicitMemoryKey(content: string, kind: MemoryKind): string {
-  const lower = content.toLowerCase();
-
-  if (
-    /\b(reason thoroughly|think step-by-step|consider tradeoffs|comprehensive analysis)\b/.test(lower)
-  ) {
-    return 'response_standard.deep_thorough_reasoning';
-  }
-
-  return `${kind}.${slugifyMemoryKey(content.slice(0, 80))}`;
-}
-
-function memorySimilarityScore(a: string, b: string): number {
-  const aa = a.toLowerCase().trim();
-  const bb = b.toLowerCase().trim();
-  if (!aa || !bb) return 0;
-  if (aa === bb) return 1;
-  if (aa.includes(bb) || bb.includes(aa)) return 0.92;
-
-  const aTerms = new Set(aa.split(/\W+/).filter(Boolean));
-  const bTerms = new Set(bb.split(/\W+/).filter(Boolean));
-  if (aTerms.size === 0 || bTerms.size === 0) return 0;
-
-  let overlap = 0;
-  for (const term of aTerms) {
-    if (bTerms.has(term)) overlap++;
-  }
-  return overlap / Math.min(aTerms.size, bTerms.size);
-}
+// normalizeRememberContent / inferRememberKind / buildRememberTitle /
+// slugifyMemoryKey / inferExplicitMemoryKey / memorySimilarityScore now live in
+// the pure `./memoryDedupeCore` (imported above). They were moved there to fix a
+// silent data-loss bug: the old key inference collapsed unrelated memories onto
+// one row, and the old similarity scorer treated any substring containment (and
+// `overlap / min(size)` token overlap) as near-identity, so a one-word
+// `/remember` could overwrite an existing memory in place.
 
 function scoreMemoryTaskAffinity(
   candidate: {
@@ -2281,14 +2518,23 @@ function buildRetrievedMemoryReason(opts: {
   soulRole?: RetrievedMemory['soul_role'];
   taskReason?: string | null;
   retrievalMode?: string | null;
+  matchSource?: MemoryMatchSource;
+  pinned?: boolean;
 }): string {
+  // A keyword-fallback row must never be described as a semantic match — the
+  // reason string is what the "why did you say X?" affordance shows the user.
+  const evidence = opts.matchSource === 'keyword'
+    ? 'keyword match'
+    : opts.similarity >= 0.8
+      ? 'strong semantic match'
+      : 'semantic match';
   const parts: string[] = [];
   if (opts.taskReason) parts.push(opts.taskReason);
+  if (opts.pinned) parts.push('pinned');
   if (opts.soulRole === 'primary') parts.push('active soul memory');
   else if (opts.soulRole === 'shared') parts.push('shared soul memory');
   else if (opts.retrievalMode === 'startup') parts.push('startup guidance');
-  else if (opts.similarity >= 0.8) parts.push('strong semantic match');
-  else parts.push('semantic match');
+  else parts.push(evidence);
   return parts.slice(0, 2).join(' + ');
 }
 
@@ -2326,6 +2572,10 @@ async function upsertAgentMemoryTarget(opts: {
   title: string;
   content: string;
   sourceSurface: string;
+  /** The run that produced this memory. Without it `memory_entries.source_run_id`
+   *  stays NULL and no memory can be traced back to its run — a live check on
+   *  2026-07-28 found it NULL on all 4,716 active rows. */
+  sourceRunId?: string;
   importance: number;
   retrievalMode: 'startup' | 'on_demand' | 'manual_only';
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
@@ -2375,6 +2625,10 @@ async function upsertAgentMemoryTarget(opts: {
       })
       .eq('id', existing.id);
 
+    // Re-embed: this UPDATE replaced title/content, so the row's stored
+    // vector now describes the OLD text and semantic recall would match
+    // on wording the user already corrected.
+    queueMemoryEmbeddingSafe(existing.id, opts.title, opts.content);
     if (error) return null;
     return {
       ...existing,
@@ -2400,6 +2654,7 @@ async function upsertAgentMemoryTarget(opts: {
     title: opts.title,
     content: opts.content,
     sourceSurface: opts.sourceSurface,
+    sourceRunId: opts.sourceRunId,
     visibility: 'private',
     importance: opts.importance,
     retrievalMode: opts.retrievalMode,
@@ -2473,6 +2728,10 @@ async function upsertExplicitMemory(opts: {
       })
       .eq('id', keyed.id);
 
+    // Re-embed: this UPDATE replaced title/content, so the row's stored
+    // vector now describes the OLD text and semantic recall would match
+    // on wording the user already corrected.
+    if (!error) queueMemoryEmbeddingSafe(keyed.id, opts.title, opts.content);
     return error ? null : {
       ...keyed,
       title: opts.title,
@@ -2509,7 +2768,7 @@ async function upsertExplicitMemory(opts: {
 export async function saveResponseStandardMemory(
   circleId: string,
   userId: string,
-  content = 'Always reason thoroughly and deeply. Treat every request as complex unless I explicitly say otherwise. Never optimize for brevity at the expense of quality. Think step-by-step, consider tradeoffs, and provide comprehensive analysis.',
+  content = RESPONSE_STANDARD_DEFAULT_CONTENT,
 ): Promise<MemoryEntry | null> {
   const normalizedContent = normalizeRememberContent(content);
 
@@ -2518,12 +2777,12 @@ export async function saveResponseStandardMemory(
     userId,
     scope: 'user',
     memoryKind: 'instruction',
-    title: 'Response Standard: Deep Thorough Reasoning',
+    title: RESPONSE_STANDARD_MEMORY_TITLE,
     content: normalizedContent,
     visibility: 'private',
     retrievalMode: 'startup',
     importance: 0.95,
-    key: 'response_standard.deep_thorough_reasoning',
+    key: RESPONSE_STANDARD_MEMORY_KEY,
     sourceSurface: 'main_chat',
   });
 }
@@ -2571,15 +2830,17 @@ export async function rememberFromChat(
     limit: 80,
   });
 
-  const duplicate = existing.find(mem => {
-    if (mem.scope !== scope) return false;
-    if (isPrivate && mem.user_id !== userId) return false;
-    if (!isPrivate && mem.scope !== 'circle') return false;
-
-    const titleScore = memorySimilarityScore(mem.title, title);
-    const contentScore = memorySimilarityScore(mem.content, normalizedContent);
-    return titleScore >= 0.88 || contentScore >= 0.82;
+  // Destructive path: this UPDATE replaces an existing row's title+content with
+  // no history row, so the match must be conservative. pickDuplicateMemory owns
+  // the scope/ownership filters and the (fixed) similarity predicate.
+  const duplicateMatch = pickDuplicateMemory<MemoryEntry>(existing, {
+    title,
+    content: normalizedContent,
+    scope,
+    isPrivate,
+    userId,
   });
+  const duplicate = duplicateMatch?.memory;
 
   if (duplicate) {
     const { error } = await supabase
@@ -2595,6 +2856,9 @@ export async function rememberFromChat(
       })
       .eq('id', duplicate.id)
       ;
+
+    // Re-embed: the duplicate row's content was just replaced.
+    if (!error) queueMemoryEmbeddingSafe(duplicate.id, title, normalizedContent);
 
     return error ? null : {
       ...duplicate,
@@ -2663,15 +2927,19 @@ export async function retrieveAgentMemories(opts: {
   circleId: string;
   userId: string;
   agentId: string;
+  agentAliases?: string[];
   agentName?: string;
   types?: string[];
   limit?: number;
   soulKey?: string;
   query?: string;
 }): Promise<MemoryEntry[]> {
+  const lookupIds = uniqueMemoryIds([opts.agentId, ...(opts.agentAliases || [])]);
+  const lookupSet = new Set(lookupIds);
   const agentScopedMemories = await loadMemories({
     circleId: opts.circleId,
     agentId: opts.agentId,
+    agentAliases: opts.agentAliases,
     userId: opts.userId,
     scopes: ['agent'],
     limit: 120,
@@ -2686,7 +2954,7 @@ export async function retrieveAgentMemories(opts: {
 
   const memories = [
     ...agentScopedMemories,
-    ...legacyMemories.filter(mem => mem.metadata?.agentId === opts.agentId),
+    ...legacyMemories.filter(mem => lookupSet.has(String(mem.metadata?.agentId || ''))),
   ];
   const activeSoulKey = opts.soulKey || (await getAgentSoulInfo({
     circleId: opts.circleId,
@@ -2718,7 +2986,7 @@ export async function retrieveAgentMemories(opts: {
   }
 
   return Array.from(deduped.values())
-    .filter(mem => (mem.agent_id || mem.metadata?.agentId) === opts.agentId)
+    .filter(mem => lookupSet.has(String(mem.agent_id || mem.metadata?.agentId || '')))
     .filter(mem => allowedTypes.size === 0 || allowedTypes.has(String(mem.metadata?.source || '')))
     .map(mem => {
       let score = 0;
@@ -2822,6 +3090,14 @@ export async function saveAgentMemory(opts: {
   excerpt?: string;
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
   sourceId?: string;
+  /** The run that produced this memory (see upsertAgentMemoryTarget). */
+  sourceRunId?: string;
+  /** The REAL originating surface. This used to be hardcoded `'feed_task'` for
+   *  every caller, so an OpenSwan session outcome or an Office gateway write was
+   *  stamped as a Feed task — and `openswanMemoryStores` renders that back to the
+   *  model as `src:feed_task`. A wrong origin is worse than an absent one, so
+   *  callers that know their surface should pass it. */
+  sourceSurface?: string;
   evaluationScore?: number;
   feedback?: string;
   namespace?: MemoryNamespace;
@@ -2855,7 +3131,8 @@ export async function saveAgentMemory(opts: {
     memoryKind: opts.memoryKind || 'finding',
     title: opts.title,
     content: opts.content,
-    sourceSurface: 'feed_task',
+    sourceSurface: opts.sourceSurface || 'agent_run',
+    sourceRunId: opts.sourceRunId,
     importance: opts.importance ?? 0.7,
     retrievalMode: opts.memoryKind === 'instruction' ? 'startup' : 'on_demand',
     sourceType: opts.sourceType || 'run',
@@ -2893,7 +3170,8 @@ export async function saveAgentMemory(opts: {
       memoryKind: opts.memoryKind || 'finding',
       title: opts.title,
       content: opts.content,
-      sourceSurface: 'feed_task',
+      sourceSurface: opts.sourceSurface || 'agent_run',
+      sourceRunId: opts.sourceRunId,
       importance: Math.max(0.55, (opts.importance ?? 0.7) - 0.05),
       retrievalMode: opts.memoryKind === 'instruction' ? 'startup' : 'on_demand',
       sourceType: opts.sourceType || 'run',
@@ -2937,6 +3215,10 @@ export async function saveSoulAwareAgentMemory(opts: {
   excerpt?: string;
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
   sourceId?: string;
+  /** Run provenance, forwarded to saveAgentMemory. */
+  sourceRunId?: string;
+  /** Real originating surface, forwarded to saveAgentMemory. */
+  sourceSurface?: string;
   evaluationScore?: number;
   feedback?: string;
   namespace?: MemoryNamespace;
@@ -2991,6 +3273,13 @@ export async function saveSharedTaskMemory(opts: {
   excerpt?: string;
   sourceType?: 'message' | 'run' | 'step' | 'artifact' | 'approval' | 'manual';
   sourceId?: string;
+  /** The run that produced this. NULL on every pre-2026-07-28 row. */
+  sourceRunId?: string;
+  /** Override when the caller is NOT Feed task execution (e.g.
+   *  `promoteAgentMemoriesToSharedPatterns`). The default stays `'feed_task'`
+   *  because that genuinely is this function's dominant caller — unlike
+   *  `saveAgentMemory`, where the same literal was a lie for every caller. */
+  sourceSurface?: string;
   evaluationScore?: number;
   feedback?: string;
   namespace?: MemoryNamespace;
@@ -3003,7 +3292,8 @@ export async function saveSharedTaskMemory(opts: {
     memoryKind: 'finding',
     title: opts.title,
     content: opts.content,
-    sourceSurface: 'feed_task',
+    sourceSurface: opts.sourceSurface || 'feed_task',
+    sourceRunId: opts.sourceRunId,
     visibility: 'circle_shared',
     importance: opts.importance ?? 0.7,
     retrievalMode: 'on_demand',
@@ -3152,13 +3442,24 @@ export async function saveMemoryWithContext(opts: {
 
   if (!saved) return null;
 
+  // These two stay fire-and-forget on purpose — provenance must never fail the
+  // memory write itself. But `.then(() => {})` also swallowed the ERROR branch,
+  // so a rejected insert vanished with no trace: the memory existed while its
+  // provenance and quality-score rows silently did not. That is exactly the
+  // failure this app cannot afford, because provenance is the accountability
+  // claim. Same fire-and-forget behaviour, now observable.
   if (opts.sourceType) {
     void supabase.from('memory_sources').insert({
       memory_id: saved.id,
       source_type: opts.sourceType,
       source_id: opts.sourceId || null,
       excerpt: opts.excerpt || opts.content.slice(0, 280),
-    }).then(() => {});
+    }).then(
+      ({ error }) => {
+        if (error) console.warn('[memoryService] memory_sources insert failed:', error.message);
+      },
+      (err: unknown) => console.warn('[memoryService] memory_sources insert threw:', err),
+    );
   }
 
   if (opts.evaluation) {
@@ -3170,7 +3471,12 @@ export async function saveMemoryWithContext(opts: {
       score: opts.evaluation.score ?? null,
       feedback: opts.evaluation.feedback || null,
       metadata: opts.evaluation.metadata || {},
-    }).then(() => {});
+    }).then(
+      ({ error }) => {
+        if (error) console.warn('[memoryService] memory_evaluations insert failed:', error.message);
+      },
+      (err: unknown) => console.warn('[memoryService] memory_evaluations insert threw:', err),
+    );
   }
 
   return saved;
@@ -3188,6 +3494,11 @@ function mapMemoryEntry(d: any): MemoryEntry {
     is_active: d.is_active, visibility: d.visibility, importance: d.importance,
     retrieval_mode: d.retrieval_mode, status: d.status, access_count: d.access_count,
     last_accessed_at: d.last_accessed_at, updated_at: d.updated_at, created_at: d.created_at,
+    // `pinned` is a real column (20260408) that pinMemory/unpinMemory write and
+    // the ranker boosts. Dropping it here silently disabled user pinning on the
+    // keyword-retrieval branch — the semantic branch lost it in the RPC
+    // projection instead (fixed in 20260728_memory_match_pinned.sql).
+    pinned: d.pinned === true,
     metadata: d.metadata || {},
   };
 }
@@ -3201,7 +3512,11 @@ function extractSearchTerms(query: string): string[] {
     'which', 'why', 'i', 'me', 'my', 'we', 'you', 'your', 'our', 'their', 'they', 'them',
   ]);
 
-  const quoted = Array.from(query.matchAll(/"([^"]+)"/g))
+  // Quoted phrases are search terms only when they LOOK like search terms.
+  // Computer-task turns carry multi-KB dispatch context with quoted blobs;
+  // an uncapped quoted span became a single monster ILIKE term that blew the
+  // request URL past the transport limit (net::ERR_FAILED) — cap hard.
+  const quoted = Array.from(query.matchAll(/"([^"\n]{1,64})"/g))
     .map(match => match[1].trim())
     .filter(Boolean);
 

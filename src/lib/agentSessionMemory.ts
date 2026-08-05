@@ -9,6 +9,12 @@
 import { supabase } from './supabase';
 import { promoteExternalAgentSessionKnowledge } from './memoryService';
 import { devLog } from './devLog';
+// Credential-shape refusal gate. These two writers insert into `memory_entries`
+// DIRECTLY, bypassing agentRunSystem.saveMemory where the app-wide gate lives —
+// and their content is bridge/session TRANSCRIPT material (recent responses,
+// tool output, active files), which is the most realistic path for an agent to
+// echo a token into a permanent, prompt-injected row.
+import { detectCredentialMemoryContent } from './userMemoryCaps';
 
 // ── Auth Helper ─────────────────────────────────────────────────────────────
 
@@ -259,6 +265,16 @@ export async function saveAgentUserAccountMemories(
       userAccountMemory: true,
     });
 
+    const snapshotCredential =
+      detectCredentialMemoryContent(snapshot.content) || detectCredentialMemoryContent(snapshot.title);
+    if (snapshotCredential) {
+      console.warn(
+        `[agentSessionMemory] REFUSED user-account memory — credential-shaped content (rule: ${snapshotCredential.rule})`,
+      );
+      skipped++;
+      continue;
+    }
+
     try {
       const { data: existingRows, error: existingError } = await supabase
         .from('memory_entries')
@@ -424,6 +440,16 @@ export async function saveAgentSessionsToMemory(
     ].filter(Boolean).join('\n');
 
     const title = `${label} Project: ${project}`;
+
+    const sessionCredential = detectCredentialMemoryContent(content) || detectCredentialMemoryContent(title);
+    if (sessionCredential) {
+      console.warn(
+        `[agentSessionMemory] REFUSED session project memory — credential-shaped content (rule: ${sessionCredential.rule})`,
+      );
+      skipped++;
+      continue;
+    }
+
     try {
       // Look up by title + source_surface (session_id is UUID, can't use for text bucket keys)
       let existingQuery = supabase

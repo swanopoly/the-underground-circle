@@ -19,9 +19,13 @@ import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   getDesktopBridgeHealth,
   isDesktopBridgePaired,
-  pairDesktopBridge,
   type DesktopHealth,
 } from '../lib/desktopBridge';
+import {
+  buildDesktopBridgeRecoveryPayload,
+  type DesktopBridgeRecoveryPayload,
+} from '../lib/desktopBridgeRecovery';
+import { autoConnectDesktopBridge } from '../lib/desktopBridgeAutoConnect';
 
 type ChipState =
   | { kind: 'loading' }
@@ -29,8 +33,10 @@ type ChipState =
   | { kind: 'needs_pair' }
   | { kind: 'ready' };
 
+type ChipPhase = 'starting' | 'pairing' | 'checking' | null;
+
 interface Props {
-  onMessage?: (md: string) => void;   // pipe pairing results back to chat as localOnly message
+  onMessage?: (md: string | DesktopBridgeRecoveryPayload) => void;   // pipe pairing results back to chat as localOnly message
   accentColor?: string;
 }
 
@@ -39,6 +45,7 @@ const POLL_INTERVAL_MS = 10_000;
 export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c55e' }: Props) {
   const [state, setState] = useState<ChipState>({ kind: 'loading' });
   const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<ChipPhase>(null);
 
   const probe = useCallback(async () => {
     const health: DesktopHealth | null = await getDesktopBridgeHealth();
@@ -89,35 +96,34 @@ export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c
     setBusy(true);
     try {
       if (state.kind === 'offline') {
-        onMessage?.(
-          state.reason === 'unreachable'
-            ? '**Desktop bridge unreachable.** Start it in a terminal:\n\n```\nnode scripts/claude-bridge.js\n```\n\nThen tap the 🔴 chip again.'
-            : `**Bridge is on a platform we do not support.** Desktop automation is macOS-only in Phase 1. Windows/Linux is on the roadmap.`,
-        );
+        if (state.reason === 'unsupported') {
+          onMessage?.(buildDesktopBridgeRecoveryPayload('unsupported', 'Desktop automation is macOS-only in Phase 1. Windows/Linux is on the roadmap.'));
+          await probe();
+          return;
+        }
+        setPhase('starting');
+        const result = await autoConnectDesktopBridge();
+        onMessage?.(result.recoveryPayload ? { ...result.recoveryPayload, content: result.content } : result.content);
+        setPhase('checking');
         await probe();
         return;
       }
       if (state.kind === 'needs_pair' || state.kind === 'ready') {
-        const r = await pairDesktopBridge();
-        if (!r.ok) {
-          onMessage?.(`**Pair failed:** ${r.error || 'unknown error'}`);
-        } else {
-          onMessage?.(
-            state.kind === 'needs_pair'
-              ? '**Desktop bridge paired.** Agent can now launch apps, type text, and send key combos (HITL-gated). First keystroke may prompt for macOS Accessibility permission.'
-              : '**Desktop bridge re-paired.** Token refreshed.',
-          );
-        }
+        setPhase('pairing');
+        const result = await autoConnectDesktopBridge();
+        onMessage?.(result.recoveryPayload ? { ...result.recoveryPayload, content: result.content } : result.content);
+        setPhase('checking');
         await probe();
       }
     } finally {
+      setPhase(null);
       setBusy(false);
     }
   }, [busy, state, onMessage, probe]);
 
   if (Platform.OS !== 'web') return null;
 
-  const { label, dot, textColor } = visualFor(state, accentColor);
+  const { label, dot, textColor } = visualFor(state, accentColor, phase);
 
   return (
     <Pressable
@@ -127,7 +133,7 @@ export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c
       style={({ hovered }: any) => [
         styles.chip,
         hovered && ({ backgroundColor: '#0f172a' } as any),
-        Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+        Platform.OS === 'web' && ({ cursor: busy ? 'wait' : 'pointer' } as any),
       ]}
     >
       <View style={[styles.dot, { backgroundColor: dot }]} />
@@ -137,7 +143,10 @@ export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c
   );
 }
 
-function visualFor(state: ChipState, accent: string): { label: string; dot: string; textColor: string } {
+function visualFor(state: ChipState, accent: string, phase: ChipPhase): { label: string; dot: string; textColor: string } {
+  if (phase === 'starting') return { label: 'START', dot: '#38bdf8', textColor: '#38bdf8' };
+  if (phase === 'pairing') return { label: 'PAIRING', dot: '#f59e0b', textColor: '#f59e0b' };
+  if (phase === 'checking') return { label: 'CHECK', dot: '#a78bfa', textColor: '#a78bfa' };
   switch (state.kind) {
     case 'loading':   return { label: '…',       dot: '#475569', textColor: '#64748b' };
     case 'offline':   return { label: 'OFFLINE', dot: '#ef4444', textColor: '#ef4444' };
@@ -168,5 +177,6 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: '700',
     letterSpacing: 0.8,
+    minWidth: 44,
   },
 });

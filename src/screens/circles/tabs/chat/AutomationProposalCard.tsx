@@ -11,25 +11,37 @@ import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, Platform } from 'react-native';
 import type { AutomationProposal } from '../../../../lib/automationChatBuilder';
 import { createAutomationFromProposal } from '../../../../lib/automationChatBuilder';
+import type { AgentRuntimeSubjectMetadata } from '../../../../lib/agentRuntimeSubject';
 
 interface Props {
   proposal: AutomationProposal;
   circleId: string;
   userId: string;
   accentColor?: string;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
 }
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
-export default function AutomationProposalCard({ proposal, circleId, userId, accentColor = '#f59e0b' }: Props) {
+export default function AutomationProposalCard({
+  proposal,
+  circleId,
+  userId,
+  accentColor = '#f59e0b',
+  agentSubjectMetadata,
+}: Props) {
   const [status, setStatus] = useState<'pending' | 'creating' | 'created' | 'failed'>('pending');
   const [error, setError] = useState<string | null>(null);
   const [createdId, setCreatedId] = useState<string | null>(null);
+  const agentDisplayName = String(agentSubjectMetadata?.agentDisplayName || '').trim();
+  const agentSubjectKey = String(agentSubjectMetadata?.agentSubjectKey || '').trim();
+  const agentLabel = agentDisplayName || proposal.agent;
+  const subjectSuffix = agentSubjectKey && agentSubjectKey !== agentLabel ? ` · ${agentSubjectKey}` : '';
 
   const handleCreate = async () => {
     if (status !== 'pending') return;
     setStatus('creating');
-    const id = await createAutomationFromProposal({ proposal, circleId, userId });
+    const id = await createAutomationFromProposal({ proposal, circleId, userId, agentSubjectMetadata });
     if (id) {
       setCreatedId(id);
       setStatus('created');
@@ -68,7 +80,7 @@ export default function AutomationProposalCard({ proposal, circleId, userId, acc
 
       <View style={s.row}>
         <Text style={s.label}>WHO</Text>
-        <Text style={s.value}>{proposal.agent}</Text>
+        <Text style={s.value}>{agentLabel}{subjectSuffix}</Text>
       </View>
 
       <View style={s.row}>

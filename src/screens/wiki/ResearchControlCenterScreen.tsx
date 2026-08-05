@@ -2,9 +2,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, RefreshControl, Alert, TextInput } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import {
+  RESEARCH_PROFILE_OPTIONS,
+  SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS,
   getGeneratedResearchBriefs,
   getGeneratedResearchDigests,
   getResearchAgentRuns,
+  runSecondBrainKnowledgeProfile,
   runResearchProfile,
   setResearchDocumentReviewStatus,
   type ResearchAgentRun,
@@ -46,6 +49,7 @@ export default function ResearchControlCenterScreen({ navigation, route }: any) 
   const [briefs, setBriefs] = useState<ResearchDocument[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [runningProfiles, setRunningProfiles] = useState<string[]>([]);
+  const [runningKnowledgeProfiles, setRunningKnowledgeProfiles] = useState<string[]>([]);
   const [reviewingDocIds, setReviewingDocIds] = useState<string[]>([]);
   const [docFilter, setDocFilter] = useState<'all' | 'draft' | 'reviewed' | 'validated'>('all');
   const [query, setQuery] = useState('');
@@ -112,6 +116,17 @@ export default function ResearchControlCenterScreen({ navigation, route }: any) 
     await load();
   }, [load]);
 
+  const triggerKnowledgeProfile = useCallback(async (profileKey: string) => {
+    setRunningKnowledgeProfiles((current) => [...current, profileKey]);
+    const result = await runSecondBrainKnowledgeProfile({ profileKeys: [profileKey] });
+    setRunningKnowledgeProfiles((current) => current.filter((item) => item !== profileKey));
+    if (!result.ok) {
+      Alert.alert('Knowledge Intake Failed', result.error || 'Could not trigger this knowledge profile.');
+      return;
+    }
+    await load();
+  }, [load]);
+
   const promoteDoc = useCallback(async (
     documentId: string,
     reviewStatus: 'draft' | 'reviewed' | 'validated',
@@ -138,18 +153,18 @@ export default function ResearchControlCenterScreen({ navigation, route }: any) 
             <Text style={styles.backText}>{'<-'} Back</Text>
           </Pressable>
           <View style={styles.headerCopy}>
-            <Text style={styles.kicker}>Knowledge Ops</Text>
-            <Text style={styles.title}>Research Control Center</Text>
-            <Text style={styles.subtitle}>Daily research agents, fresh digests, and the SOULs they are feeding.</Text>
+            <Text style={styles.kicker}>Wiki Ops</Text>
+            <Text style={styles.title}>Wiki Control Center</Text>
+            <Text style={styles.subtitle}>Daily research agents, source-backed Wiki documents, broad-domain knowledge intake, and the SOULs they are feeding.</Text>
           </View>
         </View>
 
         <View style={styles.commandDeck}>
           <View style={styles.commandDeckPrimary}>
             <Text style={styles.commandDeckLabel}>Operations Snapshot</Text>
-            <Text style={styles.commandDeckTitle}>Research intelligence pipeline is live</Text>
+            <Text style={styles.commandDeckTitle}>Knowledge intelligence pipeline is live</Text>
             <Text style={styles.commandDeckBody}>
-              This panel governs automated ingestion, document review state, and the research signals currently flowing into matching SOULs.
+              This panel governs automated ingestion, document review state, Wiki coverage, and the research signals currently flowing into matching SOULs and the Digital Brain.
             </Text>
             <View style={styles.commandDeckMetaRow}>
               <Text style={styles.commandDeckMeta}>Success rate: {runSuccessRate}%</Text>
@@ -190,26 +205,45 @@ export default function ResearchControlCenterScreen({ navigation, route }: any) 
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Manual Runs</Text>
-          <Text style={styles.sectionSubtitle}>Kick off a research profile immediately without waiting for cron.</Text>
+          <Text style={styles.sectionTitle}>Research Profiles</Text>
+          <Text style={styles.sectionSubtitle}>Kick off focused source intake immediately without waiting for cron.</Text>
           <View style={styles.actionRow}>
-            {[
-              { key: 'deep_learning_frontier', label: 'Deep Learning' },
-              { key: 'agent_systems_and_evals', label: 'Agents + Evals' },
-              { key: 'physical_ai_and_robotics', label: 'Robotics' },
-              { key: 'biotech_and_medical_ai', label: 'Biotech + Medical' },
-              { key: 'open_model_serving_and_infra', label: 'Open Model Infra' },
-            ].map((profile) => {
+            {RESEARCH_PROFILE_OPTIONS.map((profile) => {
               const active = runningProfiles.includes(profile.key);
               return (
                 <Pressable
                   key={profile.key}
                   onPress={() => void triggerProfile(profile.key)}
-                  style={[styles.runButton, active && styles.runButtonActive]}
+                  style={[styles.runButton, { borderColor: `${profile.color}44` }, active && styles.runButtonActive]}
                   accessibilityRole="button"
                   accessibilityLabel={`Run ${profile.label} research profile`}
                 >
                   <Text style={styles.runButtonText}>{active ? 'RUNNING…' : profile.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Broad Knowledge Intake</Text>
+          <Text style={styles.sectionSubtitle}>
+            These profiles feed the Wiki first, and write to a configured .web Digital Brain when a user/circle target is available.
+          </Text>
+          <View style={styles.knowledgeProfileGrid}>
+            {SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS.map((profile) => {
+              const active = runningKnowledgeProfiles.includes(profile.key);
+              return (
+                <Pressable
+                  key={profile.key}
+                  onPress={() => void triggerKnowledgeProfile(profile.key)}
+                  style={[styles.knowledgeProfileCard, { borderColor: `${profile.color}44`, backgroundColor: `${profile.color}10` }, active && styles.runButtonActive]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Run ${profile.label} knowledge intake`}
+                >
+                  <Text style={[styles.knowledgeProfileTitle, { color: profile.color }]}>{active ? 'RUNNING...' : profile.label}</Text>
+                  <Text style={styles.cardMeta}>{profile.cadence.toUpperCase()} · WIKI + DIGITAL BRAIN</Text>
+                  <Text style={styles.cardBody}>{profile.description}</Text>
                 </Pressable>
               );
             })}
@@ -244,8 +278,8 @@ export default function ResearchControlCenterScreen({ navigation, route }: any) 
         <View style={styles.dashboardGrid}>
           <View style={styles.dashboardMain}>
             <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Daily Digests</Text>
-              <Text style={styles.sectionSubtitle}>Synthesized research drops currently being injected into matching spirits.</Text>
+              <Text style={styles.sectionTitle}>Knowledge Digests</Text>
+              <Text style={styles.sectionSubtitle}>Synthesized research drops currently being injected into Wiki, matching spirits, and eligible Digital Brains.</Text>
               {filteredDigests.map((doc) => {
                 const isFocused = focusDocumentId === doc.id;
                 return (
@@ -330,7 +364,7 @@ export default function ResearchControlCenterScreen({ navigation, route }: any) 
 
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Source Briefs</Text>
-              <Text style={styles.sectionSubtitle}>Fresh source-level items collected by the runner.</Text>
+              <Text style={styles.sectionSubtitle}>Fresh source-level items collected by the runner across AI, technology, science, cities, health, infrastructure, and more.</Text>
               {filteredBriefs.map((doc) => {
                 const isFocused = focusDocumentId === doc.id;
                 return (
@@ -443,6 +477,17 @@ const styles = StyleSheet.create({
   runButton: { backgroundColor: CYAN + '14', borderWidth: 1, borderColor: CYAN + '35', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 10 },
   runButtonActive: { backgroundColor: CYAN + '25' },
   runButtonText: { color: CYAN, fontSize: 12, fontWeight: '800', letterSpacing: 0.5 },
+  knowledgeProfileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  knowledgeProfileCard: {
+    minWidth: 240,
+    flexGrow: 1,
+    flexBasis: 0,
+    backgroundColor: BG_SURFACE,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+  },
+  knowledgeProfileTitle: { fontSize: 15, fontWeight: '800' },
   statusButton: { backgroundColor: BG_RAISED, borderWidth: 1, borderColor: BORDER_DEF, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 8 },
   statusButtonActive: { borderColor: GREEN + '50', backgroundColor: GREEN + '14' },
   statusButtonBusy: { opacity: 0.7 },

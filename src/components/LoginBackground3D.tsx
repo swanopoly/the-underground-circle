@@ -2879,6 +2879,7 @@ function PortalPhoenix() {
   const groupRef = useRef<THREE.Group>(null);
   const wingRef = useRef<THREE.Group>(null);
   const tailRef = useRef<THREE.Group>(null);
+  const tailSegmentRefs = useRef<THREE.Group[]>([]);
   const emberRef = useRef<THREE.Group>(null);
   const tStart = useRef(performance.now() / 1000);
 
@@ -3134,6 +3135,36 @@ function PortalPhoenix() {
     return list;
   }, [v, BRIGHT_RED, RED, ORANGE, BRIGHT_OR, YELLOW, BRIGHT_YEL, HOT_CORE]);
 
+  // Articulated tail sections. A real bird/fish-like plume does not swing
+  // as one rigid object; each section lags slightly behind the one before it.
+  const tailSegments = useMemo<Array<{
+    index: number;
+    pivot: [number, number, number];
+    voxels: Array<{ pos: [number, number, number]; color: THREE.Color }>;
+  }>>(() => {
+    const segments = Array.from({ length: 7 }, (_, index) => ({
+      index,
+      pivot: [-(2 + index * 2.15) * v, (0.18 + index * 0.17) * v, 0] as [number, number, number],
+      voxels: [] as Array<{ pos: [number, number, number]; color: THREE.Color }>,
+    }));
+
+    for (const voxel of tailVoxels) {
+      const rawX = Math.abs(voxel.pos[0] / v);
+      const index = Math.max(0, Math.min(segments.length - 1, Math.floor((rawX - 2) / 2.15)));
+      const pivot = segments[index].pivot;
+      segments[index].voxels.push({
+        color: voxel.color,
+        pos: [
+          voxel.pos[0] - pivot[0],
+          voxel.pos[1] - pivot[1],
+          voxel.pos[2] - pivot[2],
+        ],
+      });
+    }
+
+    return segments.filter((segment) => segment.voxels.length > 0);
+  }, [tailVoxels, v]);
+
   // Detached ember particles — flicker behind the bird at random
   // positions. Animated separately so they pulse and drift.
   const emberSeeds = useMemo(() => {
@@ -3229,12 +3260,29 @@ function PortalPhoenix() {
       wingRef.current.rotation.x = Math.sin(t * 8) * 0.22;
     }
     if (tailRef.current) {
-      // Tail trails behind with a slight wave — feathers shimmer.
-      tailRef.current.rotation.z = Math.sin(t * 5) * 0.10;
-      tailRef.current.rotation.y = Math.sin(t * 2.6) * 0.07;
-      // Subtle pulse so the long flames feel alive.
-      const pulse = 0.95 + Math.sin(t * 7) * 0.05;
+      // Tail root follows the body, while the segment refs below create
+      // delayed S-curve motion through the plume.
+      tailRef.current.rotation.z = Math.sin(t * 2.6) * 0.08 + Math.sin(t * 5.4) * 0.025;
+      tailRef.current.rotation.y = Math.sin(t * 1.9 + 0.8) * 0.08;
+      tailRef.current.rotation.x = Math.sin(t * 2.25 + 1.3) * 0.035;
+      tailRef.current.position.y = Math.sin(t * 2.8) * v * 0.08;
+      // Subtle pulse so the long flames breathe without looking rubbery.
+      const pulse = 0.96 + Math.sin(t * 6.5) * 0.035;
       tailRef.current.scale.x = pulse;
+    }
+    for (let i = 0; i < tailSegmentRefs.current.length; i++) {
+      const segment = tailSegmentRefs.current[i];
+      if (!segment) continue;
+      const lag = i * 0.48;
+      const amp = 0.055 + i * 0.032;
+      const flutter = Math.sin(t * 7.4 - lag * 1.3) * amp * 0.24;
+
+      segment.rotation.z = Math.sin(t * 3.15 - lag) * amp + flutter;
+      segment.rotation.y = Math.sin(t * 2.15 - lag * 0.8) * amp * 0.95;
+      segment.rotation.x = Math.sin(t * 2.55 - lag + 1.2) * amp * 0.42;
+      segment.position.y = Math.sin(t * 3.0 - lag) * v * (0.05 + i * 0.018);
+      segment.position.z = Math.sin(t * 2.0 - lag * 0.9) * v * (0.06 + i * 0.035);
+      segment.scale.y = 1 + Math.sin(t * 4.2 - lag) * 0.012 * (i + 1);
     }
     // Embers — flicker via opacity-style scale. Each ember has its
     // own seed so they don't pulse in lock-step.
@@ -3244,6 +3292,11 @@ function PortalPhoenix() {
         const seed = emberSeeds[i];
         const s = 0.7 + 0.5 * Math.sin(t * seed.speed + seed.seed);
         children[i].scale.set(s, s, s);
+        children[i].position.set(
+          (seed.basePos[0] + Math.sin(t * 1.1 + seed.seed) * 0.45) * v,
+          (seed.basePos[1] + Math.sin(t * 1.45 + seed.seed * 0.7) * 0.32) * v,
+          (seed.basePos[2] + Math.cos(t * 1.25 + seed.seed) * 0.52) * v,
+        );
       }
     }
   });
@@ -3283,7 +3336,17 @@ function PortalPhoenix() {
         {wingVoxels.map((wv, i) => renderMesh(wv, 'pw', i, 2.5))}
       </group>
       <group ref={tailRef}>
-        {tailVoxels.map((tv, i) => renderMesh(tv, 'pt', i, 2.6))}
+        {tailSegments.map((segment) => (
+          <group
+            key={`pts${segment.index}`}
+            ref={(node) => {
+              if (node) tailSegmentRefs.current[segment.index] = node;
+            }}
+            position={segment.pivot}
+          >
+            {segment.voxels.map((tv, i) => renderMesh(tv, `pt${segment.index}-`, i, 2.6))}
+          </group>
+        ))}
       </group>
       {/* Detached ember particles — float behind the bird, flickering
           on their own clocks for a more chaotic flame trail. */}

@@ -26,22 +26,23 @@ interface Props {
 }
 
 export default function RunStatusBar({
-  status, subagentColor,
+  status,
   currentStep,
-  accentColor = '#6366f1',
 }: Props) {
-  if (status === 'idle') return null;
-
-  const statusColor = status === 'running' ? '#22c55e' : status === 'delegated' ? subagentColor || '#a855f7' : '#f59e0b';
-
   // Rotate the "noodling / pondering / …" verb every 1.5s so the
   // single line that's left on this bar actually breathes.
   const [verbIdx, setVerbIdx] = useState(0);
   useEffect(() => {
     setVerbIdx(0);
+    // RunStatusBar stays mounted while Chat moves idle -> running -> idle.
+    // Keep its hook topology stable and only suspend the timer while hidden;
+    // returning before these hooks triggers React 19's static-flag warning.
+    if (status === 'idle') return;
     const t = setInterval(() => setVerbIdx((i) => i + 1), 1500);
     return () => clearInterval(t);
   }, [status]);
+
+  if (status === 'idle') return null;
 
   // Minimal design: just the animated colored dot + a single label.
   // Explicit run-step labels still win (they're load-bearing context

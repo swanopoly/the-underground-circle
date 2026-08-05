@@ -19,14 +19,6 @@
 
 import { supabase } from './supabase';
 
-export type UserMemory = {
-  id: string;
-  userId: string;
-  circleId: string | null;
-  content: string;
-  updatedAt: string;
-};
-
 // Cap helpers live in `userMemoryCaps` (pure, no Supabase) so smoke
 // tests and edge functions can import them without react-native.
 // Re-exported here so existing callers don't change.
@@ -34,15 +26,23 @@ export {
   USER_MEMORY_SOFT_CAP,
   USER_MEMORY_HARD_CAP,
   USER_MEMORY_CAP_ERROR,
+  USER_MEMORY_CREDENTIAL_ERROR,
   checkUserMemoryCap,
   describeUserMemoryUsage,
+  looksLikeCredentialMemoryContent,
   type UserMemoryCapCheck,
 } from './userMemoryCaps';
 import {
   USER_MEMORY_CAP_ERROR,
+  USER_MEMORY_CREDENTIAL_ERROR,
   USER_MEMORY_HARD_CAP,
   checkUserMemoryCap,
+  looksLikeCredentialMemoryContent,
 } from './userMemoryCaps';
+
+// Human-facing refusal shared by the append + replace credential guards.
+const USER_MEMORY_CREDENTIAL_REFUSAL =
+  "won't store credentials in memory — keep passwords, API keys, and other secrets in your vault (e.g. 1Password) and I can reference them by name.";
 
 /**
  * Read the caller's memory for a circle. Merges the user's global profile
@@ -99,6 +99,14 @@ export async function appendUserMemory(
 > {
   if (!note || note.trim().length === 0) return { ok: false, error: 'empty note' };
   const trimmed = note.trim();
+
+  // Secret hygiene: refuse credential-shaped content BEFORE any persistence.
+  // Passwords/keys/tokens belong in the vault, never in memory. This guards
+  // the tool + UI writers directly (the /remember conversational path has its
+  // own copy of this check upstream).
+  if (looksLikeCredentialMemoryContent(trimmed)) {
+    return { ok: false, error: `${USER_MEMORY_CREDENTIAL_ERROR}: ${USER_MEMORY_CREDENTIAL_REFUSAL}` };
+  }
 
   // `upsert` with `onConflict` requires the user_id + circle_id unique index
   // we declared in RUN_THIS_SQL.sql §11. For PostgREST's upsert semantics we
@@ -164,6 +172,10 @@ export async function replaceUserMemory(
   // Even on replace, enforce the hard cap — prevents the agent from
   // "consolidating" past the ceiling with a single overlong rewrite.
   const trimmed = (content || '').trim();
+  // Secret hygiene: a rewrite must not smuggle a credential into memory either.
+  if (looksLikeCredentialMemoryContent(trimmed)) {
+    return { ok: false, error: `${USER_MEMORY_CREDENTIAL_ERROR}: ${USER_MEMORY_CREDENTIAL_REFUSAL}` };
+  }
   if (trimmed.length > USER_MEMORY_HARD_CAP) {
     return {
       ok: false,

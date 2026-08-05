@@ -18,7 +18,8 @@ export async function generateReport(
     circleIds?: string[];
   }
 ): Promise<{ data?: Report; error?: string }> {
-  const { data: userData } = await supabase.auth.getUser();
+  // Fail-safe: a backgrounded-tab auth throw must not crash report creation (P67/#101).
+  const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
   if (!userData.user) return { error: 'Not authenticated' };
 
   // Create report record

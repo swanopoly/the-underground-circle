@@ -16,6 +16,7 @@
  */
 
 import { getBridgeUrl } from './bridgeEnvironment';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { importLibrarySkillFromText, type ImportResult } from './skillLibraryImport';
 
 const CLAUDE_BRIDGE_PORT = 7778;
@@ -33,11 +34,11 @@ export type ListClaudeSkillsResult =
   | { ok: true; root: string; skills: ClaudeCodeSkillEntry[]; count: number }
   | { ok: false; error: string };
 
-async function fetchWithTimeout(url: string): Promise<Response> {
+async function fetchWithTimeout(url: string, authenticated = false): Promise<Response> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await (authenticated ? fetchBridgeAuthenticated : fetch)(url, { signal: controller.signal });
   } finally {
     clearTimeout(timeout);
   }
@@ -67,7 +68,7 @@ export async function listClaudeCodeSkills(): Promise<ListClaudeSkillsResult> {
     };
   }
   try {
-    const res = await fetchWithTimeout(`${base}/skills`);
+    const res = await fetchWithTimeout(`${base}/skills`, true);
     if (!res.ok) return { ok: false, error: `bridge returned ${res.status}` };
     const data = await res.json();
     if (data?.error && !Array.isArray(data?.skills)) {
@@ -92,7 +93,7 @@ async function readClaudeCodeSkill(name: string): Promise<
   const base = getBridgeUrl(CLAUDE_BRIDGE_PORT);
   if (!base) return { ok: false, error: 'bridge not available' };
   try {
-    const res = await fetchWithTimeout(`${base}/skills/${encodeURIComponent(name)}`);
+    const res = await fetchWithTimeout(`${base}/skills/${encodeURIComponent(name)}`, true);
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       return { ok: false, error: `bridge ${res.status}: ${body.slice(0, 200)}` };

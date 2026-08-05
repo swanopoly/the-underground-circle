@@ -11,6 +11,7 @@ import {
   View, Text, StyleSheet, ScrollView, Pressable, Platform,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { subscribeWithReconnect } from '../lib/subscribeWithReconnect';
 import { CircleOfficeAgent } from '../lib/circleOffice';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -178,8 +179,12 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
 
   // Additional realtime subscription for analytics-specific fields
   useEffect(() => {
-    const channel = supabase
-      .channel(`analytics-${circleId}`)
+    const handle = subscribeWithReconnect({
+      channelName: `analytics-${circleId}`,
+      // No onCatchUp: this handler applies incremental UPDATE patches over the
+      // `propAgents` snapshot the parent owns, so there is nothing local to
+      // refetch. Reconnect alone is the fix — the parent's own poll re-seeds it.
+      setup: (channel) => channel
       .on('postgres_changes', {
         event: 'UPDATE',
         schema: 'public',
@@ -210,10 +215,10 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
               }
             : a
         ));
-      })
-      .subscribe();
+      }),
+    });
 
-    return () => { supabase.removeChannel(channel); };
+    return () => { handle.unsubscribe(); };
   }, [circleId]);
 
   // Load latency percentiles and error rates from terminal responses

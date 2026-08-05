@@ -58,6 +58,7 @@ import {
   TEMPLATE_CATEGORIES,
 } from '../lib/automationTemplates';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById, type AgentSpirit } from '../lib/agentSpirits';
+import { getAgentSubjectSummary, type AutomationAgentSubjectSummary } from '../lib/automationSubjectMetadata';
 import { supabase } from '../lib/supabase';
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -85,6 +86,35 @@ function timeUntil(iso: string | null): string {
   if (ms < 3_600_000) return `in ${Math.floor(ms / 60_000)}m`;
   if (ms < 86_400_000) return `in ${Math.floor(ms / 3_600_000)}h`;
   return `in ${Math.floor(ms / 86_400_000)}d`;
+}
+
+// ─── Agent subject display UI ─────────────────────────────────────────────────
+
+function SubjectChip({ subject }: { subject: AutomationAgentSubjectSummary }) {
+  const compactKey = subject.subjectKey && subject.subjectKey !== subject.label ? subject.subjectKey : null;
+  const aliasCount = subject.aliases.length;
+
+  return (
+    <View style={s.subjectBadge}>
+      <Text style={s.subjectBadgePrefix}>SUBJECT</Text>
+      <Text style={s.subjectBadgeText} numberOfLines={1}>{subject.label}</Text>
+      {compactKey && <Text style={s.subjectBadgeKey} numberOfLines={1}>{compactKey}</Text>}
+      {aliasCount > 0 && <Text style={s.subjectBadgeAliasCount}>+{aliasCount}</Text>}
+    </View>
+  );
+}
+
+function buildSubjectSearchText(subject: AutomationAgentSubjectSummary | null): string {
+  if (!subject) return '';
+  return [
+    subject.label,
+    subject.subjectKey,
+    subject.dbId,
+    subject.sessionKey,
+    subject.provider,
+    subject.spiritId,
+    ...subject.aliases,
+  ].filter(Boolean).join(' ').toLowerCase();
 }
 
 // ─── Trigger catalog ──────────────────────────────────────────────────────────
@@ -1259,8 +1289,18 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      list = list.filter(
-        (a) =>
+      list = list.filter((a) => {
+        const subjectSummary = getAgentSubjectSummary(a.eventConfig);
+        const eventConfig = a.eventConfig || {};
+        const eventSearchText = [
+          eventConfig.table,
+          eventConfig.provider,
+          eventConfig.event,
+          eventConfig.linked_goal_id,
+          buildSubjectSearchText(subjectSummary),
+        ].filter(Boolean).join(' ').toLowerCase();
+
+        return (
           a.name.toLowerCase().includes(q) ||
           (a.description ?? '').toLowerCase().includes(q) ||
           (a.prompt ?? '').toLowerCase().includes(q) ||
@@ -1268,8 +1308,9 @@ export default function AutomationsPanel({ circleId, accentColor = '#e8e8e8' }: 
           (a.model ?? '').toLowerCase().includes(q) ||
           (a.agent ?? '').toLowerCase().includes(q) ||
           (a.outputTarget ?? '').toLowerCase().includes(q) ||
-          JSON.stringify(a.eventConfig || {}).toLowerCase().includes(q),
-      );
+          eventSearchText.includes(q)
+        );
+      });
     }
     list.sort((a, b) => {
       const aScore =
@@ -1707,6 +1748,7 @@ function AutomationCard({
   onMemoryNotes: () => void;
 }) {
   const trigger = TRIGGER_LABELS[auto.triggerType] ?? TRIGGER_LABELS.manual;
+  const subjectSummary = getAgentSubjectSummary(auto.eventConfig);
 
   return (
     <View style={s.card}>
@@ -1735,6 +1777,7 @@ function AutomationCard({
                 <Text style={[s.triggerText, { color: '#b5b5b5' }]}>🎯 Goal linked</Text>
               </View>
             )}
+            {subjectSummary && <SubjectChip subject={subjectSummary} />}
             <Text style={s.cardMetaText}>·</Text>
             <Text style={s.cardMetaText}>Last: {timeAgo(auto.lastRunAt)}</Text>
             {auto.runCount > 0 && (
@@ -1832,14 +1875,20 @@ function AutomationCard({
         </Pressable>
       </View>
 
-      {expanded && <RunHistory automationId={auto.id} />}
+      {expanded && <RunHistory automationId={auto.id} subjectSummary={subjectSummary} />}
     </View>
   );
 }
 
 // ─── Run History (expandable) ─────────────────────────────────────────────────
 
-function RunHistory({ automationId }: { automationId: string }) {
+function RunHistory({
+  automationId,
+  subjectSummary,
+}: {
+  automationId: string;
+  subjectSummary?: AutomationAgentSubjectSummary | null;
+}) {
   const { runs, isLoading } = useAutomationRuns(automationId);
 
   if (isLoading) return <ActivityIndicator size="small" color="#555" style={{ padding: 8 }} />;
@@ -1848,13 +1897,19 @@ function RunHistory({ automationId }: { automationId: string }) {
   return (
     <View style={s.runsList}>
       {runs.slice(0, 10).map((run) => (
-        <RunRow key={run.id} run={run} />
+        <RunRow key={run.id} run={run} subjectSummary={subjectSummary} />
       ))}
     </View>
   );
 }
 
-function RunRow({ run }: { run: AutomationRun }) {
+function RunRow({
+  run,
+  subjectSummary,
+}: {
+  run: AutomationRun;
+  subjectSummary?: AutomationAgentSubjectSummary | null;
+}) {
   const [expanded, setExpanded] = useState(run.status === 'running');
   const [showPrompt, setShowPrompt] = useState(false);
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
@@ -1877,6 +1932,18 @@ function RunRow({ run }: { run: AutomationRun }) {
   const wallets = ctx?.wallets || [];
   const recentTrades = ctx?.recentTrades || [];
   const eventPayload = ctx?.eventPayload;
+  const runSubjectSummary = getAgentSubjectSummary(ctx) || subjectSummary || null;
+  const subjectDetailItems = runSubjectSummary
+    ? [
+        ['NAME', runSubjectSummary.label],
+        ['KEY', runSubjectSummary.subjectKey && runSubjectSummary.subjectKey !== runSubjectSummary.label ? runSubjectSummary.subjectKey : null],
+        ['DB', runSubjectSummary.dbId],
+        ['SESSION', runSubjectSummary.sessionKey],
+        ['PROVIDER', runSubjectSummary.provider],
+        ['SPIRIT', runSubjectSummary.spiritId],
+        ['ALIASES', runSubjectSummary.aliases.length > 0 ? runSubjectSummary.aliases.join(', ') : null],
+      ].filter((item): item is [string, string] => typeof item[1] === 'string' && item[1].trim().length > 0)
+    : [];
 
   const sectionHead = { color: '#6f6f6f', fontSize: 9, fontWeight: '800' as const, fontFamily: 'monospace' as const, marginBottom: 3, letterSpacing: 1 };
   const sectionBox = { backgroundColor: '#0a0a0a', borderRadius: 4, padding: 6, marginBottom: 6, borderWidth: 1, borderColor: '#2a2a2a' };
@@ -1911,6 +1978,21 @@ function RunRow({ run }: { run: AutomationRun }) {
       </Pressable>
       {expanded && (
         <View style={s.runDetail}>
+          {/* ── Agent Subject ── */}
+          {subjectDetailItems.length > 0 && (
+            <View style={sectionBox}>
+              <Text style={sectionHead}>SUBJECT</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                {subjectDetailItems.map(([label, value]) => (
+                  <View key={label} style={s.subjectDetailItem}>
+                    <Text style={s.subjectDetailLabel}>{label}</Text>
+                    <Text style={s.subjectDetailValue} numberOfLines={label === 'ALIASES' ? 2 : 1}>{value}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
           {/* ── Execution Log ── */}
           {logSteps.length > 0 && (
             <View style={sectionBox}>
@@ -2989,6 +3071,22 @@ const s = StyleSheet.create({
   cardMetaText: { color: '#6f6f6f', fontSize: 10, fontFamily: 'monospace' },
   triggerBadge: { borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 },
   triggerText: { fontSize: 9, fontWeight: '800', fontFamily: 'monospace' },
+  subjectBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    maxWidth: 280,
+    borderRadius: 4,
+    backgroundColor: '#22d3ee14',
+    borderWidth: 1,
+    borderColor: '#22d3ee30',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    gap: 4,
+  },
+  subjectBadgePrefix: { color: '#22d3ee', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
+  subjectBadgeText: { color: '#b5f3ff', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', flexShrink: 1 },
+  subjectBadgeKey: { color: '#7dd3fc', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', flexShrink: 1, opacity: 0.85 },
+  subjectBadgeAliasCount: { color: '#22d3ee', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
   statsRow: { flexDirection: 'row', gap: 10, marginTop: 3 },
   statText: { color: '#6f6f6f', fontSize: 9, fontFamily: 'monospace' },
   errorRow: { paddingHorizontal: 10, paddingBottom: 4 },
@@ -3030,6 +3128,17 @@ const s = StyleSheet.create({
   runOutput: { color: '#b5b5b5', fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
   runError: { color: '#9e9e9e', fontSize: 11, fontFamily: 'monospace', marginTop: 4 },
   runMeta: { color: '#3e3e3e', fontSize: 9, fontFamily: 'monospace', marginTop: 6 },
+  subjectDetailItem: {
+    backgroundColor: '#161616',
+    borderRadius: 4,
+    paddingVertical: 3,
+    paddingHorizontal: 6,
+    borderWidth: 1,
+    borderColor: '#1a1a1a',
+    maxWidth: 240,
+  },
+  subjectDetailLabel: { color: '#6f6f6f', fontSize: 7, fontWeight: '700', fontFamily: 'monospace' },
+  subjectDetailValue: { color: '#b5f3ff', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' },
 });
 
 // ─── Form styles ──────────────────────────────────────────────────────────────

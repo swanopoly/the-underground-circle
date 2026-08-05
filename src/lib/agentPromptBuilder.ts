@@ -29,6 +29,7 @@
  */
 
 import { buildAgentSystemPrompt, type BuildSystemPromptOptions } from './agentSystemPrompt';
+import { describeUserMemoryUsage } from './userMemoryCaps';
 import type { AnthropicSystemBlock } from './agentProviders/anthropic';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -156,6 +157,12 @@ export interface DefaultPromptContext {
    *  progress docs. Cached UNLESS a per-turn context fragment is
    *  included — keep per-turn fragments in `environmentDetails`. */
   memoryBankBlock?: string;
+  /** Raw `user_memory` content for this user/circle. When present, the
+   *  memory_bank component appends a one-line cap-usage summary (via
+   *  `describeUserMemoryUsage`) so the agent sees how close it is to the
+   *  hard cap and can self-consolidate before `appendUserMemory` rejects
+   *  (Phase CA-8b follow-up). Cached — usage drifts only when memory does. */
+  userMemoryContent?: string;
   /** Hard rules ("never do X"). Cached. */
   rules?: string;
   /** Per-turn environment details (ISO timestamp, active user id,
@@ -172,7 +179,12 @@ export const DEFAULT_PROMPT_COMPONENTS: ReadonlyArray<PromptComponent<DefaultPro
   { key: 'tools',               cache: 'frozen',   heading: 'TOOLS',                render: (c) => c.toolsBlock ?? null },
   { key: 'skills',              cache: 'frozen',   heading: 'SKILL LIBRARY',        render: (c) => c.skillsBlock ?? null },
   { key: 'mcp_servers',         cache: 'frozen',   heading: 'MCP SERVERS',          render: (c) => c.mcpBlock ?? null },
-  { key: 'memory_bank',         cache: 'frozen',   heading: 'MEMORY BANK',          render: (c) => c.memoryBankBlock ?? null },
+  { key: 'memory_bank',         cache: 'frozen',   heading: 'MEMORY BANK',          render: (c) => {
+      const parts: string[] = [];
+      if (c.memoryBankBlock && c.memoryBankBlock.trim()) parts.push(c.memoryBankBlock.trim());
+      if (typeof c.userMemoryContent === 'string') parts.push(describeUserMemoryUsage(c.userMemoryContent));
+      return parts.length ? parts.join('\n\n') : null;
+    } },
   { key: 'rules',               cache: 'frozen',   heading: 'RULES',                render: (c) => c.rules ?? null },
   { key: 'environment_details', cache: 'volatile', heading: 'ENVIRONMENT DETAILS',  render: (c) => c.environmentDetails ?? null },
   { key: 'objective',           cache: 'frozen',   heading: 'OBJECTIVE',            render: (c) => c.objective ?? null },

@@ -6,15 +6,78 @@ export const BLACKSWAN_PUBLIC_MODEL_ID = `huggingface/${BLACKSWAN_MODEL_ID}`;
 export const BLACKSWAN_ENDPOINT_MODEL_ID = `huggingface_endpoint/${BLACKSWAN_MODEL_ID}`;
 export const BLACKSWAN_TOOL_EXECUTOR_MODEL_ID = 'claude-haiku-4-5';
 
-const MARKETPLACE_PREFIX_RE = /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama)\//i;
+/**
+ * Canonical set of every model id that means "BlackSwan" across the app.
+ * Centralizing these here means a future app-trained checkpoint only has to
+ * be registered in one place (add its id + classify it as local/hosted) and
+ * every BlackSwan-aware code path picks it up.
+ *
+ * Two distinct routing classes live behind the BlackSwan brand:
+ *   - LOCAL: the on-device Ollama `blackswan` weight (runs through the local
+ *     `blackswanLLM` bridge, only available on native/desktop).
+ *   - HOSTED: the HuggingFace public model + dedicated inference endpoint
+ *     (`cswan801/BlackSwan-v5`), which must NOT take the local-Ollama path.
+ */
+export const BLACKSWAN_LOCAL_OLLAMA_MODEL_IDS = new Set<string>([
+  'blackswan',
+  'ollama/blackswan',
+]);
 
-export function isBlackSwanModel(modelId: string | null | undefined): boolean {
+export const BLACKSWAN_HOSTED_MODEL_IDS = new Set<string>([
+  BLACKSWAN_MODEL_ID.toLowerCase(),
+  BLACKSWAN_PUBLIC_MODEL_ID.toLowerCase(),
+  BLACKSWAN_ENDPOINT_MODEL_ID.toLowerCase(),
+]);
+
+/** Every known BlackSwan id (local + hosted), for callers that just need
+ *  "is this BlackSwan in any form?" membership without re-deriving it. */
+export const BLACKSWAN_MODEL_IDS: ReadonlySet<string> = new Set<string>([
+  ...BLACKSWAN_LOCAL_OLLAMA_MODEL_IDS,
+  ...BLACKSWAN_HOSTED_MODEL_IDS,
+]);
+
+const MARKETPLACE_PREFIX_RE = /^(openai|openai_compatible|openrouter|huggingface|huggingface_endpoint|replicate|github-models|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama)\//i;
+
+/**
+ * True only for the LOCAL Ollama BlackSwan weight. Use this to gate the
+ * local `blackswanLLM` bridge path so the HOSTED HuggingFace endpoint id
+ * stops being misrouted through on-device Ollama.
+ */
+export function isLocalOllamaBlackSwan(modelId: string | null | undefined): boolean {
   const normalized = (modelId || '').trim().toLowerCase();
   if (!normalized) return false;
-  return normalized === 'blackswan'
-    || normalized === 'ollama/blackswan'
-    || normalized.includes('/blackswan')
-    || normalized.includes('cswan801/blackswan');
+  if (BLACKSWAN_LOCAL_OLLAMA_MODEL_IDS.has(normalized)) return true;
+  // A bare `ollama/<...>blackswan...>` weight is also local, but never treat a
+  // huggingface(_endpoint)/ id as local even though it contains "blackswan".
+  if (normalized.startsWith('huggingface/') || normalized.startsWith('huggingface_endpoint/')) {
+    return false;
+  }
+  return normalized.startsWith('ollama/') && normalized.includes('blackswan');
+}
+
+/**
+ * True for the HOSTED BlackSwan model: the HuggingFace public model, the
+ * dedicated inference endpoint, or the bare `cswan801/BlackSwan-v5` repo id.
+ */
+export function isHostedBlackSwanModel(modelId: string | null | undefined): boolean {
+  const normalized = (modelId || '').trim().toLowerCase();
+  if (!normalized) return false;
+  if (BLACKSWAN_HOSTED_MODEL_IDS.has(normalized)) return true;
+  if (normalized.startsWith('huggingface/') || normalized.startsWith('huggingface_endpoint/')) {
+    return normalized.includes('blackswan');
+  }
+  // Bare repo form, e.g. `cswan801/blackswan-v5` (no provider prefix).
+  return normalized.includes('cswan801/blackswan');
+}
+
+export function isBlackSwanModel(modelId: string | null | undefined): boolean {
+  if (isLocalOllamaBlackSwan(modelId) || isHostedBlackSwanModel(modelId)) return true;
+  // Backward-compat: the original greedy matcher treated any `*/blackswan*`
+  // or `*cswan801/blackswan*` id as BlackSwan. Preserve that so existing
+  // callers of this union predicate never lose a match after the split.
+  const normalized = (modelId || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.includes('/blackswan') || normalized.includes('cswan801/blackswan');
 }
 
 export function isMarketplaceRoutedModel(modelId: string | null | undefined): boolean {
@@ -27,6 +90,197 @@ export function isNativeAnthropicModel(modelId: string | null | undefined): bool
 
 export function canUseAnthropicChatStream(modelId: string | null | undefined): boolean {
   return isNativeAnthropicModel(modelId) && !isMarketplaceRoutedModel(modelId);
+}
+
+/**
+ * App-domain vocabulary detector for the Auto router (P8). BlackSwan-v5 is
+ * trained on Underground Circle app data (conversations, missions,
+ * check-ins, proof-of-work, XP/streaks, office agents) — for questions
+ * ABOUT that domain it is the best-grounded model available; for general
+ * knowledge it is not. High-precision term list on purpose: a false
+ * negative just keeps the turn on a frontier model, a false positive
+ * routes a general question to an app specialist — so only unambiguous
+ * app vocabulary counts.
+ */
+const APP_GROUNDED_TERM_RE = new RegExp(
+  [
+    '\\bcircle members?\\b', '\\bmy circle\\b', '\\bour circle\\b',
+    '\\bmissions?\\b', '\\bcheck-?ins?\\b', '\\bstreaks?\\b',
+    '\\bproof of work\\b', '\\bnorth star\\b', '\\bmemory bank\\b',
+    '\\bswan\\s?bot\\b', '\\bblack\\s?swan\\b', '\\bopen\\s?swan\\b',
+    '\\boffice agents?\\b', '\\bxp\\b', '\\bshout-?outs?\\b',
+    '\\bthe feed\\b', '\\bproof-of-work\\b',
+  ].join('|'),
+  'i',
+);
+
+/** True when a message reads as a question/statement about THIS app's domain. */
+export function looksLikeAppGroundedMessage(message: string | null | undefined): boolean {
+  const text = String(message || '').trim();
+  if (!text) return false;
+  return APP_GROUNDED_TERM_RE.test(text);
+}
+
+/**
+ * Confidence proxy for the BlackSwan Auto lane (reliability guard).
+ *
+ * BlackSwan-v5 is a small fine-tuned model (Qwen3.5-4B). The published
+ * small-model research is consistent: tiny models discriminate poorly on
+ * HARD / BROAD / AMBIGUOUS inputs, and a wrong answer reads to the user as
+ * "the model got dumber." This guard does NOT remove BlackSwan from Auto —
+ * BlackSwan still owns every simple app-grounded turn it was trained for
+ * (status / memory / casual / social + light `looksLikeAppGroundedMessage`
+ * questions). It only ESCALATES the genuinely-hard SUBSET of that same lane
+ * to the frontier model the lane would otherwise have used — a proxy for
+ * "this turn is beyond a 4B model's reliable discrimination," never a
+ * BlackSwan removal and never a route to any other BlackSwan id.
+ *
+ * Deliberately CONSERVATIVE: the whole point of the lane is BlackSwan, so we
+ * bias toward KEEPING it. Escalate only on clear hard-for-a-small-model
+ * signals; a false negative just leaves an easy turn on BlackSwan (fine),
+ * while a false positive needlessly spends a frontier call, so the bar is
+ * "unambiguous hard signal," mirroring the high-precision app-domain matcher.
+ *
+ * Hard signals (any one fires):
+ *   1. Multi-step / sequenced work — "then", "after that", numbered lists,
+ *      "step 1", bulleted sequences. Ordering + chaining is where small
+ *      models drop or reorder steps.
+ *   2. Explicit tool/action/execution verbs — "deploy", "run", "open",
+ *      "book", "install", "refactor", etc. These imply DOING, not the Q&A
+ *      recall BlackSwan is trained for. (The provider strip + tool-loop
+ *      executor swap already handle true tool turns; this catches
+ *      action-shaped phrasing that still lands in the conversational lane.)
+ *   3. Code / technical reasoning — "debug", "why does", "explain the
+ *      difference", "trade-offs", "architecture", "root cause", stack
+ *      traces, code fences. Comparative / causal reasoning is exactly the
+ *      hard-discrimination case for a 4B model.
+ *   4. Long / compound messages — > ~400 chars OR > ~2 question marks.
+ *      Length and multi-question compounds broaden the input past the small
+ *      model's reliable band.
+ *   5. Explicit ambiguity the small model would fumble — "not sure",
+ *      "either ... or", "it depends", "figure out", "what's the best way".
+ */
+const BLACKSWAN_ESCALATION_SIGNALS: Array<{ reason: string; test: (text: string, lower: string) => boolean }> = [
+  {
+    reason: 'multi_step',
+    // Sequencing words as whole words, or a numbered/bulleted list of steps.
+    test: (_text, lower) =>
+      /\b(?:then|and then|after that|afterwards?|next,|followed by|first\b.*\bthen|step\s*\d)\b/i.test(lower)
+      // Two+ numbered items ("1. ... 2. ...") or two+ bullet lines.
+      || /(?:^|\n)\s*(?:[-*•]|\d+[.)])\s+.*(?:\n\s*(?:[-*•]|\d+[.)])\s+)/.test(_text),
+  },
+  {
+    reason: 'action_verb',
+    // Execution verbs that imply DOING, not recall/Q&A. Whole-word matched so
+    // "running total" / "opened issues" don't trip it; paired with word
+    // boundaries and common object nouns to keep precision high.
+    test: (_text, lower) =>
+      /\b(?:deploy|redeploy|install|uninstall|configure|set\s?up|refactor|rebuild|migrate|provision|book|purchase|order|schedule|automate|execute|run\s+(?:the|a|this|that|my)|open\s+(?:the|a|this|that|my)|create\s+(?:a|the|an)|delete|remove|update\s+(?:the|my|a)|send\s+(?:a|the|an)|push\s+(?:the|a|to)|merge\s+(?:the|a|this)|fix\s+(?:the|this|my|a))\b/i.test(lower),
+  },
+  {
+    reason: 'technical_reasoning',
+    test: (_text, lower) =>
+      /\b(?:debug|root\s?cause|stack\s?trace|traceback|exception|why\s+(?:does|is|isn'?t|are|aren'?t|do|did|can'?t|won'?t)|explain\s+(?:the\s+)?(?:difference|why|how)|difference\s+between|trade[\s-]?offs?|architecture|design\s+pattern|time\s+complexity|big\s?-?o|race\s+condition|memory\s+leak|refactor)\b/i.test(lower)
+      // Fenced code / inline code blocks are a strong technical-reasoning tell.
+      || /```/.test(_text),
+  },
+  {
+    reason: 'ambiguous',
+    test: (_text, lower) =>
+      /\b(?:not\s+sure|i'?m\s+not\s+sure|unsure|it\s+depends|depends\s+on|figure\s+out|what'?s\s+the\s+best\s+way|which\s+(?:is\s+)?(?:better|best)|either\b.*\bor\b|should\s+i\s+.*\bor\b|help\s+me\s+(?:decide|choose|figure))\b/i.test(lower),
+  },
+];
+
+const BLACKSWAN_LONG_MESSAGE_CHARS = 400;
+const BLACKSWAN_MAX_QUESTION_MARKS = 2;
+
+export type BlackSwanEscalationReason =
+  | 'multi_step'
+  | 'action_verb'
+  | 'technical_reasoning'
+  | 'long_compound'
+  | 'ambiguous';
+
+/**
+ * Decide whether an app-grounded Auto turn should ESCALATE from BlackSwan to
+ * the lane's frontier fallback. Pure + dependency-light (string only) so it
+ * stays smoke-testable. Conservative by design — see the signal set above.
+ *
+ * Returns `escalate: false, reason: null` for the simple grounded turns
+ * BlackSwan is designed for; `escalate: true` with the first matching reason
+ * for the genuinely-hard subset.
+ */
+export function shouldEscalateBlackSwanToFrontier(
+  message: string | null | undefined,
+): { escalate: boolean; reason: BlackSwanEscalationReason | null } {
+  const text = String(message || '').trim();
+  // Empty / whitespace: nothing hard to detect — keep BlackSwan.
+  if (!text) return { escalate: false, reason: null };
+  const lower = text.toLowerCase();
+
+  // Long / compound is a first-class signal (length + multi-question).
+  const questionMarks = (text.match(/\?/g) || []).length;
+  if (text.length > BLACKSWAN_LONG_MESSAGE_CHARS || questionMarks > BLACKSWAN_MAX_QUESTION_MARKS) {
+    return { escalate: true, reason: 'long_compound' };
+  }
+
+  for (const signal of BLACKSWAN_ESCALATION_SIGNALS) {
+    if (signal.test(text, lower)) {
+      return { escalate: true, reason: signal.reason as BlackSwanEscalationReason };
+    }
+  }
+
+  return { escalate: false, reason: null };
+}
+
+/**
+ * Human-facing, ≤60-char clause naming WHY the BlackSwan lane escalated to a
+ * frontier model. Companion to `shouldEscalateBlackSwanToFrontier`; used by
+ * the Auto transparency layer so users see "hard turn → frontier fallback",
+ * never a raw reason key. No provider ids, no jargon.
+ */
+export function describeBlackSwanEscalation(
+  reason: BlackSwanEscalationReason | null | undefined,
+): string {
+  switch (reason) {
+    case 'multi_step':
+      return 'multi-step request → frontier fallback';
+    case 'action_verb':
+      return 'action request → frontier fallback';
+    case 'technical_reasoning':
+      return 'technical reasoning → frontier fallback';
+    case 'long_compound':
+      return 'long/compound request → frontier fallback';
+    case 'ambiguous':
+      return 'ambiguous request → frontier fallback';
+    default:
+      return 'app-domain turn → app-trained BlackSwan';
+  }
+}
+
+/**
+ * Composer-pattern plan/execute split for computer tasks (P9, from the
+ * verified Cursor research: "create the plan with one model and build it
+ * with another" — Cursor 2.0 Plan Mode; the browser loop itself stays a
+ * separate tool-scoped agent). The TEXT-ONLY planner/validator pass for
+ * browser/app automation is exactly where the app-trained model wins: it
+ * knows the app's sites, pipelines, missions, and vocabulary. The native
+ * screenshot/action loop is untouched — the edge function keeps its
+ * Sonnet pin regardless of what plans.
+ *
+ * Returns the BlackSwan endpoint id ONLY for Auto turns when the
+ * `blackswan` integration is connected; explicit picks return null so the
+ * caller's model is used for planning too (explicit picks stay
+ * authoritative everywhere).
+ */
+export function resolveComputerTaskPlannerModel(
+  selectedModel: string | null | undefined,
+  connectedProviders?: ReadonlySet<string> | null,
+): string | null {
+  const selected = String(selectedModel || '').trim();
+  if (selected && selected !== 'auto') return null;
+  if (!connectedProviders || !connectedProviders.has('blackswan')) return null;
+  return BLACKSWAN_ENDPOINT_MODEL_ID;
 }
 
 export function externalProviderForModel(modelId: string | null | undefined): string | null {
@@ -108,6 +362,144 @@ export function buildBlackSwanRoutingMetadata(opts: {
     toolExecutorReason: toolExecutorUsed
       ? 'OpenSwan runtime tools require a model with reliable native tool/function calling; BlackSwan remains in the grounding context.'
       : null,
+  };
+}
+
+// ─── FAIL-VISIBLE BlackSwan endpoint failover (pure) ────────────────────────
+
+/** Input evidence for `planBlackSwanEndpointFailover`. All fields except
+ *  `model` are optional — missing evidence simply means "no failover". */
+export interface BlackSwanEndpointFailoverInput {
+  /** The model id that was actually dispatched for this turn. */
+  model: string;
+  /** Edge/body error code, e.g. `marketplace_provider_unavailable`. */
+  errorCode?: string | null;
+  /** Edge/body error message (may contain provider details — never echoed). */
+  errorMessage?: string | null;
+  /** `routing_fallback.provider` from the swanbot-ai relay body, if present. */
+  routingFallbackProvider?: string | null;
+  /** True when this turn already failed over once — never chain twice. */
+  alreadyFailedOver?: boolean;
+}
+
+export type BlackSwanEndpointFailoverPlan =
+  | { failover: false }
+  | {
+      failover: true;
+      /** First entry of the caller-supplied failover chain. */
+      fallbackModel: string;
+      /** One friendly, secret-free line to show the user (FAIL-VISIBLE). */
+      userNotice: string;
+      /** Compact metadata for routing/telemetry structures. Slug reason only —
+       *  raw provider error text (which may embed tokens) is never carried. */
+      routingNote: { failover_from: string; fallback_model: string; reason: string };
+    };
+
+/** Matches messages that name the BlackSwan route itself (the swanbot-ai
+ *  fail-closed copy routes through `blackswan` or `hugging_face`). */
+const BLACKSWAN_ROUTE_ERROR_RE =
+  /could not be routed through (blackswan|hugging_face)|endpoint url not set|blackswan/i;
+
+/** Unavailability vocabulary that must accompany a route mention before a
+ *  message alone (no code / no fallback provider) can justify a failover.
+ *  Deliberately does NOT include generic words like "rate limit" — an
+ *  unrelated provider error must fail closed (no failover). */
+const BLACKSWAN_UNAVAILABILITY_RE =
+  /unavailable|not set|not connected|integration_not_connected|not configured|could not be routed|unreachable|cold|warming|waking|scal(?:e[sd]?|ing)[\s-]*to[\s-]*zero|initializ|starting|paused|\b50[234]\b|\b5\d{2}\b|timed?\s?-?out|timeout|refused|provider_call_failed|failed/i;
+
+/** Config-problem flavor: the endpoint URL / integration is not set up at all
+ *  (fix it in Marketplace) — as opposed to a cold / warming / unreachable
+ *  endpoint that will come back on its own. */
+const BLACKSWAN_CONFIG_PROBLEM_RE =
+  /endpoint url not set|integration_not_connected|not connected|not configured/i;
+
+/** Human-friendly fallback display name for the failover notice: strips any
+ *  provider prefix and date suffix, then prettifies claude ids
+ *  (`claude-haiku-4-5-20251001` → `Claude Haiku 4.5`). */
+function describeFallbackModelForNotice(modelId: string): string {
+  const bare = modelId.replace(/^[^/]*\//, '').replace(/-20\d{6}$/, '');
+  const m = bare.match(/^claude-([a-z]+)-(\d+)-(\d+)$/i);
+  if (m) return `Claude ${m[1].charAt(0).toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}`;
+  return bare;
+}
+
+/**
+ * Decide whether a failed BlackSwan turn should fail over VISIBLY to the first
+ * model of the advertised failover chain (`MODEL_FAILOVER` /
+ * `getModelFailoverChain` in `serviceProfileSouls`).
+ *
+ * FAIL-VISIBLE house rule: this never plans a silent switch — the returned
+ * `userNotice` MUST be shown to the user as part of the turn, and the
+ * `routingNote` names exactly what served it.
+ *
+ * Failover fires only when ALL hold:
+ *   (a) `model` is one of the hosted BlackSwan ids
+ *       (`BLACKSWAN_ENDPOINT_MODEL_ID`, `BLACKSWAN_PUBLIC_MODEL_ID`, or the
+ *       bare `BLACKSWAN_MODEL_ID`),
+ *   (b) the error clearly indicates BlackSwan-ROUTE unavailability
+ *       (`marketplace_provider_unavailable` code, a `routing_fallback`
+ *       provider of `blackswan`, or a route-naming message combined with an
+ *       unavailability word) — unrelated errors (rate limits, etc.) fail
+ *       closed,
+ *   (c) this turn has not already failed over (`alreadyFailedOver`), and
+ *   (d) the supplied chain has a non-empty first entry (empty chain → fail
+ *       closed).
+ *
+ * The failover CHAIN is a parameter (call sites pass
+ * `getModelFailoverChain(model)`) instead of an import: `serviceProfileSouls`
+ * already imports this module's constants, so importing it back from here
+ * would create an import cycle.
+ *
+ * Notices are fully templated — the raw `errorMessage` (which can embed
+ * provider tokens or URLs) is never interpolated into the notice or the
+ * routing note.
+ */
+export function planBlackSwanEndpointFailover(
+  input: BlackSwanEndpointFailoverInput,
+  chain: readonly string[],
+): BlackSwanEndpointFailoverPlan {
+  if (input.alreadyFailedOver) return { failover: false };
+
+  const model = String(input.model || '').trim();
+  const normalizedModel = model.toLowerCase();
+  const isBlackSwanId =
+    normalizedModel === BLACKSWAN_ENDPOINT_MODEL_ID.toLowerCase()
+    || normalizedModel === BLACKSWAN_PUBLIC_MODEL_ID.toLowerCase()
+    || normalizedModel === BLACKSWAN_MODEL_ID.toLowerCase();
+  if (!isBlackSwanId) return { failover: false };
+
+  const errorCode = String(input.errorCode || '').trim();
+  const errorMessage = String(input.errorMessage || '');
+  const fallbackProvider = String(input.routingFallbackProvider || '').trim().toLowerCase();
+  const routeUnavailable =
+    errorCode === 'marketplace_provider_unavailable'
+    || fallbackProvider === 'blackswan'
+    || (BLACKSWAN_ROUTE_ERROR_RE.test(errorMessage) && BLACKSWAN_UNAVAILABILITY_RE.test(errorMessage));
+  if (!routeUnavailable) return { failover: false };
+
+  // First non-empty chain entry; an empty chain fails closed (no failover).
+  const fallbackModel = chain
+    .map((entry) => String(entry || '').trim())
+    .find((entry) => entry.length > 0);
+  if (!fallbackModel) return { failover: false };
+
+  const configProblem = BLACKSWAN_CONFIG_PROBLEM_RE.test(errorMessage);
+  const fallbackName = describeFallbackModelForNotice(fallbackModel);
+  const userNotice = configProblem
+    ? `⚠️ BlackSwan's endpoint isn't connected — this answer came from ${fallbackName} instead. Connect or fix the BlackSwan integration in Marketplace to route turns to BlackSwan.`
+    : `⚠️ BlackSwan is waking up (its endpoint scales to zero when idle) — this answer came from ${fallbackName} instead. Ask again in a minute or two to use BlackSwan.`;
+
+  return {
+    failover: true,
+    fallbackModel,
+    userNotice,
+    routingNote: {
+      failover_from: model,
+      fallback_model: fallbackModel,
+      reason: configProblem
+        ? 'blackswan_endpoint_not_configured'
+        : 'blackswan_endpoint_cold_or_unreachable',
+    },
   };
 }
 

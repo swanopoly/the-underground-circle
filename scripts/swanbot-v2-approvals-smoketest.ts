@@ -7,8 +7,8 @@
  *   - approvals.request requires title + approvalKind; rejects invalid kind;
  *     scope-guards runId (rejects cross-circle); falls back to ctx.runId
  *     when input.runId omitted; clamps timeoutSeconds to [30, 86400]
- *   - approvals.resolve requires 'approved' | 'rejected'; scope-guards
- *     circle_id; rejects already-resolved rows
+ *   - approvals.resolve is not model-callable; humans resolve through the
+ *     signed UI or another out-of-band operator flow
  *
  * Client-side credentials.get (reimplemented from src/lib/swanbot.ts):
  *   - Requires item; passes vault + fields straight through
@@ -16,6 +16,8 @@
  *
  * Run: npm run smoke:swanbot-v2-approvals
  */
+
+import { readFileSync } from "node:fs";
 
 // ─── Stub Supabase builder (copied + trimmed from writers test) ────
 type Row = Record<string, any>;
@@ -131,30 +133,11 @@ async function approvalsRequest(input: any, ctx: Ctx): Promise<Result> {
   return { ok: true, data: { id: data.id, title: data.title, status: data.status } };
 }
 
-async function approvalsResolve(input: any, ctx: Ctx): Promise<Result> {
-  const approvalId = String(input?.approvalId || "").trim();
-  if (!approvalId) return { ok: false, error: "approvalId required" };
-  if (input?.status !== "approved" && input?.status !== "rejected") {
-    return { ok: false, error: "status must be 'approved' or 'rejected'" };
-  }
-  const { data: row, error: rowErr } = await ctx.supabase
-    .from("agent_run_approvals")
-    .select("id, circle_id, status")
-    .eq("id", approvalId)
-    .maybeSingle();
-  if (rowErr) return { ok: false, error: rowErr.message };
-  if (!row || row.circle_id !== ctx.circleId) return { ok: false, error: "approval not found in this circle" };
-  if (row.status !== "pending") return { ok: false, error: `approval already ${row.status}` };
-  const { error } = await ctx.supabase
-    .from("agent_run_approvals")
-    .update({
-      status: input.status,
-      resolved_by: ctx.userId,
-      resolved_at: new Date().toISOString(),
-    })
-    .eq("id", approvalId);
-  if (error) return { ok: false, error: error.message };
-  return { ok: true, data: { approvalId, status: input.status } };
+async function approvalsResolve(_input: any, _ctx: Ctx): Promise<Result> {
+  return {
+    ok: false,
+    error: "approvals.resolve is disabled for SwanBot model-side tools; use the approval UI or signed operator flow",
+  };
 }
 
 // ─── credentials.get client dispatcher shim ────────────────────────
@@ -186,6 +169,20 @@ function assert(cond: unknown, name: string, detail?: string) {
 }
 
 async function main() {
+  const edgeSource = readFileSync("supabase/functions/swanbot-v2-ai/index.ts", "utf8");
+  assert(
+    edgeSource.includes('approvals: ["approvals.list", "approvals.request"]'),
+    "source guard: approvals.resolve is not selected for model tools",
+  );
+  assert(
+    !edgeSource.includes('approvals: ["approvals.list", "approvals.request", "approvals.resolve"]'),
+    "source guard: old self-resolve approval group is absent",
+  );
+  assert(
+    edgeSource.includes("approvals.resolve is disabled for SwanBot model-side tools"),
+    "source guard: approvals.resolve handler fails closed",
+  );
+
   // ─── approvals.list ──────────────────────────────────────────
   {
     const store = new StubStore();
@@ -263,28 +260,8 @@ async function main() {
     const ctx: Ctx = { supabase: makeClient(store), circleId: "circle_A", userId: "u1" };
 
     const r1 = await approvalsResolve({ approvalId: "a_pending", status: "approved" }, ctx);
-    assert(r1.ok, "approvals.resolve: happy path ok");
-    assert(store.updated[0].payload.status === "approved", "approvals.resolve: status persisted");
-    assert(store.updated[0].payload.resolved_by === "u1", "approvals.resolve: resolved_by=caller");
-    assert(typeof store.updated[0].payload.resolved_at === "string", "approvals.resolve: resolved_at set");
-
-    // Cross-circle
-    store.clear();
-    const r2 = await approvalsResolve({ approvalId: "a_other", status: "approved" }, ctx);
-    assert(!r2.ok && /not found in this circle/.test((r2 as any).error), "approvals.resolve: cross-circle blocked");
-    assert(store.updated.length === 0, "approvals.resolve: no update on cross-circle reject");
-
-    // Already resolved
-    const r3 = await approvalsResolve({ approvalId: "a_done", status: "rejected" }, ctx);
-    assert(!r3.ok && /already approved/.test((r3 as any).error), "approvals.resolve: already-resolved rejected");
-
-    // Invalid status
-    const r4 = await approvalsResolve({ approvalId: "a_pending", status: "maybe" }, ctx);
-    assert(!r4.ok && /'approved' or 'rejected'/.test((r4 as any).error), "approvals.resolve: invalid status rejected");
-
-    // Missing id
-    const r5 = await approvalsResolve({ status: "approved" }, ctx);
-    assert(!r5.ok, "approvals.resolve: missing id rejected");
+    assert(!r1.ok && /disabled/.test((r1 as any).error), "approvals.resolve: model-side approval disabled");
+    assert(store.updated.length === 0, "approvals.resolve: no update when model tries to self-approve");
   }
 
   // ─── credentials.get (client dispatcher) ─────────────────────

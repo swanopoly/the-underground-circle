@@ -1,5 +1,6 @@
 // Generate Report — Creates PDF/CSV reports from analytics, goals, and check-ins
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { getAuthenticatedUser, isServiceRoleRequest } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -26,11 +27,40 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // ── Authorization ──────────────────────────────────────────────────────
+    // Reports aggregate cross-circle analytics + per-user check-ins for an org
+    // and run under the service role. Require either a trusted service-role
+    // caller (cron) or an authenticated user who is a member of the target org.
+    // Without this, anyone could POST a reportId + orgId and receive another
+    // org's data.
+    if (!isServiceRoleRequest(req)) {
+      const authUser = await getAuthenticatedUser(req);
+      if (!authUser) {
+        return new Response(
+          JSON.stringify({ error: "Authentication required", code: "unauthenticated" }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      const { data: membership } = await supabase
+        .from("org_members")
+        .select("user_id")
+        .eq("org_id", orgId)
+        .eq("user_id", authUser.id)
+        .maybeSingle();
+      if (!membership) {
+        return new Response(
+          JSON.stringify({ error: "Not authorized for this organization", code: "forbidden" }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     // Get report details
     const { data: report } = await supabase
       .from("reports")
       .select("*")
       .eq("id", reportId)
+      .eq("org_id", orgId)
       .single();
 
     if (!report) {
@@ -124,22 +154,33 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Get public URL
-    const { data: urlData } = supabase.storage
+    // Get a time-limited SIGNED URL. The `reports` bucket MUST be private — a
+    // public bucket leaves report files readable by anyone who can guess the
+    // path (reports/{orgId}/{type}_{dates}). Signed URLs scope + expire access.
+    const { data: urlData, error: signErr } = await supabase.storage
       .from("reports")
-      .getPublicUrl(filePath);
+      .createSignedUrl(filePath, 60 * 60 * 24 * 7); // 7 days
+
+    if (signErr || !urlData?.signedUrl) {
+      await supabase.from("reports").update({ status: "failed" }).eq("id", reportId);
+      return new Response(
+        JSON.stringify({ error: signErr?.message || "could not sign report URL" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const fileUrl = urlData.signedUrl;
 
     // Update report with URL
     await supabase
       .from("reports")
       .update({
         status: "ready",
-        file_url: urlData.publicUrl,
+        file_url: fileUrl,
       })
       .eq("id", reportId);
 
     return new Response(
-      JSON.stringify({ success: true, url: urlData.publicUrl }),
+      JSON.stringify({ success: true, url: fileUrl }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error: any) {

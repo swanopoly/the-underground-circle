@@ -134,7 +134,7 @@ This is the point where Option B (dedicated Tauri binary) becomes worth consider
 
 ## Conflicts with existing plans
 
-1. **`PHASE_CA-8_HERMES_DELTA_PLAN.md` non-goal "`execute_code`".** Desktop automation IS power-user surface area but is narrower — the agent calls typed tools, not arbitrary Python. `execute_code` stays deferred; `desktop_*` tools are OK because the catalog is bounded and HITL-gated.
+1. **`PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md` non-goal "`execute_code`".** Desktop automation IS power-user surface area but is narrower — the agent calls typed tools, not arbitrary Python. `execute_code` stays deferred; `desktop_*` tools are OK because the catalog is bounded and HITL-gated.
 2. **Memory / approval category proliferation.** New `desktop_action` joins `memory_read/write`, `skill_run/write`, `automation_create/run`, `browser_click`, `external_publish`. Cap at ~10 categories — if we add much more we need a "category family" abstraction.
 3. **Claude Code bridge mandate.** The bridge already reads `~/.claude/projects` — adding desktop-control responsibility means the bridge is now a trust boundary, not just a session viewer. Document this. If users don't want desktop automation, don't pair; the bridge keeps working for its original purpose.
 

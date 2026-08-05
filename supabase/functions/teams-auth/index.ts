@@ -1,4 +1,15 @@
-// Teams Auth — Azure AD OAuth callback for MS Teams integration
+// Teams Auth — Azure AD OAuth for MS Teams integration
+//
+//   POST (Authorization: Bearer <supabase jwt>) { circleId?, orgId? }
+//        → authenticated initiate: verifies the caller is an org owner/admin or
+//          the circle creator (mirrors the teams_connections RLS), stores a
+//          random state bound to the verified user, returns { url }.
+//   GET  ?code&state
+//        → Azure redirect callback: validates state against the server store
+//          (never a decoded state) and binds the connection to the SERVER-STORED
+//          org/circle with installed_by = the stored user.
+//
+// See docs/EDGE_SECURITY_ADVISORY_2026-07-16.md (second sweep, teams-auth).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 
 const corsHeaders = {
@@ -6,11 +17,116 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+const TEAMS_SCOPES = "ChannelMessage.Send Channel.ReadBasic.All Team.ReadBasic.All";
+
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function svc() {
+  return createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+}
+
+async function getAuthedUser(req: Request): Promise<string | null> {
+  const token = (req.headers.get("Authorization") || "").replace("Bearer ", "");
+  if (!token) return null;
+  const anon = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { global: { headers: { Authorization: `Bearer ${token}` } } },
+  );
+  const { data: { user } } = await anon.auth.getUser();
+  return user?.id || null;
+}
+
+// Mirror the teams_connections RLS: org owner/admin OR circle creator may
+// connect a Teams bot for that org/circle.
+async function isAuthorizedForConnection(
+  supabase: ReturnType<typeof svc>,
+  userId: string,
+  orgId: string | null,
+  circleId: string | null,
+): Promise<boolean> {
+  if (orgId) {
+    const { data } = await supabase
+      .from("org_members")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("user_id", userId)
+      .in("role", ["owner", "admin"])
+      .maybeSingle();
+    if (data) return true;
+  }
+  if (circleId) {
+    const { data } = await supabase
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", circleId)
+      .eq("user_id", userId)
+      .eq("role", "creator")
+      .maybeSingle();
+    if (data) return true;
+  }
+  return false;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
+  // ── Authenticated initiate ────────────────────────────────────────────────
+  if (req.method === "POST") {
+    const userId = await getAuthedUser(req);
+    if (!userId) return json({ error: "Unauthenticated" }, 401);
+
+    let body: { circleId?: unknown; orgId?: unknown } = {};
+    try { body = await req.json(); } catch { /* empty body */ }
+    const circleId = typeof body.circleId === "string" && body.circleId ? body.circleId : null;
+    const orgId = typeof body.orgId === "string" && body.orgId ? body.orgId : null;
+    if (!circleId && !orgId) return json({ error: "circleId or orgId required" }, 400);
+
+    const supabase = svc();
+    if (!(await isAuthorizedForConnection(supabase, userId, orgId, circleId))) {
+      return json({ error: "Not authorized to connect Teams for this org/circle" }, 403);
+    }
+
+    const clientId = Deno.env.get("TEAMS_CLIENT_ID");
+    if (!clientId) return json({ error: "TEAMS_CLIENT_ID not configured" }, 500);
+
+    const stateBytes = new Uint8Array(24);
+    crypto.getRandomValues(stateBytes);
+    const state = Array.from(stateBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+    const { error: stateErr } = await supabase.from("teams_oauth_states").insert({
+      state,
+      user_id: userId,
+      org_id: orgId,
+      circle_id: circleId,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    });
+    if (stateErr) {
+      console.error("Failed to store Teams OAuth state:", stateErr);
+      return json({ error: "Failed to initiate OAuth flow" }, 500);
+    }
+
+    const redirectUri = `${Deno.env.get("SUPABASE_URL")}/functions/v1/teams-auth`;
+    const oauthUrl =
+      `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=${clientId}` +
+      `&response_type=code` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&scope=${encodeURIComponent(TEAMS_SCOPES)}` +
+      `&state=${state}`;
+    return json({ url: oauthUrl });
+  }
+
+  // ── Callback (GET from Azure redirect) ────────────────────────────────────
   try {
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
@@ -20,25 +136,32 @@ Deno.serve(async (req: Request) => {
     if (error) {
       return new Response(
         `<html><body><h1>Error</h1><p>${error}</p></body></html>`,
-        { status: 400, headers: { "Content-Type": "text/html" } }
+        { status: 400, headers: { "Content-Type": "text/html" } },
       );
     }
-
     if (!code || !state) {
-      return new Response(
-        JSON.stringify({ error: "Missing code or state" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return json({ error: "Missing code or state" }, 400);
     }
 
-    // Decode state
-    let stateData: { circleId?: string; orgId?: string };
-    try {
-      stateData = JSON.parse(atob(state));
-    } catch {
+    const supabase = svc();
+
+    // Validate state against the server store — never trust a decoded state.
+    const { data: stateRow } = await supabase
+      .from("teams_oauth_states")
+      .select("id, user_id, org_id, circle_id, expires_at")
+      .eq("state", state)
+      .maybeSingle();
+    if (!stateRow) {
       return new Response(
-        JSON.stringify({ error: "Invalid state" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        `<html><body><h1>Invalid or expired state</h1></body></html>`,
+        { status: 400, headers: { "Content-Type": "text/html" } },
+      );
+    }
+    if (new Date(stateRow.expires_at) < new Date()) {
+      await supabase.from("teams_oauth_states").delete().eq("id", stateRow.id);
+      return new Response(
+        `<html><body><h1>State expired</h1></body></html>`,
+        { status: 400, headers: { "Content-Type": "text/html" } },
       );
     }
 
@@ -47,7 +170,6 @@ Deno.serve(async (req: Request) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const redirectUri = `${supabaseUrl}/functions/v1/teams-auth`;
 
-    // Exchange code for token
     const tokenResponse = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -66,7 +188,7 @@ Deno.serve(async (req: Request) => {
       console.error("Token exchange error:", err);
       return new Response(
         `<html><body><h1>Authentication Failed</h1><p>Could not exchange code for token.</p></body></html>`,
-        { status: 500, headers: { "Content-Type": "text/html" } }
+        { status: 500, headers: { "Content-Type": "text/html" } },
       );
     }
 
@@ -77,47 +199,39 @@ Deno.serve(async (req: Request) => {
     const meResponse = await fetch("https://graph.microsoft.com/v1.0/me/joinedTeams", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-
     const teamsData = await meResponse.json();
     const firstTeam = teamsData.value?.[0];
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
-
-    // Store connection
+    // Bind using the SERVER-STORED org/circle, not client-supplied state.
     const { error: insertError } = await supabase
       .from("teams_connections")
       .upsert({
-        org_id: stateData.orgId || null,
-        circle_id: stateData.circleId || null,
+        org_id: stateRow.org_id || null,
+        circle_id: stateRow.circle_id || null,
         tenant_id: tokenData.ext_expires_in ? "azure" : "unknown",
         team_name: firstTeam?.displayName || "Microsoft Teams",
         bot_token: accessToken,
         refresh_token: tokenData.refresh_token || null,
+        installed_by: stateRow.user_id,
         is_active: true,
       });
-
     if (insertError) {
       console.error("DB insert error:", insertError);
     }
 
+    await supabase.from("teams_oauth_states").delete().eq("id", stateRow.id);
+
     // Redirect back to app
     const appUrl = Deno.env.get("APP_URL") || "https://app.chrisswanson.xyz";
-    const redirectPath = stateData.circleId
-      ? `/circle/${stateData.circleId}?tab=teams`
+    const redirectPath = stateRow.circle_id
+      ? `/circle/${stateRow.circle_id}?tab=teams`
       : "/";
-
     return new Response(null, {
       status: 302,
       headers: { Location: `${appUrl}${redirectPath}` },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Teams auth error:", error);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return json({ error: error instanceof Error ? error.message : "internal" }, 500);
   }
 });

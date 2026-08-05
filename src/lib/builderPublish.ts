@@ -7,6 +7,7 @@
  */
 
 import { supabase } from './supabase';
+import { getFreshAccessToken, safeGetUser } from './authSession';
 
 export interface PublishResult {
   id: string;
@@ -29,8 +30,8 @@ export async function publishPreview(input: {
   title?: string;
   circleId?: string | null;
 }): Promise<PublishResult> {
-  const { data: sessionData } = await supabase.auth.getSession();
-  const accessToken = sessionData?.session?.access_token;
+  // getFreshAccessToken never throws (null on any auth error) + refreshes near-expiry (P67/#101).
+  const accessToken = await getFreshAccessToken();
   if (!accessToken) throw new Error('You need to be signed in to publish a share link.');
 
   const res = await fetch(resolveUrl('/functions/v1/publish-preview'), {
@@ -62,12 +63,12 @@ export async function publishPreview(input: {
 /** List the user's own published links. Public read is enabled but we
  * filter client-side to ownership here for the "My shares" UI. */
 export async function listMyPublications(limit = 20) {
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth?.user) return [];
+  const { value: user } = await safeGetUser();
+  if (!user) return [];
   const { data, error } = await supabase
     .from('builder_publications')
     .select('id, title, view_count, created_at, expires_at')
-    .eq('user_id', auth.user.id)
+    .eq('user_id', user.id)
     .order('created_at', { ascending: false })
     .limit(limit);
   if (error) throw error;

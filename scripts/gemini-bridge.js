@@ -18,7 +18,9 @@ const os = require('os');
 const crypto = require('crypto');
 const { exec, execSync } = require('child_process');
 const {
+  appendOpenSwanWorktreeConfigPrompt,
   clampLaunchCount,
+  ensureOpenSwanWorktree,
   loadManagedTerminalSessions,
   makeLaunchId,
   makeTerminalTitle,
@@ -33,8 +35,14 @@ const {
   shellQuote,
   shellTextArg,
 } = require('./terminal-launch-utils');
+const {
+  createPairingChallengeStore,
+  isBridgeRequestSourceAllowed,
+  isPairingRequestSourceAllowed,
+} = require('./desktop-bridge-security');
 
-const PORT = 7780;
+const PORT = Math.max(1024, Math.min(65535, Number(process.env.UC_GEMINI_BRIDGE_PORT) || 7780));
+const BRIDGE_BIND_HOST = '127.0.0.1';
 const ACTIVE_THRESHOLD = 60_000;    // 60s → active (Gemini sessions update less frequently)
 const IDLE_THRESHOLD = 86_400_000;  // 24h → show sessions from today
 const SCAN_INTERVAL = 5000;         // Scan every 5s
@@ -48,7 +56,7 @@ const GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrp9e3aqf6av3hmdib135j.apps.
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
   'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
@@ -58,6 +66,7 @@ let lastScanTime = '';
 let oauthCreds = null;
 let userEmail = '';
 let launchedSessions = loadManagedTerminalSessions('gemini');
+const pairingChallenges = createPairingChallengeStore({ ttlMs: 30_000, maxEntries: 64 });
 
 function getOrCreateBridgeToken() {
   try {
@@ -74,6 +83,29 @@ function getOrCreateBridgeToken() {
 function hasBridgeAuth(req) {
   const sent = req.headers['x-uc-desktop-token'];
   return typeof sent === 'string' && sent === getOrCreateBridgeToken();
+}
+
+function requireBridgeMutationAuth(req, res) {
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  if (!sourceCheck.ok) {
+    res.writeHead(403, CORS);
+    res.end(JSON.stringify({
+      ok: false,
+      code: sourceCheck.code,
+      error: 'Bridge mutations are available only through an allowed loopback request.',
+    }));
+    return false;
+  }
+  if (!hasBridgeAuth(req)) {
+    res.writeHead(401, CORS);
+    res.end(JSON.stringify({
+      ok: false,
+      code: 'bridge_auth_required',
+      error: 'Missing or invalid desktop bridge token',
+    }));
+    return false;
+  }
+  return true;
 }
 
 // ── WSL-aware path resolution ────────────────────────────────────────────────
@@ -486,6 +518,9 @@ function registerLaunchedGeminiSession(data) {
   const session = {
     sessionId: data.sessionId,
     projectDir: data.projectDir || process.cwd(),
+    branch: data.branch || null,
+    worktree: data.worktreeDir || null,
+    isWorktree: Boolean(data.isWorktree),
     model: data.model || 'gemini-cli',
     status: data.status || 'active',
     task: data.task || 'Gemini CLI terminal session',
@@ -536,15 +571,25 @@ async function launchGeminiCliSessions(data) {
   for (let i = 0; i < count; i++) {
     const sessionId = `${launchId}-${i + 1}`;
     const displayName = Array.isArray(data.names) && data.names[i] ? String(data.names[i]) : `Gemini CLI #${i + 1}`;
+    // Per-session git-worktree isolation when requested (fail-open to shared cwd).
+    const { cwd: sessionCwd, branch, worktreeDir, isWorktree } = ensureOpenSwanWorktree({
+      baseCwd: cwd, useWorktree: data.useWorktree, index: i,
+    });
     const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
-    const cliPrompt = buildGeminiManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
-    const command = buildGeminiLaunchCommand({ cwd, prompt: cliPrompt, model, yolo });
+    const cliPrompt = appendOpenSwanWorktreeConfigPrompt(
+      buildGeminiManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt }),
+      sessionCwd,
+    );
+    const command = buildGeminiLaunchCommand({ cwd: sessionCwd, prompt: cliPrompt, model, yolo });
     const launchedAt = new Date().toISOString();
     const terminalTitle = makeTerminalTitle('Gemini CLI', displayName, sessionId);
     const terminalResult = await openTerminal(command, terminalTitle);
     const session = registerLaunchedGeminiSession({
       sessionId,
-      projectDir: cwd,
+      projectDir: sessionCwd,
+      branch,
+      worktreeDir,
+      isWorktree,
       model: model || 'gemini-cli',
       status: terminalResult.ok ? 'active' : 'idle',
       displayName,
@@ -670,18 +715,54 @@ const server = http.createServer(async (req, res) => {
       bridge: 'gemini-cli',
       version: '1.1.0',
       sessions: cachedSessions.length,
-      auth: oauthCreds ? 'oauth' : 'none',
-      email: userEmail,
-      geminiDir: GEMINI_DIR,
       capabilities: ['sessions', 'send', 'launch', 'terminal-send'],
     }));
     return;
   }
 
   if (url === '/pair' && req.method === 'POST') {
-    if (!isAllowedPairOrigin(req)) {
+    const sourceCheck = isPairingRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+    if (!sourceCheck.ok) {
       res.writeHead(403, CORS);
-      res.end(JSON.stringify({ ok: false, error: 'Pairing origin not allowlisted.' }));
+      res.end(JSON.stringify({
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Pairing is available only through an allowed loopback bridge request.',
+      }));
+      return;
+    }
+    let pairInput;
+    try {
+      pairInput = await readJsonBody(req, 2048);
+    } catch (err) {
+      res.writeHead(400, CORS);
+      res.end(JSON.stringify({
+        ok: false,
+        code: 'pairing_body_invalid',
+        error: String(err?.message || err || 'Invalid pairing request body.').slice(0, 300),
+      }));
+      return;
+    }
+    const pairingChallenge = String(pairInput?.pairingChallenge || '').trim();
+    if (!pairingChallenge) {
+      const issued = pairingChallenges.issue(req.socket.remoteAddress);
+      res.writeHead(428, CORS);
+      res.end(JSON.stringify({
+        ok: false,
+        code: 'pairing_challenge_required',
+        challenge: issued.challenge,
+        expiresAt: new Date(issued.expiresAt).toISOString(),
+        error: 'Retry pairing once with the short-lived challenge.',
+      }));
+      return;
+    }
+    if (!pairingChallenges.consume(pairingChallenge, req.socket.remoteAddress)) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({
+        ok: false,
+        code: 'pairing_challenge_invalid',
+        error: 'Pairing challenge is invalid, expired, already used, or belongs to another source.',
+      }));
       return;
     }
     res.writeHead(200, CORS);
@@ -689,7 +770,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  if (!sourceCheck.ok) {
+    res.writeHead(403, CORS);
+    res.end(JSON.stringify({
+      ok: false,
+      code: sourceCheck.code,
+      error: 'Bridge access is available only through an allowed loopback or explicitly configured tunnel request.',
+    }));
+    return;
+  }
+
   if (url === '/sessions') {
+    if (!hasBridgeAuth(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
+      return;
+    }
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ sessions: cachedSessions, timestamp: lastScanTime }));
     return;
@@ -734,6 +831,11 @@ const server = http.createServer(async (req, res) => {
 
   // ── GET /auth — Check OAuth status ─────────────────────────────────────────
   if (url === '/auth' && req.method === 'GET') {
+    if (!hasBridgeAuth(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
+      return;
+    }
     loadOAuthCreds(); // Reload from disk
     userEmail = loadUserEmail();
     res.writeHead(200, CORS);
@@ -748,13 +850,7 @@ const server = http.createServer(async (req, res) => {
 
   // ── POST /send — Send a message via Gemini API (using OAuth tokens) ────────
   if (url === '/send' && req.method === 'POST') {
-    const origin = req.headers['origin'] || req.headers['referer'] || '';
-    const isLocal = !origin || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('app.chrisswanson.xyz');
-    if (!isLocal) {
-      res.writeHead(403, CORS);
-      res.end(JSON.stringify({ ok: false, error: 'Forbidden: only local/app origins allowed' }));
-      return;
-    }
+    if (!requireBridgeMutationAuth(req, res)) return;
 
     let body = '';
     req.on('data', chunk => {
@@ -842,9 +938,9 @@ server.on('error', (err) => {
 
 process.on('uncaughtException', (err) => console.error('[gemini-bridge] Uncaught:', err.message));
 
-server.listen(PORT, () => {
+server.listen(PORT, BRIDGE_BIND_HOST, () => {
   console.log(`\n  Gemini CLI Bridge`);
-  console.log(`  Serving on http://localhost:${PORT}`);
+  console.log(`  Serving on http://${BRIDGE_BIND_HOST}:${PORT} (loopback only)`);
   console.log(`  Scanning ${GEMINI_DIR}`);
   console.log(`  Auth: ${oauthCreds ? `OAuth (${userEmail})` : 'Not authenticated — run gemini CLI first'}`);
   console.log(`  Found ${cachedSessions.length} active session(s)\n`);

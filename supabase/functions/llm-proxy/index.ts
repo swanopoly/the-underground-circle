@@ -72,6 +72,10 @@ interface LLMProxyRequest {
   circleId?: string;
   userId?: string;
   thinkingLevel?: "fast" | "balanced" | "deep";
+  // Snake-case alias of `thinkingLevel` — accepted so OpenAI-style callers
+  // that send `thinking_level` (chat orchestration surfaces) get the same
+  // temperature/max_tokens defaults. `thinkingLevel` wins when both are set.
+  thinking_level?: "fast" | "balanced" | "deep";
   // Optional caller-supplied key for one-off testing before saving.
   api_key?: string;
   // Optional caller-supplied endpoint for one-off OpenAI-compatible key tests.
@@ -89,8 +93,20 @@ interface EmbeddingProxyResponse {
   input_tokens: number;
 }
 
+/** Normalized provider tool call. `arguments` is always the raw
+ *  JSON-encoded string exactly as the provider returned it (objects are
+ *  stringified) — callers parse it themselves. */
+interface NormalizedToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
 interface LLMProxyResponse {
   response: string;
+  /** Present only when the provider returned tool calls. Omitted (not
+   *  empty-array) otherwise, so existing consumers see no shape change. */
+  toolCalls?: NormalizedToolCall[];
   usage: {
     model: string;
     provider: string;
@@ -142,6 +158,45 @@ const OPENAI_COMPATIBLE: Provider[] = [
   "deepseek",
 ];
 
+// ─── SSRF guard for caller-supplied endpoints (ollama / openai_compatible) ───
+// A caller-controlled endpoint URL must never resolve to a loopback, private,
+// link-local, CGNAT, or cloud-metadata host from the hosted edge server.
+// (Mirrors the guard in custom-api-proxy/index.ts.)
+function isPrivateIpv4(hostname: string): boolean {
+  const match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) return false;
+  const nums = match.slice(1).map(Number);
+  if (nums.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = nums;
+  return a === 10
+    || a === 127
+    || a === 0
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127);
+}
+function isBlockedHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost"
+    || host.endsWith(".localhost")
+    || host.endsWith(".local")
+    || host.endsWith(".internal")
+    || host === "::1"
+    || host.startsWith("fc")
+    || host.startsWith("fd")
+    || host.startsWith("fe80")
+    || host === "169.254.169.254"
+    || isPrivateIpv4(host);
+}
+/** True when a resolved endpoint must NOT be fetched (bad scheme or blocked host). */
+function endpointIsBlocked(rawUrl: string): boolean {
+  let u: URL;
+  try { u = new URL(rawUrl); } catch { return true; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return true;
+  return isBlockedHostname(u.hostname);
+}
+
 function normalizeOpenAICompatibleEndpoint(endpoint: string): string {
   const trimmed = endpoint.trim().replace(/\/+$/, "");
   if (!trimmed) return "";
@@ -167,6 +222,11 @@ function normalizeProviderModel(provider: Provider, model: string): string {
 
 const MODEL_COSTS: Record<string, [number, number]> = {
   // OpenAI
+  "gpt-5.5-pro": [30.00, 180.00],
+  "gpt-5.5": [5.00, 30.00],
+  "gpt-5.4": [2.50, 15.00],
+  "gpt-5.4-mini": [0.75, 4.50],
+  "gpt-5.4-nano": [0.20, 1.20],
   "gpt-4.1": [2.00, 8.00],
   "gpt-4.1-mini": [0.40, 1.60],
   "gpt-4.1-nano": [0.10, 0.40],
@@ -177,9 +237,15 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "o1": [15.00, 60.00],
   "o3-mini": [1.10, 4.40],
   // Google
+  "gemini-3.5-flash": [1.50, 9.00],
+  "gemini-3.1-pro-preview": [2.00, 12.00],
+  "gemini-3.1-flash-lite": [0.04, 0.15],
   "gemini-2.5-pro": [1.25, 10.00],
   "gemini-2.5-flash": [0.15, 0.60],
+  "gemini-2.5-flash-lite": [0.04, 0.15],
   // Anthropic
+  "claude-fable-5": [10.00, 50.00],
+  "claude-opus-4-8": [5.00, 25.00],
   "claude-opus-4-7": [5.00, 25.00],
   "claude-opus-4-6": [5.00, 25.00],
   "claude-sonnet-4-6": [3.00, 15.00],
@@ -235,6 +301,52 @@ const THINKING_LEVELS: Record<string, ThinkingConfig> = {
   balanced: { temperature: 0.7, max_tokens: 1024 },
   deep: { temperature: 0.9, max_tokens: 4096 },
 };
+
+// Provider-safe ceiling for caller-supplied max_tokens. An explicit
+// `max_tokens` in the request always beats the thinking-level default,
+// but never exceeds this so a bad caller can't request unbounded output.
+const MAX_TOKENS_CEILING = 16384;
+
+/** Resolve the output-token budget: explicit request value wins (clamped
+ *  to [1, MAX_TOKENS_CEILING]); absent/invalid falls back to the
+ *  thinking-level default — today's behavior unchanged. */
+function resolveMaxTokens(requested: unknown, thinkingDefault: number): number {
+  if (typeof requested === "number" && Number.isFinite(requested) && requested >= 1) {
+    return Math.min(Math.floor(requested), MAX_TOKENS_CEILING);
+  }
+  return thinkingDefault;
+}
+
+/** Normalize OpenAI-compatible `choices[0].message.tool_calls` into the
+ *  proxy's `toolCalls` contract. Returns undefined when there are no
+ *  usable tool calls so the response field stays absent. */
+function normalizeToolCalls(raw: unknown): NormalizedToolCall[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: NormalizedToolCall[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const tc = raw[i] as Record<string, unknown> | null;
+    if (!tc || typeof tc !== "object") continue;
+    // OpenAI shape: { id, type: 'function', function: { name, arguments } }.
+    // Some compatible providers flatten name/arguments onto the call itself.
+    const fn = (tc.function && typeof tc.function === "object"
+      ? tc.function
+      : tc) as Record<string, unknown>;
+    const name = typeof fn.name === "string" ? fn.name : "";
+    if (!name) continue;
+    const rawArgs = fn.arguments;
+    const args = typeof rawArgs === "string"
+      ? rawArgs
+      : rawArgs == null
+        ? "{}"
+        : JSON.stringify(rawArgs);
+    out.push({
+      id: typeof tc.id === "string" && tc.id ? tc.id : `tool_call_${i}`,
+      name,
+      arguments: args,
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
 
 // ─── Load agent personality ─────────────────────────────────────────────────
 
@@ -304,7 +416,14 @@ async function callOpenAICompatible(
   // for function-calling, so passing them through is safe — they just
   // won't trigger the OpenRouter-specific `openrouter:web_search`
   // server tool that needs OR's host to handle it.
-  extra?: { tools?: Array<Record<string, unknown>>; plugins?: Array<Record<string, unknown>> },
+  extra?: {
+    tools?: Array<Record<string, unknown>>;
+    plugins?: Array<Record<string, unknown>>;
+    // OpenAI-compatible tool_choice ('auto' | 'none' | 'required' |
+    // {type:'function',...}). Only forwarded when tools are also present —
+    // providers reject tool_choice without tools.
+    tool_choice?: unknown;
+  },
 ): Promise<LLMProxyResponse> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -325,6 +444,9 @@ async function callOpenAICompatible(
   };
   if (extra?.tools && Array.isArray(extra.tools) && extra.tools.length > 0) {
     requestBody.tools = extra.tools;
+    if (extra.tool_choice !== undefined && extra.tool_choice !== null) {
+      requestBody.tool_choice = extra.tool_choice;
+    }
   }
   if (extra?.plugins && Array.isArray(extra.plugins) && extra.plugins.length > 0) {
     requestBody.plugins = extra.plugins;
@@ -348,8 +470,13 @@ async function callOpenAICompatible(
   const inputTokens = usage.prompt_tokens || 0;
   const outputTokens = usage.completion_tokens || 0;
 
+  // Tool-call passthrough: a tool-calling turn legitimately has empty
+  // content, so don't replace it with "No response generated." then.
+  const toolCalls = normalizeToolCalls(choice?.message?.tool_calls);
+
   return {
-    response: choice?.message?.content || "No response generated.",
+    response: choice?.message?.content || (toolCalls ? "" : "No response generated."),
+    ...(toolCalls ? { toolCalls } : {}),
     usage: {
       model: data.model || model,
       provider,
@@ -380,13 +507,16 @@ async function callAnthropic(
   // Map model shortcuts to full IDs. Canonical short form (no date suffixes)
   // per Anthropic. `claude-opus` follows the latest opus — currently 4.7.
   const MODEL_MAP: Record<string, string> = {
+    "claude-fable": "claude-fable-5",
+    "claude-fable-5": "claude-fable-5",
+    "claude-opus-4-8": "claude-opus-4-8",
     "claude-opus-4-7": "claude-opus-4-7",
     "claude-opus-4-6": "claude-opus-4-6",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-haiku-4-5": "claude-haiku-4-5",
     "claude-haiku": "claude-haiku-4-5",
     "claude-sonnet": "claude-sonnet-4-6",
-    "claude-opus": "claude-opus-4-7",
+    "claude-opus": "claude-opus-4-8",
   };
   const resolvedModel = MODEL_MAP[model] || model;
 
@@ -513,6 +643,7 @@ Deno.serve(async (req: Request) => {
     const body: LLMProxyRequest & {
       tools?: Array<Record<string, unknown>>;
       plugins?: Array<Record<string, unknown>>;
+      tool_choice?: unknown;
     } = await req.json();
     const { provider, model: rawModel, messages, circleId, thinkingLevel } = body;
     const model = rawModel && provider !== "openai-embed"
@@ -630,10 +761,15 @@ Deno.serve(async (req: Request) => {
     apiKey = keyData.apiKey;
     customEndpoint = body.endpoint || keyData.endpoint || undefined;
 
-    // Apply thinking level config
-    const thinkConfig = THINKING_LEVELS[thinkingLevel || "balanced"];
+    // Apply thinking level config. `thinking_level` is an accepted
+    // snake-case alias; camelCase wins if both are present, and unknown
+    // level strings fall back to balanced instead of crashing.
+    const requestedLevel = thinkingLevel || body.thinking_level;
+    const thinkConfig = THINKING_LEVELS[requestedLevel || "balanced"] ?? THINKING_LEVELS.balanced;
     const temperature = body.temperature ?? thinkConfig.temperature;
-    const maxTokens = body.max_tokens ?? thinkConfig.max_tokens;
+    // Explicit request max_tokens beats the thinking-level default,
+    // clamped to MAX_TOKENS_CEILING; absent -> prior behavior unchanged.
+    const maxTokens = resolveMaxTokens(body.max_tokens, thinkConfig.max_tokens);
 
     // Build messages with personality and context
     const finalMessages = [...messages];
@@ -681,6 +817,12 @@ Deno.serve(async (req: Request) => {
       } else {
         endpoint = PROVIDER_ENDPOINTS[provider];
       }
+      // SSRF guard: only the caller-controlled endpoints (ollama /
+      // openai_compatible) are attacker-influenced. Built-in PROVIDER_ENDPOINTS
+      // are trusted public hosts and are left unchecked.
+      if ((provider === "ollama" || provider === "openai_compatible") && endpointIsBlocked(endpoint)) {
+        return errResponse(400, "validation", "Endpoint host is not allowed.");
+      }
       result = await callOpenAICompatible(
         endpoint,
         apiKey!,
@@ -689,7 +831,7 @@ Deno.serve(async (req: Request) => {
         temperature,
         maxTokens,
         provider,
-        { tools: body.tools, plugins: body.plugins },
+        { tools: body.tools, plugins: body.plugins, tool_choice: body.tool_choice },
       );
     } else {
       return errResponse(400, "unsupported_provider", `Unsupported provider: ${provider}`);

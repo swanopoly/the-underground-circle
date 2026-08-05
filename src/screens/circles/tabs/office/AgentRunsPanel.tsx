@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { MONO, formatTokens } from './AgentPanelShared';
 import OpenSwanQualityAggregate from '../../../../components/chat/OpenSwanQualityAggregate';
@@ -6,6 +6,8 @@ import OpenSwanQualityDashboard from '../../../../components/chat/OpenSwanQualit
 import RunMetadataSummary from '../../../../components/chat/RunMetadataSummary';
 import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard } from '../../../../lib/openswanObservedEvals';
 import { buildRunMetadataSummaryProps } from '../../../../lib/runMetadataSummary';
+import { getRunSubjectSummary } from '../../../../lib/agentRunSubjectSummary';
+import { planRunReap } from '../../../../lib/runStallPolicyCore';
 
 type StatusFilter = 'all' | 'completed' | 'running' | 'failed';
 
@@ -71,8 +73,11 @@ function matchesFilter(run: any, filter: StatusFilter): boolean {
   return true;
 }
 
-export default function AgentRunsPanel({ circleId, agentId, agentName, accentColor }: { circleId: string; agentId: string; agentName: string; accentColor: string }) {
+export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], agentName, accentColor }: { circleId: string; agentId: string; agentAliases?: string[]; agentName: string; accentColor: string }) {
   const [runs, setRuns] = useState<any[]>([]);
+  // Run-reaper wire: 'running' runs whose heartbeat (updated_at) is aging —
+  // flagged "STALLED?" but not yet reaped (dead ones get flipped to failed).
+  const [staleRunIds, setStaleRunIds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [steps, setSteps] = useState<any[]>([]);
@@ -81,16 +86,61 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Run-reaper dedupe: run ids this mount already issued a DB reap for, so
+  // dep-change effect re-runs (pageSize / identity) don't re-fire writes while
+  // the conditional status flip is still in flight.
+  const reapedRunIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
-        const { listRuns } = await import('../../../../lib/agentRunSystem');
+        const { listRunsForAgentSubject, reapRun } = await import('../../../../lib/agentRunSystem');
         // Fetch one extra row so we know whether to show "load more"
-        const data = await listRuns(circleId, { agentId, limit: pageSize + 1 });
+        const aliases = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
+        const rawData = await listRunsForAgentSubject(circleId, {
+          agentId,
+          agentAliases: aliases,
+          agentName,
+          limit: pageSize + 1,
+        });
+        // Run-reaper: classify liveness off the heartbeat column only.
+        // started_at deliberately OMITTED so runs from producers that never
+        // heartbeat classify as 'live' (core fail-safe), not false-reaped.
+        const reapPlan = planRunReap(
+          rawData.map((r) => ({ id: r.id, status: r.status, updated_at: r.updated_at })),
+          Date.now(),
+        );
+        // Reap eligibility (fail-safe floor): every producer's row carries a
+        // non-null updated_at (DEFAULT now() + updateRunStatus), so a dead
+        // heartbeat only proves death for runs that OPTED IN to heartbeating —
+        // metadata.heartbeat, set by agentRunPersistence.createPersistedRun.
+        // Everything else (edge v2 loops, legacy runtimes, or any active
+        // client-continuation phase) gets at most the soft "STALLED?" badge
+        // below, NEVER the local 'failed' flip or the DB reap.
+        const reapEligibleIds = new Set(rawData
+          .filter((r) => r.metadata?.heartbeat === true
+            && !['client_pending', 'client_dispatching', 'client_resuming'].includes(String(r.final_stop_reason || '')))
+          .map((r) => r.id));
+        const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
+        const data = reapIds.size > 0
+          ? rawData.map((r) => (reapIds.has(r.id) ? { ...r, status: 'failed' as const } : r))
+          : rawData;
         if (cancelled) return;
+        for (const runId of reapIds) {
+          // Fire-and-forget reap, once per mount: reapRun claims the row
+          // conditionally (only while still 'running'), so concurrent surfaces
+          // never duplicate the status flip or the reaped_reason metadata
+          // merge (the merge only runs for the claim winner).
+          if (reapedRunIdsRef.current.has(runId)) continue;
+          reapedRunIdsRef.current.add(runId);
+          void reapRun(runId, 'heartbeat_stale');
+        }
+        setStaleRunIds(new Set([
+          ...reapPlan.stale,
+          ...reapPlan.toReap.filter((id) => !reapIds.has(id)),
+        ]));
         if (data.length > pageSize) {
           setRuns(data.slice(0, pageSize));
           setHasMore(true);
@@ -104,7 +154,7 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [agentId, circleId, pageSize]);
+  }, [agentAliases, agentId, agentName, circleId, pageSize]);
 
   const loadSteps = async (runId: string) => {
     try {
@@ -227,6 +277,7 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
                 ? `$${run.estimated_cost.toFixed(run.estimated_cost < 0.01 ? 4 : 3)}`
                 : null;
               const metadataSummary = buildRunMetadataSummaryProps(run.metadata);
+              const subjectSummary = getRunSubjectSummary(run, agentName);
 
               return (
                 <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 8, overflow: 'hidden' }}>
@@ -245,6 +296,9 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sc }} />
                       <Text style={{ color: '#f0f0f5', fontSize: 13, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled run'}</Text>
+                      {staleRunIds.has(run.id) ? (
+                        <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>STALLED?</Text>
+                      ) : null}
                       <Text style={{ color: sc, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
                     </View>
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 3 }}>
@@ -256,6 +310,11 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
                         variant="compact"
                         accentColor="#38bdf8"
                       />
+                      {subjectSummary.subjectKey ? (
+                        <Text style={{ color: accentColor, fontSize: 11, fontFamily: MONO }} numberOfLines={1}>
+                          SUBJECT {subjectSummary.subjectKey}{subjectSummary.aliases.length > 0 ? ` +${subjectSummary.aliases.length}` : ''}
+                        </Text>
+                      ) : null}
                       {tokenSummary && <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{tokenSummary}</Text>}
                       {costSummary && <Text style={{ color: '#22c55e', fontSize: 11, fontFamily: MONO }}>{costSummary}</Text>}
                       <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>{new Date(run.created_at).toLocaleTimeString()}</Text>
@@ -264,6 +323,29 @@ export default function AgentRunsPanel({ circleId, agentId, agentName, accentCol
 
                   {isExpanded && (
                     <View style={{ paddingHorizontal: 8, paddingBottom: 8, borderTopWidth: 1, borderTopColor: '#1a1a28', paddingTop: 6 }}>
+                      {(subjectSummary.subjectKey || subjectSummary.aliases.length > 0 || subjectSummary.dbId) ? (
+                        <View style={{ borderWidth: 1, borderColor: '#24243a', backgroundColor: '#0b0b14', borderRadius: 2, padding: 8, marginBottom: 8, gap: 5 }}>
+                          <Text style={{ color: '#909098', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
+                            SUBJECT IDENTITY
+                          </Text>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                            {subjectSummary.displayName ? (
+                              <Text style={{ color: '#d8d8e8', fontSize: 11, fontFamily: MONO }}>{subjectSummary.displayName}</Text>
+                            ) : null}
+                            {subjectSummary.subjectKey ? (
+                              <Text style={{ color: accentColor, fontSize: 11, fontFamily: MONO }}>{subjectSummary.subjectKey}</Text>
+                            ) : null}
+                            {subjectSummary.dbId ? (
+                              <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{subjectSummary.dbId.slice(0, 8)}</Text>
+                            ) : null}
+                          </View>
+                          {subjectSummary.aliases.length > 0 ? (
+                            <Text style={{ color: '#707086', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>
+                              aliases {subjectSummary.aliases.slice(0, 8).join(' · ')}{subjectSummary.aliases.length > 8 ? ` · +${subjectSummary.aliases.length - 8}` : ''}
+                            </Text>
+                          ) : null}
+                        </View>
+                      ) : null}
                       {childRuns.length > 0 ? (
                         <View style={{ marginBottom: 10, gap: 6 }}>
                           <Text style={{ color: '#7c3aed', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>

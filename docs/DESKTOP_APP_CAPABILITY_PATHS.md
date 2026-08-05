@@ -92,7 +92,7 @@
 | **B — Local desktop bridge** | Deferred indefinitely — 3+ user requests gate | Full OS-level control | L (2–4 wk) | High — permissions, signing, sandbox |
 | **D — Anthropic desktop mode** | Research only | Full autonomous desktop | L (integration work) + ongoing compute cost | High — autonomous mouse |
 
-**Rule** (mirrors `PHASE_CA-8_HERMES_DELTA_PLAN.md` non-goals): do not ship B or D without the user explicitly opting into a **per-circle** "desktop automation allowed" setting, and all destructive tools from either path MUST route through `chatApprovalGate` by default (no `alwaysAllow`).
+**Rule** (mirrors `PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md` non-goals): do not ship B or D without the user explicitly opting into a **per-circle** "desktop automation allowed" setting, and all destructive tools from either path MUST route through `chatApprovalGate` by default (no `alwaysAllow`).
 
 ---
 

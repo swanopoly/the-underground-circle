@@ -8,8 +8,14 @@ import {
   TextInput,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import {
+  getTrustedMcpServerIds,
+  setMcpServerTrusted,
+  MCP_TRUST_WARNING_COPY,
+} from '../../../../lib/circleMcpTrustSettings';
 
 interface McpServer {
   id: string;
@@ -62,6 +68,8 @@ export default function McpPanel({ circleId, onClose }: Props) {
   const [testing, setTesting] = useState<string | null>(null);
   const [serverTools, setServerTools] = useState<Record<string, McpTool[]>>({});
   const [loadingTools, setLoadingTools] = useState<Record<string, boolean>>({});
+  const [trustedIds, setTrustedIds] = useState<string[]>([]);
+  const [togglingTrust, setTogglingTrust] = useState<string | null>(null);
 
   useEffect(() => {
     loadServers();
@@ -69,15 +77,50 @@ export default function McpPanel({ circleId, onClose }: Props) {
 
   const loadServers = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from('circle_mcp_servers')
-      .select('*')
-      .eq('circle_id', circleId)
-      .order('created_at', { ascending: false });
+    const [{ data, error }, trusted] = await Promise.all([
+      supabase
+        .from('circle_mcp_servers')
+        .select('*')
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false }),
+      getTrustedMcpServerIds(circleId),
+    ]);
 
     if (error) console.error('Error loading MCP servers:', error);
     else setServers(data || []);
+    setTrustedIds(trusted);
     setLoading(false);
+  };
+
+  // Confirmation helper — window.confirm on web (RN-web Alert.alert with
+  // buttons is a no-op), Alert.alert on native. Same pattern as
+  // AgentGatewayPanels.
+  const confirmTrust = (message: string): Promise<boolean> => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      return Promise.resolve(window.confirm(message));
+    }
+    return new Promise(resolve => {
+      Alert.alert('Trust this MCP server?', message, [
+        { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'Trust Server', style: 'destructive', onPress: () => resolve(true) },
+      ]);
+    });
+  };
+
+  const handleToggleTrust = async (server: McpServer) => {
+    const currentlyTrusted = trustedIds.includes(server.id);
+    if (!currentlyTrusted) {
+      const ok = await confirmTrust(`Trust "${server.name}"?\n\n${MCP_TRUST_WARNING_COPY}`);
+      if (!ok) return;
+    }
+    setTogglingTrust(server.id);
+    const result = await setMcpServerTrusted(circleId, server.id, !currentlyTrusted);
+    if (result.ok) {
+      setTrustedIds(result.trustedIds);
+    } else if (result.error) {
+      Alert.alert('Error', result.error);
+    }
+    setTogglingTrust(null);
   };
 
   const fetchTools = async (server: McpServer) => {
@@ -149,6 +192,12 @@ export default function McpPanel({ circleId, onClose }: Props) {
     if (error) {
       Alert.alert('Error', error.message);
     } else {
+      // Clean up the trust entry so deleted servers don't keep occupying a
+      // slot in the bounded trusted-id list.
+      if (trustedIds.includes(id)) {
+        const result = await setMcpServerTrusted(circleId, id, false);
+        if (result.ok) setTrustedIds(result.trustedIds);
+      }
       setServerTools(prev => {
         const next = { ...prev };
         delete next[id];
@@ -261,6 +310,7 @@ export default function McpPanel({ circleId, onClose }: Props) {
             servers.map((server) => {
               const tools = serverTools[server.id];
               const isLoadingTools = loadingTools[server.id];
+              const isTrusted = trustedIds.includes(server.id);
               return (
                 <View key={server.id} style={styles.serverCardWrapper}>
                   <View style={styles.serverCard}>
@@ -274,9 +324,29 @@ export default function McpPanel({ circleId, onClose }: Props) {
                         )}
                       </View>
                       <Text style={styles.serverUrl} numberOfLines={1}>{server.url}</Text>
-                      <View style={styles.badge}>
-                        <Text style={styles.badgeText}>{server.type.toUpperCase()}</Text>
+                      <View style={styles.badgeRow}>
+                        <View style={styles.badge}>
+                          <Text style={styles.badgeText}>{server.type.toUpperCase()}</Text>
+                        </View>
+                        <Pressable
+                          onPress={() => handleToggleTrust(server)}
+                          disabled={togglingTrust === server.id}
+                          style={[styles.trustToggle, isTrusted ? styles.trustToggleOn : styles.trustToggleOff]}
+                        >
+                          {togglingTrust === server.id ? (
+                            <ActivityIndicator size="small" color={isTrusted ? '#22c55e' : '#6f6f6f'} />
+                          ) : (
+                            <Text style={[styles.trustToggleText, { color: isTrusted ? '#22c55e' : '#6f6f6f' }]}>
+                              {isTrusted ? '✓ TRUSTED' : 'UNTRUSTED'}
+                            </Text>
+                          )}
+                        </Pressable>
                       </View>
+                      {isTrusted && (
+                        <Text style={styles.trustNote}>
+                          Read-only tools run without approval. Output is still treated as untrusted data.
+                        </Text>
+                      )}
                     </View>
                     <View style={styles.serverActions}>
                       <Pressable
@@ -467,13 +537,43 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 6,
+  },
   badge: {
     backgroundColor: '#6366f120',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
     alignSelf: 'flex-start',
+  },
+  trustToggle: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  trustToggleOn: {
+    borderColor: '#22c55e60',
+    backgroundColor: '#22c55e12',
+  },
+  trustToggleOff: {
+    borderColor: '#3a3a3a',
+    backgroundColor: 'transparent',
+  },
+  trustToggleText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    letterSpacing: 0.5,
+  },
+  trustNote: {
+    color: '#eab308',
+    fontSize: 10,
     marginTop: 6,
+    fontStyle: 'italic',
   },
   badgeText: {
     color: '#6366f1',

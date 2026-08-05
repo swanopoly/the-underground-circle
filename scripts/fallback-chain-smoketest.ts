@@ -4,6 +4,11 @@
  * chain on transient failures, bubbles structural errors, and fires
  * the onFallback observer once per advance.
  *
+ * Also covers `providerHealthRegistry` (health-aware PRE-selection for
+ * the cross-provider router) with injected time: class→cooldown
+ * mapping, 30s window enter/exit, request-specific classes NOT cooling
+ * down, order-only reorder (never drops to zero), and ring bounding.
+ *
  * Run: npm run smoke:fallback-chain
  */
 
@@ -15,6 +20,19 @@ import {
   type FallbackProviderEntry,
 } from '../src/lib/agentProviders/fallbackChain';
 import type { AgentProvider, ProviderTurnResult } from '../src/lib/agentExecutionCore';
+import {
+  recordProviderOutcome,
+  isProviderCoolingDown,
+  classifyProviderError,
+  excludeCoolingProviders,
+  resetProviderHealth,
+  providerHealthDebug,
+  COOLDOWN_BY_CLASS,
+  DEFAULT_COOLDOWN_MS,
+  MAX_EVENTS_PER_PROVIDER,
+  type ProviderErrorClass,
+} from '../src/lib/providerHealthRegistry';
+import { resolveProviderRoutes } from '../src/lib/crossProviderRouter';
 
 let failures = 0;
 function fail(m: string) { failures += 1; console.error('FAIL:', m); }
@@ -208,6 +226,188 @@ async function main() {
     let threw = false;
     try { createFallbackProvider({ providers: [] }); } catch { threw = true; }
     assert(threw, 'construction: empty providers rejected');
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  //  providerHealthRegistry — health-aware PRE-selection (injected time)
+  // ════════════════════════════════════════════════════════════════
+  {
+    // Fixed clock base so every assertion is deterministic.
+    const T0 = 1_000_000;
+
+    // ── classifyProviderError: status-code mapping ────────────────
+    resetProviderHealth();
+    assert(classifyProviderError({ status: 429 }) === 'rate_limit', 'classify: 429 → rate_limit');
+    assert(classifyProviderError({ status: 529 }) === 'overload', 'classify: 529 → overload');
+    assert(classifyProviderError({ status: 503 }) === 'overload', 'classify: 503 → overload');
+    assert(classifyProviderError({ status: 500 }) === 'transient', 'classify: 500 → transient');
+    assert(classifyProviderError({ status: 504 }) === 'transient', 'classify: 504 → transient');
+    assert(classifyProviderError({ status: 408 }) === 'transient', 'classify: 408 → transient');
+    assert(classifyProviderError({ status: 401 }) === 'auth', 'classify: 401 → auth');
+    assert(classifyProviderError({ status: 403 }) === 'auth', 'classify: 403 → auth');
+    assert(classifyProviderError({ statusCode: 500 }) === 'transient', 'classify: .statusCode shape → transient');
+    assert(classifyProviderError({ response: { status: 429 } }) === 'rate_limit', 'classify: .response.status shape → rate_limit');
+
+    // ── classifyProviderError: message heuristics ─────────────────
+    assert(classifyProviderError(new Error('Rate limit exceeded')) === 'rate_limit', 'classify: "rate limit" msg → rate_limit');
+    assert(classifyProviderError(new Error('too many requests')) === 'rate_limit', 'classify: "too many requests" → rate_limit');
+    assert(classifyProviderError(new Error('Model is overloaded')) === 'overload', 'classify: "overloaded" msg → overload');
+    assert(classifyProviderError(new Error('fetch failed')) === 'transient', 'classify: "fetch failed" → transient');
+    assert(classifyProviderError(new Error('ECONNRESET')) === 'transient', 'classify: ECONNRESET → transient');
+    assert(classifyProviderError(new Error('invalid api key')) === 'auth', 'classify: "invalid api key" → auth');
+    assert(classifyProviderError(new Error("This model's maximum context length is 8192")) === 'context_overflow', 'classify: context-length msg → context_overflow');
+    assert(classifyProviderError({ status: 400, message: 'reduce the length of the messages' }) === 'context_overflow', 'classify: 400 + context msg → context_overflow');
+    assert(classifyProviderError(new Error('flagged by content policy')) === 'content_policy', 'classify: "content policy" → content_policy');
+    assert(classifyProviderError({ status: 400, message: 'request blocked by safety moderation' }) === 'content_policy', 'classify: 400 + safety msg → content_policy');
+    assert(classifyProviderError({ status: 400, message: 'bad param foo' }) === 'other', 'classify: plain 400 → other');
+    assert(classifyProviderError(null) === 'other', 'classify: null → other');
+    assert(classifyProviderError(new Error('some unknown thing')) === 'other', 'classify: unknown msg → other');
+
+    // ── COOLDOWN_BY_CLASS table: health vs request-specific ───────
+    const coolClasses: ProviderErrorClass[] = ['rate_limit', 'overload', 'transient'];
+    const noCoolClasses: ProviderErrorClass[] = ['context_overflow', 'content_policy', 'auth', 'other'];
+    for (const c of coolClasses) assert(COOLDOWN_BY_CLASS[c] === true, `table: ${c} DOES cool down`);
+    for (const c of noCoolClasses) assert(COOLDOWN_BY_CLASS[c] === false, `table: ${c} does NOT cool down`);
+
+    // ── isProviderCoolingDown: rate_limit enters, ages out at 30s ──
+    resetProviderHealth();
+    assert(!isProviderCoolingDown('groq', T0), 'cooldown: unknown provider not cooling');
+    recordProviderOutcome('groq', { ok: false, errorClass: 'rate_limit' }, T0);
+    assert(isProviderCoolingDown('groq', T0), 'cooldown: rate_limit → cooling at t0');
+    assert(isProviderCoolingDown('groq', T0 + 29_999), 'cooldown: still cooling at 29.999s (inside 30s window)');
+    assert(!isProviderCoolingDown('groq', T0 + DEFAULT_COOLDOWN_MS + 1), 'cooldown: restored after 30s window');
+    assert(DEFAULT_COOLDOWN_MS === 30_000, 'cooldown: default window is 30s');
+
+    // ── overload + transient also cool down ───────────────────────
+    resetProviderHealth();
+    recordProviderOutcome('openrouter', { ok: false, errorClass: 'overload' }, T0);
+    assert(isProviderCoolingDown('openrouter', T0 + 5_000), 'cooldown: overload → cooling');
+    resetProviderHealth();
+    recordProviderOutcome('huggingface', { ok: false, errorClass: 'transient' }, T0);
+    assert(isProviderCoolingDown('huggingface', T0 + 5_000), 'cooldown: transient → cooling');
+
+    // ── content_policy / auth / context_overflow do NOT cool down ─
+    resetProviderHealth();
+    recordProviderOutcome('openai', { ok: false, errorClass: 'content_policy' }, T0);
+    assert(!isProviderCoolingDown('openai', T0), 'cooldown: content_policy does NOT cool (request-specific)');
+    recordProviderOutcome('openai', { ok: false, errorClass: 'auth' }, T0);
+    assert(!isProviderCoolingDown('openai', T0), 'cooldown: auth does NOT cool (config, not health)');
+    recordProviderOutcome('openai', { ok: false, errorClass: 'context_overflow' }, T0);
+    assert(!isProviderCoolingDown('openai', T0), 'cooldown: context_overflow does NOT cool (prompt-specific)');
+
+    // ── success is not a cooldown signal ──────────────────────────
+    resetProviderHealth();
+    recordProviderOutcome('groq', { ok: true }, T0);
+    assert(!isProviderCoolingDown('groq', T0), 'cooldown: success → not cooling');
+    // A recent success alongside a still-in-window failure: failure wins
+    // (we surface honesty; a fresh rate-limit still deprioritizes).
+    recordProviderOutcome('groq', { ok: false, errorClass: 'rate_limit' }, T0 + 10);
+    assert(isProviderCoolingDown('groq', T0 + 20), 'cooldown: in-window rate_limit still cools despite prior success');
+
+    // ── custom cooldown window override ───────────────────────────
+    resetProviderHealth();
+    recordProviderOutcome('deepseek', { ok: false, errorClass: 'rate_limit' }, T0);
+    assert(isProviderCoolingDown('deepseek', T0 + 4_000, { cooldownMs: 5_000 }), 'cooldown: custom 5s window → still cooling at 4s');
+    assert(!isProviderCoolingDown('deepseek', T0 + 6_000, { cooldownMs: 5_000 }), 'cooldown: custom 5s window → restored at 6s');
+
+    // ── excludeCoolingProviders: moves cooling to BACK, keeps order ─
+    resetProviderHealth();
+    const order = ['ollama', 'huggingface', 'groq', 'openrouter'] as const;
+    recordProviderOutcome('groq', { ok: false, errorClass: 'rate_limit' }, T0);
+    const ex = excludeCoolingProviders(order, T0 + 1_000);
+    assert(ex.ordered.length === order.length, 'exclude: length preserved (nothing dropped)');
+    assert(ex.ordered[ex.ordered.length - 1] === 'groq', 'exclude: cooling provider moved to BACK');
+    assert(ex.ordered[0] === 'ollama' && ex.ordered[1] === 'huggingface' && ex.ordered[2] === 'openrouter',
+      'exclude: healthy providers keep relative order');
+    assert(ex.deprioritized.length === 1 && ex.deprioritized[0] === 'groq', 'exclude: deprioritized note names groq');
+    assert(order.every((p) => ex.ordered.includes(p)), 'exclude: every original provider still present');
+
+    // ── excludeCoolingProviders: NEVER drops to zero (all cooling) ─
+    resetProviderHealth();
+    recordProviderOutcome('ollama', { ok: false, errorClass: 'overload' }, T0);
+    recordProviderOutcome('groq', { ok: false, errorClass: 'rate_limit' }, T0);
+    const allCool = excludeCoolingProviders(['ollama', 'groq'] as const, T0 + 100);
+    assert(allCool.ordered.length === 2, 'exclude: all-cooling still returns full list (never zero)');
+    assert(allCool.ordered[0] === 'ollama' && allCool.ordered[1] === 'groq',
+      'exclude: all-cooling → original order preserved (worst case = unchanged)');
+
+    // ── excludeCoolingProviders: no health data → identity order ──
+    resetProviderHealth();
+    const untouched = excludeCoolingProviders(['a', 'b', 'c'] as const, T0);
+    assert(untouched.ordered.join(',') === 'a,b,c', 'exclude: no health data → order unchanged');
+    assert(untouched.deprioritized.length === 0, 'exclude: no health data → nothing deprioritized');
+
+    // ── Ring bounding: never exceeds MAX_EVENTS_PER_PROVIDER ──────
+    resetProviderHealth();
+    for (let i = 0; i < MAX_EVENTS_PER_PROVIDER + 20; i += 1) {
+      recordProviderOutcome('churny', { ok: true }, T0 + i);
+    }
+    assert(providerHealthDebug('churny').events === MAX_EVENTS_PER_PROVIDER,
+      `ring: bounded to MAX_EVENTS_PER_PROVIDER (${MAX_EVENTS_PER_PROVIDER})`);
+    // The most-recent event must still be the newest we pushed (ring keeps tail).
+    recordProviderOutcome('churny', { ok: false, errorClass: 'rate_limit' }, T0 + 10_000);
+    assert(isProviderCoolingDown('churny', T0 + 10_001), 'ring: newest event retained after trim');
+
+    // ── empty / blank provider ids are ignored (no crash) ─────────
+    resetProviderHealth();
+    recordProviderOutcome('', { ok: false, errorClass: 'rate_limit' }, T0);
+    assert(!isProviderCoolingDown('', T0), 'edge: blank provider id never cools');
+    assert(providerHealthDebug().providers === 0, 'edge: blank id not tracked');
+
+    // ── missing errorClass on failure defaults to "other" (no cool) ─
+    resetProviderHealth();
+    recordProviderOutcome('mystery', { ok: false }, T0);
+    assert(!isProviderCoolingDown('mystery', T0), 'edge: failure w/o class defaults to other → no cooldown');
+
+    // ════════════════════════════════════════════════════════════
+    //  Integration: resolveProviderRoutes health-aware PRE-selection
+    // ════════════════════════════════════════════════════════════
+    // Fail-visible check: reordering changes ORDER, never drops routes.
+    resetProviderHealth();
+    const avail = new Set<any>(['huggingface', 'groq', 'openrouter']);
+
+    // Baseline order (no health clock): HF → groq → OR (per default pref).
+    const base = resolveProviderRoutes('llama-3.3-70b', { available: avail });
+    const baseProviders = base.map((r) => r.provider);
+    assert(baseProviders.indexOf('huggingface') < baseProviders.indexOf('groq')
+      && baseProviders.indexOf('groq') < baseProviders.indexOf('openrouter'),
+      'integ: baseline order HF → groq → OR');
+
+    // Now groq just rate-limited. With the clock injected, groq's route
+    // must move AFTER openrouter — but still be present (fail-visible).
+    recordProviderOutcome('groq', { ok: false, errorClass: 'rate_limit' }, T0);
+    const reordered = resolveProviderRoutes('llama-3.3-70b', { available: avail, healthNowMs: T0 + 1_000 });
+    const reProviders = reordered.map((r) => r.provider);
+    assert(reProviders.includes('groq'), 'integ: cooling groq STILL present (not dropped — fail-visible)');
+    assert(reordered.length === base.length, 'integ: same route count (order changed, nothing dropped)');
+    assert(reProviders.indexOf('groq') > reProviders.indexOf('openrouter'),
+      'integ: cooling groq deprioritized behind openrouter');
+    assert(reProviders.indexOf('huggingface') === 0, 'integ: healthy HF still first');
+
+    // After the window, order returns to baseline.
+    const restored = resolveProviderRoutes('llama-3.3-70b', { available: avail, healthNowMs: T0 + DEFAULT_COOLDOWN_MS + 1 });
+    const restoredProviders = restored.map((r) => r.provider);
+    assert(restoredProviders.indexOf('groq') < restoredProviders.indexOf('openrouter'),
+      'integ: after 30s window groq restored ahead of openrouter');
+
+    // Health-class that is request-specific (content_policy) must NOT
+    // reorder — a moderation refusal on one turn is not a health signal.
+    resetProviderHealth();
+    recordProviderOutcome('groq', { ok: false, errorClass: 'content_policy' }, T0);
+    const notReordered = resolveProviderRoutes('llama-3.3-70b', { available: avail, healthNowMs: T0 + 1_000 });
+    const nrProviders = notReordered.map((r) => r.provider);
+    assert(nrProviders.indexOf('groq') < nrProviders.indexOf('openrouter'),
+      'integ: content_policy failure does NOT reorder (request-specific, not health)');
+
+    // Opt-out: omitting healthNowMs leaves order byte-identical to baseline
+    // even when a provider is cooling (production default = no reorder).
+    resetProviderHealth();
+    recordProviderOutcome('groq', { ok: false, errorClass: 'rate_limit' }, T0);
+    const optOut = resolveProviderRoutes('llama-3.3-70b', { available: avail });
+    assert(optOut.map((r) => r.provider).join(',') === baseProviders.join(','),
+      'integ: no healthNowMs → order unchanged (opt-in only)');
+
+    resetProviderHealth();
   }
 
   if (failures > 0) {

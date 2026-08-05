@@ -1872,13 +1872,21 @@ export default function CustomizePanel({
                 </View>
                 <Pressable
                   onPress={() => {
-                    // Start Figma OAuth flow
+                    // Start Figma OAuth flow. Mint the authorize URL server-side
+                    // (nonce state) so the JWT never lands in the URL/history (advisory #7).
                     (async () => {
                       const { data: auth } = await supabase.auth.getSession();
                       const token = auth.session?.access_token || '';
+                      if (!token) return;
                       const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-                      const url = `${supabaseUrl}/functions/v1/figma-oauth/authorize?state=${encodeURIComponent(token)}`;
-                      Linking.openURL(url);
+                      try {
+                        const res = await fetch(`${supabaseUrl}/functions/v1/figma-oauth/authorize`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (data?.url) Linking.openURL(data.url);
+                      } catch {}
                     })();
                   }}
                   style={[styles.quickConnectBtn, { alignSelf: 'flex-start' }]}

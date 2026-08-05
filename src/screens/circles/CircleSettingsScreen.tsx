@@ -36,6 +36,9 @@ import {
   GOOGLE_SERVICE_LABELS,
   type GoogleService,
 } from '../../lib/googleCreds';
+import { listLibrarySkills, viewLibrarySkill, type LibrarySkillMetadata } from '../../lib/skillLibrary';
+import { parseSkillFrontmatter } from '../../lib/skillFrontmatter';
+import { canonicalSkillsMissing } from '../../lib/canonicalSkills';
 import { Circle, CheckInFormat } from '../../types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -94,6 +97,13 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [circleImageUrl, setCircleImageUrl] = useState<string | undefined>(undefined);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
+  const [librarySkills, setLibrarySkills] = useState<LibrarySkillMetadata[]>([]);
+  const [librarySkillsLoading, setLibrarySkillsLoading] = useState(true);
+  const [expandedSkill, setExpandedSkill] = useState<string | null>(null);
+  const [skillBodies, setSkillBodies] = useState<Record<string, string>>({});
+  const [skillBodyLoading, setSkillBodyLoading] = useState<string | null>(null);
+  const [addingSkills, setAddingSkills] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
   const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
@@ -121,6 +131,17 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
 
   useEffect(() => {
     loadData();
+  }, [circleId]);
+
+  // Circle SKILL.md library (read-only view) — members can SELECT via RLS.
+  useEffect(() => {
+    let cancelled = false;
+    setLibrarySkillsLoading(true);
+    listLibrarySkills(circleId, { limit: 50 })
+      .then((rows) => { if (!cancelled) setLibrarySkills(rows); })
+      .catch(() => { if (!cancelled) setLibrarySkills([]); })
+      .finally(() => { if (!cancelled) setLibrarySkillsLoading(false); });
+    return () => { cancelled = true; };
   }, [circleId]);
 
   const loadData = async () => {
@@ -314,6 +335,68 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
     }
   };
 
+  const copyCircleId = async () => {
+    await Clipboard.setStringAsync(circleId);
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 2000);
+  };
+
+  // Tap a library skill to read its full SKILL.md body (progressive disclosure,
+  // mirroring the agent's viewLibrarySkill). Bodies are fetched once + cached.
+  const toggleSkill = async (name: string) => {
+    if (expandedSkill === name) { setExpandedSkill(null); return; }
+    setExpandedSkill(name);
+    if (skillBodies[name] !== undefined) return;
+    setSkillBodyLoading(name);
+    try {
+      const full = await viewLibrarySkill(circleId, name);
+      const body = full?.content ? parseSkillFrontmatter(full.content).body.trim() : '';
+      setSkillBodies((prev) => ({ ...prev, [name]: body || '(no body)' }));
+    } catch {
+      setSkillBodies((prev) => ({ ...prev, [name]: '(failed to load skill body)' }));
+    } finally {
+      setSkillBodyLoading(null);
+    }
+  };
+
+  // Seed the bundled canonical skills into this circle's library. Writes through
+  // the logged-in member's session (author_id = currentUserId) so it satisfies
+  // the `authors_write_skills` RLS — no service-role key or SQL needed.
+  const addCanonicalSkills = async () => {
+    if (!isCreator || !currentUserId) return;
+    const missing = canonicalSkillsMissing(librarySkills.map((s) => s.name));
+    if (missing.length === 0) return;
+    const ok = await showConfirm({
+      title: 'Add canonical skills?',
+      message: `Add ${missing.length} starter SKILL.md procedure${missing.length === 1 ? '' : 's'} (${missing.map((s) => s.name).join(', ')}) to this circle's library? Agents will be able to use them.`,
+      confirmLabel: 'Add',
+      cancelLabel: 'Cancel',
+    });
+    if (!ok) return;
+    setAddingSkills(true);
+    try {
+      const rows = missing.map((s) => ({
+        circle_id: circleId,
+        author_id: currentUserId,
+        name: s.name,
+        description: s.description,
+        version: s.version,
+        tags: s.tags,
+        content: s.content,
+      }));
+      const { error } = await supabase.from('circle_skills').upsert(rows, { onConflict: 'circle_id,name' });
+      if (error) {
+        Alert.alert('Could not add skills', error.message || 'Write failed.');
+      } else {
+        const fresh = await listLibrarySkills(circleId, { limit: 50 });
+        setLibrarySkills(fresh);
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to add canonical skills');
+    }
+    setAddingSkills(false);
+  };
+
   const regenerateInvite = async () => {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     await save({ invite_code: code });
@@ -347,6 +430,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   }
 
   const readOnly = !isCreator;
+  const missingCanonical = isCreator ? canonicalSkillsMissing(librarySkills.map((s) => s.name)) : [];
 
   return (
     <View style={styles.container}>
@@ -647,6 +731,65 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
               thumbColor={sessionMemoryMode === 'shared' ? accentColor : '#52525b'}
             />
           </View>
+        </Section>
+
+        {/* ─── Skill Library (read-only) ─── */}
+        <Section title="SKILL LIBRARY" accentColor={accentColor}>
+          <Text style={styles.memoryModeDesc}>
+            SKILL.md procedures your agents can use — reusable observe→act→verify runbooks (app automation, browser forms, file work, and more). Agents see these ranked by relevance and pull the full body on demand.
+          </Text>
+          {librarySkillsLoading ? (
+            <Text style={[styles.memoryModeDesc, { marginTop: 10, color: '#475569', fontStyle: 'italic' }]}>Loading…</Text>
+          ) : librarySkills.length === 0 ? (
+            <Text style={[styles.memoryModeDesc, { marginTop: 10, color: '#475569' }]}>
+              No skills in this circle's library yet. Members can author SKILL.md procedures (chat: “/skill”) or seed the canonical set.
+            </Text>
+          ) : (
+            <View style={{ marginTop: 10, gap: 10 }}>
+              {librarySkills.map((s) => {
+                const expanded = expandedSkill === s.name;
+                return (
+                  <Pressable key={s.name} onPress={() => toggleSkill(s.name)} style={styles.skillRow}>
+                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
+                      <Text style={styles.skillName}>{s.name}</Text>
+                      <Text style={styles.skillVersion}>v{s.version}</Text>
+                      <Text style={[styles.skillVersion, { marginLeft: 'auto', fontSize: 12 }]}>{expanded ? '▾' : '▸'}</Text>
+                    </View>
+                    {s.tags?.length > 0 ? (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                        {s.tags.slice(0, 6).map((t) => (
+                          <View key={t} style={[styles.typeChip, { paddingVertical: 3, paddingHorizontal: 7, backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
+                            <Text style={[styles.typeChipText, { color: accentColor, fontSize: 9 }]}>{t}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
+                    <Text style={[styles.memoryModeDesc, { marginTop: 5, fontSize: 11 }]} numberOfLines={expanded ? undefined : 3}>{s.description}</Text>
+                    {expanded ? (
+                      skillBodyLoading === s.name ? (
+                        <Text style={[styles.memoryModeDesc, { marginTop: 8, color: '#475569', fontStyle: 'italic' }]}>Loading…</Text>
+                      ) : (
+                        <Text style={styles.skillBody} selectable>{skillBodies[s.name] ?? ''}</Text>
+                      )
+                    ) : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
+          {!librarySkillsLoading && missingCanonical.length > 0 ? (
+            <Pressable
+              onPress={addCanonicalSkills}
+              disabled={addingSkills}
+              style={[styles.smallBtn, { backgroundColor: accentColor, marginTop: 12, alignSelf: 'flex-start' }]}
+            >
+              {addingSkills ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={styles.smallBtnText}>+ ADD {missingCanonical.length} CANONICAL SKILL{missingCanonical.length === 1 ? '' : 'S'}</Text>
+              )}
+            </Pressable>
+          ) : null}
         </Section>
 
         {/* ─── AI Spend Last 24h — unified view across every agent ─── */}
@@ -1164,6 +1307,17 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
               </Pressable>
             )}
           </View>
+
+          <Text style={[styles.fieldLabel, { marginTop: 14 }]}>CIRCLE ID</Text>
+          <Text style={[styles.memoryModeDesc, { fontSize: 11, color: '#64748b', marginBottom: 6 }]}>
+            The unique id for this circle — used to connect agents, seed skills, or reference it in scripts and URLs.
+          </Text>
+          <View style={styles.inviteRow}>
+            <Text style={styles.circleIdText} selectable>{circleId}</Text>
+            <Pressable onPress={copyCircleId} style={[styles.smallBtn, { backgroundColor: accentColor }]}>
+              <Text style={styles.smallBtnText}>{copiedId ? 'COPIED!' : 'COPY'}</Text>
+            </Pressable>
+          </View>
         </Section>
 
         {/* ─── Discovery ─── */}
@@ -1429,6 +1583,17 @@ const styles = StyleSheet.create({
   // Invite
   inviteRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   inviteCode: { color: '#fff', fontSize: 16, fontWeight: '900', letterSpacing: 3, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  circleIdText: { color: '#cbd5e1', fontSize: 12, fontWeight: '700', flex: 1, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+
+  // Skill library
+  skillRow: { backgroundColor: '#000000', borderWidth: 1, borderColor: '#1a1a1a', borderRadius: 8, padding: 10 },
+  skillName: { color: '#e2e8f0', fontSize: 13, fontWeight: '800', fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  skillVersion: { color: '#475569', fontSize: 10, fontWeight: '700' },
+  skillBody: {
+    color: '#94a3b8', fontSize: 11, lineHeight: 17, marginTop: 8, paddingTop: 8,
+    borderTopWidth: 1, borderTopColor: '#1a1a1a',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
 
   // Danger
   dangerBtn: {

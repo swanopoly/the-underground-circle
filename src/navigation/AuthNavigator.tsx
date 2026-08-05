@@ -49,6 +49,6 @@ export default function AuthNavigator() {
 const styles = StyleSheet.create({
   fallback: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#0A0A0A',
   },
 });

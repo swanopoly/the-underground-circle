@@ -40,6 +40,17 @@
  */
 
 import { supabase } from './supabase';
+import { storage } from './storage';
+import { sanitizeMetadataField } from './skillBodyFence';
+import {
+  appendSkillRunOutcomeToStats,
+  compactSkillRunStats,
+  evaluateSkillHealth,
+  skillHealthMarker,
+  type SkillHealth,
+  type SkillRunOutcome,
+  type SkillRunStats,
+} from './skillLifecycle';
 
 export type LibrarySkillMetadata = {
   id: string;
@@ -126,18 +137,41 @@ export async function viewLibrarySkill(circleId: string, name: string): Promise<
  * USER-role message, NOT into the system block — the system block stays
  * stable so Anthropic prompt caching keeps hitting. Hermes' trick; see
  * `agentSystemPrompt.ts` comments.
+ *
+ * Fields are member-authored / externally-imported → untrusted; each is run
+ * through `sanitizeMetadataField` so a crafted name/description/tag can't
+ * escape the caller's fence or forge extra rows.
  */
-export function renderLibraryMetadataTable(skills: LibrarySkillMetadata[]): string {
+export function renderLibraryMetadataTable(
+  skills: LibrarySkillMetadata[],
+  /** L2 lifecycle: device-storage health merged at read time — FAILING
+   *  skills get a compact review marker; stale/healthy stay unmarked. */
+  healthByName?: Record<string, SkillHealth>,
+): string {
   if (skills.length === 0) {
     return 'No SKILL.md files in this circle yet. Once the library has entries, call `skill_view(name)` to read one.';
   }
   const lines = ['Available SKILL.md procedures — call `skill_view(name)` for the body:'];
   for (const s of skills) {
-    const tagTail = s.tags.length > 0 ? ` [${s.tags.join(', ')}]` : '';
-    lines.push(`- ${s.name} (v${s.version})${tagTail}: ${s.description}`);
+    const name = sanitizeMetadataField(s.name, 120);
+    const cleanTags = s.tags.map((t) => sanitizeMetadataField(t, 40)).filter(Boolean);
+    const tagTail = cleanTags.length > 0 ? ` [${cleanTags.join(', ')}]` : '';
+    // Health marker is keyed by the raw name (matches the device-stats map).
+    const marker = skillHealthMarker(healthByName?.[s.name]);
+    const description = sanitizeMetadataField(s.description);
+    lines.push(`- ${name} (v${sanitizeMetadataField(s.version, 40)})${tagTail}: ${description}${marker ? ` ${marker}` : ''}`);
   }
   return lines.join('\n');
 }
+
+// Canonical untrusted skill-body fence + metadata-field sanitizer live in the
+// pure `skillBodyFence` module (smoke-testable without Supabase). Re-exported
+// here so model-prompt injection sites import them from one place.
+export {
+  fenceSkillBodyForModel,
+  sanitizeMetadataField,
+  SKILL_BODY_MODEL_MAX_CHARS,
+} from './skillBodyFence';
 
 // ─── Level-2 sub-file retrieval (Phase CA-8c) ───────────────────────────────
 
@@ -262,6 +296,82 @@ export { parseSkillFrontmatter } from './skillFrontmatter';
 // Re-export the pure relpath validator so `/skill view <name> <path>`
 // handlers and the importer don't duplicate the rule.
 export { parseSkillRelPath, isSafeSkillRelPath, type SkillRelPathResult } from './skillRelPath';
+
+// ─── L2 skill lifecycle: first-use outcome write-back ───────────────────────
+//
+// Storage decision: `circle_skills` has NO jsonb column (RUN_THIS_SQL §10 —
+// usage_count/success_count are plain ints) and the only sanctioned write
+// path is the HITL approval queue in `skillLibraryWrite` (the runtime files
+// proposals, never mutates the table). Routing per-run outcome pings through
+// human approval would be absurd, and plain counters cannot express what the
+// health evaluator needs (consecutive-failure streaks + last-used
+// staleness). So stats live in bounded DEVICE storage (≤50 skills × last 10
+// outcomes per circle) and merge into metadata at READ time — the DB stays
+// HITL-only, and a lost device cache only loses local health hints.
+// Pure logic lives in `skillLifecycle.ts` (smoke-testable).
+
+const SKILL_STATS_KEY_PREFIX = 'skill_run_stats_v1';
+
+function skillStatsKey(circleId: string): string {
+  return `${SKILL_STATS_KEY_PREFIX}_${circleId}`;
+}
+
+/** Load the device-stored run stats for a circle. Never throws — [] on failure. */
+export async function loadSkillRunStats(circleId: string): Promise<SkillRunStats[]> {
+  try {
+    const raw = await storage.getItem(skillStatsKey(circleId));
+    return raw ? compactSkillRunStats(JSON.parse(raw)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Record one run outcome for a skill/recipe (L2 first-use write-back).
+ * Fire-and-forget safe: never throws. Bounded by `skillLifecycle` rules.
+ *
+ * PRODUCER: call this after a recipe/skill-guided run finishes —
+ * `computerTaskRuntime` (recipe-guided computer tasks; owned by another
+ * agent right now) and the chat tool loop are the intended call sites,
+ * passing the skill `name` that was injected into the run.
+ */
+export async function recordSkillRunOutcome(
+  circleId: string,
+  skillName: string,
+  outcome: SkillRunOutcome,
+): Promise<void> {
+  try {
+    if (!circleId || !skillName?.trim()) return;
+    const stats = appendSkillRunOutcomeToStats(await loadSkillRunStats(circleId), skillName, outcome);
+    await storage.setItem(skillStatsKey(circleId), JSON.stringify(stats));
+  } catch {}
+}
+
+/**
+ * Read-time merge: health per skill name from device stats. Skills with no
+ * recorded outcomes evaluate healthy ("no recorded uses yet"), so the map
+ * only carries entries that have stats. Never throws — {} on failure.
+ */
+export async function loadSkillHealthByName(
+  circleId: string,
+  nowMs: number = Date.now(),
+): Promise<Record<string, SkillHealth>> {
+  const healthByName: Record<string, SkillHealth> = {};
+  for (const entry of await loadSkillRunStats(circleId)) {
+    healthByName[entry.skillName] = evaluateSkillHealth(entry, nowMs);
+  }
+  return healthByName;
+}
+
+// Re-export the pure lifecycle surface so callers (prompt injection,
+// console) import from one place without reaching into skillLifecycle.
+export {
+  evaluateSkillHealth,
+  skillHealthMarker,
+  type SkillHealth,
+  type SkillRunOutcome,
+  type SkillRunStats,
+} from './skillLifecycle';
 
 // ─── Internals ──────────────────────────────────────────────────────────────
 

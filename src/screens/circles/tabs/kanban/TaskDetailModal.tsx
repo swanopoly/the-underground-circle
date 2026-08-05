@@ -15,6 +15,7 @@ import type { KanbanData, KanbanMember, ThinkingLevel, AgentModel, AgentMode } f
 import type { GoalWithCount } from '../../../../hooks/useGoals';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import { supabase } from '../../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 import MentionPicker, { detectMentionQuery, insertMention } from '../../../../components/MentionPicker';
 import MentionText from '../../../../components/MentionText';
 import { extractMentionRefs, persistMentions } from '../../../../lib/mentions';
@@ -26,6 +27,7 @@ import TaskRunTimeline from './TaskRunTimeline';
 import TaskArtifactsPanel from './TaskArtifactsPanel';
 import TaskChecksPanel from './TaskChecksPanel';
 import TaskApprovalsPanel from './TaskApprovalsPanel';
+import TaskProofPanel from '../../../../components/feed/TaskProofPanel';
 import { useProjectRooms } from '../../../../services/projectRooms';
 import { listCircleIntegrations } from '../../../../lib/circleIntegrations';
 import { getInstalledProviderSet, recommendMarketplaceItemsForWork } from '../../../../lib/marketplaceRecommendations';
@@ -471,16 +473,19 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
     return () => { cancelled = true; };
   }, [circleId]);
 
-  // Realtime comments
+  // Realtime comments — routed through subscribeWithReconnect so a dropped
+  // socket auto-reconnects and refetches missed comments (catch-up), instead of
+  // silently freezing the comment thread.
   useEffect(() => {
-    const channel = supabase
-      .channel(`task-comments-${task.id}`)
-      .on('postgres_changes', {
+    const sub = subscribeWithReconnect({
+      channelName: `task-comments-${task.id}`,
+      setup: (channel) => channel.on('postgres_changes', {
         event: 'INSERT', schema: 'public', table: 'task_comments',
         filter: `task_id=eq.${task.id}`,
-      }, () => loadComments())
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
+      }, () => loadComments()),
+      onCatchUp: () => loadComments(),
+    });
+    return () => { sub.unsubscribe(); };
   }, [task.id, loadComments]);
 
   const handleSave = async () => {
@@ -1637,6 +1642,10 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 </>
               );
             })()}
+
+            {/* ── Proof of Work — agent-run proof rows back-linked to this task
+                   via detail.task_id (renders null when none) ── */}
+            <TaskProofPanel circleId={task.circle_id} taskId={task.id} />
 
             {/* Comments section */}
             <View style={s.commentSection}>

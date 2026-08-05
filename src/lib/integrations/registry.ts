@@ -13,9 +13,10 @@
  *   - popular: surface on the "Popular" filter (top of marketplace)
  *
  * Categories (in display order):
- *   communication, code_dev, ai_llm, cloud_infra, productivity, crm_sales,
- *   marketing, analytics, ads, commerce, cms_site, storage, auth, finance,
- *   support, observability, search_db, crypto_web3, social
+ *   communication, code_dev, workflow_automation, ai_llm, cloud_infra,
+ *   productivity, crm_sales, marketing, analytics, ads, commerce, cms_site,
+ *   storage, auth, finance, support, observability, search_db, crypto_web3,
+ *   social
  */
 
 import type { ProviderDefinition, IntegrationCategory } from './types';
@@ -75,13 +76,15 @@ export const INTEGRATIONS: ProviderDefinition[] = [
   },
   {
     id: 'gmail', label: 'Gmail', category: 'communication',
-    description: 'Send and receive email through your Google account.',
+    description: 'Search, read, draft, and send email through your Google account (agent tools gmail.read / gmail.write; sends are approval-gated). Connect via Circle Settings → Google Workspace.',
     color: '#ea4335', icon: '✉️',
     authModel: 'oauth2',
-    capabilities: ['send_message', 'read_data', 'automation_trigger', 'automation_action'],
-    status: 'beta', popular: true,
+    capabilities: ['send_message', 'read_data', 'automation_trigger', 'automation_action', 'agent_tool'],
+    status: 'live', popular: true,
     homepage: 'https://gmail.com',
-    oauthScopes: ['https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/gmail.readonly'],
+    // The actual grant comes from the google-oauth edge fn's SCOPE_SETS
+    // (gmail.modify) via Circle Settings → Google Workspace.
+    oauthScopes: ['https://www.googleapis.com/auth/gmail.modify'],
     tags: ['email'],
   },
   {
@@ -197,6 +200,17 @@ export const INTEGRATIONS: ProviderDefinition[] = [
     status: 'coming_soon',
     homepage: 'https://launchdarkly.com',
     tags: ['feature-flags'],
+  },
+
+  // ── Workflow Automation ──────────────────────────────────────────────────
+  {
+    id: 'custom_api', label: 'Custom API', category: 'workflow_automation',
+    description: 'Connect any REST or HTTP API as an agent-ready tool with scoped metadata, hidden secrets, and approval before side effects.',
+    color: '#38bdf8', icon: 'API',
+    authModel: 'api_key',
+    capabilities: ['read_data', 'write_data', 'automation_action', 'agent_tool', 'receive_webhook'],
+    status: 'beta', popular: true,
+    tags: ['api', 'rest', 'webhook', 'automation', 'agent-tool'],
   },
 
   // ── AI / LLM ──────────────────────────────────────────────────────────────
@@ -446,23 +460,47 @@ export const INTEGRATIONS: ProviderDefinition[] = [
   },
   {
     id: 'google_sheets', label: 'Google Sheets', category: 'productivity',
-    description: 'Read/write spreadsheets — the universal data exchange.',
+    description: 'Read ranges and append/update rows (agent tools gsheets.read / gsheets.write; writes are approval-gated). Connect via Circle Settings → Google Workspace.',
     color: '#0f9d58', icon: '📊',
     authModel: 'oauth2',
-    capabilities: ['read_data', 'write_data', 'automation_action'],
-    status: 'planned', popular: true,
+    capabilities: ['read_data', 'write_data', 'automation_action', 'agent_tool'],
+    status: 'live', popular: true,
     homepage: 'https://sheets.google.com',
+    oauthScopes: ['https://www.googleapis.com/auth/spreadsheets'],
     tags: ['spreadsheet', 'data'],
   },
   {
+    id: 'google_docs', label: 'Google Docs', category: 'productivity',
+    description: 'Create docs from markdown, read doc text, append to existing docs (agent tools docs.create_document / gdocs.read / gdocs.append; writes are approval-gated). Connect via Circle Settings → Google Workspace.',
+    color: '#4285f4', icon: '📝',
+    authModel: 'oauth2',
+    capabilities: ['read_data', 'write_data', 'automation_action', 'agent_tool'],
+    status: 'live',
+    homepage: 'https://docs.google.com',
+    oauthScopes: ['https://www.googleapis.com/auth/documents'],
+    tags: ['documents', 'writing'],
+  },
+  {
     id: 'google_drive', label: 'Google Drive', category: 'productivity',
-    description: 'Files in Drive — read, list, share.',
+    description: 'Search Drive and read/export file text (agent tool gdrive.read; read-only). Connect via Circle Settings → Google Workspace.',
     color: '#0f9d58', icon: '📁',
     authModel: 'oauth2',
-    capabilities: ['read_data', 'write_data', 'storage'],
-    status: 'beta',
+    capabilities: ['read_data', 'write_data', 'storage', 'agent_tool'],
+    status: 'live',
     homepage: 'https://drive.google.com',
+    oauthScopes: ['https://www.googleapis.com/auth/drive'],
     tags: ['files', 'storage'],
+  },
+  {
+    id: 'google_calendar', label: 'Google Calendar', category: 'productivity',
+    description: 'List events and create events with invites (agent tools gcal.read / gcal.write; event creation is approval-gated). Connect via Circle Settings → Google Workspace.',
+    color: '#4285f4', icon: '📅',
+    authModel: 'oauth2',
+    capabilities: ['read_data', 'write_data', 'automation_action', 'agent_tool'],
+    status: 'live',
+    homepage: 'https://calendar.google.com',
+    oauthScopes: ['https://www.googleapis.com/auth/calendar'],
+    tags: ['calendar', 'scheduling'],
   },
   {
     id: 'monday', label: 'Monday.com', category: 'productivity',
@@ -1175,15 +1213,16 @@ export function getPopularIntegrations(): ProviderDefinition[] {
  * All distinct categories present in the registry, in display order.
  */
 export const CATEGORIES_IN_ORDER: IntegrationCategory[] = [
-  'communication', 'code_dev', 'ai_llm', 'cloud_infra', 'productivity',
-  'crm_sales', 'marketing', 'analytics', 'ads', 'commerce', 'cms_site',
-  'storage', 'auth', 'finance', 'support', 'observability', 'search_db',
-  'crypto_web3', 'social',
+  'communication', 'code_dev', 'workflow_automation', 'ai_llm', 'cloud_infra',
+  'productivity', 'crm_sales', 'marketing', 'analytics', 'ads', 'commerce',
+  'cms_site', 'storage', 'auth', 'finance', 'support', 'observability',
+  'search_db', 'crypto_web3', 'social',
 ];
 
 export const CATEGORY_LABELS: Record<IntegrationCategory, string> = {
   communication: 'Communication',
   code_dev: 'Code & Dev',
+  workflow_automation: 'Workflow Automation',
   ai_llm: 'AI & LLM',
   cloud_infra: 'Cloud Infra',
   productivity: 'Productivity',

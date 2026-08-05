@@ -25,6 +25,7 @@ import {
   deleteTerminalMessage,
 } from '../lib/officeTerminal';
 import { supabase } from '../lib/supabase';
+import { subscribeWithReconnect } from '../lib/subscribeWithReconnect';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from '../lib/privacyMode';
 import { CircleOfficeAgent } from '../lib/circleOffice';
 import { awardPoints } from '../services/rewardService';
@@ -33,10 +34,15 @@ import AutomationsPanel from './AutomationsPanel';
 import TrainingDashboard from './TrainingDashboard';
 import SpawnAgentPanel from './SpawnAgentPanel';
 import { ProviderKey, PROVIDER_MODELS, LLMProvider, ThinkingLevel } from '../lib/llmProviders';
-import { PROVIDER_META } from '../lib/connectionManager';
+import { PROVIDER_META, type ProviderType } from '../lib/connectionManager';
 import { detectClaudeCodeBridge, execBridgeCommand } from '../lib/claudeCodeDetector';
 import { executeDeviceCommand } from '../lib/deviceManager';
 import { getAllModels, formatModelOption, type RegisteredModel } from '../lib/modelRegistry';
+import {
+  buildAgentRuntimeSubject,
+  isUuidLike,
+  type AgentRuntimeSubjectMetadata,
+} from '../lib/agentRuntimeSubject';
 
 // ─── BlackSwan Terminal Theme (Ollama-inspired monochrome) ───────────────────
 
@@ -167,6 +173,8 @@ interface Props {
     targetAgentId: string | null;
     targetAgentIds: string[] | null;
     targetAgentName: string;
+    targetAgentSubject?: AgentRuntimeSubjectMetadata | null;
+    targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
     model: string | null;
     senderId: string;
   }) => void;
@@ -205,6 +213,72 @@ function fmtTokenCost(n: number): string {
   if (!n) return '';
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K tok`;
   return `${n} tok`;
+}
+
+function cleanTargetLookupName(value: string | null | undefined): string {
+  return String(value || '').trim().replace(/^@+/, '').trim().toLowerCase();
+}
+
+function buildTerminalAgentSubjectMetadata(agent: CircleOfficeAgent): AgentRuntimeSubjectMetadata {
+  return buildAgentRuntimeSubject({
+    id: agent.id,
+    name: agent.name,
+    providerType: agent.provider as ProviderType,
+    spirit: agent.spirit,
+  }, {
+    dbAgentId: isUuidLike(agent.id) ? agent.id : null,
+  }).metadata;
+}
+
+function uniqueTerminalAgentSubjects(
+  subjects: Array<AgentRuntimeSubjectMetadata | null | undefined>
+): AgentRuntimeSubjectMetadata[] {
+  const seen = new Set<string>();
+  const out: AgentRuntimeSubjectMetadata[] = [];
+  for (const subject of subjects) {
+    if (!subject?.agentSubjectKey || seen.has(subject.agentSubjectKey)) continue;
+    seen.add(subject.agentSubjectKey);
+    out.push(subject);
+  }
+  return out;
+}
+
+function buildTerminalTargetSubjectContext(params: {
+  agents: CircleOfficeAgent[];
+  targetAgentId: string | null;
+  targetAgentName: string;
+  targetAgentIds: string[] | null;
+}): {
+  targetAgentSubject: AgentRuntimeSubjectMetadata | null;
+  targetAgentSubjects: AgentRuntimeSubjectMetadata[] | null;
+} {
+  const byId = new Map(params.agents.map(agent => [agent.id, agent]));
+  const byName = new Map(
+    params.agents.map(agent => [cleanTargetLookupName(agent.name), agent])
+  );
+  const resolve = (id?: string | null, fallbackName?: string | null) => {
+    if (id && byId.has(id)) return buildTerminalAgentSubjectMetadata(byId.get(id)!);
+    const cleanName = cleanTargetLookupName(fallbackName);
+    if (cleanName && byName.has(cleanName)) return buildTerminalAgentSubjectMetadata(byName.get(cleanName)!);
+    return null;
+  };
+
+  const requestedTargetCount = params.targetAgentIds?.length
+    ? params.targetAgentIds.length
+    : params.targetAgentId
+      ? 1
+      : params.agents.length;
+  const selectedSubjects = params.targetAgentIds?.length
+    ? params.targetAgentIds.map(id => resolve(id))
+    : params.targetAgentId
+      ? [resolve(params.targetAgentId, params.targetAgentName)]
+      : params.agents.map(buildTerminalAgentSubjectMetadata);
+
+  const targetAgentSubjects = uniqueTerminalAgentSubjects(selectedSubjects);
+  return {
+    targetAgentSubject: requestedTargetCount === 1 && targetAgentSubjects.length === 1 ? targetAgentSubjects[0] : null,
+    targetAgentSubjects: targetAgentSubjects.length > 0 ? targetAgentSubjects : null,
+  };
 }
 
 // ─── Streaming indicator ─────────────────────────────────────────────────────
@@ -1302,10 +1376,15 @@ export default function OfficeTerminal({
   }, [selectTarget, selectTargets]);
 
   // ── Load history + subscribe ───────────────────────────────────────────────
-  useEffect(() => {
-    deletedIdsRef.current.clear();
-
-    loadTerminalHistory(circleId, 50).then(async ({ messages: hist }) => {
+  // Authoritative transcript load — used for the initial fetch AND as the
+  // realtime catch-up. Messages/responses written while the socket was down
+  // never arrive as events, so a reconnect that does not replay this leaves the
+  // terminal permanently missing whatever the agent said during the gap.
+  const reloadTranscript = useCallback(async () => {
+    // Never throws: this runs as a realtime catch-up, and a rejected catch-up
+    // would escape the subscription wrapper's synchronous try/catch.
+    try {
+      const { messages: hist } = await loadTerminalHistory(circleId, 50);
       setMessages(hist);
       setLoading(false);
       // Phase 3: load existing responses for history messages
@@ -1320,7 +1399,17 @@ export default function OfficeTerminal({
         }
         setResponses(map);
       }
-    });
+    } catch (err) {
+      console.error('[OfficeTerminal] transcript load failed:', err);
+      setLoading(false);
+    }
+  }, [circleId]);
+
+  useEffect(() => {
+    deletedIdsRef.current.clear();
+
+    void reloadTranscript();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [circleId]);
 
   useEffect(() => {
@@ -1348,9 +1437,10 @@ export default function OfficeTerminal({
           return next;
         });
       },
+      () => { void reloadTranscript(); },
     );
     return unsub;
-  }, [circleId]);
+  }, [circleId, reloadTranscript]);
 
   // Phase 2 broadcast subscription removed — Phase 3 postgres_changes on
   // office_terminal_responses is now the single source of truth for responses.
@@ -1358,8 +1448,10 @@ export default function OfficeTerminal({
   // Phase 3: Subscribe to office_terminal_responses for this circle's responses.
   // Single stable channel — never re-created on messages change to avoid missing events.
   useEffect(() => {
-    const channel = supabase
-      .channel(`terminal-responses:${circleId}`)
+    const handle = subscribeWithReconnect({
+      channelName: `terminal-responses:${circleId}`,
+      onCatchUp: () => { void reloadTranscript(); },
+      setup: (channel) => channel
       .on(
         'postgres_changes',
         {
@@ -1402,13 +1494,13 @@ export default function OfficeTerminal({
             return next;
           });
         }
-      )
-      .subscribe();
+      ),
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      handle.unsubscribe();
     };
-  }, [circleId]);
+  }, [circleId, reloadTranscript]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -1692,6 +1784,13 @@ export default function OfficeTerminal({
       ? `${selectedModel}::${thinkingLevel}`
       : selectedModel;
 
+    const targetSubjectContext = buildTerminalTargetSubjectContext({
+      agents,
+      targetAgentId: targetAgentId ?? null,
+      targetAgentName: displayTargetName,
+      targetAgentIds: targetIds ?? null,
+    });
+
     const result = await sendTerminalCommand({
       circleId,
       senderId: userId,
@@ -1700,6 +1799,8 @@ export default function OfficeTerminal({
       targetAgentId: targetAgentId ?? undefined,
       targetAgentName: displayTargetName,
       targetAgentIds: targetIds,
+      targetAgentSubject: targetSubjectContext.targetAgentSubject,
+      targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
       model: modelWithThinking,
     });
 
@@ -1720,6 +1821,8 @@ export default function OfficeTerminal({
           targetAgentId: targetAgentId ?? null,
           targetAgentIds: targetIds ?? null,
           targetAgentName: displayTargetName,
+          targetAgentSubject: targetSubjectContext.targetAgentSubject,
+          targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
           model: modelWithThinking ?? null,
           senderId: userId,
         });

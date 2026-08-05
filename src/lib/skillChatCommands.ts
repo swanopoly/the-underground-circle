@@ -9,7 +9,7 @@
  * Supported sub-commands (phase 1):
  *   /skill                      → help (lists available sub-commands)
  *   /skill list [tag:<t>]       → renders the metadata table
- *   /skill view <name>          → renders the full SKILL.md body
+ *   /skill view <name> [path]   → renders the full SKILL.md body (or one bundled sub-file)
  *   /skill import <url>         → fetches, validates, files a create approval
  *   /skill import --replace <url>  → allowPatch variant
  *
@@ -23,7 +23,12 @@ import {
   importLibrarySkillFromText,
   type ImportResult,
 } from './skillLibraryImport';
-import { listLibrarySkills, viewLibrarySkill } from './skillLibrary';
+import {
+  listLibrarySkills,
+  viewLibrarySkill,
+  listLibrarySkillFiles,
+  viewLibrarySkillFile,
+} from './skillLibrary';
 import {
   claudeBridgeAvailable,
   importSelectedClaudeCodeSkills,
@@ -44,7 +49,8 @@ function helpMessage(): string {
   return [
     '**Skill commands**',
     '• `/skill list [tag:<t>]` — show circle SKILL.md library',
-    '• `/skill view <name>` — read a skill\'s full body',
+    '• `/skill view <name> [path]` — read a skill\'s full body (or one bundled file)',
+    '• `/skill export <name>` — standard-conformant SKILL.md for claude.ai / Claude Code / the Skills API',
     '• `/skill import <url>` — stage a new skill for review (HITL)',
     '• `/skill import --replace <url>` — update an existing skill',
     '• `/skill import --from-claude-code [name …]` — pull from `~/.claude/skills/` via the local bridge',
@@ -105,10 +111,37 @@ async function listSubcommand(args: string, ctx: SkillCommandContext): Promise<S
 async function viewSubcommand(args: string, ctx: SkillCommandContext): Promise<SkillCommandResult> {
   const name = args.trim();
   if (!name) {
-    return { success: false, message: 'Usage: `/skill view <name>` — run `/skill list` to see available skills.' };
+    return { success: false, message: 'Usage: `/skill view <name> [path]` — run `/skill list` to see available skills.' };
   }
   const skill = await viewLibrarySkill(ctx.circleId, name);
   if (!skill) {
+    // `/skill view <name> <path>` — the syntax the export hint advertises.
+    // First token = skill name, remainder = sub-file relpath; fetches one
+    // bundled file body from `circle_skill_files` (same loader family as
+    // export's manifest). Tried only after the whole-args name lookup fails,
+    // so existing skill names containing spaces keep resolving as before.
+    const spaceAt = name.indexOf(' ');
+    if (spaceAt !== -1) {
+      const skillName = name.slice(0, spaceAt);
+      const relpath = name.slice(spaceAt + 1).trim();
+      const file = await viewLibrarySkillFile(ctx.circleId, skillName, relpath);
+      if (file) {
+        return {
+          success: true,
+          message: [
+            `**${skillName}/${file.relpath}**${file.mimeType ? ` \`${file.mimeType}\`` : ''} (${file.sizeBytes} bytes)`,
+            '',
+            '```',
+            file.content,
+            '```',
+          ].join('\n'),
+        };
+      }
+      return {
+        success: false,
+        message: `No skill named **${name}** and no file \`${relpath}\` under **${skillName}** in this circle.`,
+      };
+    }
     return { success: false, message: `No skill named **${name}** in this circle.` };
   }
   return {
@@ -122,6 +155,61 @@ async function viewSubcommand(args: string, ctx: SkillCommandContext): Promise<S
       '```',
     ].join('\n'),
   };
+}
+
+/**
+ * X8 tail (P51): `/skill export <name>` — render the skill as an Agent
+ * Skills standard SKILL.md (normalized name, scrubbed description, body
+ * carried over) plus the folder layout and a portability audit line. Export
+ * always renders; portability problems are surfaced, never blocking —
+ * the user decides whether to fix before uploading.
+ */
+async function exportSubcommand(args: string, ctx: SkillCommandContext): Promise<SkillCommandResult> {
+  const name = args.trim();
+  if (!name) {
+    return { success: false, message: 'Usage: `/skill export <name>` — run `/skill list` to see available skills.' };
+  }
+  const skill = await viewLibrarySkill(ctx.circleId, name);
+  if (!skill) {
+    return { success: false, message: `No skill named **${name}** in this circle.` };
+  }
+  const { buildStandardSkillMd, auditSkillStandardCompat, summarizeSkillCompat } =
+    await import('./skillStandardCompat');
+  const files = await listLibrarySkillFiles(ctx.circleId, name);
+  const built = buildStandardSkillMd({
+    name: skill.name,
+    description: skill.description,
+    content: skill.content,
+    version: skill.version,
+    tags: skill.tags,
+  });
+  const residualNote = summarizeSkillCompat(auditSkillStandardCompat({
+    name: built.normalizedName,
+    description: skill.description,
+    content: built.markdown,
+    fileRelpaths: files.map((f) => f.relpath),
+  }));
+
+  const lines = [
+    `**Export: \`${built.normalizedName}/SKILL.md\`** (Agent Skills standard)`,
+  ];
+  if (residualNote) lines.push(residualNote);
+  lines.push('', '```markdown', built.markdown.trimEnd(), '```');
+  if (files.length > 0) {
+    lines.push(
+      '',
+      '**Folder layout** — bundle these alongside SKILL.md:',
+      `\`${built.normalizedName}/\``,
+      '`├── SKILL.md`',
+      ...files.map((f, i) => `\`${i === files.length - 1 ? '└──' : '├──'} ${f.relpath}\``),
+      `_Fetch each file body with \`/skill view ${skill.name} <path>\`._`,
+    );
+  }
+  lines.push(
+    '',
+    '_Works as-is in Claude Code (`~/.claude/skills/`), claude.ai (Settings → Features, zipped), and the Skills API (`/v1/skills`)._',
+  );
+  return { success: true, message: lines.join('\n') };
 }
 
 async function importSubcommand(args: string, ctx: SkillCommandContext): Promise<SkillCommandResult> {
@@ -226,6 +314,7 @@ export async function executeSkillCommand(
     case 'help':    return { success: true, message: helpMessage() };
     case 'list':    return listSubcommand(subArgs, ctx);
     case 'view':    return viewSubcommand(subArgs, ctx);
+    case 'export':  return exportSubcommand(subArgs, ctx);
     case 'import':  return importSubcommand(subArgs, ctx);
     default:
       return {

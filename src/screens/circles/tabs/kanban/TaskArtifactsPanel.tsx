@@ -8,6 +8,7 @@ import {
   View, Text, ScrollView, Pressable, StyleSheet, Platform, Linking,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 
 interface Props {
   runId: string;
@@ -120,18 +121,20 @@ export default function TaskArtifactsPanel({ runId, circleId }: Props) {
   useEffect(() => {
     fetchArtifacts();
 
-    const channel = supabase
-      .channel(`task-run-artifacts-${runId}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'task_run_artifacts',
-        filter: `run_id=eq.${runId}`,
-      }, () => fetchArtifacts())
-      .subscribe();
+    const sub = subscribeWithReconnect({
+      channelName: `task-run-artifacts-${runId}`,
+      setup: (channel) =>
+        channel.on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'task_run_artifacts',
+          filter: `run_id=eq.${runId}`,
+        }, () => fetchArtifacts()),
+      onCatchUp: () => fetchArtifacts(),
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      sub.unsubscribe();
     };
   }, [runId, fetchArtifacts]);
 

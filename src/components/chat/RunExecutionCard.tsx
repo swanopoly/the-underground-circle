@@ -101,13 +101,65 @@ export default function RunExecutionCard({
   ));
   const executionCount = executionContracts.filter((entry) => entry.status !== 'planned').length;
   const executionGreenCount = executionContracts.filter((entry) => entry.status === 'passed').length;
+  const toolCount = toolEvents.length || taskPlan?.recommendedTools.length || 0;
+  const checkCount = verificationResults.length || taskPlan?.verification.length || 0;
+  const browserCount = browserPlans.length + browserSessions.length;
+  const runStateLabel = blockerContracts.length > 0
+    ? 'Needs attention'
+    : executionContracts.some((entry) => entry.status === 'running')
+      ? 'Running'
+      : executionContracts.length > 0 && executionGreenCount >= Math.max(1, executionCount)
+        ? 'Green'
+        : taskPlan
+          ? 'Planned'
+          : 'Recorded';
+  const summaryMetrics = [
+    { label: 'Status', value: runStateLabel, tone: blockerContracts.length > 0 ? 'blocked' : runStateLabel === 'Green' ? 'green' : 'neutral' },
+    executionContracts.length > 0 ? { label: 'Steps', value: `${executionGreenCount}/${executionCount || executionContracts.length}`, tone: 'neutral' } : null,
+    toolCount > 0 ? { label: 'Tools', value: String(toolCount), tone: 'neutral' } : null,
+    checkCount > 0 ? { label: 'Checks', value: String(checkCount), tone: 'neutral' } : null,
+    browserCount > 0 ? { label: 'Browser', value: String(browserCount), tone: 'browser' } : null,
+  ].filter(Boolean) as Array<{ label: string; value: string; tone: 'neutral' | 'green' | 'blocked' | 'browser' }>;
 
   return (
     <View style={[styles.card, { borderColor: `${accentColor}30` }]}>
       <View style={styles.header}>
-        <Text style={[styles.title, { color: accentColor }]}>RUN LEDGER</Text>
+        <Text style={[styles.title, { color: accentColor }]}>TASK RUN</Text>
         {taskPlan ? <Text style={styles.meta}>{taskPlan.summary}</Text> : null}
       </View>
+
+      <View style={styles.summaryRail}>
+        {summaryMetrics.map((metric) => (
+          <View
+            key={`${metric.label}-${metric.value}`}
+            style={[
+              styles.summaryPill,
+              metric.tone === 'green' && styles.summaryPillGreen,
+              metric.tone === 'blocked' && styles.summaryPillBlocked,
+              metric.tone === 'browser' && styles.summaryPillBrowser,
+            ]}
+          >
+            <Text style={styles.summaryPillLabel}>{metric.label}</Text>
+            <Text
+              style={[
+                styles.summaryPillValue,
+                metric.tone === 'green' && styles.summaryPillValueGreen,
+                metric.tone === 'blocked' && styles.summaryPillValueBlocked,
+                metric.tone === 'browser' && styles.summaryPillValueBrowser,
+              ]}
+            >
+              {metric.value}
+            </Text>
+          </View>
+        ))}
+      </View>
+
+      {blockerContracts[0] ? (
+        <View style={styles.attentionBanner}>
+          <Text style={styles.attentionTitle}>NEXT FIX</Text>
+          <Text style={styles.attentionText} numberOfLines={2}>{blockerContracts[0].summary}</Text>
+        </View>
+      ) : null}
 
       {taskPlan ? (
         <>
@@ -249,6 +301,21 @@ export default function RunExecutionCard({
                   <Text style={styles.browserPlanStep}>
                     {plan.intent.mode.replace(/_/g, ' ').toUpperCase()} · {plan.intent.risk.toUpperCase()} RISK · {plan.intent.allowedDomains.length > 0 ? plan.intent.allowedDomains.join(', ') : 'NO DOMAIN YET'}
                   </Text>
+                ) : null}
+                {plan.computerAppGroundingTrace ? (
+                  <View style={styles.groundingMiniCard}>
+                    <Text style={styles.groundingMiniTitle}>
+                      GROUNDING · {plan.computerAppGroundingTrace.status.replace(/_/g, ' ').toUpperCase()}
+                    </Text>
+                    <Text style={styles.browserPlanStep}>
+                      Next safe action: {plan.computerAppGroundingTrace.display.nextAction}
+                    </Text>
+                    {plan.computerAppGroundingTrace.display.blockers.slice(0, 2).map((blocker, blockerIndex) => (
+                      <Text key={`${plan.planId}-grounding-blocker-${blockerIndex}`} style={styles.browserPlanBlocker}>
+                        {blocker}
+                      </Text>
+                    ))}
+                  </View>
                 ) : null}
                 {plan.actions.slice(0, 5).map((action) => (
                   <Text key={action.id} style={styles.browserPlanStep}>
@@ -429,6 +496,78 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'right',
   },
+  summaryRail: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 9,
+  },
+  summaryPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#0f172a',
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  summaryPillGreen: {
+    borderColor: '#22c55e45',
+    backgroundColor: '#052e1628',
+  },
+  summaryPillBlocked: {
+    borderColor: '#ef444445',
+    backgroundColor: '#3f0b0b38',
+  },
+  summaryPillBrowser: {
+    borderColor: '#8b5cf645',
+    backgroundColor: '#2e106528',
+  },
+  summaryPillLabel: {
+    color: '#64748b',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+    fontFamily: 'monospace',
+  },
+  summaryPillValue: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  summaryPillValueGreen: {
+    color: '#86efac',
+  },
+  summaryPillValueBlocked: {
+    color: '#fca5a5',
+  },
+  summaryPillValueBrowser: {
+    color: '#ddd6fe',
+  },
+  attentionBanner: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#ef444440',
+    backgroundColor: '#2a0c0c',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 3,
+  },
+  attentionTitle: {
+    color: '#fca5a5',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    fontFamily: 'monospace',
+  },
+  attentionText: {
+    color: '#fee2e2',
+    fontSize: 11,
+    lineHeight: 15,
+  },
   sectionTitle: {
     color: '#64748b',
     fontSize: 10,
@@ -493,6 +632,29 @@ const styles = StyleSheet.create({
   },
   browserPlanStep: {
     color: '#d8d4fe',
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  groundingMiniCard: {
+    borderWidth: 1,
+    borderColor: '#38bdf830',
+    backgroundColor: '#06111f',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    gap: 3,
+    marginTop: 6,
+    marginBottom: 4,
+  },
+  groundingMiniTitle: {
+    color: '#7dd3fc',
+    fontSize: 9,
+    fontFamily: 'monospace',
+    fontWeight: '900',
+    letterSpacing: 0.7,
+  },
+  browserPlanBlocker: {
+    color: '#fca5a5',
     fontSize: 10,
     lineHeight: 15,
   },

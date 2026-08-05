@@ -12,6 +12,7 @@
  */
 
 import { getBridgeUrl } from './bridgeEnvironment';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 
 const BRIDGE_PORT = 7778;
 
@@ -36,6 +37,7 @@ export interface SpawnResult {
   total: number;
   results: Array<{
     ok: boolean;
+    spawnId?: string;
     pid?: string;
     task: string;
     cwd?: string;
@@ -47,6 +49,7 @@ export interface SpawnResult {
 
 export interface SpawnedAgentStatus {
   ok: boolean;
+  spawnId?: string | null;
   pid?: string | null;
   logFile?: string | null;
   isRunning: boolean;
@@ -66,12 +69,12 @@ function isLegacyMissingTaskError(message: string): boolean {
 async function spawnSingleLegacy(
   task: SpawnTask,
   opts?: Pick<SpawnOpts, 'useWorktree' | 'workdir'>,
-): Promise<{ ok: boolean; pid?: string; task: string; cwd?: string; logFile?: string; error?: string }> {
+): Promise<{ ok: boolean; spawnId?: string; pid?: string; task: string; cwd?: string; logFile?: string; error?: string }> {
   const bridgeUrl = getSpawnerBridgeUrl();
   if (!bridgeUrl) {
     return { ok: false, task: task.task, error: 'Bridge unavailable in this environment' };
   }
-  const res = await fetch(`${bridgeUrl}/spawn`, {
+  const res = await fetchBridgeAuthenticated(`${bridgeUrl}/spawn`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -102,6 +105,7 @@ async function spawnSingleLegacy(
     const first = payload.results[0];
     return {
       ok: !!first?.ok,
+      spawnId: first?.spawnId,
       pid: first?.pid,
       task: first?.task || task.task,
       cwd: first?.cwd,
@@ -112,6 +116,7 @@ async function spawnSingleLegacy(
 
   return {
     ok: !!payload?.ok,
+    spawnId: payload?.spawnId,
     pid: payload?.pid,
     task: task.task,
     cwd: payload?.cwd,
@@ -147,7 +152,7 @@ export async function spawnAgents(opts: SpawnOpts): Promise<SpawnResult> {
       };
     }
 
-    const res = await fetch(`${bridgeUrl}/spawn`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/spawn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -231,28 +236,25 @@ export async function isBridgeAvailable(): Promise<boolean> {
 }
 
 export async function fetchSpawnedAgentStatus(opts: {
-  pid?: string | null;
-  logFile?: string | null;
+  spawnId: string;
   maxBytes?: number;
 }): Promise<SpawnedAgentStatus> {
   const bridgeUrl = getSpawnerBridgeUrl();
   if (!bridgeUrl) {
     return {
       ok: false,
-      pid: opts.pid || null,
-      logFile: opts.logFile || null,
+      spawnId: opts.spawnId || null,
       isRunning: false,
       completed: false,
       error: 'Bridge unavailable in this environment',
     };
   }
   try {
-    const res = await fetch(`${bridgeUrl}/spawn/status`, {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/spawn/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        pid: opts.pid || undefined,
-        logFile: opts.logFile || undefined,
+        spawnId: opts.spawnId,
         maxBytes: opts.maxBytes,
       }),
       signal: AbortSignal.timeout(8000),
@@ -266,8 +268,7 @@ export async function fetchSpawnedAgentStatus(opts: {
     if (!res.ok) {
       return {
         ok: false,
-        pid: opts.pid || null,
-        logFile: opts.logFile || null,
+        spawnId: opts.spawnId || null,
         isRunning: false,
         completed: false,
         error: payload?.error || `HTTP ${res.status}`,
@@ -275,8 +276,8 @@ export async function fetchSpawnedAgentStatus(opts: {
     }
     return {
       ok: payload?.ok === true,
-      pid: payload?.pid ?? opts.pid ?? null,
-      logFile: payload?.logFile ?? opts.logFile ?? null,
+      spawnId: payload?.spawnId ?? opts.spawnId ?? null,
+      pid: payload?.pid ?? null,
       isRunning: !!payload?.isRunning,
       completed: !!payload?.completed,
       hasOutput: !!payload?.hasOutput,
@@ -288,8 +289,7 @@ export async function fetchSpawnedAgentStatus(opts: {
   } catch (err: any) {
     return {
       ok: false,
-      pid: opts.pid || null,
-      logFile: opts.logFile || null,
+      spawnId: opts.spawnId || null,
       isRunning: false,
       completed: false,
       error: err?.message || 'Failed to fetch spawn status',

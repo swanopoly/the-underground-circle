@@ -41,7 +41,10 @@ export const DEFAULT_MODEL = "claude-haiku-4-5";
 interface RateRow { in: number; out: number; cacheCreate: number; cacheRead: number; }
 
 const RATES: Record<string, RateRow> = {
-  // Opus 4.6 / 4.7 — published $5/$25
+  // Fable 5 — published $10/$50
+  "claude-fable-5":    { in: 12.50, out: 62.50, cacheCreate: 15.625, cacheRead: 1.25 },
+  // Opus 4.6+ — published $5/$25
+  "claude-opus-4-8":   { in: 6.25,  out: 31.25, cacheCreate: 7.8125, cacheRead: 0.625 },
   "claude-opus-4-7":   { in: 6.25,  out: 31.25, cacheCreate: 7.8125, cacheRead: 0.625 },
   "claude-opus-4-6":   { in: 6.25,  out: 31.25, cacheCreate: 7.8125, cacheRead: 0.625 },
   // Sonnet 4.6 / 4.5 — published $3/$15

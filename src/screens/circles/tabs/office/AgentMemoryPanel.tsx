@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 import { getAgentSoulInfo, getMemorySoulKey } from './agentSoulMemory';
 import { MONO, formatMsgTime } from './AgentPanelShared';
 
@@ -18,6 +19,27 @@ function getRelevantSouls(mem: any): string[] {
   return Array.isArray(mem.metadata?.relevant_souls)
     ? mem.metadata.relevant_souls.filter((item: unknown): item is string => typeof item === 'string')
     : [];
+}
+
+function getMemoryUseLabel(mem: any): string | null {
+  const count = Number(mem.access_count || 0);
+  const lastAccessed = mem.last_accessed_at ? formatMsgTime(mem.last_accessed_at) : null;
+  if (count > 0 && lastAccessed) return `used ${count} - ${lastAccessed}`;
+  if (count > 0) return `used ${count}`;
+  if (lastAccessed) return `last used ${lastAccessed}`;
+  return null;
+}
+
+function formatSubjectIdSnippet(id: string): string {
+  const compact = id.replace(/\s+/g, ' ').trim();
+  return compact.length > 28 ? `${compact.slice(0, 25).trim()}...` : compact;
+}
+
+function getAgentMemoryProvenanceLabel(mem: any, canonicalSubjectId: string): string | null {
+  if (mem.scope !== 'agent' || !canonicalSubjectId) return null;
+  const storedAgentId = String(mem.agent_id || '').trim();
+  if (!storedAgentId || storedAgentId === canonicalSubjectId) return null;
+  return `legacy/alias id: ${formatSubjectIdSnippet(storedAgentId)}`;
 }
 
 function dedupeMemoryGroups(items: any[], activeSoulKey: string | null): any[] {
@@ -57,8 +79,8 @@ type MemorySection = {
   borderColor: string;
 };
 
-export default function AgentMemoryPanel({ circleId, userId, agentId, agentName, accentColor }: {
-  circleId: string; userId?: string; agentId: string; agentName: string; accentColor: string;
+export default function AgentMemoryPanel({ circleId, userId, agentId, agentAliases = [], agentName, accentColor }: {
+  circleId: string; userId?: string; agentId: string; agentAliases?: string[]; agentName: string; accentColor: string;
 }) {
   const [memories, setMemories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,24 +100,26 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
   // no-ops (the key check fails), so rapid agent switching doesn't race.
   const loadKeyRef = useRef('');
   const load = useCallback(async () => {
-    const key = `${circleId}|${agentId}|${userId || ''}`;
+    const lookupIds = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
+    const key = `${circleId}|${lookupIds.join(',')}|${userId || ''}`;
     loadKeyRef.current = key;
     setLoading(true);
     try {
       const { getUserMemories } = await import('../../../../lib/agentMemory');
-      const [data, soul] = await Promise.all([
-        getUserMemories(circleId, userId, agentId),
+      const [memoryBuckets, soul] = await Promise.all([
+        Promise.all(lookupIds.map(id => getUserMemories(circleId, userId, id))),
         getAgentSoulInfo({ circleId, agentId, agentName, userId }),
       ]);
       if (loadKeyRef.current !== key) return; // stale
-      setMemories(dedupeMemoryGroups([...data.agent, ...data.circle, ...data.user, ...data.session], soul.soulKey || null));
+      const merged = memoryBuckets.flatMap(data => [...data.agent, ...data.circle, ...data.user, ...data.session]);
+      setMemories(dedupeMemoryGroups(merged, soul.soulKey || null));
       setSoulKey(soul.soulKey);
       setSoulLabel(soul.soulLabel);
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to load memories:', err);
     }
     if (loadKeyRef.current === key) setLoading(false);
-  }, [agentId, agentName, circleId, userId]);
+  }, [agentAliases, agentId, agentName, circleId, userId]);
 
   useEffect(() => {
     void load();
@@ -106,21 +130,23 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
   }, [load]);
 
   useEffect(() => {
-    const channel = supabase
-      .channel(`agent-memory-panel:${circleId}:${agentId}`)
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'memory_entries',
-        filter: `circle_id=eq.${circleId}`,
-      }, () => { void load(); })
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'circle_office_agents',
-        filter: `circle_id=eq.${circleId}`,
-      }, () => { void load(); })
-      .subscribe();
+    const handle = subscribeWithReconnect({
+      channelName: `agent-memory-panel:${circleId}:${agentId}`,
+      setup: (channel) => channel
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'memory_entries',
+          filter: `circle_id=eq.${circleId}`,
+        }, () => { void load(); })
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'circle_office_agents',
+          filter: `circle_id=eq.${circleId}`,
+        }, () => { void load(); }),
+      onCatchUp: () => { void load(); },
+    });
 
     // Realtime subscriptions above already fire `load` on INSERT/UPDATE. This
     // polling is a belt-and-suspenders refresh for missed realtime events;
@@ -128,7 +154,7 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
     const intervalId = setInterval(() => { void load(); }, 30000);
     return () => {
       clearInterval(intervalId);
-      void supabase.removeChannel(channel);
+      handle.unsubscribe();
     };
   }, [agentId, circleId, load]);
 
@@ -338,6 +364,11 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
   const kindColors: Record<string, string> = { preference: '#909098', fact: '#909098', decision: '#a0a0b0', finding: '#909098', instruction: '#a0a0b0', policy: '#909098', context: '#606075' };
   const scopeLabels: Record<string, string> = { agent: 'agent', circle: 'shared', user: 'user', session: 'session' };
   const scopeColors: Record<string, string> = { agent: accentColor, circle: '#909098', user: '#22c55e', session: '#f59e0b' };
+  const subjectLookupIds = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
+  const canonicalSubjectId = String(agentId || '').trim();
+  const subjectAliases = subjectLookupIds.filter(id => id !== canonicalSubjectId);
+  const aliasPreview = subjectAliases.slice(0, 3).join(', ');
+  const aliasOverflow = subjectAliases.length > 3 ? ` +${subjectAliases.length - 3} more` : '';
 
   // Ownership gate for Edit/Delete. Rule: a user can only mutate memories they
   // own. Circle-shared memories (`scope==='circle'`) are read-only from this
@@ -353,6 +384,8 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
 
   const renderMemoryCard = (mem: any) => {
     const editable = canEditMemory(mem);
+    const useLabel = getMemoryUseLabel(mem);
+    const provenanceLabel = getAgentMemoryProvenanceLabel(mem, canonicalSubjectId);
     return (
     <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12, marginBottom: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
@@ -364,6 +397,13 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
             {scopeLabels[mem.scope] || mem.scope}
           </Text>
         </View>
+        {provenanceLabel ? (
+          <View style={{ backgroundColor: '#241a0b', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b40', maxWidth: 190 }}>
+            <Text style={{ color: '#fbbf24', fontSize: 10, fontFamily: MONO }} numberOfLines={1}>
+              {provenanceLabel}
+            </Text>
+          </View>
+        ) : null}
         {typeof mem.metadata?.soul_memory_mode === 'string' ? (
           <View style={{ backgroundColor: '#221933', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
             <Text style={{ color: '#a78bfa', fontSize: 10, fontFamily: MONO }}>
@@ -375,6 +415,13 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
           <View style={{ backgroundColor: '#102334', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
             <Text style={{ color: '#7dd3fc', fontSize: 10, fontFamily: MONO }}>
               {`${getRelevantSouls(mem).length} souls`}
+            </Text>
+          </View>
+        ) : null}
+        {useLabel ? (
+          <View style={{ backgroundColor: '#171717', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
+            <Text style={{ color: '#9a9aa8', fontSize: 10, fontFamily: MONO }}>
+              {useLabel}
             </Text>
           </View>
         ) : null}
@@ -489,6 +536,20 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentName,
           Active soul memory lane: {soulLabel || soulKey}
         </Text>
       ) : null}
+      <View style={{ backgroundColor: '#080810', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 7, gap: 4 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Text style={{ color: '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>SUBJECT</Text>
+          <Text style={{ color: accentColor, fontSize: 11, fontFamily: MONO, flex: 1 }} numberOfLines={1}>
+            {canonicalSubjectId || 'unassigned'}
+          </Text>
+          <Text style={{ color: '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
+            {subjectAliases.length} {subjectAliases.length === 1 ? 'ALIAS' : 'ALIASES'}
+          </Text>
+        </View>
+        <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 15 }} numberOfLines={2}>
+          Memory resolves through the canonical subject{subjectAliases.length > 0 ? ` and legacy aliases: ${aliasPreview}${aliasOverflow}` : '; no legacy aliases are attached.'}
+        </Text>
+      </View>
 
       {/* Filter pills — active = solid accent, idle = low-contrast outline.
           The previous design tinted the active pill at 20% opacity which was

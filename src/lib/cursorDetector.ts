@@ -14,7 +14,7 @@ import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
-import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 
 const BRIDGE_PORT = 7781;
@@ -40,6 +40,8 @@ export interface CursorSession {
   userMessages: number;
   assistantMessages: number;
   recentActions: string[];
+  displayName?: string;
+  manageable?: boolean;
 }
 
 // Purple tones to match Cursor branding
@@ -56,8 +58,7 @@ export async function detectCursorBridge(): Promise<boolean> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -74,8 +75,7 @@ export async function fetchCursorSessions(): Promise<CursorSession[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -232,6 +232,89 @@ export async function updateCursorAgentStatus(
       .eq('owner_id', auth.user.id)
       .eq('name', CURSOR_AGENT_NAME);
   } catch {}
+}
+
+// ── Launch / send via local Cursor Composer bridge ─────────────────────────
+
+export interface CursorComposerLaunchRequest {
+  count: number;
+  prompts: string[];
+  names: string[];
+  circleId?: string;
+  userId?: string;
+}
+
+export interface CursorComposerLaunchResult {
+  ok: boolean;
+  launchId?: string;
+  sessions: CursorSession[];
+  launched: number;
+  failed: Array<{ sessionId?: string; displayName?: string; error: string }>;
+  projectDir?: string;
+  error?: string;
+}
+
+export async function launchCursorComposerSessions(input: CursorComposerLaunchRequest): Promise<CursorComposerLaunchResult> {
+  const bridgeUrl = getCursorBridgeUrl();
+  if (!bridgeUrl) {
+    return {
+      ok: false,
+      sessions: [],
+      launched: 0,
+      failed: [{ error: 'Cursor bridge URL is unavailable in this runtime.' }],
+      error: 'Cursor bridge URL is unavailable in this runtime.',
+    };
+  }
+
+  try {
+    const res = await fetchBridgeAuthenticated(`${bridgeUrl}/launch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        count: input.count,
+        prompts: input.prompts,
+        names: input.names,
+      }),
+    });
+    const data = await res.json().catch(() => null) as Partial<CursorComposerLaunchResult> | null;
+    if (!res.ok && !data?.launched) {
+      const error = data?.error || `Cursor bridge launch failed with HTTP ${res.status}`;
+      return {
+        ok: false,
+        sessions: [],
+        launched: 0,
+        failed: [{ error }],
+        error,
+      };
+    }
+
+    const sessions = Array.isArray(data?.sessions) ? data.sessions as CursorSession[] : [];
+    if (input.circleId) {
+      await publishCursorAgent(input.circleId, sessions.length || data?.launched || 0);
+      await updateCursorAgentStatus(input.circleId, sessions);
+    }
+
+    return {
+      ok: Boolean(data?.ok),
+      launchId: data?.launchId,
+      sessions,
+      launched: Number(data?.launched || 0),
+      failed: Array.isArray(data?.failed) ? data.failed : [],
+      projectDir: data?.projectDir,
+      error: data?.error,
+    };
+  } catch (e: any) {
+    const message = e?.name === 'AbortError'
+      ? 'Cursor bridge launch timed out.'
+      : e?.message || 'Cursor bridge launch failed.';
+    return {
+      ok: false,
+      sessions: [],
+      launched: 0,
+      failed: [{ error: message }],
+      error: message,
+    };
+  }
 }
 
 // ── Session Memory Persistence ──────────────────────────────────────────────

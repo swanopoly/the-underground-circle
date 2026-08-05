@@ -56,15 +56,23 @@ export async function resolveApproval(
   status: 'approved' | 'rejected',
   userId: string,
 ): Promise<void> {
-  const { error } = await supabase
+  // Pending-only transition (mirrors runApprovalsService.resolveRunApproval):
+  // a late click after another approver — or after expiry — must not flip an
+  // already-resolved row. 0 rows matched → silent no-op (the realtime refresh
+  // clears the card); real errors still throw. Downstream apply is safe either
+  // way: agentApprovalsWorker re-checks status + applied_at itself.
+  const { data, error } = await supabase
     .from('agent_approvals')
     .update({
       status,
       resolved_at: new Date().toISOString(),
       resolved_by: userId,
     })
-    .eq('id', approvalId);
+    .eq('id', approvalId)
+    .eq('status', 'pending')
+    .select('id');
   if (error) throw error;
+  if (!Array.isArray(data) || data.length === 0) return; // already resolved/expired
 }
 
 export async function getPendingApprovals(circleId: string): Promise<AgentApproval[]> {
@@ -91,6 +99,31 @@ export async function getAgentControl(
       .maybeSingle();
     if (error) return null;
     return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * O4: the most restrictive `spending_limit_daily` configured across the
+ * circle's agent control rows, in USD. Controls are per office agent
+ * (session_key), but subagent delegation is a circle-level multiplier on
+ * spend, so the gate honors the tightest configured budget. Returns null
+ * when no control row exists or the read fails — callers treat null as
+ * "no limit configured" (the delegation budget guard fails open).
+ */
+export async function getCircleMinSpendingLimit(circleId: string): Promise<number | null> {
+  try {
+    const { data, error } = await supabase
+      .from('agent_controls')
+      .select('spending_limit_daily')
+      .eq('circle_id', circleId);
+    if (error || !data || data.length === 0) return null;
+    const limits = data
+      .map(row => Number(row.spending_limit_daily))
+      .filter(value => Number.isFinite(value) && value >= 0);
+    if (limits.length === 0) return null;
+    return Math.min(...limits);
   } catch {
     return null;
   }

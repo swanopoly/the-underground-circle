@@ -14,6 +14,7 @@ import type { OfficeCommand } from './office/OfficeChat';
 import {
   OfficeAgent,
   DEFAULT_AGENT,
+  HUGGINGSWAN_AGENT,
   sessionsToAgents,
   getOfficeStatusColor,
   getOfficeStatusLabel,
@@ -27,7 +28,13 @@ import {
 } from '../../../lib/officeConfig';
 import { validateOfficeLayout } from '../../../lib/officeValidation';
 import { getBridgeUrl, getBridgeEnvironment } from '../../../lib/bridgeEnvironment';
+import { fetchBridgeAuthenticated } from '../../../lib/bridgeAuth';
 import ConnectAllBridgesPanel, { isConnectPanelDismissed } from '../../../components/office/ConnectAllBridgesPanel';
+import OfficeBridgeReadinessStrip from '../../../components/office/OfficeBridgeReadinessStrip';
+import OfficeLaneHealthStrip from '../../../components/office/OfficeLaneHealthStrip';
+import OfficeBridgeDiagPanel from '../../../components/office/OfficeBridgeDiagPanel';
+import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
+import type { OfficeBridgeReadinessSnapshot as OfficeBridgeReadinessSnapshotModel } from '../../../lib/officeBridgeReadiness';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity, updateAgentIdentity, getAgentIdentityByAgent, getAgentIdentityKey, applyIdentityToAgent } from '../../../lib/agentIdentity';
@@ -57,6 +64,8 @@ import {
 import { storage } from '../../../lib/storage';
 import { loadTrendingContent } from '../../../lib/trendingContent';
 import AgentQuickConnect from "../../../components/AgentQuickConnect";
+import SuggestedTaskChips from "../../../components/SuggestedTaskChips";
+import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
@@ -65,9 +74,68 @@ import {
 } from '../../../lib/budgetAlerts';
 import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
 import { calculatePeriodCosts } from '../../../lib/costCalculations';
-import OfficeActionPanel from '../../../components/OfficeActionPanel';
+import {
+  OfficeBuildingNowCard,
+  OfficeTokensCard,
+  OfficeAgentLiveOpsLines,
+  OfficeAgentAccountabilityLine,
+  OfficeBuildingBadge,
+  officeBoardHasContent,
+  officeTrackerHasContent,
+} from '../../../components/office/OfficeOpsBoardCards';
+// officeOpsBoard is a pure model module (zero runtime imports) — safe to
+// import statically for render-time helpers; data fetching stays lazy (D6).
+import {
+  applySyntheticAgentStatusUpgrade,
+  buildAgentLiveOps,
+  buildOfficeAgentXp,
+  buildOfficeDeskAccountabilityPlaque,
+  deriveSyntheticAgentStatusFromRuns,
+  formatAccountabilityCounts,
+  HUGGINGSWAN_RUN_NAME_KEYS,
+  OPENSWAN_RUN_NAME_KEYS,
+} from '../../../lib/officeOpsBoard';
+import type {
+  OfficeAgentAccountability as OfficeAgentAccountabilityModel,
+  OfficeBuildingBoard,
+  OfficeRunNode,
+  OfficeTokenTrackerCard as OfficeTokenTrackerCardModel,
+} from '../../../lib/officeOpsBoard';
+// Pure run↔agent attribution seam (extracted from this file; smoke-tested via
+// `npm run smoke:office-run-lookup`).
+import {
+  buildOfficeAgentRunLookupKeys,
+  buildOpsRunNodeLookupKeys,
+  getOpsAccountabilityForAgent,
+  getOpsRunNodesForAgent,
+  pickFreshestRunFreshness,
+  runFreshnessUpdatedAtMs,
+} from '../../../lib/officeRunLookup';
+import type { AgentRun } from '../../../lib/agentRunSystem';
+import type { AgentPlanPersisted } from '../../../lib/agentPlanMode';
+import {
+  classifyRunFreshness,
+  freshnessRank,
+  type RunFreshness,
+  type RunFreshnessResult,
+} from '../../../lib/runFreshnessCore';
+import type { ClaudeUsageSummary, ClaudeUsageByModel } from '../../../lib/claudeUsage';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
+import RunApprovalBanner from '../../../components/RunApprovalBanner';
+import ChatAttentionStrip from '../../../components/ChatAttentionStrip';
+import StandingGrantsPanel from '../../../components/StandingGrantsPanel';
+import ComputerTaskSchedulesPanel from '../../../components/ComputerTaskSchedulesPanel';
+import OfficeAgentPlanQueue, { officeAgentPlanQueueHasContent } from '../../../components/office/OfficeAgentPlanQueue';
+import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
+import {
+  buildChatAttentionState,
+  type ChatAttentionAction,
+  type ChatAttentionItem,
+} from '../../../lib/chatAttentionQueue';
+import { isApprovalRowLive } from '../../../lib/approvalCardModelCore';
+import { showAlert } from '../../../lib/alert';
+import type { ComputerTaskChecklistCard } from '../../../lib/computerTaskState';
 import { useAgentApprovals, useAgentControl } from '../../../services/hitlService';
 import {
   CircleOfficeAgent,
@@ -98,7 +166,6 @@ import {
 } from '../../../lib/agentPresence';
 import {
   subscribeToTerminalCommands,
-  respondToCommand,
   cleanupTerminalChannels,
   updateAgentAnalytics,
   sendTerminalCommand,
@@ -110,7 +177,8 @@ import {
   invokeAllAgents,
   invokeSelectedAgents,
 } from '../../../lib/agentInvocation';
-import { getCircleSessionMemoryMode } from '../../../lib/agentRunSystem';
+import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
+import { getCircleSessionMemoryMode, getActiveRuns } from '../../../lib/agentRunSystem';
 import { buildOfficeRoster } from '../../../lib/officeRoster';
 import { useUserApiKeys } from '../../../lib/llmProviders';
 import { useOfficeSurfaceState } from './office/useOfficeSurfaceState';
@@ -120,6 +188,19 @@ import {
   startIdleScheduler, stopIdleScheduler, getDefaultIdleConfig,
 } from '../../../lib/idleBehaviors';
 import { supabase } from '../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../lib/subscribeWithReconnect';
+// Stylesheets live in their own module — see office/officeTabStyles.ts.
+import {
+  styles,
+  pmStyles,
+  coStyles,
+  nftStyles,
+  imgPickerStyles,
+  stickyStyles,
+  svcStyles,
+  officeFilterChipStyles,
+} from './office/officeTabStyles';
+import CircleOfficePanel, { OfficeConnectBridgesSection } from './office/CircleOfficePanel';
 import { fetchNFTs } from '../../../lib/crypto';
 
 function setAutoConnectCircleId(circleId: string) {
@@ -227,6 +308,18 @@ function isDocumentVisible(): boolean {
   return document.visibilityState === 'visible';
 }
 
+// Shared run-liveness (runFreshnessCore): one bucket/label every surface paints
+// from a single agent_runs row, so Office's roster shows the SAME freshness as
+// Feed instead of a static agent status that can't reveal a wedged run.
+const FRESHNESS_DOT_COLORS: Record<RunFreshness, string> = {
+  live: '#22c55e',
+  recent: '#38bdf8',
+  idle: '#f59e0b',
+  stale: '#ef4444',
+  done: '#606075',
+  unknown: '#606075',
+};
+
 export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
   const surfaceState = useOfficeSurfaceState();
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
@@ -253,11 +346,294 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const pendingApprovals = useAgentApprovals(circleId);
   // showControlCard removed — controls now embedded in AgentPanel
 
+  // Circle-wide "Needs you" strip (plan §4a/§5b) — same chatAttentionQueue
+  // owner as chat: summary line with counts + soonest-expiry countdown, rows
+  // for expired approvals the live banner below cannot show, and runs stuck
+  // in waiting_approval/paused with how long they have been blocked. Pending
+  // approvals keep their approve/reject buttons in HitlApprovalBanner; the
+  // status line still counts them so the summary stays truthful.
+  const [dismissedOfficeAttentionIds, setDismissedOfficeAttentionIds] = useState<Set<string>>(new Set());
+  const [, setOfficeAttentionTick] = useState(0);
+  const [officeBlockedRuns, setOfficeBlockedRuns] = useState<AgentRun[]>([]);
+  // open_run deep-link (plan §6b): blocked-run attention items open the same
+  // run drawer chat uses instead of pointing at the board with an alert.
+  const [showOfficeRunDetail, setShowOfficeRunDetail] = useState(false);
+  const [officeRunDetailRefId, setOfficeRunDetailRefId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!circleId) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const runs = await getActiveRuns(circleId);
+        if (!cancelled) {
+          setOfficeBlockedRuns(runs.filter(
+            (run) => run.status === 'waiting_approval' || run.status === 'paused',
+          ));
+        }
+      } catch { /* queue is a summary — a failed poll just shows stale data */ }
+    };
+    void load();
+    const timer = setInterval(() => { void load(); }, 60_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [circleId]);
+  const officeAttention = buildChatAttentionState({
+    approvals: pendingApprovals,
+    blockedRuns: officeBlockedRuns,
+  }, { dismissedIds: dismissedOfficeAttentionIds });
+  const officeAttentionItems = officeAttention.items.filter((item) =>
+    item.kind !== 'approval_pending'
+      && item.kind !== 'approval_expiring',
+  );
+  const officeAttentionActive = officeAttention.statusLine !== null;
+  useEffect(() => {
+    if (!officeAttentionActive) return;
+    const timer = setInterval(() => setOfficeAttentionTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, [officeAttentionActive]);
+  const handleOfficeAttentionAction = (item: ChatAttentionItem, action: ChatAttentionAction) => {
+    if (action.kind === 'dismiss') {
+      setDismissedOfficeAttentionIds((prev) => new Set(prev).add(item.id));
+      return;
+    }
+    if (action.kind === 'refile_approval') {
+      // Office has no composer — re-asking happens where the request lives.
+      showAlert(
+        'Approval expired',
+        'Resend the original request from the Chat tab and a fresh approval will be filed automatically.',
+      );
+      return;
+    }
+    if (action.kind === 'open_run') {
+      // Attention items carry the exact run id — deep-link the drawer to it
+      // instead of landing on the newest run.
+      setOfficeRunDetailRefId(item.refId ?? null);
+      setShowOfficeRunDetail(true);
+    }
+  };
+
+  // D6: active computer-task card from the persisted record (main thread) —
+  // Office is the away-from-chat surface, so a task paused on a question or
+  // approval must be visible here too. Light poll; storage read is cheap.
+  const [computerTaskCard, setComputerTaskCard] = useState<ComputerTaskChecklistCard | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { loadComputerTaskState, buildComputerTaskChecklistCard } = await import('../../../lib/computerTaskState');
+        const record = await loadComputerTaskState(circleId);
+        if (!cancelled) setComputerTaskCard(buildComputerTaskChecklistCard(record));
+      } catch { /* dashboard extra — never break Office */ }
+    };
+    void load();
+    const timer = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [circleId]);
+
+  // Saved Chat plans that are ready for Office/SwanBot/OpenSwan handoff. The
+  // queue is informational here; execution stays in Chat until the typed Office
+  // execution contract lands.
+  const [officeAgentPlans, setOfficeAgentPlans] = useState<AgentPlanPersisted[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { listAgentPlans } = await import('../../../lib/agentPlanPersistence');
+        const plans = await listAgentPlans({ circleId, limit: 20 });
+        if (!cancelled) setOfficeAgentPlans(plans);
+      } catch { /* dashboard extra - never break Office */ }
+    };
+    void load();
+    const timer = setInterval(() => { void load(); }, 60_000);
+    const handle = subscribeWithReconnect({
+      channelName: `office-agent-plans:${circleId}`,
+      setup: (channel) => channel.on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'agent_plans',
+        filter: `circle_id=eq.${circleId}`,
+      }, () => { void load(); }),
+      onCatchUp: () => { void load(); },
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      handle.unsubscribe();
+    };
+  }, [circleId]);
+  const visibleAgentPlans = useMemo(
+    () => officeAgentPlans.filter((plan) => plan.status !== 'completed' && plan.status !== 'archived'),
+    [officeAgentPlans],
+  );
+  const handleOpenAgentPlanChat = useCallback((plan: AgentPlanPersisted) => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    try {
+      window.dispatchEvent(new CustomEvent('uc:switch-tab', {
+        detail: {
+          tab: 'CHAT',
+          source: 'office_agent_plan_queue',
+          agentPlanId: plan.id,
+          agentPlanStatus: plan.status,
+        },
+      }));
+    } catch { /* web-only dashboard convenience */ }
+  }, []);
+
+  // ── Office ops board (Building Now + Token Tracker) ──────────────────────
+  // D6 pattern: lazy-import loader, bounded pure models, silent failures.
+  // Runs poll every 15s plus a realtime subscription for instant updates;
+  // Claude usage (summary + by-model, 7d) refreshes at most every 60s.
+  const [opsBoard, setOpsBoard] = useState<OfficeBuildingBoard | null>(null);
+  const [opsTokenTracker, setOpsTokenTracker] = useState<OfficeTokenTrackerCardModel | null>(null);
+  // O1 (P38): per-agent 24h accountability (last outcome + counts + cost),
+  // keyed by the same lowercased agent-name seam as opsRunNodesByAgent.
+  const [opsAccountability, setOpsAccountability] = useState<Map<string, OfficeAgentAccountabilityModel> | null>(null);
+  // Shared run freshness (runFreshnessCore) keyed by run.id, rebuilt on every
+  // 15s reload + realtime tick so the roster paints one liveness truth (the
+  // same bucket/label Feed shows) instead of a static agent status.
+  const [opsRunFreshness, setOpsRunFreshness] = useState<Map<string, RunFreshnessResult>>(() => new Map());
+  // O5 (P39): main-view bridge readiness (warn/danger strip). Shares the
+  // probe→snapshot owner with the Whiteboard (officeBridgeReadinessProbe).
+  const [bridgeReadinessStrip, setBridgeReadinessStrip] = useState<OfficeBridgeReadinessSnapshotModel | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const { runOfficeBridgeReadinessProbe } = await import('../../../lib/officeBridgeReadinessProbe');
+        const snapshot = await runOfficeBridgeReadinessProbe();
+        if (!cancelled) setBridgeReadinessStrip(snapshot);
+      } catch { /* dashboard extra — never break Office */ }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 60_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+  const opsLiveRunsRef = useRef<AgentRun[]>([]);
+  const opsUsageCacheRef = useRef<{
+    summary?: ClaudeUsageSummary;
+    byModel?: ClaudeUsageByModel[];
+    fetchedAtMs: number;
+  }>({ fetchedAtMs: 0 });
+  // Synced from enrichedSessions in render (declared below) so the loader can
+  // read the latest sessions without re-subscribing — same pattern as onReadyRef.
+  const opsSessionsRef = useRef<OpenSwanSession[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribeRuns: (() => void) | null = null;
+    // Reset per-circle so a circle switch can't show stale spend/runs.
+    opsLiveRunsRef.current = [];
+    opsUsageCacheRef.current = { fetchedAtMs: 0 };
+    setOpsRunFreshness(new Map());
+
+    const rebuildTracker = async () => {
+      try {
+        const { buildOfficeTokenTracker } = await import('../../../lib/officeOpsBoard');
+        if (cancelled) return;
+        const sessions = opsSessionsRef.current;
+        const pc = sessions.length > 0 ? calculatePeriodCosts(sessions) : null;
+        setOpsTokenTracker(buildOfficeTokenTracker({
+          summary: opsUsageCacheRef.current.summary,
+          byModel: opsUsageCacheRef.current.byModel,
+          liveRuns: opsLiveRunsRef.current,
+          periodCosts: pc ? { today: pc.today, week: pc.week } : undefined,
+          nowMs: Date.now(),
+        }));
+      } catch { /* dashboard extra — never break Office */ }
+    };
+
+    const reloadRuns = async () => {
+      try {
+        const [{ listCircleLiveRuns }, { buildOfficeBuildingBoard, buildOfficeAgentAccountabilityIndex }] = await Promise.all([
+          import('../../../lib/agentRunSystem'),
+          import('../../../lib/officeOpsBoard'),
+        ]);
+        // 24h finished window (O1 accountability). The building board
+        // self-filters recentlyFinished to its 10-minute window, so widening
+        // the fetch only feeds the per-agent accountability index.
+        const runs = await listCircleLiveRuns(circleId, { recentFinishedMs: 24 * 60 * 60 * 1000, limit: 200 });
+        if (cancelled) return;
+        opsLiveRunsRef.current = runs;
+        setOpsBoard(buildOfficeBuildingBoard(runs, { nowMs: Date.now() }));
+        setOpsAccountability(buildOfficeAgentAccountabilityIndex(runs, { nowMs: Date.now() }));
+        // One shared freshness read for every live/blocked run row (row 4-5):
+        // classify from the single agent_runs row so the roster paints the same
+        // bucket/label Feed does. Display-only — the board/poll are untouched.
+        const freshnessNowMs = Date.now();
+        const runFreshnessById = new Map<string, RunFreshnessResult>();
+        for (const run of runs) {
+          runFreshnessById.set(run.id, classifyRunFreshness({
+            status: run.status,
+            updatedAtMs: runFreshnessUpdatedAtMs(run),
+            nowMs: freshnessNowMs,
+          }));
+        }
+        setOpsRunFreshness(runFreshnessById);
+        void rebuildTracker(); // live-burn line tracks the fresh runs
+      } catch { /* dashboard extra — never break Office */ }
+    };
+
+    const reloadUsage = async () => {
+      // Cache: refresh Claude usage at most every 60s even if callers race.
+      if (Date.now() - opsUsageCacheRef.current.fetchedAtMs < 60_000) return;
+      opsUsageCacheRef.current.fetchedAtMs = Date.now(); // claim slot before await
+      try {
+        const { getClaudeUsageSummary, getClaudeUsageByModel } = await import('../../../lib/claudeUsage');
+        const [summary, byModel] = await Promise.all([
+          getClaudeUsageSummary(circleId, 7),
+          getClaudeUsageByModel(circleId, 7),
+        ]);
+        if (cancelled) return;
+        opsUsageCacheRef.current = { summary, byModel, fetchedAtMs: Date.now() };
+        void rebuildTracker();
+      } catch { /* dashboard extra — never break Office */ }
+    };
+
+    void reloadRuns();
+    void reloadUsage();
+    const runsTimer = setInterval(() => { void reloadRuns(); }, 15_000);
+    const usageTimer = setInterval(() => { void reloadUsage(); }, 60_000);
+
+    // Realtime: refetch on agent_runs INSERT/UPDATE (debounced in the lib).
+    (async () => {
+      try {
+        const { subscribeToCircleRuns } = await import('../../../lib/agentRunSystem');
+        if (cancelled) return;
+        const unsub = subscribeToCircleRuns(circleId, () => { void reloadRuns(); });
+        if (cancelled) { unsub(); return; } // raced with cleanup
+        unsubscribeRuns = unsub;
+      } catch { /* dashboard extra — never break Office */ }
+    })();
+
+    return () => {
+      cancelled = true;
+      clearInterval(runsTimer);
+      clearInterval(usageTimer);
+      try { unsubscribeRuns?.(); } catch {}
+      unsubscribeRuns = null;
+    };
+  }, [circleId]);
+
+  // Map building run nodes to roster agents by both display name and canonical
+  // subject identity. Display-name matching remains the fallback; subject keys
+  // let Office attach runs written as `agentSubjectKey` / DB id / session alias.
+  const opsRunNodesByAgent = useMemo(() => {
+    const map = new Map<string, OfficeRunNode[]>();
+    const visit = (node: OfficeRunNode) => {
+      for (const key of buildOpsRunNodeLookupKeys(node)) {
+        const list = map.get(key);
+        if (list) list.push(node); else map.set(key, [node]);
+      }
+      node.children.forEach(visit);
+    };
+    (opsBoard?.building ?? []).forEach(visit);
+    return map;
+  }, [opsBoard]);
+
   // Agent control hook for selected agent
   const selectedSessionKey = getAgentIdentityKey(selectedAgent);
   const agentControl = useAgentControl(circleId, selectedSessionKey);
 
-  // Remote shell: execute command on agent's machine via bridge /exec
+  // Read-only local diagnostics through the Claude bridge allowlist.
   const handleRunCommand = React.useCallback(async (cmd: string) => {
     if (!selectedAgent) return { ok: false, stdout: '', stderr: 'No agent selected' };
 
@@ -265,8 +641,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const bridgePorts: Record<string, number> = {
       'claude-code': 7778, 'codex': 7779, 'gemini': 7780, 'cursor': 7781,
     };
-    const port = bridgePorts[selectedAgent.providerType || ''];
+    const providerType = selectedAgent.providerType || '';
+    const port = bridgePorts[providerType];
     if (!port) return { ok: false, stdout: '', stderr: 'No bridge for this provider' };
+    if (providerType !== 'claude-code') {
+      return { ok: false, stdout: '', stderr: 'Read-only diagnostics are currently available through the Claude bridge only.' };
+    }
     const bridgeUrl = getBridgeUrl(port);
     if (!bridgeUrl) {
       return {
@@ -279,7 +659,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${bridgeUrl}/exec`, {
+      const res = await fetchBridgeAuthenticated(`${bridgeUrl}/diagnostics`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: cmd }),
@@ -361,6 +741,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
   const [enrichedSessions, setEnrichedSessions] = useState<OpenSwanSession[]>([]);
+  // Keep the ops-board loader's view of sessions current without it needing
+  // enrichedSessions in its effect deps (it reads via ref at rebuild time).
+  opsSessionsRef.current = enrichedSessions;
   const enrichedSessionSignatureRef = useRef('');
   const {
     showCustomize, setShowCustomize,
@@ -734,6 +1117,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     targetAgentId: string | null;
     targetAgentIds: string[] | null;
     targetAgentName: string;
+    targetAgentSubject?: AgentRuntimeSubjectMetadata | null;
+    targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
     model: string | null;
     senderId: string;
   }) => {
@@ -748,6 +1133,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       command: params.command,
       senderId: params.senderId,
       targetAgentName: params.targetAgentName,
+      agentSubjectMetadata: params.targetAgentSubject || undefined,
+      targetAgentSubjects: params.targetAgentSubjects || null,
       model: params.model,
     };
 
@@ -828,6 +1215,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         command: cmd.commandText,
         senderId: cmd.senderId,
         targetAgentName: cmd.targetAgentName,
+        agentSubjectMetadata: cmd.targetAgentSubject || undefined,
+        targetAgentSubjects: cmd.targetAgentSubjects || null,
         model: cmd.model,
       };
 
@@ -844,7 +1233,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       if (cmd.targetAgentIds && cmd.targetAgentIds.length > 0) {
         // Multi-select — invoke selected agents in parallel
         // Invoke BlackSwan if included
-        if (cmd.targetAgentIds.includes(BLACKSWAN_AGENT_ID)) {
+        if (blackSwanTargeted) {
           invokeAndStream(
             { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
             blackSwanAgent,
@@ -860,8 +1249,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             gwUrl
           ).catch(err => console.error('[OfficeTab] Multi-select invocation failed:', err));
         }
-      } else if (cmd.targetAgentId) {
-        // Single agent target
+      } else if (cmd.targetAgentId || blackSwanTargeted) {
+        // Single durable UUID target, or the virtual BlackSwan target encoded
+        // by name because it cannot be persisted in a UUID column.
         if (blackSwanTargeted) {
           invokeAndStream(
             { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
@@ -1848,7 +2238,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     agent.outputTokens || 0,
   ])), [userAgents]);
   const displayAgents = useMemo(() => {
-    return buildOfficeRoster({
+    const roster = buildOfficeRoster({
       agents: userAgents,
       currentUserId,
       circleAgents: mergedCircleAgents,
@@ -1856,7 +2246,33 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       identities: agentIdentities,
       selectedAgentId: selectedAgent?.id || null,
     });
-  }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id]);
+    // O8: synthetic pinned agents (OpenSwan; HuggingSwan if ever re-pinned)
+    // have no session/bridge feeding their status, so mid-task they'd keep a
+    // static default. Live agent_runs rows are authoritative evidence of work
+    // (the Building-Now board renders the same nodes), so UPGRADE-only:
+    // idle → building/active, building → active, activity → "Working: <run>".
+    // No evidence and offline/error rows pass through untouched — see
+    // officeOpsBoard.deriveSyntheticAgentStatusFromRuns (mirror image of the
+    // O2 demote-only reconcile). Matching uses the same name/subject-key map
+    // as roster live ops below.
+    if (opsRunNodesByAgent.size === 0) return roster;
+    const nowMs = Date.now();
+    return roster.map((agent) => {
+      if (!agent.isSynthetic) return agent;
+      const nameKeys =
+        agent.id === DEFAULT_AGENT.id ? OPENSWAN_RUN_NAME_KEYS
+        : agent.id === HUGGINGSWAN_AGENT.id ? HUGGINGSWAN_RUN_NAME_KEYS
+        : null;
+      if (!nameKeys) return agent;
+      const nodes = nameKeys.flatMap((key) => opsRunNodesByAgent.get(key) ?? []);
+      const upgrade = applySyntheticAgentStatusUpgrade(
+        agent.status,
+        deriveSyntheticAgentStatusFromRuns(nameKeys, nodes, nowMs),
+      );
+      if (!upgrade.changed) return agent;
+      return { ...agent, status: upgrade.status, activity: upgrade.activity ?? agent.activity };
+    });
+  }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id, opsRunNodesByAgent]);
 
   // Precompute filter counts so every chip can show its hit count inline.
   // `mine` is bridge-pushed agents owned by the current user plus the default
@@ -3631,8 +4047,88 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   return (
     <View style={styles.container}>
-      {/* HITL Approval Banner */}
-      <HitlApprovalBanner approvals={pendingApprovals} circleId={circleId} />
+      {/* Circle-wide "Needs you" summary (plan §4a) */}
+      <ChatAttentionStrip
+        state={officeAttention}
+        items={officeAttentionItems}
+        onAction={handleOfficeAttentionAction}
+        accentColor={accentColor}
+      />
+
+      {/* HITL Approval Banner — expired rows are excluded (the strip above
+          declares them expired; live APPROVE on a dead window is a trap). */}
+      <HitlApprovalBanner
+        approvals={pendingApprovals.filter((approval) =>
+          // Shared liveness predicate (approvalCardModelCore); no-timeout rows
+          // age out at the 30-min staleness cap too — narrows-only.
+          isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now()),
+        )}
+        circleId={circleId}
+      />
+
+      {/* Tool-loop run approvals — visible + resolvable from the dashboard.
+          Gated on currentUserId (mirrors ChatTab): an empty userId would make
+          approve/reject a silent no-op (uuid column rejects ''). */}
+      {currentUserId ? <RunApprovalBanner circleId={circleId} userId={currentUserId} /> : null}
+
+      {/* Standing "always allow" grants — review + revoke (plan §4d) */}
+      <StandingGrantsPanel accentColor={accentColor} userId={currentUserId} />
+
+      {/* Recurring watches — list / pause / delete (plan §6a) */}
+      <ComputerTaskSchedulesPanel circleId={circleId} accentColor={accentColor} />
+
+      {/* Run detail drawer for open_run attention items (plan §6b) */}
+      <RunHistoryDrawer
+        visible={showOfficeRunDetail}
+        circleId={circleId}
+        currentUserId={currentUserId}
+        title="Circle Runs"
+        initialRunId={officeRunDetailRefId}
+        onClose={() => setShowOfficeRunDetail(false)}
+      />
+
+      {/* D6: active computer task — phase, needs-you, stage progress */}
+      {computerTaskCard?.active ? (
+        <View
+          style={{
+            marginHorizontal: 12,
+            marginTop: 6,
+            paddingVertical: 8,
+            paddingHorizontal: 12,
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: computerTaskCard.needsYou.length > 0 ? '#e8b33955' : '#33415555',
+            backgroundColor: computerTaskCard.needsYou.length > 0 ? '#e8b33912' : '#1e293b33',
+          }}
+        >
+          <Text style={{ color: '#e2e8f0', fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
+            🖥 {computerTaskCard.title} — {computerTaskCard.phaseLabel}
+          </Text>
+          {computerTaskCard.needsYou.slice(0, 2).map((item, index) => (
+            <Text key={`${item.kind}_${index}`} style={{ color: '#e8b339', fontSize: 11, marginTop: 2 }} numberOfLines={2}>
+              ⚑ {item.kind === 'question' ? 'Needs your answer' : item.kind === 'approval' ? 'Needs your approval' : 'Blocked'}: {item.label}
+            </Text>
+          ))}
+          {computerTaskCard.stages.length > 0 ? (
+            <Text style={{ color: '#94a3b8', fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+              {computerTaskCard.stages.map((stage) => (
+                stage.status === 'completed' ? '✓' : stage.status === 'failed' ? '✕' : '○'
+              )).join(' ')} {computerTaskCard.stages.length} stages
+            </Text>
+          ) : null}
+          {/* E1: escalation breadcrumbs — dim, latest switch only */}
+          {computerTaskCard.surfaceChanges.length > 0 ? (
+            <Text style={{ color: '#64748b', fontSize: 10, marginTop: 2 }} numberOfLines={1}>
+              {computerTaskCard.surfaceChanges[computerTaskCard.surfaceChanges.length - 1]}
+            </Text>
+          ) : null}
+          {computerTaskCard.needsYou.length > 0 ? (
+            <Text style={{ color: '#64748b', fontSize: 10, marginTop: 2 }} numberOfLines={1}>
+              Open Chat → Use Computer to answer or approve.
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* Budget Alerts */}
       {!budgetAlertsDismissed && budgetAlerts.length > 0 && (
@@ -3643,6 +4139,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         />
       )}
 
+      {/* O5 (P39): fail-visible bridge readiness on the main view — warns when
+          the core proxy or all execution bridges are down; silent when healthy
+          (the connect panel's "✓ Connected" chip owns the happy state). */}
+      <OfficeBridgeReadinessStrip snapshot={bridgeReadinessStrip} />
+      {/* X7 tail (P53): per-lane chat quality — warn/danger-only, silent when
+          healthy; self-polls the session lane-health registry (P48). */}
+      <OfficeLaneHealthStrip />
+      {/* Passive bridge/pairing status — always-on collapsed strip, expandable
+          to per-bridge rows; self-polls, no OfficeTab state. */}
+      <OfficeBridgeDiagPanel />
       <OfficeConnectBridgesSection circleId={circleId} />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
@@ -3707,6 +4213,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         {/* Mobile: Card-based agent list */}
         {!isDesktop ? (
           <ScrollView style={styles.mobileAgentScroll} showsVerticalScrollIndicator={true} contentContainerStyle={styles.mobileAgentList}>
+            {/* Ops board: live builds + token spend (after the computer-task
+                card above, before the agent roster). Hidden when empty. */}
+            <OfficeBuildingNowCard board={opsBoard} />
+            <OfficeTokensCard tracker={opsTokenTracker} />
+            <OfficeAgentPlanQueue
+              plans={visibleAgentPlans}
+              accentColor={accentColor}
+              maxItems={3}
+              onOpenChat={handleOpenAgentPlanChat}
+            />
+
             {/* Circle members' agents — shared office */}
             {mergedCircleAgents.length > 0 && (
               <CircleOfficePanel
@@ -3831,7 +4348,36 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     );
                   }
                   return (
-                    <AgentQuickConnect circleId={circleId} onOpenWizard={() => setShowSetupWizard(true)} compact />
+                    <>
+                      <AgentQuickConnect circleId={circleId} onOpenWizard={() => setShowSetupWizard(true)} compact />
+                      {/* Empty-state next-action chips. "Deploy an agent"
+                          (office:deploy-agent handler token) opens the setup
+                          wizard in-surface; /apps and /screen are chat
+                          commands, so those pick navigate to Chat via the
+                          existing uc:switch-tab event (visual guidance — no
+                          cross-surface composer-seed plumbing exists). */}
+                      <View style={{ marginTop: 20, width: '100%' }}>
+                        <SuggestedTaskChips
+                          suggestions={getEmptyStateSuggestions('office')}
+                          onPick={(action: EmptyStateSuggestionAction) => {
+                            if (action.kind === 'seed_command' && action.value === 'office:deploy-agent') {
+                              setShowSetupWizard(true);
+                              return;
+                            }
+                            // /apps + /screen live in Chat — seed the composer, then land the user there.
+                            if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                              const seed = action.kind === 'seed_command' ? buildComposerSeedDetail(action.value) : null;
+                              try {
+                                if (seed) window.dispatchEvent(new CustomEvent(SEED_EVENT_NAME, { detail: seed }));
+                                window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } }));
+                              } catch {}
+                            }
+                          }}
+                          accentColor={accentColor}
+                          nativeID="section-office-empty-suggestions"
+                        />
+                      </View>
+                    </>
                   );
                 })()}
               </View>
@@ -3856,6 +4402,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               filteredDisplayAgents.map((agent) => {
                 const statusColor = getOfficeStatusColor(agent.status);
                 const statusLabel = getOfficeStatusLabel(agent.status);
+                const opsNodes = getOpsRunNodesForAgent(agent, opsRunNodesByAgent);
+                // Shared run freshness for this agent's live/blocked run(s) —
+                // freshnessRank picks the most-alive one so the roster paints
+                // the same bucket/label Feed shows (reveals a wedged run a
+                // static agent status can't).
+                const runFreshness = pickFreshestRunFreshness(
+                  opsNodes,
+                  opsRunFreshness,
+                );
                 const isSelected = selectedAgent?.id === agent.id;
                 return (
                   <Pressable
@@ -3878,6 +4433,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                           ) : null}
                           <View style={[styles.mobileCardStatus, { backgroundColor: statusColor }]} />
                           <Text style={[styles.mobileCardStatusText, { color: statusColor }]}>{statusLabel}</Text>
+                          {runFreshness ? (
+                            <>
+                              <View style={[styles.mobileCardStatus, { backgroundColor: FRESHNESS_DOT_COLORS[runFreshness.freshness] }]} />
+                              <Text
+                                style={[styles.mobileCardStatusText, { color: FRESHNESS_DOT_COLORS[runFreshness.freshness] }]}
+                                numberOfLines={1}
+                              >
+                                {runFreshness.label}
+                              </Text>
+                            </>
+                          ) : null}
                         </View>
                         <Text style={styles.mobileCardRole}>{agent.role} · {PROVIDER_META[agent.providerType]?.icon || '⚡'} {agent.connectionName}</Text>
                         <Text style={styles.mobileCardModel}>{agent.model}</Text>
@@ -3888,6 +4454,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       </View>
                     </View>
                     <Text style={styles.mobileCardActivity} numberOfLines={1}>{agent.activity}</Text>
+                    {/* Live ops: "Now: tool" + recent tools / uptime / subagents.
+                        Runs attach by display name plus canonical subject ids. */}
+                    <OfficeAgentLiveOpsLines
+                      ops={buildAgentLiveOps(
+                        agent,
+                        opsNodes,
+                        Date.now(),
+                      )}
+                      accentColor={agent.color || accentColor}
+                    />
+                    {/* O1/O2 (P38): last finished outcome + 24h counts/cost,
+                        plus the fail-visible bridge status note when set. */}
+                    <OfficeAgentAccountabilityLine
+                      entry={getOpsAccountabilityForAgent(agent, opsAccountability)}
+                      statusNote={agent.statusNote}
+                    />
                   </Pressable>
                 );
               })
@@ -3975,8 +4557,31 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     {agents.map((agent, i) => {
                       const pos = OFFICE_DESK_POSITIONS[i];
                       if (!pos) return null;
+                      // Ops board: small "building" badge when this agent has a
+                      // matching building root or active subagents. Sprite and
+                      // its own status indicator are untouched.
+                      const opsNodes = getOpsRunNodesForAgent(agent, opsRunNodesByAgent);
+                      const opsBuilding =
+                        opsNodes.some((n) => !n.isSubagent) ||
+                        buildAgentLiveOps(agent, opsNodes, Date.now()).subagents.active > 0;
+                      // Desk plaque: same accountability index + fail-visible
+                      // status note the mobile card renders, compressed to what
+                      // fits under a sprite (24h ✓/✗ + bridge warning).
+                      const deskPlaque = buildOfficeDeskAccountabilityPlaque(
+                        getOpsAccountabilityForAgent(agent, opsAccountability),
+                        agent.statusNote,
+                      );
+                      // Per-agent build XP — same currency as the sprite's own
+                      // "+N BUILD XP" floats. Previously every desk rendered
+                      // the circle USER's lifetime points, so all 16 bars were
+                      // identical and none of them moved with the floats.
+                      const deskXp = buildOfficeAgentXp(
+                        agent.turns || agent.messagesProcessed || 0,
+                        agent.tokensUsed || 0,
+                      );
                       return (
                         <View key={agent.id} style={[styles.agentPosition, { left: pos.x - 2, top: pos.y - 50 }]}>
+                          {opsBuilding ? <OfficeBuildingBadge /> : null}
                           <PixelAgent
                             agent={agent}
                             appearance={getAppearance(agent)}
@@ -3986,11 +4591,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                             showThoughts={!editMode}
                             totalAgents={agents.length}
                             dancing={dancingAgentId === 'all' || dancingAgentId === agent.id}
-                            xp={userXp}
-                            xpNext={xpNext}
+                            xp={deskXp.total}
+                            xpNext={deskXp.nextTotal}
+                            xpLevel={deskXp.level}
+                            xpIntoLevel={deskXp.intoLevel}
+                            xpLevelSpan={deskXp.levelSpan}
+                            xpMaxed={deskXp.maxed}
                             turns={agent.turns || agent.messagesProcessed || 0}
                             tokens={agent.tokensUsed || 0}
                             onAutomate={handleOpenAutomate}
+                            plaque={deskPlaque}
                           />
                         </View>
                       );
@@ -4078,6 +4688,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   </View>
                 </View>
               </ScrollView>
+
+              {/* Ops board row — live builds + token spend beneath the floor,
+                  next to the whiteboard/server-rack column. Hidden when empty. */}
+              {(officeBoardHasContent(opsBoard) || officeTrackerHasContent(opsTokenTracker) || officeAgentPlanQueueHasContent(visibleAgentPlans)) ? (
+                <View style={styles.opsBoardRow}>
+                  <OfficeBuildingNowCard board={opsBoard} style={{ flex: 1.4, minWidth: 260 }} />
+                  <OfficeTokensCard tracker={opsTokenTracker} style={{ flex: 1, minWidth: 220 }} />
+                  <OfficeAgentPlanQueue
+                    plans={visibleAgentPlans}
+                    accentColor={accentColor}
+                    maxItems={3}
+                    onOpenChat={handleOpenAgentPlanChat}
+                    style={{ flex: 1.2, minWidth: 260 }}
+                  />
+                </View>
+              ) : null}
             </ScrollView>
 
             {/* Circle Office Panel — all members' bots */}
@@ -4150,6 +4776,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       }]} />
                       <Text style={[styles.quickName, selectedAgent?.id === agent.id && { color: agent.color }]}>{agent.name}</Text>
                       <Text style={styles.quickCost}>${(agent.costTotal || agent.costToday).toFixed(2)}</Text>
+                      {/* O1 (P38): 24h finished-run counts, tone by last outcome. */}
+                      {(() => {
+                        const acct = opsAccountability?.get(agent.name.trim().toLowerCase());
+                        const counts = formatAccountabilityCounts(acct);
+                        if (!counts) return null;
+                        return (
+                          <Text style={[styles.quickCost, { color: acct?.tone === 'danger' ? '#ef4444' : '#22c55e' }]}>
+                            {counts}
+                          </Text>
+                        );
+                      })()}
                     </Pressable>
                   ))}
                 </ScrollView>
@@ -4251,14 +4888,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
             <Text style={pmStyles.label}>Agent Type</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={pmStyles.providerRow}>
-              {[
-                { key: 'openswan',      icon: '🦞', label: 'OpenSwan' },
-                { key: 'claude-code',   icon: '🤖', label: 'Claude Code' },
-                { key: 'codex',         icon: '🧠', label: 'Codex' },
-                { key: 'cursor',        icon: '🖱️', label: 'Cursor' },
-                { key: 'gemini',        icon: '♊', label: 'Gemini' },
-                { key: 'generic-agent', icon: '⚡', label: 'Other' },
-              ].map(p => (
+              {/* O7 (P39): icon/label come from PROVIDER_META (single source —
+                  this array drifted: 🦞 vs 🐾 etc.). Curated agent-type ORDER
+                  stays local; 'generic-agent' keeps the friendlier "Other". */}
+              {([
+                'openswan', 'claude-code', 'codex', 'cursor', 'gemini', 'opencode',
+                'aider', 'cline', 'windsurf', 'continue', 'amp', 'generic-agent',
+              ] as const).map((key) => ({
+                key,
+                icon: PROVIDER_META[key]?.icon || '⚡',
+                label: key === 'generic-agent' ? 'Other' : (PROVIDER_META[key]?.label || key),
+              })).map(p => (
                 <Pressable
                   key={p.key}
                   style={[pmStyles.providerChip, publishProvider === p.key && pmStyles.providerChipActive]}
@@ -5133,1195 +5773,3 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     </View>
   );
 }
-
-// ─── Circle Office Panel ──────────────────────────────────────────────────────
-// Shows ALL circle members' published agents with their live status.
-
-const CONNECTION_STATUS_UI = {
-  connecting:   { label: 'Connecting…',   color: '#f59e0b', dot: '🟡' },
-  live:         { label: 'Live',          color: '#22c55e', dot: '🟢' },
-  reconnecting: { label: 'Reconnecting…', color: '#f59e0b', dot: '🟡' },
-  offline:      { label: 'Offline',       color: '#666',    dot: '⚫' },
-} as const;
-
-// Shown on production web where localhost bridges (Claude Code, Codex, Gemini,
-// Cursor, OpenSwan) can't be reached. Explains *why* the agent list is empty
-// instead of leaving the user staring at an unhelpful blank panel.
-/**
- * OfficeConnectBridgesSection — wraps the new ConnectAllBridgesPanel
- * with the per-circle dismiss flag and falls back to the legacy
- * BridgeUnavailableBanner for environments where the bridges
- * truly cannot be reached (e.g. native mobile users on a build that
- * predates the panel).
- */
-function OfficeConnectBridgesSection({ circleId }: { circleId: string }) {
-  const [dismissed, setDismissed] = useState<boolean>(() => isConnectPanelDismissed(circleId));
-
-  if (dismissed) {
-    // After explicit dismiss the legacy banner still surfaces the
-    // "no bridges reachable" message in case the env is unreachable.
-    return <BridgeUnavailableBanner />;
-  }
-
-  return (
-    <ConnectAllBridgesPanel
-      circleId={circleId}
-      onDismiss={() => setDismissed(true)}
-    />
-  );
-}
-
-function BridgeUnavailableBanner() {
-  const env = getBridgeEnvironment();
-  const [dismissed, setDismissed] = useState(false);
-  if (env.available || dismissed) return null;
-  return (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'flex-start',
-        gap: 12,
-        backgroundColor: '#161b22',
-        borderWidth: 1,
-        borderColor: '#30363d',
-        borderLeftWidth: 3,
-        borderLeftColor: '#6366f1',
-        borderRadius: 6,
-        padding: 12,
-        marginHorizontal: 16,
-        marginTop: 8,
-      }}
-      nativeID="section-office-bridge-unavailable"
-    >
-      <View style={{ flex: 1 }}>
-        <Text style={{ color: '#e6edf3', fontSize: 13, fontWeight: '600', marginBottom: 4 }}>
-          Agent bridges can run locally or on any reachable machine
-        </Text>
-        <Text style={{ color: '#8b949e', fontSize: 12, lineHeight: 18 }}>
-          The Office can show local bridges, public bridges, and custom agents running on a Pi,
-          VPS, or another machine. On the hosted web app, raw localhost ports are not reachable,
-          so purely local bridges will stay empty unless you run the app locally or expose a public bridge URL. Start the UC dev server locally
-          (<Text style={{ fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string, color: '#c9d1d9' }}>npm run dev</Text>)
-          to see your local agents, or set <Text style={{ fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string, color: '#c9d1d9' }}>EXPO_PUBLIC_BRIDGE_HOST</Text> or a custom public endpoint to reach agents elsewhere.
-        </Text>
-      </View>
-      <Pressable
-        onPress={() => setDismissed(true)}
-        style={{ padding: 4 }}
-        accessibilityRole="button"
-        accessibilityLabel="Dismiss bridge notice"
-      >
-        <Text style={{ color: '#8b949e', fontSize: 14 }}>×</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-function CircleOfficePanel({
-  agents,
-  onRefresh,
-  accentColor,
-  compact = false,
-  connectionStatus = 'offline',
-}: {
-  agents: CircleOfficeAgent[];
-  onRefresh: () => void;
-  accentColor: string;
-  compact?: boolean;
-  connectionStatus?: 'connecting' | 'live' | 'reconnecting' | 'offline';
-}) {
-  const formatBuildMetric = (value: number): string => {
-    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-    if (value >= 10_000) return `${Math.round(value / 1000)}K`;
-    if (value >= 1_000) return `${(value / 1000).toFixed(1)}K`;
-    return `${Math.max(0, Math.round(value))}`;
-  };
-
-  const getBuildMinutes = (agent: CircleOfficeAgent): number => {
-    const ts = new Date(agent.lastActiveAt || agent.updatedAt || Date.now()).getTime();
-    if (!Number.isFinite(ts)) return 1;
-    const mins = Math.round((Date.now() - ts) / 60000);
-    return Math.max(1, Math.min(45, mins));
-  };
-
-  const getBuildXp = (agent: CircleOfficeAgent): number => {
-    const tokenXp = Math.round(((agent.input_tokens_today || 0) + (agent.output_tokens_today || 0) + ((agent.cached_tokens_today || 0) * 0.35)) / 180);
-    const actionXp = (agent.message_count_today || 0) * 26;
-    const liveXp = agent.status === 'building' ? getBuildMinutes(agent) * 8 : 0;
-    return Math.max(agent.status === 'building' ? 24 : 0, tokenXp + actionXp + liveXp);
-  };
-
-  const building = agents.filter(a => a.status === 'building');
-  const connected = agents.filter(a => isConnectedOfficeStatus(a.status) && a.status !== 'building');
-  const offline = agents.filter(a => !isConnectedOfficeStatus(a.status));
-  const totalBuildingXp = building.reduce((sum, agent) => sum + getBuildXp(agent), 0);
-
-  if (compact) {
-    // Horizontal strip for desktop — scrollable row of agent chips
-    return (
-      <View style={coStyles.compactBar}>
-        <Text style={coStyles.compactLabel}>🏢 Circle Office</Text>
-        <View style={[coStyles.connectionDot, { backgroundColor: CONNECTION_STATUS_UI[connectionStatus].color, marginRight: 4 }]} />
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={coStyles.compactScroll}>
-          {agents.map(agent => {
-            const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
-            const statusColor = agent.status === 'building' ? '#22c55e' : getOfficeStatusColor(agent.status);
-            const buildXp = getBuildXp(agent);
-            return (
-              <View key={agent.id} style={[coStyles.compactChip, { borderColor: display.color + '44' }]}>
-                {/* Live pulse for building */}
-                {agent.status === 'building' && (
-                  <View style={[coStyles.buildingDot, { backgroundColor: '#22c55e' }]} />
-                )}
-                <Text style={coStyles.compactIcon}>{display.icon}</Text>
-                <View>
-                  <Text style={coStyles.compactOwner}>{agent.ownerDisplayName}</Text>
-                  <Text style={coStyles.compactAgentName} numberOfLines={1}>{agent.name}</Text>
-                  {agent.status === 'building' && (
-                    <Text style={coStyles.compactBuildXp}>BUILDING · +{formatBuildMetric(buildXp)} XP</Text>
-                  )}
-                </View>
-                <View style={[coStyles.statusDot, { backgroundColor: statusColor }]} />
-                {agent.status === 'building' && agent.currentTask && (
-                  <Text style={coStyles.compactTask} numberOfLines={1}>{agent.currentTask}</Text>
-                )}
-              </View>
-            );
-          })}
-        </ScrollView>
-      </View>
-    );
-  }
-
-  // Sort: connected agents first, then unavailable, with most recent first within each group
-  const sorted = [...agents].sort((a, b) => {
-    const rankDiff = getOfficeStatusSortRank(a.status) - getOfficeStatusSortRank(b.status);
-    if (rankDiff !== 0) return rankDiff;
-    return new Date(b.lastActiveAt || 0).getTime() - new Date(a.lastActiveAt || 0).getTime();
-  });
-
-  const onlineCount = agents.filter(a => isConnectedOfficeStatus(a.status)).length;
-
-  // Full card view for mobile
-  return (
-    <View style={coStyles.panel}>
-      <View style={coStyles.panelHeader}>
-        <View>
-          <Text style={coStyles.panelTitle}>🏢 Circle Office</Text>
-          <View style={coStyles.connectionRow}>
-            <View style={[coStyles.connectionDot, { backgroundColor: CONNECTION_STATUS_UI[connectionStatus].color }]} />
-            <Text style={[coStyles.connectionLabel, { color: CONNECTION_STATUS_UI[connectionStatus].color }]}>
-              {CONNECTION_STATUS_UI[connectionStatus].label}
-            </Text>
-          </View>
-        </View>
-        <View style={coStyles.panelStats}>
-          {building.length > 0 && <Text style={coStyles.statBuilding}>⚡ {building.length} BUILDING · +{formatBuildMetric(totalBuildingXp)} XP</Text>}
-          {connected.length > 0 && <Text style={coStyles.statIdle}>🟢 {connected.length} connected</Text>}
-          {offline.length > 0 && <Text style={coStyles.statOffline}>⚫ {offline.length} away</Text>}
-        </View>
-      </View>
-
-      {sorted.map(agent => {
-        const display = PROVIDER_DISPLAY[agent.provider] || PROVIDER_DISPLAY['generic-agent'];
-        const isBuilding = agent.status === 'building';
-        const isConnected = isConnectedOfficeStatus(agent.status) && !isBuilding;
-        const isOffline = !isConnectedOfficeStatus(agent.status) && !isBuilding;
-        const lastSeen = getLastSeen(agent.lastActiveAt);
-        const buildXp = getBuildXp(agent);
-        const buildMinutes = getBuildMinutes(agent);
-        const buildTokens = (agent.input_tokens_today || 0) + (agent.output_tokens_today || 0) + (agent.cached_tokens_today || 0);
-        const buildActions = agent.message_count_today || 0;
-
-        return (
-          <View
-            key={agent.id}
-            style={[
-              coStyles.agentCard,
-              isBuilding && coStyles.buildingAgentCard,
-              { borderColor: isBuilding ? display.color + '66' : isConnected ? display.color + '33' : '#000000' },
-              isBuilding && { backgroundColor: display.color + '10' },
-              agent.isOwn && coStyles.ownAgentCard,
-              isOffline && coStyles.offlineCard,
-            ]}
-          >
-            {/* Header row */}
-            <View style={coStyles.agentCardHeader}>
-              <View style={[coStyles.providerBadge, { backgroundColor: display.color + '22', borderColor: display.color + '44' }]}>
-                <Text style={coStyles.providerIcon}>{display.icon}</Text>
-                <Text style={[coStyles.providerLabel, { color: display.color }]}>{display.label}</Text>
-              </View>
-              <View style={coStyles.statusChip}>
-                <View style={[coStyles.statusDot, {
-                  backgroundColor: isBuilding ? '#3b82f6' : isConnected ? '#22c55e' : '#333',
-                }]} />
-                <Text style={[coStyles.statusText, isBuilding && coStyles.statusTextBuilding, isOffline && { color: '#444' }]}>
-                  {isBuilding ? 'BUILDING NOW' : isConnected ? 'connected' : lastSeen.text}
-                </Text>
-              </View>
-            </View>
-
-            {/* Owner + agent name */}
-            <View style={coStyles.agentIdentity}>
-              <View style={[coStyles.ownerAvatar, { backgroundColor: display.color + '33' }]}>
-                <Text style={coStyles.ownerAvatarText}>{agent.ownerDisplayName[0]?.toUpperCase()}</Text>
-              </View>
-              <View>
-                <Text style={coStyles.agentName}>{agent.name}</Text>
-                <Text style={coStyles.ownerName}>
-                  {agent.isOwn ? '👤 Your agent' : `👤 ${agent.ownerDisplayName}`}
-                </Text>
-              </View>
-            </View>
-
-            {/* Live task if building */}
-            {isBuilding && agent.currentTask && (
-              <View style={[coStyles.taskBlock, { borderLeftColor: display.color }]}>
-                <Text style={coStyles.taskLabel}>BUILDING</Text>
-                <Text style={coStyles.taskText}>{agent.currentTask}</Text>
-                {agent.currentGoal && (
-                  <Text style={coStyles.goalText}>🎯 {agent.currentGoal}</Text>
-                )}
-                <View style={coStyles.buildStatRow}>
-                  <View style={[coStyles.buildStatPill, { borderColor: display.color + '55', backgroundColor: display.color + '18' }]}>
-                    <Text style={coStyles.buildStatValue}>+{formatBuildMetric(buildXp)}</Text>
-                    <Text style={coStyles.buildStatLabel}>BUILD XP</Text>
-                  </View>
-                  <View style={coStyles.buildStatPill}>
-                    <Text style={coStyles.buildStatValue}>{formatBuildMetric(buildActions)}</Text>
-                    <Text style={coStyles.buildStatLabel}>ACTIONS</Text>
-                  </View>
-                  <View style={coStyles.buildStatPill}>
-                    <Text style={coStyles.buildStatValue}>{formatBuildMetric(buildTokens)}</Text>
-                    <Text style={coStyles.buildStatLabel}>TOKENS</Text>
-                  </View>
-                  <View style={coStyles.buildStatPill}>
-                    <Text style={coStyles.buildStatValue}>{buildMinutes}M</Text>
-                    <Text style={coStyles.buildStatLabel}>HOT</Text>
-                  </View>
-                </View>
-                <Text style={coStyles.buildingFlavor}>
-                  BUILDING hard. The work is live and momentum is compounding.
-                </Text>
-              </View>
-            )}
-
-            {/* Session URL */}
-            {agent.sessionUrl && (
-              <Pressable onPress={() => Linking.openURL(agent.sessionUrl!)} style={coStyles.sessionLink}>
-                <Text style={[coStyles.sessionLinkText, { color: display.color }]}>
-                  🔗 Watch live →
-                </Text>
-              </Pressable>
-            )}
-
-            {agent.returnTime && isBuilding && (
-              <Text style={coStyles.returnTime}>Back: {agent.returnTime}</Text>
-            )}
-          </View>
-        );
-      })}
-    </View>
-  );
-}
-
-// ─── Manual Publish Modal Styles ──────────────────────────────────────────────
-const pmStyles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: '#000000bb',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modal: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 24,
-    width: 340,
-    maxWidth: '90%',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-  },
-  title: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 6,
-  },
-  subtitle: {
-    color: '#6f6f6f',
-    fontSize: 12,
-    lineHeight: 17,
-    marginBottom: 20,
-  },
-  label: {
-    color: '#a3a3a3',
-    fontSize: 11,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 8,
-  },
-  input: {
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    color: '#fff',
-    fontSize: 15,
-    marginBottom: 18,
-  },
-  providerRow: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingBottom: 4,
-    marginBottom: 20,
-  },
-  providerChip: {
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    minWidth: 64,
-  },
-  providerChipActive: {
-    backgroundColor: '#6366f115',
-    borderColor: '#6366f1',
-  },
-  providerIcon: { fontSize: 20, marginBottom: 4 },
-  providerLabel: { color: '#6f6f6f', fontSize: 10, fontWeight: '600' },
-  providerLabelActive: { color: '#6366f1' },
-  submitBtn: {
-    backgroundColor: '#252525',
-    borderRadius: 10,
-    paddingVertical: 13,
-    alignItems: 'center',
-  },
-  submitBtnDisabled: {
-    backgroundColor: '#2a2a2a',
-    opacity: 0.6,
-  },
-  submitText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-});
-
-const coStyles = StyleSheet.create({
-  // Compact (desktop)
-  compactBar: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 12, paddingVertical: 8,
-    borderTopWidth: 1, borderTopColor: '#1a1a1a',
-    backgroundColor: '#000000',
-    gap: 10,
-  },
-  compactLabel: { color: '#444', fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
-  compactScroll: { flexDirection: 'row', gap: 8 },
-  compactChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 20, borderWidth: 1, backgroundColor: '#0a0a0a',
-    position: 'relative',
-  },
-  buildingDot: {
-    position: 'absolute', top: 4, right: 4,
-    width: 6, height: 6, borderRadius: 3,
-  },
-  compactIcon: { fontSize: 14 },
-  compactOwner: { color: '#888', fontSize: 10 },
-  compactAgentName: { color: '#ccc', fontSize: 12, fontWeight: '600', maxWidth: 80 },
-  compactBuildXp: { color: '#60a5fa', fontSize: 9, fontWeight: '800', marginTop: 1, letterSpacing: 0.4 },
-  compactTask: { color: '#555', fontSize: 11, maxWidth: 120, fontStyle: 'italic' },
-  statusDot: { width: 7, height: 7, borderRadius: 3.5, marginLeft: 2 },
-
-  // Full card (mobile)
-  panel: { paddingHorizontal: 4, paddingBottom: 8 },
-  panelHeader: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 8, paddingVertical: 10,
-  },
-  panelTitle: { color: '#fff', fontSize: 16, fontWeight: '800' },
-  connectionRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
-  connectionDot: { width: 7, height: 7, borderRadius: 3.5 },
-  connectionLabel: { fontSize: 11, fontWeight: '600' },
-  panelStats: { flexDirection: 'row', gap: 10 },
-  statBuilding: { color: '#22c55e', fontSize: 12, fontWeight: '600' },
-  statIdle: { color: '#f59e0b', fontSize: 12 },
-  statOffline: { color: '#444', fontSize: 12 },
-
-  agentCard: {
-    backgroundColor: '#111', borderRadius: 14, borderWidth: 1,
-    padding: 14, marginBottom: 10, marginHorizontal: 4,
-  },
-  buildingAgentCard: {
-    shadowColor: '#3b82f6',
-    shadowOpacity: 0.18,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 4,
-  },
-  ownAgentCard: { borderStyle: 'dashed' },
-  offlineCard: { opacity: 0.6 },
-
-  agentCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  providerBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: 9, paddingVertical: 4, borderRadius: 20, borderWidth: 1,
-  },
-  providerIcon: { fontSize: 14 },
-  providerLabel: { fontSize: 11, fontWeight: '700' },
-
-  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  statusText: { color: '#666', fontSize: 12 },
-  statusTextBuilding: { color: '#60a5fa', fontWeight: '900', letterSpacing: 0.6 },
-
-  agentIdentity: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
-  ownerAvatar: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  ownerAvatarText: { color: '#fff', fontSize: 14, fontWeight: '800' },
-  agentName: { color: '#ddd', fontSize: 14, fontWeight: '700' },
-  ownerName: { color: '#555', fontSize: 12 },
-
-  taskBlock: { borderLeftWidth: 3, paddingLeft: 10, marginBottom: 8 },
-  taskLabel: { color: '#60a5fa', fontSize: 10, fontWeight: '900', letterSpacing: 1.4, marginBottom: 4 },
-  taskText: { color: '#ddd', fontSize: 14, lineHeight: 20 },
-  goalText: { color: '#888', fontSize: 12, marginTop: 4 },
-  buildStatRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10, marginBottom: 8 },
-  buildStatPill: {
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#2c3344',
-    backgroundColor: '#111827',
-  },
-  buildStatValue: { color: '#f8fafc', fontSize: 12, fontWeight: '900' },
-  buildStatLabel: { color: '#7dd3fc', fontSize: 9, fontWeight: '800', letterSpacing: 0.5, marginTop: 1 },
-  buildingFlavor: { color: '#93c5fd', fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
-
-  sessionLink: { marginBottom: 4 },
-  sessionLinkText: { fontSize: 12, fontWeight: '600' },
-  returnTime: { color: '#444', fontSize: 11 },
-
-  publishBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    margin: 8, padding: 14,
-    backgroundColor: '#0a0a0a', borderRadius: 12, borderWidth: 1,
-    borderStyle: 'dashed',
-  },
-  publishBtnIcon: { fontSize: 24 },
-  publishBtnTitle: { fontSize: 14, fontWeight: '700', marginBottom: 2 },
-  publishBtnSub: { color: '#555', fontSize: 12 },
-});
-
-const nftStyles = StyleSheet.create({
-  overlay: { flex: 1, backgroundColor: '#00000088', justifyContent: 'center', alignItems: 'center' },
-  card: { width: 380, maxHeight: 500, backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 16, overflow: 'hidden' },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderColor: '#2a2a2a' },
-  headerText: { color: '#eee', fontSize: 14, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 2 },
-  closeBtn: { padding: 6 },
-  closeText: { color: '#666', fontSize: 16 },
-  emptyState: { padding: 40, alignItems: 'center', gap: 12 },
-  emptyIcon: { fontSize: 40 },
-  emptyText: { color: '#888', fontSize: 14, fontFamily: 'monospace', fontWeight: '700' },
-  emptyHint: { color: '#555', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', lineHeight: 16 },
-  grid: { maxHeight: 380 },
-  gridContent: { flexDirection: 'row', flexWrap: 'wrap', padding: 8, gap: 8 },
-  nftCard: { width: '30%' as any, backgroundColor: '#111', borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a', overflow: 'hidden', padding: 4, alignItems: 'center' },
-  nftImage: { width: '100%' as any, aspectRatio: 1, borderRadius: 6 },
-  nftName: { color: '#ccc', fontSize: 9, fontFamily: 'monospace', fontWeight: '700', marginTop: 4, textAlign: 'center' },
-  nftCollection: { color: '#555', fontSize: 7, fontFamily: 'monospace', textAlign: 'center' },
-  clearBtn: { margin: 12, padding: 10, backgroundColor: '#2a2a2a', borderRadius: 8, alignItems: 'center' },
-  clearText: { color: '#9e9e9e', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
-});
-
-const imgPickerStyles = StyleSheet.create({
-  tabRow: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#2a2a2a' },
-  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: '#000000' },
-  tabActive: { backgroundColor: '#0a0a0a', borderBottomWidth: 2, borderBottomColor: '#6366f1' },
-  tabText: { color: '#555', fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
-  tabTextActive: { color: '#eee' },
-  uploadArea: { padding: 40, alignItems: 'center', gap: 12 },
-  uploadTitle: { color: '#ccc', fontSize: 14, fontFamily: 'monospace', fontWeight: '700' },
-  uploadHint: { color: '#555', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' },
-  uploadBtn: { marginTop: 8, paddingHorizontal: 24, paddingVertical: 10, backgroundColor: '#6366f1', borderRadius: 8 },
-  uploadBtnText: { color: '#e8e8e8', fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
-});
-
-const stickyStyles = StyleSheet.create({
-  colorRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingVertical: 10, borderBottomWidth: 1, borderColor: '#2a2a2a' },
-  colorDot: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: '#333' },
-  colorDotActive: { borderColor: '#fff', borderWidth: 3 },
-  writeArea: { padding: 12, flex: 1 },
-  textInput: {
-    minHeight: 140, borderRadius: 6, padding: 12,
-    color: '#000000', fontSize: 14, fontFamily: 'monospace',
-    textAlignVertical: 'top',
-    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
-  },
-  drawArea: { padding: 12, alignItems: 'center', gap: 8 },
-  canvasWrap: { width: '100%' as any, height: 200, borderRadius: 6, overflow: 'hidden' },
-  clearDrawBtn: {
-    paddingHorizontal: 16, paddingVertical: 6, borderRadius: 6,
-    borderWidth: 1, borderColor: '#333', backgroundColor: '#000000',
-  },
-  clearDrawText: { color: '#888', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 },
-  gifArea: { padding: 12, gap: 10 },
-  gifInput: {
-    backgroundColor: '#0a0a0a', borderWidth: 1, borderColor: '#222',
-    borderRadius: 8, padding: 10, color: '#ddd', fontSize: 12, fontFamily: 'monospace',
-    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
-  },
-  gifPreview: { height: 150, borderRadius: 6, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  gifImage: { width: '100%' as any, height: '100%' as any },
-  gifHint: { height: 120, alignItems: 'center', justifyContent: 'center', gap: 8 },
-  gifHintText: { color: '#555', fontSize: 10, fontFamily: 'monospace', textAlign: 'center' },
-  saveBtn: {
-    margin: 12, paddingVertical: 12, borderRadius: 8, backgroundColor: '#252525',
-    alignItems: 'center',
-  },
-  saveBtnText: { color: '#e8e8e8', fontSize: 12, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
-});
-
-// ─── Service Connector Modal Styles ──────────────────────────────────────────
-const svcStyles = StyleSheet.create({
-  sectionLabel: {
-    color: '#888',
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 1.5,
-    textTransform: 'uppercase',
-    marginBottom: 8,
-    marginTop: 16,
-  },
-  appGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 12,
-  },
-  appCard: {
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    alignItems: 'center',
-    minWidth: 72,
-    position: 'relative',
-  },
-  appIcon: {
-    fontSize: 22,
-    marginBottom: 4,
-  },
-  appName: {
-    color: '#aaa',
-    fontSize: 10,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-  },
-  appCheck: {
-    position: 'absolute',
-    top: 4,
-    right: 6,
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  input: {
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#fff',
-    fontSize: 13,
-    fontFamily: 'monospace',
-    marginBottom: 12,
-  },
-  sizeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 16,
-  },
-  sizeField: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  sizeLabel: {
-    color: '#666',
-    fontSize: 9,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-    marginBottom: 4,
-  },
-  sizeInput: {
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    color: '#fff',
-    fontSize: 14,
-    fontFamily: 'monospace',
-    textAlign: 'center',
-    width: '100%',
-  },
-  sizeX: {
-    color: '#555',
-    fontSize: 16,
-    fontWeight: '700',
-    marginTop: 14,
-  },
-  openBtn: {
-    backgroundColor: '#252525',
-    borderRadius: 8,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginTop: 4,
-    marginBottom: 12,
-  },
-  openBtnText: {
-    color: '#e8e8e8',
-    fontSize: 11,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-  },
-  serviceHero: {
-    alignItems: 'center',
-    paddingVertical: 16,
-    marginBottom: 8,
-  },
-  heroTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    marginTop: 8,
-  },
-  heroDesc: {
-    color: '#666',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    textAlign: 'center',
-    marginTop: 6,
-    lineHeight: 16,
-    maxWidth: 260,
-  },
-  connectBtn: {
-    borderRadius: 8,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  connectBtnText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-  },
-  saveBtn: {
-    backgroundColor: '#252525',
-    borderRadius: 8,
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  saveBtnText: {
-    color: '#e8e8e8',
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-  },
-});
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000000' },
-  tagsActionBtn: {
-    flex: 1,
-    backgroundColor: '#6366f118',
-    borderWidth: 1,
-    borderColor: '#6366f140',
-    borderRadius: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  tagsActionBtnSecondary: {
-    backgroundColor: '#ffffff10',
-    borderColor: '#ffffff20',
-  },
-  tagsActionBtnText: {
-    color: '#6366f1',
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 0.5,
-  },
-  tagsActionBtnTextSecondary: { color: '#6366f1' },
-  toolbarBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6,
-    backgroundColor: '#181818', borderWidth: 1, borderColor: '#2a2a2a',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  toolbarBtnActiveGreen: {
-    borderColor: '#ffffff20', backgroundColor: '#ffffff10',
-  },
-  toolbarBtnActiveMemory: {
-    backgroundColor: '#22c55e18',
-    borderColor: '#22c55e40',
-  },
-  toolbarBtnIcon: { fontSize: 13 },
-  toolbarBtnText: { fontSize: 11, fontWeight: '700', color: '#888', fontFamily: 'monospace' },
-  toolbarBtnTextActiveMemory: { color: '#22c55e' },
-  reconnectBtnStyle: {
-    backgroundColor: '#ffffff08', borderColor: '#ffffff15',
-  },
-  tgBadge: { fontSize: 7, marginRight: 1 },
-
-  // Office enhancement panels
-  enhancementRow: {
-    flexDirection: 'row' as const, alignItems: 'stretch' as const,
-    gap: 4, paddingHorizontal: 8, paddingVertical: 4,
-    backgroundColor: '#050508',
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
-  },
-  feedPanel: {
-    paddingHorizontal: 8, paddingVertical: 4,
-    backgroundColor: '#050508',
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a',
-  },
-
-  // Combined floor + actions bar
-  floorBar: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 8, paddingVertical: 5,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#000000',
-    gap: 8,
-    position: 'relative',
-    zIndex: 40,
-    overflow: 'visible',
-  },
-  floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
-  barActions: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 0, zIndex: 50, overflow: 'visible' },
-  officeDashboardPanels: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    paddingHorizontal: 8,
-    paddingTop: 8,
-    paddingBottom: 4,
-    flexWrap: 'wrap',
-    backgroundColor: '#000000',
-    borderBottomWidth: 1,
-    borderBottomColor: '#111111',
-    zIndex: 1,
-  },
-  officeDashboardPanel: {
-    minWidth: 220,
-    maxWidth: 360,
-    flexShrink: 1,
-  },
-  soundPanelWrap: {
-    maxWidth: 220,
-  },
-  floorChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4,
-    borderRadius: 5, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
-  },
-  floorChipActive: {
-    borderColor: '#ffffff30', backgroundColor: '#ffffff10',
-  },
-  floorChipText: {
-    fontSize: 11, color: '#888', fontFamily: 'monospace', fontWeight: '600',
-  },
-  floorChipTextActive: {
-    color: '#fff', fontWeight: '700',
-  },
-  floorThemeDot: {
-    width: 7, height: 7, borderRadius: 4,
-  },
-  floorAgentBadge: {
-    backgroundColor: '#ffffff10',
-    borderRadius: 8,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    minWidth: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  floorAgentBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#6366f1',
-    fontFamily: 'monospace',
-  },
-  floorAddBtn: {
-    paddingHorizontal: 12, paddingVertical: 5,
-    borderRadius: 6, borderWidth: 1, borderColor: '#6366f130', backgroundColor: '#6366f115',
-  },
-  floorAddBtnText: {
-    fontSize: 11, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
-  },
-
-  // Connections bar
-  connectionsBar: {
-    paddingHorizontal: 12, paddingVertical: 4,
-    borderBottomWidth: 1, borderBottomColor: '#2a2a2a', backgroundColor: '#000000',
-    flexDirection: 'row', alignItems: 'center',
-  },
-  connectionsToggle: { paddingRight: 8, paddingVertical: 2 },
-  connectionsToggleText: { fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
-  connectionsBarInner: { gap: 8, flexDirection: 'row', alignItems: 'center', flex: 1 },
-  connectionChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#0a0a0a',
-  },
-  connectionChipDot: { width: 6, height: 6, borderRadius: 3 },
-  connectionChipStatus: { width: 5, height: 5, borderRadius: 3 },
-  connectionChipName: { fontSize: 11, color: '#ccc', fontFamily: 'monospace', fontWeight: '600', maxWidth: 120 },
-  connectionChipLabel: { fontSize: 9, fontFamily: 'monospace', fontWeight: '600' },
-  connectionChipLocal: { fontSize: 10, marginLeft: 2 },
-  connectionAddChip: {
-    width: 28, height: 28, borderRadius: 14, borderWidth: 1,
-    borderColor: '#ffffff20', backgroundColor: '#ffffff08',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  connectionAddChipText: { fontSize: 14, color: '#6366f1', fontWeight: '700' },
-
-  editToolbar: {
-    paddingHorizontal: 8, paddingVertical: 4,
-    borderBottomWidth: 1, borderBottomColor: '#1a1a1a', backgroundColor: '#0a0a0a',
-  },
-  editLabel: { fontSize: 8, color: '#888', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1, marginBottom: 4 },
-  editItems: { gap: 8, flexDirection: 'row', paddingRight: 12 },
-  editItem: {
-    alignItems: 'center', justifyContent: 'center',
-    width: 88, height: 88,
-    borderRadius: 12, borderWidth: 1.5, borderColor: '#2a2a2a', backgroundColor: '#000000',
-    gap: 3, paddingHorizontal: 4, paddingVertical: 6,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  editItemActive: {
-    borderColor: '#ffffff30', backgroundColor: '#ffffff10',
-    ...(Platform.OS === 'web' ? { boxShadow: '0 0 12px rgba(99,102,241,0.3)' } as any : {}),
-  },
-  editItemIcon: { fontSize: 28 },
-  editItemName: { fontSize: 10, color: '#aaa', fontFamily: 'monospace', fontWeight: '800', textAlign: 'center' },
-  editItemDesc: { fontSize: 8, color: '#555', fontFamily: 'monospace', maxWidth: 80, textAlign: 'center', lineHeight: 10 },
-  editToolbarHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  editToolbarActions: { flexDirection: 'row', gap: 6 },
-  editActionBtn: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  editActionBtnText: { fontSize: 9, fontWeight: '800', fontFamily: 'monospace' },
-  editCatalogWrap: {
-    position: 'relative' as const,
-  },
-  editCatTabs: {
-    flexDirection: 'row' as const, gap: 6, paddingBottom: 8, paddingRight: 12,
-  },
-  editCatTab: {
-    flexDirection: 'row' as const, alignItems: 'center' as const, gap: 4,
-    paddingHorizontal: 10, paddingVertical: 5,
-    borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a',
-    backgroundColor: '#0a0a0a',
-  },
-  editCatTabText: {
-    fontSize: 8, fontFamily: 'monospace', fontWeight: '800' as const, letterSpacing: 1,
-  },
-  editCatTabCount: {
-    fontSize: 7, fontFamily: 'monospace', fontWeight: '700' as const,
-  },
-  editCatRowWrap: {
-    flexDirection: 'row' as const, alignItems: 'center' as const,
-  },
-  editScrollArrow: {
-    width: 24, height: 80, borderRadius: 6, borderWidth: 1,
-    backgroundColor: '#0a0a0a90', alignItems: 'center' as const, justifyContent: 'center' as const,
-    zIndex: 2,
-  },
-  editScrollArrowLeft: { marginRight: 4 },
-  editScrollArrowRight: { marginLeft: 4 },
-  editScrollArrowText: {
-    fontSize: 22, fontWeight: '700' as const,
-  },
-  floorChipWrap: { position: 'relative', flexDirection: 'row', alignItems: 'center', marginRight: 6 },
-  floorChipWithDelete: { paddingRight: 18 },
-  floorDeleteBtn: {
-    position: 'absolute',
-    right: 2,
-    top: '50%',
-    marginTop: -8,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: '#160b0b',
-    borderWidth: 1,
-    borderColor: '#ef444455',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 5,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  floorDeleteBtnText: { fontSize: 8, color: '#ef4444', fontWeight: '800', lineHeight: 16 },
-  clearBtn: {
-    marginTop: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 4,
-    backgroundColor: '#ffffff10', alignSelf: 'flex-start',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  clearBtnText: { fontSize: 8, color: '#9e9e9e', fontFamily: 'monospace', fontWeight: '700' },
-  mainContent: { flex: 1 },
-
-  // Mobile agent cards
-  mobileAgentScroll: { flex: 1 },
-  mobileAgentList: { padding: 16, gap: 12 },
-  mobileEmpty: {
-    alignItems: 'center', justifyContent: 'center', paddingVertical: 60, gap: 12,
-  },
-  mobileEmptyIcon: { fontSize: 40 },
-  mobileEmptyTitle: { fontSize: 18, color: '#999', fontFamily: 'monospace', fontWeight: '800' },
-  mobileEmptyText: { fontSize: 14, color: '#666', fontFamily: 'monospace', textAlign: 'center', paddingHorizontal: 24 },
-  mobileEmptyBtn: {
-    marginTop: 8, paddingHorizontal: 24, paddingVertical: 14, borderRadius: 12,
-    backgroundColor: '#252525', minHeight: 48,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  mobileEmptyBtnText: { fontSize: 14, color: '#e8e8e8', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 },
-  mobileAgentCard: {
-    backgroundColor: '#161616', borderWidth: 1, borderColor: '#2a2a2a',
-    borderRadius: 14, padding: 16, gap: 10,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  mobileCardRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  mobileCardAvatar: {
-    width: 48, height: 48, borderRadius: 14, borderWidth: 1.5,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  mobileCardAvatarText: { fontSize: 20, fontWeight: '900', fontFamily: 'monospace' },
-  mobileCardInfo: { flex: 1, gap: 3 },
-  mobileCardNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  mobileCardName: { fontSize: 16, fontWeight: '800', color: '#eee', fontFamily: 'monospace' },
-  mobileCardMainBadge: { fontSize: 10, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
-  mobileCardStatus: { width: 8, height: 8, borderRadius: 4 },
-  mobileCardStatusText: { fontSize: 12, fontFamily: 'monospace', fontWeight: '600', textTransform: 'uppercase' as any },
-  mobileCardRole: { fontSize: 13, color: '#888', fontFamily: 'monospace' },
-  mobileCardModel: { fontSize: 12, color: '#666', fontFamily: 'monospace' },
-  mobileCardRight: { alignItems: 'flex-end', gap: 2 },
-  mobileCardCost: { fontSize: 16, fontWeight: '900', color: '#22d3ee', fontFamily: 'monospace' },
-  mobileCardCostLabel: { fontSize: 11, color: '#666', fontFamily: 'monospace' },
-  mobileCardActivity: { fontSize: 13, color: '#777', fontFamily: 'monospace', paddingLeft: 62 },
-  officeScroll: { flex: 1 },
-  officeScaleOuter: { overflow: 'hidden' },
-  officeWrapper: { position: 'relative', transformOrigin: 'top left' as any },
-  emptyOverlay: {
-    position: 'absolute', top: '35%' as any, left: 0, right: 0, alignItems: 'center', zIndex: 20, gap: 6, paddingHorizontal: 20,
-  },
-  emptyIcon: { fontSize: 28 },
-  emptyTitle: { fontSize: 13, color: '#666', fontFamily: 'monospace', fontWeight: '800', textAlign: 'center' },
-  emptyText: { fontSize: 10, color: '#555', fontFamily: 'monospace', textAlign: 'center' },
-  emptySub: { fontSize: 9, color: '#444', fontFamily: 'monospace', fontStyle: 'italic', textAlign: 'center' },
-  desktopWidgetPlaceholder: {
-    position: 'absolute', top: 12, right: 12, minWidth: 148, paddingHorizontal: 12, paddingVertical: 8,
-    backgroundColor: '#05050bcc', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 10, zIndex: 6,
-  },
-  desktopWidgetPlaceholderRack: {
-    top: 104,
-  },
-  desktopWidgetPlaceholderTitle: {
-    fontSize: 10, color: '#7a7a8a', fontFamily: 'monospace', fontWeight: '700',
-  },
-  agentPosition: { position: 'absolute', zIndex: 10 },
-  quickBar: {
-    borderTopWidth: 1, borderTopColor: '#2a2a2a', paddingVertical: 6, paddingHorizontal: 8,
-  },
-  quickBarInner: { gap: 6, flexDirection: 'row' },
-  quickChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8,
-    paddingVertical: 4, borderRadius: 10, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
-  },
-  quickProviderDot: { width: 4, height: 4, borderRadius: 2 },
-  quickMainMark: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace' },
-  quickDot: { width: 4, height: 4, borderRadius: 2 },
-  quickName: { fontSize: 9, color: '#666', fontFamily: 'monospace', fontWeight: '600' },
-  quickCost: { fontSize: 8, color: '#444', fontFamily: 'monospace' },
-  chatToggle: {
-    borderTopWidth: 1, borderTopColor: '#2a2a2a',
-    backgroundColor: '#0a0a0a',
-  },
-  terminalBar: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    paddingVertical: 8, paddingHorizontal: 12, gap: 12,
-  },
-  terminalBarBtn: {
-    paddingVertical: 4, paddingHorizontal: 12,
-  },
-  terminalLoader: {
-    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10,
-    backgroundColor: '#040409',
-  },
-  terminalLoaderText: {
-    fontSize: 12, color: '#7a7a8a', fontFamily: 'monospace',
-  },
-  chatToggleText: { fontSize: 13, color: '#888', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1 },
-  terminalSizeButtons: {
-    flexDirection: 'row', gap: 4,
-  },
-  terminalSizeBtn: {
-    width: 32, height: 28, borderRadius: 6,
-    backgroundColor: '#000000', borderWidth: 1, borderColor: '#2a2a2a',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  terminalSizeBtnActive: {
-    borderColor: '#6366f1', backgroundColor: '#6366f115',
-  },
-  terminalSizeBtnText: {
-    fontSize: 12, color: '#555',
-  },
-  terminalSizeBtnTextActive: {
-    color: '#6366f1',
-  },
-  chatPane: { height: 320 },
-
-  // Action Result Toast
-  actionResultToast: {
-    position: 'absolute',
-    bottom: 280,
-    left: 12,
-    right: 12,
-    backgroundColor: '#0a0a0a',
-    borderWidth: 2,
-    borderColor: '#6366f1',
-    borderRadius: 12,
-    padding: 16,
-    zIndex: 1000,
-    shadowColor: '#6366f1',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 10,
-  },
-  toastClose: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#ffffff10',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1001,
-  },
-  toastCloseText: {
-    fontSize: 12,
-    color: '#999',
-    fontWeight: '700',
-  },
-  actionResultText: {
-    fontSize: 12,
-    color: '#fff',
-    fontFamily: 'monospace',
-    lineHeight: 18,
-    paddingRight: 32,
-  },
-  terminalFullscreen: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 2000,
-    backgroundColor: '#000',
-  },
-  terminalFullscreenHeader: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: '#2a2a2a',
-    backgroundColor: '#000000',
-  },
-  terminalFullscreenBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 6,
-    backgroundColor: '#ffffff08',
-    borderWidth: 1,
-    borderColor: '#ffffff15',
-  },
-  terminalFullscreenBtnText: {
-    color: '#888',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '600',
-  },
-});
-
-// ─── Filter chip row above the agent list ───────────────────────────────────
-
-const officeFilterChipStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingTop: 12,
-    paddingBottom: 8,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#262626',
-    backgroundColor: '#0a0a0a',
-  },
-  chipActive: {
-    borderColor: '#ffffff',
-    backgroundColor: '#141414',
-  },
-  label: {
-    color: '#a3a3a3',
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.8,
-    fontFamily: 'monospace',
-  },
-  labelActive: {
-    color: '#ffffff',
-  },
-  count: {
-    color: '#525252',
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 3,
-    backgroundColor: '#000000',
-    minWidth: 16,
-    textAlign: 'center',
-  },
-  countActive: {
-    color: '#ffffff',
-    backgroundColor: '#1f1f1f',
-  },
-});

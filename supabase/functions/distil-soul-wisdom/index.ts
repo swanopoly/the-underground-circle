@@ -72,7 +72,7 @@ async function loadSoulMemories(
     .select(`
       role, ownership_mode, confidence,
       memory:memory_entries!inner (
-        id, title, content, memory_kind, importance, updated_at, is_active
+        id, title, content, memory_kind, importance, updated_at, is_active, visibility
       )
     `)
     .eq("circle_id", circleId)
@@ -86,7 +86,15 @@ async function loadSoulMemories(
   }
 
   return (data || [])
-    .filter((r: any) => r.memory && r.memory.is_active)
+    // PRIVACY (2026-07-24): distillation writes into `soul_wisdom`, which EVERY
+    // circle member can read (20260418_soul_wisdom.sql:45). Private memories do
+    // get soul links (memoryService.ts links agent-scope rows that are written
+    // visibility='private'), so without this filter the distiller launders
+    // owner-only content into a permanent circle-wide prompt block with no
+    // audit trail back to the private source. Runs on a service-role client, so
+    // RLS is not a backstop. NULL/legacy visibility is treated as shared, which
+    // matches how the rest of the app reads these rows.
+    .filter((r: any) => r.memory && r.memory.is_active && r.memory.visibility !== 'private')
     .map((r: any) => ({
       id: r.memory.id,
       title: r.memory.title,

@@ -21,6 +21,8 @@
  */
 
 import { supabase } from './supabase';
+import type { MemoryDocKind } from './memoryBankKinds';
+import { updateMemoryDoc } from '../services/sharedMemory';
 
 const DEFAULT_MAX_CHARS = 4000;
 const COMPACTION_TRIGGER_MULTIPLIER = 1.1; // 10% overage before we propose
@@ -28,6 +30,7 @@ const COMPACTION_COOLDOWN_HOURS = 24;
 
 export type MemorySizeCheck = {
   circleId: string;
+  docKind: MemoryDocKind;
   contentLength: number;
   lastEditedAt: string | null;
   maxChars: number;
@@ -38,14 +41,18 @@ export type MemorySizeCheck = {
 
 export async function checkCircleMemorySize(
   circleId: string,
+  docKind: MemoryDocKind = 'brief',
 ): Promise<MemorySizeCheck | null> {
   // Fetch the memory doc + circle settings in parallel so we apply the
-  // right per-circle budget.
+  // right per-circle budget. circle_memory is keyed (circle_id, doc_kind) —
+  // one row per doc kind — so we MUST filter by doc_kind, else .maybeSingle()
+  // errors (PGRST116) on any circle with more than one memory doc.
   const [{ data: memoryRow, error: mErr }, { data: circleRow }] = await Promise.all([
     supabase
       .from('circle_memory')
       .select('content, last_edited_at')
       .eq('circle_id', circleId)
+      .eq('doc_kind', docKind)
       .maybeSingle(),
     supabase
       .from('circles')
@@ -66,12 +73,13 @@ export async function checkCircleMemorySize(
   const content = (memoryRow?.content || '').toString();
   const contentLength = content.length;
 
-  // Look for an existing pending compaction so we don't double-file.
+  // Look for an existing pending compaction for THIS doc so we don't double-file.
   const { data: pending } = await supabase
     .from('agent_approvals')
     .select('id, requested_at')
     .eq('circle_id', circleId)
     .eq('action_type', 'memory.compact')
+    .eq('payload->>docKind', docKind)
     .eq('status', 'pending')
     .order('requested_at', { ascending: false })
     .limit(1)
@@ -84,6 +92,7 @@ export async function checkCircleMemorySize(
 
   return {
     circleId,
+    docKind,
     contentLength,
     lastEditedAt: memoryRow?.last_edited_at ?? null,
     maxChars,
@@ -99,6 +108,8 @@ export type ProposeCompactionResult =
   | { ok: false; error: string };
 
 export type ProposeCompactionOptions = {
+  /** Which memory doc to compact (circle_memory is keyed by doc_kind). */
+  docKind?: MemoryDocKind;
   /**
    * Function that returns a compacted version of the current content.
    * Defaults to a simple head+tail truncation ("keep first 40% + last
@@ -122,7 +133,8 @@ export async function proposeMemoryCompaction(
   circleId: string,
   opts: ProposeCompactionOptions = {},
 ): Promise<ProposeCompactionResult> {
-  const status = await checkCircleMemorySize(circleId);
+  const docKind: MemoryDocKind = opts.docKind ?? 'brief';
+  const status = await checkCircleMemorySize(circleId, docKind);
   if (!status) return { ok: false, error: 'could not load circle_memory' };
   if (!status.overBudget) return { ok: true, skipped: 'under_budget' };
   if (status.pendingCompactionId) {
@@ -140,6 +152,7 @@ export async function proposeMemoryCompaction(
     .from('circle_memory')
     .select('content')
     .eq('circle_id', circleId)
+    .eq('doc_kind', docKind)
     .maybeSingle();
   const originalContent = (memoryRow?.content || '').toString();
 
@@ -174,6 +187,7 @@ export async function proposeMemoryCompaction(
       payload: {
         action: 'compact',
         circleId,
+        docKind,
         originalContent,
         proposedSummary,
         originalChars: originalContent.length,
@@ -220,35 +234,45 @@ export async function applyApprovedMemoryCompaction(
   const payload = approval.payload || {};
   const proposedSummary = String(payload.proposedSummary || '');
   const circleId = approval.circle_id;
+  // circle_memory is keyed (circle_id, doc_kind); the doc to compact is
+  // recorded in the proposal payload (default 'brief' for legacy rows).
+  const docKind: MemoryDocKind = (payload.docKind as MemoryDocKind) || 'brief';
   if (!circleId || proposedSummary.length === 0) {
     return { ok: false, error: 'invalid payload' };
   }
 
-  // Upsert the new content. `circle_memory` has one row per circle; it may
-  // already exist, so prefer update-first, fall back to insert.
-  const { data: existing } = await supabase
-    .from('circle_memory')
-    .select('id')
-    .eq('circle_id', circleId)
-    .maybeSingle();
-  if (existing) {
-    const { error } = await supabase
-      .from('circle_memory')
-      .update({
-        content: proposedSummary,
-        last_edited_at: new Date().toISOString(),
-        edited_by: approval.resolved_by ?? null,
-      })
-      .eq('id', existing.id);
-    if (error) return { ok: false, error: `update failed: ${error.message}` };
-  } else {
-    const { error } = await supabase.from('circle_memory').insert({
-      circle_id: circleId,
-      content: proposedSummary,
-      last_edited_at: new Date().toISOString(),
-      edited_by: approval.resolved_by ?? null,
-    });
-    if (error) return { ok: false, error: `insert failed: ${error.message}` };
+  // Route through the shared, audited write path rather than UPDATEing
+  // `circle_memory.content` directly.
+  //
+  // Compaction REPLACES the circle's shared operating doc with a summary — it is
+  // the most destructive memory operation in the app, and it was the ONLY write
+  // path that recorded no `circle_memory_history` row and never bumped
+  // `version`. So the one operation users would most want to undo was the one
+  // with no undo and no audit trail, and it silently desynced `version` from
+  // history for every write that followed.
+  //
+  // `guardBaseContent` pins the write to the exact document the approved summary
+  // was generated from (captured as `originalContent` in the proposal payload).
+  // Without it, an edit made between proposal and approval would be summarised
+  // away — destroyed by a change the approver never saw and with a perfectly
+  // well-formed audit trail claiming it was intended.
+  const guardBaseContent = typeof payload.originalContent === 'string'
+    ? payload.originalContent
+    : null;
+  const writeResult = await updateMemoryDoc(
+    circleId,
+    proposedSummary,
+    approval.resolved_by ?? '',
+    docKind,
+    { guardBaseContent },
+  );
+  if (!writeResult.ok) {
+    return {
+      ok: false,
+      error: writeResult.status === 'conflict'
+        ? `compaction not applied — the shared doc changed after this was proposed (${writeResult.message}). Re-run the proposal against the current content.`
+        : `${writeResult.status}: ${writeResult.message}`,
+    };
   }
 
   try {

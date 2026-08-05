@@ -16,6 +16,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View, Platf
 import {
   getRun,
   getRunSteps,
+  mergeRunMetadata,
   subscribeToRun,
   updateRunStatus,
   type AgentRun,
@@ -31,6 +32,8 @@ interface Props {
    *  OpenSwan Console prefilled with the same task + mode. */
   onRunAgain?: (run: AgentRun) => void;
   accentColor?: string;
+  /** Historical/superseded chat rows stay inspectable but cannot mutate a run. */
+  readOnly?: boolean;
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -60,7 +63,7 @@ const STEP_KIND_GLYPH: Record<string, string> = {
   error:       '⚠',
 };
 
-export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa' }: Props) {
+export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa', readOnly = false }: Props) {
   const [run, setRun] = useState<AgentRun | null>(null);
   const [steps, setSteps] = useState<RunStep[]>([]);
   const [expandedStepIds, setExpandedStepIds] = useState<Set<string>>(new Set());
@@ -244,7 +247,7 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
       </ScrollView>
 
       <View style={s.actionRow}>
-        {isLive ? (
+        {isLive && !readOnly ? (
           <Pressable
             onPress={async () => {
               if (cancelling) return;
@@ -253,12 +256,15 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
               // even if the realtime UPDATE event takes a beat.
               setRun((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
               try {
-                await updateRunStatus(runId, 'cancelled', {
-                  metadata: {
-                    ...(run.metadata || {}),
-                    cancelled_by: 'user',
-                    cancelled_at: new Date().toISOString(),
-                  },
+                // Split the STOP write so we don't clobber the metadata column
+                // with the lagging realtime snapshot (run.metadata): a bare
+                // status flip leaves the column untouched (preserving runtime
+                // keys written after this snapshot), then a read-merge-write
+                // records cancel provenance without dropping them.
+                await updateRunStatus(runId, 'cancelled');
+                await mergeRunMetadata(runId, {
+                  cancelled_by: 'user',
+                  cancelled_at: new Date().toISOString(),
                 });
               } catch {
                 // Revert if the write failed — the realtime sub will
@@ -279,7 +285,7 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
             <Text style={s.stopText}>{cancelling ? 'STOPPING…' : '■ STOP'}</Text>
           </Pressable>
         ) : null}
-        {(isFailed || isDone || run.status === 'cancelled') && onRunAgain ? (
+        {!readOnly && (isFailed || isDone || run.status === 'cancelled') && onRunAgain ? (
           <Pressable
             onPress={() => onRunAgain(run)}
             style={({ pressed }) => [

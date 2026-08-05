@@ -16,11 +16,19 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../lib/subscribeWithReconnect';
+import {
+  MAX_DRAFT_LENGTH,
+  draftKey,
+  reconcileDraft,
+  resolveStateAction,
+  shouldPreserveDraft,
+} from '../../../lib/chatComposerDraftCore';
 import FlatIcon from '../../../components/FlatIcon';
 import MemoryViewer from '../../../components/agent/MemoryViewer';
 import ChatThreadSidebar, { getInitialSidebarCollapsed, persistSidebarCollapsed } from './chat/ChatThreadSidebar';
 import ChatThreadHeader from './chat/ChatThreadHeader';
-import { createPrivateThread, getCircleDefaultThread, getThread, renameThread, updateThreadDefaultModel } from '../../../lib/circleChatThreads';
+import { createPrivateThread, deleteThread, getCircleDefaultThread, getThread, renameThread, updateThreadDefaultModel } from '../../../lib/circleChatThreads';
 import RunStatusBar from '../../../components/agent/RunStatusBar';
 import PluginPicker from '../../../components/agent/PluginPicker';
 import MemoryToast from '../../../components/agent/MemoryToast';
@@ -31,6 +39,7 @@ import {
   type SwanBotStructuredResponse,
   tryHandleLocalSwanBotCommand,
 } from '../../../lib/swanbot';
+import { isSwanbotV2ClientLoopEnabled } from '../../../lib/swanbotV2ClientLoopFlag';
 import type { WalletInfo, CryptoChain } from '../../../lib/crypto';
 import {
   getCircleDiscordConfig, getCachedChannels, getChannelMessages,
@@ -57,6 +66,9 @@ import MessageCitations from './chat/MessageCitations';
 import QuickActionDock from './chat/QuickActionDock';
 import AutomationProposalCard from './chat/AutomationProposalCard';
 import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
+import { loadChatAutomationDecisions } from '../../../lib/chatAutomationDecisions';
+import { buildOpenSwanAutomationInitialTask } from '../../../lib/openswanAutomationLaunch';
+import { buildRepeatedFlowAutomationProposals } from '../../../lib/chatAutomationSuggestions';
 import {
   buildMultiAgentDispatchPrompt,
   formatMultiAgentHelp,
@@ -64,19 +76,40 @@ import {
   formatMultiAgentStrategyLabel,
   parseMultiAgentOrchestrationRequest,
 } from '../../../lib/multiAgentDispatch';
+import {
+  DEFAULT_CHAT_AGENT_TARGET_ID,
+  buildChatAgentSetupMessage,
+  buildChatAgentTargets,
+  formatChatAgentProviderLabel,
+  isOpenSwanChatAgentTarget,
+  resolveChatAgentTarget,
+  type ChatAgentTarget,
+} from '../../../lib/chatAgentTargets';
+import { resolveChatAgentSelectorPresentation } from '../../../lib/chatAgentSelectorPresentation';
+import {
+  dispatchCustomAgentBridgeTask,
+  supportsGenericCustomAgentDispatch,
+} from '../../../lib/customAgentBridgeDispatcher';
 import SearchResultsCard, { type SearchResultRow } from './chat/SearchResultsCard';
 import CommandsHelpCard from './chat/CommandsHelpCard';
 import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
 import BridgeDiagCard from './chat/BridgeDiagCard';
+import PreflightBlockersCard, { type PreflightBlockerItem } from './chat/PreflightBlockersCard';
+import QuickReplyChips from './chat/QuickReplyChips';
+import FollowupChipRow from './chat/FollowupChipRow';
+import ChatAutomationPlanCard from './chat/ChatAutomationPlanCard';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
 import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
-import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
+import { fetchBridgeAuthenticated } from '../../../lib/bridgeAuth';
 import RunTraceCard from './chat/RunTraceCard';
 import RunCostDrawer from './chat/RunCostDrawer';
+import ChatSourcesRow from './chat/ChatSourcesRow';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
-import { createStagedFile, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
-import { soulKeyForProfile, resolveModelForProfile } from '../../../lib/serviceProfileSouls';
+import { createStagedFile, getSignedUrl, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
+import { soulKeyForProfile, resolveModelForProfile, explainAutoModelChoice, spiritIdForProfile, suggestAutoModelAlternative, suggestModelForManualPick } from '../../../lib/serviceProfileSouls';
+import BestOfNResultCard from '../../../components/BestOfNResultCard';
+import type { PersistedBestOfNRace } from '../../../lib/persistedChatMetadata';
 import { canUseAnthropicChatStream } from '../../../lib/blackswanRouting';
 import { analyzeMessageRouting } from '../../../lib/messageRouting';
 import { dispatchBridgeTask, sendTerminalAgentSessionMessage, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
@@ -114,24 +147,76 @@ import {
 } from '../../../lib/computerUse';
 import ComputerUsePanel from '../../../components/computer-use/ComputerUsePanel';
 import BrowserSessionDrawer from '../../../components/computer-use/BrowserSessionDrawer';
+import AgentMonitorHost from '../../../components/agent-monitor/AgentMonitorHost';
 import ComputerUsePermissionDialog from '../../../components/computer-use/ComputerUsePermissionDialog';
 import ComputerUseButton from '../../../components/computer-use/ComputerUseButton';
 import AnimatedPopup from '../../../components/chat-animations/AnimatedPopup';
 import ThinkingDots from '../../../components/chat-animations/ThinkingDots';
 import ThinkingLabel from '../../../components/chat-animations/ThinkingLabel';
 import { pickThinkingVerb } from '../../../lib/thinkingVerbs';
+import { initStreamHealth, advanceStreamHealth, describeStreamHealth } from '../../../lib/streamHealthCore';
 import ComputerUseConsole from '../../../components/computer-use/ComputerUseConsole';
 import ChatCostFooter from '../../../components/ChatCostFooter';
 import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
 import WebSearchStatusChip from '../../../components/WebSearchStatusChip';
 import RunApprovalBanner from '../../../components/RunApprovalBanner';
+import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
+import ChatAttentionStrip from '../../../components/ChatAttentionStrip';
+import ToolCallCheckpointStrip from '../../../components/ToolCallCheckpointStrip';
+import ChatComputerFindingsCard from '../../../components/ChatComputerFindingsCard';
+import ChatMemoryAttributionRow from '../../../components/ChatMemoryAttributionRow';
+import ComputerTaskSteeringBar from '../../../components/ComputerTaskSteeringBar';
+import { useComputerTaskScheduleRunner } from '../../../lib/computerTaskScheduleRunner';
+import {
+  isOpenSwanSteeringScopeActive,
+  pushOpenSwanSteeringNote,
+} from '../../../lib/openswanSteering';
+import {
+  BLACKSWAN_ENDPOINT_MODEL_ID,
+  isLocalOllamaBlackSwan,
+  looksLikeAppGroundedMessage,
+  resolveComputerTaskPlannerModel,
+} from '../../../lib/blackswanRouting';
+import {
+  buildChatAttentionState,
+  type ChatAttentionAction,
+  type ChatAttentionItem,
+} from '../../../lib/chatAttentionQueue';
+// Proactive heads-up: fold the live "Needs you" items into the prompt
+// builder's surfacing signals (pure adapter; anti-nag decision happens in
+// proactiveSurfacingRuntime behind buildStreamableSystemPrompt).
+import { attentionItemsToSurfacingSignals } from '../../../lib/proactiveSurfacingSignals';
+import { isApprovalRowLive } from '../../../lib/approvalCardModelCore';
+import {
+  formatChatUserFacingOutcome,
+  providerBlockerFromFailure,
+  translateChatFailure,
+} from '../../../lib/chatUserFacingOutcomes';
+import {
+  buildRoomHandoffSeedMessage,
+  detectRoomHandoffSuggestion,
+} from '../../../lib/chatRoomHandoff';
 import RecordingBadge from '../../../components/RecordingBadge';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
-import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
+import { resolveComputerUseConfirmation, sendComputerUseSteeringNote } from '../../../lib/computerUseConfirmations';
+import { decideBrowserAutoStart } from '../../../lib/computerTaskAutoStart';
+import { matchBookingFollowup, type BookingFollowupLastRun } from '../../../lib/computerTaskFollowup';
+import { computerFindingsMetadata, type PersistedComputerFindings } from '../../../lib/persistedChatMetadata';
+import { buildAgentMonitorTaskFromComputerUseState } from '../../../lib/agentMonitorState';
 import {
   getMatchingChatSlashCommands,
+  CHAT_SLASH_COMMANDS,
   type ChatSlashCommand,
 } from '../../../lib/chatSlashCommands';
+import { buildEmptyChatSuggestions } from '../../../lib/capabilityOverviewCore';
+import { matchStopResolution as matchChatStopResolution, resolveChatStopMessage } from '../../../lib/chatStopMessageCore';
+import { assessStreamDegeneracy, describeStreamDegeneracy } from '../../../lib/streamDegeneracyCore';
+import { formatVerificationReceipt } from '../../../lib/verificationReceiptCore';
+import { guardChatSend } from '../../../lib/chatSendGuardCore';
+import {
+  segmentChatIntents,
+  shouldSurfaceMultiIntentNotice,
+} from '../../../lib/chatMultiIntentCore';
 import ChatArtifacts from '../../../components/chat/ChatArtifacts';
 // V2 Builder adds copy/download/publish toolbar, device frames, and an
 // iframe runtime error overlay. Lives in tabs/chat/ because the components/
@@ -140,12 +225,18 @@ import ChatBuildStudio from './chat/ChatBuildStudioV2';
 import ChatBotIdentityRow from '../../../components/chat/ChatBotIdentityRow';
 import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
 import ChatInlineRichText from '../../../components/chat/ChatInlineRichText';
+import ChatMarkdownBody from '../../../components/chat/ChatMarkdownBody';
+import { hasRenderableMarkdown } from '../../../lib/markdownSegmentCore';
+import ChatMessageDetailsDisclosure from '../../../components/chat/ChatMessageDetailsDisclosure';
+import AgentReceiptCard from '../../../components/AgentReceiptCard';
+import { buildAgentReceipt, shouldRenderReceipt } from '../../../lib/agentReceipt';
 import RunExecutionCard from '../../../components/chat/RunExecutionCard';
 import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
 import ChatSlashCommandPalette from '../../../components/chat/ChatSlashCommandPalette';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from '../../../lib/openswanExecution';
 import {
   clearChatAgentAvatar,
+  formatPersistedChatBotMessage,
   getChatAgentAvatarSource,
   isPersistedChatBotMessage,
   loadChatAgentAvatar,
@@ -156,29 +247,115 @@ import {
   saveChatAgentAvatar,
   saveChatAgentName,
   saveLastThreadBuildArtifact,
+  type PersistedChatBotMetadata,
+  type PersistedChatRecoveryReliabilitySummary,
 } from '../../../lib/chatAgentIdentity';
 import {
+  deriveBrowserPlanChatOutcomeSignal,
+  deriveComputerTaskChatOutcomeSignal,
+  deriveOutcomeVerdict,
+  deriveStopMessageChatOutcomeSignal,
+  mapReactionToSignal,
+  type ChatOutcomeVerdict,
+  type ChatUserSignal,
+} from '../../../lib/chatOutcomeSignals';
+import {
+  deriveCrossSurfaceFollowups,
+  type CrossSurfaceFollowup,
+} from '../../../lib/crossSurfaceFollowupCore';
+// reference-nav-chips: type-only — the resolver itself is dynamic-imported in
+// addUserMessage so the send path stays lean.
+import type { SurfaceReferenceMatch } from '../../../lib/crossSurfaceReferenceResolverCore';
+import { extractGitReferences } from '../../../lib/taskPRLinkageCore';
+import {
   buildChatInfluenceReferences,
-  persistMainChatBotMessageWithRetry,
-  updateMainChatBotMessageWithRetry,
 } from '../../../lib/chatAgentService';
 import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
+import { compileComputerSequenceProgram } from '../../../lib/computerSequenceProgramCore';
+import { UNIFIED_CONVERSATIONAL_INTENT_TYPES } from '../../../lib/chatConversationalCutoverParity';
+import { buildChatAutomationPlanPreview, type ChatAutomationPlanPreview } from '../../../lib/chatAutomationPlanPreview';
+import { createHitlApprovalGate } from '../../../lib/chatApprovalGate';
+import { recallForClarification, reconstructClarificationAnswer } from '../../../lib/chatGapFill';
+import { analyzeBuildBrief } from '../../../lib/buildBriefQuality';
+import {
+  buildChatComputerHandoffContext,
+  formatChatComputerHandoffForMessage,
+  type ChatComputerHandoffMetadata,
+} from '../../../lib/chatComputerHandoffContext';
+import {
+  buildChatComputerOutcomePresentation,
+  isQuietSuccessfulComputerTaskWarning,
+} from '../../../lib/chatComputerOutcomeUx';
+import { buildChatComputerRequestUserNotice } from '../../../lib/chatComputerRequestUx';
+import {
+  buildChatComputerUsePolicyInputs,
+  isCredentialedWebsiteAdminRoute,
+} from '../../../lib/chatComputerRequestRouter';
+import {
+  deserializeChatFailureLedger,
+  deserializeLastAppResolution,
+  serializeChatFailureLedger,
+  serializeLastAppResolution,
+} from '../../../lib/chatSessionStatePersistence';
+import type { ComputerTaskEvidenceContract } from '../../../lib/computerTaskEvidenceContract';
+import {
+  applyChatDesignTaskTimelineDisposition,
+  buildChatDesignTaskCardModel,
+  classifyChatDesignTaskTimeline,
+} from '../../../lib/chatDesignTaskCard';
+import { SEED_EVENT_NAME, parseComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
+import EngineeringDesignCard from '../../../components/chat/EngineeringDesignCard';
+import { extractEngineeringCapturesFromToolEvents } from '../../../lib/engineeringRuntimeCaptureCore';
+import { buildEngineeringCardModels } from '../../../lib/engineeringDesignCardCore';
+import {
+  buildAgentPlanDraft,
+  formatAgentPlanForChat,
+  shouldCreateAgentPlanForMessage,
+  type AgentPlanDraft,
+} from '../../../lib/agentPlanMode';
+import { saveAgentPlanDraft } from '../../../lib/agentPlanPersistence';
 import { executeTerminalAgentLaunchFromChat } from '../../../lib/terminalAgentSessionLauncher';
 import { executeTerminalAgentControlFromChat } from '../../../lib/terminalAgentControl';
 import {
+  buildInDesignBannerClarification,
+  buildPhotoshopGenerativeFillClarification,
   detectLocalComputerAwarenessIntent,
-  looksLikeLocalComputerAwarenessRequest,
 } from '../../../lib/localComputerAwarenessIntent';
-import { dispatchChatAutomationPlan } from '../../../lib/runChatAutomationPlan';
+import type { PredictiveChatCommand } from '../../../lib/predictiveChatCommands';
+import { dispatchChatAutomationPlan, type ChatAutomationOutcome, type ChatClarificationResumeStore } from '../../../lib/runChatAutomationPlan';
+import { createChatTransportHandlers, getOutcomeStateRequests, type ChatTransportStateRequests } from '../../../lib/chatTransportHandlers';
+import { chooseChatTerminalTransport, looksLikeTerminalActionRequest as looksLikeActionRequest } from '../../../lib/chatTerminalTransportPolicy';
+import { decideChatOrchestration } from '../../../lib/aiFirstChatPolicy';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
-import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
+import {
+  deriveChatActivityFlags,
+  reconcileChatMessageSnapshot,
+  shapePersistedChatMessage,
+} from '../../../lib/chatMessageShape';
+import type { ChatMessage, ChatMessageSource, ChatBotMessageExtra } from '../../../lib/chatMessageTypes';
+import { buildFailoverBadge, type FailoverBadge } from '../../../lib/transportFailoverBadgeCore';
 import {
   applyOpenSwanMemoryRecommendation,
-  getLatestSpiritMemoryReferences,
   rememberFromChat,
   type OpenSwanMemoryRecommendation,
   type PromptMemoryReference,
 } from '../../../lib/memoryService';
+import {
+  formatMemoryRecencyLabel,
+  formatMemoryStrengthLabel,
+  formatMemoryStateLabel,
+  formatMemoryTrustLabel,
+  formatArchiveBiasLabel,
+  formatMemorySourceLabel,
+  getMemoryFamily,
+  getMemoryFamilyLabel,
+} from '../../../lib/chatMemoryLabelCore';
+import {
+  deriveSessionTitleFromMessage,
+  isAutoNamedSession,
+  normalizeThreadModelPreference,
+} from '../../../lib/chatSessionTitleCore';
+import { autoModelDisplayName } from '../../../lib/chatModelDisplayCore';
 import { decayMemoryImportance, pinMemory, promoteMemory, recordMemoryFeedback, softDeleteMemory } from '../../../lib/memoryActions';
 import {
   getLatestSpiritResearchReferences,
@@ -187,8 +364,12 @@ import {
 import {
   getCurrentChatUserProfile,
   loadCircleChatMembers,
+  loadMessageReactions,
+  loadOlderThreadMessages,
   loadThreadMessages,
   persistChatMessage,
+  setMessageReaction,
+  updateChatMessageContent,
 } from '../../../lib/chatService';
 import {
   FEATURED_QUICK_ACTIONS,
@@ -200,6 +381,7 @@ import {
 import { detectAgenticCodingProfile } from '../../../lib/agenticCodingProfile';
 import { getSpiritById } from '../../../lib/agentSpirits';
 import { getAgentIdentityKey, loadAgentIdentities, type TerminalAgentOfficeConfig } from '../../../lib/agentIdentity';
+import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
 import { loadConnections } from '../../../lib/connectionManager';
 import { DEFAULT_AGENT, sessionsToAgents, type OfficeAgent } from '../../../lib/officeAgents';
 import { loadCircleOfficeAgents, type CircleOfficeAgent } from '../../../lib/circleOffice';
@@ -216,24 +398,6 @@ import {
 } from '../../../lib/chatSessionProfile';
 import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
 
-/**
- * Loose detector for messages that probably need tool use.
- *
- * When the user says things like "create a room", "pause the automation",
- * "update the circle theme", the chat flow needs to fall through to the
- * `runOpenSwanSessionTurn` path (which enables the tool catalog). The
- * streaming fast-path has NO tools — so without this detector, BlackSwan
- * replies "I can't create rooms" even though it has the tool.
- *
- * Matches action-verb + app-noun pairs. False positives are cheap
- * (they just forgo streaming for one turn). False negatives are bad
- * (tools don't get called) so the regex is deliberately permissive.
- */
-const ACTION_INTENT_RE = /\b(create|make|add|new|start|rename|archive|unarchive|update|change|edit|set|toggle|pause|resume|raise|lower|bump|assign|unassign|remove|delete|pin|unpin|forget|log|mark|complete|switch|connect|disconnect|list|show|post|send)\b[^\n]{0,60}?\b(room|rooms|circle|agent|agent'?s?|mission|missions|task|tasks|memory|memories|automation|automations|automations?|check[\s-]?in|check[\s-]?ins|budget|cap|caps|theme|setting|settings|name|description|icon|vibe|spirit|appearance|public|private|accent|schedule|integration|integrations)\b/i;
-
-function looksLikeActionRequest(message: string): boolean {
-  return ACTION_INTENT_RE.test(message) || looksLikeLocalComputerAwarenessRequest(message);
-}
 import { runOpenSwanSessionTurn, type OpenSwanDelegatedAgentDescriptor } from '../../../lib/openswanSessionRuntime';
 import type { OpenSwanTaskPlan } from '../../../lib/openswanTaskPlanner';
 import type { OpenSwanToolEvent } from '../../../lib/openswanToolRuntime';
@@ -243,19 +407,93 @@ import {
   type OpenSwanVerificationResult,
   upsertOpenSwanVerificationResult,
 } from '../../../lib/openswanVerificationRuntime';
+import {
+  getActiveLocalFileSessionGrant,
+  inferLocalFileGrantRootsForTask,
+  requestLocalFileSessionGrant,
+  stageAttachmentForDesktop,
+  stageAttachmentManifestForDesktop,
+} from '../../../lib/desktopBridge';
 import { addArtifact, appendRunBrowserPlanEvent, appendRunToolEvent, mergeRunMetadata } from '../../../lib/agentRunSystem';
 import { getMainChatSessionActions } from '../../../lib/sessionPromptCatalog';
 import { auditComputerCapabilities } from '../../../lib/computerCapabilityRegistry';
-import { prepareComputerTaskExecution } from '../../../lib/computerTaskExecution';
-import { executeComputerTaskWithAgent } from '../../../lib/computerTaskRuntime';
+import {
+  buildComputerTaskLocalFileAccessBlockedPresentation,
+  buildComputerTaskSurfacePreparationBlockedPresentation,
+  buildComputerTaskSurfacePreparationPlan,
+  buildComputerTaskSurfacePreparationReceipt,
+} from '../../../lib/computerTaskSurfacePreparation';
+import {
+  diagnoseComputerTaskCheckpointFailure,
+  type ComputerTaskCheckpointRecoveryContext,
+} from '../../../lib/computerTaskCheckpointRecovery';
+import type { ComputerTaskAppRouteDecisionInput } from '../../../lib/computerTaskEvidenceRecovery';
+import {
+  buildChatFailureRecoveryExecutionPlan,
+  formatChatFailureRecoveryOptionSelection,
+  formatChatFailureRecoveryOptionSelectionForPrompt,
+  parseChatFailureRecoveryOptionSelection,
+  resolveChatFailureRecoveryOptionFollowup,
+  stripChatFailureRecoveryOptionsText,
+  type ChatFailureRecoveryOption,
+} from '../../../lib/chatFailureRecovery';
+import {
+  appendCustomerSafeRecoveryMessage,
+  isSupportOnlyComputerTaskWarning,
+  sanitizeVisibleComputerTaskMessage,
+  getRecoveryOptionActorLabel,
+  getRecoveryOptionAccent,
+  formatRecoverySurfaceKind,
+  formatRecoveryFailureArea,
+  formatRecoveryEvidenceLabel,
+  formatHandoffSurfaceRouteLabel,
+  buildComputerTaskSummaryLine,
+  getRecoveryReliabilityStatus,
+  buildRecoveryReliabilityCard,
+  buildChatAppChoiceCard,
+  stripChatAppChoiceLine,
+  getRecoveryOptionPolicyBadges,
+  getRecoveryReliabilityFromArchive,
+} from '../../../lib/chatRecoveryDisplayCore';
+import {
+  buildChatRecoveryActionIntent,
+  formatChatRecoveryActionDisplayText,
+} from '../../../lib/chatRecoveryActionIntent';
+import {
+  autoConnectDesktopBridge,
+  isDesktopBridgeRecoverySelection,
+} from '../../../lib/desktopBridgeAutoConnect';
+import type { ComputerTaskComplexityPlan } from '../../../lib/computerTaskComplexityPlan';
+import { prepareComputerTaskExecution, type ComputerTaskExecutionEnvelope } from '../../../lib/computerTaskExecution';
+import type { ComputerTaskGrantId } from '../../../lib/computerTaskGrants';
+import { executeComputerTaskWithAgent, refreshComputerTaskCapabilityBuildoutFromConnectedAgentSession } from '../../../lib/computerTaskRuntime';
+import {
+  mapComputerTaskOutcomeToChatStatus,
+  normalizeComputerTaskOutcomeStatus,
+  type ComputerTaskOutcomeStatus,
+} from '../../../lib/computerTaskOutcome';
 import { listApiKeys } from '../../../lib/llmProviders';
+import { isPendingClarificationFresh } from '../../../lib/chatSessionResumptionCore';
 import {
   buildImplicitBusinessModelProfiles,
   loadCircleBusinessModelProfiles,
   planBusinessModelForComputerTask,
 } from '../../../lib/businessModelProfiles';
 import { deriveGrantedScopesFromBrowserPermission, grantComputerTaskScopes, loadComputerTaskGrantIds } from '../../../lib/computerTaskGrantMemory';
-import { buildComputerTaskStateSteps, clearComputerTaskState, loadComputerTaskState, saveComputerTaskState, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
+import { acknowledgeComputerTaskNotificationsState, appendComputerTaskNotification, buildComputerTaskChecklistCard, buildComputerTaskStateSteps, clearComputerTaskState, compactComputerTaskCheckpointRecovery, compactComputerTaskComplexityPlan, computerTaskNotificationSnapshot, deriveComputerTaskNotification, listUnacknowledgedComputerTaskNotifications, loadComputerTaskState, markComputerTaskCheckpointRecoveryObserved, saveComputerTaskState, COMPUTER_TASK_NOTIFICATION_GLYPHS, type ComputerTaskCapabilityBuildout, type ComputerTaskCheckpointEvidenceObservation, type ComputerTaskStateCheckpointRecovery, type ComputerTaskStateComplexity, type ComputerTaskStateGrounding, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
+import {
+  buildAgentAppCapabilityBuildoutStateHints,
+  formatAgentAppCapabilityBuildoutForUser,
+} from '../../../lib/agentAppCapabilityBuildout';
+import {
+  buildDesktopAttachmentComputerTask,
+  buildDesktopAttachmentPackageManifest,
+  buildDesktopAttachmentStageGroupName,
+  inferDesktopAppForAttachment,
+  shouldRouteAttachedFilesToDesktop,
+  type ChatDesktopAttachmentCandidate,
+  type StagedDesktopAttachment,
+} from '../../../lib/chatDesktopAttachmentRouting';
 import {
   appendChatSessionArchiveEvent,
   clearChatSessionArchive,
@@ -271,6 +509,7 @@ import {
   savePendingBotMessage,
   type PendingBotMessageRecord,
 } from '../../../lib/pendingBotMessages';
+import { useAgentApprovals } from '../../../services/hitlService';
 
 const OpenSwanConsole = React.lazy(() => import('../../../components/openswan/OpenSwanConsole'));
 const ComputerUseLiveCard = React.lazy(() => import('../../../components/ComputerUseLiveCard'));
@@ -279,7 +518,42 @@ const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
 const BLACKSWAN_ID = 'blackswan';
 const LOGIN_NEON = '#b8ff61';
 const CHAT_SURFACE_MAX_WIDTH = 1680;
+// First-run starter prompts, computed once from the pure capability catalog
+// (deterministic + bounded) so the empty chat surfaces real, tappable examples.
+const EMPTY_CHAT_STARTERS = buildEmptyChatSuggestions({ max: 5 });
 const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
+type ChatThreadLoadState = {
+  status: 'resolving' | 'loading' | 'ready' | 'error';
+  threadId: string | null;
+  message?: string;
+};
+
+function activeChatThreadStorageKey(circleId: string, userId?: string | null): string {
+  const safeCircleId = String(circleId || '').trim().slice(0, 160) || '_';
+  const safeUserId = String(userId || '').trim().slice(0, 160) || '_';
+  return `uc_chat_active_thread::${safeCircleId}::${safeUserId}`;
+}
+
+function transcriptChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => message.durability !== 'ephemeral');
+}
+
+const LEGACY_EPHEMERAL_CHAT_SURFACES = new Set([
+  'main_chat_multi_intent_notice',
+  'main_chat_session_greeting',
+  'chat_automation_suggestion',
+  'chat_agent_selector_setup',
+  'agent_plan_mode_help',
+  'multi_agent_dispatch',
+  'multi_agent_roundtable',
+  'multi_agent_chain',
+  'multi_agent_debate',
+  'multi_agent_help',
+]);
+
+function isLegacyEphemeralChatSurface(surface?: string | null): boolean {
+  return LEGACY_EPHEMERAL_CHAT_SURFACES.has(String(surface || '').trim());
+}
 // Auto is the default — the runtime resolver in serviceProfileSouls
 // picks Haiku for casual / status / clarifying turns, Sonnet for
 // general code + design, and Opus for research / architecture / deep
@@ -303,6 +577,7 @@ type AssignableAgent = {
   spirit?: string | null;
   model?: string | null;
   sessionKey?: string | null;
+  gatewayUrl?: string | null;
   source?: 'db' | 'openswan-session' | 'bridge-session' | 'default';
   terminalConfig?: TerminalAgentOfficeConfig | null;
 };
@@ -342,6 +617,7 @@ function toAssignableDbAgent(agent: CircleOfficeAgent): AssignableAgent {
     spirit: agent.spirit || null,
     model: agent.model_name || extended?.modelPreference || null,
     sessionKey: agent.provider === 'openswan' ? agent.id : null,
+    gatewayUrl: agent.gatewayUrl || null,
     source: 'db',
   };
 }
@@ -362,55 +638,16 @@ function toAssignableSessionAgent(agent: OfficeAgent, circleId: string): Assigna
     source: 'openswan-session',
   };
 }
-const TITLE_STOP_WORDS = new Set([
-  'a', 'an', 'and', 'are', 'at', 'be', 'build', 'can', 'create', 'do', 'for',
-  'from', 'help', 'how', 'i', 'in', 'is', 'it', 'make', 'me', 'my', 'of', 'on',
-  'please', 'show', 'the', 'this', 'to', 'we', 'with', 'you',
-]);
+// Session-title derivation (TITLE_STOP_WORDS, formatSessionTitleWord,
+// deriveSessionTitleFromMessage) extracted verbatim to the pure, smoke-tested
+// src/lib/chatSessionTitleCore.ts (decomposition unit U6) and imported above.
 
-function formatSessionTitleWord(word: string): string {
-  if (!word) return '';
-  if (word.length <= 4 && word === word.toUpperCase()) return word;
-  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-}
+// appendCustomerSafeRecoveryMessage, isSupportOnlyComputerTaskWarning, and
+// sanitizeVisibleComputerTaskMessage extracted verbatim to the pure, smoke-tested
+// src/lib/chatRecoveryDisplayCore.ts (decomposition unit U2) and imported above.
 
-function deriveSessionTitleFromMessage(content: string): string {
-  const normalized = content
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/[@/#][\w-]+/g, ' ')
-    .replace(/[^\w\s'-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!normalized) return SESSION_FALLBACK_TITLE;
-
-  const words = normalized
-    .split(' ')
-    .map(word => word.replace(/^'+|'+$/g, '').trim())
-    .filter(Boolean);
-
-  const prioritized = words.filter(word => {
-    const lower = word.toLowerCase();
-    return word.length > 2 && !TITLE_STOP_WORDS.has(lower);
-  });
-
-  const chosen = (prioritized.length >= 2 ? prioritized : words)
-    .slice(0, 3)
-    .map(formatSessionTitleWord)
-    .filter(Boolean);
-
-  return chosen.length > 0 ? chosen.join(' ') : SESSION_FALLBACK_TITLE;
-}
-
-function isAutoNamedSession(title: string | null | undefined): boolean {
-  const normalized = (title || '').trim().toLowerCase();
-  return normalized === '' || normalized === 'openswan session' || normalized === 'new chat';
-}
-
-function normalizeThreadModelPreference(model: string | null | undefined): string {
-  const normalized = (model || '').trim().toLowerCase();
-  if (!normalized || normalized === 'openswan') return DEFAULT_CHAT_MODEL;
-  return model || DEFAULT_CHAT_MODEL;
-}
+// isAutoNamedSession + normalizeThreadModelPreference extracted verbatim to
+// src/lib/chatSessionTitleCore.ts (decomposition unit U6) and imported above.
 
 function getFallbackSpiritIdForSessionProfile(profile: SessionCodingProfile): string {
   switch (profile) {
@@ -439,70 +676,198 @@ function buildSessionThinkingLabel(currentRunStep: string, verbIndex: number): s
   return pickThinkingVerb(verbIndex);
 }
 
-function formatMemoryRecencyLabel(ref: PromptMemoryReference): string {
-  const timestamp = ref.lastAccessedAt || ref.updatedAt;
-  if (!timestamp) return 'unknown freshness';
-  const ageMs = Date.now() - new Date(timestamp).getTime();
-  const ageHours = ageMs / 3_600_000;
-  if (ageHours < 24) return 'fresh today';
-  const ageDays = ageHours / 24;
-  if (ageDays < 7) return `${Math.max(1, Math.round(ageDays))}d old`;
-  if (ageDays < 30) return `${Math.max(1, Math.round(ageDays / 7))}w old`;
-  return `${Math.max(1, Math.round(ageDays / 30))}mo old`;
+type ChatTabPersistBotMessageParams = {
+  circleId: string;
+  userId: string;
+  agentName: string;
+  content: string;
+  threadId: string | null | undefined;
+  metadata?: PersistedChatBotMetadata;
+  maxAttempts?: number;
+  onError?: (error: unknown) => void;
+  onPersisted?: (messageId: string) => void;
+};
+
+function persistChatTabBotMessageWithRetry(params: ChatTabPersistBotMessageParams): void {
+  const {
+    circleId,
+    userId,
+    agentName,
+    content,
+    threadId,
+    metadata,
+    maxAttempts = 3,
+    onError,
+    onPersisted,
+  } = params;
+
+  const persistAttempt = async (attempt = 0) => {
+    try {
+      const messageId = await persistChatMessage({
+        circleId,
+        userId,
+        content: formatPersistedChatBotMessage(agentName, content, metadata),
+        threadId,
+        isBot: true,
+        reactions: {},
+      });
+      if (messageId) onPersisted?.(messageId);
+    } catch (error) {
+      onError?.(error);
+      if (attempt < maxAttempts) {
+        setTimeout(() => {
+          void persistAttempt(attempt + 1);
+        }, 1000 * (attempt + 1));
+      }
+    }
+  };
+
+  void persistAttempt();
 }
 
-function formatMemoryStrengthLabel(ref: PromptMemoryReference): string {
-  const score = ref.importance ?? 0.5;
-  if (score >= 0.9) return 'core';
-  if (score >= 0.75) return 'strong';
-  if (score >= 0.6) return 'active';
-  return 'light';
+type ChatTabUpdateBotMessageParams = {
+  messageId: string;
+  agentName: string;
+  content: string;
+  metadata?: PersistedChatBotMetadata;
+  maxAttempts?: number;
+  onError?: (error: unknown) => void;
+};
+
+function updateChatTabBotMessageWithRetry(params: ChatTabUpdateBotMessageParams): void {
+  const {
+    messageId,
+    agentName,
+    content,
+    metadata,
+    maxAttempts = 3,
+    onError,
+  } = params;
+
+  const persistAttempt = async (attempt = 0) => {
+    try {
+      await updateChatMessageContent(
+        messageId,
+        formatPersistedChatBotMessage(agentName, content, metadata),
+      );
+    } catch (error) {
+      onError?.(error);
+      if (attempt < maxAttempts) {
+        setTimeout(() => {
+          void persistAttempt(attempt + 1);
+        }, 1000 * (attempt + 1));
+      }
+    }
+  };
+
+  void persistAttempt();
 }
 
-function formatMemoryStateLabel(ref: PromptMemoryReference): string {
-  if (ref.memoryState === 'distilled') return 'distilled guidance';
-  if (ref.retrievalMode === 'startup' && ref.pinned) return 'pinned startup';
-  if (ref.retrievalMode === 'startup') return 'startup guidance';
-  if (ref.pinned) return 'pinned';
-  if (ref.memoryState === 'supporting') return 'supporting';
-  return 'retrieved';
+type PendingBotMessageRecordWithAgentSubject = PendingBotMessageRecord & {
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+};
+
+/** One hydration path for initial loads and realtime inserts. Keeping this
+ * parity is important: a row must not lose action-safety lineage merely
+ * because it arrived over Realtime instead of the initial query. */
+function hydratePersistedChatBotMetadata(
+  metadata?: PersistedChatBotMetadata | null,
+): Partial<ChatMessage> {
+  if (!metadata) return {};
+  return {
+    persistedMetadataSnapshot: metadata,
+    artifacts: metadata.artifacts,
+    wikiRefs: metadata.wikiRefs,
+    researchRefs: metadata.researchRefs,
+    memoriesUsed: metadata.memoriesUsed,
+    memoryRefs: metadata.memoryRefs,
+    memoryRecommendations: metadata.memoryRecommendations,
+    source: metadata.source,
+    agentSubjectMetadata: metadata.agentSubjectMetadata || undefined,
+    usage: metadata.usage || undefined,
+    executionStream: metadata.executionStream,
+    agentPlan: metadata.agentPlan,
+    taskPlan: metadata.taskPlan,
+    toolEvents: metadata.toolEvents,
+    verificationResults: metadata.verificationResults,
+    browserPlans: metadata.browserPlans,
+    browserPlanEvents: metadata.browserPlanEvents,
+    browserSessions: metadata.browserSessions,
+    runId: metadata.runId || metadata.computerHandoff?.runId || undefined,
+    requestId: metadata.requestId || undefined,
+    requestAuthorId: metadata.requestAuthorId || undefined,
+    recoveryOptions: metadata.recoveryOptions,
+    recoveryReliability: metadata.recoveryReliability || undefined,
+    computerTaskStatus: normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus)
+      || normalizeComputerTaskOutcomeStatus(metadata.computerHandoff?.outcomeStatus)
+      || undefined,
+    computerHandoff: metadata.computerHandoff || undefined,
+    chatAutomationPlanPreview: metadata.chatAutomationPlanPreview || undefined,
+    computerFindings: metadata.computerFindings || undefined,
+    bestOfN: metadata.bestOfN || undefined,
+    outcomeSignal: metadata.outcomeSignal || undefined,
+    quickReplies: metadata.computerFindings?.items?.length
+      ? metadata.computerFindings.items.map((_, i) => `Book option ${i + 1}`)
+      : undefined,
+    routing: metadata.routing || undefined,
+  };
 }
 
-function formatMemoryTrustLabel(ref: PromptMemoryReference): string {
-  const helpfulness = ref.helpfulness;
-  if (helpfulness == null) return 'unrated';
-  if (helpfulness >= 0.8) return 'trusted';
-  if (helpfulness >= 0.6) return 'proven';
-  if (helpfulness <= 0.3) return 'weak';
-  return 'mixed';
-}
-
-function formatArchiveBiasLabel(ref: PromptMemoryReference): string | null {
-  if (ref.archiveBias === 'boosted') return 'archive boosted';
-  if (ref.archiveBias === 'suppressed') return 'archive suppressed';
-  if (ref.archiveBias === 'neutral' && ref.archivePassiveScore != null) return 'archive neutral';
-  return null;
-}
-
-function formatMemorySourceLabel(ref: PromptMemoryReference): string | null {
-  switch (ref.sourceSurface) {
-    case 'claude_code_bridge': return 'Claude Code';
-    case 'codex_bridge': return 'Codex';
-    case 'cursor_bridge': return 'Cursor';
-    case 'gemini_bridge': return 'Gemini';
-    default: return null;
+/** Lossless persistence projector. Structured UI fields override their last
+ * parsed values, while envelope-only fields (for example observed evals and
+ * verification receipts) survive unrelated reaction/status updates. */
+function projectPersistedChatBotMetadata(
+  message: ChatMessage,
+  fallbackAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null,
+): PersistedChatBotMetadata {
+  const metadata: PersistedChatBotMetadata = {
+    ...(message.persistedMetadataSnapshot || {}),
+    localMessageId: message.id,
+  };
+  const assign = <K extends keyof PersistedChatBotMetadata>(
+    key: K,
+    value: PersistedChatBotMetadata[K] | undefined,
+  ) => {
+    if (value !== undefined) metadata[key] = value;
+  };
+  assign('runId', message.runId);
+  assign('requestId', message.requestId);
+  assign('requestAuthorId', message.requestAuthorId);
+  assign('source', message.source);
+  assign('agentSubjectMetadata', message.agentSubjectMetadata);
+  assign('usage', message.usage);
+  assign('artifacts', message.artifacts);
+  assign('wikiRefs', message.wikiRefs);
+  assign('researchRefs', message.researchRefs);
+  assign('memoriesUsed', message.memoriesUsed);
+  assign('memoryRefs', message.memoryRefs);
+  assign('memoryRecommendations', message.memoryRecommendations);
+  assign('executionStream', message.executionStream);
+  assign('agentPlan', message.agentPlan);
+  assign('taskPlan', message.taskPlan);
+  assign('toolEvents', message.toolEvents);
+  assign('verificationResults', message.verificationResults);
+  assign('browserPlans', message.browserPlans);
+  assign('browserPlanEvents', message.browserPlanEvents);
+  assign('browserSessions', message.browserSessions);
+  assign('recoveryOptions', message.recoveryOptions);
+  assign('recoveryReliability', message.recoveryReliability);
+  assign('computerTaskStatus', message.computerTaskStatus);
+  assign('computerHandoff', message.computerHandoff);
+  assign('chatAutomationPlanPreview', message.chatAutomationPlanPreview);
+  assign('computerFindings', message.computerFindings);
+  assign('bestOfN', message.bestOfN);
+  assign('routing', message.routing);
+  assign('outcomeSignal', message.outcomeSignal);
+  if (!metadata.agentSubjectMetadata && fallbackAgentSubjectMetadata) {
+    metadata.agentSubjectMetadata = fallbackAgentSubjectMetadata;
   }
+  return metadata;
 }
 
-function getMemoryFamily(ref: PromptMemoryReference): 'guidance' | 'pattern' {
-  return ['instruction', 'preference', 'decision', 'policy'].includes(String(ref.memoryKind))
-    ? 'guidance'
-    : 'pattern';
-}
-
-function getMemoryFamilyLabel(ref: PromptMemoryReference): string {
-  return getMemoryFamily(ref) === 'guidance' ? 'Guidance' : 'Pattern';
-}
+// Memory-reference label formatters (8) extracted verbatim to the pure,
+// smoke-tested src/lib/chatMemoryLabelCore.ts (decomposition unit U1) and
+// imported above. Behavior-identical to the former inline copies.
 
 function mapPersistedRowsToChatMessages(
   rows: any[],
@@ -520,30 +885,25 @@ function mapPersistedRowsToChatMessages(
     return {
       ...base,
       reactions: row.reactions || {},
-      replyTo: null,
-      artifacts: metadata?.artifacts,
-      wikiRefs: metadata?.wikiRefs,
-      researchRefs: metadata?.researchRefs,
-      memoriesUsed: metadata?.memoriesUsed,
-      memoryRefs: metadata?.memoryRefs,
-      memoryRecommendations: metadata?.memoryRecommendations,
-      source: metadata?.source,
-      usage: metadata?.usage || undefined,
-      executionStream: metadata?.executionStream,
-      taskPlan: metadata?.taskPlan,
-      toolEvents: metadata?.toolEvents,
-      verificationResults: metadata?.verificationResults,
-      browserPlans: metadata?.browserPlans,
-      browserPlanEvents: metadata?.browserPlanEvents,
-      browserSessions: metadata?.browserSessions,
-      routing: metadata?.routing || undefined,
+      replyTo: row.reply
+        ? {
+            name: row.reply.is_bot
+              ? agentName
+              : (row.reply.user?.display_name || row.reply.user?.username || 'Circle Member'),
+            content: String(row.reply.content || '').slice(0, 80),
+          }
+        : null,
+      ...hydratePersistedChatBotMetadata(metadata),
       ...deriveChatActivityFlags(row.content),
     };
-  });
+  }).filter((message) => !isLegacyEphemeralChatSurface(message.source?.surface));
 }
 
 function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], agentName: string): ChatMessage[] {
-  return records.map((record) => {
+  return records.filter((record) => !isLegacyEphemeralChatSurface(
+    (record.source as ChatMessageSource | undefined)?.surface,
+  )).map((record) => {
+    const pendingRecord = record as PendingBotMessageRecordWithAgentSubject;
     const timestampMs = Date.parse(record.createdAt);
     const isBot = record.isBot !== false;
     return {
@@ -552,6 +912,7 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       isBot,
       isUser: !isBot,
       userName: record.userName || agentName,
+      authorId: record.authorId || null,
       timestamp: Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date(),
       reactions: record.reactions || {},
       replyTo: record.replyTo || null,
@@ -559,6 +920,7 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       wikiRefs: record.wikiRefs as WikiArticleReference[] | undefined,
       researchRefs: record.researchRefs as ResearchDocumentReference[] | undefined,
       source: record.source as ChatMessageSource | undefined,
+      agentSubjectMetadata: pendingRecord.agentSubjectMetadata || undefined,
       usage: record.usage as SwanBotStructuredResponse['usage'] | undefined,
       memoriesUsed: record.memoriesUsed,
       memoryRefs: record.memoryRefs as PromptMemoryReference[] | undefined,
@@ -567,12 +929,26 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       browserPlans: record.browserPlans as BrowserPlanCardData[] | undefined,
       browserPlanEvents: record.browserPlanEvents as BrowserPlanEvent[] | undefined,
       browserSessions: record.browserSessions as BrowserSessionRecord[] | undefined,
+      recoveryOptions: record.recoveryOptions as ChatFailureRecoveryOption[] | undefined,
+      recoveryReliability: record.recoveryReliability as PersistedChatRecoveryReliabilitySummary | undefined,
+      computerTaskStatus: normalizeComputerTaskOutcomeStatus(record.computerTaskStatus)
+        || normalizeComputerTaskOutcomeStatus((record.computerHandoff as ChatComputerHandoffMetadata | undefined)?.outcomeStatus)
+        || undefined,
+      computerHandoff: record.computerHandoff as ChatComputerHandoffMetadata | undefined,
+      chatAutomationPlanPreview: record.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
       delegatedTo: record.delegatedTo,
       delegatedSubagents: record.delegatedSubagents,
       runId: record.runId,
+      requestId: record.requestId,
+      requestAuthorId: record.requestAuthorId,
+      persistedMetadataSnapshot: record.persistedMetadataSnapshot as PersistedChatBotMetadata | undefined,
+      agentPlan: record.agentPlan as AgentPlanDraft | Record<string, unknown> | undefined,
       taskPlan: record.taskPlan as OpenSwanTaskPlan | undefined,
       toolEvents: record.toolEvents as OpenSwanToolEvent[] | undefined,
       verificationResults: record.verificationResults as OpenSwanVerificationResult[] | undefined,
+      computerFindings: record.computerFindings as PersistedComputerFindings | undefined,
+      bestOfN: record.bestOfN as PersistedBestOfNRace | undefined,
+      outcomeSignal: record.outcomeSignal as ChatMessage['outcomeSignal'],
       routing: record.routing as SwanBotStructuredResponse['routing'] | undefined,
       isPending: false,
       ...deriveChatActivityFlags(record.content),
@@ -615,97 +991,258 @@ async function mapLoadedThreadMessages(
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type ChatMessageSource = {
-  actor?: string;
-  surface?: string;
-  selectedModel?: string | null;
-  effectiveModel?: string | null;
-  provider?: string | null;
+type ChatFailureRecoveryLedgerEntry = {
+  firstAt: number;
+  lastAt: number;
+  count: number;
+  suppressedCount: number;
+  lastSuccessfulHandoffAt: number | null;
 };
 
-type ChatMessage = {
-  id: string;
-  content: string;
-  isBot: boolean;
-  isUser: boolean;
-  userName?: string;
-  timestamp: Date;
-  reactions: Record<string, string[]>;
-  replyTo?: { name: string; content: string } | null;
-  dbId?: string;
-  isCheckIn?: boolean;
-  isAchievement?: boolean;
-  artifacts?: SwanBotStructuredArtifact[];
-  wikiRefs?: WikiArticleReference[];
-  researchRefs?: ResearchDocumentReference[];
-  // Memory indicators
-  memoriesSaved?: string[];   // titles of memories extracted from this exchange
-  memoriesUsed?: string[];    // titles of memories that informed this response
-  memoryRefs?: PromptMemoryReference[];
-  memoryRecommendations?: OpenSwanMemoryRecommendation[];
-  source?: ChatMessageSource;
-  usage?: SwanBotStructuredResponse['usage'];
-  executionStream?: OpenSwanExecutionContract[];
-  browserPlans?: BrowserPlanCardData[];
-  browserPlanEvents?: BrowserPlanEvent[];
-  browserSessions?: BrowserSessionRecord[];
-  delegatedTo?: string;       // subagent that handled this message
-  delegatedSubagents?: string[];
+type ChatFailureRecoveryDetails = {
+  task: string;
+  failureMessage: string;
+  failureStack?: string | null;
+  outcomeStatus?: string | null;
+  executionKind?: string | null;
   runId?: string | null;
-  taskPlan?: OpenSwanTaskPlan;
-  toolEvents?: OpenSwanToolEvent[];
-  verificationResults?: OpenSwanVerificationResult[];
-  routing?: SwanBotStructuredResponse['routing'];
-  /** Automation proposal parsed from a natural-language request like
-   *  "every Friday at 5pm post a weekly summary". When present, the
-   *  message renders an AutomationProposalCard with a CREATE button. */
-  automationProposal?: AutomationProposal;
-  /** Search results from `/search <query>`. Renders as a clickable
-   *  list with JUMP buttons per row. */
-  searchResults?: { query: string; rows: SearchResultRow[] };
-  /** When true, render the structured `/help` panel under this
-   *  message — interactive, filterable, click-to-insert. */
-  commandsHelp?: boolean;
-  /** Live agents to render under a /assign picker. */
-  assignPickerAgents?: AssignPickerAgent[];
-  /** Bridge probe results to render under a /diag card. */
-  bridgeDiagResults?: BridgeProbeResult[];
-  /** When true and runId is set, render a live RunTraceCard under
-   *  this message that subscribes to agent_run_steps in real time. */
-  showRunTrace?: boolean;
-  isPending?: boolean;
+  planSummary?: string | null;
+  groundingSummary?: string | null;
+  preflightSummary?: string | null;
+  source?: string | null;
+  launchIfMissing?: boolean;
+  touched?: string[];
+  checkpointRecovery?: ComputerTaskCheckpointRecoveryContext | null;
+  evidenceContract?: ComputerTaskEvidenceContract | null;
+  appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+  replayPolicy?: 'normal' | 'manual_verify_only';
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[];
 };
 
-type ChatBotMessageExtra = {
-  delegatedTo?: string;
-  delegatedSubagents?: string[];
-  memoriesUsed?: string[];
-  memoryRefs?: PromptMemoryReference[];
-  memoryRecommendations?: OpenSwanMemoryRecommendation[];
-  executionStream?: OpenSwanExecutionContract[];
-  browserPlans?: BrowserPlanCardData[];
-  browserPlanEvents?: BrowserPlanEvent[];
-  browserSessions?: BrowserSessionRecord[];
-  localOnly?: boolean;
-  runId?: string | null;
-  taskPlan?: OpenSwanTaskPlan;
-  toolEvents?: OpenSwanToolEvent[];
-  verificationResults?: OpenSwanVerificationResult[];
-  wikiRefs?: WikiArticleReference[];
-  researchRefs?: ResearchDocumentReference[];
-  automationProposal?: AutomationProposal;
-  searchResults?: { query: string; rows: SearchResultRow[] };
-  commandsHelp?: boolean;
-  assignPickerAgents?: AssignPickerAgent[];
-  bridgeDiagResults?: BridgeProbeResult[];
-  showRunTrace?: boolean;
-  routing?: SwanBotStructuredResponse['routing'];
-  source?: ChatMessageSource;
-  usage?: SwanBotStructuredResponse['usage'] | null;
+type ChatFailureRecoveryPayload = {
+  message: string;
+  recoveryOptions?: ChatFailureRecoveryOption[];
+  recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
+  archiveMetadata?: Record<string, unknown>;
 };
+
+const CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS = 10 * 60 * 1000;
+const CHAT_FAILURE_RECOVERY_LEDGER_RETENTION_MS = 60 * 60 * 1000;
+const CHAT_FAILURE_RECOVERY_LEDGER_MAX = 64;
+
+function isLastTaskModelQuestion(message: string): boolean {
+  const normalized = message.trim().toLowerCase().replace(/\s+/g, ' ');
+  return /^(what|which)\s+model\s+(was\s+)?(used|ran|did\s+you\s+use)\s+(for|on)\s+(the\s+)?(last|previous|prior)\s+(task|request|message|response)\s*[?!]?$/.test(normalized)
+    || /^what\s+model\s+was\s+used\s+last\s*[?!]?$/.test(normalized)
+    || /^last\s+(task|request|response)\s+model\s*[?!]?$/.test(normalized);
+}
+
+function formatModelDisplayName(model: string | null | undefined): string {
+  const raw = String(model || '').trim();
+  if (!raw) return 'unknown';
+  if (raw.toLowerCase() === 'auto') return 'Auto';
+  return raw
+    .replace(/^openrouter\//i, '')
+    .replace(/^huggingface_endpoint\//i, '')
+    .replace(/^huggingface\//i, '')
+    .replace(/^google_ai\//i, '')
+    .replace(/^openai\//i, '')
+    .replace(/^anthropic\//i, '')
+    .replace(/^groq\//i, '')
+    .replace(/^mistral_ai\//i, '')
+    .replace(/^deepseek\//i, '')
+    .replace(/^zai\//i, '')
+    .replace(/^z_ai\//i, '')
+    .replace(/^minimax\//i, '');
+}
+
+type ChatMessageRouteChip = {
+  label: string;
+  value: string;
+  tone: 'route' | 'model' | 'local' | 'provider';
+};
+
+function formatRouteSurfaceLabel(surface: string | null | undefined): string {
+  const raw = String(surface || '').trim();
+  if (!raw) return 'Main chat';
+  const normalized = raw.toLowerCase();
+  if (normalized.includes('desktop_bridge')) return 'Desktop bridge';
+  if (normalized.includes('computer_task')) return 'Computer task';
+  if (normalized.includes('file')) return 'File tools';
+  if (normalized.includes('openswan')) return 'OpenSwan';
+  if (normalized.includes('browser')) return 'Browser';
+  if (normalized.includes('local')) return 'Local';
+  if (normalized.includes('model_audit')) return 'Model audit';
+  return raw
+    .replace(/^main_chat_?/i, '')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase()) || 'Main chat';
+}
+
+function isLocalExecutionSource(source?: ChatMessageSource, effectiveModel?: string | null): boolean {
+  const surface = String(source?.surface || '').toLowerCase();
+  const model = String(effectiveModel || '').toLowerCase();
+  return surface.includes('desktop_bridge')
+    || surface.includes('computer_task')
+    || surface.includes('local')
+    || model === 'local-desktop-bridge'
+    || model === 'computer-file-adapter';
+}
+
+function buildMessageRouteChips(message: ChatMessage): ChatMessageRouteChip[] {
+  if (!message.isBot || !message.source) return [];
+  const source = message.source;
+  if (source.showRouteChips !== true) return [];
+  const effectiveModel = source.effectiveModel || message.usage?.model || null;
+  const selectedModel = source.selectedModel || null;
+  const provider = source.provider || message.routing?.provider_routed || null;
+  const localExecution = isLocalExecutionSource(source, effectiveModel);
+  if (localExecution) return [];
+  // P22: prefer the handoff's true surface for the displayed Route so a
+  // desktop/app task doesn't read "browser". Display-only — nothing about
+  // routing/executor selection changes.
+  const routeValue = formatHandoffSurfaceRouteLabel(message.computerHandoff)
+    || formatRouteSurfaceLabel(source.surface);
+  const chips: ChatMessageRouteChip[] = [
+    { label: 'Route', value: routeValue, tone: localExecution ? 'local' : 'route' },
+  ];
+
+  if (selectedModel) {
+    chips.push({
+      label: selectedModel.toLowerCase() === 'auto' ? 'Picker' : 'Selected',
+      value: formatModelDisplayName(selectedModel),
+      tone: 'model',
+    });
+  }
+
+  if (effectiveModel) {
+    chips.push({
+      label: localExecution ? 'Engine' : selectedModel?.toLowerCase() === 'auto' ? 'Resolved' : 'Model',
+      value: localExecution && effectiveModel === 'local-desktop-bridge'
+        ? 'Local desktop bridge'
+        : localExecution && effectiveModel === 'computer-file-adapter'
+          ? 'Computer file adapter'
+          : formatModelDisplayName(effectiveModel),
+      tone: localExecution ? 'local' : 'model',
+    });
+  } else if (localExecution) {
+    chips.push({ label: 'Engine', value: 'Local execution', tone: 'local' });
+  }
+
+  if (provider && !String(effectiveModel || '').toLowerCase().startsWith(`${provider}/`)) {
+    chips.push({ label: 'Provider', value: formatModelDisplayName(provider), tone: 'provider' });
+  }
+
+  return chips.slice(0, 4);
+}
+
+/**
+ * failover-badge: fallback provenance chip ("via Anthropic (OpenRouter 529)")
+ * on the exact bot message a fallback served. Reads the persisted routing
+ * block (routing_fallback round-trips via persistedChatMetadata, so the chip
+ * also appears retroactively on historical fallback turns) and mirrors the
+ * servedBy shape chatLaneOutcome.normalizeStructuredResponse builds.
+ * Deliberately NOT inside buildMessageRouteChips — that fn is gated on
+ * source.showRouteChips, and a provider fallback must never be silent.
+ * NEVER render routing_fallback.reason raw (unbounded edge string):
+ * buildFailoverBadge redacts secrets and clips every emitted string.
+ */
+function failoverBadgeForMessage(message: ChatMessage): FailoverBadge | null {
+  const rf = message.isBot ? message.routing?.routing_fallback : null;
+  if (!rf) return null;
+  return buildFailoverBadge({
+    fallback: true,
+    model: message.routing?.provider_model ?? message.usage?.model ?? null,
+    transport: message.routing?.provider_routed ?? null,
+    fallbackReason: `${rf.provider}: ${rf.reason}`,
+  });
+}
+
+function describeLastTaskModel(messages: ChatMessage[]): string {
+  const lastBot = [...transcriptChatMessages(messages)].reverse().find((message) => (
+    message.isBot
+    && !message.isPending
+    && !!message.content?.trim()
+    && message.source?.surface !== 'main_chat_model_audit'
+  ));
+  if (!lastBot) return 'No previous assistant task is recorded in this chat yet.';
+
+  const effectiveModel = lastBot.source?.effectiveModel || lastBot.usage?.model || null;
+  const selectedModel = lastBot.source?.selectedModel || null;
+  const surface = lastBot.source?.surface || 'main_chat';
+  const noLlmSurface = effectiveModel === 'local-desktop-bridge'
+    || effectiveModel === 'computer-file-adapter'
+    || surface.includes('desktop_bridge')
+    || surface.includes('computer_task');
+
+  if (noLlmSurface && (!effectiveModel || effectiveModel === 'local-desktop-bridge' || effectiveModel === 'computer-file-adapter')) {
+    return [
+      'The last task did not use an LLM model.',
+      `It ran locally through **${effectiveModel === 'computer-file-adapter' ? 'the file adapter' : 'the desktop bridge'}**.`,
+      selectedModel ? `Picker selection at the time: **${formatModelDisplayName(selectedModel)}**.` : null,
+    ].filter(Boolean).join(' ');
+  }
+
+  if (effectiveModel) {
+    return [
+      `The last assistant task used **${formatModelDisplayName(effectiveModel)}**.`,
+      selectedModel ? `Picker selection: **${formatModelDisplayName(selectedModel)}**.` : null,
+      `Surface: \`${surface}\`.`,
+    ].filter(Boolean).join(' ');
+  }
+
+  return `I do not have model metadata for the last assistant message. Surface: \`${surface}\`.`;
+}
+
+// getRecoveryOptionActorLabel through stripChatAppChoiceLine (recovery/handoff
+// display formatters, including the two P22 comment blocks) extracted verbatim
+// to the pure, smoke-tested src/lib/chatRecoveryDisplayCore.ts (decomposition
+// unit U2) and imported above.
+
+function buildRecoveryOptionComposerPrompt(option: ChatFailureRecoveryOption, message?: ChatMessage): string {
+  return formatChatFailureRecoveryOptionSelection(option, message ? {
+    messageId: message.dbId || message.id,
+    runId: message.runId || null,
+    sourceSurface: message.source?.surface || null,
+    failureExcerpt: message.content,
+  } : null);
+}
+
+function findLatestRecoveryOptionsMessage(messages: ChatMessage[]): ChatMessage | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.isBot && message.recoveryOptions && message.recoveryOptions.length > 0) {
+      return message;
+    }
+  }
+  return null;
+}
+
+// Receipt Retry affordance: the user prompt that immediately preceded a bot
+// message, so "Retry" on its receipt re-sends the exact original request. Pure
+// and bounded (returns the text or null; slash-commands are skipped so retry
+// never re-fires a command).
+function findPriorUserPromptForMessage(messages: ChatMessage[], botMessageId: string): string | null {
+  const botIndex = messages.findIndex((message) => message.id === botMessageId);
+  if (botIndex < 0) return null;
+  for (let index = botIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message.isUser) continue;
+    const text = (message.content || '').trim();
+    if (!text || text.startsWith('/')) return null;
+    return text.slice(0, 4000);
+  }
+  return null;
+}
+
+// getRecoveryOptionPolicyBadges and getRecoveryReliabilityFromArchive extracted
+// verbatim to src/lib/chatRecoveryDisplayCore.ts (decomposition unit U2) and
+// imported above.
 
 function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRecord {
-  return {
+  const record: PendingBotMessageRecordWithAgentSubject = {
     localMessageId: message.id,
     content: message.content || '',
     createdAt: message.timestamp instanceof Date
@@ -714,11 +1251,16 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     isBot: message.isBot,
     isUser: message.isUser,
     userName: message.userName,
+    authorId: message.authorId || null,
     replyTo: message.replyTo || null,
     reactions: message.reactions,
     source: message.source,
+    agentSubjectMetadata: message.agentSubjectMetadata || undefined,
     usage: message.usage,
     runId: message.runId,
+    requestId: message.requestId,
+    requestAuthorId: message.requestAuthorId,
+    persistedMetadataSnapshot: message.persistedMetadataSnapshot,
     delegatedTo: message.delegatedTo,
     delegatedSubagents: message.delegatedSubagents,
     artifacts: message.artifacts,
@@ -728,14 +1270,24 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     memoryRefs: message.memoryRefs,
     memoryRecommendations: message.memoryRecommendations,
     executionStream: message.executionStream,
+    agentPlan: message.agentPlan,
     browserPlans: message.browserPlans,
     browserPlanEvents: message.browserPlanEvents,
     browserSessions: message.browserSessions,
+    recoveryOptions: message.recoveryOptions,
+    recoveryReliability: message.recoveryReliability,
+    computerTaskStatus: message.computerTaskStatus,
+    computerHandoff: message.computerHandoff,
+    chatAutomationPlanPreview: message.chatAutomationPlanPreview,
+    computerFindings: message.computerFindings,
+    bestOfN: message.bestOfN,
+    outcomeSignal: message.outcomeSignal,
     taskPlan: message.taskPlan,
     toolEvents: message.toolEvents,
     verificationResults: message.verificationResults,
     routing: message.routing,
   };
+  return record;
 }
 
 function saveRecoverableChatMessage(threadId: string | null | undefined, message: ChatMessage): void {
@@ -879,16 +1431,122 @@ function formatTimeAgo(date: Date): string {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
+function buildComputerTaskGroundingStateFromExecution(
+  execution: ComputerTaskExecutionEnvelope,
+): ComputerTaskStateGrounding | null {
+  return execution.computerAppGroundingTrace
+    ? {
+        status: execution.computerAppGroundingTrace.status,
+        strategyId: execution.computerAppGroundingTrace.strategyId,
+        strategyLabel: execution.computerAppGroundingTrace.strategyLabel,
+        primarySurface: execution.computerAppGroundingTrace.primarySurface,
+        summary: execution.computerAppGroundingTrace.display.summary,
+        nextAction: execution.computerAppGroundingTrace.display.nextAction,
+        badges: execution.computerAppGroundingTrace.display.badges,
+        blockers: execution.computerAppGroundingTrace.display.blockers,
+      }
+    : null;
+}
+
+function stagedFileDesktopCandidate(file: StagedFile): ChatDesktopAttachmentCandidate {
+  return {
+    name: file.name,
+    mimeType: file.mimeType,
+    sizeBytes: file.sizeBytes,
+  };
+}
+
+function mediaAttachmentDesktopCandidate(attachment: ChatAttachment): ChatDesktopAttachmentCandidate {
+  return {
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.size,
+  };
+}
+
+async function base64FromChatMediaAttachment(attachment: ChatAttachment): Promise<string | null> {
+  if (attachment.base64) return attachment.base64;
+  if (!attachment.uri || typeof fetch !== 'function') return null;
+  try {
+    const response = await fetch(attachment.uri);
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    if (typeof FileReader === 'undefined') return null;
+    return await new Promise<string | null>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const value = typeof reader.result === 'string' ? reader.result : '';
+        const comma = value.indexOf(',');
+        resolve(comma >= 0 ? value.slice(comma + 1) : value || null);
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+
+function describeChatAutomationApproval(agentName: string, plan: ChatAutomationPlan): string {
+  const route = plan.execution.routeId ? ` (${plan.execution.routeId})` : '';
+  const command = String(plan.execution.commandText || '').replace(/\s+/g, ' ').trim();
+  const commandLine = command ? `: "${command.slice(0, 140)}"` : '';
+  const reason = plan.approval.required && plan.approval.reason ? ` ${plan.approval.reason}` : '';
+  return `Approve ${agentName} to run ${plan.execution.kind}${route}${commandLine}.${reason}`.trim();
+}
+
 export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleId: string; accentColor?: string }) {
   const navigation = useNavigation<any>();
   const { width: viewportWidth } = useWindowDimensions();
+  const desktopWriteGrantSeededRef = useRef(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  messagesRef.current = messages;
   // ── Threaded chat state ──────────────────────────────────────────────────
   // activeThreadId is the row in circle_chat_threads currently displayed.
-  // null until we resolve the circle's default thread. Persisted in the URL
-  // hash so refresh keeps you on the same thread.
+  // null until we resolve a validated saved/default thread. The selection is
+  // persisted per circle + user through the cross-platform storage helper.
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [threadLoadState, setThreadLoadState] = useState<ChatThreadLoadState>({
+    status: 'resolving',
+    threadId: null,
+  });
+  const [threadReloadToken, setThreadReloadToken] = useState(0);
+  const [circleInitRetryToken, setCircleInitRetryToken] = useState(0);
+  const [threadNavigationNotice, setThreadNavigationNotice] = useState<string | null>(null);
+  const [olderMessagesState, setOlderMessagesState] = useState<{
+    loading: boolean;
+    hasMore: boolean;
+    error: string | null;
+  }>({ loading: false, hasMore: true, error: null });
+  const olderMessagesInFlightRef = useRef(false);
+  const threadLoadGenerationRef = useRef(0);
+  const circleInitGenerationRef = useRef(0);
+  const initializedCircleRef = useRef<string | null>(null);
+  const activeThreadScopeRef = useRef<{ circleId: string; threadId: string | null }>({
+    circleId,
+    threadId: null,
+  });
+  activeThreadScopeRef.current = { circleId, threadId: activeThreadId };
+
+  // Fast Refresh preserves mounted React state. Remove legacy durable copies of
+  // what are now ephemeral routing/progress surfaces without requiring the user
+  // to reload Chat; newly-created ephemeral rows carry durability and remain
+  // visible for their current session.
+  useEffect(() => {
+    setMessages((current) => {
+      const next = current.filter((message) => (
+        message.durability === 'ephemeral'
+        || !isLegacyEphemeralChatSurface(message.source?.surface)
+      ));
+      if (next.length === current.length) return current;
+      messagesRef.current = next;
+      return next;
+    });
+  }, [activeThreadId, circleId]);
+
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(getInitialSidebarCollapsed);
+  const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
   const [threadListRefreshToken, setThreadListRefreshToken] = useState(0);
   const [members, setMembers] = useState<any[]>([]);
   const [input, setInput] = useState('');
@@ -918,6 +1576,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showCreateProposal, setShowCreateProposal] = useState(false);
   const [showCreatePoll, setShowCreatePoll] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_CHAT_MODEL);
+  useEffect(() => {
+    if (Platform.OS !== 'web' || desktopWriteGrantSeededRef.current) return;
+    const isLocalHost = typeof window !== 'undefined'
+      && ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
+    if (!isLocalHost) return;
+
+    desktopWriteGrantSeededRef.current = true;
+    const roots = ['~/Desktop'];
+    if (getActiveLocalFileSessionGrant(roots, 'write')) return;
+    void requestLocalFileSessionGrant({
+      roots,
+      scope: 'write',
+      reason: 'Local Chat dashboard Desktop file-write access',
+    }).then((result) => {
+      if (!result.ok) {
+        desktopWriteGrantSeededRef.current = false;
+        console.warn('[ChatTab] Desktop write grant unavailable:', result.error);
+      }
+    });
+  }, []);
   // Pull the marketplace catalog at the parent level — both the
   // composer (for the picker UI + Auto preview) and the send flow
   // (for resolving 'auto' → concrete model id with provider bias) need
@@ -937,7 +1615,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [circleId]);
+  }, [circleId, circleInitRetryToken]);
   const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
     return new Set(
       marketplaceModelGroups
@@ -976,7 +1654,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // each call so a freshly-typed message gets routed by its own intent
   // (not the previous turn's). Returns the original pick when not auto.
   const resolveSendModel = useCallback((messageText: string): string | null => {
-    if (selectedModel !== 'auto') return selectedModel;
+    if (selectedModel !== 'auto') {
+      // P8 hard rule: the retired local-Ollama BlackSwan normalizes to the
+      // one real BlackSwan — cswan801/BlackSwan-v5 on the dedicated endpoint.
+      return isLocalOllamaBlackSwan(selectedModel) ? BLACKSWAN_ENDPOINT_MODEL_ID : selectedModel;
+    }
     try {
       const draft = (messageText || '').trim();
       const route = draft.length > 0
@@ -991,6 +1673,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         route?.intent,
         providerSetForTurn,
         route?.complexity,
+        // P8: app-domain questions can route to the app-trained BlackSwan.
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+        // P27: raw message → BlackSwan reliability guard escalates the hard
+        // subset of the grounded lane (multi-step/technical/ambiguous) to frontier.
+        draft,
       );
     } catch {
       return null;
@@ -1005,6 +1692,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [streamingBuildText, setStreamingBuildText] = useState<string>('');
   const [streamingBuildPhase, setStreamingBuildPhase] = useState<string | null>(null);
   const streamingBuildCleanupRef = useRef<null | (() => void)>(null);
+  // Ownership token for the shared run-UI (runStatus / botTyping / coding
+  // workbench). Each run that establishes that UI bumps the counter and
+  // captures its value; a late terminal (a cancelled stream's catch) only
+  // resets the UI when the counter is unchanged — i.e. no newer run (e.g. a
+  // superseding launchBuildStream) has taken the UI over in the meantime.
+  // A ref-equality check on streamingBuildCleanupRef is NOT enough: the
+  // abort rejection lands within a microtask of cancel(), before
+  // launchBuildStream's awaits finish and it reassigns the ref.
+  const chatUiOwnerRef = useRef(0);
   // Builder revision history — last 10 artifacts per thread, newest-first.
   // Loaded on thread switch; pushed whenever latestBuildArtifact changes.
   const [builderRevisions, setBuilderRevisions] = useState<BuilderRevision[]>([]);
@@ -1055,10 +1751,108 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!chatModeStorageKey || typeof localStorage === 'undefined') return;
     try { localStorage.setItem(chatModeStorageKey, chatMode); } catch { /* quota */ }
   }, [chatModeStorageKey, chatMode]);
+  const [selectedChatAgentId, setSelectedChatAgentId] = useState<string>(DEFAULT_CHAT_AGENT_TARGET_ID);
+  const chatAgentStorageKey = activeThreadId ? `uc_chat_agent:${activeThreadId}` : null;
+  useEffect(() => {
+    if (!chatAgentStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const saved = localStorage.getItem(chatAgentStorageKey);
+      if (saved && saved !== selectedChatAgentId) setSelectedChatAgentId(saved);
+    } catch { /* private mode / disabled — not critical */ }
+    // Intentional: load once per thread change, not on every selection edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatAgentStorageKey]);
+  useEffect(() => {
+    if (!chatAgentStorageKey || typeof localStorage === 'undefined') return;
+    try { localStorage.setItem(chatAgentStorageKey, selectedChatAgentId); } catch { /* quota */ }
+  }, [chatAgentStorageKey, selectedChatAgentId]);
   const [agentName, setAgentNameState] = useState<string>(MAIN_CHAT_AGENT_NAME);
   const [editingAgentName, setEditingAgentName] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
+  const pendingHitlApprovals = useAgentApprovals(circleId);
+  // Exact Chat plan approvals end the filing turn before any desktop action.
+  // Keep the original compiled request only in this tab's memory, keyed by the
+  // opaque approval id, so approving the card can resume it immediately
+  // without persisting raw task text in the approval row. The gate still
+  // recomputes and atomically consumes the exact plan fingerprint. Remaining
+  // limitation: this local continuation does not survive a tab refresh or an
+  // approval resolved exclusively from another member's client.
+  const pendingExactPlanApprovalResumesRef = useRef(new Map<string, {
+    task: string;
+    circleId: string;
+    threadId: string | null;
+    expiresAt: number;
+    originSettled: Promise<void>;
+  }>());
+  // Approval resolution can race the filing turn's final UI writes. Track the
+  // committed Chat context independently of the callback closure so a resume
+  // approved in one thread cannot dispatch after navigation or unmount. The
+  // generation also catches leave-and-return navigation where the identifiers
+  // happen to match again before originSettled resolves.
+  const exactApprovalResumeContextRef = useRef({
+    mounted: false,
+    circleId,
+    threadId: activeThreadId || null,
+    generation: 0,
+  });
+  useEffect(() => {
+    const generation = exactApprovalResumeContextRef.current.generation + 1;
+    exactApprovalResumeContextRef.current = {
+      mounted: true,
+      circleId,
+      threadId: activeThreadId || null,
+      generation,
+    };
+    return () => {
+      if (exactApprovalResumeContextRef.current.generation === generation) {
+        exactApprovalResumeContextRef.current = {
+          ...exactApprovalResumeContextRef.current,
+          mounted: false,
+        };
+      }
+    };
+  }, [activeThreadId, circleId]);
+  useEffect(() => {
+    for (const [approvalId, pending] of pendingExactPlanApprovalResumesRef.current) {
+      if (pending.circleId !== circleId || pending.threadId !== (activeThreadId || null)) {
+        pendingExactPlanApprovalResumesRef.current.delete(approvalId);
+      }
+    }
+  }, [activeThreadId, circleId]);
+  // "Needs you" attention strip state (plan §1b/§1c/§2b). Declared up here —
+  // ahead of sendMessage and the persistence effects that reference the
+  // setters — while the derived attention state is computed just before the
+  // main return where all inputs exist.
+  const [attentionProviderBlocker, setAttentionProviderBlocker] =
+    useState<{ provider: string; reason: string } | null>(null);
+  const [dismissedAttentionIds, setDismissedAttentionIds] = useState<Set<string>>(new Set());
+  const [, setAttentionTick] = useState(0);
+  // Latest memory-bank checkpoint → live Restore strip above the composer
+  // (plan §2c; the id previously appeared only as prose).
+  const [latestMemoryCheckpointId, setLatestMemoryCheckpointId] = useState<string | null>(null);
+  // The Restore strip is per-conversation context — clear it on thread
+  // switch so thread A's checkpoint never floats above thread B (P12).
+  useEffect(() => { setLatestMemoryCheckpointId(null); }, [activeThreadId]);
+  // Room handoff (plan §4c): dismissible per-thread suggestion when the
+  // conversation turns into multi-file project work.
+  const [dismissedRoomHandoffThreads, setDismissedRoomHandoffThreads] = useState<Set<string>>(new Set());
+  const [roomHandoffBusy, setRoomHandoffBusy] = useState(false);
+  // Recurring watches (plan §6a): while chat is open, due watches run
+  // headless and post diff-only updates to their originating thread. The
+  // runner is fail-soft (missing table / creds → silent skip) and never
+  // grants approvals — watch tasks are floor-checked read-only at create.
+  useComputerTaskScheduleRunner({ circleId, userId: currentUserId, enabled: !!circleId });
+  const chatAutomationApprovalSessionKey = activeThreadId
+    ? `chat::${activeThreadId}`
+    : `chat::${circleId}`;
+  const chatAutomationApprovalGate = useMemo(() => createHitlApprovalGate({
+    sessionKey: chatAutomationApprovalSessionKey,
+    agentName,
+    timeoutSeconds: 15 * 60,
+    describe: (plan) => describeChatAutomationApproval(agentName, plan),
+  }), [agentName, chatAutomationApprovalSessionKey]);
+  const automationSuggestionSeenRef = useRef<Set<string>>(new Set());
   const setAgentName = useCallback((name: string) => {
     const trimmed = name.trim() || MAIN_CHAT_AGENT_NAME;
     setAgentNameState(trimmed);
@@ -1076,9 +1870,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [liveAgents, setLiveAgents] = useState<AssignableAgent[]>([]);
   const refreshAssignableAgentsRef = useRef<(() => Promise<void>) | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<AssignableAgent | null>(null);
+  const chatAgentTargets = useMemo(
+    () => buildChatAgentTargets(liveAgents),
+    [liveAgents],
+  );
+  const selectedChatAgentTarget = useMemo(
+    () => resolveChatAgentTarget(chatAgentTargets, selectedChatAgentId),
+    [chatAgentTargets, selectedChatAgentId],
+  );
+  const selectedAgentSubjectContext = useMemo<Pick<SwanBotContext,
+    'agentId' | 'agentName' | 'agentSubjectKey' | 'agentDbId' | 'agentSessionKey' | 'agentLegacyIds' | 'agentSubjectMetadata'
+  >>(() => {
+    const subjectKey = selectedChatAgentTarget?.agentSubjectKey || BLACKSWAN_ID;
+    const displayName = selectedChatAgentTarget?.label || agentName;
+    const dbId = selectedChatAgentTarget?.agentDbId || null;
+    const sessionKey = selectedChatAgentTarget?.agentSessionKey || selectedChatAgentTarget?.sessionKey || null;
+    const legacyIds = selectedChatAgentTarget?.agentLegacyIds || [];
+    const metadata = selectedChatAgentTarget?.agentSubjectMetadata
+      ? { ...selectedChatAgentTarget.agentSubjectMetadata, agentDisplayName: displayName }
+      : {
+          agentSubjectKey: subjectKey,
+          agentDisplayName: displayName,
+          agentDbId: dbId,
+          agentSessionKey: sessionKey,
+          legacyAgentIds: legacyIds,
+        };
+    return {
+      agentId: subjectKey,
+      agentName: displayName,
+      agentSubjectKey: subjectKey,
+      agentDbId: dbId,
+      agentSessionKey: sessionKey,
+      agentLegacyIds: legacyIds,
+      agentSubjectMetadata: metadata,
+    };
+  }, [agentName, selectedChatAgentTarget]);
   const [activeSpiritId, setActiveSpiritId] = useState<string | null>(null);
   const [soulLearningRefs, setSoulLearningRefs] = useState<ResearchDocumentReference[]>([]);
-  const [soulMemoryRefs, setSoulMemoryRefs] = useState<PromptMemoryReference[]>([]);
   const [taskPrompt, setTaskPrompt] = useState('');
   const [assigning, setAssigning] = useState(false);
   // Media attachments
@@ -1097,18 +1925,111 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [pendingComputerUsePlan, setPendingComputerUsePlan] = useState<BrowserPlanCardData | null>(null);
   const [pendingComputerUseGrantSummary, setPendingComputerUseGrantSummary] = useState('');
   const [pendingComputerUseApprovalSummary, setPendingComputerUseApprovalSummary] = useState('');
-  const [pendingComputerUseGrantIds, setPendingComputerUseGrantIds] = useState<Array<'browser_navigation' | 'browser_side_effect' | 'file_read' | 'file_write' | 'app_read' | 'app_action' | 'mcp_tool' | 'bridge_tool'>>([]);
+  const [pendingComputerUseGrantIds, setPendingComputerUseGrantIds] = useState<ComputerTaskGrantId[]>([]);
   const [pendingComputerUseOrigin, setPendingComputerUseOrigin] = useState<{ messageId: string; runId?: string | null; planId: string } | null>(null);
+  // T7 sticky allow scopes: the standing-grant scope id riding the pending
+  // browser plan, recorded as "used" only when the plan actually launches.
+  const [pendingComputerUseStickyScopeId, setPendingComputerUseStickyScopeId] = useState<string | null>(null);
   const [computerTaskState, setComputerTaskState] = useState<ComputerTaskStateRecord | null>(null);
+  // Wave-2 task→app resolution: the last route's app choice, kept so a
+  // follow-up "use Pixelmator instead" can record a category preference.
+  const lastAppResolutionRef = useRef<import('../../../lib/chatComputerRequestRouter').ChatComputerAppResolution | null>(null);
+  // The transient last-route pointer survives reload so a "use X instead" sent
+  // as the FIRST message after a refresh still has the previous resolution to
+  // diff against (the durable per-category preference persists separately). A
+  // bounded, JSON-safe single-slot mirror — hydrated once per circle.
+  const lastAppResolutionStorageKey = circleId ? `uc_last_app_resolution::${circleId}` : null;
+  const persistLastAppResolution = useCallback(() => {
+    if (!lastAppResolutionStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const serialized = serializeLastAppResolution(lastAppResolutionRef.current);
+      if (serialized === null) localStorage.removeItem(lastAppResolutionStorageKey);
+      else localStorage.setItem(lastAppResolutionStorageKey, serialized);
+    } catch { /* quota — last-route pointer is best-effort */ }
+  }, [lastAppResolutionStorageKey]);
+  useEffect(() => {
+    if (!lastAppResolutionStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const restored = deserializeLastAppResolution(localStorage.getItem(lastAppResolutionStorageKey));
+      if (restored && !lastAppResolutionRef.current) lastAppResolutionRef.current = restored;
+    } catch { /* corrupt state — start clean */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastAppResolutionStorageKey]);
+  const [pendingCapabilityBuildoutNotice, setPendingCapabilityBuildoutNotice] = useState<{
+    key: string;
+    task: string;
+    buildout: ComputerTaskCapabilityBuildout;
+  } | null>(null);
   // Real Computer Use agent (cost-capped Claude + Browserbase via edge function). The
   // permission dialog's Allow handler hands a task to this hook, which
   // streams reasoning/actions/screenshots into ComputerUseLiveCard below.
   const computerUseTask = useComputerUseTask(circleId);
+  const agentMonitorTask = useMemo(
+    () => buildAgentMonitorTaskFromComputerUseState(computerUseTask.state, { sourceLabel: 'SwanBot' }),
+    [computerUseTask.state],
+  );
   const computerUsePostedKeyRef = useRef<string | null>(null);
+  // Idempotency key for the mirrored mid-run confirmation chat bubble so a
+  // single pay/book confirmation posts exactly once (StrictMode-safe).
+  const computerConfirmPostedKeyRef = useRef<string | null>(null);
+  const capabilityAutoRetryKeyRef = useRef<string | null>(null);
+  const capabilityBuildoutNoticeKeyRef = useRef<string | null>(null);
+  const chatFailureRecoveryLedgerRef = useRef<Map<string, ChatFailureRecoveryLedgerEntry>>(new Map());
+  // Duplicate-handoff suppression survives reload. Bounded localStorage mirror
+  // of the ledger — hydrated once per circle, pruned to the same 60-minute
+  // retention / 64-entry cap the runtime enforces, so a reload-to-retry can't
+  // reset the suppression window and fire a redundant recovery handoff the
+  // ledger already saw. Entries are tiny (five numeric fields).
+  const failureLedgerStorageKey = circleId ? `uc_chat_failure_ledger::${circleId}` : null;
+  const persistChatFailureLedger = useCallback(() => {
+    if (!failureLedgerStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const serialized = serializeChatFailureLedger(
+        chatFailureRecoveryLedgerRef.current.entries(),
+        Date.now(),
+        CHAT_FAILURE_RECOVERY_LEDGER_RETENTION_MS,
+        CHAT_FAILURE_RECOVERY_LEDGER_MAX,
+      );
+      if (serialized === null) localStorage.removeItem(failureLedgerStorageKey);
+      else localStorage.setItem(failureLedgerStorageKey, serialized);
+    } catch { /* quota — suppression ledger is best-effort */ }
+  }, [failureLedgerStorageKey]);
+  useEffect(() => {
+    if (!failureLedgerStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(failureLedgerStorageKey);
+      const bounded = deserializeChatFailureLedger(
+        raw,
+        Date.now(),
+        CHAT_FAILURE_RECOVERY_LEDGER_RETENTION_MS,
+        CHAT_FAILURE_RECOVERY_LEDGER_MAX,
+      );
+      for (const [fingerprint, entry] of bounded) {
+        if (!chatFailureRecoveryLedgerRef.current.has(fingerprint)) {
+          chatFailureRecoveryLedgerRef.current.set(fingerprint, entry);
+        }
+      }
+    } catch { /* corrupt state — start clean */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failureLedgerStorageKey]);
   // Use Computer console — the pop-up that collects the task before
   // planning. Opens from the Quick Actions "Use Computer" chip and from
   // the __COMPUTER_USE__ slash action.
   const [showComputerUseConsole, setShowComputerUseConsole] = useState(false);
+  // D6 needs-you strip dismissal: keyed by the record's updatedAt so a NEW
+  // task update re-surfaces the strip, but a dismissed stale state stays
+  // hidden across reloads (persisted per circle).
+  const [needsYouStripDismissedKey, setNeedsYouStripDismissedKey] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const stored = await storage.getItem(`uc_needs_you_strip_dismissed::${circleId}`);
+        if (!cancelled) setNeedsYouStripDismissedKey(stored || null);
+      } catch { /* dashboard extra — never break chat */ }
+    })();
+    return () => { cancelled = true; };
+  }, [circleId]);
   // OpenSwan console — launches an OpenSwan turn with a chosen mode.
   // Surface triggered by the Quick Actions "OS OpenSwan" chip.
   const [showOpenSwanConsole, setShowOpenSwanConsole] = useState(false);
@@ -1127,11 +2048,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     };
   }, [input]);
 
+  // Cross-surface composer seed — empty-state chips on Feed/Office/Rooms
+  // dispatch uc:seed-composer before uc:switch-tab so the user lands in Chat
+  // with the command pre-filled instead of an empty composer. The parser is
+  // total over hostile event detail; a bad payload is simply ignored.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const onSeedComposer = (event: Event) => {
+      const seed = parseComposerSeedDetail((event as CustomEvent).detail);
+      if (seed) setInput(seed.text);
+    };
+    window.addEventListener(SEED_EVENT_NAME, onSeedComposer as EventListener);
+    return () => {
+      window.removeEventListener(SEED_EVENT_NAME, onSeedComposer as EventListener);
+    };
+  }, []);
+
   const persistComputerTaskState = useCallback(async (args: {
     task: string;
     taskKind: string;
     taskLabel: string;
-    phase: 'planning' | 'awaiting_approval' | 'executing' | 'completed' | 'failed' | 'blocked';
+    phase: 'planning' | 'awaiting_approval' | 'awaiting_capability_approval' | 'building_capability' | 'executing' | 'completed' | 'failed' | 'blocked';
     adapterId?: string | null;
     blockers?: string[];
     nextSteps?: string[];
@@ -1140,7 +2077,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     runId?: string | null;
     sessionId?: string | null;
     liveUrl?: string | null;
+    outcomeStatus?: ComputerTaskOutcomeStatus | null;
+    grounding?: ComputerTaskStateGrounding | null;
+    capabilityBuildout?: ComputerTaskCapabilityBuildout | null;
+    complexity?: ComputerTaskStateComplexity | null;
+    checkpointRecovery?: ComputerTaskStateCheckpointRecovery | null;
+    checkpointRecoveryIsNew?: boolean;
+    checkpointRecoveryObservations?: ComputerTaskCheckpointEvidenceObservation[];
+    /** D6: result summary used as the completed/failed notification body. */
+    resultSummary?: string | null;
+    /** A new active run is replacing any terminal notice from the prior run. */
+    startsNewActiveRun?: boolean;
   }) => {
+    const checkpointRecovery = args.checkpointRecoveryIsNew
+      ? markComputerTaskCheckpointRecoveryObserved(computerTaskState?.checkpointRecovery || null, args.checkpointRecovery || null, args.checkpointRecoveryObservations || [])
+      : compactComputerTaskCheckpointRecovery(args.checkpointRecovery || null);
+    const checkpointNextAction = checkpointRecovery?.retryPolicy?.nextAction || checkpointRecovery?.safeNextStep;
+    const capabilityStepLabel = args.capabilityBuildout?.status === 'approval_required'
+      ? 'Approve app capability buildout'
+      : 'Build missing app capability';
+    const phaseNextSteps = checkpointRecovery && (args.phase === 'blocked' || args.phase === 'failed') && checkpointNextAction
+      ? [checkpointNextAction]
+      : [];
     const nextState: ComputerTaskStateRecord = {
       id: `computer_task_${circleId}_${activeThreadId || 'main'}`,
       circleId,
@@ -1151,8 +2109,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       adapterId: args.adapterId || null,
       phase: args.phase,
       currentStep:
-        args.phase === 'planning' ? 'Plan task'
+        checkpointRecovery && (args.phase === 'blocked' || args.phase === 'failed') ? `Resolve ${checkpointRecovery.failedCheckpointLabel}`
+          : args.phase === 'planning' ? 'Plan task'
           : args.phase === 'awaiting_approval' ? 'Approve access'
+            : args.phase === 'awaiting_capability_approval' || args.phase === 'building_capability' ? capabilityStepLabel
             : args.phase === 'executing' ? 'Execute task'
               : args.phase === 'completed' ? 'Summarize result'
                 : args.phase === 'blocked' ? 'Resolve blocker'
@@ -1160,19 +2120,59 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       steps: buildComputerTaskStateSteps({
         taskKind: args.taskKind,
         phase: args.phase,
+        capabilityBuildout: args.capabilityBuildout || null,
+        complexity: args.complexity || null,
       }),
       blockers: (args.blockers || []).filter(Boolean).slice(0, 5),
-      nextSteps: (args.nextSteps || []).filter(Boolean).slice(0, 5),
+      nextSteps: Array.from(new Set([...phaseNextSteps, ...(args.nextSteps || [])].filter(Boolean))).slice(0, 5),
       grantedAccess: (args.grantedAccess || []).filter(Boolean).slice(0, 8),
       accessPlan: args.accessPlan || null,
       runId: args.runId || null,
       sessionId: args.sessionId || null,
       liveUrl: args.liveUrl || null,
+      outcomeStatus: normalizeComputerTaskOutcomeStatus(args.outcomeStatus),
+      grounding: args.grounding || null,
+      capabilityBuildout: args.capabilityBuildout || null,
+      complexity: args.complexity || null,
+      checkpointRecovery,
       updatedAt: new Date().toISOString(),
     };
+    // D6: derive a completion/blocked/needs-you notification on this
+    // transition. The stored record is the previous snapshot (the in-memory
+    // copy can miss hook-written questions/notifications), and its bounded
+    // notification list carries over so banners survive phase rewrites.
+    // Reading storage (not React state) also keeps this callback's deps
+    // narrow — widening them would re-trigger the run-status effect loop.
+    const previousForNotifications = await loadComputerTaskState(circleId, activeThreadId).catch(() => null);
+    // A fresh planning/executing dispatch owns the status surface now. Keep
+    // unresolved needs-you notices, but acknowledge terminal notices from the
+    // previous attempt so a persisted "Blocked" banner cannot sit above a
+    // genuinely live run after reload/retry.
+    const notificationsToCarry = args.startsNewActiveRun
+      && (args.phase === 'planning' || args.phase === 'executing')
+      ? (previousForNotifications?.notifications || []).map((item) => (
+          item.kind === 'completed'
+          || item.kind === 'failed'
+          || item.kind === 'blocked'
+          || item.kind === 'partial_result'
+            ? { ...item, acknowledged: true }
+            : item
+        ))
+      : previousForNotifications?.notifications;
+    const notification = deriveComputerTaskNotification(
+      nextState,
+      computerTaskNotificationSnapshot(previousForNotifications),
+      { resultSummary: args.resultSummary || null },
+    );
+    nextState.notifications = appendComputerTaskNotification(notificationsToCarry, notification);
     setComputerTaskState(nextState);
-    await saveComputerTaskState(nextState);
-  }, [activeThreadId, circleId]);
+    // Best-effort persistence (UI recovery convenience, not task-critical): on
+    // native, storage is AsyncStorage directly and setItem can reject (I/O
+    // pressure / oversized row). Swallow it here so a persist failure can never
+    // unwind out of the caller's pre-try preamble and strand the typing
+    // indicator (executeSharedComputerTask sets botTyping before its try/finally).
+    await saveComputerTaskState(nextState).catch(() => {});
+  }, [activeThreadId, circleId, computerTaskState?.checkpointRecovery]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1182,6 +2182,143 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     })();
     return () => { cancelled = true; };
   }, [activeThreadId, circleId]);
+
+  // D6: acknowledge persisted task notifications (banner DISMISS, or the
+  // console opening on a terminal banner) and refresh the mount-loaded copy.
+  const acknowledgeTaskNotifications = useCallback(() => {
+    void (async () => {
+      const next = await acknowledgeComputerTaskNotificationsState(circleId, activeThreadId);
+      if (next) setComputerTaskState(next);
+    })();
+  }, [activeThreadId, circleId]);
+
+  useEffect(() => {
+    // Completed/failed banners auto-acknowledge once the console is open —
+    // the user has now seen the outcome. Needs-you/blocked/partial banners
+    // stay until explicitly dismissed (they still require action).
+    if (!showComputerUseConsole) return;
+    const unacknowledged = listUnacknowledgedComputerTaskNotifications(computerTaskState);
+    if (unacknowledged.length > 0 && (unacknowledged[0].kind === 'completed' || unacknowledged[0].kind === 'failed')) {
+      acknowledgeTaskNotifications();
+    }
+  }, [acknowledgeTaskNotifications, computerTaskState, showComputerUseConsole]);
+
+  useEffect(() => {
+    // T7 sticky allow scopes: hydrate the in-memory grant registry on the
+    // chat path so the synchronous request router sees standing grants on a
+    // fresh app load (previously hydrated only when the Computer Use console
+    // opened, which made chat fail closed and keep prompting).
+    let cancelled = false;
+    import('../../../lib/computerGrantGateStore')
+      .then(({ loadStickyAllowScopes }) => (cancelled ? null : loadStickyAllowScopes()))
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Wave-2 task→app resolution: hydrate the router's in-memory app-resolution
+  // registry (same pattern as the T7 sticky-scope registry above) so the
+  // synchronous route build can pick the best app for everyday tasks —
+  // installed/running apps from the desktop bridge plus the circle's
+  // preferred-app-per-category store. Silent failures leave the fail-honest
+  // empty context (bridge treated as offline; known-good web apps win).
+  const hydrateAppResolutionContext = useCallback(async () => {
+    try {
+      const [{ setAppResolutionContext }, bridge, shortcuts] = await Promise.all([
+        import('../../../lib/chatComputerRequestRouter'),
+        import('../../../lib/desktopBridge'),
+        import('../../../lib/knownAppShortcuts'),
+      ]);
+      const bridgeOnline = await bridge.isDesktopBridgeAvailable().catch(() => false);
+      const [installedApps, runningApps, preferredAppByCategory] = await Promise.all([
+        bridgeOnline ? bridge.listInstalledAppNamesLower().catch(() => [] as string[]) : Promise.resolve([] as string[]),
+        bridgeOnline
+          ? bridge.listRunningApps().then((result) => (result.ok ? result.data : undefined)).catch(() => undefined)
+          : Promise.resolve(undefined),
+        shortcuts.loadPreferredAppsByCategory(circleId).catch(() => ({})),
+      ]);
+      setAppResolutionContext({
+        bridgeOnline,
+        // An empty probe result is ambiguous (it also means "probe failed")
+        // — fail honest by leaving installedApps unknown instead of
+        // claiming nothing is installed.
+        ...(installedApps.length > 0 ? { installedApps } : {}),
+        ...(runningApps && runningApps.length > 0 ? { runningApps } : {}),
+        preferredAppByCategory,
+      });
+    } catch { /* fail-honest: unhydrated registry keeps bridgeOnline=false */ }
+  }, [circleId]);
+
+  useEffect(() => {
+    void hydrateAppResolutionContext();
+  }, [hydrateAppResolutionContext]);
+
+  useEffect(() => {
+    const capabilityBuildout = computerTaskState?.capabilityBuildout;
+    if (!computerTaskState || capabilityBuildout?.status !== 'requested' || !capabilityBuildout.sessionId) return;
+
+    let cancelled = false;
+    const refresh = async () => {
+      const refreshed = await refreshComputerTaskCapabilityBuildoutFromConnectedAgentSession(capabilityBuildout).catch(() => null);
+      if (cancelled || !refreshed) return;
+      const hints = buildAgentAppCapabilityBuildoutStateHints({
+        status: refreshed.status,
+        message: refreshed.message,
+        retryPlan: refreshed.retryPlan,
+        userActionNeeded: refreshed.userActionNeeded,
+        missingEvidence: refreshed.missingEvidence,
+      });
+      await persistComputerTaskState({
+        task: computerTaskState.task,
+        taskKind: computerTaskState.taskKind,
+        taskLabel: computerTaskState.taskLabel,
+        phase: hints.phase || computerTaskState.phase,
+        outcomeStatus: computerTaskState.outcomeStatus || null,
+        adapterId: computerTaskState.adapterId || null,
+        blockers: Array.from(new Set([
+          ...computerTaskState.blockers,
+          ...hints.blockers,
+        ])).slice(0, 8),
+        nextSteps: hints.nextSteps.length > 0 ? hints.nextSteps : computerTaskState.nextSteps,
+        grantedAccess: computerTaskState.grantedAccess,
+        accessPlan: computerTaskState.accessPlan,
+        runId: computerTaskState.runId || null,
+        sessionId: computerTaskState.sessionId || null,
+        liveUrl: computerTaskState.liveUrl || null,
+        grounding: computerTaskState.grounding || null,
+        capabilityBuildout: refreshed,
+        complexity: computerTaskState.complexity || null,
+        checkpointRecovery: computerTaskState.checkpointRecovery || null,
+      });
+      if (refreshed.status === 'blocked' || refreshed.status === 'failed' || refreshed.status === 'incomplete') {
+        const noticeKey = [
+          computerTaskState.id,
+          refreshed.status,
+          refreshed.sessionId || '',
+          refreshed.userActionNeeded || refreshed.summary || refreshed.retryPlan || refreshed.message,
+        ].join(':');
+        if (capabilityBuildoutNoticeKeyRef.current !== noticeKey) {
+          capabilityBuildoutNoticeKeyRef.current = noticeKey;
+          setPendingCapabilityBuildoutNotice({
+            key: noticeKey,
+            task: computerTaskState.task,
+            buildout: refreshed,
+          });
+        }
+      }
+    };
+
+    void refresh();
+    const interval = setInterval(refresh, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [
+    computerTaskState?.id,
+    computerTaskState?.capabilityBuildout?.sessionId,
+    computerTaskState?.capabilityBuildout?.status,
+    persistComputerTaskState,
+  ]);
 
   const syncSessionArchiveMessage = useCallback((message: ChatMessage | null | undefined) => {
     if (!message || !circleId) return;
@@ -1206,6 +2343,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       browserPlans: message.browserPlans,
       browserPlanEvents: message.browserPlanEvents,
       browserSessions: message.browserSessions,
+      recoveryOptions: message.recoveryOptions,
+      recoveryReliability: message.recoveryReliability,
     }).catch((error) => {
       console.warn('[ChatTab] session archive sync failed:', error);
     });
@@ -1246,22 +2385,203 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     });
   }, [activeThreadId, circleId]);
 
+  const startMainChatFailureRecoveryPayload = useCallback(async (details: ChatFailureRecoveryDetails): Promise<ChatFailureRecoveryPayload> => {
+    const task = details.task.trim() || 'Recover failed chat task';
+    try {
+      const {
+        buildChatFailureRecoveryFingerprint,
+        shouldSuppressDuplicateChatFailureHandoff,
+        startChatFailureRecovery,
+      } = await import('../../../lib/chatFailureRecovery');
+      const route = analyzeMessageRouting(task, 'main_chat').route;
+      const recoveryPlanSummary = [
+        details.planSummary ? `Existing plan summary:\n${details.planSummary}` : '',
+        `Chat mode: ${chatMode || 'none'}`,
+        `Session profile: ${sessionProfile || 'auto'}`,
+        `Selected model: ${selectedModel || 'auto'}`,
+        `Resolved send model: ${resolveSendModel(task) || 'auto'}`,
+        `Web search enabled: ${webSearchEnabled}`,
+        route ? `Route intent: ${route.intent || 'unknown'}; complexity: ${route.complexity || 'unknown'}; profile: ${route.profile || 'unknown'}; confidence: ${route.confidence || 'unknown'}` : '',
+        `Connected providers: ${Array.from(connectedProviderSet).slice(0, 16).join(', ') || 'none'}`,
+      ].filter(Boolean).join('\n');
+      const baseRecoveryInput = {
+        task,
+        failureMessage: details.failureMessage,
+        failureStack: details.failureStack,
+        outcomeStatus: details.outcomeStatus || 'failed',
+        executionKind: details.executionKind || 'run_openswan',
+        runId: details.runId,
+        planSummary: recoveryPlanSummary,
+        groundingSummary: details.groundingSummary,
+        preflightSummary: details.preflightSummary,
+        source: details.source || 'main_chat_failure',
+        launchIfMissing: details.launchIfMissing ?? true,
+        circleId,
+        userId: currentUserId || 'anonymous',
+        selectedModel,
+        checkpointRecovery: details.checkpointRecovery || null,
+        evidenceContract: details.evidenceContract || null,
+        appRouteDecision: details.appRouteDecision || null,
+      };
+      const fingerprint = buildChatFailureRecoveryFingerprint(baseRecoveryInput);
+      const now = Date.now();
+      const ledger = chatFailureRecoveryLedgerRef.current;
+      for (const [key, entry] of Array.from(ledger.entries())) {
+        if (now - entry.lastAt > CHAT_FAILURE_RECOVERY_LEDGER_RETENTION_MS) {
+          ledger.delete(key);
+        }
+      }
+      const previous = ledger.get(fingerprint);
+      const recentRepeat = Boolean(previous && now - previous.lastAt <= CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS);
+      const repeatCount = recentRepeat ? (previous?.count || 0) + 1 : 1;
+      const suppressConnectedHandoff = shouldSuppressDuplicateChatFailureHandoff({
+        recentRepeat,
+        repeatCount,
+        lastSuccessfulHandoffAt: previous?.lastSuccessfulHandoffAt || null,
+        nowMs: now,
+        repeatWindowMs: CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS,
+      });
+      const firstAt = recentRepeat ? previous?.firstAt || now : now;
+      const suppressionReason = suppressConnectedHandoff
+        ? `matching failure seen ${repeatCount} times in ${Math.max(1, Math.round((now - firstAt) / 1000))}s after a successful recovery handoff; keeping the existing recovery path instead of launching another handoff`
+        : null;
+      const ledgerEntry: ChatFailureRecoveryLedgerEntry = {
+        firstAt,
+        lastAt: now,
+        count: repeatCount,
+        suppressedCount: (recentRepeat ? previous?.suppressedCount || 0 : 0) + (suppressConnectedHandoff ? 1 : 0),
+        lastSuccessfulHandoffAt: previous?.lastSuccessfulHandoffAt || null,
+      };
+      ledger.set(fingerprint, ledgerEntry);
+      if (ledger.size > CHAT_FAILURE_RECOVERY_LEDGER_MAX) {
+        const oldestKey = Array.from(ledger.entries()).sort((a, b) => a[1].lastAt - b[1].lastAt)[0]?.[0];
+        if (oldestKey) ledger.delete(oldestKey);
+      }
+      persistChatFailureLedger();
+
+      const recovery = await startChatFailureRecovery({
+        ...baseRecoveryInput,
+        recoveryFingerprint: fingerprint,
+        repeatCount,
+        suppressConnectedHandoff,
+        suppressionReason,
+      });
+      ledger.set(fingerprint, {
+        ...ledgerEntry,
+        lastSuccessfulHandoffAt: recovery.recovery.ok ? now : ledgerEntry.lastSuccessfulHandoffAt,
+      });
+      persistChatFailureLedger();
+      recordSessionArchiveEvent({
+        kind: 'tool',
+        summary: recovery.archiveSummary,
+        touched: Array.from(new Set([...(details.touched || []), ...recovery.archiveTouched])),
+        metadata: recovery.archiveMetadata,
+      });
+      const recoveryReliability = getRecoveryReliabilityFromArchive(recovery.archiveMetadata);
+      return {
+        message: `\n\n${recovery.userMessage}`,
+        recoveryOptions: recovery.recoveryOptions,
+        recoveryReliability,
+        archiveMetadata: recovery.archiveMetadata,
+      };
+    } catch (recoveryError: any) {
+      recordSessionArchiveError(
+        `Chat failure recovery handoff failed: ${recoveryError?.message || 'Unknown error'}`,
+        typeof recoveryError?.stack === 'string' ? recoveryError.stack : null,
+        ['surface:main_chat', 'surface:failure_recovery', ...(details.touched || [])],
+      );
+      return {
+        message: '\n\nRecovery could not start automatically. Try again, or open the details for support.',
+        recoveryOptions: [{
+          id: 'stop_and_report',
+          label: 'Stop and report the blocker',
+          detail: 'Recovery could not start automatically. Technical details were saved for support.',
+          actor: 'none',
+          recommended: true,
+          source: 'safety_stop',
+        }],
+      };
+    }
+  }, [
+    chatMode,
+    circleId,
+    connectedProviderSet,
+    currentUserId,
+    recordSessionArchiveError,
+    recordSessionArchiveEvent,
+    resolveSendModel,
+    selectedModel,
+    sessionProfile,
+    webSearchEnabled,
+  ]);
+
   const loadSessionArchiveContext = useCallback(async () => {
     if (!circleId) return null;
     const archive = await loadChatSessionArchive(circleId, activeThreadId).catch(() => null);
     return formatChatSessionArchiveBlock(archive, {
       maxMessages: 10,
       maxEvents: 12,
+      maxRecommendations: 3,
       maxTouched: 24,
       maxChars: 3200,
     });
   }, [activeThreadId, circleId]);
 
-  const executeSharedComputerTask = useCallback(async (taskText: string, options?: { planPrefix?: string }) => {
+  const executeSharedComputerTask = useCallback(async (taskText: string, options?: {
+    planPrefix?: string;
+    readyCapabilityBuildout?: ComputerTaskCapabilityBuildout | null;
+  }) => {
     const trimmed = taskText.trim();
     if (!trimmed) return;
+    const exactSequenceProgram = compileComputerSequenceProgram(trimmed);
+    let settleExactApprovalOrigin: () => void = () => {};
+    const exactApprovalOriginSettled = exactSequenceProgram
+      ? new Promise<void>((resolve) => { settleExactApprovalOrigin = resolve; })
+      : Promise.resolve();
+    // Show the typing indicator immediately so the ~430-line multi-await
+    // preamble below (capability audit, Supabase reads, optional bridge
+    // autoconnect, persist writes) never leaves the user staring at their own
+    // bubble. This runs before the try/finally, so the two top-level blocked
+    // early-returns below reset it explicitly; the normal path's finally does.
+    setBotTyping(true);
+    // T7 sticky allow scopes: re-hydrate the standing-grant registry before
+    // the synchronous route build below reads it, so a grant persisted on a
+    // previous load can downgrade approval on the first task of this session.
+    await import('../../../lib/computerGrantGateStore')
+      .then(({ loadStickyAllowScopes }) => loadStickyAllowScopes())
+      .catch(() => {});
+    // Wave-2: refresh the app-resolution registry fire-and-forget (bridge
+    // probes are cached). The awaits below give it time to land before the
+    // route build; a stale registry only degrades the app pick, never blocks.
+    void hydrateAppResolutionContext();
+    const initialExecution = prepareComputerTaskExecution({ task: trimmed, audit: null, grantedIds: [] });
+    const surfacePreparationPlan = buildComputerTaskSurfacePreparationPlan(initialExecution);
+    const surfacePreparationResult = surfacePreparationPlan.shouldPrepareDesktopBridge && Platform.OS === 'web'
+      ? await autoConnectDesktopBridge().catch((error: any) => ({
+          ok: false,
+          status: 'starter_failed' as const,
+          content: error?.message || String(error || 'Desktop bridge preparation failed.'),
+          detail: error?.message || String(error || 'Desktop bridge preparation failed.'),
+          userActionRequired: true,
+        }))
+      : null;
+    const surfacePreparationReceipt = buildComputerTaskSurfacePreparationReceipt(
+      surfacePreparationPlan,
+      surfacePreparationResult,
+    );
+    if (surfacePreparationReceipt.attempted) {
+      recordSessionArchiveEvent({
+        kind: 'tool',
+        summary: surfacePreparationReceipt.summary,
+        touched: surfacePreparationReceipt.touched,
+        metadata: {
+          surfacePreparation: surfacePreparationReceipt,
+          plan: surfacePreparationPlan,
+        },
+      });
+    }
     const audit = await auditComputerCapabilities(circleId).catch(() => null);
-    const grantedIds = await loadComputerTaskGrantIds(circleId).catch(() => []);
+    let grantedIds = await loadComputerTaskGrantIds(circleId).catch(() => []);
     const previewExecution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds });
     const [businessProfiles, providerKeys] = await Promise.all([
       loadCircleBusinessModelProfiles(circleId).catch(() => []),
@@ -1273,25 +2593,256 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       profiles: [...businessProfiles, ...buildImplicitBusinessModelProfiles(providerKeys)],
       providerKeys,
     });
-    const execution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds, businessModelPlan });
+    let execution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds, businessModelPlan });
+    const markEarlyReadyCapabilityAutoRetryFailed = async (reason: string, nextSteps: string[]) => {
+      if (!options?.readyCapabilityBuildout) return;
+      const failedAt = new Date().toISOString();
+      const earlyGroundingState = buildComputerTaskGroundingStateFromExecution(execution);
+      await persistComputerTaskState({
+        task: trimmed,
+        taskKind: execution.preview.kind,
+        taskLabel: execution.preview.label,
+        phase: 'blocked',
+        outcomeStatus: 'blocked',
+        adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+        grantedAccess: execution.grants.granted,
+        accessPlan: execution.grants.summary,
+        blockers: [reason, ...(earlyGroundingState?.blockers || [])].slice(0, 6),
+        nextSteps: nextSteps.slice(0, 4),
+        grounding: earlyGroundingState,
+        capabilityBuildout: {
+          ...options.readyCapabilityBuildout,
+          autoRetryStatus: 'failed',
+          autoRetryCompletedAt: failedAt,
+          updatedAt: failedAt,
+        },
+        complexity: compactComputerTaskComplexityPlan(execution.complexityPlan),
+        checkpointRecovery: diagnoseComputerTaskCheckpointFailure({
+          task: trimmed,
+          failureMessage: reason,
+          outcomeStatus: 'blocked',
+          executionKind: 'run_computer_task',
+          source: 'computer_task_capability_auto_retry',
+          groundingSummary: earlyGroundingState?.summary || null,
+          complexityPlan: execution.complexityPlan,
+        }),
+        checkpointRecoveryIsNew: true,
+        checkpointRecoveryObservations: execution.computerAppGroundingTrace?.observations || [],
+      });
+    };
+    const needsLocalFileRead = execution.entrypoint !== 'browser_runtime'
+      && execution.grants.grants.some((grant) => grant.id === 'file_read');
+    const needsLocalFileWrite = execution.entrypoint !== 'browser_runtime'
+      && execution.grants.grants.some((grant) => grant.id === 'file_write');
+    const needsLocalFileSessionGrant = needsLocalFileRead || needsLocalFileWrite;
+    const canRequestLocalFileSessionGrant = !surfacePreparationReceipt.attempted || surfacePreparationReceipt.ok;
+    if (needsLocalFileSessionGrant && canRequestLocalFileSessionGrant) {
+      const roots = inferLocalFileGrantRootsForTask(trimmed);
+      const requiredScope = needsLocalFileWrite ? 'write' : 'read';
+      const existingGrant = getActiveLocalFileSessionGrant(roots, requiredScope);
+      if (!existingGrant) {
+        const rootLabel = roots.join(', ');
+        const grantResult = await requestLocalFileSessionGrant({
+          roots,
+          scope: requiredScope,
+          reason: trimmed,
+        });
+        if (!grantResult.ok) {
+          const grantBlockedPresentation = buildComputerTaskLocalFileAccessBlockedPresentation({
+            roots,
+            scope: requiredScope,
+            error: grantResult.error || null,
+            errorCode: grantResult.errorCode || null,
+          });
+          const grantGroundingState = buildComputerTaskGroundingStateFromExecution(execution);
+          await persistComputerTaskState({
+            task: trimmed,
+            taskKind: execution.preview.kind,
+            taskLabel: execution.preview.label,
+            phase: 'blocked',
+            outcomeStatus: 'blocked',
+            adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+            grantedAccess: execution.grants.granted,
+            accessPlan: execution.grants.summary,
+            blockers: [
+              ...grantBlockedPresentation.blockers,
+              ...(grantGroundingState?.blockers || []),
+            ].slice(0, 6),
+            nextSteps: grantBlockedPresentation.nextSteps,
+            grounding: grantGroundingState,
+            capabilityBuildout: options?.readyCapabilityBuildout
+              ? {
+                  ...options.readyCapabilityBuildout,
+                  autoRetryStatus: 'failed',
+                  autoRetryCompletedAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                }
+              : null,
+            complexity: compactComputerTaskComplexityPlan(execution.complexityPlan),
+          });
+          recordSessionArchiveEvent({
+            kind: 'computer_task',
+            summary: `Computer task paused for local file ${requiredScope} access: ${trimmed}`,
+            touched: Array.from(new Set([
+              'surface:computer_use',
+              'surface:local_file',
+              `computer_task:${trimmed}`,
+              ...roots,
+            ])),
+            metadata: {
+              localFileSessionGrant: {
+                scope: requiredScope,
+                roots,
+                error: grantResult.error || null,
+                errorCode: grantResult.errorCode || null,
+              },
+              grounding: grantGroundingState,
+              complexityPlan: execution.complexityPlan,
+            },
+          });
+          addBotMessage(grantBlockedPresentation.message, undefined, {
+            localOnly: true,
+            source: {
+              actor: 'OpenSwan',
+              surface: 'main_chat_desktop_bridge',
+              selectedModel,
+              effectiveModel: 'local-desktop-bridge',
+            },
+          });
+          setBotTyping(false);
+          return { handled: true as const, browser: false as const };
+        }
+        recordSessionArchiveEvent({
+          kind: 'tool',
+          summary: `Prepared scoped local file ${requiredScope} access for ${rootLabel}.`,
+          touched: roots,
+          metadata: {
+            localFileSessionGrant: {
+              scope: requiredScope,
+              roots,
+              expiresAt: grantResult.data?.expiresAt || null,
+            },
+          },
+        });
+      }
+      grantedIds = Array.from(new Set([
+        ...grantedIds,
+        'file_read' as ComputerTaskGrantId,
+        ...(needsLocalFileWrite ? ['file_write' as ComputerTaskGrantId] : []),
+      ]));
+      execution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds, businessModelPlan });
+    }
     const businessModelPickerId = businessModelPlan.routeProvider && businessModelPlan.routeModel
       ? `${businessModelPlan.routeProvider}/${businessModelPlan.routeModel}`
       : null;
     const computerTaskModel = selectedModel !== 'auto'
       ? selectedModel
       : (businessModelPickerId || resolveSendModel(trimmed) || undefined);
+    // Composer-pattern split (P9): on Auto, the app-trained BlackSwan plans
+    // the browser/app task (it knows the app's sites, pipelines, and
+    // vocabulary) while the runtime keeps computerTaskModel — and the
+    // native screen loop keeps its Sonnet pin regardless. Explicit picks
+    // plan with the picked model.
+    const computerTaskPlannerModel =
+      resolveComputerTaskPlannerModel(selectedModel, connectedProviderSet) || computerTaskModel;
+    const groundingState = buildComputerTaskGroundingStateFromExecution(execution);
+    const groundingNextSteps = groundingState?.nextAction
+      ? [`Grounding next action: ${groundingState.nextAction}`]
+      : [];
+    const groundingBlockers = groundingState?.blockers || [];
+    const surfacePreparationBlockers = surfacePreparationReceipt.ok
+      ? []
+      : surfacePreparationReceipt.warnings;
+    const preflightBlockers = [
+      ...surfacePreparationBlockers,
+      ...execution.preflight.blockers.map((item) => `${item.label}: ${item.fix}`),
+    ];
+    const preflightWarnings = execution.preflight.warnings.map((item) => `${item.label}: ${item.fix}`);
+    const defaultNextSteps = execution.entrypoint === 'browser_runtime'
+      ? ['Review the access plan', 'Approve browser access if the task looks right']
+      : ['Run the best available computer surface', 'Review the result and blockers'];
+    const complexityNextSteps = execution.complexityPlan.level === 'simple'
+      ? []
+      : execution.complexityPlan.visibleNextSteps;
+    const surfacePreparationBlockedPresentation = buildComputerTaskSurfacePreparationBlockedPresentation(surfacePreparationReceipt);
+    if (surfacePreparationBlockedPresentation.shouldBlock) {
+      const blocker = surfacePreparationBlockedPresentation.blockers[0] || surfacePreparationReceipt.summary;
+      await markEarlyReadyCapabilityAutoRetryFailed(blocker, surfacePreparationBlockedPresentation.nextSteps);
+      await persistComputerTaskState({
+        task: trimmed,
+        taskKind: execution.preview.kind,
+        taskLabel: execution.preview.label,
+        phase: 'blocked',
+        outcomeStatus: 'blocked',
+        adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+        grantedAccess: execution.grants.granted,
+        accessPlan: execution.grants.summary,
+        blockers: [
+          ...surfacePreparationBlockedPresentation.blockers,
+          ...execution.preflight.blockers.map((item) => `${item.label}: ${item.fix}`),
+          ...groundingBlockers,
+        ].slice(0, 6),
+        nextSteps: surfacePreparationBlockedPresentation.nextSteps,
+        grounding: groundingState,
+        capabilityBuildout: options?.readyCapabilityBuildout
+          ? {
+              ...options.readyCapabilityBuildout,
+              autoRetryStatus: 'failed',
+              autoRetryCompletedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }
+          : null,
+        complexity: compactComputerTaskComplexityPlan(execution.complexityPlan),
+      });
+      recordSessionArchiveEvent({
+        kind: 'computer_task',
+        summary: `Computer task paused for desktop bridge preparation: ${trimmed}`,
+        touched: Array.from(new Set([
+          'surface:computer_use',
+          'surface:desktop_bridge',
+          `computer_task:${trimmed}`,
+          execution.preview.kind,
+          ...surfacePreparationReceipt.touched,
+        ])),
+        metadata: {
+          entrypoint: execution.entrypoint,
+          surfacePreparation: surfacePreparationReceipt,
+          grounding: groundingState,
+          complexityPlan: execution.complexityPlan,
+        },
+      });
+      addBotMessage(surfacePreparationBlockedPresentation.message, undefined, {
+        source: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_desktop_bridge',
+          selectedModel,
+          effectiveModel: 'local-desktop-bridge',
+        },
+      });
+      setBotTyping(false);
+      return { handled: true as const, browser: false as const };
+    }
     await persistComputerTaskState({
       task: trimmed,
       taskKind: execution.preview.kind,
       taskLabel: execution.preview.label,
-      phase: 'planning',
+      phase: options?.readyCapabilityBuildout ? 'executing' : 'planning',
+      startsNewActiveRun: true,
+      outcomeStatus: null,
       adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
       grantedAccess: execution.grants.granted,
       accessPlan: execution.grants.summary,
-      blockers: execution.readiness.ready ? [] : [execution.readiness.summary],
-      nextSteps: execution.entrypoint === 'browser_runtime'
-        ? ['Review the access plan', 'Approve browser access if the task looks right']
-        : ['Run the best available computer surface', 'Review the result and blockers'],
+      blockers: [
+        ...(!execution.readiness.ready ? [execution.readiness.summary] : []),
+        ...preflightBlockers,
+        ...groundingBlockers,
+      ].slice(0, 6),
+      nextSteps: execution.preflight.fixActions.length > 0
+        ? execution.preflight.fixActions.slice(0, 4)
+        : [...groundingNextSteps, ...complexityNextSteps, ...defaultNextSteps].slice(0, 5),
+      grounding: groundingState,
+      capabilityBuildout: options?.readyCapabilityBuildout || null,
+      complexity: compactComputerTaskComplexityPlan(execution.complexityPlan),
     });
     recordSessionArchiveEvent({
       kind: 'computer_task',
@@ -1305,6 +2856,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         entrypoint: execution.entrypoint,
         capabilityProfile: execution.capabilityProfile,
         recommendedMode: execution.recommendedMode,
+        preflight: {
+          status: execution.preflight.status,
+          ready: execution.preflight.ready,
+          strategy: execution.preflight.strategy
+            ? {
+                id: execution.preflight.strategy.id,
+                label: execution.preflight.strategy.label,
+              }
+            : null,
+          blockers: preflightBlockers,
+          warnings: preflightWarnings,
+          fixActions: execution.preflight.fixActions,
+        },
+        grounding: groundingState,
+        complexityPlan: execution.complexityPlan,
         businessModel: businessModelPlan.selectedProfile
           ? {
               id: businessModelPlan.selectedProfile.id,
@@ -1316,10 +2882,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       },
     });
 
-    const builtPlan = buildChatAutomationPlan({
-      message: options?.planPrefix ? `${options.planPrefix}${trimmed}` : trimmed,
+    // Classifiers and exact-program compilers must see the user's raw task.
+    // Console/retry labels are dispatch context only; prepending them used to
+    // turn an exact desktop program into a generic browser-tagged plan.
+    const classifiedPlan = buildChatAutomationPlan({
+      message: trimmed,
       selectedMode: chatMode,
     });
+    const builtPlan: ChatAutomationPlan = options?.planPrefix
+      ? {
+          ...classifiedPlan,
+          notes: [
+            `Dispatch context: ${options.planPrefix.trim()}`,
+            ...classifiedPlan.notes,
+          ],
+        }
+      : classifiedPlan;
     const computerPlan: ChatAutomationPlan = builtPlan.execution.kind === 'run_computer_task'
       ? builtPlan
       : {
@@ -1331,10 +2909,246 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           confidence: 0.9,
           notes: ['Forced into the shared computer-task runtime.'],
         };
+    const computerRequestNotice = computerPlan.computerRequestRoute
+      ? buildChatComputerRequestUserNotice(computerPlan.computerRequestRoute)
+      : null;
+    // Wave-2: remember this route's app choice so a follow-up "use <app>
+    // instead" can record the user's preferred app for the category.
+    if (computerPlan.computerRequestRoute) {
+      lastAppResolutionRef.current = computerPlan.computerRequestRoute.appResolution ?? null;
+      persistLastAppResolution();
+    }
+    const computerEvidenceContract = computerPlan.computerRequestRoute?.evidenceContract || null;
+    const computerAppRouteDecision = computerPlan.computerRequestRoute?.appAutomationRouteDecision || execution.preflight.routeDecision || null;
+    const computerStickyScopeApplied = computerPlan.computerRequestRoute?.stickyScopeApplied || null;
+
+    const startTaskFailureRecovery = async (details: {
+      failureMessage: string;
+      failureStack?: string | null;
+      outcomeStatus?: string | null;
+      executionKind?: string | null;
+      runId?: string | null;
+      planSummary?: string | null;
+      groundingSummary?: string | null;
+      preflightSummary?: string | null;
+      source?: string | null;
+      complexityPlan?: ComputerTaskComplexityPlan | null;
+      checkpointRecovery?: ComputerTaskCheckpointRecoveryContext | null;
+      evidenceContract?: ComputerTaskEvidenceContract | null;
+      appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+      replayPolicy?: 'normal' | 'manual_verify_only';
+      mutationDispatched?: boolean;
+      verificationOnlyTools?: string[];
+    }): Promise<ChatFailureRecoveryPayload> => {
+      const checkpointRecovery = details.checkpointRecovery || diagnoseComputerTaskCheckpointFailure({
+        task: trimmed,
+        failureMessage: details.failureMessage,
+        outcomeStatus: details.outcomeStatus,
+        executionKind: details.executionKind || 'run_computer_task',
+        source: details.source || 'chat_computer_task',
+        planSummary: details.planSummary,
+        groundingSummary: details.groundingSummary,
+        preflightSummary: details.preflightSummary,
+        complexityPlan: details.complexityPlan || execution.complexityPlan,
+      });
+      // W5/X1 (P45): every computer-task terminal (all three call sites
+      // funnel here) is classified through the unified lane boundary and the
+      // two-axis signal rides the recovery archive tags. Telemetry only —
+      // the evidence-recovery flow stays authoritative.
+      let laneTags: string[] = [];
+      // Local-console diagnostic: the compact user-facing copy deliberately
+      // hides the raw failure, which makes "why did this block?" undebuggable
+      // from the browser. One bounded line with the real terminal detail.
+      try {
+        console.warn('[ChatTab] computer-task failure detail:', JSON.stringify({
+          status: details.outcomeStatus || null,
+          message: String(details.failureMessage || '').slice(0, 600),
+          grounding: String(details.groundingSummary || '').slice(0, 200),
+          preflight: String(details.preflightSummary || '').slice(0, 200),
+          routeStatus: (details.appRouteDecision as any)?.status || null,
+        }));
+      } catch {}
+      try {
+        const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
+          await import('../../../lib/chatLaneOutcome');
+        const laneOutcome = normalizeThrownError('computer_task', details.failureMessage);
+        laneTags = buildChatLaneOutcomeTags(laneOutcome);
+        console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
+        // X7 (P48): registry + degradation-scope tags.
+        const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
+          await import('../../../lib/chatLaneHealthRegistry');
+        recordChatLaneOutcomeNow(laneOutcome);
+        laneTags = [...laneTags, ...buildChatLaneHealthTags('computer_task', Date.now())];
+      } catch {}
+      return startMainChatFailureRecoveryPayload({
+        task: trimmed,
+        failureMessage: details.failureMessage,
+        failureStack: details.failureStack,
+        outcomeStatus: details.outcomeStatus,
+        executionKind: details.executionKind || 'run_computer_task',
+        runId: details.runId,
+        planSummary: details.planSummary,
+        groundingSummary: details.groundingSummary,
+        preflightSummary: details.preflightSummary,
+        source: details.source || 'chat_computer_task',
+        launchIfMissing: true,
+        checkpointRecovery,
+        evidenceContract: details.evidenceContract || computerEvidenceContract,
+        appRouteDecision: details.appRouteDecision || computerAppRouteDecision,
+        replayPolicy: details.replayPolicy || 'normal',
+        mutationDispatched: details.mutationDispatched === true,
+        verificationOnlyTools: details.verificationOnlyTools || [],
+        touched: [
+          'surface:computer_use',
+          `computer_task:${trimmed}`,
+          checkpointRecovery ? `checkpoint:${checkpointRecovery.failedCheckpointId}` : '',
+          (details.evidenceContract || computerEvidenceContract)?.targetName
+            ? `evidence_contract:${(details.evidenceContract || computerEvidenceContract)?.targetName}`
+            : '',
+          ...laneTags,
+        ].filter(Boolean),
+      });
+    };
 
     setBotTyping(true);
     setRunStatus('running');
+    let computerTaskController: AbortController | null = null;
+    const releaseComputerTaskTransientUi = () => {
+      if (openSwanAbortRef.current === computerTaskController) {
+        openSwanAbortRef.current = null;
+      }
+      setRunStatus('idle');
+      setBotTyping(false);
+    };
     try {
+      if (preflightBlockers.length > 0) {
+        const blockerLines = preflightBlockers.map((blocker) => `- ${blocker}`).join('\n');
+        const fixLines = execution.preflight.fixActions.map((fix) => `- ${fix}`).join('\n');
+        const preflightHandoffContext = buildChatComputerHandoffContext({
+          task: trimmed,
+          entrypoint: execution.entrypoint,
+          adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+          taskKind: execution.preview.kind,
+          taskLabel: execution.preview.label,
+          capabilityProfile: execution.capabilityProfile,
+          recommendedMode: execution.recommendedMode,
+          grantSummary: execution.grants.summary,
+          approvalSummary: execution.grants.approvalSummary,
+          preflightStatus: execution.preflight.status,
+          preflightSummary: execution.preflight.summary,
+          groundingStatus: groundingState?.status || null,
+          groundingSummary: groundingState?.summary || null,
+          requestNotice: computerRequestNotice,
+          evidenceContract: computerEvidenceContract,
+          appAutomationRouteDecision: computerAppRouteDecision,
+          stickyScopeApplied: computerStickyScopeApplied,
+          warnings: preflightWarnings,
+          blockers: [...preflightBlockers, ...groundingBlockers],
+        });
+        const preflightHandoffBlock = formatChatComputerHandoffForMessage(preflightHandoffContext);
+        const preflightFailureMessage = [
+          execution.preflight.summary,
+          blockerLines ? `Blockers:\n${blockerLines}` : '',
+          fixLines ? `Fix actions:\n${fixLines}` : '',
+        ].filter(Boolean).join('\n\n');
+        const preflightCheckpointRecovery = diagnoseComputerTaskCheckpointFailure({
+          task: trimmed,
+          failureMessage: preflightFailureMessage,
+          outcomeStatus: 'blocked',
+          executionKind: 'run_computer_task',
+          source: 'computer_preflight',
+          groundingSummary: groundingState?.summary || null,
+          preflightSummary: execution.preflight.summary,
+          complexityPlan: execution.complexityPlan,
+        });
+        await persistComputerTaskState({
+          task: trimmed,
+          taskKind: execution.preview.kind,
+          taskLabel: execution.preview.label,
+          phase: 'blocked',
+          outcomeStatus: 'blocked',
+          adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+          grantedAccess: execution.grants.granted,
+          accessPlan: execution.grants.summary,
+          blockers: [...preflightBlockers, ...groundingBlockers].slice(0, 6),
+          nextSteps: execution.preflight.fixActions.length > 0
+            ? execution.preflight.fixActions.slice(0, 4)
+            : [...groundingNextSteps, ...complexityNextSteps].slice(0, 5),
+          grounding: groundingState,
+          capabilityBuildout: options?.readyCapabilityBuildout
+            ? {
+                ...options.readyCapabilityBuildout,
+                autoRetryStatus: 'failed',
+                autoRetryCompletedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }
+            : null,
+          complexity: compactComputerTaskComplexityPlan(execution.complexityPlan),
+          checkpointRecovery: preflightCheckpointRecovery,
+          checkpointRecoveryIsNew: true,
+          checkpointRecoveryObservations: execution.computerAppGroundingTrace?.observations || [],
+        });
+        recordSessionArchiveEvent({
+          kind: 'computer_task',
+          summary: `Computer task blocked by preflight: ${trimmed}`,
+          touched: Array.from(new Set([...preflightHandoffContext.touched, execution.preview.kind])),
+          metadata: {
+            handoff: preflightHandoffContext.metadata,
+            entrypoint: execution.entrypoint,
+            preflight: {
+              status: execution.preflight.status,
+              summary: execution.preflight.summary,
+              strategy: execution.preflight.strategy
+                ? {
+                    id: execution.preflight.strategy.id,
+                    label: execution.preflight.strategy.label,
+                  }
+                : null,
+              blockers: preflightBlockers,
+              warnings: preflightWarnings,
+              fixActions: execution.preflight.fixActions,
+            },
+            grounding: groundingState,
+            complexityPlan: execution.complexityPlan,
+            checkpointRecovery: preflightCheckpointRecovery,
+          },
+        });
+        releaseComputerTaskTransientUi();
+        const recovery = await startTaskFailureRecovery({
+          failureMessage: preflightFailureMessage,
+          outcomeStatus: 'blocked',
+          executionKind: 'run_computer_task',
+          preflightSummary: execution.preflight.summary,
+          groundingSummary: groundingState?.summary || null,
+          source: 'computer_preflight',
+          checkpointRecovery: preflightCheckpointRecovery,
+          appRouteDecision: computerAppRouteDecision,
+        });
+        const recoveryBlock = recovery.message;
+        addBotMessage([
+          `**Use Computer** blocked by preflight.`,
+          execution.preflight.summary,
+          preflightHandoffBlock,
+          blockerLines ? `Blockers:\n${blockerLines}` : '',
+          fixLines ? `Fix:\n${fixLines}` : '',
+          recoveryBlock,
+        ].filter(Boolean).join('\n\n'), undefined, {
+          recoveryOptions: recovery.recoveryOptions,
+          recoveryReliability: recovery.recoveryReliability,
+          computerHandoff: preflightHandoffContext.metadata,
+          computerPreflightBlockers: execution.preflight.blockers.length > 0
+            ? { task: trimmed, items: execution.preflight.blockers }
+            : undefined,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_computer_task',
+            selectedModel,
+            effectiveModel: computerTaskModel || null,
+          },
+        });
+        return { handled: true as const, browser: false as const };
+      }
+
       const outcome = await dispatchChatAutomationPlan(computerPlan, {
         ctx: {
           circleId,
@@ -1346,15 +3160,65 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             audit,
           },
         },
+        // Only compiler-owned sequences have complete, immutable calls at
+        // plan time. The dispatcher can therefore authorize their local
+        // deterministic handler from the declared policy: a direct request for
+        // the bounded unsaved draft, or one approval when the compiler marks a
+        // resource-heavy allocation. Generic/model-planned computer work keeps
+        // its existing per-tool exact approval boundaries.
+        approvalGate: exactSequenceProgram ? chatAutomationApprovalGate : undefined,
         handlers: {
-          run_computer_task: async () => {
+          run_computer_task: async (_dispatchedPlan, transportCtx) => {
             if (execution.entrypoint === 'browser_runtime') {
+              // P57: browser-lane parity for the P54 model-driven one-shot
+              // clarifier (the app/file/hybrid lane gets it inside
+              // executeComputerTaskWithAgent; this lane bypasses that
+              // runtime). Fail-open by contract — null means proceed.
+              try {
+                const { runComputerTaskClarifierCheck } = await import('../../../lib/computerTaskRuntime');
+                const clarification = await runComputerTaskClarifierCheck({
+                  task: trimmed,
+                  circleId,
+                  userId: currentUserId || 'anonymous',
+                  executionSummary: `browser · ${execution.preview.label}`,
+                  // Parity with the app lane's call inside
+                  // executeComputerTaskWithAgent: without the conversation
+                  // tail / attachment / resolved-app context, this lane
+                  // re-asks questions the user already answered in chat.
+                  appResolutionName: computerPlan.computerRequestRoute?.appResolution?.best?.displayName || null,
+                  hasAttachments: attachments.length > 0,
+                  chatHistoryTail: transcriptChatMessages(messages).slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n').slice(-1500),
+                  isLaunchOnly: false,
+                });
+                if (clarification) {
+                  return {
+                    executionKind: 'run_computer_task',
+                    status: 'needs_input',
+                    message: clarification.message,
+                    data: {
+                      adapterId: 'browser_adapter',
+                      clarification: {
+                        questions: clarification.questions,
+                        assumptions: clarification.assumptions,
+                      },
+                    },
+                  };
+                }
+              } catch { /* fail-open — proceed to planning */ }
               const plan = await describeComputerUsePlan({
                 task: trimmed,
                 circleId,
                 agentName,
                 userId: currentUserId || undefined,
-                model: computerTaskModel,
+                // P9: text-only planning may use the app-trained planner;
+                // the screen loop keeps its Sonnet pin downstream.
+                model: computerTaskPlannerModel,
+                planningContext: [
+                  transportCtx.agentContextPack?.compactPrompt || '',
+                  execution.dispatchPrefix,
+                ].filter(Boolean).join('\n\n'),
+                computerAppPreflight: execution.preflight,
+                computerAppGroundingTrace: execution.computerAppGroundingTrace,
               });
               const planCard = toBrowserPlanCardData(plan);
               return {
@@ -1368,6 +3232,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   readinessSummary: execution.readiness.summary,
                   recommendedMode: execution.recommendedMode,
                   capabilityProfile: execution.capabilityProfile,
+                  preflightSummary: execution.preflight.summary,
+                  preflightStatus: execution.preflight.status,
+                  preflightStrategy: execution.preflight.strategy
+                    ? {
+                        id: execution.preflight.strategy.id,
+                        label: execution.preflight.strategy.label,
+                      }
+                    : null,
+                  preflightBlockers,
+                  preflightWarnings,
+                  preflightFixActions: execution.preflight.fixActions,
+                  appAutomationRouteDecision: computerAppRouteDecision,
+                  groundingStatus: execution.computerAppGroundingTrace?.status || null,
+                  groundingSummary: execution.computerAppGroundingTrace?.display.summary || null,
+                  groundingNextAction: execution.computerAppGroundingTrace?.display.nextAction || null,
+                  groundingTrace: execution.computerAppGroundingTrace || null,
+                  complexityPlan: execution.complexityPlan,
                   grantSummary: execution.grants.summary,
                   approvalSummary: execution.grants.approvalSummary,
                   grantIds: execution.grants.outstanding.map((grant) => grant.id),
@@ -1385,6 +3266,33 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               };
             }
 
+            if (computerStickyScopeApplied?.scopeId) {
+              // T7 sticky allow scopes: this branch actually executes (it is
+              // not a preview), so record the standing-grant use
+              // fire-and-forget for the Permissions panel use count.
+              void import('../../../lib/computerGrantGateStore')
+                .then(({ recordStickyAllowScopeUse }) => recordStickyAllowScopeUse([computerStickyScopeApplied.scopeId]))
+                .catch(() => {});
+            }
+            // This branch is the native app/file/hybrid boundary (the browser
+            // runtime returned above). Release the web composer immediately
+            // before dispatch so later task-state reconciliation cannot make
+            // Chrome reclaim the foreground from the target desktop app.
+            if (Platform.OS === 'web') {
+              try { inputRef.current?.blur(); } catch {}
+            }
+            // Give the native app/file/hybrid agent lane the same real STOP
+            // signal used by OpenSwan session turns. The dispatcher above
+            // authorizes a compiled exact sequence at entry (direct request
+            // for a bounded unsaved draft, or a consumed plan approval); it is
+            // intentionally NOT adapted into a generic per-tool approval gate,
+            // so non-exact ask-before/floor matches remain closed.
+            computerTaskController = new AbortController();
+            // The legacy edge batch lane does not consume AbortSignal. Expose
+            // STOP only when the SwanBot v2 client loop can honor it.
+            if (isSwanbotV2ClientLoopEnabled()) {
+              openSwanAbortRef.current = computerTaskController;
+            }
             const result = await executeComputerTaskWithAgent({
               task: trimmed,
               circleId,
@@ -1394,46 +3302,360 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               audit,
               grantedIds,
               businessModelPlan,
-              chatHistory: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+              chatHistory: transcriptChatMessages(messages).slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
               sessionArchiveContext: await loadSessionArchiveContext() || undefined,
               replyTo: replyTo?.content,
+              readyCapabilityBuildout: options?.readyCapabilityBuildout || null,
+              disableCapabilityBuildout: Boolean(options?.readyCapabilityBuildout),
+              threadId: activeThreadId || undefined,
+              activePluginIds: activePluginsRef.current.slice(),
+              signal: computerTaskController.signal,
+              userConstraints: computerPlan.computerRequestRoute?.userConstraints ?? undefined,
+              alwaysConfirmFloor: computerPlan.computerRequestRoute?.alwaysConfirmFloor ?? undefined,
+              agentContextPack: transportCtx.agentContextPack,
+              exactSequenceDispatchAuthorized: Boolean(exactSequenceProgram),
+              // Wave-2 app choice: thread the route's resolution so the
+              // dispatch block carries the App-choice contract (open the
+              // chosen app first, verify frontmost, one named fallback).
+              appResolution: computerPlan.computerRequestRoute?.appResolution ?? null,
             });
+            // L0 escalation breadcrumbs: persist runtime surface escalations onto the durable record fire-and-forget (console/Office cards consume them).
+            if (result.surfaceEscalations?.length) void import('../../../lib/computerTaskState').then((m) => m.recordComputerTaskSurfaceEscalations(circleId, activeThreadId, result.surfaceEscalations)).catch(() => {});
+            // P62: a clarification is a QUESTION, not a completed task — the
+            // runtime early-returned before executing anything. Surface it as
+            // needs_input so the outcome pipeline's clarification seam below
+            // renders the questions verbatim and parks the task for resume
+            // (a 'completed' status here used to archive "Computer task
+            // completed" for a task that never ran, and image tasks had the
+            // questions replaced by fabricated proof-failure copy).
+            if (result.clarification) {
+              return {
+                executionKind: 'run_computer_task',
+                status: mapComputerTaskOutcomeToChatStatus(result.status),
+                message: result.response,
+                data: {
+                  adapterId: result.adapterId,
+                  computerTaskStatus: result.status,
+                  clarification: result.clarification,
+                },
+              };
+            }
+            const completedAutoRetryBuildout = options?.readyCapabilityBuildout
+              ? {
+                  ...(result.capabilityBuildout || options.readyCapabilityBuildout),
+                  autoRetryStatus: result.status === 'completed' ? 'completed' as const : 'failed' as const,
+                  autoRetryCompletedAt: result.status === 'completed' ? new Date().toISOString() : null,
+                  autoRetryRunId: result.runId || options.readyCapabilityBuildout.autoRetryRunId || null,
+                  updatedAt: new Date().toISOString(),
+                }
+              : null;
 
             return {
               executionKind: 'run_computer_task',
-              status: 'completed',
+              status: mapComputerTaskOutcomeToChatStatus(result.status),
               message: result.response,
               warnings: result.warnings,
               runId: result.runId || null,
               data: {
                 adapterId: result.adapterId,
+                computerTaskStatus: result.status,
                 taskKind: result.execution.preview.kind,
                 taskLabel: result.execution.preview.label,
                 readinessSummary: result.execution.readiness.summary,
                 recommendedMode: result.execution.recommendedMode,
                 capabilityProfile: result.execution.capabilityProfile,
+                preflightSummary: result.execution.preflight.summary,
+                preflightStatus: result.execution.preflight.status,
+                preflightStrategy: result.execution.preflight.strategy
+                  ? {
+                      id: result.execution.preflight.strategy.id,
+                      label: result.execution.preflight.strategy.label,
+                    }
+                  : null,
+                preflightBlockers: result.execution.preflight.blockers.map((item) => `${item.label}: ${item.fix}`),
+                preflightWarnings: result.execution.preflight.warnings.map((item) => `${item.label}: ${item.fix}`),
+                preflightFixActions: result.execution.preflight.fixActions,
+                appAutomationRouteDecision: result.execution.preflight.routeDecision || computerAppRouteDecision,
+                groundingStatus: result.execution.computerAppGroundingTrace?.status || null,
+                groundingSummary: result.execution.computerAppGroundingTrace?.display.summary || null,
+                groundingNextAction: result.execution.computerAppGroundingTrace?.display.nextAction || null,
+                groundingTrace: result.execution.computerAppGroundingTrace || null,
+                complexityPlan: result.execution.complexityPlan,
                 grantSummary: result.execution.grants.summary,
                 approvalSummary: result.execution.grants.approvalSummary,
                 grantIds: result.execution.grants.outstanding.map((grant) => grant.id),
                 handoffSuggestion: result.handoffSuggestion || null,
+                capabilityBuildout: completedAutoRetryBuildout || result.capabilityBuildout || null,
+                replayPolicy: result.replayPolicy || 'normal',
+                mutationDispatched: result.mutationDispatched === true,
+                verificationOnlyTools: result.verificationOnlyTools?.slice(0, 4) || [],
               },
             };
           },
         },
-        onOutcome: attachPlanDecisionToRun,
+        onOutcome: async (plan, planOutcome, context) => {
+          await attachPlanDecisionToRun(plan, planOutcome, context);
+          const status = normalizeComputerTaskOutcomeStatus(planOutcome.data?.computerTaskStatus)
+            || normalizeComputerTaskOutcomeStatus(planOutcome.status)
+            || (planOutcome.status === 'deferred' ? 'waiting_approval' : null);
+          if (!planOutcome.runId || !status) return;
+          await import('../../../lib/agentRunSystem')
+            .then(({ mergeRunMetadata }) => mergeRunMetadata(planOutcome.runId!, {
+              computerTaskStatus: status,
+            }))
+            .catch(() => {});
+        },
       });
 
-      const prefix = outcome.data?.taskLabel
-        ? `**Use Computer** routed as ${String(outcome.data.taskLabel).toLowerCase()}.\n\n`
-        : '**Use Computer**\n\n';
+      const deferredApprovalCategory = typeof outcome.data?.approvalCategory === 'string'
+        ? outcome.data.approvalCategory
+        : null;
+      if (
+        exactSequenceProgram
+        && outcome.status === 'deferred'
+        && outcome.approvalId
+        && (deferredApprovalCategory === 'filed' || deferredApprovalCategory === 'pending')
+      ) {
+        const now = Date.now();
+        for (const [approvalId, pending] of pendingExactPlanApprovalResumesRef.current) {
+          if (pending.expiresAt <= now) pendingExactPlanApprovalResumesRef.current.delete(approvalId);
+        }
+        const reportedExpiry = Number(outcome.data?.approvalExpiresAt);
+        pendingExactPlanApprovalResumesRef.current.set(outcome.approvalId, {
+          task: trimmed,
+          circleId,
+          threadId: activeThreadId || null,
+          expiresAt: Number.isFinite(reportedExpiry) && reportedExpiry > now
+            ? reportedExpiry
+            : now + 15 * 60 * 1000,
+          originSettled: exactApprovalOriginSettled,
+        });
+      }
+
+      const prefix = '';
       const grantSummary = typeof outcome.data?.grantSummary === 'string' ? outcome.data.grantSummary : '';
       const approvalSummary = typeof outcome.data?.approvalSummary === 'string' ? outcome.data.approvalSummary : '';
+      const computerTaskStatus = normalizeComputerTaskOutcomeStatus(outcome.data?.computerTaskStatus)
+        || normalizeComputerTaskOutcomeStatus(outcome.status)
+        || (outcome.status === 'deferred' ? 'waiting_approval' : null);
       const grantIds = Array.isArray(outcome.data?.grantIds)
         ? outcome.data.grantIds as Array<'browser_navigation' | 'browser_side_effect' | 'file_read' | 'file_write' | 'app_read' | 'app_action' | 'mcp_tool' | 'bridge_tool'>
         : [];
+      const outcomePreflightBlockers = Array.isArray(outcome.data?.preflightBlockers)
+        ? (outcome.data.preflightBlockers as unknown[]).map(String).filter(Boolean)
+        : [];
+      const outcomePreflightWarnings = Array.isArray(outcome.data?.preflightWarnings)
+        ? (outcome.data.preflightWarnings as unknown[]).map(String).filter(Boolean)
+        : [];
+      const outcomePreflightFixActions = Array.isArray(outcome.data?.preflightFixActions)
+        ? (outcome.data.preflightFixActions as unknown[]).map(String).filter(Boolean)
+        : [];
+      const rawOutcomeWarnings = Array.isArray(outcome.warnings)
+        ? Array.from(new Set((outcome.warnings as unknown[]).map(String).filter(Boolean)))
+        : [];
+      const outcomeWarnings = rawOutcomeWarnings.filter((warning) => (
+        !isQuietSuccessfulComputerTaskWarning(warning)
+        && !isSupportOnlyComputerTaskWarning(warning)
+      ));
+      const visibleOutcomeMessage = sanitizeVisibleComputerTaskMessage(
+        outcome.message,
+        computerTaskStatus || outcome.status,
+      );
       const browserPlan = outcome.data?.browserPlan as BrowserPlanCardData | undefined;
       const browserActions = outcome.data?.browserActions as BrowserAction[] | undefined;
       const handoff = outcome.data?.handoffSuggestion as HandoffSuggestion | undefined;
+      const capabilityBuildout = outcome.data?.capabilityBuildout as ComputerTaskCapabilityBuildout | null | undefined;
+      const replayPolicy = outcome.data?.replayPolicy === 'manual_verify_only'
+        ? 'manual_verify_only' as const
+        : 'normal' as const;
+      const mutationDispatched = outcome.data?.mutationDispatched === true;
+      const verificationOnlyTools = Array.isArray(outcome.data?.verificationOnlyTools)
+        ? (outcome.data.verificationOnlyTools as unknown[]).map(String).filter(Boolean).slice(0, 4)
+        : [];
+      const capabilityBuildoutHints = buildAgentAppCapabilityBuildoutStateHints({
+        status: capabilityBuildout?.status,
+        message: capabilityBuildout?.message,
+        retryPlan: capabilityBuildout?.retryPlan,
+        userActionNeeded: capabilityBuildout?.userActionNeeded,
+        missingEvidence: capabilityBuildout?.missingEvidence,
+      });
+      const adapterId = typeof outcome.data?.adapterId === 'string' ? outcome.data.adapterId : null;
+      const computerTaskSource: ChatMessageSource = {
+        actor: 'OpenSwan',
+        surface: 'main_chat_computer_task',
+        selectedModel,
+        effectiveModel: adapterId === 'file_adapter'
+          ? 'computer-file-adapter'
+          : (computerTaskModel || null),
+      };
+      // ── P62: clarification seam ─────────────────────────────────────────
+      // A needs_input outcome carrying clarifier questions is a CONVERSATION
+      // turn, not a task outcome. Render the questions VERBATIM (the
+      // sanitize/compaction pipeline below can replace them with credential-
+      // failure or bridge copy), park the original task so the user's next
+      // reply resumes it with the answers folded in (the existing
+      // pendingClarificationRef seam — same resume path as ask_clarification),
+      // clear any planning-phase task card, and skip every completion/failure
+      // surface: no archive line, no failure recovery, no blocked/completed
+      // state.
+      const outcomeClarification = outcome.status === 'needs_input'
+        && outcome.data && typeof outcome.data === 'object'
+        ? (outcome.data as { clarification?: { questions?: unknown[]; assumptions?: unknown[] } }).clarification
+        : null;
+      if (outcomeClarification && typeof outcome.message === 'string' && outcome.message.trim()) {
+        const clarifyKey = activeThreadId || 'main';
+        pendingClarificationRef.current.set(clarifyKey, {
+          originalMessage: trimmed,
+          pendingIntent: null, // default fold-in: `${original} — ${answer}`
+          missingParams: Array.isArray(outcomeClarification.questions)
+            ? outcomeClarification.questions.map(String).slice(0, 3)
+            : [],
+          askedAt: Date.now(),
+        });
+        persistPendingClarifications();
+        setAttentionTick((tick) => tick + 1);
+        setComputerTaskState(null);
+        await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+        addBotMessage(outcome.message, undefined, {
+          source: computerTaskSource,
+          computerTaskStatus: computerTaskStatus || 'needs_input',
+          quickReplies: ['Proceed'],
+        });
+        return { handled: true as const, browser: false };
+      }
+      const outcomeGroundingTrace = outcome.data?.groundingTrace as any;
+      const outcomeGroundingState: ComputerTaskStateGrounding | null = outcomeGroundingTrace?.display
+        ? {
+            status: String(outcomeGroundingTrace.status || ''),
+            strategyId: outcomeGroundingTrace.strategyId ? String(outcomeGroundingTrace.strategyId) : null,
+            strategyLabel: outcomeGroundingTrace.strategyLabel ? String(outcomeGroundingTrace.strategyLabel) : null,
+            primarySurface: outcomeGroundingTrace.primarySurface ? String(outcomeGroundingTrace.primarySurface) : null,
+            summary: outcomeGroundingTrace.display.summary ? String(outcomeGroundingTrace.display.summary) : null,
+            nextAction: outcomeGroundingTrace.display.nextAction ? String(outcomeGroundingTrace.display.nextAction) : null,
+            badges: Array.isArray(outcomeGroundingTrace.display.badges) ? outcomeGroundingTrace.display.badges.map(String).filter(Boolean) : [],
+            blockers: Array.isArray(outcomeGroundingTrace.display.blockers) ? outcomeGroundingTrace.display.blockers.map(String).filter(Boolean) : [],
+          }
+        : groundingState;
+      const outcomeGroundingNextSteps = outcomeGroundingState?.nextAction
+        ? [`Grounding next action: ${outcomeGroundingState.nextAction}`]
+        : [];
+      const outcomeGroundingBlockers = outcomeGroundingState?.blockers || [];
+      const outcomeComplexityPlan = (outcome.data?.complexityPlan as any) || execution.complexityPlan;
+      const outcomeComplexityNextSteps = outcomeComplexityPlan?.level && outcomeComplexityPlan.level !== 'simple' && Array.isArray(outcomeComplexityPlan.visibleNextSteps)
+        ? outcomeComplexityPlan.visibleNextSteps.map(String).filter(Boolean)
+        : [];
+      const handoffContext = buildChatComputerHandoffContext({
+        task: trimmed,
+        entrypoint: execution.entrypoint,
+        adapterId,
+        taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+        taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+        capabilityProfile: typeof outcome.data?.capabilityProfile === 'string' ? outcome.data.capabilityProfile : execution.capabilityProfile,
+        recommendedMode: typeof outcome.data?.recommendedMode === 'string' ? outcome.data.recommendedMode : execution.recommendedMode,
+        grantSummary: grantSummary || execution.grants.summary,
+        approvalSummary: approvalSummary || null,
+        browserPlanId: browserPlan?.planId || null,
+        browserActionCount: Array.isArray(browserActions) ? browserActions.length : null,
+        runId: outcome.runId || null,
+        // A browser plan is not the task outcome. Manual plans receive an
+        // explicit waiting_approval status below; auto-started plans remain
+        // non-terminal until their browser runtime posts a result.
+        outcomeStatus: browserPlan && browserActions ? null : computerTaskStatus,
+        preflightStatus: typeof outcome.data?.preflightStatus === 'string' ? outcome.data.preflightStatus : execution.preflight.status,
+        preflightSummary: typeof outcome.data?.preflightSummary === 'string' ? outcome.data.preflightSummary : execution.preflight.summary,
+        groundingStatus: outcomeGroundingState?.status || null,
+        groundingSummary: outcomeGroundingState?.summary || null,
+        requestNotice: computerRequestNotice,
+        evidenceContract: computerEvidenceContract,
+        appAutomationRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
+        replayPolicy,
+        mutationDispatched,
+        verificationOnlyTools,
+        stickyScopeApplied: computerStickyScopeApplied,
+        warnings: outcomeWarnings,
+        rawWarnings: rawOutcomeWarnings,
+        blockers: [...outcomePreflightBlockers, ...outcomeGroundingBlockers, ...capabilityBuildoutHints.blockers],
+      });
+      const handoffBlock = formatChatComputerHandoffForMessage(handoffContext);
+      let shouldShowPendingHandoff = Boolean(handoff);
+      let shouldClearPendingHandoff = false;
+      // WI-1: zero-tap auto-start. A plain-web browser route with no login/
+      // delete/grant floor and no "ask me first" constraint launches without
+      // the permission dialog. The pay/book floor (route.alwaysConfirmFloor may
+      // carry 'pay') is a MID-RUN gate enforced by the edge loop, so it does
+      // not block the start tap here. WordPress/website-admin credentialed
+      // routes and desktop mutations still fail closed to the dialog.
+      const autoStartRoute = computerPlan.computerRequestRoute;
+      const browserAutoStart = (browserPlan && browserActions && autoStartRoute)
+        ? decideBrowserAutoStart({
+            routeKind: autoStartRoute.kind,
+            entrypoint: execution.entrypoint,
+            alwaysConfirmFloor: autoStartRoute.alwaysConfirmFloor ?? null,
+            userConstraints: autoStartRoute.userConstraints ?? null,
+            websitePlatformAdmin: isCredentialedWebsiteAdminRoute(autoStartRoute.appStrategy ?? null, trimmed),
+          })
+        : { autoStart: false as const, reason: 'no-browser-plan' };
+      if (browserPlan && browserActions && browserAutoStart.autoStart) {
+        // Auto-start: run the dialog's onAllow body inline (including the
+        // grantComputerTaskScopes / recordStickyAllowScopeUse persistence that
+        // otherwise only fires from the dialog) then launch immediately.
+        // browserAutoStart.reason is secret-safe — log for audit only.
+        console.log('[ChatTab] browser auto-start:', browserAutoStart.reason);
+        const autoPermission: ComputerUsePermission = browserPlan.recommendedPermission || 'ask_for_new_sites';
+        const autoGrantIdsToPersist = deriveGrantedScopesFromBrowserPermission(autoPermission, grantIds);
+        const autoStickyScopeId = computerStickyScopeApplied?.scopeId || null;
+        computerUsePostedKeyRef.current = null;
+        await persistComputerTaskState({
+          task: trimmed,
+          taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+          taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+          phase: 'executing',
+          outcomeStatus: null,
+          adapterId: String(outcome.data?.adapterId || 'browser_adapter'),
+          grantedAccess: Array.from(new Set([...grantIds, ...autoGrantIdsToPersist])),
+          accessPlan: grantSummary || execution.grants.summary,
+          nextSteps: ['Run browser task', 'Summarize findings'],
+          grounding: outcomeGroundingState,
+          complexity: compactComputerTaskComplexityPlan(outcomeComplexityPlan),
+        });
+        await grantComputerTaskScopes(circleId, autoGrantIdsToPersist).catch(() => {});
+        if (autoStickyScopeId) {
+          void import('../../../lib/computerGrantGateStore')
+            .then(({ recordStickyAllowScopeUse }) => recordStickyAllowScopeUse([autoStickyScopeId]))
+            .catch(() => {});
+        }
+        // WI-1 default backend: with no Browserbase configured the plan runs on
+        // the local playwright bridge. computerUseTask.run only drives the cloud
+        // (Stagehand) agent, so mirror the manual onAllow path and dispatch the
+        // bridge run here; it posts its own launch message.
+        if (browserPlan.backend === 'playwright_bridge') {
+          await runLocalBrowserPlan(browserPlan, autoPermission, null);
+          return { handled: true as const, browser: true, autoStarted: true as const };
+        }
+        const autoPolicy = buildChatComputerUsePolicyInputs(trimmed);
+        const autoStarted = await computerUseTask.run(trimmed, {
+          model: resolveSendModel(trimmed) || undefined,
+          userConstraints: autoPolicy.userConstraints,
+          alwaysConfirmCategories: autoPolicy.alwaysConfirmCategories,
+        });
+        if (!autoStarted.started) {
+          addBotMessage('**Computer Use** could not start. Check the connection and try again.', undefined, {
+            source: computerTaskSource,
+          });
+        } else {
+          // WI-1: the run has already launched, so surface it as launched (not
+          // "APPROVAL REQUIRED"). Override on both the posted card and the
+          // persisted metadata copy so a reload does not re-show the approval.
+          const launchedBrowserPlan = { ...browserPlan, requiresApproval: false, status: 'launched' as const };
+          addBotMessage(`Browser run started — live view\n\n${trimmed}`, undefined, {
+            runId: outcome.runId || null,
+            browserPlans: [launchedBrowserPlan],
+            computerHandoff: handoffContext.metadata,
+            source: computerTaskSource,
+          });
+        }
+        return { handled: true as const, browser: !!browserPlan, autoStarted: true as const };
+      }
       if (browserPlan && browserActions) {
         setPendingComputerUseTask(trimmed);
         setPendingComputerUsePlan(browserPlan);
@@ -1442,8 +3664,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         setPendingComputerUseApprovalSummary(approvalSummary);
         setPendingComputerUseGrantIds(grantIds);
         setPendingComputerUseOrigin(null);
+        setPendingComputerUseStickyScopeId(computerStickyScopeApplied?.scopeId || null);
         setShowComputerUsePermission(true);
-        const accessBlock = grantSummary
+        const showAccessBlock = Boolean(
+          approvalSummary
+          || outcome.status !== 'completed'
+          || outcomeWarnings.length > 0
+          || outcomePreflightBlockers.length > 0
+          || outcomePreflightWarnings.length > 0
+          || outcomeGroundingBlockers.length > 0,
+        );
+        const accessBlock = grantSummary && showAccessBlock
           ? `\n\n${grantSummary}${approvalSummary ? `\n${approvalSummary}` : ''}`
           : '';
         await persistComputerTaskState({
@@ -1451,90 +3682,335 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           taskKind: String(outcome.data?.taskKind || execution.preview.kind),
           taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
           phase: 'awaiting_approval',
+          outcomeStatus: 'waiting_approval',
           adapterId: String(outcome.data?.adapterId || 'browser_adapter'),
           grantedAccess: execution.grants.granted,
           accessPlan: grantSummary || execution.grants.summary,
-          nextSteps: ['Approve the task to start browser execution'],
-          blockers: approvalSummary ? [approvalSummary] : [],
+          nextSteps: outcomePreflightFixActions.length > 0
+            ? outcomePreflightFixActions
+            : [...outcomeGroundingNextSteps, ...outcomeComplexityNextSteps, 'Approve the task to start browser execution'].slice(0, 5),
+          blockers: [
+            ...(approvalSummary ? [approvalSummary] : []),
+            ...outcomePreflightBlockers,
+            ...outcomeGroundingBlockers,
+          ].slice(0, 6),
+          grounding: outcomeGroundingState,
+          complexity: compactComputerTaskComplexityPlan(outcomeComplexityPlan),
         });
         recordSessionArchiveEvent({
           kind: 'computer_task',
           summary: `Computer task awaiting approval: ${trimmed}`,
-          touched: ['surface:computer_use', 'surface:browser', `computer_task:${trimmed}`],
+          touched: Array.from(new Set([...handoffContext.touched, 'surface:browser'])),
           metadata: {
+            handoff: handoffContext.metadata,
+            computerTaskStatus: 'waiting_approval',
             adapterId: String(outcome.data?.adapterId || 'browser_adapter'),
             grantSummary: grantSummary || execution.grants.summary,
             approvalSummary: approvalSummary || null,
+            preflight: {
+              status: outcome.data?.preflightStatus || execution.preflight.status,
+              summary: outcome.data?.preflightSummary || execution.preflight.summary,
+              strategy: outcome.data?.preflightStrategy || null,
+              blockers: outcomePreflightBlockers,
+              warnings: outcomePreflightWarnings,
+              fixActions: outcomePreflightFixActions,
+            },
+            grounding: outcomeGroundingState,
+            complexityPlan: outcomeComplexityPlan,
           },
         });
-        addBotMessage(`${prefix}${outcome.message}${accessBlock}`, undefined, { runId: outcome.runId || null, browserPlans: [browserPlan] });
+        addBotMessage(`${prefix}${visibleOutcomeMessage || outcome.message}${handoffBlock}${accessBlock}`, undefined, {
+          runId: outcome.runId || null,
+          browserPlans: [browserPlan],
+          computerTaskStatus: 'waiting_approval',
+          computerHandoff: handoffContext.metadata,
+          chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
+          source: computerTaskSource,
+        });
       } else {
-        const accessBlock = grantSummary
+        const showAccessBlock = Boolean(
+          approvalSummary
+          || outcome.status !== 'completed'
+          || outcomeWarnings.length > 0
+          || outcomePreflightBlockers.length > 0
+          || outcomePreflightWarnings.length > 0
+          || outcomeGroundingBlockers.length > 0,
+        );
+        const accessBlock = grantSummary && showAccessBlock
           ? `\n\n${grantSummary}${approvalSummary ? `\n${approvalSummary}` : ''}`
           : '';
-        const warningBlock = outcome.warnings?.length
-          ? `\n\n${outcome.warnings.map((warning) => `- ${warning}`).join('\n')}`
-          : '';
-        await persistComputerTaskState({
+        const outcomePresentation = buildChatComputerOutcomePresentation({
           task: trimmed,
-          taskKind: String(outcome.data?.taskKind || execution.preview.kind),
-          taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
-          phase: outcome.warnings?.length ? 'blocked' : 'completed',
-          adapterId: typeof outcome.data?.adapterId === 'string' ? outcome.data.adapterId : null,
-          runId: outcome.runId || null,
-          grantedAccess: execution.grants.granted,
-          accessPlan: grantSummary || execution.grants.summary,
-          blockers: outcome.warnings || [],
-          nextSteps: handoff ? [handoff.title] : [],
+          outcomeStatus: computerTaskStatus || outcome.status,
+          outcomeMessage: outcome.message,
+          rawWarnings: rawOutcomeWarnings,
+          visibleWarnings: outcomeWarnings,
+          preflightBlockers: outcomePreflightBlockers,
+          preflightWarnings: outcomePreflightWarnings,
+          groundingBlockers: outcomeGroundingBlockers,
+          capabilityBlockers: capabilityBuildoutHints.blockers,
+          capabilityPhase: capabilityBuildoutHints.phase,
+          suppressGenericRecovery: capabilityBuildoutHints.suppressGenericRecovery,
+          approvalCategory: deferredApprovalCategory,
+          replayPolicy,
+          mutationDispatched,
+          verificationOnlyTools,
         });
+        shouldShowPendingHandoff = Boolean(handoff && !outcomePresentation.hideComputerHandoff);
+        shouldClearPendingHandoff = outcomePresentation.hideComputerHandoff;
+        const warningBlock = outcomePresentation.warningBlock;
+        const blockerList = outcomePresentation.blockerList;
+        const shouldRecoverOutcome = outcomePresentation.shouldRecoverOutcome;
+        const outcomeFailureMessage = [
+          outcome.message,
+          blockerList.length ? `Outcome blockers:\n${blockerList.map((blocker) => `- ${blocker}`).join('\n')}` : '',
+          outcomeWarnings.length ? `Warnings:\n${outcomeWarnings.map((warning) => `- ${warning}`).join('\n')}` : '',
+          outcomePreflightBlockers.length ? `Preflight blockers:\n${outcomePreflightBlockers.map((blocker) => `- ${blocker}`).join('\n')}` : '',
+          outcomeGroundingBlockers.length ? `Grounding blockers:\n${outcomeGroundingBlockers.map((blocker) => `- ${blocker}`).join('\n')}` : '',
+        ].filter(Boolean).join('\n\n');
+        const outcomeCheckpointRecovery = shouldRecoverOutcome
+          ? diagnoseComputerTaskCheckpointFailure({
+              task: trimmed,
+              failureMessage: outcomeFailureMessage,
+              outcomeStatus: computerTaskStatus || (outcome.status === 'completed' ? 'completed_with_warnings' : outcome.status),
+              executionKind: outcome.executionKind,
+              source: 'computer_task_outcome',
+              planSummary: computerPlan.notes.join('; '),
+              groundingSummary: outcomeGroundingState?.summary || null,
+              preflightSummary: typeof outcome.data?.preflightSummary === 'string' ? outcome.data.preflightSummary : execution.preflight.summary,
+              complexityPlan: outcomeComplexityPlan,
+            })
+          : null;
+        if (outcomePresentation.hideComputerTaskStatus) {
+          setComputerTaskState(null);
+          await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+        } else {
+          await persistComputerTaskState({
+            task: trimmed,
+            taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+            taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+            phase: outcomePresentation.statePhase,
+            outcomeStatus: computerTaskStatus,
+            adapterId,
+            runId: outcome.runId || null,
+            grantedAccess: execution.grants.granted,
+            accessPlan: grantSummary || execution.grants.summary,
+            blockers: blockerList,
+            nextSteps: capabilityBuildoutHints.nextSteps.length > 0
+              ? capabilityBuildoutHints.nextSteps
+              : outcomePresentation.nextSteps.length > 0
+                ? outcomePresentation.nextSteps
+                : handoff && !outcomePresentation.hideComputerHandoff
+                  ? [handoff.title]
+                  : outcomePreflightFixActions.length > 0
+                    ? outcomePreflightFixActions
+                    : [...outcomeGroundingNextSteps, ...outcomeComplexityNextSteps].slice(0, 5),
+            grounding: outcomeGroundingState,
+            capabilityBuildout: capabilityBuildout || null,
+            complexity: compactComputerTaskComplexityPlan(outcomeComplexityPlan),
+            checkpointRecovery: outcomeCheckpointRecovery,
+            checkpointRecoveryIsNew: true,
+            checkpointRecoveryObservations: Array.isArray(outcomeGroundingTrace?.observations) ? outcomeGroundingTrace.observations : execution.computerAppGroundingTrace?.observations || [],
+          });
+        }
+        const computerTaskArchiveSummary = capabilityBuildout
+          ? capabilityBuildout.status === 'approval_required'
+            ? `Computer task awaiting app capability buildout approval: ${trimmed}`
+            : capabilityBuildout.status === 'requested'
+              ? `Computer task building missing app capability: ${trimmed}`
+              : capabilityBuildout.status === 'ready_to_retry'
+                ? `Computer task ready to retry after app capability buildout: ${trimmed}`
+                : capabilityBuildout.status === 'incomplete'
+                  ? `Computer task has incomplete app capability buildout evidence: ${trimmed}`
+                : capabilityBuildout.status === 'blocked'
+                  ? `Computer task blocked by app capability buildout: ${trimmed}`
+                  : `Computer task app capability buildout failed: ${trimmed}`
+          : computerTaskStatus === 'completed'
+            ? `Computer task completed without browser runtime: ${trimmed}`
+            : computerTaskStatus === 'partial'
+              ? `Computer task partially completed: ${trimmed}`
+              : computerTaskStatus === 'waiting_approval'
+                ? `Computer task awaiting approval: ${trimmed}`
+                : computerTaskStatus === 'needs_input'
+                  ? `Computer task needs input: ${trimmed}`
+                  : computerTaskStatus === 'cancelled'
+                    ? `Computer task cancelled: ${trimmed}`
+                    : computerTaskStatus === 'failed'
+                      ? `Computer task failed: ${trimmed}`
+                      : `Computer task blocked: ${trimmed}`;
         recordSessionArchiveEvent({
           kind: 'computer_task',
-          summary: outcome.warnings?.length
-            ? `Computer task blocked: ${trimmed}`
-            : `Computer task completed without browser runtime: ${trimmed}`,
-          touched: ['surface:computer_use', `computer_task:${trimmed}`],
+          summary: computerTaskArchiveSummary,
+          touched: handoffContext.touched,
           metadata: {
-            adapterId: typeof outcome.data?.adapterId === 'string' ? outcome.data.adapterId : null,
-            warnings: outcome.warnings || [],
+            handoff: handoffContext.metadata,
+            computerTaskStatus,
+            adapterId,
+            warnings: outcomeWarnings,
             runId: outcome.runId || null,
+            preflight: {
+              status: outcome.data?.preflightStatus || execution.preflight.status,
+              summary: outcome.data?.preflightSummary || execution.preflight.summary,
+              strategy: outcome.data?.preflightStrategy || null,
+              blockers: outcomePreflightBlockers,
+              warnings: outcomePreflightWarnings,
+              fixActions: outcomePreflightFixActions,
+            },
+            grounding: outcomeGroundingState,
+            complexityPlan: outcomeComplexityPlan,
+            capabilityBuildout: capabilityBuildout || null,
+            checkpointRecovery: outcomeCheckpointRecovery,
           },
         });
-        addBotMessage(`${prefix}${outcome.message}${accessBlock}${warningBlock}`, undefined, { runId: outcome.runId || null });
+        let recovery: ChatFailureRecoveryPayload | null = null;
+        if (shouldRecoverOutcome) {
+          releaseComputerTaskTransientUi();
+          recovery = await startTaskFailureRecovery({
+              failureMessage: outcomeFailureMessage,
+              outcomeStatus: computerTaskStatus || (outcome.status === 'completed' ? 'completed_with_warnings' : outcome.status),
+              executionKind: outcome.executionKind,
+              runId: outcome.runId || null,
+              planSummary: computerPlan.notes.join('; '),
+              groundingSummary: outcomeGroundingState?.summary || null,
+              preflightSummary: typeof outcome.data?.preflightSummary === 'string' ? outcome.data.preflightSummary : execution.preflight.summary,
+              source: 'computer_task_outcome',
+              complexityPlan: outcomeComplexityPlan,
+              checkpointRecovery: outcomeCheckpointRecovery,
+              appRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
+              replayPolicy,
+              mutationDispatched,
+              verificationOnlyTools,
+            });
+        }
+        const userVisibleOutcome = outcomePresentation.compactUserMessage
+          ? outcomePresentation.compactUserMessage
+          : `${prefix}${visibleOutcomeMessage || outcome.message}${handoffBlock}${accessBlock}${warningBlock}${recovery?.message || ''}`;
+        addBotMessage(userVisibleOutcome, undefined, {
+          runId: outcome.runId || null,
+          recoveryOptions: outcomePresentation.hideRecoveryDetails ? undefined : recovery?.recoveryOptions,
+          recoveryReliability: outcomePresentation.hideRecoveryDetails ? undefined : recovery?.recoveryReliability,
+          computerTaskStatus,
+          computerHandoff: outcomePresentation.hideComputerHandoff ? undefined : handoffContext.metadata,
+          chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
+          source: computerTaskSource,
+        });
       }
 
-      if (handoff) {
+      if (shouldShowPendingHandoff && handoff) {
         setPendingHandoff(handoff);
+      } else if (shouldClearPendingHandoff) {
+        setPendingHandoff(null);
       }
       return { handled: true as const, browser: !!browserPlan };
     } catch (error: any) {
+      const exceptionHandoffContext = buildChatComputerHandoffContext({
+        task: trimmed,
+        entrypoint: execution.entrypoint,
+        adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+        taskKind: execution.preview.kind,
+        taskLabel: execution.preview.label,
+        capabilityProfile: execution.capabilityProfile,
+        recommendedMode: execution.recommendedMode,
+        outcomeStatus: 'failed',
+        grantSummary: execution.grants.summary,
+        approvalSummary: execution.grants.approvalSummary,
+        preflightStatus: execution.preflight.status,
+        preflightSummary: execution.preflight.summary,
+        groundingStatus: groundingState?.status || null,
+        groundingSummary: groundingState?.summary || null,
+        requestNotice: computerRequestNotice,
+        evidenceContract: computerEvidenceContract,
+        appAutomationRouteDecision: computerAppRouteDecision,
+        blockers: [error?.message || 'Unknown error'],
+      });
+      const exceptionCheckpointRecovery = diagnoseComputerTaskCheckpointFailure({
+        task: trimmed,
+        failureMessage: error?.message || 'Unknown error',
+        outcomeStatus: 'failed',
+        executionKind: 'run_computer_task',
+        source: 'computer_task_exception',
+        preflightSummary: execution.preflight.summary,
+        groundingSummary: groundingState?.summary || null,
+        complexityPlan: execution.complexityPlan,
+      });
       await persistComputerTaskState({
         task: trimmed,
         taskKind: execution.preview.kind,
         taskLabel: execution.preview.label,
         phase: 'failed',
+        outcomeStatus: 'failed',
         adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
         grantedAccess: execution.grants.granted,
         accessPlan: execution.grants.summary,
         blockers: [error?.message || 'Unknown error'],
+        grounding: groundingState,
+        capabilityBuildout: options?.readyCapabilityBuildout
+          ? {
+              ...options.readyCapabilityBuildout,
+              autoRetryStatus: 'failed',
+              autoRetryCompletedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }
+          : null,
+        complexity: compactComputerTaskComplexityPlan(execution.complexityPlan),
+        checkpointRecovery: exceptionCheckpointRecovery,
+        checkpointRecoveryIsNew: true,
+        checkpointRecoveryObservations: execution.computerAppGroundingTrace?.observations || [],
       });
       recordSessionArchiveError(
         `Use Computer failed: ${error?.message || 'Unknown error'}`,
         typeof error?.stack === 'string' ? error.stack : null,
-        ['surface:computer_use', `computer_task:${trimmed}`],
+        exceptionHandoffContext.touched,
       );
-      addBotMessage(`**Use Computer** failed: ${error?.message || 'Unknown error'}`);
+      releaseComputerTaskTransientUi();
+      const recovery = await startTaskFailureRecovery({
+        failureMessage: error?.message || 'Unknown error',
+        failureStack: typeof error?.stack === 'string' ? error.stack : null,
+        outcomeStatus: 'failed',
+        executionKind: 'run_computer_task',
+        preflightSummary: execution.preflight.summary,
+        groundingSummary: groundingState?.summary || null,
+        source: 'computer_task_exception',
+        checkpointRecovery: exceptionCheckpointRecovery,
+        appRouteDecision: computerAppRouteDecision,
+      });
+      addBotMessage(appendCustomerSafeRecoveryMessage(
+        '**Use Computer** could not complete that task. Technical details were saved for recovery.',
+        recovery.message,
+      ), undefined, {
+        recoveryOptions: recovery.recoveryOptions,
+        recoveryReliability: recovery.recoveryReliability,
+        computerTaskStatus: 'failed',
+        computerHandoff: exceptionHandoffContext.metadata,
+        source: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_computer_task',
+          selectedModel,
+          effectiveModel: computerTaskModel || null,
+        },
+      });
       return { handled: true as const, browser: false as const };
     } finally {
+      if (openSwanAbortRef.current === computerTaskController) {
+        openSwanAbortRef.current = null;
+      }
       setRunStatus('idle');
       setBotTyping(false);
+      // A realtime approval click can arrive while the filing invocation is
+      // still persisting its awaiting-approval state. Release a queued resume
+      // only after this invocation has completed its own final UI writes, so
+      // it cannot clobber the resumed run back to idle/awaiting approval.
+      settleExactApprovalOrigin();
     }
   }, [
     activeThreadId,
     agentName,
+    chatAutomationApprovalGate,
     chatMode,
     circleId,
     currentUserId,
     currentUserName,
+    hydrateAppResolutionContext,
     loadSessionArchiveContext,
     messages,
     planActMode,
@@ -1543,6 +4019,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     replyTo,
     selectedModel,
     persistComputerTaskState,
+    startMainChatFailureRecoveryPayload,
   ]);
 
   // Called by the console when the user submits a drafted task. Kicks off
@@ -1559,9 +4036,89 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showMemoryViewer, setShowMemoryViewer] = useState(false);
   const [showPluginPicker, setShowPluginPicker] = useState(false);
   const [activePlugins, setActivePlugins] = useState<string[]>([]);
+  // executeSharedComputerTask is declared before plugin state in this legacy
+  // component. Read the current set through a stable ref so its callback never
+  // captures the initial empty list.
+  const activePluginsRef = useRef(activePlugins);
+  activePluginsRef.current = activePlugins;
   const [showRunHistory, setShowRunHistory] = useState(false);
   const [retryingLedgerCheck, setRetryingLedgerCheck] = useState<{ messageId: string; checkId: string } | null>(null);
   const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'delegated' | 'waiting_approval'>('idle');
+  // approval-resume: live pending agent_run_approvals count, reported by the
+  // RunApprovalBanner mount below. When a turn finalizes (runStatus back to
+  // 'idle') while an approval request is still pending, flip the run pill to
+  // 'waiting_approval' ("Needs your approval") instead of sitting silent —
+  // and clear it once the approvals resolve.
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
+  useEffect(() => {
+    if (botTyping) {
+      // A live turn owns the thinking label — never clobber it with the
+      // approval-pill copy, and clear a leftover pill label so an unrelated
+      // turn doesn't "think" under "Needs your approval".
+      if (runStatus === 'waiting_approval' && currentRunStep === 'Needs your approval') {
+        setCurrentRunStep('');
+      }
+      return;
+    }
+    if (pendingApprovalCount > 0 && runStatus === 'idle') {
+      setRunStatus('waiting_approval');
+      setCurrentRunStep('Needs your approval');
+    } else if (pendingApprovalCount === 0 && runStatus === 'waiting_approval') {
+      setRunStatus('idle');
+      setCurrentRunStep('');
+    }
+    // NOTE: `currentRunStep` is intentionally read (not depended on) — it is
+    // declared later in the component, so listing it here would evaluate the
+    // binding during render before initialization (TDZ). The clobber-clear
+    // only needs to run when botTyping/runStatus flip, which are deps.
+  }, [pendingApprovalCount, runStatus, botTyping]);
+  // approval-resume (multi-approve): approving several banner cards must not
+  // launch overlapping continuation turns (or silently drop the second card's
+  // resume behind the send lock / stale-idle runStatus window). Approved-but-
+  // unresumed approvals queue here; ONE combined continuation turn is
+  // dispatched when no send is in flight, and the "resuming" notice prints
+  // only at actual dispatch. Approvals granted while a turn is running are
+  // drained when that turn ends (runStatus idle + typing done), which keeps
+  // them inside the runtime's 15-minute cross-run approval honor window.
+  const queuedApprovalResumesRef = useRef<Array<{ id: string; tool: string }>>([]);
+  const approvalResumeInFlightRef = useRef(false);
+  const flushQueuedApprovalResumesRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (runStatus === 'idle' && !botTyping) {
+      approvalResumeInFlightRef.current = false;
+      flushQueuedApprovalResumesRef.current();
+    }
+  }, [runStatus, botTyping]);
+  // Re-assigned every render so the drain effect and the banner's onResolved
+  // always invoke the freshest closure (addBotMessage/sendMessage are declared
+  // later in this component; they are only dereferenced at call time, after
+  // render, so the late declaration is safe).
+  flushQueuedApprovalResumesRef.current = () => {
+    if (queuedApprovalResumesRef.current.length === 0) return;
+    // One continuation at a time — the in-flight ref is synchronous, so a
+    // second Approve tapped inside the stale-idle window (before
+    // setRunStatus('running') commits) still queues instead of double-sending.
+    if (approvalResumeInFlightRef.current) return;
+    // A live loop picks run-scoped approvals up on its next round by itself;
+    // the turn-end drain effect above flushes anything still queued.
+    if (runStatus === 'running' || runStatus === 'delegated' || botTyping) return;
+    // A send is mid-dispatch (350ms lock window): don't collide into
+    // sendMessage's silent return — the turn-end drain will retry.
+    if (sendLockRef.current) return;
+    const queued = queuedApprovalResumesRef.current.splice(0, queuedApprovalResumesRef.current.length);
+    approvalResumeInFlightRef.current = true;
+    const toolLabels = Array.from(new Set(queued.map((q) => q.tool)));
+    // The "resuming" notice prints ONLY at actual dispatch — never before a
+    // guard that could silently drop the continuation.
+    addBotMessage(`✅ Approval${queued.length > 1 ? 's' : ''} granted — resuming ${toolLabels.join(', ')} now.`, undefined, {
+      localOnly: true,
+      durability: 'ephemeral',
+    });
+    const lines = queued.map((q) => `Approval ${q.id.slice(0, 8)} for ${q.tool} was granted.`);
+    void sendMessage(
+      `${lines.join(' ')} For each approved tool call that has not already executed since its approval, retry that exact call with the same arguments now — skip any that already completed. Then continue the task.`,
+    );
+  };
   // Drives the rotating "is noodling / is pondering / is cooking …"
   // verbs in the typing indicator. Ticks only while the bot is
   // actually typing so the interval doesn't run forever in the
@@ -1569,7 +4126,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // always sees the full rotation from the start.
   const [thinkingVerbIndex, setThinkingVerbIndex] = useState(0);
   useEffect(() => {
-    if (!botTyping || runStatus !== 'idle') {
+    // 'waiting_approval' must not freeze the rotation: an unrelated pending
+    // approval pins runStatus there while ordinary turns still type (many
+    // paths never set 'running'), and the typing indicator renders for both.
+    if (!botTyping || (runStatus !== 'idle' && runStatus !== 'waiting_approval')) {
       setThinkingVerbIndex(0);
       return;
     }
@@ -1579,12 +4139,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [activeSubagent, setActiveSubagent] = useState<{ name: string; icon: string; color: string } | null>(null);
   const [activeDelegatedSubagents, setActiveDelegatedSubagents] = useState<OpenSwanDelegatedAgentDescriptor[]>([]);
   const [currentRunStep, setCurrentRunStep] = useState<string>('');
+  // Live progress: let the async SwanBot turn pipeline (swanbot.ts) push
+  // "Reading the screen…" / "Running tests…" labels to the typing indicator
+  // during v2 tool loops. Fail-soft sink; cleared on unmount.
+  useEffect(() => {
+    let active = true;
+    const sink = (label: string) => { if (active) setCurrentRunStep(label); };
+    import('../../../lib/swanbotActivitySink')
+      .then((m) => { if (active) m.setSwanBotActivitySink(sink); })
+      .catch(() => {});
+    return () => {
+      active = false;
+      import('../../../lib/swanbotActivitySink').then((m) => m.clearSwanBotActivitySink(sink)).catch(() => {});
+    };
+  }, []);
   const [memoryToast, setMemoryToast] = useState<{ message: string; type: 'saved' | 'updated' | 'conflict' | 'forgotten' } | null>(null);
   // User behavior profile
   const profileRef = useRef<UserChatProfile | null>(null);
 
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+  // STOP button for OpenSwan typed-loop turns — holds the live turn's cancel
+  // handle so the steering bar can abort it at the next loop boundary.
+  const openSwanAbortRef = useRef<AbortController | null>(null);
   const codingWorkbenchStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const builderDragContainerRef = useRef<HTMLDivElement | null>(null);
   const builderDraggingRef = useRef(false);
@@ -1593,6 +4170,57 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const welcomeAnim = useRef(new Animated.Value(0)).current;
   const newMessageAnims = useRef<Map<string, Animated.Value>>(new Map()).current;
   const sendLockRef = useRef(false);
+  // Open clarifying questions, keyed by thread. When the planner asks for a
+  // missing detail we stash the original intent here; the user's next reply is
+  // then reconstructed into a well-specified request and routed to completion.
+  const pendingClarificationRef = useRef<Map<string, {
+    originalMessage: string;
+    pendingIntent: string | null;
+    missingParams: string[];
+    askedAt: number;
+  }>>(new Map());
+  // Plan §1c: parked clarifications survive reload. Bounded localStorage
+  // mirror of the ref — hydrated once per circle, pruned to the same
+  // 15-minute freshness window the resume path enforces, so "Waiting on
+  // you: task title" reappears in the attention strip after a refresh
+  // instead of the request dying silently.
+  const clarificationStorageKey = circleId ? `uc_pending_clarifications::${circleId}` : null;
+  const persistPendingClarifications = useCallback(() => {
+    if (!clarificationStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const entries = [...pendingClarificationRef.current.entries()]
+        .filter(([, value]) => isPendingClarificationFresh(value.askedAt, Date.now()))
+        .slice(-5);
+      if (entries.length === 0) localStorage.removeItem(clarificationStorageKey);
+      else localStorage.setItem(clarificationStorageKey, JSON.stringify(Object.fromEntries(entries)));
+    } catch { /* quota — clarification parking is best-effort */ }
+  }, [clarificationStorageKey]);
+  useEffect(() => {
+    if (!clarificationStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(clarificationStorageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, {
+        originalMessage: string;
+        pendingIntent: string | null;
+        missingParams: string[];
+        askedAt: number;
+      }>;
+      let hydrated = false;
+      for (const [key, value] of Object.entries(parsed)) {
+        if (!value || typeof value.askedAt !== 'number') continue;
+        if (!isPendingClarificationFresh(value.askedAt, Date.now())) continue;
+        if (!pendingClarificationRef.current.has(key)) {
+          pendingClarificationRef.current.set(key, value);
+          hydrated = true;
+        }
+      }
+      if (hydrated) setAttentionTick((tick) => tick + 1);
+    } catch { /* corrupt state — start clean */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clarificationStorageKey]);
+  // Guards against re-asking while we're resolving a clarification answer.
+  const resolvingClarificationRef = useRef(false);
   const scrollOffsetRef = useRef(0);
   const contentHeightRef = useRef(0);
   const layoutHeightRef = useRef(0);
@@ -1756,68 +4384,425 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     };
   }, [addDroppedFiles, globalFileDragActive]);
 
+  // P20 — paste-an-image: Cmd+V a screenshot/copied image anywhere in the chat
+  // and it rides the SAME staged-upload path as drag-drop (storage-backed, so
+  // downstream lanes like WordPress media upload can reach the bytes). Text
+  // pastes are untouched — we only intercept when actual image files are on
+  // the clipboard.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const handlePaste = (event: ClipboardEvent) => {
+      const items = Array.from(event.clipboardData?.items || []);
+      const files: File[] = [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            // Pasted screenshots often arrive unnamed — give them a stable name.
+            files.push(file.name && file.name !== 'image.png'
+              ? file
+              : new File([file], `pasted-${Date.now().toString(36)}.${(item.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png'}`, { type: item.type }));
+          }
+        }
+      }
+      if (files.length === 0) return;
+      event.preventDefault();
+      addDroppedFiles(files);
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [addDroppedFiles]);
+
   // ─── Init ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    init();
+    const generation = ++circleInitGenerationRef.current;
+    initializedCircleRef.current = null;
+    threadLoadGenerationRef.current += 1;
+    setLoaded(false);
+    setActiveThreadId(null);
+    activeThreadScopeRef.current = { circleId, threadId: null };
+    setThreadLoadState({ status: 'resolving', threadId: null });
+    setThreadNavigationNotice(null);
+    setMessages([]);
+    messagesRef.current = [];
+    setInput('');
+    setReplyTo(null);
+    setShowReactions(null);
+    setShowMentions(false);
+    setMentionQuery('');
+    setAttachments([]);
+    setStagedFiles([]);
+    setOlderMessagesState({ loading: false, hasMore: true, error: null });
+    void init(circleId, generation);
+    return () => {
+      if (circleInitGenerationRef.current === generation) {
+        circleInitGenerationRef.current += 1;
+      }
+    };
   }, [circleId]);
 
-  // ── Reload messages when the user switches threads ───────────────────────
-  // Runs only on subsequent thread changes — initial load is handled by init().
-  // Skip when activeThreadId is null (still resolving) or matches the freshly
-  // loaded set.
-  const initialThreadRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!circleId || !activeThreadId) return;
-    if (initialThreadRef.current === null) {
-      initialThreadRef.current = activeThreadId;
-      return; // first set during init() — don't double-load
-    }
-    if (initialThreadRef.current === activeThreadId) return;
-    initialThreadRef.current = activeThreadId;
+  // ── Thread-scoped composer + transcript transition ───────────────────────
+  // Draft text is durable per circle/thread/user. In-memory attachment buckets
+  // keep files from one thread from being dispatched in another; late async
+  // callbacks are additionally checked against activeThreadScopeRef.
+  const threadComposerSessionsRef = useRef(new Map<string, {
+    attachments: ChatAttachment[];
+    stagedFiles: StagedFile[];
+  }>());
 
+  const persistDraftForThread = useCallback((threadId: string | null, text: string) => {
+    if (!threadId || !currentUserId) return;
+    const key = draftKey({ circleId, threadId, userId: currentUserId });
+    const operation = shouldPreserveDraft(text)
+      ? storage.setItem(key, text.slice(0, MAX_DRAFT_LENGTH))
+      : storage.removeItem(key);
+    void Promise.resolve(operation).catch(() => {});
+  }, [circleId, currentUserId]);
+
+  const saveMountedComposerSession = useCallback(() => {
+    if (!activeThreadId) return;
+    persistDraftForThread(activeThreadId, input);
+    threadComposerSessionsRef.current.set(activeThreadId, {
+      attachments: [...attachments],
+      stagedFiles: [...stagedFiles],
+    });
+  }, [activeThreadId, attachments, input, persistDraftForThread, stagedFiles]);
+
+  const clearMountedThreadState = useCallback(() => {
+    setMessages([]);
+    messagesRef.current = [];
+    setInput('');
+    setReplyTo(null);
+    setShowReactions(null);
+    setShowMentions(false);
+    setMentionQuery('');
+    setExpandedCategory(null);
+    setAttachments([]);
+    setStagedFiles([]);
+    setOlderMessagesState({ loading: false, hasMore: true, error: null });
+  }, []);
+
+  const transitionToThread = useCallback((id: string, options?: { force?: boolean; skipSave?: boolean }) => {
+    const nextThreadId = String(id || '').trim();
+    if (!nextThreadId) return;
+    const taskOwnsMountedThread = botTyping
+      || runStatus === 'running'
+      || computerUseTask.state.status === 'starting'
+      || computerUseTask.state.status === 'running';
+    const uploadOwnsMountedThread = stagedFiles.some((file) => file.uploading || (!file.attachment && !file.error));
+    if (!options?.force && nextThreadId !== activeThreadId && uploadOwnsMountedThread) {
+      setThreadNavigationNotice('Wait for the current file upload to finish before switching conversations.');
+      return;
+    }
+    if (!options?.force && nextThreadId !== activeThreadId && taskOwnsMountedThread) {
+      setThreadNavigationNotice('Finish or stop the running task before switching conversations. This keeps its live output in the correct thread.');
+      return;
+    }
+    if (nextThreadId === activeThreadId && threadLoadState.status === 'ready') return;
+
+    if (!options?.skipSave) saveMountedComposerSession();
+    setThreadNavigationNotice(null);
+    setCompactSidebarOpen(false);
+    clearMountedThreadState();
+    activeThreadScopeRef.current = { circleId, threadId: nextThreadId };
+    setThreadLoadState({ status: 'loading', threadId: nextThreadId });
+    setActiveThreadId(nextThreadId);
+  }, [
+    activeThreadId,
+    botTyping,
+    circleId,
+    clearMountedThreadState,
+    computerUseTask.state.status,
+    runStatus,
+    saveMountedComposerSession,
+    stagedFiles,
+    threadLoadState.status,
+  ]);
+
+  // One authoritative load path handles both the initial selection and every
+  // later switch. It validates circle ownership before revealing the composer,
+  // clears the prior transcript immediately, and ignores late responses.
+  useEffect(() => {
+    if (!circleId || !activeThreadId || initializedCircleRef.current !== circleId) return;
+
+    const generation = ++threadLoadGenerationRef.current;
     let cancelled = false;
+    setThreadLoadState({ status: 'loading', threadId: activeThreadId });
+    setMessages([]);
+    messagesRef.current = [];
     (async () => {
       try {
+        const thread = await getThread(activeThreadId);
+        if (!thread || thread.circle_id !== circleId || thread.archived) {
+          throw new Error('That conversation is no longer available in this circle.');
+        }
         const { rows } = await loadThreadMessages(circleId, activeThreadId);
-        if (cancelled) return;
+        if (cancelled || generation !== threadLoadGenerationRef.current) return;
         const nextMessages = await mapLoadedThreadMessages(rows, activeThreadId, currentUserId || undefined, agentName);
-        if (cancelled) return;
+        const storedDraft = currentUserId
+          ? await storage.getItem(draftKey({ circleId, threadId: activeThreadId, userId: currentUserId })).catch(() => null)
+          : null;
+        if (cancelled || generation !== threadLoadGenerationRef.current) return;
+        const draftDecision = reconcileDraft({
+          current: '',
+          incomingThreadId: activeThreadId,
+          prevThreadId: null,
+          stored: storedDraft,
+        });
+        const composerSession = threadComposerSessionsRef.current.get(activeThreadId);
         setMessages(nextMessages);
+        messagesRef.current = nextMessages;
+        setInput(draftDecision.action === 'restore' ? draftDecision.value : '');
+        setAttachments(composerSession?.attachments || []);
+        setStagedFiles(composerSession?.stagedFiles || []);
+        setOlderMessagesState({ loading: false, hasMore: rows.length >= 50, error: null });
+        setThreadLoadState({ status: 'ready', threadId: activeThreadId });
+        await storage.setItem(activeChatThreadStorageKey(circleId, currentUserId), activeThreadId).catch(() => {});
       } catch (err) {
-        console.warn('[ChatTab] Thread switch reload failed:', err);
+        if (cancelled || generation !== threadLoadGenerationRef.current) return;
+        console.warn('[ChatTab] Thread load failed:', err);
+        const message = err instanceof Error && err.message
+          ? err.message
+          : 'Could not refresh this conversation.';
+        setMessages([]);
+        messagesRef.current = [];
+        setThreadLoadState({ status: 'error', threadId: activeThreadId, message });
       }
     })();
     return () => { cancelled = true; };
-  }, [activeThreadId, circleId, currentUserId, agentName]);
+  }, [activeThreadId, circleId, currentUserId, agentName, threadReloadToken]);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (
+      olderMessagesInFlightRef.current
+      || !olderMessagesState.hasMore
+      || !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+    ) return;
+    const oldestPersisted = messagesRef.current.find((message) => !!message.dbId);
+    if (!oldestPersisted?.dbId) {
+      setOlderMessagesState({ loading: false, hasMore: false, error: null });
+      return;
+    }
+
+    const scopedCircleId = circleId;
+    const scopedThreadId = activeThreadId;
+    const generation = threadLoadGenerationRef.current;
+    olderMessagesInFlightRef.current = true;
+    setOlderMessagesState((state) => ({ ...state, loading: true, error: null }));
+    try {
+      const { rows, hasMore } = await loadOlderThreadMessages(
+        scopedCircleId,
+        scopedThreadId,
+        { createdAt: oldestPersisted.timestamp.toISOString(), id: oldestPersisted.dbId },
+      );
+      if (
+        generation !== threadLoadGenerationRef.current
+        || activeThreadScopeRef.current.circleId !== scopedCircleId
+        || activeThreadScopeRef.current.threadId !== scopedThreadId
+      ) return;
+      const older = await mapLoadedThreadMessages(rows, scopedThreadId, currentUserId || undefined, agentName);
+      if (
+        generation !== threadLoadGenerationRef.current
+        || activeThreadScopeRef.current.circleId !== scopedCircleId
+        || activeThreadScopeRef.current.threadId !== scopedThreadId
+      ) return;
+      setMessages((current) => {
+        const next = reconcileChatMessageSnapshot(current, older);
+        messagesRef.current = next;
+        return next;
+      });
+      setOlderMessagesState({ loading: false, hasMore, error: null });
+    } catch (error) {
+      console.warn('[ChatTab] older message load failed:', error);
+      if (
+        generation === threadLoadGenerationRef.current
+        && activeThreadScopeRef.current.circleId === scopedCircleId
+        && activeThreadScopeRef.current.threadId === scopedThreadId
+      ) {
+        setOlderMessagesState((state) => ({
+          ...state,
+          loading: false,
+          error: 'Could not load earlier messages. Tap to retry.',
+        }));
+      }
+    } finally {
+      olderMessagesInFlightRef.current = false;
+    }
+  }, [
+    activeThreadId,
+    agentName,
+    circleId,
+    currentUserId,
+    olderMessagesState.hasMore,
+    threadLoadState.status,
+    threadLoadState.threadId,
+  ]);
 
   const handleSelectThread = useCallback((id: string) => {
-    setActiveThreadId(id);
-  }, []);
+    transitionToThread(id);
+  }, [transitionToThread]);
+
+  const retryActiveThreadLoad = useCallback(() => {
+    if (!activeThreadId) {
+      setCircleInitRetryToken((value) => value + 1);
+      return;
+    }
+    clearMountedThreadState();
+    setThreadLoadState({ status: 'loading', threadId: activeThreadId });
+    setThreadReloadToken((value) => value + 1);
+  }, [activeThreadId, clearMountedThreadState]);
 
   const handleNewThread = useCallback(async () => {
     if (!circleId) return;
     try {
       const t = await createPrivateThread(circleId, SESSION_FALLBACK_TITLE);
       setThreadListRefreshToken(prev => prev + 1);
-      setActiveThreadId(t.id);
-      setMessages([]);
+      transitionToThread(t.id);
     } catch (err) {
       console.error('[ChatTab] createPrivateThread failed:', err);
     }
-  }, [circleId]);
+  }, [circleId, transitionToThread]);
+
+  const handleDeleteThread = useCallback(async (threadId: string) => {
+    const deletingActiveThread = activeThreadId === threadId;
+    if (
+      deletingActiveThread
+      && (botTyping
+        || runStatus === 'running'
+        || computerUseTask.state.status === 'starting'
+        || computerUseTask.state.status === 'running')
+    ) {
+      setThreadNavigationNotice('Finish or stop the running task before deleting this conversation.');
+      return;
+    }
+    const uploadOwnsMountedThread = deletingActiveThread
+      && stagedFiles.some((file) => file.uploading || (!file.attachment && !file.error));
+    if (uploadOwnsMountedThread) {
+      setThreadNavigationNotice('Wait for the current file upload to finish before deleting this conversation.');
+      return;
+    }
+    const prompt = 'Delete this conversation and its messages? This cannot be undone.';
+    const confirmed = Platform.OS === 'web'
+      ? (typeof window !== 'undefined' && window.confirm(prompt))
+      : await new Promise<boolean>((resolve) => {
+          import('react-native')
+            .then(({ Alert }) => Alert.alert('Delete conversation?', prompt, [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
+            ]))
+            .catch(() => resolve(false));
+        });
+    if (!confirmed) return;
+
+    try {
+      await deleteThread(threadId);
+      threadComposerSessionsRef.current.delete(threadId);
+      setThreadListRefreshToken(prev => prev + 1);
+      if (!deletingActiveThread) return;
+
+      clearMountedThreadState();
+      setActiveThreadId(null);
+      activeThreadScopeRef.current = { circleId, threadId: null };
+      await storage.removeItem(activeChatThreadStorageKey(circleId, currentUserId)).catch(() => {});
+      const defaultThread = await getCircleDefaultThread(circleId);
+      if (!defaultThread || defaultThread.id === threadId || defaultThread.archived) {
+        setThreadLoadState({
+          status: 'error',
+          threadId: null,
+          message: 'The conversation was deleted, but Chat could not open the default conversation.',
+        });
+        return;
+      }
+      transitionToThread(defaultThread.id, { force: true, skipSave: true });
+    } catch (err) {
+      console.warn('[ChatTab] delete thread failed:', err);
+      setThreadNavigationNotice('Could not delete that conversation. Nothing was removed; try again.');
+    }
+  }, [
+    activeThreadId,
+    botTyping,
+    circleId,
+    clearMountedThreadState,
+    computerUseTask.state.status,
+    currentUserId,
+    runStatus,
+    stagedFiles,
+    transitionToThread,
+  ]);
+
+  const handleSidebarNewAgent = useCallback(() => {
+    setSpawnModalOpen(true);
+  }, []);
+
+  const handleSidebarAutomations = useCallback(() => {
+    setOpenSwanInitialTask(buildOpenSwanAutomationInitialTask(input));
+    setShowOpenSwanConsole(true);
+  }, [input]);
+
+  const handleSidebarMarketplace = useCallback(() => {
+    const tab = 'INTEGRATIONS';
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab } }));
+      return;
+    }
+    try {
+      navigation.setParams?.({ tab, _tabTs: Date.now() });
+    } catch {
+      navigation.navigate?.('CircleDetail', { circleId, tab, _tabTs: Date.now() });
+    }
+  }, [circleId, navigation]);
 
   const handleToggleSidebar = useCallback(() => {
+    if (viewportWidth < 900) {
+      setCompactSidebarOpen((open) => !open);
+      return;
+    }
     setSidebarCollapsed(prev => {
       const next = !prev;
       persistSidebarCollapsed(next);
       return next;
     });
-  }, []);
+  }, [viewportWidth]);
+
+  useEffect(() => {
+    if (viewportWidth >= 900) setCompactSidebarOpen(false);
+  }, [viewportWidth]);
 
   const handleThreadMetaChanged = useCallback(() => {
     setThreadListRefreshToken(prev => prev + 1);
-  }, []);
+    const scopedThreadId = activeThreadId;
+    if (!scopedThreadId) return;
+    void (async () => {
+      const thread = await getThread(scopedThreadId);
+      if (
+        activeThreadScopeRef.current.circleId !== circleId
+        || activeThreadScopeRef.current.threadId !== scopedThreadId
+      ) return;
+      if (thread?.circle_id === circleId && !thread.archived) return;
+
+      threadComposerSessionsRef.current.delete(scopedThreadId);
+      clearMountedThreadState();
+      setActiveThreadId(null);
+      activeThreadScopeRef.current = { circleId, threadId: null };
+      await storage.removeItem(activeChatThreadStorageKey(circleId, currentUserId)).catch(() => {});
+      const defaultThread = await getCircleDefaultThread(circleId);
+      if (defaultThread && defaultThread.id !== scopedThreadId && !defaultThread.archived) {
+        transitionToThread(defaultThread.id, { force: true, skipSave: true });
+      } else {
+        setThreadLoadState({
+          status: 'error',
+          threadId: null,
+          message: 'This conversation is no longer available, and Chat could not open the default conversation.',
+        });
+      }
+    })().catch((error) => {
+      console.warn('[ChatTab] active thread validation failed:', error);
+      setThreadNavigationNotice('Could not verify this conversation after the update. Retry if it does not refresh.');
+    });
+  }, [activeThreadId, circleId, clearMountedThreadState, currentUserId, transitionToThread]);
 
   useEffect(() => {
     if (!activeThreadId) {
@@ -1839,7 +4824,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     (async () => {
       try {
         const identities = await loadAgentIdentities();
-        const identityKey = getAgentIdentityKey({ id: BLACKSWAN_ID, name: agentName });
+        const identityKey = selectedAgentSubjectContext.agentSubjectKey
+          || getAgentIdentityKey({ id: BLACKSWAN_ID, name: agentName });
         const resolvedSpiritId = identities.get(identityKey)?.spiritId || getFallbackSpiritIdForSessionProfile(sessionProfile);
         if (!cancelled) {
           setActiveSpiritId(resolvedSpiritId);
@@ -1851,7 +4837,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     })();
     return () => { cancelled = true; };
-  }, [agentName, sessionProfile]);
+  }, [agentName, selectedAgentSubjectContext, sessionProfile]);
 
   useEffect(() => {
     if (!activeSpiritId) {
@@ -1870,25 +4856,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     });
     return () => { cancelled = true; };
   }, [activeSpiritId, circleId]);
-
-  useEffect(() => {
-    if (!activeSpiritId || !currentUserId) {
-      setSoulMemoryRefs([]);
-      return;
-    }
-    let cancelled = false;
-    getLatestSpiritMemoryReferences({
-      spiritId: activeSpiritId,
-      circleId,
-      userId: currentUserId,
-      limit: 4,
-    }).then((refs) => {
-      if (!cancelled) setSoulMemoryRefs(refs);
-    }).catch(() => {
-      if (!cancelled) setSoulMemoryRefs([]);
-    });
-    return () => { cancelled = true; };
-  }, [activeSpiritId, circleId, currentUserId]);
 
   useEffect(() => {
     if (!activeThreadId) {
@@ -2094,6 +5061,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // all three paths behave identically (same UI, same error handling).
   const launchBuildStream = useCallback(async (brief: string, systemExtra?: string, friendlyLabel?: string) => {
     const display = friendlyLabel || brief;
+    // Take ownership of the shared run-UI SYNCHRONOUSLY (before any await)
+    // so a chat stream we are about to cancel below can't tear down the
+    // typing indicator / workbench its late catch would otherwise reset.
+    chatUiOwnerRef.current += 1;
     startCodingWorkbench(`/build-page ${display}`);
     setBotTyping(true);
     setStreamingBuildText('');
@@ -2136,7 +5107,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           streamingBuildCleanupRef.current = null;
         },
         onError: (msg) => {
-          addBotMessage(`Build-page stream failed: ${msg}.`);
+          addBotMessage('I could not finish the page build stream. Try again in a moment.');
           setStreamingBuildText('');
           setStreamingBuildPhase(null);
           setBotTyping(false);
@@ -2240,7 +5211,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   // Load assignable agents for chat dispatch. This includes:
   // published custom agents, the default OpenSwan agent, live OpenSwan
-  // sessions, and bridge-detected Claude Code sessions.
+  // sessions, and bridge-detected terminal/editor agents.
   useEffect(() => {
     if (!circleId) return;
     let disposed = false;
@@ -2321,13 +5292,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             { provider: 'gemini', label: 'Gemini CLI', port: 7780, color: '#4285f4' },
             { provider: 'cursor', label: 'Cursor', port: 7781, color: '#8b5cf6' },
           ];
-          const bridgeToken = await ensureBridgeToken();
           await Promise.all(bridgeProviders.map(async (bridge) => {
             const bridgeUrl = getBridgeUrl(bridge.port);
             if (!bridgeUrl) return;
-            const res = await fetch(`${bridgeUrl}/sessions`, {
+            const res = await fetchBridgeAuthenticated(`${bridgeUrl}/sessions`, {
               signal: AbortSignal.timeout(3000),
-              headers: bridgeAuthHeaders(bridgeToken),
             });
             if (!res.ok) return;
             const { sessions } = await res.json();
@@ -2442,7 +5411,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
     if (bridgeProviders.includes(normalizedProvider)) {
-      if (agent.sessionKey && agent.source === 'bridge-session' && normalizedProvider !== 'cursor') {
+      if (agent.sessionKey && agent.source === 'bridge-session') {
         const sendResult = await sendTerminalAgentSessionMessage(normalizedProvider, agent.sessionKey, profiledTask);
         if (sendResult.ok) {
           return `**${agent.name}** [managed terminal session ${agent.sessionKey.slice(0, 12)}]:\n\n${sendResult.response || 'Message sent.'}`;
@@ -2464,16 +5433,49 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         },
       );
       if (result.ok) {
-        return `**${agent.name}** [executed via ${normalizedProvider}${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${result.response || 'Done'}`;
+        const providerLabel = formatChatAgentProviderLabel(normalizedProvider);
+        return `**${agent.name}** [executed via ${providerLabel}${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${result.response || 'Done'}`;
       }
     }
 
+    if (supportsGenericCustomAgentDispatch(normalizedProvider)) {
+      const connections = await loadConnections();
+      const customResult = await dispatchCustomAgentBridgeTask({
+        id: agent.id,
+        name: agent.name,
+        provider: normalizedProvider,
+        gatewayUrl: agent.gatewayUrl || undefined,
+        circleId,
+        model: preferredModel || agent.model || undefined,
+        sessionKey: agent.sessionKey || undefined,
+      }, profiledTask, connections);
+      if (customResult.ok) {
+        const providerLabel = formatChatAgentProviderLabel(normalizedProvider);
+        return `**${agent.name}** [sent to ${providerLabel} bridge${customResult.path ? ` · ${customResult.path}` : ''}]:\n\n${customResult.response || 'Task accepted.'}`;
+      }
+      throw new Error(customResult.error || `${formatChatAgentProviderLabel(normalizedProvider)} bridge could not accept the task.`);
+    }
+
+    const agentSubject = buildAgentRuntimeSubject({
+      id: agent.id,
+      name: agent.name,
+      sessionKey: agent.sessionKey || undefined,
+      providerType: normalizedProvider as any,
+      spirit: agent.spirit || undefined,
+    }, {
+      dbAgentId: isUuidLike(agent.id) ? agent.id : null,
+    });
     const aiResp = await getAIResponse(`[Task for ${agent.name}] ${task}`, {
       userId: currentUserId || '',
       circleId,
       userName: currentUserName,
-      agentId: agent.sessionKey || agent.id,
+      agentId: agentSubject.subjectKey,
       agentName: agent.name,
+      agentSubjectKey: agentSubject.subjectKey,
+      agentDbId: agentSubject.dbAgentId,
+      agentSessionKey: agentSubject.sessionKey,
+      agentLegacyIds: agentSubject.legacyIds,
+      agentSubjectMetadata: agentSubject.metadata,
       model: preferredModel,
       spiritId: agent.spirit || undefined,
     });
@@ -2506,10 +5508,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
   }, [circleId, showPluginPicker]);
 
-  const init = async () => {
+  const init = async (scopedCircleId: string, generation: number) => {
+    const isCurrent = () => circleInitGenerationRef.current === generation && circleId === scopedCircleId;
     try {
     // Get current user
     const currentUser = await getCurrentChatUserProfile();
+    if (!isCurrent()) return;
     const userId = currentUser?.id;
     if (userId) {
       setCurrentUserId(userId);
@@ -2517,7 +5521,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // Check if first visit (uses cross-platform storage helper)
-    const visitKey = `circle_${circleId}_visited`;
+    const visitKey = `circle_${scopedCircleId}_visited`;
     const hasVisited = await storage.getItem(visitKey);
     if (!hasVisited) {
       setIsFirstVisit(true);
@@ -2533,39 +5537,42 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     // Fetch members
     try {
-      const m = await loadCircleChatMembers(circleId);
+      const m = await loadCircleChatMembers(scopedCircleId);
+      if (!isCurrent()) return;
       m.push({ id: BLACKSWAN_ID, username: 'openswan', display_name: agentName });
       setMembers(m);
     } catch (e) { /* circle may not exist yet */ }
 
-    // Resolve the circle's default thread first so the message query can
-    // filter by thread_id. The migration backfills this row for every circle.
-    let resolvedThreadId: string | null = activeThreadId;
+    // Restore only a visible, non-archived thread from this exact circle. A
+    // stale id from another circle/account is discarded before any transcript
+    // query, then we fall back to the circle's canonical default thread.
+    let resolvedThreadId: string | null = null;
+    const selectionKey = activeChatThreadStorageKey(scopedCircleId, userId);
+    const storedThreadId = String(await storage.getItem(selectionKey).catch(() => '') || '').trim();
+    if (storedThreadId) {
+      const storedThread = await getThread(storedThreadId);
+      if (!isCurrent()) return;
+      if (storedThread?.circle_id === scopedCircleId && !storedThread.archived) {
+        resolvedThreadId = storedThread.id;
+      } else {
+        await storage.removeItem(selectionKey).catch(() => {});
+      }
+    }
     if (!resolvedThreadId) {
-      try {
-        const defaultThread = await getCircleDefaultThread(circleId);
-        if (defaultThread) {
-          resolvedThreadId = defaultThread.id;
-          setActiveThreadId(defaultThread.id);
-        }
-      } catch (err) {
-        console.warn('[ChatTab] Default thread lookup failed (migration may be pending):', err);
+      const defaultThread = await getCircleDefaultThread(scopedCircleId);
+      if (!isCurrent()) return;
+      if (defaultThread?.circle_id === scopedCircleId && !defaultThread.archived) {
+        resolvedThreadId = defaultThread.id;
       }
     }
-
-    // Load persisted messages — filter by thread_id when we have one so
-    // multi-thread chats stay separated.
-    try {
-      const { rows, usedFallback } = await loadThreadMessages(circleId, resolvedThreadId);
-      if (usedFallback) {
-        console.warn('[ChatTab] Schema migration pending — loading without is_bot/reactions');
-      }
-      const nextMessages = await mapLoadedThreadMessages(rows, resolvedThreadId, userId, agentName);
-      setMessages(nextMessages);
-    } catch (e) { 
-      console.error('[ChatTab] Unexpected error loading messages:', e);
+    if (!resolvedThreadId) {
+      throw new Error('Could not find an available Chat conversation for this circle.');
     }
 
+    initializedCircleRef.current = scopedCircleId;
+    activeThreadScopeRef.current = { circleId: scopedCircleId, threadId: resolvedThreadId };
+    setActiveThreadId(resolvedThreadId);
+    setThreadLoadState({ status: 'loading', threadId: resolvedThreadId });
     setLoaded(true);
 
     // Non-critical enrichments — load after the chat shell is ready
@@ -2573,44 +5580,59 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       try {
         const { getConnectedWallet } = await import('../../../lib/crypto');
         const w = await getConnectedWallet();
-        if (w) setWallet(w);
+        if (w && isCurrent()) setWallet(w);
       } catch {}
     })();
 
     void (async () => {
       try {
-        const dConfig = await getCircleDiscordConfig(circleId);
+        const dConfig = await getCircleDiscordConfig(scopedCircleId);
+        if (!isCurrent()) return;
         setDiscordConfig(dConfig);
         if (dConfig.guild_id) {
-          const chans = await getCachedChannels(circleId);
-          setDiscordChannels(chans.filter(c => isTextChannel(c.type)).map(c => c.name));
+          const chans = await getCachedChannels(scopedCircleId);
+          if (isCurrent()) setDiscordChannels(chans.filter(c => isTextChannel(c.type)).map(c => c.name));
         }
       } catch {}
     })();
 
     void (async () => {
       try {
-        const props = await getProposals(circleId, 'active');
+        const props = await getProposals(scopedCircleId, 'active');
+        if (!isCurrent()) return;
         setProposals(props);
-        const pins = await getPinnedMessages(circleId);
-        setPinnedMessages(pins);
+        const pins = await getPinnedMessages(scopedCircleId);
+        if (isCurrent()) setPinnedMessages(pins);
       } catch {}
     })();
 
     } catch (e) {
+      if (!isCurrent()) return;
       console.error('[ChatTab] init error:', e);
+      initializedCircleRef.current = scopedCircleId;
+      const message = e instanceof Error && e.message
+        ? e.message
+        : 'Could not open Chat for this circle.';
+      setThreadLoadState({ status: 'error', threadId: null, message });
     } finally {
-      setLoaded(true);
+      if (isCurrent()) setLoaded(true);
     }
   };
 
   // ─── Agent greeting on session start ──────────────────────────────────────
   // Personalized greeting when user first lands on chat each session.
   // Uses local greetings (instant) — no network dependency.
-  const greetingSentRef = useRef(false);
+  const greetingSentCircleRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!loaded || !currentUserId || !circleId || greetingSentRef.current) return;
+    if (
+      !loaded
+      || !currentUserId
+      || !circleId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+      || greetingSentCircleRef.current === circleId
+    ) return;
 
     // Check if we already greeted this session
     const greetKey = `uc_greeted_${circleId}`;
@@ -2618,7 +5640,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       try { if (sessionStorage.getItem(greetKey)) return; } catch {}
     }
 
-    greetingSentRef.current = true;
+    greetingSentCircleRef.current = circleId;
     if (Platform.OS === 'web') {
       try { sessionStorage.setItem(greetKey, '1'); } catch {}
     }
@@ -2651,9 +5673,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const greeting = pool[Math.floor(Math.random() * pool.length)];
 
     // Small delay so it feels natural, not instant
-    const timer = setTimeout(() => addBotMessage(greeting), 800);
+    const timer = setTimeout(() => addBotMessage(greeting, undefined, {
+      localOnly: true,
+      durability: 'ephemeral',
+      source: { actor: agentName, surface: 'main_chat_session_greeting' },
+    }), 800);
     return () => clearTimeout(timer);
-  }, [loaded, currentUserId, circleId]);
+  }, [loaded, currentUserId, circleId, activeThreadId, threadLoadState.status, threadLoadState.threadId]);
 
   // ─── Save session to memory — periodic checkpoint + page unload ─────────
   const lastCheckpointRef = useRef(0);
@@ -2696,22 +5722,101 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // ─── Realtime subscription — see other members' messages live ──────────
 
   useEffect(() => {
-    if (!circleId || !currentUserId || !activeThreadId) return;
+    if (
+      !circleId
+      || !currentUserId
+      || !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+    ) return;
 
-    const channel = supabase
-      .channel(`circle-chat-${circleId}-${activeThreadId}`)
+    let disposed = false;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    let fallbackPollTimer: ReturnType<typeof setInterval> | null = null;
+    let hasSubscribed = false;
+    const isMountedScope = () => !disposed
+      && activeThreadScopeRef.current.circleId === circleId
+      && activeThreadScopeRef.current.threadId === activeThreadId;
+
+    // A reconnect must reconcile a bounded authoritative snapshot rather than
+    // fetch only newer rows: message UPDATEs retain their original created_at,
+    // so a cursor-only catch-up would leave stale approval/retry/task metadata
+    // mounted after a dropped channel. Snapshot reconciliation preserves older
+    // loaded pages and current optimistic rows while replacing durable matches.
+    const refreshThreadSnapshot = async () => {
+      if (!isMountedScope()) return;
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        do {
+          refreshQueued = false;
+          const snapshotReadBaselineDbIds = new Set(
+            messagesRef.current
+              .map((message) => message.dbId)
+              .filter((id): id is string => typeof id === 'string' && id.length > 0),
+          );
+          const { rows } = await loadThreadMessages(circleId, activeThreadId);
+          if (!isMountedScope()) return;
+          const snapshot = await mapLoadedThreadMessages(
+            rows,
+            activeThreadId,
+            currentUserId,
+            agentName,
+          );
+          if (!isMountedScope()) return;
+          setMessages((current) => {
+            const reconciled = reconcileChatMessageSnapshot(current, snapshot, {
+              authoritativeTail: true,
+              completeSnapshot: rows.length < 50,
+              readBaselineDbIds: snapshotReadBaselineDbIds,
+            });
+            messagesRef.current = reconciled;
+            return reconciled;
+          });
+        } while (refreshQueued && !disposed);
+      } catch (error) {
+        if (!disposed) console.warn('[ChatTab] Realtime catch-up refresh failed:', error);
+      } finally {
+        refreshInFlight = false;
+      }
+    };
+
+    const stopFallbackPolling = () => {
+      if (!fallbackPollTimer) return;
+      clearInterval(fallbackPollTimer);
+      fallbackPollTimer = null;
+    };
+
+    const startFallbackPolling = () => {
+      if (disposed || fallbackPollTimer) return;
+      void refreshThreadSnapshot();
+      fallbackPollTimer = setInterval(() => {
+        void refreshThreadSnapshot();
+      }, 15_000);
+    };
+
+    const subscription = subscribeWithReconnect({
+      channelName: `circle-chat-${circleId}-${activeThreadId}`,
+      setup: (channel) => channel
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
         table: 'messages',
-        filter: `circle_id=eq.${circleId}`,
+        filter: `thread_id=eq.${activeThreadId}`,
       }, (payload: any) => {
+        if (!isMountedScope()) return;
         const newMsg = payload.new;
         if ((newMsg.thread_id || null) !== activeThreadId) return;
-        // Skip messages we sent ourselves — BUT allow bot messages from FloatingChat
+        // Do not skip rows solely because they share this account's user id:
+        // another tab/device may be signed in as the same user. The db-id and
+        // optimistic matcher below deduplicate this tab's own insert safely.
         const isBotFromPopout = isPersistedChatBotMessage(newMsg.content, newMsg.is_bot === true);
-        if (newMsg.user_id === currentUserId && !isBotFromPopout) return;
         const botMetadata = isBotFromPopout ? readPersistedChatBotMetadata(newMsg.content) : null;
+        if (isLegacyEphemeralChatSurface(botMetadata?.source?.surface)) return;
         if (botMetadata?.localMessageId) {
           void removePendingBotMessage(activeThreadId, botMetadata.localMessageId).catch(() => {});
         }
@@ -2724,19 +5829,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           }),
           reactions: newMsg.reactions || {},
           replyTo: null,
-          artifacts: botMetadata?.artifacts || undefined,
-          wikiRefs: botMetadata?.wikiRefs || undefined,
-          researchRefs: botMetadata?.researchRefs || undefined,
-          memoryRefs: botMetadata?.memoryRefs || undefined,
-          memoriesUsed: botMetadata?.memoriesUsed || undefined,
-          memoryRecommendations: botMetadata?.memoryRecommendations || undefined,
-          executionStream: botMetadata?.executionStream || undefined,
-          browserPlans: botMetadata?.browserPlans || undefined,
-          browserPlanEvents: botMetadata?.browserPlanEvents || undefined,
-          browserSessions: botMetadata?.browserSessions || undefined,
-          source: botMetadata?.source,
-          usage: botMetadata?.usage || undefined,
-          routing: botMetadata?.routing || undefined,
+          ...hydratePersistedChatBotMetadata(botMetadata),
           ...deriveChatActivityFlags(newMsg.content),
         };
 
@@ -2747,7 +5840,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             .eq('id', newMsg.user_id)
             .single()
             .then(({ data }) => {
-              if (data) {
+              if (data && isMountedScope()) {
                 setMessages(prev => prev.map(m => 
                   m.id === msg.id ? { ...m, userName: data.display_name || data.username || 'Unknown' } : m
                 ));
@@ -2756,7 +5849,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
 
         setMessages(prev => {
-          if (prev.some(m => m.dbId === newMsg.id)) return prev;
+          if (prev.some(m => m.dbId === newMsg.id)) {
+            messagesRef.current = prev;
+            return prev;
+          }
 
           const incomingTs = new Date(newMsg.created_at || Date.now()).getTime();
           const optimisticMatchIndex = prev.findIndex(m => {
@@ -2776,19 +5872,171 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               timestamp: msg.timestamp,
               userName: msg.userName,
             };
+            messagesRef.current = next;
             return next;
           }
 
-          return [...prev, msg];
+          const next = [...prev, msg];
+          messagesRef.current = next;
+          return next;
         });
+        if (newMsg.reply_to) void refreshThreadSnapshot();
         animateNewMessage(msg.id);
       })
-      .subscribe();
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages',
+        filter: `thread_id=eq.${activeThreadId}`,
+      }, (payload: any) => {
+        if (!isMountedScope()) return;
+        const updatedRow = payload.new;
+        if (!updatedRow || (updatedRow.thread_id || null) !== activeThreadId) return;
+
+        const isBot = isPersistedChatBotMessage(updatedRow.content, updatedRow.is_bot === true);
+        const botMetadata = isBot ? readPersistedChatBotMetadata(updatedRow.content) : null;
+        if (isLegacyEphemeralChatSurface(botMetadata?.source?.surface)) {
+          setMessages((prev) => {
+            const next = prev.filter((existing) => existing.dbId !== updatedRow.id);
+            messagesRef.current = next;
+            return next;
+          });
+          return;
+        }
+        if (botMetadata?.localMessageId) {
+          void removePendingBotMessage(activeThreadId, botMetadata.localMessageId).catch(() => {});
+        }
+        const shaped = shapePersistedChatMessage(updatedRow, {
+          currentUserId,
+          botDisplayName: agentName,
+          fallbackUserName: 'Circle Member',
+        });
+        const hydrated: Partial<ChatMessage> = botMetadata
+          ? hydratePersistedChatBotMetadata(botMetadata)
+          : isBot
+            ? {
+                // A metadata-free/invalid bot UPDATE must fail closed. Keeping
+                // the previous structured fields here would leave stale Run,
+                // Retry, approval, or recovery controls executable even though
+                // the durable row no longer proves their lineage.
+                persistedMetadataSnapshot: null,
+                artifacts: undefined,
+                wikiRefs: undefined,
+                researchRefs: undefined,
+                memoriesUsed: undefined,
+                memoryRefs: undefined,
+                memoryRecommendations: undefined,
+                executionStream: undefined,
+                agentPlan: undefined,
+                taskPlan: undefined,
+                toolEvents: undefined,
+                verificationResults: undefined,
+                browserPlans: undefined,
+                browserPlanEvents: undefined,
+                browserSessions: undefined,
+                runId: undefined,
+                requestId: undefined,
+                requestAuthorId: undefined,
+                recoveryOptions: undefined,
+                recoveryReliability: undefined,
+                computerTaskStatus: undefined,
+                computerHandoff: undefined,
+                chatAutomationPlanPreview: undefined,
+                computerPreflightBlockers: undefined,
+                computerFindings: undefined,
+                bestOfN: undefined,
+                outcomeSignal: undefined,
+                quickReplies: undefined,
+                crossSurfaceFollowups: undefined,
+                routing: undefined,
+                showRunTrace: false,
+              }
+            : {};
+
+        // UPDATE can race ahead of INSERT after reconnect. Never drop the
+        // durable change just because this client lacks the row; an immediate
+        // authoritative snapshot will upsert it and clear stale controls.
+        if (!messagesRef.current.some((existing) => existing.dbId === updatedRow.id)) {
+          void refreshThreadSnapshot();
+          return;
+        }
+
+        // Bot metadata is updated after launch, verification, reactions, and
+        // recovery. Merge those UPDATEs into the existing row so other open
+        // clients do not keep stale buttons or stale proof until refresh.
+        setMessages((prev) => {
+          const next = prev.map((existing) => (
+            existing.dbId === updatedRow.id
+            ? {
+                ...existing,
+                ...shaped,
+                ...hydrated,
+                ...deriveChatActivityFlags(updatedRow.content),
+                // Keep optimistic/local identity stable after its database id
+                // is attached; changing the React key would remount live cards.
+                id: existing.id,
+                dbId: updatedRow.id,
+                userName: isBot ? agentName : (existing.userName || shaped.userName),
+                reactions: updatedRow.reactions || {},
+                replyTo: existing.replyTo || null,
+              }
+            : existing
+          ));
+          messagesRef.current = next;
+          return next;
+        });
+        if (updatedRow.reply_to) void refreshThreadSnapshot();
+      }),
+      // The shared subscription helper calls this after a reconnect and when a
+      // seemingly subscribed channel has gone silent past its heartbeat.
+      onCatchUp: () => {
+        void refreshThreadSnapshot();
+      },
+      onStateChange: (state) => {
+        if (state === 'subscribed') {
+          stopFallbackPolling();
+          if (!hasSubscribed) {
+            // Close the initial fetch -> subscribe race. Events committed
+            // between init()'s snapshot and channel establishment are caught
+            // before the user can act on an apparently current transcript.
+            hasSubscribed = true;
+            void refreshThreadSnapshot();
+          }
+        } else if (state === 'error' || state === 'closed' || state === 'reconnecting') {
+          startFallbackPolling();
+        }
+      },
+      // Quiet chats should not reread the latest page every 30 seconds merely
+      // because no member posted. Status failures still poll every 15 seconds,
+      // while this slower guard catches a silently stale subscribed socket.
+      heartbeatMs: 120_000,
+    });
+
+    // Browser tab throttling and laptop sleep can miss the status callback
+    // window. Reconcile immediately when the user returns or connectivity does.
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void refreshThreadSnapshot();
+      }
+    };
+    const handleOnline = () => {
+      void refreshThreadSnapshot();
+    };
+    if (Platform.OS === 'web' && typeof document !== 'undefined' && typeof window !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+      window.addEventListener('online', handleOnline);
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      disposed = true;
+      stopFallbackPolling();
+      subscription.unsubscribe();
+      if (Platform.OS === 'web' && typeof document !== 'undefined' && typeof window !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
+        window.removeEventListener('online', handleOnline);
+      }
     };
-  }, [circleId, currentUserId, activeThreadId, agentName]);
+  }, [circleId, currentUserId, activeThreadId, agentName, threadLoadState.status, threadLoadState.threadId]);
 
   // With inverted FlatList, scroll management is minimal — the latest
   // message is always at index 0 which is pinned to the visual bottom.
@@ -2855,6 +6103,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       isBot: false,
       isUser: true,
       userName: currentUserName,
+      authorId: currentUserId || null,
       timestamp: new Date(),
       reactions: {},
       replyTo: replyTo ? { name: replyTo.userName || '', content: replyTo.content.slice(0, 50) } : null,
@@ -2863,7 +6112,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       source: { actor: 'user', surface: 'main_chat' },
     };
 
-    setMessages(prev => [...prev, msg]);
+    setMessages(prev => {
+      const next = [...prev, msg];
+      messagesRef.current = next;
+      return next;
+    });
+    persistDraftForThread(messageThreadId, '');
     animateNewMessage(msg.id);
 
     // Trigger effects for special messages
@@ -2901,6 +6155,41 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       persistMessage();
     }
 
+    // reference-nav-chips: resolve "open the Acme mission"-style entity
+    // references in the user's message against the circle context snapshot and
+    // patch tappable jump-to chips onto this row (by-id map, so the persisted
+    // `msg` object itself is never mutated). Fire-and-forget + time-boxed
+    // (~1.5s, mirroring circleSnapshotContextInjection) so sending is never
+    // delayed; slash commands skip it (they already route explicitly). Chips
+    // are transient — the persist call above sends explicit fields only.
+    if (!content.trimStart().startsWith('/')) {
+      void (async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const [snapshotMod, resolverMod] = await Promise.all([
+            import('../../../lib/circleContextSnapshot'),
+            import('../../../lib/crossSurfaceReferenceResolverCore'),
+          ]);
+          const snapshot = await Promise.race([
+            (async () => snapshotMod.getCircleContextSnapshot(circleId))().catch(() => null),
+            new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 1500); }),
+          ]);
+          if (!snapshot) return;
+          const { matches } = resolverMod.resolveCrossSurfaceReferences(
+            content,
+            snapshotMod.snapshotReferenceEntities(snapshot),
+            { maxMatches: 3, minConfidence: 'medium', surfaceHint: 'chat' },
+          );
+          if (matches.length === 0) return;
+          setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, referenceChips: matches } : m)));
+        } catch {
+          // Best-effort: no chips on failure, the send itself is untouched.
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      })();
+    }
+
     syncSessionArchiveMessage(msg);
 
     return msg;
@@ -2909,11 +6198,86 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: ChatBotMessageExtra) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const messageThreadId = activeThreadId;
+    const messageCircleId = circleId;
+    const durability = extra?.durability
+      || (isLegacyEphemeralChatSurface(extra?.source?.surface) ? 'ephemeral' : 'transcript');
+    const isMountedMessageScope = () => activeThreadScopeRef.current.circleId === messageCircleId
+      && activeThreadScopeRef.current.threadId === messageThreadId;
+    // One-tap recovery: if a turn ended on a stop/cap/failure message and the
+    // caller didn't already attach chips, surface Continue / Try again so the
+    // user taps a button instead of re-typing. Single choke point → every lane
+    // (stream/batch/v2) benefits. matchStopResolution is pure + smoke-pinned.
+    let autoQuickReplies = extra?.quickReplies;
+    const detectedStopResolution = content ? matchChatStopResolution(content) : null;
+    if (!autoQuickReplies && detectedStopResolution) {
+      autoQuickReplies = detectedStopResolution.quickReplies;
+    }
     const messageSource: ChatMessageSource = extra?.source || {
       actor: agentName,
       surface: extra?.localOnly ? 'main_chat_local' : 'main_chat',
       selectedModel: selectedModel || null,
     };
+    const routedRequestId = (extra?.routing as any)?.requestId
+      || (extra?.routing as any)?.request_id
+      || null;
+    const messageRequestId = String(extra?.requestId || routedRequestId || '').trim().slice(0, 96) || null;
+    const messageRequestAuthorId = String(extra?.requestAuthorId || currentUserId || '').trim().slice(0, 160) || null;
+    const messageAgentSubjectMetadata = extra?.agentSubjectMetadata
+      || selectedAgentSubjectContext.agentSubjectMetadata;
+    // Flywheel: derive the outcome verdict from the data already in scope so
+    // it can be stamped onto the row once persisted (Cursor-Tab precedent).
+    // Deterministic + fail-safe: recovery affordances => partial, an approval/
+    // blocker gate => blocked, clean artifact/text => completed. Hoisted ABOVE
+    // the message literal so the cross-surface follow-up chips derived from it
+    // ride the same setMessages render below.
+    const followupHasRecovery = (extra?.recoveryOptions?.length || 0) > 0;
+    const followupHadError = extra?.hadError === true;
+    const normalizedComputerTaskStatus = normalizeComputerTaskOutcomeStatus(extra?.computerTaskStatus);
+    const computerTaskOutcomeSignal = deriveComputerTaskChatOutcomeSignal(normalizedComputerTaskStatus);
+    const stopMessageOutcomeSignal = deriveStopMessageChatOutcomeSignal(content);
+    const browserPlanOutcomeSignal = deriveBrowserPlanChatOutcomeSignal(extra?.browserPlans);
+    const authoritativeOutcomeSignal = computerTaskOutcomeSignal
+      || (followupHadError ? null : stopMessageOutcomeSignal || browserPlanOutcomeSignal);
+    const followupApprovalPending = authoritativeOutcomeSignal?.approvalPending === true
+      || extra?.chatAutomationPlanPreview?.approvalRequired === true
+      || (extra?.computerPreflightBlockers?.items?.length || 0) > 0;
+    const inferredFinalizeVerdict = deriveOutcomeVerdict({
+      hadError: followupHadError,
+      hadRecoveryOptions: followupHasRecovery,
+      approvalPending: followupApprovalPending,
+      producedArtifact: (artifacts?.length || 0) > 0
+        || (extra?.computerFindings?.items?.length || 0) > 0
+        || (extra?.bestOfN?.candidates?.length || 0) > 0,
+      producedText: (content || '').trim().length > 0,
+    });
+    const finalizeVerdict = authoritativeOutcomeSignal?.verdict || inferredFinalizeVerdict;
+    const initialOutcomeSignal: NonNullable<ChatMessage['outcomeSignal']> = {
+      verdict: finalizeVerdict,
+      lane: messageSource.surface || undefined,
+      model: messageSource.effectiveModel || messageSource.selectedModel || undefined,
+    };
+    // crossSurfaceFollowupCore: turn the finalized structural outcome into a
+    // ranked chip row (FollowupChipRow) so a finished turn doesn't dead-end in
+    // chat. Mission/task handles are deliberately omitted — ChatTab has no
+    // thread→mission binding today — so the live chip set is create_feed_task,
+    // retry_run, request_approval, open_run. NOT persisted (derivable; keeps
+    // message rows bounded).
+    const crossSurfaceFollowups = deriveCrossSurfaceFollowups({
+      verdict: finalizeVerdict,
+      artifactCount: artifacts?.length || 0,
+      hasBrowserProof: (extra?.browserPlans?.length || 0) > 0
+        || (extra?.computerFindings?.items?.length || 0) > 0,
+      gitReferences: extractGitReferences({ deliverable: content, toolEvents: extra?.toolEvents }),
+      contextRun: extra?.runId ? { kind: 'run', id: extra.runId } : null,
+      hasRecoveryOptions: followupHasRecovery,
+      // Decoupled from hasRecoveryOptions: an error turn is retryable even
+      // when the recovery flow produced no options. When recoveryOptions ARE
+      // present, visibleFollowupChips defers to the recovery card and drops
+      // the retry chip — so this independent signal is what makes retry_run
+      // reachable at all (error, no recovery options → visible chip).
+      canRetry: authoritativeOutcomeSignal?.canRetry === true || followupHadError || followupHasRecovery,
+      approvalPending: followupApprovalPending,
+    }).followups;
     const msg: ChatMessage = {
       id: msgId,
       content,
@@ -2926,22 +6290,40 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       wikiRefs: extra?.wikiRefs,
       researchRefs: extra?.researchRefs,
       source: messageSource,
+      durability,
+      agentSubjectMetadata: messageAgentSubjectMetadata,
       usage: extra?.usage || undefined,
       delegatedTo: extra?.delegatedTo,
       delegatedSubagents: extra?.delegatedSubagents,
       runId: extra?.runId,
+      requestId: messageRequestId,
+      requestAuthorId: messageRequestAuthorId,
       memoriesUsed: extra?.memoriesUsed,
       memoryRefs: extra?.memoryRefs,
       memoryRecommendations: extra?.memoryRecommendations,
       executionStream: extra?.executionStream,
+      agentPlan: extra?.agentPlan,
       browserPlans: extra?.browserPlans,
       browserPlanEvents: extra?.browserPlanEvents,
       browserSessions: extra?.browserSessions,
+      recoveryOptions: extra?.recoveryOptions,
+      recoveryReliability: extra?.recoveryReliability,
+      computerTaskStatus: normalizedComputerTaskStatus,
+      computerHandoff: extra?.computerHandoff,
+      chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
+      computerPreflightBlockers: extra?.computerPreflightBlockers,
+      computerFindings: extra?.computerFindings,
+      bestOfN: extra?.bestOfN,
+      quickReplies: autoQuickReplies,
+      quickRepliesLabel: extra?.quickRepliesLabel,
+      crossSurfaceFollowups: crossSurfaceFollowups.length > 0 ? crossSurfaceFollowups : undefined,
+      outcomeSignal: initialOutcomeSignal,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
       routing: extra?.routing,
       automationProposal: extra?.automationProposal,
+      automationAgentSubjectMetadata: extra?.automationAgentSubjectMetadata,
       searchResults: extra?.searchResults,
       commandsHelp: extra?.commandsHelp,
       assignPickerAgents: extra?.assignPickerAgents,
@@ -2950,72 +6332,192 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       isPending: false,
     };
 
-    setMessages(prev => [...prev, msg]);
-    animateNewMessage(msg.id);
+    const initialPersistedMetadata = projectPersistedChatBotMetadata(
+      msg,
+      messageAgentSubjectMetadata,
+    );
+    msg.persistedMetadataSnapshot = initialPersistedMetadata;
+
+    if (isMountedMessageScope()) {
+      setMessages(prev => {
+        const next = [...prev, msg];
+        messagesRef.current = next;
+        return next;
+      });
+      animateNewMessage(msg.id);
+    }
 
     // Background memory extraction — non-blocking, updates the message with saved indicators
-    if (currentUserId && circleId) {
+    if (durability === 'transcript' && currentUserId && messageCircleId) {
       (async () => {
         try {
           const { autoExtractAndSave } = await import('../../../lib/agentMemory');
-          const history = messages.slice(-6).map(m => ({ role: m.isBot ? 'model' : 'user', text: m.content }));
+          const history = transcriptChatMessages(messages).slice(-6).map(m => ({ role: m.isBot ? 'model' : 'user', text: m.content }));
           history.push({ role: 'model', text: content });
-          const { saved } = await autoExtractAndSave(circleId, currentUserId, history);
+          // Stamp the run that produced this turn so the saved memory is
+          // traceable back to it (memory_entries.source_run_id).
+          const { saved } = await autoExtractAndSave(messageCircleId, currentUserId, history, extra?.runId ?? undefined);
           if (saved > 0) {
             // Update the message with memory saved indicator
-            setMessages(prev => prev.map(m =>
-              m.id === msgId ? { ...m, memoriesSaved: [`${saved} new`] } : m
-            ));
-            setMemoryToast({ message: `${saved} memor${saved === 1 ? 'y' : 'ies'} saved from this conversation`, type: 'saved' });
+            if (isMountedMessageScope()) {
+              setMessages(prev => prev.map(m =>
+                m.id === msgId ? { ...m, memoriesSaved: [`${saved} new`] } : m
+              ));
+              setMemoryToast({ message: `${saved} memor${saved === 1 ? 'y' : 'ies'} saved from this conversation`, type: 'saved' });
+            }
           }
         } catch {}
       })();
     }
 
-    // Persist every visible bot message. `localOnly` now only describes
-    // UI behavior; refresh recovery still keeps the transcript intact.
-    if (messageThreadId) {
+    // Only durable outcome/conversation rows enter recovery, Supabase, archives,
+    // and memory. `localOnly` remains a presentation/routing flag; explicit
+    // durability prevents greetings/progress/routing notices from fossilizing.
+    if (durability === 'transcript' && messageThreadId) {
       saveRecoverableChatMessage(messageThreadId, msg);
     }
-    if (currentUserId && messageThreadId) {
-      persistMainChatBotMessageWithRetry({
-        circleId,
+    // (finalizeVerdict is derived above the message literal so the follow-up
+    // chips could reuse it; it is stamped onto the persisted row below.)
+    if (durability === 'transcript' && currentUserId && messageThreadId) {
+      persistChatTabBotMessageWithRetry({
+        circleId: messageCircleId,
         userId: currentUserId,
         agentName,
         content,
         threadId: messageThreadId,
-        localMessageId: msgId,
-        source: messageSource,
-        usage: extra?.usage || null,
-        artifacts,
-        wikiRefs: extra?.wikiRefs,
-        researchRefs: extra?.researchRefs,
-        memoriesUsed: extra?.memoriesUsed,
-        memoryRefs: extra?.memoryRefs,
-        memoryRecommendations: extra?.memoryRecommendations,
-        executionStream: extra?.executionStream,
-        taskPlan: extra?.taskPlan,
-        toolEvents: extra?.toolEvents,
-        verificationResults: extra?.verificationResults,
-        browserPlans: extra?.browserPlans,
-        browserPlanEvents: extra?.browserPlanEvents,
-        browserSessions: extra?.browserSessions,
-        routing: extra?.routing,
+        metadata: initialPersistedMetadata,
         onError: (error) => {
           console.error('[ChatTab] Unexpected error persisting bot msg:', error);
         },
         onPersisted: (dbId) => {
           void removePendingBotMessage(messageThreadId, msgId).catch(() => {});
-          setMessages(prev => prev.map((message) => (
-            message.id === msgId ? { ...message, dbId } : message
-          )));
+          if (isMountedMessageScope()) {
+            setMessages(prev => prev.map((message) => (
+              message.id === msgId ? { ...message, dbId } : message
+            )));
+          }
         },
       });
     }
 
-    syncSessionArchiveMessage(msg);
+    if (durability === 'transcript') syncSessionArchiveMessage(msg);
 
     return msg;
+  };
+
+  useEffect(() => {
+    if (!circleId || !currentUserId || !activeThreadId || messages.length < 4) return;
+    if (messages.some((message) => message.isBot && message.automationProposal)) return;
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const since = new Date(Date.now() - 14 * 24 * 3_600_000).toISOString();
+        const rows = await loadChatAutomationDecisions(circleId, { since, limit: 120 });
+        if (cancelled) return;
+
+        const [suggestion] = buildRepeatedFlowAutomationProposals(rows, {
+          minOccurrences: 3,
+          maxSuggestions: 1,
+        });
+        if (!suggestion) return;
+
+        const seenKey = `${circleId}:${activeThreadId}:${suggestion.fingerprint}`;
+        if (automationSuggestionSeenRef.current.has(seenKey)) return;
+
+        const storageKey = `uc_chat_automation_suggestion_seen:${seenKey}`;
+        if (typeof localStorage !== 'undefined') {
+          const stored = localStorage.getItem(storageKey);
+          if (stored) {
+            automationSuggestionSeenRef.current.add(seenKey);
+            return;
+          }
+          try { localStorage.setItem(storageKey, new Date().toISOString()); } catch {}
+        }
+        automationSuggestionSeenRef.current.add(seenKey);
+        if (cancelled) return;
+
+        addBotMessage(suggestion.message, undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+          automationProposal: suggestion.proposal,
+          automationAgentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'chat_automation_suggestion',
+            selectedModel,
+            effectiveModel: 'repeated-flow-detector-v1',
+          },
+        });
+      })();
+    }, 1800);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // `addBotMessage` is intentionally omitted: it is recreated every render,
+    // while this effect is keyed to thread/message activity and deduped by the
+    // suggestion fingerprint.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadId, circleId, currentUserId, messages.length, selectedModel]);
+
+  const addDesktopBridgeAutoConnectMessage = async (surface = 'desktop_bridge_recovery') => {
+    const result = await autoConnectDesktopBridge();
+    addBotMessage(result.content, undefined, {
+      localOnly: true,
+      recoveryOptions: result.recoveryPayload?.recoveryOptions,
+      source: {
+        actor: 'OpenSwan',
+        surface,
+        selectedModel,
+        effectiveModel: 'local-desktop-bridge',
+      },
+    });
+    return result;
+  };
+
+  const addRecoverableChatErrorMessage = async (details: {
+    title: string;
+    task: string;
+    error: unknown;
+    executionKind: string;
+    source: string;
+    touched?: string[];
+    messageSource?: ChatMessageSource;
+    launchIfMissing?: boolean;
+  }): Promise<void> => {
+    const failureMessage = details.error instanceof Error
+      ? details.error.message
+      : typeof details.error === 'string'
+        ? details.error
+        : (details.error as any)?.message || 'Unknown error';
+    const failureStack = details.error instanceof Error
+      ? details.error.stack || null
+      : typeof (details.error as any)?.stack === 'string'
+        ? (details.error as any).stack
+        : null;
+    const recovery = await startMainChatFailureRecoveryPayload({
+      task: details.task,
+      failureMessage,
+      failureStack,
+      outcomeStatus: 'failed',
+      executionKind: details.executionKind,
+      source: details.source,
+      launchIfMissing: details.launchIfMissing ?? true,
+      touched: details.touched,
+    });
+    addBotMessage(`${details.title}: ${failureMessage}${recovery.message}`, undefined, {
+      localOnly: true,
+      hadError: true,
+      recoveryOptions: recovery.recoveryOptions,
+      recoveryReliability: recovery.recoveryReliability,
+      source: details.messageSource || {
+        actor: 'OpenSwan',
+        surface: `${details.source}_message`,
+        selectedModel: selectedModel || null,
+      },
+    });
   };
 
   const addPendingBotMessage = (content: string, extra?: { taskPlan?: OpenSwanTaskPlan }) => {
@@ -3026,6 +6528,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       isBot: true,
       isUser: false,
       userName: agentName,
+      requestAuthorId: currentUserId || null,
       timestamp: new Date(),
       reactions: {},
       taskPlan: extra?.taskPlan,
@@ -3037,6 +6540,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         surface: 'main_chat_pending',
         selectedModel: selectedModel || null,
       },
+      agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
       isPending: true,
     };
     setMessages(prev => [...prev, msg]);
@@ -3046,6 +6550,101 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
     return msg;
   };
+
+  useEffect(() => {
+    const notice = pendingCapabilityBuildoutNotice;
+    if (!notice) return;
+    const visible = formatAgentAppCapabilityBuildoutForUser(notice.buildout);
+    if (!visible.trim()) {
+      setPendingCapabilityBuildoutNotice(null);
+      return;
+    }
+    const task = String(notice.task || '').trim();
+    const taskLine = task
+      ? `\n\n- Task: ${task.length > 180 ? `${task.slice(0, 177)}...` : task}`
+      : '';
+    addBotMessage(`${visible}${taskLine}`, undefined, {
+      source: {
+        actor: 'OpenSwan',
+        surface: 'main_chat_computer_task_capability_update',
+        selectedModel,
+        effectiveModel: selectedModel || null,
+      },
+    });
+    setPendingCapabilityBuildoutNotice(null);
+  // addBotMessage is intentionally omitted; the pending notice key/ref makes
+  // this one-shot while avoiding duplicate notifications across rerenders.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCapabilityBuildoutNotice?.key, selectedModel]);
+
+  useEffect(() => {
+    const taskState = computerTaskState;
+    const capabilityBuildout = taskState?.capabilityBuildout;
+    if (!taskState || capabilityBuildout?.status !== 'ready_to_retry') return;
+    if (capabilityBuildout.autoRetryAttemptedAt || capabilityBuildout.autoRetryStatus) return;
+
+    const retryKey = `${taskState.id}:${capabilityBuildout.sessionId || capabilityBuildout.updatedAt || capabilityBuildout.retryPlan || taskState.task}`;
+    if (capabilityAutoRetryKeyRef.current === retryKey) return;
+    capabilityAutoRetryKeyRef.current = retryKey;
+
+    let cancelled = false;
+    void (async () => {
+      const attemptedAt = new Date().toISOString();
+      const runningBuildout: ComputerTaskCapabilityBuildout = {
+        ...capabilityBuildout,
+        autoRetryStatus: 'running',
+        autoRetryAttemptedAt: attemptedAt,
+        updatedAt: attemptedAt,
+      };
+      await persistComputerTaskState({
+        task: taskState.task,
+        taskKind: taskState.taskKind,
+        taskLabel: taskState.taskLabel,
+        phase: 'executing',
+        outcomeStatus: null,
+        adapterId: taskState.adapterId || null,
+        blockers: taskState.blockers,
+        nextSteps: ['Retrying the task with the newly available app capability'],
+        grantedAccess: taskState.grantedAccess,
+        accessPlan: taskState.accessPlan,
+        runId: taskState.runId || null,
+        sessionId: taskState.sessionId || null,
+        liveUrl: taskState.liveUrl || null,
+        grounding: taskState.grounding || null,
+        capabilityBuildout: runningBuildout,
+        complexity: taskState.complexity || null,
+        checkpointRecovery: taskState.checkpointRecovery || null,
+      });
+      if (cancelled) return;
+      addBotMessage(formatAgentAppCapabilityBuildoutForUser(runningBuildout) || '**Use Computer**\n- App support is ready. Retrying now.', undefined, {
+        durability: 'ephemeral',
+        source: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_computer_task',
+          selectedModel,
+          effectiveModel: selectedModel || null,
+        },
+      });
+      await executeSharedComputerTask(taskState.task, {
+        planPrefix: 'Retry after app capability buildout: ',
+        readyCapabilityBuildout: runningBuildout,
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  // addBotMessage intentionally not in deps; retryKey/ref and persisted
+  // autoRetryAttemptedAt make this one-shot across rerenders.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    computerTaskState?.id,
+    computerTaskState?.capabilityBuildout?.status,
+    computerTaskState?.capabilityBuildout?.updatedAt,
+    executeSharedComputerTask,
+    persistComputerTaskState,
+    selectedModel,
+  ]);
 
   const nukeCurrentThread = useCallback(async () => {
     if (!circleId || !activeThreadId) {
@@ -3060,7 +6659,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       .eq('thread_id', activeThreadId);
 
     if (error) {
-      addBotMessage(`Could not clear this thread: ${error.message}`);
+      addBotMessage('I could not clear this thread. Try again in a moment.');
       return;
     }
 
@@ -3083,6 +6682,34 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     await clearChatSessionArchive(circleId, activeThreadId).catch(() => {});
   }, [activeThreadId, circleId, computerUseTask]);
 
+  // Mirror the single mid-run confirmation (the pay/book floor) as a PERSISTED
+  // chat bubble with Yes/No quick replies, in addition to the live overlay, so
+  // the user can confirm from the transcript and it survives reload. v1 reuses
+  // the quickReplies chip surface; the answer routes back through sendMessage →
+  // the booking follow-up / confirmation intercept. Idempotency-keyed by the
+  // confirmation id so it posts exactly once even under StrictMode re-render.
+  useEffect(() => {
+    const pending = computerUseTask.state.pendingConfirmation;
+    if (!pending || !pending.id) return;
+    const key = `confirm::${pending.id}`;
+    if (computerConfirmPostedKeyRef.current === key) return;
+    computerConfirmPostedKeyRef.current = key;
+    // Restate the LIVE question text (carries amount+merchant from the edge);
+    // it is model-authored/untrusted, so it is shown as plain text only — no
+    // secrets/card data are ever placed here (guest-card entry is isolated in
+    // the live session view via human_takeover, never in chat context).
+    const question = String(pending.question || 'Confirm this action to continue?').slice(0, 600);
+    addBotMessage(question, undefined, {
+      quickReplies: ['Yes', 'No'],
+      source: {
+        actor: 'OpenSwan',
+        surface: 'main_chat_computer_confirmation',
+        selectedModel,
+        effectiveModel: selectedModel !== 'auto' ? selectedModel : null,
+      },
+    });
+  }, [computerUseTask.state.pendingConfirmation, selectedModel]);
+
   // When the Computer Use agent completes (or errors out), post its result
   // to chat once. Deduped via a ref keyed on runId so React StrictMode
   // double-invocation doesn't double-post.
@@ -3095,6 +6722,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           taskKind: 'browser_task',
           taskLabel: 'Browser task',
           phase: 'executing',
+          outcomeStatus: null,
           adapterId: 'browser_adapter',
           runId: runId || null,
           sessionId: sessionId || null,
@@ -3102,6 +6730,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           grantedAccess: pendingComputerUseGrantIds,
           accessPlan: pendingComputerUseGrantSummary || null,
           nextSteps: ['Wait for the browser run to finish', 'Review the summary and findings'],
+          grounding: computerTaskState?.grounding || null,
+          capabilityBuildout: computerTaskState?.capabilityBuildout || null,
+          complexity: computerTaskState?.complexity || null,
+          checkpointRecovery: computerTaskState?.checkpointRecovery || null,
         });
       }
       if (status === 'idle') computerUsePostedKeyRef.current = null;
@@ -3116,6 +6748,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         taskKind: 'browser_task',
         taskLabel: 'Browser task',
         phase: 'completed',
+        outcomeStatus: 'completed',
         adapterId: 'browser_adapter',
         runId: runId || null,
         sessionId: sessionId || null,
@@ -3123,6 +6756,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         grantedAccess: pendingComputerUseGrantIds,
         accessPlan: pendingComputerUseGrantSummary || null,
         nextSteps: [],
+        grounding: computerTaskState?.grounding || null,
+        capabilityBuildout: computerTaskState?.capabilityBuildout || null,
+        complexity: computerTaskState?.complexity || null,
+        checkpointRecovery: null,
+        resultSummary: result.summary || null,
       });
       recordSessionArchiveEvent({
         kind: 'computer_task',
@@ -3134,6 +6772,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           computerUseTask.state.liveUrl ? `url:${computerUseTask.state.liveUrl}` : '',
         ].filter(Boolean),
         metadata: {
+          computerTaskStatus: 'completed',
           runId: runId || null,
           sessionId: sessionId || null,
           iterations: result.iterations,
@@ -3158,16 +6797,82 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const extractedData = result.extractedData
         ? `\n\n**Extracted Data**\n\`\`\`json\n${JSON.stringify(result.extractedData, null, 2).slice(0, 4000)}\n\`\`\``
         : '';
-      addBotMessage(`${header}\n\n${result.summary}${findings}${extractedData}`, undefined, { runId });
+      // WI-4: persist bounded structured findings + attach "Book option N"
+      // quick replies so the follow-up seam (WI-5) can resolve durably after
+      // reload. Findings carry only title/url/price/rating/notes text — no
+      // secrets/card data — and the builder clamps + caps to 10 items.
+      const computerFindings = computerFindingsMetadata(result.findings, {
+        runId: runId || null,
+        sessionId: sessionId || computerUseTask.state.sessionId || null,
+      });
+      const bookQuickReplies = computerFindings && computerFindings.items.length
+        ? computerFindings.items.map((_, i) => `Book option ${i + 1}`)
+        : undefined;
+      // Repeat-run diff (plan §5c): when this same task ran before, lead
+      // with what CHANGED instead of re-dumping the list — including an
+      // explicit "no changes". Best-effort lookup; the message posts either
+      // way. Owner for matching/diff/copy: src/lib/computerRunDiff.ts.
+      void (async () => {
+        let diffBlock = '';
+        try {
+          if (result.findings?.length) {
+            const { normalizeComputerTaskForComparison, diffComputerRunFindings, formatComputerRunDiffSummary } =
+              await import('../../../lib/computerRunDiff');
+            const normalizedTask = normalizeComputerTaskForComparison(task);
+            if (normalizedTask) {
+              const { data: priorRuns } = await supabase
+                .from('computer_use_runs')
+                .select('id, task, findings, completed_at')
+                .eq('circle_id', circleId)
+                .eq('status', 'done')
+                .not('findings', 'is', null)
+                .neq('id', runId || '')
+                .order('completed_at', { ascending: false })
+                .limit(10);
+              const prior = (priorRuns || []).find(
+                (row) => normalizeComputerTaskForComparison(String(row.task || '')) === normalizedTask,
+              );
+              if (prior && Array.isArray(prior.findings) && prior.findings.length) {
+                const diff = diffComputerRunFindings(prior.findings as any[], result.findings || []);
+                const completedAt = Date.parse(String(prior.completed_at || ''));
+                diffBlock = formatComputerRunDiffSummary(diff, {
+                  previousAgeMs: Number.isFinite(completedAt) ? Math.max(0, Date.now() - completedAt) : null,
+                });
+              }
+            }
+          }
+        } catch { /* diff is a bonus — never delay or drop the result */ }
+        addBotMessage(
+          `${header}\n\n${diffBlock ? `${diffBlock}\n\n` : ''}${result.summary}${findings}${extractedData}`,
+          undefined,
+          {
+            runId,
+            computerTaskStatus: 'completed',
+            computerFindings: computerFindings || undefined,
+            quickReplies: bookQuickReplies,
+          },
+        );
+      })();
     } else if (status === 'error' && errorMessage) {
       const key = `err::${task}::${errorMessage.slice(0, 80)}`;
       if (computerUsePostedKeyRef.current === key) return;
       computerUsePostedKeyRef.current = key;
+      const checkpointRecovery = diagnoseComputerTaskCheckpointFailure({
+        task: task || 'Browser computer task',
+        failureMessage: errorMessage,
+        outcomeStatus: 'failed',
+        executionKind: 'browser_computer_use',
+        source: 'computer_use_agent_error',
+        stateComplexity: computerTaskState?.complexity || null,
+        groundingSummary: computerTaskState?.grounding?.summary || null,
+        planSummary: pendingComputerUseGrantSummary || null,
+      });
       void persistComputerTaskState({
         task,
         taskKind: 'browser_task',
         taskLabel: 'Browser task',
         phase: 'failed',
+        outcomeStatus: 'failed',
         adapterId: 'browser_adapter',
         runId: runId || null,
         sessionId: sessionId || null,
@@ -3175,22 +6880,51 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         grantedAccess: pendingComputerUseGrantIds,
         accessPlan: pendingComputerUseGrantSummary || null,
         blockers: [errorMessage],
+        grounding: computerTaskState?.grounding || null,
+        capabilityBuildout: computerTaskState?.capabilityBuildout || null,
+        complexity: computerTaskState?.complexity || null,
+        checkpointRecovery,
+        checkpointRecoveryIsNew: true,
       });
       recordSessionArchiveError(
         `Computer task failed: ${task}`,
         errorMessage,
         ['surface:computer_use', task ? `computer_task:${task}` : ''].filter(Boolean),
       );
-      addBotMessage(`**Computer Use** failed: ${errorMessage}`);
+      void (async () => {
+        const recovery = await startMainChatFailureRecoveryPayload({
+          task: task || 'Browser computer task',
+          failureMessage: errorMessage,
+          outcomeStatus: 'failed',
+          executionKind: 'browser_computer_use',
+          runId: runId || sessionId || null,
+          source: 'computer_use_agent_error',
+          launchIfMissing: true,
+          checkpointRecovery,
+          touched: [
+            'surface:computer_use',
+            task ? `computer_task:${task}` : '',
+            checkpointRecovery ? `checkpoint:${checkpointRecovery.failedCheckpointId}` : '',
+          ].filter(Boolean),
+        });
+        addBotMessage(appendCustomerSafeRecoveryMessage(
+          '**Computer Use** could not complete that task. Technical details were saved for recovery.',
+          recovery.message,
+        ), undefined, {
+          recoveryOptions: recovery.recoveryOptions,
+          recoveryReliability: recovery.recoveryReliability,
+          computerTaskStatus: 'failed',
+        });
+      })();
     }
   // addBotMessage intentionally not in deps — it's recreated every render,
   // and the ref-based dedupe above guarantees one post per terminal state.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [computerUseTask.state.status, computerUseTask.state.result, computerUseTask.state.errorMessage, computerUseTask.state.runId, computerUseTask.state.sessionId, computerUseTask.state.task, computerUseTask.state.liveUrl, pendingComputerUseGrantIds, pendingComputerUseGrantSummary, persistComputerTaskState, recordSessionArchiveError, recordSessionArchiveEvent]);
+  }, [computerUseTask.state.status, computerUseTask.state.result, computerUseTask.state.errorMessage, computerUseTask.state.runId, computerUseTask.state.sessionId, computerUseTask.state.task, computerUseTask.state.liveUrl, pendingComputerUseGrantIds, pendingComputerUseGrantSummary, persistComputerTaskState, recordSessionArchiveError, recordSessionArchiveEvent, startMainChatFailureRecoveryPayload]);
 
   const updateBotMessage = (
     messageId: string,
-    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing' | 'source' | 'usage'>>,
+    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'recoveryOptions' | 'recoveryReliability' | 'chatAutomationPlanPreview' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing' | 'source' | 'agentSubjectMetadata' | 'usage'>>,
   ) => {
     let nextMessageToPersist: ChatMessage | null = null;
     setMessages(prev => prev.map((message) => {
@@ -3211,31 +6945,109 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const syncPersistedBotMessage = useCallback((message: ChatMessage | null | undefined) => {
     if (!message?.dbId || !message.isBot) return;
-    updateMainChatBotMessageWithRetry({
+    updateChatTabBotMessageWithRetry({
       messageId: message.dbId,
       agentName,
       content: message.content,
-      artifacts: message.artifacts,
-      wikiRefs: message.wikiRefs,
-      researchRefs: message.researchRefs,
-      memoriesUsed: message.memoriesUsed,
-      memoryRefs: message.memoryRefs,
-      memoryRecommendations: message.memoryRecommendations,
-      executionStream: message.executionStream,
-      taskPlan: message.taskPlan,
-      toolEvents: message.toolEvents,
-      verificationResults: message.verificationResults,
-      browserPlans: message.browserPlans,
-      browserPlanEvents: message.browserPlanEvents,
-      browserSessions: message.browserSessions,
-      source: message.source,
-      usage: message.usage,
-      routing: message.routing,
+      metadata: projectPersistedChatBotMetadata(
+        message,
+        selectedAgentSubjectContext.agentSubjectMetadata,
+      ),
       onError: (error) => {
         console.error('[ChatTab] Unexpected error updating bot msg:', error);
       },
     });
-  }, [agentName]);
+  }, [agentName, selectedAgentSubjectContext.agentSubjectMetadata]);
+
+  const finalizeFailedBotMessage = useCallback((details: {
+    pendingMessage?: ChatMessage | null;
+    content: string;
+    recoveryOptions?: ChatMessage['recoveryOptions'];
+    recoveryReliability?: ChatMessage['recoveryReliability'];
+    source?: ChatMessageSource;
+  }): ChatMessage => {
+    const fallbackPending = [...messagesRef.current].reverse().find((entry) => entry.isBot && entry.isPending);
+    const hasPendingMessageHint = Object.prototype.hasOwnProperty.call(details, 'pendingMessage');
+    const base = hasPendingMessageHint
+      ? details.pendingMessage
+        ? messagesRef.current.find((entry) => entry.id === details.pendingMessage?.id) || details.pendingMessage
+        : undefined
+      : fallbackPending;
+    const terminalSource = details.source || base?.source || {
+      actor: agentName,
+      surface: 'main_chat_error',
+      selectedModel: selectedModel || null,
+    };
+    const terminalMessage: ChatMessage = {
+      ...(base || {}),
+      id: base?.id || `bot-error-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      content: details.content,
+      isBot: true,
+      isUser: false,
+      userName: agentName,
+      requestAuthorId: base?.requestAuthorId || currentUserId || null,
+      timestamp: new Date(),
+      reactions: base?.reactions || {},
+      recoveryOptions: details.recoveryOptions,
+      recoveryReliability: details.recoveryReliability,
+      source: terminalSource,
+      outcomeSignal: {
+        verdict: 'failed',
+        lane: terminalSource.surface || undefined,
+        model: terminalSource.effectiveModel || terminalSource.selectedModel || undefined,
+      },
+      isPending: false,
+    };
+    const metadata = projectPersistedChatBotMetadata(
+      terminalMessage,
+      terminalMessage.agentSubjectMetadata || selectedAgentSubjectContext.agentSubjectMetadata,
+    );
+    terminalMessage.persistedMetadataSnapshot = metadata;
+
+    const replaceOrAppend = (items: ChatMessage[]) => (
+      items.some((entry) => entry.id === terminalMessage.id)
+        ? items.map((entry) => entry.id === terminalMessage.id ? terminalMessage : entry)
+        : [...items, terminalMessage]
+    );
+    messagesRef.current = replaceOrAppend(messagesRef.current);
+    setMessages(replaceOrAppend);
+    if (activeThreadId) saveRecoverableChatMessage(activeThreadId, terminalMessage);
+    syncSessionArchiveMessage(terminalMessage);
+
+    if (terminalMessage.dbId) {
+      syncPersistedBotMessage(terminalMessage);
+    } else if (currentUserId && activeThreadId) {
+      persistChatTabBotMessageWithRetry({
+        circleId,
+        userId: currentUserId,
+        agentName,
+        content: terminalMessage.content,
+        threadId: activeThreadId,
+        metadata,
+        onError: (error) => console.error('[ChatTab] persist failed terminal bot message:', error),
+        onPersisted: (dbId) => {
+          void removePendingBotMessage(activeThreadId, terminalMessage.id).catch(() => {});
+          messagesRef.current = messagesRef.current.map((entry) => (
+            entry.id === terminalMessage.id ? { ...entry, dbId } : entry
+          ));
+          setMessages((prev) => prev.map((entry) => (
+            entry.id === terminalMessage.id ? { ...entry, dbId } : entry
+          )));
+        },
+      });
+    }
+
+    return terminalMessage;
+  }, [
+    activeThreadId,
+    agentName,
+    circleId,
+    currentUserId,
+    selectedAgentSubjectContext.agentSubjectMetadata,
+    selectedModel,
+    syncPersistedBotMessage,
+    syncSessionArchiveMessage,
+  ]);
 
   const applyBrowserPlanPatch = useCallback((
     messageId: string,
@@ -3414,6 +7226,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setPendingComputerUseApprovalSummary('');
     setPendingComputerUseGrantIds([]);
     setPendingComputerUseOrigin({ messageId: message.id, runId: message.runId, planId: plan.planId });
+    setPendingComputerUseStickyScopeId(null);
     setPendingComputerUseActions(plan.actions.map((action) => ({
       id: action.id,
       type: action.type,
@@ -3558,14 +7371,44 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       };
       setComputerUseSession(completedSession);
       finalizeBrowserPlanFromSession(completedSession, result);
-      addBotMessage(`**Computer Use** ${result.success ? 'completed locally' : 'failed locally'}: ${result.message}`);
+      if (result.success) {
+        addBotMessage(`**Computer Use** completed locally: ${result.message}`);
+      } else {
+        await addRecoverableChatErrorMessage({
+          title: '**Computer Use** failed locally',
+          task: plan.task,
+          error: result.message,
+          executionKind: 'local_browser_plan',
+          source: 'local_browser_plan_failed',
+          touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${plan.task}`],
+          messageSource: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_local_browser_plan_error',
+            selectedModel,
+            effectiveModel: 'local-browser-plan',
+          },
+        });
+      }
     } catch (error: any) {
       const failedSession: ComputerUseSession = { ...runnable, status: 'failed' };
       setComputerUseSession(failedSession);
       finalizeBrowserPlanFromSession(failedSession, { success: false });
-      addBotMessage(`**Computer Use** failed locally: ${error?.message || 'Unknown error'}`);
+      await addRecoverableChatErrorMessage({
+        title: '**Computer Use** failed locally',
+        task: plan.task,
+        error,
+        executionKind: 'local_browser_plan',
+        source: 'local_browser_plan_exception',
+        touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${plan.task}`],
+        messageSource: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_local_browser_plan_error',
+          selectedModel,
+          effectiveModel: 'local-browser-plan',
+        },
+      });
     }
-  }, [addBotMessage, agentName, circleId, finalizeBrowserPlanFromSession]);
+  }, [addBotMessage, addRecoverableChatErrorMessage, agentName, circleId, finalizeBrowserPlanFromSession, selectedModel]);
 
   const executeLocalComputerAwarenessRequest = async (message: string): Promise<boolean> => {
     const intent = detectLocalComputerAwarenessIntent(message);
@@ -3620,9 +7463,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       });
       return true;
     } catch (err: any) {
-      addBotMessage(`Local desktop bridge failed: ${err?.message || 'Unknown error'}`, undefined, {
-        localOnly: true,
-        source: {
+      await addRecoverableChatErrorMessage({
+        title: 'Local desktop bridge failed',
+        task: message,
+        error: err,
+        executionKind: 'local_desktop_awareness',
+        source: 'local_desktop_bridge_error',
+        touched: ['surface:desktop_bridge', `desktop_intent:${intent.kind}`],
+        messageSource: {
           actor: 'OpenSwan',
           surface: 'main_chat_desktop_bridge_error',
           selectedModel,
@@ -3673,7 +7521,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
         setWallet(activeWallet);
       } catch (e: any) {
-        addBotMessage(`Wallet connection failed: ${e.message}`);
+        addBotMessage('I could not connect the wallet. Check the wallet popup and try again.');
         setSendingCrypto(false);
         return;
       }
@@ -3711,7 +7559,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // Trigger celebration effect
       setTimeout(() => triggerParticleEffect(300, 200), 500);
     } else {
-      addBotMessage(`❌ Transaction failed: ${result.error}\n\nTry again or check your wallet.`);
+      addBotMessage('I could not finish the transaction. Check your wallet and try again.');
     }
 
     setSendingCrypto(false);
@@ -3722,10 +7570,267 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   // ─── Send Message ────────────────────────────────────────────────────────
 
-  const sendMessage = async (overrideText?: string) => {
+  const stageUploadedFilesForDesktopTask = useCallback(async (
+    requestText: string,
+    mediaAttachments: ChatAttachment[],
+    stagedUploads: StagedFile[],
+  ): Promise<StagedDesktopAttachment[]> => {
+    const staged: StagedDesktopAttachment[] = [];
+    const groupId = buildDesktopAttachmentStageGroupName(requestText);
+
+    for (const upload of stagedUploads) {
+      let sourceUrl: string | null = null;
+      if (upload.attachment?.storagePath) {
+        sourceUrl = await getSignedUrl(upload.attachment.storagePath);
+      }
+      if (!sourceUrl) {
+        throw new Error(`"${upload.name}" is not ready to stage locally yet. Wait for upload to finish, then send again.`);
+      }
+      const result = await stageAttachmentForDesktop({
+        filename: upload.name,
+        mimeType: upload.mimeType,
+        sourceUrl,
+        groupId,
+      });
+      if (!result.ok || !result.data?.path) {
+        throw new Error(`Could not stage "${upload.name}" for desktop apps: ${result.error || result.errorCode || 'unknown bridge error'}`);
+      }
+      const candidate = stagedFileDesktopCandidate(upload);
+      staged.push({
+        ...candidate,
+        localPath: result.data.path,
+        stageDirectory: result.data.directory || null,
+        sha256: result.data.sha256 || null,
+        sizeBytes: result.data.sizeBytes || candidate.sizeBytes,
+        appName: inferDesktopAppForAttachment(candidate, requestText),
+      });
+    }
+
+    for (const attachment of mediaAttachments) {
+      const sourceUrl = attachment.uploadedUrl || null;
+      const base64 = sourceUrl ? null : await base64FromChatMediaAttachment(attachment);
+      if (!sourceUrl && !base64) {
+        throw new Error(`Could not read "${attachment.name}" for desktop staging.`);
+      }
+      const result = await stageAttachmentForDesktop({
+        filename: attachment.name,
+        mimeType: attachment.mimeType,
+        sourceUrl,
+        base64,
+        groupId,
+      });
+      if (!result.ok || !result.data?.path) {
+        throw new Error(`Could not stage "${attachment.name}" for desktop apps: ${result.error || result.errorCode || 'unknown bridge error'}`);
+      }
+      const candidate = mediaAttachmentDesktopCandidate(attachment);
+      staged.push({
+        ...candidate,
+        localPath: result.data.path,
+        stageDirectory: result.data.directory || null,
+        sha256: result.data.sha256 || null,
+        sizeBytes: result.data.sizeBytes || candidate.sizeBytes,
+        appName: inferDesktopAppForAttachment(candidate, requestText),
+      });
+    }
+
+    if (staged.length > 0) {
+      try {
+        const manifest = buildDesktopAttachmentPackageManifest(requestText, staged);
+        const manifestResult = await stageAttachmentManifestForDesktop({ groupId, manifest });
+        if (manifestResult.ok && manifestResult.data?.path) {
+          for (const attachment of staged) {
+            attachment.manifestPath = manifestResult.data.path;
+            attachment.stageDirectory = attachment.stageDirectory || manifestResult.data.directory;
+          }
+        }
+      } catch {
+        // The manifest is a recovery aid. The staged files and exact task prompt
+        // are still sufficient to run if an older bridge lacks this endpoint.
+      }
+    }
+
+    return staged;
+  }, []);
+
+  const sendMessage = async (
+    overrideText?: string,
+    options?: {
+      displayText?: string;
+      modeOverride?: string | null;
+      modelOverride?: string | null;
+    },
+  ) => {
     if (sendLockRef.current) return;
-    const content = (overrideText || input).trim();
+    if (
+      !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+      || activeThreadScopeRef.current.circleId !== circleId
+      || activeThreadScopeRef.current.threadId !== activeThreadId
+    ) {
+      setThreadNavigationNotice('This conversation is still refreshing. Retry the conversation load before sending.');
+      return;
+    }
+    const requestedContent = (overrideText || input).trim();
+    const hasPendingAttachments = attachments.length > 0 || stagedFiles.length > 0;
+    const content = requestedContent || (hasPendingAttachments ? 'Open the attached file.' : '');
+    // Pre-send guard: a friendly hint instead of silently swallowing an empty
+    // send. Only 'block' is enforced (an empty message with no attachment);
+    // confirm/send both proceed so no new hoop is added to normal sends.
+    const sendGuard = guardChatSend(requestedContent, { hasAttachment: hasPendingAttachments });
+    if (sendGuard.action === 'block') {
+      addBotMessage(sendGuard.hint, undefined, { localOnly: true, durability: 'ephemeral' });
+      return;
+    }
     if (!content) return;
+    const effectiveChatMode = options?.modeOverride || chatMode;
+    const effectivePlanActMode: 'plan' | 'act' = effectiveChatMode === 'plan' ? 'plan' : 'act';
+    const effectiveSelectedModel = options?.modelOverride && options.modelOverride !== 'auto'
+      ? options.modelOverride
+      : selectedModel;
+
+    // ── Resume a pending clarification ──────────────────────────────────────
+    // If we recently asked the user for a missing detail, treat this reply as
+    // the answer: reconstruct a well-specified request and route THAT, while
+    // still displaying the user's actual words. Cancel words abort cleanly.
+    if (!overrideText?.startsWith('__') && !content.startsWith('/') && !resolvingClarificationRef.current) {
+      const clarifyKey = activeThreadId || 'main';
+      const pendingClarify = pendingClarificationRef.current.get(clarifyKey);
+      if (pendingClarify) {
+        pendingClarificationRef.current.delete(clarifyKey);
+        persistPendingClarifications();
+        const fresh = isPendingClarificationFresh(pendingClarify.askedAt, Date.now());
+        const cancelled = /\b(nevermind|never\s*mind|cancel|forget it|forget that|skip it|no thanks|stop)\b/i.test(content);
+        // A reply ending in "?" is almost certainly a new question, not the
+        // answer to ours — don't fold it into the pending task; let it route
+        // normally (safe failure: the user can just re-state the task).
+        const looksLikeNewQuestion = /\?\s*$/.test(content);
+        if (fresh && !cancelled && !looksLikeNewQuestion) {
+          const synthetic = reconstructClarificationAnswer(
+            pendingClarify.pendingIntent,
+            pendingClarify.originalMessage,
+            content,
+          );
+          if (synthetic && synthetic.trim() && synthetic.trim() !== content.trim()) {
+            resolvingClarificationRef.current = true;
+            try {
+              await sendMessage(synthetic, { displayText: content });
+            } finally {
+              resolvingClarificationRef.current = false;
+            }
+            return;
+          }
+        }
+        // stale / cancelled / nothing to build → fall through and treat the
+        // reply as a normal message (the pending entry is already cleared).
+      }
+    }
+
+    // ── Booking follow-up seam ("book option 2") ────────────────────────────
+    // WI-5: after the clarification collision guard and before the automation
+    // planner, see whether this reply is a pick against the last browser run's
+    // findings. Runs ONLY when a prior computer run left durable findings (or a
+    // live confirmation is open) — matchBookingFollowup fails closed to none
+    // for unrelated chat, so a false positive can't hijack a normal message.
+    if (
+      !overrideText?.startsWith('__')
+      && !content.startsWith('/')
+      && !resolvingClarificationRef.current
+    ) {
+      // Reconstruct lastComputerRun from the most recent completion message
+      // that carried persisted structured findings (survives reload) plus the
+      // live task state (session id / open confirmation).
+      const findingsMessage = [...messages].reverse().find(
+        (m) => m.isBot && m.computerFindings && (m.computerFindings.items?.length || 0) > 0,
+      );
+      const livePending = computerUseTask.state.pendingConfirmation;
+      const livePendingId = livePending?.id || null;
+      const runAlive = computerUseTask.state.status === 'running'
+        || computerUseTask.state.status === 'starting';
+      // Decline the mirrored mid-run (pay/book) confirmation: a clear "No"
+      // while a confirmation is live resolves it negatively. matchBookingFollowup
+      // only maps affirmatives/selections, so handle the decline here so the
+      // "No" chip on the confirmation bubble cleanly stops the run at the floor.
+      if (runAlive && livePendingId
+        && /^(n|no|nope|cancel|stop|don'?t|do not|abort|decline|not now)\b/i.test(content.trim())) {
+        addUserMessage((options?.displayText || content).trim());
+        setInput('');
+        setReplyTo(null);
+        try {
+          await resolveComputerUseConfirmation(livePendingId, 'no');
+        } catch {
+          addBotMessage('I could not record that. Try again in a moment.', undefined, { localOnly: true });
+        }
+        return;
+      }
+      const lastComputerRun: BookingFollowupLastRun | null = findingsMessage?.computerFindings || livePendingId
+        ? {
+            runId: findingsMessage?.computerFindings?.runId
+              ?? findingsMessage?.runId
+              ?? null,
+            sessionId: findingsMessage?.computerFindings?.sessionId
+              ?? computerUseTask.state.sessionId
+              ?? null,
+            findings: findingsMessage?.computerFindings?.items || null,
+            // Case A only fires while a confirmation is live; once terminal we
+            // leave this null so Case B (synthesize + continue session) fires.
+            pendingConfirmationId: runAlive ? livePendingId : null,
+            completedAt: runAlive ? null : (findingsMessage ? Date.now() : null),
+          }
+        : null;
+      if (lastComputerRun) {
+        const followup = matchBookingFollowup(content, lastComputerRun);
+        if (followup.kind === 'resolve_confirmation') {
+          addUserMessage((options?.displayText || content).trim());
+          setInput('');
+          setReplyTo(null);
+          try {
+            await resolveComputerUseConfirmation(followup.confirmationId, followup.choice);
+          } catch {
+            addBotMessage('I could not record that booking choice. Try again in a moment.', undefined, { localOnly: true });
+          }
+          return;
+        }
+        if (followup.kind === 'continue_session') {
+          addUserMessage((options?.displayText || content).trim());
+          setInput('');
+          setReplyTo(null);
+          const followupPolicy = buildChatComputerUsePolicyInputs(followup.task, {
+            booking: true,
+          });
+          const started = await computerUseTask.run(followup.task, {
+            sessionId: followup.sessionId ?? undefined,
+            booking: true,
+            model: resolveSendModel(followup.task) || undefined,
+            userConstraints: followupPolicy.userConstraints,
+            alwaysConfirmCategories: followupPolicy.alwaysConfirmCategories,
+          });
+          if (!started.started) {
+            addBotMessage('I could not continue that booking run. The browser session may have expired — say "book" again to start fresh.', undefined, { localOnly: true });
+          } else {
+            addBotMessage('Continuing the booking run — live view', undefined, {
+              localOnly: true,
+              durability: 'ephemeral',
+            });
+          }
+          return;
+        }
+        // kind === 'none' → fall through to normal routing untouched.
+      }
+    }
+
+    const recoverySelectionForDisplay = options?.displayText
+      ? null
+      : parseChatFailureRecoveryOptionSelection(content);
+    const displayContent = (options?.displayText || (recoverySelectionForDisplay
+      ? formatChatRecoveryActionDisplayText(
+          recoverySelectionForDisplay,
+          buildChatRecoveryActionIntent(recoverySelectionForDisplay, {
+            sourceSurface: recoverySelectionForDisplay.context?.sourceSurface || null,
+            platform: Platform.OS,
+          }),
+        )
+      : content)).trim();
     sendLockRef.current = true;
     setTimeout(() => { sendLockRef.current = false; }, 350);
 
@@ -3746,6 +7851,59 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     // Capture current attachments before clearing
     const currentAttachments = [...attachments];
+    const currentStagedFiles = [...stagedFiles];
+    const desktopAttachmentCandidates = [
+      ...currentAttachments.map(mediaAttachmentDesktopCandidate),
+      ...currentStagedFiles
+        .filter((file) => !file.error)
+        .map(stagedFileDesktopCandidate),
+    ];
+    const shouldRunDesktopAttachmentTask = shouldRouteAttachedFilesToDesktop(content, desktopAttachmentCandidates);
+    if (shouldRunDesktopAttachmentTask) {
+      const uploading = currentStagedFiles.find((file) => file.uploading || (!file.attachment && !file.error));
+      if (uploading) {
+        addBotMessage(`**${uploading.name}** is still uploading. Send again after the upload finishes so I can stage it for the desktop app.`, undefined, { localOnly: true, durability: 'ephemeral' });
+        return;
+      }
+      const failed = currentStagedFiles.find((file) => file.error);
+      if (failed) {
+        addBotMessage(`**${failed.name}** did not upload cleanly. Remove it or upload it again before I open it in a desktop app.`, undefined, { localOnly: true, durability: 'ephemeral' });
+        return;
+      }
+      setBotTyping(true);
+      try {
+        const stagedDesktopAttachments = await stageUploadedFilesForDesktopTask(content, currentAttachments, currentStagedFiles);
+        const desktopTask = buildDesktopAttachmentComputerTask(content, stagedDesktopAttachments);
+        addUserMessage(displayContent);
+        setInput('');
+        setAttachments([]);
+        setStagedFiles([]);
+        revokeStagedPreviews(currentStagedFiles);
+        setReplyTo(null);
+        setExpandedCategory(null);
+        if (profileRef.current) {
+          profileRef.current = updateProfileFromMessage(profileRef.current, displayContent, true);
+          saveUserProfile(profileRef.current).catch(() => {});
+        }
+        recordChatActivity(circleId, 'message').catch(() => {});
+        if (content.startsWith('/')) {
+          recordChatActivity(circleId, 'slash').catch(() => {});
+        }
+        await executeSharedComputerTask(desktopTask, { planPrefix: 'Use uploaded desktop file: ' });
+      } catch (error: any) {
+        await addRecoverableChatErrorMessage({
+          title: 'Uploaded file desktop task failed',
+          task: `Open and edit uploaded chat file(s): ${content.slice(0, 240)}`,
+          error,
+          executionKind: 'uploaded_desktop_file_task',
+          source: 'chat_uploaded_desktop_file_task',
+          touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/chatDesktopAttachmentRouting.ts', 'src/lib/desktopBridge.ts', 'scripts/claude-bridge.js'],
+        });
+      } finally {
+        setBotTyping(false);
+      }
+      return;
+    }
     const resolvedFigmaRefs = (currentUserId && (currentAttachments.some((attachment) => attachment.isFigma) || /figma\.com\//i.test(content)))
       ? await resolveFigmaReferences({
           message: content,
@@ -3762,20 +7920,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setSelectedBuilderFigmaRefId(nextSelectedFigmaRefId);
 
     // Add user message immediately
-    addUserMessage(content);
+    const userMessage = addUserMessage(displayContent);
     setInput('');
     setAttachments([]);
+    setStagedFiles([]);
+    revokeStagedPreviews(currentStagedFiles);
     setReplyTo(null);
     setExpandedCategory(null);
 
     // Track user message in behavior profile
     if (profileRef.current) {
-      profileRef.current = updateProfileFromMessage(profileRef.current, content, true);
+      profileRef.current = updateProfileFromMessage(profileRef.current, displayContent, true);
       saveUserProfile(profileRef.current).catch(() => {});
     }
     recordChatActivity(circleId, 'message').catch(() => {});
     if (content.startsWith('/')) {
       recordChatActivity(circleId, 'slash').catch(() => {});
+    }
+    const lowerContent = content.toLowerCase().trim();
+    const directRecoverySelection = parseChatFailureRecoveryOptionSelection(content);
+    if (isDesktopBridgeRecoverySelection(directRecoverySelection)) {
+      setBotTyping(true);
+      try {
+        await addDesktopBridgeAutoConnectMessage(directRecoverySelection?.context?.sourceSurface || 'desktop_bridge_recovery');
+      } catch (error: any) {
+        await addRecoverableChatErrorMessage({
+          title: 'Desktop bridge recovery failed',
+          task: 'Start or repair the local desktop bridge from chat',
+          error,
+          executionKind: 'desktop_bridge_recovery',
+          source: 'desktop_bridge_direct_recovery_error',
+          touched: ['src/lib/desktopBridgeAutoConnect.ts', 'src/lib/desktopBridge.ts', 'scripts/claude-bridge.js'],
+        });
+      } finally {
+        setBotTyping(false);
+      }
+      return;
+    }
+
+    if (isLastTaskModelQuestion(content)) {
+      addBotMessage(describeLastTaskModel(messages), undefined, {
+        localOnly: true,
+        source: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_model_audit',
+          selectedModel,
+          effectiveModel: 'local-chat-state',
+        },
+      });
+      return;
     }
 
     // ─── Terminal agent control ────────────────────────────────────────────
@@ -3789,7 +7982,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return;
       }
     } catch (err: any) {
-      addBotMessage(`Terminal agent control error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+      await addRecoverableChatErrorMessage({
+        title: 'Terminal agent control error',
+        task: content,
+        error: err,
+        executionKind: 'terminal_agent_control',
+        source: 'terminal_agent_control_error',
+        touched: ['surface:terminal_agent', 'surface:main_chat'],
+      });
       return;
     }
 
@@ -3809,7 +8009,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return;
       }
     } catch (err: any) {
-      addBotMessage(`Terminal agent launch error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+      await addRecoverableChatErrorMessage({
+        title: 'Terminal agent launch error',
+        task: content,
+        error: err,
+        executionKind: 'terminal_agent_launch',
+        source: 'terminal_agent_launch_error',
+        touched: ['surface:terminal_agent', 'surface:main_chat'],
+      });
       return;
     }
 
@@ -3824,7 +8031,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addBotMessage(
           `I think you want to set up an automation. Confirm and I'll create it.`,
           undefined,
-          { localOnly: true, automationProposal: proposal },
+          {
+            localOnly: true,
+            automationProposal: proposal,
+            automationAgentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
+          },
         );
         return;
       }
@@ -3838,6 +8049,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (multiAgentPlan.kind === 'help') {
         addBotMessage(formatMultiAgentHelp(liveAgents, multiAgentPlan.reason), undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           source: {
             actor: 'OpenSwan',
             surface: 'multi_agent_help',
@@ -3853,6 +8065,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (targets.length < 2) {
         addBotMessage(formatMultiAgentHelp(liveAgents, 'Need at least two available agents for a multi-agent run.'), undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           source: {
             actor: 'OpenSwan',
             surface: 'multi_agent_help',
@@ -3885,6 +8098,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         undefined,
         {
           localOnly: true,
+          durability: 'ephemeral',
           source: {
             actor: 'OpenSwan',
             surface: strategySurface,
@@ -3957,9 +8171,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           addMultiAgentCompletion(results);
         })().catch((err: any) => {
           setBotTyping(false);
-          addBotMessage(`Multi-agent ${strategyLabel} failed: ${err?.message || 'unknown error'}`, undefined, {
-            localOnly: true,
-            source: {
+          void addRecoverableChatErrorMessage({
+            title: `Multi-agent ${strategyLabel} failed`,
+            task: content,
+            error: err,
+            executionKind: 'multi_agent_dispatch',
+            source: `${strategySurface}_error`,
+            touched: ['surface:multi_agent', 'surface:main_chat'],
+            messageSource: {
               actor: 'OpenSwan',
               surface: `${strategySurface}_error`,
               selectedModel: selectedModel || null,
@@ -3994,9 +8213,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               results.push(result);
               addMultiAgentReply(result);
             } else {
-              addBotMessage(`Multi-agent ${strategyLabel} error: ${String(s.reason)}`, undefined, {
-                localOnly: true,
-                source: {
+              void addRecoverableChatErrorMessage({
+                title: `Multi-agent ${strategyLabel} error`,
+                task: content,
+                error: s.reason,
+                executionKind: 'multi_agent_dispatch',
+                source: `${strategySurface}_error`,
+                touched: ['surface:multi_agent', 'surface:main_chat'],
+                messageSource: {
                   actor: 'OpenSwan',
                   surface: `${strategySurface}_error`,
                   selectedModel: selectedModel || null,
@@ -4008,15 +8232,74 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addMultiAgentCompletion(results);
       }).catch((err: any) => {
         setBotTyping(false);
-        addBotMessage(`Multi-agent ${strategyLabel} failed: ${err?.message || 'unknown error'}`, undefined, {
-          localOnly: true,
-          source: {
+        void addRecoverableChatErrorMessage({
+          title: `Multi-agent ${strategyLabel} failed`,
+          task: content,
+          error: err,
+          executionKind: 'multi_agent_dispatch',
+          source: `${strategySurface}_error`,
+          touched: ['surface:multi_agent', 'surface:main_chat'],
+          messageSource: {
             actor: 'OpenSwan',
             surface: `${strategySurface}_error`,
             selectedModel: selectedModel || null,
           },
         });
       });
+      return;
+    }
+
+    // ─── Selected connected-agent route ─────────────────────────────────────
+    // The OpenSwan composer button can pin a connected agent for the next chat
+    // turns. Slash commands and explicit multi-agent requests still keep their
+    // deterministic handlers; ordinary task text goes to the selected agent.
+    if (!content.startsWith('/') && selectedChatAgentTarget && !isOpenSwanChatAgentTarget(selectedChatAgentTarget)) {
+      if (!selectedChatAgentTarget.connected || !selectedChatAgentTarget.agent) {
+        addBotMessage(buildChatAgentSetupMessage(selectedChatAgentTarget), undefined, {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'selected_chat_agent_setup',
+            provider: selectedChatAgentTarget.provider,
+            selectedModel: selectedModel || null,
+          },
+        });
+        return;
+      }
+
+      const selectedDispatchAgent = selectedChatAgentTarget.agent as AssignableAgent;
+      setBotTyping(true);
+      try {
+        const response = await dispatchAssignedAgentTask(selectedDispatchAgent, content);
+        addBotMessage(response, undefined, {
+          source: {
+            actor: selectedDispatchAgent.name,
+            surface: 'selected_chat_agent_dispatch',
+            provider: selectedDispatchAgent.provider,
+            selectedModel: selectedDispatchAgent.model || selectedModel || null,
+          },
+        });
+      } catch (err: any) {
+        await addRecoverableChatErrorMessage({
+          title: `**${selectedDispatchAgent.name}** failed`,
+          task: content,
+          error: err,
+          executionKind: 'selected_chat_agent_dispatch',
+          source: 'selected_chat_agent_dispatch_error',
+          touched: ['surface:main_chat', 'surface:selected_agent', 'src/lib/bridgeTaskDispatcher.ts', 'src/lib/customAgentBridgeDispatcher.ts', 'scripts/cursor-bridge.js'],
+          messageSource: {
+            actor: selectedDispatchAgent.name,
+            surface: 'selected_chat_agent_dispatch_error',
+            provider: selectedDispatchAgent.provider,
+            selectedModel: selectedDispatchAgent.model || selectedModel || null,
+          },
+        });
+      } finally {
+        setBotTyping(false);
+        setTimeout(() => {
+          void refreshAssignableAgentsRef.current?.();
+        }, 1500);
+      }
       return;
     }
 
@@ -4033,11 +8316,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return;
         }
       } catch (err: any) {
-        addBotMessage(`SwanBot v2 router error: ${err?.message || 'unknown'}`, undefined, { localOnly: true });
+        await addRecoverableChatErrorMessage({
+          title: 'SwanBot v2 router error',
+          task: content,
+          error: err,
+          executionKind: 'swanbot_v2_router',
+          source: 'swanbot_v2_router_error',
+          touched: ['surface:main_chat', 'runtime:swanbot_v2'],
+        });
         return;
       }
     }
-    if (content.startsWith('/memory-bank') || content.startsWith('/mb')) {
+    if (lowerContent.startsWith('/memory-bank') || lowerContent.startsWith('/mb')) {
       try {
         const { executeMemoryBankCommand } = await import('../../../lib/memoryBankChatCommands');
         const outcome = await executeMemoryBankCommand(content, {
@@ -4045,11 +8335,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           userId: currentUserId || 'anonymous',
         });
         if (outcome) {
+          // Plan §2c: destructive memory-bank writes get a live Restore
+          // strip (rendered above the composer) instead of a prose-only id.
+          if (outcome.checkpointId) setLatestMemoryCheckpointId(outcome.checkpointId);
           addBotMessage(outcome.message, undefined, { localOnly: true });
           return;
         }
       } catch (err: any) {
-        addBotMessage(`Memory Bank error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+        await addRecoverableChatErrorMessage({
+          title: 'Memory Bank error',
+          task: content,
+          error: err,
+          executionKind: 'memory_bank_command',
+          source: 'memory_bank_command_error',
+          touched: ['surface:main_chat', 'surface:memory_bank'],
+        });
         return;
       }
     }
@@ -4071,7 +8371,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           }
         }
       } catch (err: any) {
-        addBotMessage(`Recording command failed: ${err?.message || 'unknown'}`, undefined, { localOnly: true });
+        await addRecoverableChatErrorMessage({
+          title: 'Recording command failed',
+          task: content,
+          error: err,
+          executionKind: 'recording_command',
+          source: 'recording_command_error',
+          touched: ['surface:main_chat', 'surface:recording'],
+        });
         return;
       }
     }
@@ -4090,7 +8397,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return;
         }
       } catch (err: any) {
-        addBotMessage(`Desktop diag failed: ${err?.message || 'unknown'}`, undefined, { localOnly: true });
+        await addRecoverableChatErrorMessage({
+          title: 'Desktop diag failed',
+          task: content,
+          error: err,
+          executionKind: 'desktop_diag',
+          source: 'desktop_diag_error',
+          touched: ['surface:main_chat', 'surface:desktop_bridge'],
+        });
         return;
       }
     }
@@ -4101,13 +8415,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const outcome = await executeAutomationCommand(content, {
           circleId,
           userId: currentUserId || 'anonymous',
+          agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
         });
         if (outcome) {
           addBotMessage(outcome.message, undefined, { localOnly: true });
           return;
         }
       } catch (err: any) {
-        addBotMessage(`Automation command error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+        await addRecoverableChatErrorMessage({
+          title: 'Automation command error',
+          task: content,
+          error: err,
+          executionKind: 'automation_command',
+          source: 'automation_command_error',
+          touched: ['surface:main_chat', 'surface:automation'],
+        });
         return;
       }
     }
@@ -4127,11 +8449,161 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       })();
     }
 
+    // ─── Agent Plan Mode ─────────────────────────────────────────────────────
+    // Plan mode is first-class now: Chat classifies the request, SwanBot
+    // stays in planner posture, OpenSwan contributes tools/verification,
+    // and the result is persisted for Office/run-ledger handoff.
+    if (shouldCreateAgentPlanForMessage(content, effectiveChatMode)) {
+      const explicitPlanTask = content.replace(/^\/plan\s*/i, '').trim();
+      const taskText = lowerContent.startsWith('/plan') ? explicitPlanTask : content;
+      if (!taskText) {
+        addBotMessage('Plan mode is on. Send `/plan <task>` or type the task you want me to plan before execution.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+          source: {
+            actor: 'OpenSwan',
+            surface: 'agent_plan_mode_help',
+            selectedModel: selectedModel || null,
+            effectiveModel: 'agent-plan-mode-v1',
+          },
+        });
+        return;
+      }
+
+      setBotTyping(true);
+      try {
+        const draft = buildAgentPlanDraft({
+          task: taskText,
+          selectedMode: 'plan',
+          selectedModel: effectiveSelectedModel || null,
+          threadId: activeThreadId || null,
+          sourceMessageId: userMessage.id,
+          circleId,
+          createdBy: currentUserId || null,
+        });
+        const saved = currentUserId
+          ? await saveAgentPlanDraft({
+              circleId,
+              userId: currentUserId,
+              threadId: activeThreadId || null,
+              sourceMessageId: userMessage.id,
+              draft,
+            })
+          : {
+              ok: false as const,
+              plan: draft,
+              error: 'Sign in to save agent plans to the database.',
+              code: 'auth_missing',
+            };
+        const planForChat = saved.ok ? saved.plan : saved.plan;
+        const warning = saved.ok
+          ? saved.warnings.join(' ')
+          : saved.error;
+        const contentForChat = formatAgentPlanForChat(planForChat, {
+          persisted: saved.ok,
+          persistenceWarning: warning || null,
+        });
+        addBotMessage(contentForChat, undefined, {
+          localOnly: !saved.ok,
+          agentPlan: planForChat,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'agent_plan_mode',
+            selectedModel: selectedModel || null,
+            effectiveModel: 'agent-plan-mode-v1',
+          },
+        });
+      } catch (err: any) {
+        await addRecoverableChatErrorMessage({
+          title: 'Agent Plan Mode failed',
+          task: content,
+          error: err,
+          executionKind: 'agent_plan_mode',
+          source: 'agent_plan_mode_error',
+          touched: ['surface:main_chat', 'surface:agent_plan_mode'],
+          messageSource: {
+            actor: 'OpenSwan',
+            surface: 'agent_plan_mode_error',
+            selectedModel: selectedModel || null,
+            effectiveModel: 'agent-plan-mode-v1',
+          },
+        });
+      } finally {
+        setBotTyping(false);
+      }
+      return;
+    }
+
     // ─── Conversational intent routing (natural language → actions) ─────────
     // Catches "post this to WordPress", "create a task", "remember that...", etc.
     // Only fires for non-slash-command messages
-    const lowerContent = content.toLowerCase().trim();
     if (!lowerContent.startsWith('/')) {
+      // Wave-2 preference learning: a conservative, verb-anchored "use
+      // Pixelmator (instead)" follow-up against the previous route's app
+      // resolution records the preferred app for that category. Fire-and-
+      // forget; a missed parse just means no preference is learned.
+      const previousAppResolution = lastAppResolutionRef.current;
+      if (previousAppResolution && circleId) {
+        void import('../../../lib/chatComputerRequestRouter')
+          .then(async ({ parseAppOverrideChoice, getAppResolutionContext, setAppResolutionContext }) => {
+            const override = parseAppOverrideChoice(content, previousAppResolution);
+            if (!override) return;
+            const { recordPreferredAppForCategory } = await import('../../../lib/knownAppShortcuts');
+            await recordPreferredAppForCategory(circleId, override.category, override.appId);
+            // Update the hydrated registry too so the very next route build
+            // already resolves to the user's choice.
+            const ctx = getAppResolutionContext();
+            setAppResolutionContext({
+              ...ctx,
+              preferredAppByCategory: {
+                ...(ctx.preferredAppByCategory || {}),
+                [override.category]: override.appId,
+              },
+            });
+          })
+          .catch(() => {});
+      }
+
+      const photoshopGenerativeFillClarification = buildPhotoshopGenerativeFillClarification(content);
+      if (photoshopGenerativeFillClarification.route) {
+        addBotMessage([
+          photoshopGenerativeFillClarification.question,
+          '',
+          'Examples:',
+          ...photoshopGenerativeFillClarification.suggestions.map((suggestion) => `- ${suggestion}`),
+        ].join('\n'), undefined, {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_photoshop_clarification',
+            selectedModel,
+            effectiveModel: 'deterministic-photoshop-generative-fill',
+          },
+        });
+        setBotTyping(false);
+        return;
+      }
+
+      const indesignBannerClarification = buildInDesignBannerClarification(content);
+      if (indesignBannerClarification.route) {
+        addBotMessage([
+          indesignBannerClarification.question,
+          '',
+          'Examples:',
+          ...indesignBannerClarification.suggestions.map((suggestion) => `- ${suggestion}`),
+        ].join('\n'), undefined, {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_indesign_banner_clarification',
+            selectedModel,
+            effectiveModel: 'deterministic-indesign-banner-helper',
+          },
+        });
+        setBotTyping(false);
+        return;
+      }
+
       const plan = buildChatAutomationPlan({
         message: content,
         attachments: currentAttachments.map((attachment) => ({
@@ -4139,11 +8611,66 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           type: attachment.type,
           id: attachment.id,
         })),
-        selectedMode: chatMode,
+        selectedMode: effectiveChatMode,
       });
+      // multi-intent-loop: compound-message notice. The single-intent execution
+      // lanes below (command handler / build discovery) classify ONE ask per
+      // turn and early-return, silently dropping the later asks — so when the
+      // deterministic segmenter finds 2-3 verb-led asks, post a local notice
+      // with the later asks as "tap to run next" chips BEFORE lane #1 runs.
+      // Excluded on purpose: run_computer_task because its shared runtime owns
+      // the complete original task as one ordered workflow; splitting or
+      // previewing only #1 contradicts what is actually dispatched.
+      // Also excluded: ask_clarification (the
+      // clarify-resume seam would fold a chip tap into the pending answer) and
+      // run_openswan/run_plain_chat/local_reply/open_modal (the tool-loop agent /
+      // SwanBot sees the full text and handles every ask itself; run_openswan's
+      // only ask-specific branch is a read-only local-desktop short-circuit,
+      // otherwise it falls through to the same full-content handler). Suppressed for clarify-resume re-sends
+      // (resolvingClarificationRef / displayText). The pipeline continues
+      // UNCHANGED with the full message; segment text is already bounded,
+      // control/bidi-stripped, and secret-redacted by chatMultiIntentCore.
+      if (!resolvingClarificationRef.current && !options?.displayText) {
+        const multiAsk = segmentChatIntents(content);
+        const laterAsks = multiAsk.isMultiIntent
+          ? multiAsk.segments.slice(1).map((segment) => segment.text).filter((text) => text.trim().length > 0)
+          : [];
+        if (
+          multiAsk.isMultiIntent
+          && multiAsk.segments.length >= 2
+          && multiAsk.segments.length <= 3
+          && laterAsks.length === multiAsk.segments.length - 1
+          && multiAsk.segments[0].text.trim().length > 0
+          && shouldSurfaceMultiIntentNotice(plan.execution.kind)
+        ) {
+          const firstAsk = multiAsk.segments[0].text.length > 80
+            ? `${multiAsk.segments[0].text.slice(0, 79).trimEnd()}…`
+            : multiAsk.segments[0].text;
+          addBotMessage(
+            `I count ${multiAsk.segments.length} asks in that message — I'm on #1 now: «${firstAsk}». If the run doesn't cover the rest, tap one below to run it next.`,
+            undefined,
+            {
+              localOnly: true,
+              durability: 'ephemeral',
+              quickReplies: laterAsks,
+              quickRepliesLabel: 'TAP TO RUN NEXT',
+              source: {
+                actor: 'OpenSwan',
+                surface: 'main_chat_multi_intent_notice',
+                selectedModel,
+                effectiveModel: 'deterministic-multi-intent',
+              },
+            },
+          );
+        }
+      }
       if (plan.execution.kind === 'run_computer_task') {
         const shared = await executeSharedComputerTask(content);
-        if (shared?.handled && !shared.browser) {
+        // WI-1: a zero-tap auto-started browser run owns the turn — return so
+        // the parallel SwanBot text stream does not post a duplicate answer on
+        // top of the live browser card. Non-auto-started browser plans (the
+        // approval-dialog path) still fall through to today's behavior.
+        if (shared?.handled && (!shared.browser || shared.autoStarted)) {
           return;
         }
       }
@@ -4153,25 +8680,427 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return;
         }
       }
-    }
+      // R7 — apply handler state requests AFTER dispatch (called from a
+      // try/finally around each dispatch below). Handlers return the UI
+      // state they want instead of mutating ChatTab state in their closures,
+      // so a gate refusal, dispatcher skip, or mid-handler throw can never
+      // leave the typing indicator stuck or the composer locked. Only
+      // `workbench.stop` is honored here — a visible `start` must happen
+      // mid-handler (post-dispatch it would appear after the work is done).
+      const applyTransportStateRequests = (requests: ChatTransportStateRequests | null) => {
+        if (!requests) return;
+        if (requests.modalToOpen === 'memory_viewer') setShowMemoryViewer(true);
+        if (requests.workbench?.action === 'stop') stopCodingWorkbench();
+        if (typeof requests.typing === 'boolean') setBotTyping(requests.typing);
+        if (typeof requests.composerLock === 'boolean') sendLockRef.current = requests.composerLock;
+      };
+      const postDispatcherStopOutcome = (
+        outcome: ChatAutomationOutcome | undefined,
+        surface: string,
+      ) => {
+        if (!outcome) return;
+        if (outcome.status === 'skipped' && outcome.data?.planModeRefusal) {
+          addBotMessage(outcome.message, undefined, {
+            localOnly: true,
+            runId: outcome.runId || null,
+            chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
+            source: {
+              actor: 'OpenSwan',
+              surface,
+              selectedModel,
+              effectiveModel: 'chat-automation-plan-refusal',
+            },
+          });
+          return;
+        }
+        if (outcome.status === 'skipped') return;
+        // Approval transparency (Phase 1b): the gate says when an earlier
+        // approval covered this run instead of silently reusing it.
+        const approvalNotice = typeof outcome.data?.approvalNotice === 'string'
+          ? outcome.data.approvalNotice
+          : null;
+        if (outcome.status === 'completed') {
+          // A completed run means any provider blocker is fixed.
+          setAttentionProviderBlocker(null);
+          // Handlers post their own success text, so the reuse notice gets
+          // its own compact line for completed runs (plan §1 follow-up).
+          if (approvalNotice) {
+            addBotMessage(approvalNotice, undefined, {
+              localOnly: true,
+              runId: outcome.runId || null,
+              source: {
+                actor: 'OpenSwan',
+                surface,
+                selectedModel,
+                effectiveModel: 'chat-automation-approval-notice',
+              },
+            });
+          }
+          return;
+        }
+        if (outcome.status !== 'deferred' && outcome.status !== 'failed' && outcome.status !== 'blocked') return;
+        // Phase 2b: lead with plain language + one next action when the
+        // failure classifies; keep the raw message as a detail line so no
+        // information is lost. Deferred messages are already human-written
+        // by the gate, so they pass through untranslated.
+        const translated = outcome.status !== 'deferred'
+          ? translateChatFailure(outcome.message)
+          : null;
+        if (translated) {
+          const blocker = providerBlockerFromFailure(outcome.message);
+          if (blocker) setAttentionProviderBlocker(blocker);
+        }
+        const messageParts = translated
+          ? [formatChatUserFacingOutcome(translated), `_Details: ${String(outcome.message).slice(0, 200)}_`]
+          : [outcome.message];
+        if (approvalNotice) messageParts.push(approvalNotice);
+        addBotMessage(messageParts.join('\n\n'), undefined, {
+          localOnly: true,
+          runId: outcome.runId || null,
+          chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
+          source: {
+            actor: 'OpenSwan',
+            surface,
+            selectedModel,
+            effectiveModel: `chat-automation-${outcome.status}`,
+          },
+        });
+      };
+      const shouldStopAfterDispatcherOutcome = (outcome: ChatAutomationOutcome | undefined) => (
+        !!outcome && (outcome.status !== 'skipped' || Boolean(outcome.data?.planModeRefusal))
+      );
+      // R9 — thread-scoped clarification park/resume seam handed to handlers
+      // through the dispatch ctx. `pendingClarificationRef` REMAINS the
+      // backing store (the resume block at the top of sendMessage still reads
+      // it directly — no behavior change); this just lets dispatcher handlers
+      // park/resume without reaching into component refs, so the create_task
+      // cutover can use the same seam.
+      const clarifyResumeKey = activeThreadId || 'main';
+      const clarificationResumeStore: ChatClarificationResumeStore = {
+        pending: pendingClarificationRef.current.get(clarifyResumeKey) || null,
+        setPending: (pending) => {
+          pendingClarificationRef.current.set(clarifyResumeKey, pending);
+          persistPendingClarifications();
+        },
+        clearPending: () => {
+          pendingClarificationRef.current.delete(clarifyResumeKey);
+          persistPendingClarifications();
+        },
+      };
+      // Underspecified request — ask for the missing details instead of
+      // guessing or fabricating a placeholder. Recall context first (memory +
+      // recent thread) so the question is informed, then post it as a bot
+      // message (mirrors the Photoshop/InDesign clarification UX above).
+      //
+      // C1 (Phase 1b) cutover #1: this intent now runs through the unified
+      // executor (`createChatTransportHandlers` → `dispatchChatAutomationPlan`)
+      // instead of an ad-hoc inline branch. `ask_clarification` is plan-safe and
+      // approval-free, so behavior is identical — but it now shares the single
+      // plan-mode / approval / observer pipeline with every other kind. The dep
+      // below is the former inline body verbatim (R7/R9: the trailing typing
+      // reset became a state request and the park moved to the ctx seam).
+      if (plan.execution.kind === 'ask_clarification' && plan.execution.clarification && !resolvingClarificationRef.current) {
+        const clarificationHandlers = createChatTransportHandlers({
+          ask_clarification: async (dispatchedPlan, depCtx) => {
+            const clarification = dispatchedPlan.execution.clarification!;
+            const recentMessages = transcriptChatMessages(messages).slice(-6).map((m) => m.content).filter(Boolean);
+            const fill = await recallForClarification({
+              circleId,
+              userId: currentUserId || '',
+              message: content,
+              recentMessages,
+              gap: { missingParams: clarification.missingParams },
+            });
+            const lines = [clarification.question];
+            if (fill.contextNote) lines.push('', fill.contextNote);
+            // Examples render as tappable chips (QuickReplyChips) rather than inline
+            // text — one tap sends the answer, which the pending-clarification resume
+            // path reconstructs into the completed task.
+            addBotMessage(lines.join('\n'), undefined, {
+              localOnly: true,
+              chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
+              quickReplies: clarification.examples,
+              source: {
+                actor: 'OpenSwan',
+                surface: 'main_chat_clarification',
+                selectedModel,
+                effectiveModel: 'deterministic-clarification',
+              },
+            });
+            // Remember what we asked so the user's next reply completes the task
+            // instead of being routed from scratch (see the resume block above).
+            // R9: park through the dispatcher-ctx seam (refs stay the store).
+            depCtx.clarificationResume?.setPending({
+              originalMessage: content,
+              pendingIntent: clarification.pendingIntent || null,
+              missingParams: clarification.missingParams,
+              askedAt: Date.now(),
+            });
+            // R7: typing reset is a state request, applied post-dispatch.
+            return { status: 'needs_input', stateRequests: { typing: false } };
+          },
+        });
+        let outcome: ChatAutomationOutcome | undefined;
+        try {
+          outcome = await dispatchChatAutomationPlan(plan, {
+            handlers: clarificationHandlers,
+            ctx: {
+              circleId,
+              userId: currentUserId || '',
+              threadId: activeThreadId || undefined,
+              model: effectiveSelectedModel,
+              chatMode: effectivePlanActMode,
+              clarificationResume: clarificationResumeStore,
+            },
+            approvalGate: chatAutomationApprovalGate,
+            onOutcome: attachPlanDecisionToRun,
+          });
+        } finally {
+          // R7: applied after dispatch, even on a gate refusal or throw.
+          // Default typing→false mirrors the legacy in-closure reset, so a
+          // handler crash can't leave the indicator stuck.
+          const requests = getOutcomeStateRequests(outcome);
+          applyTransportStateRequests(requests ?? { typing: false });
+        }
+        postDispatcherStopOutcome(outcome, 'main_chat_clarification_dispatch');
+        // Handled (asked the question, or refused by the plan-mode gate) →
+        // stop here. Only an unexpected `skipped` (no handler) falls through to
+        // the legacy path, preserving the old safety net.
+        if (shouldStopAfterDispatcherOutcome(outcome)) return;
+      }
 
-    if (!lowerContent.startsWith('/')) {
-      try {
-        const { detectConversationalIntent, executeConversationalIntent } = await import('../../../lib/conversationalRouter');
-        const intent = detectConversationalIntent(content, currentAttachments as any);
-        if (intent.type !== 'none') {
-          const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
+      // C1 (Phase 1b) cutover #7: natural-language build requests now use the
+      // unified dispatcher before the legacy chat path. The handler preserves
+      // the existing `/build-page` behavior: thin briefs get the same
+      // deterministic clarification, while good briefs launch the streaming
+      // builder and leave its workbench/typing state running until the stream
+      // completes.
+      if (plan.execution.kind === 'run_build_discovery') {
+        let buildStreamStarted = false;
+        const buildDiscoveryHandlers = createChatTransportHandlers({
+          run_build_discovery: async (dispatchedPlan) => {
+            const brief = (dispatchedPlan.execution.commandText || content)
+              .replace(/^\/build-page\s*/i, '')
+              .trim();
+            if (!brief) {
+              addBotMessage('Usage: `/build-page <brief>` — describe the page you want.', undefined, {
+                localOnly: true,
+                chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
+                source: {
+                  actor: 'OpenSwan',
+                  surface: 'main_chat_build_discovery_dispatch',
+                  selectedModel,
+                  effectiveModel: 'deterministic-build-brief',
+                },
+              });
+              return { status: 'needs_input', stateRequests: { typing: false } };
+            }
+
+            const briefQuality = analyzeBuildBrief(brief, 'build-page');
+            if (briefQuality.needsClarification) {
+              addBotMessage(briefQuality.hint, undefined, {
+                localOnly: true,
+                chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
+                source: {
+                  actor: 'OpenSwan',
+                  surface: 'main_chat_build_discovery_dispatch',
+                  selectedModel,
+                  effectiveModel: 'deterministic-build-brief',
+                },
+              });
+              return { status: 'needs_input', stateRequests: { typing: false } };
+            }
+
+            await launchBuildStream(brief);
+            buildStreamStarted = true;
+            return {
+              status: 'completed',
+              data: { buildStreamStarted: true },
+            };
+          },
+        });
+        let buildOutcome: ChatAutomationOutcome | undefined;
+        try {
+          buildOutcome = await dispatchChatAutomationPlan(plan, {
+            handlers: buildDiscoveryHandlers,
+            ctx: {
+              circleId,
+              userId: currentUserId || '',
+              threadId: activeThreadId || undefined,
+              model: effectiveSelectedModel,
+              chatMode: effectivePlanActMode,
+              clarificationResume: clarificationResumeStore,
+            },
+            approvalGate: chatAutomationApprovalGate,
+            onOutcome: attachPlanDecisionToRun,
+          });
+        } finally {
+          const requests = getOutcomeStateRequests(buildOutcome);
+          if (requests) {
+            applyTransportStateRequests(requests);
+          } else if (!buildStreamStarted) {
+            applyTransportStateRequests({ typing: false, workbench: { action: 'stop', kind: 'coding' } });
+          }
+        }
+        postDispatcherStopOutcome(buildOutcome, 'main_chat_build_discovery_dispatch');
+        if (shouldStopAfterDispatcherOutcome(buildOutcome)) return;
+      }
+
+      // C1 (Phase 1b) cutovers #2/#3/#4/#5/#6/#8: the memory family
+      // (remember / forget / show_memories), image generation, and read-only
+      // WordPress listing / well-specified create-task / office-agent task
+      // requests, plus approval-gated WordPress publish/schedule, now execute
+      // through the unified executor using the planner's already-detected
+      // intent — removing the double-classification where the legacy
+      // `conversationalRouter` below re-ran its own detector. Remaining
+      // conversational intents still fall through to the legacy router
+      // unchanged. The dep body mirrors the legacy block, so behavior is
+      // preserved (same executor, same workbench/render) while image requests
+      // now share the `/imagine` HF command path.
+      // R8: the dep calls `executeDetectedConversationalIntent` with
+      // `plan.intent.intent` — `detectConversationalIntent` never runs on
+      // this path (the chat-transport-handlers smoke asserts it).
+      if (plan.intent.kind === 'conversational_action' && plan.execution.kind === 'run_command_handler') {
+        const isUnifiedConversationalIntentType = (intentType: string) => intentType === 'remember'
+          || intentType === 'forget'
+          || intentType === 'show_memories'
+          || intentType === 'generate_image'
+          || intentType === 'wordpress_list'
+          || intentType === 'wordpress_publish'
+          || intentType === 'wordpress_schedule'
+          || intentType === 'create_task'
+          || intentType === 'office_agent_task';
+        if (isUnifiedConversationalIntentType(plan.intent.intent.type)) {
+          // R7 fail-safe: tracks the mid-handler workbench start so the finally
+          // below can stop it even when a throw drops the state requests.
+          let conversationalWorkbenchStarted = false;
+          const conversationalCommandHandlers = createChatTransportHandlers({
+            run_command_handler: async (dispatchedPlan) => {
+              if (dispatchedPlan.intent.kind !== 'conversational_action') return { handled: false };
+              const intent = dispatchedPlan.intent.intent;
+              if (!isUnifiedConversationalIntentType(intent.type)) {
+                return { handled: false };
+              }
+              const { executeDetectedConversationalIntent } = await import('../../../lib/conversationalRouter');
+              const shouldShowWorkbench = intent.type === 'generate_image'
+                || isCodingGenerationRequest(content, sessionProfile)
+                || currentAttachments.some((attachment) => attachment.isFigma)
+                || !!figmaPromptContext;
+              if (shouldShowWorkbench) {
+                // R7: stays mid-handler — the workbench must be VISIBLE while
+                // the executor runs; starting it post-dispatch would flash it
+                // after the work already finished.
+                startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
+                conversationalWorkbenchStarted = true;
+              }
+              // R7: stays mid-handler — the typing indicator must show DURING
+              // the executor call; the post-dispatch state request below only
+              // handles the reset.
+              setBotTyping(true);
+              const result = await executeDetectedConversationalIntent(intent, {
+                circleId, userId: currentUserId || '', userName: currentUserName,
+                model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
+                fullMessage: content, attachments: currentAttachments as any,
+              });
+              const cleanupRequests: ChatTransportStateRequests = {
+                typing: false,
+                ...(shouldShowWorkbench ? { workbench: { action: 'stop' as const, kind: 'coding' } } : {}),
+              };
+              if (result?.handled) {
+                if (result.message === '__SHOW_MEMORIES__') {
+                  // R7: modal open is a state request, applied post-dispatch.
+                  return { status: 'completed', stateRequests: { ...cleanupRequests, modalToOpen: 'memory_viewer' } };
+                }
+                addBotMessage(result.message, result.artifacts as SwanBotStructuredArtifact[] | undefined, {
+                  chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
+                  source: intent.type === 'generate_image'
+                    ? {
+                        actor: 'OpenSwan',
+                        surface: 'main_chat_hf_tools_dispatch',
+                        selectedModel,
+                        effectiveModel: 'hf-tools-dispatch',
+                      }
+                    : undefined,
+                });
+                return { status: 'completed', stateRequests: cleanupRequests };
+              }
+              return { handled: false, stateRequests: cleanupRequests };
+            },
+          });
+          let conversationalOutcome: ChatAutomationOutcome | undefined;
+          try {
+            conversationalOutcome = await dispatchChatAutomationPlan(plan, {
+              handlers: conversationalCommandHandlers,
+              ctx: {
+                circleId,
+                userId: currentUserId || '',
+                threadId: activeThreadId || undefined,
+                model: effectiveSelectedModel,
+                chatMode: effectivePlanActMode,
+                clarificationResume: clarificationResumeStore,
+              },
+              approvalGate: chatAutomationApprovalGate,
+              onOutcome: attachPlanDecisionToRun,
+            });
+          } finally {
+            // R7: applied after dispatch in a finally — a gate refusal or
+            // mid-handler throw drops the state requests, so fall back to the
+            // fail-safe defaults (typing off; stop the workbench if the
+            // handler started it) instead of leaving the UI stuck.
+            const requests = getOutcomeStateRequests(conversationalOutcome);
+            applyTransportStateRequests(requests ?? {
+              typing: false,
+              ...(conversationalWorkbenchStarted ? { workbench: { action: 'stop' as const, kind: 'coding' } } : {}),
+            });
+          }
+          postDispatcherStopOutcome(conversationalOutcome, 'main_chat_conversational_command_dispatch');
+          // Only fall through to the plan-derived guarded net below when this
+          // handler declined (intent not cut over yet, or executor didn't
+          // handle). That net reuses `plan.intent.intent` — it never
+          // re-classifies the message.
+          if (shouldStopAfterDispatcherOutcome(conversationalOutcome)) return;
+        }
+      }
+
+      // C2 classify-once cutover: the plan-derived guarded net for a matched
+      // conversational action that the unified dispatcher above did NOT own.
+      // `buildChatAutomationPlan` already ran the planner's detector (this whole
+      // block is inside the `!lowerContent.startsWith('/')` guard where `plan`
+      // is in scope), so we REUSE `plan.intent.intent` here —
+      // `detectConversationalIntent` is NOT called again on the plain-chat turn
+      // (no double classification). The planner is a superset of the old legacy
+      // detector, so this net is unreachable in practice today (every actionable
+      // conversational intent is in the unified allowlist); it survives only as
+      // a fail-safe for a future planner intent that isn't wired into the
+      // unified path yet. `executeConversationalIntent` self-guards
+      // external-mutation intents via legacyPathRequiresApprovalGate (returns
+      // null → fall through to the normal approval-gated pipeline), so this net
+      // can never reach a live publish/schedule.
+      if (
+        plan.intent.kind === 'conversational_action'
+        && plan.intent.intent.type !== 'none'
+        && !UNIFIED_CONVERSATIONAL_INTENT_TYPES.includes(plan.intent.intent.type)
+      ) {
+        try {
+          const conversationalIntent = plan.intent.intent;
+          const { executeConversationalIntent } = await import('../../../lib/conversationalRouter');
+          const shouldShowWorkbench = conversationalIntent.type === 'generate_image' || isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
           if (shouldShowWorkbench) {
             startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
           }
           setBotTyping(true);
-          const result = await executeConversationalIntent(intent, {
+          const result = await executeConversationalIntent(conversationalIntent as any, {
             circleId, userId: currentUserId || '', userName: currentUserName,
+            model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
             fullMessage: content, attachments: currentAttachments as any,
           });
           setBotTyping(false);
           if (shouldShowWorkbench) stopCodingWorkbench();
           if (result?.handled) {
+            // The unified path owns __SHOW_MEMORIES__ (via modalToOpen:
+            // 'memory_viewer') for show_memories, which is in the allowlist and
+            // therefore never reaches this net — so this handles the signal
+            // without any risk of double-opening the viewer.
             if (result.message === '__SHOW_MEMORIES__') {
               setShowMemoryViewer(true);
             } else {
@@ -4179,8 +9108,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             }
             return;
           }
-        }
-      } catch {}
+        } catch {}
+      }
     }
 
     // ─── Governance commands ───────────────────────────────────────
@@ -4251,11 +9180,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (lowerContent.startsWith('/trace ') || lowerContent === '/trace') {
       const arg = content.slice(6).trim();
       if (!arg) {
-        addBotMessage('Usage: `/trace <runId>` — paste a run id from RECENT RUNS to see its step-by-step trace.', undefined, { localOnly: true });
+        addBotMessage('Usage: `/trace <runId>` — paste a run id from RECENT RUNS to see its step-by-step trace.', undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
       addBotMessage(`Loading trace for ${arg.slice(0, 8)}…`, undefined, {
         localOnly: true,
+        durability: 'ephemeral',
         runId: arg,
         showRunTrace: true,
       });
@@ -4266,15 +9196,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // healthy/degraded/offline dots and copy-able restart commands.
     // Brings `npm run bridges:doctor` into chat.
     if (lowerContent === '/diag' || lowerContent === '/bridges') {
-      addBotMessage('Probing bridges…', undefined, { localOnly: true });
+      addBotMessage('Probing bridges…', undefined, { localOnly: true, durability: 'ephemeral' });
       probeBridges({ urlForPort: (port) => getBridgeUrl(port) })
         .then((results) => {
           addBotMessage(`${results.filter(r => r.status === 'healthy').length}/${results.length} bridges healthy`, undefined, {
             localOnly: true,
+            durability: 'ephemeral',
             bridgeDiagResults: results,
           });
         })
-        .catch((err) => addBotMessage(`Bridge probe failed: ${err?.message || 'unknown'}`, undefined, { localOnly: true }));
+        .catch((err) => {
+          void addRecoverableChatErrorMessage({
+            title: 'Bridge probe failed',
+            task: 'Probe local desktop and browser bridges from chat',
+            error: err,
+            executionKind: 'desktop_bridge_diag',
+            source: 'bridge_probe_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/desktopBridge.ts'],
+          });
+        });
       return;
     }
 
@@ -4296,6 +9236,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }));
         addBotMessage('Pick an agent to assign:', undefined, {
           localOnly: true,
+          durability: 'ephemeral',
           assignPickerAgents: pickerAgents,
         });
         return;
@@ -4303,21 +9244,53 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // Inline mode: /assign @<name> <task>
       const m = rest.match(/^@?([\w][\w-]*)\s+(.+)$/);
       if (!m) {
-        addBotMessage('Usage: `/assign @<agent> <task description>`. Type `/assign` alone to see all agents.', undefined, { localOnly: true });
+        addBotMessage('Usage: `/assign @<agent> <task description>`. Type `/assign` alone to see all agents.', undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
       const [, alias, task] = m;
       const target = liveAgents.find(a => a.name.toLowerCase() === alias.toLowerCase());
       if (!target) {
-        addBotMessage(`No agent named "@${alias}" in this circle. Type \`/assign\` alone to see all agents.`, undefined, { localOnly: true });
+        addBotMessage(`No agent named "@${alias}" in this circle. Type \`/assign\` alone to see all agents.`, undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
-      addBotMessage(`Assigning to **${target.name}**…`, undefined, { localOnly: true });
+      addBotMessage(`Assigning to **${target.name}**…`, undefined, { localOnly: true, durability: 'ephemeral' });
       setBotTyping(true);
       dispatchAssignedAgentTask(target, task)
         .then((reply) => addBotMessage(reply))
-        .catch((err: any) => addBotMessage(`**${target.name}** error: ${err?.message || 'unknown'}`, undefined, { localOnly: true }))
+        .catch((err: any) => addRecoverableChatErrorMessage({
+          title: `**${target.name}** assignment failed`,
+          task: `Assign ${task} to ${target.name}`,
+          error: err,
+          executionKind: 'assigned_agent_task',
+          source: 'assign_agent_command_error',
+          touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/bridgeTaskDispatcher.ts'],
+        }))
         .finally(() => setBotTyping(false));
+      return;
+    }
+
+    // /v2loop — per-device canary flip for the client-side agent tool loop
+    // (swanbotV2ClientLoopFlag). ON = desktop/app tools execute locally
+    // instead of the swanbot-v2-ai edge round-trip; the designed lane for
+    // local desktop automation, and the no-deploy escape hatch when the
+    // deployed edge is failing.
+    if (lowerContent === '/v2loop' || lowerContent.startsWith('/v2loop ')) {
+      const arg = content.slice('/v2loop'.length).trim().toLowerCase();
+      const { isSwanbotV2ClientLoopEnabled: readLoop, enableSwanbotV2ClientLoop, disableSwanbotV2ClientLoop } =
+        await import('../../../lib/swanbotV2ClientLoopFlag');
+      let line: string;
+      if (arg === 'on' || arg === 'enable' || arg === 'true') {
+        enableSwanbotV2ClientLoop();
+        line = '**Local agent loop: ON** (this device). Tool turns — including desktop/app automation — now run in this browser against the local bridge instead of the edge. `/v2loop off` to revert.';
+      } else if (arg === 'off' || arg === 'disable' || arg === 'false') {
+        disableSwanbotV2ClientLoop();
+        line = '**Local agent loop: OFF** (this device). Tool turns route through the swanbot-v2-ai edge again.';
+      } else {
+        line = readLoop()
+          ? 'Local agent loop is **ON** for this device (tool turns run locally). `/v2loop off` to revert.'
+          : 'Local agent loop is **OFF** for this device (tool turns use the edge). `/v2loop on` to run desktop/app tool turns locally.';
+      }
+      addBotMessage(line, undefined, { localOnly: true, durability: 'ephemeral' });
       return;
     }
 
@@ -4325,7 +9298,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // results as clickable rows that jump to the message in chat.
     if (lowerContent.startsWith('/search ')) {
       const query = content.slice(8).trim();
-      if (!query) { addBotMessage('Usage: /search <keyword>', undefined, { localOnly: true }); return; }
+      if (!query) { addBotMessage('Usage: /search <keyword>', undefined, { localOnly: true, durability: 'ephemeral' }); return; }
       const q = query.toLowerCase();
 
       // First pass: scan in-memory messages so we can return ids that
@@ -4346,23 +9319,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }));
 
       // Second pass: pull older matches from the DB. Skip any whose
-      // dbId is already in the in-memory set.
+      // dbId is already in the in-memory set. Scope to the active thread
+      // when one is selected so results don't leak across threads.
       try {
-        const { data: dbResults } = await supabase
+        let dbQuery = supabase
           .from('messages')
-          .select('id, content, created_at, user:profiles!user_id(display_name)')
+          .select('id, content, created_at, is_bot, user:profiles!user_id(display_name)')
           .eq('circle_id', circleId)
           .ilike('content', `%${query}%`)
           .order('created_at', { ascending: false })
           .limit(15);
+        if (activeThreadId) dbQuery = dbQuery.eq('thread_id', activeThreadId);
+        const { data: dbResults } = await dbQuery;
         if (dbResults) {
           for (const r of dbResults as any[]) {
             if (inMemoryIds.has(r.id)) continue;
             // No id → archived → no JUMP button (id field stays
             // undefined so the card hides the button automatically).
+            const rowIsBot = r.is_bot === true;
             rows.push({
-              authorName: r.user?.display_name || 'Member',
-              isBot: false,
+              authorName: rowIsBot ? (agentName || 'Bot') : (r.user?.display_name || 'Member'),
+              isBot: rowIsBot,
               snippet: r.content.length > 160 ? r.content.slice(0, 157) + '…' : r.content,
               timestamp: new Date(r.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }),
             });
@@ -4374,6 +9351,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
       addBotMessage(`Search results for "${query}"`, undefined, {
         localOnly: true,
+        durability: 'ephemeral',
         searchResults: { query, rows: rows.slice(0, 25) },
       });
       return;
@@ -4386,32 +9364,76 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const mem = await saveResponseStandardMemory(circleId, currentUserId || '');
         addBotMessage(mem ? 'Saved your deep reasoning standard to memory.' : 'Failed to save reasoning standard.');
         if (mem) setMemoryToast({ message: 'Saved reasoning standard', type: 'saved' });
-      } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
+      } catch (e: any) {
+        await addRecoverableChatErrorMessage({
+          title: 'Memory command failed',
+          task: 'Save deep reasoning standard memory from chat',
+          error: e,
+          executionKind: 'memory_command',
+          source: 'memory_reasoning_standard_error',
+          touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/memoryService.ts'],
+        });
+      }
       return;
     }
 
-    if (lowerContent.startsWith('/remember ')) {
-      const what = content.slice(10).trim();
-      if (!what) { addBotMessage('Usage: `/remember <something to remember>`'); return; }
-      try {
-        const { rememberFromChat } = await import('../../../lib/memoryService');
-        const mem = await rememberFromChat(circleId, currentUserId || '', what);
-        addBotMessage(mem ? `Remembered: "${what.slice(0, 80)}"` : 'Failed to save memory.');
-        if (mem) setMemoryToast({ message: `Saved: "${what.slice(0, 50)}"`, type: 'saved' });
-      } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
-      return;
-    }
-
-    if (lowerContent.startsWith('/forget ')) {
-      const what = content.slice(8).trim();
-      if (!what) { addBotMessage('Usage: `/forget <keyword to forget>`'); return; }
-      try {
-        const { forgetFromChat } = await import('../../../lib/memoryService');
-        const { forgotten } = await forgetFromChat(circleId, currentUserId || '', what);
-        addBotMessage(forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${what}".` : `No memories found matching "${what}".`);
-        if (forgotten > 0) setMemoryToast({ message: `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'}`, type: 'forgotten' });
-      } catch (e: any) { addBotMessage(`Memory error: ${e.message}`); }
-      return;
+    // Unified memory intent (2026-07-14 UX core): `/remember [X]`, `/forget [X]`
+    // (bare form shows usage instead of falling through to the LLM), AND
+    // explicit natural language — "note that…", "remember that…", "forget
+    // that…" — actually saves/forgets and confirms, instead of the model
+    // replying "Saved." without saving. Conservative: natural language only
+    // fires on an explicit lead with real content and not a question.
+    {
+      const { parseMemoryCommand, detectMemoryIntent, MEMORY_COMMAND_USAGE } =
+        await import('../../../lib/memoryIntentCore');
+      const cmd = parseMemoryCommand(content);
+      let memAction: { kind: 'remember' | 'forget'; what: string } | null = null;
+      if (cmd) {
+        if (cmd.action === 'help') { addBotMessage(MEMORY_COMMAND_USAGE, undefined, { localOnly: true }); return; }
+        memAction = { kind: cmd.action, what: cmd.content };
+      } else {
+        const intent = detectMemoryIntent(content);
+        if (intent.kind !== 'none' && intent.confidence === 'explicit' && intent.content.length >= 4 && !content.trim().endsWith('?')) {
+          memAction = { kind: intent.kind, what: intent.content };
+        }
+      }
+      if (memAction) {
+        const what = memAction.what;
+        if (memAction.kind === 'remember') {
+          try {
+            const { rememberFromChat } = await import('../../../lib/memoryService');
+            const mem = await rememberFromChat(circleId, currentUserId || '', what);
+            addBotMessage(mem ? `Remembered: "${what.slice(0, 80)}"` : 'Failed to save memory.');
+            if (mem) setMemoryToast({ message: `Saved: "${what.slice(0, 50)}"`, type: 'saved' });
+          } catch (e: any) {
+            await addRecoverableChatErrorMessage({
+              title: 'Memory command failed',
+              task: `Remember from chat: ${what.slice(0, 160)}`,
+              error: e,
+              executionKind: 'memory_command',
+              source: 'memory_remember_command_error',
+              touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/memoryService.ts'],
+            });
+          }
+          return;
+        }
+        try {
+          const { forgetFromChat } = await import('../../../lib/memoryService');
+          const { forgotten } = await forgetFromChat(circleId, currentUserId || '', what);
+          addBotMessage(forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${what}".` : `No memories found matching "${what}".`);
+          if (forgotten > 0) setMemoryToast({ message: `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'}`, type: 'forgotten' });
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Memory command failed',
+            task: `Forget chat memory matching: ${what.slice(0, 160)}`,
+            error: e,
+            executionKind: 'memory_command',
+            source: 'memory_forget_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/memoryService.ts'],
+          });
+        }
+        return;
+      }
     }
 
     if (lowerContent === '/memories' || lowerContent === '/memory') {
@@ -4518,7 +9540,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             : `Queued **${kind}**: "${textAfterRecurrence.slice(0, 80)}"\nRuns: now (or at ${new Date(action.scheduled_for).toLocaleString()})\nTrack in the Outbox.`;
           addBotMessage(msg);
         } catch (e: any) {
-          addBotMessage(`Schedule error: ${e.message || 'Unknown error'}`);
+          await addRecoverableChatErrorMessage({
+            title: 'Schedule command failed',
+            task: content,
+            error: e,
+            executionKind: 'scheduled_action_command',
+            source: 'schedule_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/scheduledActions.ts'],
+          });
         } finally { setBotTyping(false); }
       })();
       return;
@@ -4529,7 +9558,478 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // filterable + click-to-insert, so users can find a command they
     // half-remember and seed it into the composer with one tap.
     if (lowerContent === '/help' || lowerContent === '/commands') {
-      addBotMessage('Available commands', undefined, { localOnly: true, commandsHelp: true });
+      addBotMessage('Available commands', undefined, { localOnly: true, durability: 'ephemeral', commandsHelp: true });
+      return;
+    }
+
+    // ─── Code review — /review <pr-url | #123 | latest> (plan §P13) ─────────
+    // Also fires when the message is JUST a GitHub PR link — paste a PR,
+    // get a review. Read-only: never writes to GitHub.
+    {
+      const isReviewCommand = lowerContent === '/review' || lowerContent.startsWith('/review ');
+      const soloPrLink = !isReviewCommand
+        && !lowerContent.startsWith('/')
+        && /^https:\/\/(www\.)?github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+\/?$/i.test(content);
+      if (isReviewCommand || soloPrLink) {
+        (async () => {
+          setBotTyping(true);
+          try {
+            const { executeReviewCommand } = await import('../../../lib/reviewChatCommand');
+            const commandText = soloPrLink ? `/review ${content}` : content;
+            const result = await executeReviewCommand(commandText, {
+              circleId,
+              userId: currentUserId || '',
+            });
+            addBotMessage(result?.message || 'Review did not produce output — try `/review latest`.', undefined, { localOnly: true });
+          } catch (e: any) {
+            await addRecoverableChatErrorMessage({
+              title: 'Code review failed',
+              task: content,
+              error: e,
+              executionKind: 'review_command',
+              source: 'review_command_error',
+              touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/reviewChatCommand.ts'],
+            });
+          } finally {
+            setBotTyping(false);
+          }
+        })();
+        return;
+      }
+    }
+
+    // ─── PR-link affordance (plan §P14) ──────────────────────────────────────
+    // A GitHub PR URL mid-sentence gets a one-tap review chip WITHOUT
+    // hijacking the message — the sentence still flows to the normal lanes
+    // below. The chip label IS the /review command, so tapping it routes
+    // through the existing intercept above. Solo links never reach here
+    // (the review lane returned already).
+    if (!lowerContent.startsWith('/')) {
+      void (async () => {
+        try {
+          const { detectGithubPrUrl } = await import('../../../lib/reviewChatCommand');
+          const pr = detectGithubPrUrl(content);
+          if (!pr) return;
+          addBotMessage(
+            `Spotted a PR link — want a code review of ${pr.owner}/${pr.repo}#${pr.number}? Tap below.`,
+            undefined,
+            {
+              localOnly: true,
+              quickReplies: [`/review https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`],
+            },
+          );
+        } catch {
+          // Advisory only — never block the message over the chip.
+        }
+      })();
+    }
+
+    // ─── Natural watch phrasing → /watch (P23) ───────────────────────────────
+    // "watch https://…/pricing for changes every day" and "watch my downloads
+    // folder for new pdfs" previously fell to plain chat / a one-off computer
+    // task. Rewrite them into the real /watch pipeline (same resend pattern as
+    // bare PR links → /review). Conservative: message must START with a watch
+    // verb AND contain a URL or a folder-watch target.
+    if (!lowerContent.startsWith('/') && /^(?:please\s+)?(?:watch|monitor|keep\s+an\s+eye\s+on)\s+/i.test(content)) {
+      try {
+        const { detectFolderWatchRequest } = await import('../../../lib/folderWatchModel');
+        const hasUrl = /https?:\/\/[^\s]+|(?:^|\s)[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/[^\s]*)?(?=\s|$)/i.test(content);
+        const folderTarget = detectFolderWatchRequest(content);
+        if (hasUrl || folderTarget) {
+          const rest = content.replace(/^(?:please\s+)?(?:watch|monitor|keep\s+an\s+eye\s+on)\s+/i, '').trim();
+          addBotMessage(`🪄 Setting that up as a recurring watch (\`/watch\`).`, undefined, { localOnly: true });
+          void sendMessage(`/watch ${rest}`);
+          return;
+        }
+      } catch {
+        // Advisory rewrite only — fall through to normal routing.
+      }
+    }
+
+    // ─── What's on my screen — /screen [app] (P19) ──────────────────────────
+    // One-tap observation of the frontmost (or named) app: state, windows,
+    // what changed since the last look, and a suggested next step. Read-only.
+    if (lowerContent === '/screen' || lowerContent.startsWith('/screen ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseScreenCommand, buildScreenQuickReplies } = await import('../../../lib/screenChatCommand');
+          const parsed = parseScreenCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          const { runAppScreenObservation } = await import('../../../lib/appScreenObserver');
+          const obs = await runAppScreenObservation({ appName: parsed.appName ?? undefined });
+          if (!obs) {
+            addBotMessage(
+              "I can't see the screen right now — the desktop bridge is offline. Start it with `npm run bridge`, then try /screen again.",
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          addBotMessage(obs.describeForChat, undefined, {
+            localOnly: true,
+            quickReplies: buildScreenQuickReplies(obs),
+          });
+        } catch (e: any) {
+          addBotMessage(`Could not observe the screen: ${e?.message || 'unknown error'}.`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── App integrations — /integrations [list|connect|act] (P30) ───────────
+    // list/connect are pure replies; `act <goal>` hands the goal to the main
+    // agent loop, which already has integrations.list + custom_api.read/request
+    // (approval-gated) tools to figure the API call out with the model.
+    if (lowerContent === '/integrations' || lowerContent.startsWith('/integrations ')
+      || lowerContent === '/integration' || lowerContent.startsWith('/integration ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseIntegrationsCommand, buildIntegrationsListReply, buildIntegrationsConnectGuide } =
+            await import('../../../lib/integrationsChatCommand');
+          const parsed = parseIntegrationsCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          if (parsed.kind === 'list') {
+            const { listCircleIntegrations } = await import('../../../lib/circleIntegrations');
+            const records = circleId ? await listCircleIntegrations(circleId).catch(() => []) : [];
+            addBotMessage(buildIntegrationsListReply(records as any), undefined, { localOnly: true });
+            return;
+          }
+          if (parsed.kind === 'connect') {
+            const { INTEGRATION_DEFINITIONS } = await import('../../../lib/circleIntegrations');
+            const q = parsed.query.trim().toLowerCase();
+            const def = Object.values(INTEGRATION_DEFINITIONS).find((d: any) =>
+              d.provider === q || (d.label || '').toLowerCase().includes(q)) || null;
+            addBotMessage(buildIntegrationsConnectGuide(parsed.query, def as any), undefined, { localOnly: true });
+            return;
+          }
+          // kind === 'act' — let the agent loop figure out and run the call.
+          const hint = parsed.integrationHint ? ` using the ${parsed.integrationHint} integration` : '';
+          addBotMessage('🪄 Working out the integration call — I\'ll ask you to approve before anything is sent.', undefined, { localOnly: true });
+          void sendMessage(`Use my connected integrations to: ${parsed.goal}${hint}. Steps: (1) check integrations.list to find the right Custom API and its known endpoints; (2) if unsure of the shape, custom_api.read a relevant GET; (3) call integration.compose_action with your proposed method/path/body to validate it into approval-ready args; (4) call custom_api.request with those exact args for my approval before executing.`);
+        } catch (e: any) {
+          addBotMessage(`Could not run that integration command: ${e?.message || 'unknown error'}.`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── Context dial — /context [lean|standard|max] ─────────────────────────
+    // User-controlled context depth plus a transparency receipt of what the
+    // last turn actually loaded. Policy + receipt live in contextDepthPolicy.ts.
+    if (lowerContent === '/context' || lowerContent.startsWith('/context ')) {
+      (async () => {
+        try {
+          const {
+            parseContextDepth, resolveStoredContextDepth, setStoredContextDepth,
+            describeContextDepthSetting, buildContextReceipt, getLastContextReceipt,
+          } = await import('../../../lib/contextDepthPolicy');
+          const arg = content.trim().slice('/context'.length).trim();
+          if (!arg || arg.toLowerCase() === 'show') {
+            const current = resolveStoredContextDepth();
+            addBotMessage(
+              `${describeContextDepthSetting(current)}\n\n${buildContextReceipt(getLastContextReceipt())}`,
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          const parsed = parseContextDepth(arg);
+          if (!parsed) {
+            addBotMessage(
+              'Usage: `/context` shows the current setting and what I loaded last turn · `/context max` always load everything · `/context lean` fast turns · `/context standard` automatic.',
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          const persisted = setStoredContextDepth(parsed);
+          addBotMessage(
+            `${describeContextDepthSetting(parsed)}${persisted ? '' : '\n(Set for this session — it resets when the app restarts on this device.)'}`,
+            undefined,
+            { localOnly: true },
+          );
+        } catch (e: any) {
+          addBotMessage(`Context command failed: ${e?.message || e}`, undefined, { localOnly: true });
+        }
+      })();
+      return;
+    }
+
+    // ─── App automation status — /apps [name] (P17) ─────────────────────────
+    // Overview of automatable apps, or a per-app detail card with a LIVE
+    // reachability check (bridge → installed → running → focus → a11y).
+    if (lowerContent === '/apps' || lowerContent.startsWith('/apps ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseAppsCommand, buildAppsOverview, buildAppDetail, buildAppsQuickReplies } =
+            await import('../../../lib/appsChatCommand');
+          const parsed = parseAppsCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          if (!parsed.appQuery) {
+            const { buildAppsOverviewWithLive } = await import('../../../lib/appsChatCommand');
+            const browserStatus = async (): Promise<string | null> => {
+              try {
+                const [{ isBrowserBridgeAvailable }, { getCircleIntegration }] = await Promise.all([
+                  import('../../../lib/browserBridge'),
+                  import('../../../lib/circleIntegrations'),
+                ]);
+                const [localOnline, browserbase] = await Promise.all([
+                  isBrowserBridgeAvailable().catch(() => false),
+                  circleId ? getCircleIntegration(circleId, 'browserbase').catch(() => null) : Promise.resolve(null),
+                ]);
+                const localLine = localOnline ? 'local browser bridge online' : 'local browser bridge offline';
+                const cloudLine = browserbase ? 'Browserbase connected (cloud sessions ready)' : 'Browserbase not connected (Marketplace)';
+                return `${localLine} · ${cloudLine}. Web apps (Figma, Canva, Onshape) route here.`;
+              } catch {
+                return null;
+              }
+            };
+            addBotMessage(await buildAppsOverviewWithLive({ browserStatus }), undefined, {
+              localOnly: true,
+              quickReplies: buildAppsQuickReplies(true),
+            });
+            return;
+          }
+          const probeReachability = async (appName: string) => {
+            try {
+              const { runAppReachabilityProbe } = await import('../../../lib/appReachabilityProbe');
+              const { report, text } = await runAppReachabilityProbe(appName);
+              return {
+                text,
+                status: report.status,
+                chatCanFix: report.chatCanFix,
+                resolvedAppName: report.resolvedAppName,
+              };
+            } catch {
+              return null;
+            }
+          };
+          const detail = await buildAppDetail(parsed.appQuery, { probeReachability });
+          addBotMessage(detail.message, undefined, {
+            localOnly: true,
+            quickReplies: buildAppsQuickReplies(false, detail.resolvedSlug, detail.fixChip),
+          });
+        } catch (e: any) {
+          addBotMessage(`Could not load app status: ${e?.message || 'unknown error'}.`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── Create anything — /create <brief> (plan §P13) ──────────────────────
+    // Classifies the brief and re-dispatches through the existing pipelines.
+    if (
+      lowerContent === '/create' || lowerContent.startsWith('/create ')
+      || lowerContent === '/make' || lowerContent.startsWith('/make ')
+    ) {
+      (async () => {
+        try {
+          const { parseCreateCommand, buildCreateDirective, formatCreateRoutingNote } =
+            await import('../../../lib/createChatCommand');
+          const parsed = parseCreateCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          const directive = buildCreateDirective(parsed.brief);
+          if (directive.action.kind === 'reply') {
+            addBotMessage(directive.action.message, undefined, { localOnly: true });
+            return;
+          }
+          addBotMessage(formatCreateRoutingNote(directive), undefined, { localOnly: true });
+          // Re-dispatch through the normal send path so the existing
+          // planner/commands/approval gates all apply unchanged.
+          void sendMessage(directive.action.message);
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Create routing failed',
+            task: content,
+            error: e,
+            executionKind: 'create_command',
+            source: 'create_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/createChatCommand.ts'],
+          });
+        }
+      })();
+      return;
+    }
+
+    // ─── Best-of-N race — /bestof model1,model2 <task> (plan §P10) ──────────
+    // Cursor's verified pattern: race the same task across models, judge,
+    // present the winner. Text-only generations — no tools, no side effects.
+    if (
+      lowerContent === '/bestof' || lowerContent.startsWith('/bestof ')
+      || lowerContent === '/best-of-n' || lowerContent.startsWith('/best-of-n ')
+    ) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseBestOfNCommand, resolveRaceModels, runBestOfNRace, summarizeBestOfNRace, BEST_OF_N_MAX_CANDIDATES } =
+            await import('../../../lib/bestOfNRace');
+          const { bestOfNMetadata } = await import('../../../lib/persistedChatMetadata');
+          const parsed = parseBestOfNCommand(content);
+          if (!parsed || !parsed.ok) {
+            addBotMessage(
+              (parsed && !parsed.ok && parsed.error)
+                || `Usage: \`/bestof model1,model2 <task>\` (2–${BEST_OF_N_MAX_CANDIDATES} models; aliases: auto, sonnet, haiku, opus, gpt, blackswan).`,
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          const models = resolveRaceModels(parsed.models, connectedProviderSet);
+          addBotMessage(
+            `🏁 Racing ${models.length} models on "${parsed.task.slice(0, 80)}" — judging when all finish…`,
+            undefined,
+            { localOnly: true },
+          );
+          const result = await runBestOfNRace({
+            models,
+            task: parsed.task,
+            circleId,
+            userId: currentUserId || '',
+          });
+          // P11: interactive card (adopt / race again) rides bounded
+          // metadata alongside the text report.
+          addBotMessage(result.formattedReport, undefined, {
+            localOnly: true,
+            bestOfN: bestOfNMetadata(summarizeBestOfNRace(result)),
+          });
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Best-of-N race failed',
+            task: content,
+            error: e,
+            executionKind: 'bestof_command',
+            source: 'bestof_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/bestOfNRace.ts'],
+          });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── Auto best-of-N (coding-agent P5) — DEFAULT OFF ─────────────────────
+    // When enabled (localStorage uc_auto_best_of_n), a COMPLEX text-only
+    // build/debug/review turn with ≥2 providers connected auto-races the same
+    // task across models and presents the judged winner — the manual /bestof
+    // pattern, triggered automatically. Gated hard: never for tool-runtime
+    // turns, never for /commands (messageStartsWithCommand short-circuits any
+    // slash message straight through to the interceptors below).
+    // Cheap synchronous short-circuit: skip all detection work unless the
+    // opt-in flag is set (default OFF) and this isn't a /command. Keeps the
+    // common path zero-cost.
+    if (
+      !content.trim().startsWith('/')
+      && (() => { try { const v = (globalThis as any)?.localStorage?.getItem?.('uc_auto_best_of_n'); return v === '1' || v === 'true' || v === 'on'; } catch { return false; } })()
+    ) {
+      let autoRace: { race: boolean; models: string[] } | null = null;
+      try {
+        const [{ decideAutoBestOfN }, { detectSmartRoute }] = await Promise.all([
+          import('../../../lib/codingModelSplitPolicy'),
+          import('../../../lib/agenticCodingProfile'),
+        ]);
+        const route = detectSmartRoute(content, 'main_chat');
+        const decision = decideAutoBestOfN({
+          intent: route.intent,
+          complexity: route.complexity,
+          useRuntime: route.useRuntime,
+          messageStartsWithCommand: content.trim().startsWith('/'),
+          connectedProviders: connectedProviderSet,
+        });
+        if (decision.race && decision.models.length >= 2) autoRace = decision;
+      } catch { /* auto best-of-N is best-effort — fall through to normal send */ }
+      if (autoRace) {
+        (async () => {
+          setBotTyping(true);
+          try {
+            const { runBestOfNRace, summarizeBestOfNRace } = await import('../../../lib/bestOfNRace');
+            const { bestOfNMetadata } = await import('../../../lib/persistedChatMetadata');
+            addBotMessage(
+              `🏁 Complex coding task — racing ${autoRace.models.length} models and judging the winner…`,
+              undefined,
+              { localOnly: true },
+            );
+            const result = await runBestOfNRace({
+              models: autoRace.models,
+              task: content,
+              circleId,
+              userId: currentUserId || '',
+            });
+            addBotMessage(result.formattedReport, undefined, {
+              localOnly: true,
+              bestOfN: bestOfNMetadata(summarizeBestOfNRace(result)),
+            });
+          } catch (e: any) {
+            await addRecoverableChatErrorMessage({
+              title: 'Auto best-of-N race failed',
+              task: content,
+              error: e,
+              executionKind: 'bestof_command',
+              source: 'auto_bestof_error',
+              touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/codingModelSplitPolicy.ts', 'src/lib/bestOfNRace.ts'],
+            });
+          } finally {
+            setBotTyping(false);
+          }
+        })();
+        return;
+      }
+    }
+
+    // ─── Watch commands — intercept /watch (recurring monitors, plan §6a) ────
+    if (lowerContent.startsWith('/watch') && (lowerContent === '/watch' || lowerContent[6] === ' ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { executeWatchCommand } = await import('../../../lib/watchChatCommands');
+          const { detectAlwaysConfirmFloorCategories } = await import('../../../lib/chatComputerRequestRouter');
+          const result = await executeWatchCommand(content, {
+            circleId,
+            userId: currentUserId || '',
+            threadId: activeThreadId || null,
+            // Watches are read-only monitoring — tasks carrying always-confirm
+            // floor intent (pay/delete/login/grant) are rejected at create.
+            floorCategoriesFor: (task) => detectAlwaysConfirmFloorCategories(task),
+          });
+          addBotMessage(result?.message || 'No response.', undefined, { localOnly: true });
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Watch command failed',
+            task: content,
+            error: e,
+            executionKind: 'watch_command',
+            source: 'watch_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/watchChatCommands.ts'],
+          });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
       return;
     }
 
@@ -4542,10 +10042,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const result = await executeMissionCommand(content, {
             circleId,
             userId: currentUserId || '',
+            // Receipt loop (plan §3c): chat-created missions stamp this
+            // thread so task dispatches post receipts back here.
+            threadId: activeThreadId || null,
           });
           addBotMessage(result.message || 'No response.', undefined, { localOnly: true });
         } catch (e: any) {
-          addBotMessage(`Mission error: ${e.message || 'Unknown error'}`, undefined, { localOnly: true });
+          await addRecoverableChatErrorMessage({
+            title: 'Mission command failed',
+            task: content,
+            error: e,
+            executionKind: 'mission_command',
+            source: 'mission_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/missionChatCommands.ts'],
+          });
         } finally {
           setBotTyping(false);
         }
@@ -4565,7 +10075,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           });
           addBotMessage(result.message || 'No data yet.', undefined, { localOnly: true });
         } catch (e: any) {
-          addBotMessage(`Summary error: ${e.message || 'Unknown error'}`, undefined, { localOnly: true });
+          await addRecoverableChatErrorMessage({
+            title: 'Summary command failed',
+            task: content,
+            error: e,
+            executionKind: 'summary_command',
+            source: 'summary_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/missionChatCommands.ts'],
+          });
         } finally {
           setBotTyping(false);
         }
@@ -4585,7 +10102,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           });
           addBotMessage(result.message || 'No response.');
         } catch (e: any) {
-          addBotMessage(`Room error: ${e.message || 'Unknown error'}`);
+          await addRecoverableChatErrorMessage({
+            title: 'Room command failed',
+            task: content,
+            error: e,
+            executionKind: 'room_command',
+            source: 'room_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/roomChatCommands.ts'],
+          });
         } finally {
           setBotTyping(false);
         }
@@ -4601,6 +10125,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const brief = content.replace(/^\/build-page\s*/i, '').trim();
       if (!brief) {
         addBotMessage('Usage: `/build-page <brief>` — describe the page you want.');
+        return;
+      }
+      // Gate thin briefs: ask for the missing detail instead of scaffolding a
+      // page from almost nothing. `hint` already lists what's missing.
+      const briefQuality = analyzeBuildBrief(brief, 'build-page');
+      if (briefQuality.needsClarification) {
+        addBotMessage(briefQuality.hint, undefined, {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_build_clarification',
+            selectedModel,
+            effectiveModel: 'deterministic-build-brief',
+          },
+        });
+        setBotTyping(false);
         return;
       }
       launchBuildStream(brief);
@@ -4625,7 +10165,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           addBotMessage(result.message || 'HF command not recognized.');
         }
       } catch (e: any) {
-        addBotMessage(`HF error: ${e.message}`);
+        await addRecoverableChatErrorMessage({
+          title: 'HF command failed',
+          task: content,
+          error: e,
+          executionKind: 'hf_command',
+          source: 'hf_command_error',
+          touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/hfCommands.ts'],
+        });
       } finally { setBotTyping(false); stopCodingWorkbench(); }
       return;
     }
@@ -4641,7 +10188,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           });
           addBotMessage(result.message || 'No response from GitHub.');
         } catch (e: any) {
-          addBotMessage(`GitHub error: ${e.message || 'Unknown error'}`);
+          await addRecoverableChatErrorMessage({
+            title: 'GitHub command failed',
+            task: content,
+            error: e,
+            executionKind: 'github_command',
+            source: 'github_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/githubChatCommands.ts'],
+          });
         } finally {
           setBotTyping(false);
         }
@@ -4662,7 +10216,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           });
           addBotMessage(result.message);
         } catch (e: any) {
-          addBotMessage(`WordPress error: ${e.message || 'Unknown error'}`);
+          await addRecoverableChatErrorMessage({
+            title: 'WordPress command failed',
+            task: content,
+            error: e,
+            executionKind: 'wordpress_command',
+            source: 'wordpress_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/wordpressChatCommands.ts'],
+          });
         } finally {
           setBotTyping(false);
         }
@@ -4685,7 +10246,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           });
           addBotMessage(result.message || 'No response.', undefined, { localOnly: true });
         } catch (e: any) {
-          addBotMessage(`Vault error: ${e.message || 'Unknown error'}`, undefined, { localOnly: true });
+          await addRecoverableChatErrorMessage({
+            title: 'Vault command failed',
+            task: content,
+            error: e,
+            executionKind: 'vault_command',
+            source: 'vault_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/vaultChatCommands.ts'],
+          });
         } finally {
           setBotTyping(false);
         }
@@ -4699,6 +10267,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         userId: currentUserId || 'anonymous',
         circleId,
         userName: currentUserName,
+        ...selectedAgentSubjectContext,
         model: selectedModel !== 'auto' ? selectedModel : undefined,
       });
       if (localCommandResponse) {
@@ -4707,6 +10276,57 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     } catch (localCmdErr) {
       console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
+    }
+
+    // ─── Did-you-mean for unrecognized slash commands (2026-07-14 UX core) ──
+    // A '/'-prefixed message that survived every intercept above is an unknown
+    // or typo'd command. Instead of silently sending "/reserach ai" to the LLM
+    // as plain chat, offer the nearest real commands. Exact matches fall
+    // through untouched (they're valid commands handled downstream).
+    if (content.trim().startsWith('/')) {
+      try {
+        const { suggestSlashCommand, buildDidYouMean } = await import('../../../lib/slashCommandCorrectionCore');
+        const known = CHAT_SLASH_COMMANDS.flatMap((c) => [c.command, ...(c.aliases || [])]);
+        const sugg = suggestSlashCommand(content, known);
+        if (sugg.isSlash && !sugg.exact && sugg.suggestions.length > 0) {
+          addBotMessage(buildDidYouMean(content, sugg.suggestions), undefined, { localOnly: true });
+          return;
+        }
+      } catch (correctionErr) {
+        console.warn('[ChatTab] slash correction failed:', correctionErr);
+      }
+    }
+
+    // ─── Clarify-before-guessing (2026-07-14 accuracy core) ─────────────────
+    // For a genuinely ambiguous ACTION request ("delete them", "send it",
+    // "deploy") with no disambiguating context, ask ONE crisp question with
+    // tappable options instead of guessing wrong. Deliberately conservative:
+    // passing hasActiveThreadContext (an ongoing conversation) makes it fire
+    // ~never, so it only catches contextless coin-flips. Not for slash cmds.
+    if (!content.trim().startsWith('/')) {
+      try {
+        const { decideChatClarify } = await import('../../../lib/chatClarifyGateCore');
+        const { carriesThreadContext } = await import('../../../lib/chatTurnContinuityCore');
+        // Upgrade the crude `messages.length >= 2` proxy: suppress the clarify gate only
+        // when THIS message actually carries forward from the thread AND the thread
+        // plausibly supplies its antecedent. So "delete them" with no resolvable referent
+        // still asks ONE question even mid-conversation, instead of blindly proceeding
+        // just because 2+ messages exist. (chatTurnContinuityCore bounds the window.)
+        const priorTurns = messages
+          .slice(-12)
+          .map((m) => ({ role: m.isBot ? 'assistant' : 'user', text: m.content || '' }));
+        const clarify = decideChatClarify(content, {
+          hasActiveThreadContext: carriesThreadContext(content, priorTurns),
+          hasAttachment: attachments.length > 0 || stagedFiles.length > 0,
+          mode: chatMode,
+        });
+        if (clarify.shouldClarify) {
+          addBotMessage(clarify.question, undefined, { localOnly: true, quickReplies: clarify.options });
+          return;
+        }
+      } catch (clarifyErr) {
+        console.warn('[ChatTab] clarify gate failed:', clarifyErr);
+      }
     }
 
     // ─── Web Search routing (Phase 0 + auto-detect) ────────────────────────
@@ -4722,7 +10342,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       setBotTyping(true);
       try {
         const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
-        const recent = messages.slice(-6).map(m => ({
+        const recent = transcriptChatMessages(messages).slice(-6).map(m => ({
           role: m.isBot ? ('assistant' as const) : ('user' as const),
           content: m.content,
         }));
@@ -4753,7 +10373,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const { invokeAnyChat } = await import('../../../lib/universalInvoke');
           const { listApiKeys } = await import('../../../lib/llmProviders');
           const userKeys = await listApiKeys();
-          const recent = messages.slice(-6).map(m => ({
+          const recent = transcriptChatMessages(messages).slice(-6).map(m => ({
             role: m.isBot ? ('assistant' as const) : ('user' as const),
             content: m.content,
           }));
@@ -4777,12 +10397,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         } catch (fallbackErr: any) {
           setBotTyping(false);
           const msg = err?.message || fallbackErr?.message || 'Web search failed';
-          addBotMessage(
-            `Web search failed: ${msg}\n\n` +
-            'Connect OpenRouter in **Marketplace → AI Models & APIs** for web search, or any other provider for plain chat.',
-            undefined,
-            { localOnly: true },
-          );
+          await addRecoverableChatErrorMessage({
+            title: 'Web search failed',
+            task: `Answer with web search: ${content.slice(0, 240)}`,
+            error: new Error(`${msg}. Connect OpenRouter in Marketplace > AI Models & APIs for web search, or any other provider for plain chat.`),
+            executionKind: 'web_search_command',
+            source: 'web_search_failure',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/llmProviders.ts', 'src/lib/universalInvoke.ts'],
+          });
         }
       }
       return;
@@ -4810,6 +10432,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addBotMessage(capResult.response, arts.length > 0 ? arts : undefined);
         return;
       }
+      if (capResult.fallbackNotice) {
+        // A capability backend (image gen) failed — say why before the normal
+        // model answers in text, so the missing artifact isn't a silent mystery.
+        addBotMessage(capResult.fallbackNotice);
+      }
     } catch (capErr) {
       setBotTyping(false);
       console.warn('[Chat] Capability routing error:', capErr);
@@ -4820,15 +10447,39 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const isAtMentioningSomeoneElse = new RegExp(`^@(?!agent|blackswan|swanbot|swan|${escapedName}\\b)\\w`, 'i').test(content.trim());
 
     if (!isAtMentioningSomeoneElse) {
-      const cleanContent = content.replace(new RegExp(`@(agent|blackswan|swanbot|swan|${escapedName})\\s*`, 'gi'), '').trim() || content;
+      let cleanContent = content.replace(new RegExp(`@(agent|blackswan|swanbot|swan|${escapedName})\\s*`, 'gi'), '').trim() || content;
+      const latestRecoveryOptionsMessage = findLatestRecoveryOptionsMessage(messages);
+      const recoveryFollowup = latestRecoveryOptionsMessage
+        ? resolveChatFailureRecoveryOptionFollowup(cleanContent, latestRecoveryOptionsMessage.recoveryOptions)
+        : null;
+      if (recoveryFollowup) {
+        cleanContent = buildRecoveryOptionComposerPrompt(recoveryFollowup.option, latestRecoveryOptionsMessage || undefined);
+      }
 
       // Build chat context with OpenSwan envelope wrapping for temporal awareness
-      const recentMessages = messages.slice(-10);
-      const chatHistory = recentMessages.map(m => {
+      const selectedRecoveryOption = parseChatFailureRecoveryOptionSelection(cleanContent);
+      const selectedRecoveryExecutionPlan = selectedRecoveryOption
+        ? buildChatFailureRecoveryExecutionPlan(selectedRecoveryOption)
+        : null;
+      const selectedRecoveryPolicy = selectedRecoveryExecutionPlan?.policy || null;
+      const recoveryOptionPromptContext = selectedRecoveryOption
+        ? formatChatFailureRecoveryOptionSelectionForPrompt(selectedRecoveryOption)
+        : '';
+      const recentMessages = transcriptChatMessages(messages).slice(-10);
+      // P62: the most recent bot message gets a much larger history budget.
+      // "Continue"-style follow-ups (including interrupted-stream partials,
+      // whose UI hint literally says "Say 'continue'") need that answer's
+      // tail — a uniform 300-char slice meant continue only ever saw the
+      // first 300 chars of what it was asked to continue.
+      let lastBotMessageIdx = -1;
+      for (let mi = recentMessages.length - 1; mi >= 0; mi--) {
+        if (recentMessages[mi].isBot) { lastBotMessageIdx = mi; break; }
+      }
+      const chatHistory = recentMessages.map((m, mi) => {
         const who = m.isBot ? agentName : (m.userName || 'User');
         const when = m.timestamp ? m.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '';
         const ago = m.timestamp ? formatTimeAgo(m.timestamp) : '';
-        return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, 300)}`;
+        return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, mi === lastBotMessageIdx ? 2000 : 300)}`;
       }).join('\n');
 
       // If replying to a specific message, prepend that context
@@ -4848,9 +10499,73 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         attachmentContext = figmaPromptContext;
       }
 
+      // P20 — attached images + WordPress wording → deterministic upload
+      // directive: exact wp.upload_media recipes with the real storage paths,
+      // approval-gated as always, drafts by default. Advisory lane — any
+      // failure here must never block the send.
+      let wpImageDirective = '';
+      try {
+        const stagedImageUploads = currentStagedFiles.filter(
+          (f) => (f.mimeType || '').startsWith('image/') && f.attachment?.storagePath,
+        );
+        const pickerImages = currentAttachments.filter((a) => a.type === 'image');
+        const imageCount = stagedImageUploads.length + pickerImages.length;
+        if (imageCount > 0) {
+          const { detectWordPressImagePostIntent, buildWpImageUploadDirective, summarizeWpImagePlanForUser } =
+            await import('../../../lib/wpImagePostFlow');
+          const wpIntent = detectWordPressImagePostIntent({ text: content, imageAttachmentCount: imageCount });
+          if (wpIntent) {
+            // Picker images carry base64 but no storage path — stage them now
+            // (web only) so wp.upload_media can reach the bytes.
+            const pickerUploads: Array<{ name: string; mimeType: string; storagePath: string }> = [];
+            if (Platform.OS === 'web' && currentUserId) {
+              for (const att of pickerImages) {
+                if (!att.base64) continue;
+                try {
+                  const bytes = Uint8Array.from(atob(att.base64), (c) => c.charCodeAt(0));
+                  const file = new File([bytes], att.name || 'image.jpg', { type: att.mimeType || 'image/jpeg' });
+                  const uploaded = await uploadAttachment({ file, circleId, threadId: activeThreadId, userId: currentUserId });
+                  if (uploaded?.storagePath) {
+                    pickerUploads.push({ name: file.name, mimeType: file.type, storagePath: uploaded.storagePath });
+                  }
+                } catch {
+                  // Best-effort — unstaged picker images are simply left out.
+                }
+              }
+            }
+            const wpAttachments = [
+              ...stagedImageUploads.map((f) => ({ name: f.name, mimeType: f.mimeType, storagePath: f.attachment!.storagePath })),
+              ...pickerUploads,
+            ];
+            if (wpAttachments.length > 0) {
+              wpImageDirective = buildWpImageUploadDirective({
+                attachments: wpAttachments,
+                siteUrl: wpIntent.siteUrl,
+                wantsSlide: wpIntent.wantsSlide,
+                wantsPost: wpIntent.wantsPost,
+              });
+              addBotMessage(
+                summarizeWpImagePlanForUser({
+                  count: wpAttachments.length,
+                  siteUrl: wpIntent.siteUrl,
+                  wantsSlide: wpIntent.wantsSlide,
+                  wantsPost: wpIntent.wantsPost,
+                }),
+                undefined,
+                { localOnly: true },
+              );
+            }
+          }
+        }
+      } catch {
+        // Advisory only.
+      }
+
       const fullPrompt = [
         attachmentContext,
+        wpImageDirective,
         replyContext,
+        recoveryOptionPromptContext,
         cleanContent,
       ].filter(Boolean).join('\n');
 
@@ -4869,16 +10584,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       ].filter(Boolean).join('\n\n');
       startCodingWorkbench(workbenchPrompt);
       setBotTyping(true);
+      let pendingMessage: ChatMessage | null = null;
       try {
         const sessionArchiveContext = await loadSessionArchiveContext();
-        const sendModel = resolveSendModel(cleanContent);
+        const sendModel = effectiveSelectedModel !== 'auto'
+          ? effectiveSelectedModel
+          : resolveSendModel(cleanContent);
         const context: SwanBotContext = {
           userId: currentUserId || 'anonymous',
           circleId,
           userName: currentUserName,
+          ...selectedAgentSubjectContext,
           model: sendModel || undefined,
           sessionArchiveContext: sessionArchiveContext || undefined,
           connectedProviders: connectedProviderSet,
+          threadId: activeThreadId || undefined,
+          activePluginIds: activePlugins,
         };
 
         // Inject recent chat context so the AI can reference prior messages
@@ -4898,15 +10619,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
 
         // Use unified agent runtime only when user explicitly selects a specialized mode
-        if (chatMode !== 'none' && chatMode !== 'talk') {
+        if (effectiveChatMode !== 'none' && effectiveChatMode !== 'talk') {
           const result = await executeAgentRun({
             surface: 'main_chat',
             circleId,
             userId: currentUserId || 'anonymous',
             userName: currentUserName,
             prompt: fullPrompt,
+            agentId: selectedAgentSubjectContext.agentSubjectKey,
+            agentName: selectedAgentSubjectContext.agentName,
+            agentSubjectKey: selectedAgentSubjectContext.agentSubjectKey,
+            agentDbId: selectedAgentSubjectContext.agentDbId,
+            agentSessionKey: selectedAgentSubjectContext.agentSessionKey,
+            agentLegacyIds: selectedAgentSubjectContext.agentLegacyIds,
+            agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
             model: sendModel || undefined,
-            mode: chatMode as any,
+            threadId: activeThreadId || undefined,
+            activePluginIds: activePlugins,
+            mode: effectiveChatMode as any,
             connectedProviders: connectedProviderSet,
             context: {
               chatHistory,
@@ -4948,14 +10678,99 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // exposes. Forcing them off the streaming fast-path lets
             // BlackSwan actually call rooms.create / circle.update_* /
             // missions.* instead of replying "I can't do that."
-            const streamCandidateModel = resolveSendModel(cleanContent) || 'claude-haiku-4-5';
-            const canStream = sessionDelegationMode !== 'parallel'
-              && !isFigmaBuildRequest
-              && !isCodingGenerationRequest(cleanContent, sessionProfile)
-              && !looksLikeActionRequest(cleanContent)
-              && canUseAnthropicChatStream(streamCandidateModel);
+            const streamCandidateModel = sendModel || 'claude-haiku-4-5';
+            const terminalPlan = buildChatAutomationPlan({
+              message: content,
+              attachments: currentAttachments.map((attachment) => ({
+                uri: attachment.uri,
+                type: attachment.type,
+                id: attachment.id,
+              })),
+              selectedMode: effectiveChatMode,
+            });
+            const terminalTransport = chooseChatTerminalTransport({
+              executionKind: terminalPlan.execution.kind,
+              chatMode: effectiveChatMode,
+              sessionDelegationMode,
+              hasSelectedRecoveryOption: Boolean(selectedRecoveryOption),
+              isFigmaBuildRequest,
+              isCodingGenerationRequest: isCodingGenerationRequest(cleanContent, sessionProfile),
+              looksLikeActionRequest: looksLikeActionRequest(cleanContent),
+              canStreamAnthropic: canUseAnthropicChatStream(streamCandidateModel),
+            });
+            // AI-first telemetry (NO behavior change): annotate which orchestration
+            // tier the product policy would pick for this turn — plain_model (stream
+            // a model answer), escalate_tools (stream first, activate SwanBot/OpenSwan
+            // tools on tool_use), or spawn_agents (deploy path). This is a pure,
+            // side-effect-free decision used only for a debug log; the actual transport
+            // and escalation are still driven entirely by `terminalTransport` above and
+            // the `uc_stream_escalate_on_tool_use` flag, so this is a no-op on every
+            // path regardless of flag state. (`spawn_agents` turns short-circuit far
+            // earlier via the `__SPAWN_AGENTS__` modal and never reach this stream path.)
+            try {
+              const orchestration = decideChatOrchestration({
+                message: cleanContent,
+                mode: effectiveChatMode,
+                modelId: streamCandidateModel,
+                hasAttachments: currentAttachments.length > 0,
+                // The explicit tool/agent quick-actions resolve to their own
+                // routes/modals before this point, so from the stream path's vantage
+                // these are caller-detected-false; the message heuristics still
+                // classify implicit action/capability intent for telemetry.
+                explicitToolRequest: false,
+                explicitAgentRequest: false,
+              });
+              console.debug(
+                '[ChatTab] AI-first orchestration tier:',
+                orchestration.tier,
+                '| transport:',
+                terminalTransport.path,
+                '| capabilities:',
+                orchestration.suggestedCapabilities.join(',') || 'none',
+                '|',
+                orchestration.reason,
+              );
+            } catch (orchestrationErr) {
+              // Telemetry only — never let the tier annotation affect a chat turn.
+              console.warn('[ChatTab] orchestration tier annotation failed:', orchestrationErr);
+            }
+            // Phase 2 seam (DEFAULT OFF): `stream_then_escalate` streams the
+            // turn plainly AND advertises the tiny pinned tool core + tools.search
+            // so the model can signal mid-turn that it needs a capability; on that
+            // signal this turn upgrades into the OpenSwan tool loop. The transport
+            // only returns this path while the `uc_stream_escalate_on_tool_use`
+            // flag is ON, so when the flag is OFF `escalateOnToolUse` is false and
+            // every branch below is byte-for-byte the legacy `stream_plain_chat`.
+            const escalateOnToolUse = terminalTransport.path === 'stream_then_escalate';
+            const canStream = terminalTransport.path === 'stream_plain_chat' || escalateOnToolUse;
 
             if (canStream) {
+              // W5 (P39): hoisted so the catch below can normalize the stream
+              // terminal through the unified lane boundary (chatLaneOutcome).
+              // The load-bearing distinction: interrupted ≠ failed — an
+              // interrupted stream left PARTIAL text on screen and must never
+              // be silently re-run as batch.
+              let streamAccumulated = '';
+              let streamPendingMsgId: string | null = null;
+              // P62: the pending message object + source are captured here so
+              // the catch below can PERSIST an interrupted partial (it used to
+              // live only in local React state and vanished on reload).
+              let streamPendingMsg: ReturnType<typeof addPendingBotMessage> | null = null;
+              let streamSourceForRecovery: ChatMessageSource | null = null;
+              let streamInterruptedResult: import('../../../lib/swanbotStream').StreamChatResult | undefined;
+              // Degeneracy cutoff: when the mid-stream loop detector trips, this
+              // carries the calm user-facing one-liner into the interrupted
+              // branch below (so the partial gets stuck_loop copy, not the
+              // generic "connection dropped" wording).
+              let streamDegeneracyStop: string | null = null;
+              // Stream-liveness: the handle's cancel fn, hoisted so the catch
+              // can clear streamingBuildCleanupRef ONLY when it still points at
+              // THIS stream (launchBuildStream can overwrite the shared ref).
+              let streamHandleCancel: (() => void) | null = null;
+              // Run-UI ownership token captured when this stream establishes
+              // runStatus/botTyping; the catch's UI resets are gated on the
+              // counter still matching (see chatUiOwnerRef).
+              let streamUiOwner = 0;
               try {
                 const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                 const { streamChatResponse } = await import('../../../lib/swanbotStream');
@@ -4964,10 +10779,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   circleId,
                   userId: currentUserId || 'anonymous',
                   currentMessage: cleanContent,
-                  model: selectedModel !== 'auto' ? selectedModel : undefined,
+                  model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
                   userName: currentUserName,
+                  agentId: selectedAgentSubjectContext.agentId,
+                  agentName: selectedAgentSubjectContext.agentName,
+                  agentSubjectKey: selectedAgentSubjectContext.agentSubjectKey,
+                  agentDbId: selectedAgentSubjectContext.agentDbId,
+                  agentSessionKey: selectedAgentSubjectContext.agentSessionKey,
+                  agentLegacyIds: selectedAgentSubjectContext.agentLegacyIds,
+                  agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
                   chatHistory,
                   sessionArchiveContext: sessionArchiveContext || undefined,
+                  attentionSignals: attentionItemsToSurfacingSignals(chatAttentionItemsRef.current, Date.now()),
                 });
                 // Auto resolution honours the connected marketplace
                 // providers — when OpenRouter is wired, this picks an
@@ -4976,17 +10799,91 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 // Falls back to platform Sonnet if the helper somehow
                 // returns null so we never send an unresolved 'auto'.
                 const streamModel = streamCandidateModel;
-                const pendingMsg = addPendingBotMessage('');
+                // Phase 2 seam (DEFAULT OFF): only when the transport chose
+                // `stream_then_escalate` do we advertise the pinned tool palette
+                // on the stream. `getStreamEscalationPinnedToolNames` resolves the
+                // same surface-pinned core + tools.search used by the batch
+                // tools-first path (via listPinnedOpenSwanToolsForSurface), and
+                // `getToolDefinitions` turns those names into Anthropic tool
+                // definitions. When the flag is OFF this whole block is skipped and
+                // `streamTools` stays undefined, so the stream request omits
+                // `tools` and is byte-identical to today's text-only call.
+                let streamTools: Array<{ name: string; description: string; input_schema: Record<string, unknown> }> | undefined;
+                if (escalateOnToolUse) {
+                  try {
+                    const { getStreamEscalationPinnedToolNames } = await import('../../../lib/swanbot');
+                    const { getToolDefinitions } = await import('../../../lib/openswanTools/index');
+                    const pinnedToolNames = await getStreamEscalationPinnedToolNames('main_chat');
+                    const defs = getToolDefinitions(pinnedToolNames, 'main_chat');
+                    streamTools = defs.length > 0 ? defs : undefined;
+                  } catch (toolResolveErr) {
+                    console.warn('[ChatTab] stream escalation tool resolve failed:', toolResolveErr);
+                    streamTools = undefined;
+                  }
+                }
+                // Stream-liveness (a): seed the bubble with a thinking verb —
+                // an empty-string bubble reads as dead air until the first
+                // token. onDelta below replaces the content wholesale, so the
+                // seed never mixes with real output.
+                const pendingMsg = addPendingBotMessage(`${pickThinkingVerb(Math.floor(Date.now() / 1500))}…`);
+                pendingMessage = pendingMsg;
+                streamPendingMsgId = pendingMsg.id;
+                streamPendingMsg = pendingMsg;
+                streamUiOwner = ++chatUiOwnerRef.current;
                 setRunStatus('running');
                 let accumulated = '';
                 let streamingUsage: SwanBotStructuredResponse['usage'] | undefined;
+                // Captured only on the escalation path: the SSE parser exposes the
+                // reassembled tool_use blocks + terminal stop_reason on the done
+                // result (and via additive callbacks). Left untouched on the plain
+                // path so flag-off behavior is unchanged.
+                let streamToolUses: Array<{ id: string; name: string; input: unknown }> = [];
+                let streamStopReason: string | null = null;
                 const streamSource: ChatMessageSource = {
                   actor: agentName,
                   surface: 'main_chat_stream',
                   selectedModel,
                   effectiveModel: streamModel,
                 };
+                streamSourceForRecovery = streamSource;
                 await new Promise<void>((resolve, reject) => {
+                  // Stream-liveness (b): streamHealthCore watchdog. Pure
+                  // byte-truth transport state machine — handshake/byte events
+                  // stamp the idle clock; a ~5s idle tick escalates
+                  // healthy → slow → stalled so the UI tells the truth about a
+                  // silently hung SSE feed instead of rotating verbs forever.
+                  let healthState = initStreamHealth();
+                  let healthInterval: ReturnType<typeof setInterval> | null = null;
+                  let healthStepShown = false;
+                  let settledStream = false;
+                  // Degeneracy cutoff: open/fine-tuned models can lock into a
+                  // repetition loop while the transport stays perfectly healthy.
+                  // Check the accumulated text every ~1500 new chars; on a
+                  // degenerate verdict cut the stream off instead of filling
+                  // the bubble to max_tokens. `degeneracyStopped` also makes
+                  // onDelta a no-op afterwards (swanbotStream's coalesce
+                  // setTimeout can still fire once post-cancel).
+                  let degeneracyStopped = false;
+                  let lastDegeneracyCheckLen = 0;
+                  const clearHealthWatchdog = () => {
+                    if (healthInterval) { clearInterval(healthInterval); healthInterval = null; }
+                    if (healthStepShown) { healthStepShown = false; setCurrentRunStep(''); }
+                  };
+                  // Single settle chokepoint: EVERY terminal (done, error,
+                  // cancel, stall) clears the interval + the health run-step so
+                  // no timer outlives the stream.
+                  const settleResolve = () => {
+                    if (settledStream) return;
+                    settledStream = true;
+                    clearHealthWatchdog();
+                    resolve();
+                  };
+                  const settleReject = (err: Error) => {
+                    if (settledStream) return;
+                    settledStream = true;
+                    clearHealthWatchdog();
+                    reject(err);
+                  };
                   const handle = streamChatResponse({
                     messages: [
                       { role: 'system', content: systemPrompt },
@@ -4994,26 +10891,206 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     ],
                     model: streamModel,
                     circleId,
+                    // Only set on the escalation path. The chat-stream contract
+                    // treats an absent/empty `tools` as the unchanged text-only
+                    // request, so the default flag-off path sends no tools.
+                    ...(streamTools ? { tools: streamTools } : {}),
+                    // Exact handshake instant (200 + readable body): start the
+                    // idle clock here so pre-handshake auth/fetch time can never
+                    // be misread as a stall.
+                    onOpen: () => {
+                      healthState = advanceStreamHealth(healthState, { kind: 'handshake', nowMs: Date.now() });
+                    },
                     onDelta: (text) => {
+                      // Settled terminal (degeneracy stop, cancel, stall):
+                      // ignore late/coalesced deltas. swanbotStream's 80ms
+                      // coalesce timer can fire once post-cancel and would
+                      // otherwise clobber the interrupted-notice bubble the
+                      // catch just wrote.
+                      if (degeneracyStopped || settledStream) return;
+                      const prevHealth = healthState.health;
+                      healthState = advanceStreamHealth(healthState, { kind: 'byte', nowMs: Date.now() });
+                      // Recovery edge: a byte after slow/stalled copy clears it.
+                      if (healthStepShown && (prevHealth === 'slow' || prevHealth === 'stalled') && healthState.health === 'streaming') {
+                        healthStepShown = false;
+                        setCurrentRunStep('');
+                      }
                       accumulated += text;
+                      streamAccumulated = accumulated;
+                      // Degeneracy cutoff: cheap periodic check (pure core,
+                      // conservative by construction — only egregious loops
+                      // trip it). On a degenerate verdict, classify the
+                      // terminal as `interrupted` FIRST so the catch's
+                      // partial-preserving branch keeps the good prefix
+                      // instead of the bubble-deleting batch fallback
+                      // silently re-running the whole turn.
+                      if (accumulated.length - lastDegeneracyCheckLen >= 1500) {
+                        lastDegeneracyCheckLen = accumulated.length;
+                        const verdict = assessStreamDegeneracy(accumulated);
+                        if (verdict.degenerate) {
+                          degeneracyStopped = true;
+                          streamDegeneracyStop = describeStreamDegeneracy(verdict)
+                            || 'The response started repeating itself, so I stopped it early.';
+                          streamInterruptedResult = {
+                            toolUses: [],
+                            stopReason: null,
+                            status: 'interrupted',
+                            incomplete: true,
+                            interruptReason: 'error_event',
+                          };
+                          try { handle.cancel(); } catch { /* already closed */ }
+                          settleReject(new Error(streamDegeneracyStop));
+                          return;
+                        }
+                      }
                       updateBotMessage(pendingMsg.id, { content: accumulated, isPending: false });
                     },
                     onUsage: (usage) => {
                       streamingUsage = usage;
                     },
-                    onDone: () => resolve(),
-                    onError: (msg) => reject(new Error(msg)),
+                    // The SSE parser delivers the reassembled tool_use blocks +
+                    // terminal stop_reason on the done result (additive — text-only
+                    // turns leave toolUses empty and report end_turn). Captured here
+                    // and only consulted under the `escalateOnToolUse` gate below.
+                    onDone: (result) => {
+                      if (result) {
+                        streamToolUses = result.toolUses;
+                        streamStopReason = result.stopReason;
+                      }
+                      settleResolve();
+                    },
+                    // W5 (P39): the second argument carries the interrupted
+                    // terminal result (partial toolUses/stopReason) — capture
+                    // it so the catch can tell pre-handshake from mid-stream.
+                    onError: (msg, result) => {
+                      streamInterruptedResult = result;
+                      settleReject(new Error(msg));
+                    },
                   });
+                  streamHandleCancel = handle.cancel;
+                  // Stream-liveness: baseline handshake stamp at handle
+                  // creation. The fetch has no timeout, so a connection that
+                  // hangs BEFORE the 200/SSE handshake never fires
+                  // onOpen/onError — without this stamp lastByteAtMs stays
+                  // null, idle ticks no-op forever, and a pre-handshake hang
+                  // wedges the run. The onOpen re-stamp above keeps
+                  // exact-timing accuracy once the handshake really lands.
+                  healthState = advanceStreamHealth(healthState, { kind: 'handshake', nowMs: Date.now() });
+                  // Stream-liveness (c): cancel wedge fix. swanbotStream's
+                  // cancel terminals resolve `done` to null WITHOUT firing
+                  // onDone/onError, so a cancelled stream used to leave this
+                  // Promise pending forever (wedged runStatus + typing dots).
+                  // A pre-stream error also resolves null, but its onError has
+                  // already rejected synchronously, so this reject is a no-op.
+                  void handle.done.then((r) => {
+                    if (r !== null) return;
+                    if (accumulated.length > 0 && !streamInterruptedResult) {
+                      // Partial text is on screen — classify as interrupted so
+                      // the catch's partial-preserving branch keeps it. Never
+                      // overwrite an existing classification: the degeneracy
+                      // stop stamps 'error_event' before cancelling, and this
+                      // null-terminal must not relabel it 'broken_pipe'.
+                      streamInterruptedResult = {
+                        toolUses: [],
+                        stopReason: null,
+                        status: 'interrupted',
+                        incomplete: true,
+                        interruptReason: 'broken_pipe',
+                      };
+                    }
+                    settleReject(new Error('stream cancelled'));
+                  });
+                  // Idle watchdog: ~5s ticks measure silence against the
+                  // phase-aware budgets (generous pre-first-token TTFT, tighter
+                  // inter-token) and surface truthful slow/stalled copy.
+                  // Guarded on settledStream: a synchronous pre-stream error
+                  // (e.g. strict local-AI block) settles DURING the
+                  // streamChatResponse() call above — the settle chokepoint
+                  // has already cleared a still-null healthInterval, so
+                  // creating the interval here would leak it forever.
+                  healthInterval = settledStream ? null : setInterval(() => {
+                    healthState = advanceStreamHealth(healthState, { kind: 'idle_tick', nowMs: Date.now() });
+                    const health = healthState.health;
+                    if (health === 'stalled') {
+                      if (accumulated.length > 0) {
+                        // Route through the partial-preserving interrupted
+                        // branch below (never the bubble-deleting batch retry).
+                        streamInterruptedResult = {
+                          toolUses: [],
+                          stopReason: null,
+                          status: 'interrupted',
+                          incomplete: true,
+                          interruptReason: 'broken_pipe',
+                        };
+                      }
+                      // No output yet → leave streamInterruptedResult unset so
+                      // the terminal classifies 'failed' (retry-safe batch
+                      // fallback: nothing was delivered).
+                      try { handle.cancel(); } catch { /* already closed */ }
+                      settleReject(new Error('Stream stalled — no bytes from the model for too long'));
+                      return;
+                    }
+                    if (health === 'slow') {
+                      healthStepShown = true;
+                      setCurrentRunStep(describeStreamHealth('slow'));
+                      if (accumulated === '') {
+                        updateBotMessage(pendingMsg.id, { content: describeStreamHealth('slow') });
+                      }
+                    }
+                  }, 5000);
                   // Store cancel handle in case we need to abort
                   streamingBuildCleanupRef.current = handle.cancel;
                 });
-                streamingBuildCleanupRef.current = null;
-                updateBotMessage(pendingMsg.id, {
+                if (streamingBuildCleanupRef.current === streamHandleCancel) {
+                  streamingBuildCleanupRef.current = null;
+                }
+                // Phase 2 seam (DEFAULT OFF): if this escalation-capable stream
+                // produced a tool_use (or stopped with stop_reason==='tool_use'),
+                // upgrade THIS turn into the OpenSwan tool loop, reusing every
+                // existing reliability layer. `maybeEscalateStreamedTurnToToolLoop`
+                // re-checks the flag and no-ops to `{escalated:false}` when OFF or
+                // when there is no tool-use signal, so on the default path (and on
+                // a plain streamed answer) we fall through to the existing render/
+                // persist path below with the streamed text untouched. When it
+                // escalates, the loop's response becomes the authoritative answer
+                // and flows through that same path.
+                if (escalateOnToolUse && (streamToolUses.length > 0 || streamStopReason === 'tool_use')) {
+                  try {
+                    const { maybeEscalateStreamedTurnToToolLoop } = await import('../../../lib/swanbot');
+                    const escalation = await maybeEscalateStreamedTurnToToolLoop({
+                      streamedTurn: { stopReason: streamStopReason, content: streamToolUses.map((t) => ({ type: 'tool_use', id: t.id, name: t.name, input: t.input })) },
+                      systemPrompt,
+                      userMessage: augmentedPrompt,
+                      model: streamModel,
+                      circleId,
+                      userId: currentUserId || 'anonymous',
+                      threadId: activeThreadId || undefined,
+                      activePluginIds: activePlugins,
+                      surface: 'main_chat',
+                      mode: 'talk',
+                    });
+                    if (escalation.escalated && typeof escalation.response === 'string' && escalation.response.length > 0) {
+                      accumulated = escalation.response;
+                    }
+                  } catch (escalationErr) {
+                    console.warn('[ChatTab] stream→tool escalation failed, keeping streamed text:', escalationErr);
+                  }
+                }
+                const completedStreamMessage: ChatMessage = {
+                  ...pendingMsg,
                   content: accumulated,
                   isPending: false,
                   source: streamSource,
                   usage: streamingUsage,
-                });
+                  timestamp: new Date(),
+                };
+                const completedStreamMetadata = projectPersistedChatBotMetadata(
+                  completedStreamMessage,
+                  pendingMsg.agentSubjectMetadata
+                    || selectedAgentSubjectContext.agentSubjectMetadata,
+                );
+                completedStreamMessage.persistedMetadataSnapshot = completedStreamMetadata;
+                updateBotMessage(pendingMsg.id, completedStreamMessage);
                 // Post-stream: run memory extraction in background
                 if (accumulated.length > 20) {
                   void (async () => {
@@ -5027,39 +11104,193 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   })();
                 }
                 if (activeThreadId) {
-                  saveRecoverableChatMessage(activeThreadId, {
-                    ...pendingMsg,
-                    content: accumulated,
-                    source: streamSource,
-                    usage: streamingUsage,
-                    isPending: false,
-                    timestamp: new Date(),
-                  });
+                  saveRecoverableChatMessage(activeThreadId, completedStreamMessage);
                 }
                 if (currentUserId && activeThreadId) {
-                  persistMainChatBotMessageWithRetry({
+                  persistChatTabBotMessageWithRetry({
                     circleId,
                     userId: currentUserId,
                     agentName,
                     content: accumulated,
                     threadId: activeThreadId,
-                    localMessageId: pendingMsg.id,
-                    source: streamSource,
-                    usage: streamingUsage || null,
+                    metadata: completedStreamMetadata,
                     onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
                     onPersisted: (dbId) => {
                       void removePendingBotMessage(activeThreadId, pendingMsg.id).catch(() => {});
                       setMessages(prev => prev.map((message) => (
-                        message.id === pendingMsg.id ? { ...message, dbId } : message
+                        message.id === pendingMsg.id
+                          ? { ...message, dbId, persistedMetadataSnapshot: completedStreamMetadata }
+                          : message
                       )));
                     },
                   });
                 }
+                // X7 (P48): record the clean stream terminal so lane failure
+                // rates have a denominator (successes count too).
+                try {
+                  const { recordChatLaneTerminalNow } = await import('../../../lib/chatLaneHealthRegistry');
+                  recordChatLaneTerminalNow({ lane: 'stream', status: 'completed' });
+                } catch {}
                 setRunStatus('idle');
                 setBotTyping(false);
                 stopCodingWorkbench();
                 return;
               } catch (streamErr) {
+                // W5 (P39): normalize the stream terminal through the unified
+                // lane boundary before deciding what to do. The invariant it
+                // enforces: a MID-STREAM interruption with partial text on
+                // screen is `interrupted`, not `failed` — silently re-running
+                // the whole turn as batch would render the answer twice and
+                // could double side effects on the escalation path. Only
+                // pre-handshake / no-output failures keep the legacy batch
+                // fallback (retry-safe: nothing was delivered).
+                try {
+                  const { normalizeStreamResult, summarizeChatLaneOutcomeForTelemetry } =
+                    await import('../../../lib/chatLaneOutcome');
+                  const laneOutcome = normalizeStreamResult({
+                    result: streamInterruptedResult ?? null,
+                    errorMessage: streamErr instanceof Error ? streamErr.message : String(streamErr),
+                    text: streamAccumulated,
+                    model: streamCandidateModel,
+                  });
+                  console.warn(
+                    '[ChatTab] stream lane terminal:',
+                    JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)),
+                  );
+                  // X7 (P48): feed the per-lane health registry (observability only).
+                  try {
+                    const { recordChatLaneOutcomeNow } = await import('../../../lib/chatLaneHealthRegistry');
+                    recordChatLaneOutcomeNow(laneOutcome);
+                  } catch {}
+                  if (laneOutcome.status === 'interrupted' && streamAccumulated.length > 0) {
+                    // Degeneracy cutoff: this stop was OURS (looping content,
+                    // healthy transport) — use the stuck_loop copy instead of
+                    // the generic "stream interrupted / say continue" wording;
+                    // continuing a degenerate answer would resume the loop.
+                    const interruptedContent = streamDegeneracyStop
+                      ? `${streamAccumulated}\n\n⚠️ _${streamDegeneracyStop} ${resolveChatStopMessage('stuck_loop').message}_`
+                      : `${streamAccumulated}\n\n⚠️ _Stream interrupted — the answer above may be incomplete. Say "continue" to pick up from here._`;
+                    const interruptedSource: ChatMessageSource = streamSourceForRecovery || {
+                      actor: agentName,
+                      surface: 'main_chat_stream',
+                      selectedModel,
+                      effectiveModel: streamCandidateModel,
+                    };
+                    const interruptedStreamMessage: ChatMessage | null = streamPendingMsg
+                      ? {
+                          ...streamPendingMsg,
+                          content: interruptedContent,
+                          isPending: false,
+                          source: interruptedSource,
+                          timestamp: new Date(),
+                        }
+                      : null;
+                    const interruptedStreamMetadata: PersistedChatBotMetadata = interruptedStreamMessage
+                      ? projectPersistedChatBotMetadata(
+                          interruptedStreamMessage,
+                          streamPendingMsg?.agentSubjectMetadata
+                            || selectedAgentSubjectContext.agentSubjectMetadata,
+                        )
+                      : {
+                          localMessageId: streamPendingMsgId || undefined,
+                          requestAuthorId: currentUserId || null,
+                          source: interruptedSource,
+                          agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
+                          usage: null,
+                        };
+                    if (interruptedStreamMessage) {
+                      interruptedStreamMessage.persistedMetadataSnapshot = interruptedStreamMetadata;
+                    }
+                    if (streamPendingMsgId) {
+                      updateBotMessage(streamPendingMsgId, interruptedStreamMessage || {
+                        content: interruptedContent,
+                        isPending: false,
+                        source: interruptedSource,
+                      });
+                    }
+                    // P62 (W5 regression fix): the partial lived ONLY in local
+                    // React state — reload/thread switch dropped the whole
+                    // answer while the user's question persisted, and
+                    // "continue" had nothing to continue from. Persist it
+                    // exactly like the clean-stream path above.
+                    if (activeThreadId && streamPendingMsg) {
+                      saveRecoverableChatMessage(
+                        activeThreadId,
+                        interruptedStreamMessage || streamPendingMsg,
+                      );
+                    }
+                    if (currentUserId && activeThreadId && streamPendingMsgId) {
+                      const interruptedMsgId = streamPendingMsgId;
+                      persistChatTabBotMessageWithRetry({
+                        circleId,
+                        userId: currentUserId,
+                        agentName,
+                        content: interruptedContent,
+                        threadId: activeThreadId,
+                        metadata: interruptedStreamMetadata,
+                        onError: (error) => console.error('[ChatTab] persist interrupted stream msg:', error),
+                        onPersisted: (dbId) => {
+                          void removePendingBotMessage(activeThreadId, interruptedMsgId).catch(() => {});
+                          setMessages(prev => prev.map((message) => (
+                            message.id === interruptedMsgId
+                              ? { ...message, dbId, persistedMetadataSnapshot: interruptedStreamMetadata }
+                              : message
+                          )));
+                        },
+                      });
+                    }
+                    if (streamingBuildCleanupRef.current === streamHandleCancel) {
+                      streamingBuildCleanupRef.current = null;
+                    }
+                    // Ownership guard: only reset the shared run-UI when no
+                    // newer run (e.g. a superseding build stream) owns it.
+                    if (chatUiOwnerRef.current === streamUiOwner) {
+                      setRunStatus('idle');
+                      setBotTyping(false);
+                      stopCodingWorkbench();
+                    }
+                    return;
+                  }
+                } catch (boundaryErr) {
+                  // The boundary is observability + a stop decision — its own
+                  // failure must never take down the legacy fallback.
+                  console.warn('[ChatTab] lane-outcome normalize failed:', boundaryErr);
+                }
+                // Stream-liveness (c): explicit cancellation is NON-retryable —
+                // re-running the turn as batch would resurrect a request the
+                // user (or a superseding build stream) just stopped. A partial
+                // answer was already preserved by the interrupted branch above
+                // (the done-null wedge fix stamps an interrupted result when
+                // text exists); with zero output, drop the orphan bubble and
+                // reset the run UI.
+                if (streamErr instanceof Error && streamErr.message === 'stream cancelled') {
+                  if (streamPendingMsgId && streamAccumulated.length === 0) {
+                    const orphanId = streamPendingMsgId;
+                    setMessages(prev => prev.filter((message) => message.id !== orphanId));
+                    if (activeThreadId) void removePendingBotMessage(activeThreadId, orphanId).catch(() => {});
+                  }
+                  if (streamingBuildCleanupRef.current === streamHandleCancel) {
+                    streamingBuildCleanupRef.current = null;
+                  }
+                  // Ownership guard: only reset the shared run-UI when no
+                  // newer run (e.g. a superseding build stream) owns it.
+                  if (chatUiOwnerRef.current === streamUiOwner) {
+                    setRunStatus('idle');
+                    setBotTyping(false);
+                    stopCodingWorkbench();
+                  }
+                  return;
+                }
+                // P62: pre-handshake failure / zero-text interruption → batch
+                // fallback. Remove the stream's empty pending bubble first —
+                // the batch path creates and resolves its OWN bubble, so the
+                // stream's orphan used to sit as an empty isPending message
+                // forever.
+                if (streamPendingMsgId) {
+                  const orphanId = streamPendingMsgId;
+                  setMessages(prev => prev.filter((message) => message.id !== orphanId));
+                  if (activeThreadId) void removePendingBotMessage(activeThreadId, orphanId).catch(() => {});
+                }
                 console.warn('[ChatTab] Streaming failed, falling back to batch:', streamErr);
                 // Fall through to batch path below
               }
@@ -5068,16 +11299,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setRunStatus('running');
             setActiveSubagent(null);
             setActiveDelegatedSubagents([]);
-            const pendingMessage = addPendingBotMessage(
+            pendingMessage = addPendingBotMessage(
               (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
                 ? 'BUILDING...\nOpenSwan is writing the first draft and preparing files.'
                 // Use a verb from the shared rotation so the pending
                 // stub matches the typing indicator's tone.
                 : `${pickThinkingVerb(Math.floor(Date.now() / 1500))}…`,
             );
+            const pendingMessageId = pendingMessage.id;
+            const openSwanController = new AbortController();
+            openSwanAbortRef.current = openSwanController;
             const structured = await runOpenSwanSessionTurn({
               message: augmentedPrompt,
             context,
+            signal: openSwanController.signal,
             connectedProviders: connectedProviderSet,
             surface: 'main_chat',
             chatSessionId: activeThreadId,
@@ -5088,12 +11323,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             delegationMode: sessionDelegationMode,
             activePluginIds: activePlugins,
             metadata: {
-              selectedModel,
+              selectedModel: effectiveSelectedModel,
               effectiveModel: sendModel || null,
               threadId: activeThreadId,
               attachmentCount: currentAttachments.length,
               delegationMode: sessionDelegationMode,
               activePluginIds: activePlugins,
+              selectedRecoveryOption: selectedRecoveryOption ? {
+                optionId: selectedRecoveryOption.optionId,
+                actor: selectedRecoveryOption.actor,
+                source: selectedRecoveryOption.source,
+                action: selectedRecoveryPolicy?.action || null,
+                safetyMode: selectedRecoveryPolicy?.safetyMode || null,
+                requiresApproval: selectedRecoveryPolicy?.requiresApproval || false,
+                requiresFreshEvidence: selectedRecoveryPolicy?.requiresFreshEvidence || false,
+                userActionRequired: selectedRecoveryPolicy?.userActionRequired || false,
+                allowConnectedAgent: selectedRecoveryPolicy?.allowConnectedAgent || false,
+                allowRuntimePatch: selectedRecoveryPolicy?.allowRuntimePatch || false,
+                allowBrowserDesktopRetry: selectedRecoveryPolicy?.allowBrowserDesktopRetry || false,
+                maxAttempts: selectedRecoveryPolicy?.maxAttempts || 0,
+                userSummary: selectedRecoveryExecutionPlan?.userSummary || null,
+                nextSteps: selectedRecoveryExecutionPlan?.nextSteps || [],
+                stopConditions: selectedRecoveryExecutionPlan?.stopConditions || [],
+                resolvedFromFollowup: recoveryFollowup ? {
+                  confidence: recoveryFollowup.confidence,
+                  reason: recoveryFollowup.reason,
+                  originalMessage: content.slice(0, 240),
+                } : null,
+                messageId: selectedRecoveryOption.context?.messageId || null,
+                runId: selectedRecoveryOption.context?.runId || null,
+                sourceSurface: selectedRecoveryOption.context?.sourceSurface || null,
+              } : null,
             },
             onStageChange: (stage, label) => {
               setRunStatus(stage === 'delegating' ? 'delegated' : 'running');
@@ -5110,6 +11370,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               }
             },
           });
+            openSwanAbortRef.current = null; // turn settled — release the STOP handle
             // Map the runtime's tool actions (rooms.create, circle.update_*,
             // agent.update_appearance, etc) into the UI's toolEvent shape
             // so the execution strip on the assistant message actually
@@ -5117,6 +11378,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // like nothing happened. Previously hardcoded to [], which is
             // why "ask it to add a room and the screen just refreshes"
             // felt like a silent no-op.
+            // X7 (P48): record the clean batch terminal so lane failure rates
+            // have a denominator (visible routing fallback carried through).
+            try {
+              const { recordChatLaneTerminalNow } = await import('../../../lib/chatLaneHealthRegistry');
+              recordChatLaneTerminalNow({
+                lane: 'openswan_v2',
+                status: 'completed',
+                fallback: !!structured.routing?.routing_fallback,
+              });
+            } catch {}
             const runtimeToolEvents: OpenSwanToolEvent[] = (structured.toolEvents || []).map((evt: any) => ({
               tool: evt.tool,
               status: evt.status === 'passed' || evt.status === 'completed'
@@ -5125,6 +11396,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 : evt.status === 'blocked' ? 'blocked'
                 : 'failed',
               summary: evt.summary || evt.result || evt.tool,
+              metadata: evt.metadata && typeof evt.metadata === 'object' ? evt.metadata : undefined,
             }));
             // When Claude ran tools but didn't type a natural-language
             // reply, synthesize a friendly confirmation from the tool
@@ -5133,11 +11405,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               .filter((e) => e.status === 'passed')
               .map((e) => e.summary)
               .filter(Boolean);
-            const botResponse = (structured.response && structured.response.trim())
+            // Verification receipt (honest proof-of-work): the typed tool
+            // loop already computed "edited N files · checks passed ·
+            // committed sha" — surface the bounded summary line at the top
+            // of the answer instead of leaving it buried in the hidden
+            // agent_run_events table.
+            const verificationReceiptLine = structured.verificationReceipt
+              ? formatVerificationReceipt(structured.verificationReceipt)
+              : '';
+            const baseBotResponse = (structured.response && structured.response.trim())
               ? structured.response
               : (successfulToolSummaries.length > 0
                   ? `Done:\n- ${successfulToolSummaries.join('\n- ')}`
                   : '');
+            const botResponse = verificationReceiptLine
+              ? [verificationReceiptLine, baseBotResponse].filter(Boolean).join('\n\n')
+              : baseBotResponse;
             const { wikiRefs, researchRefs } = await buildChatInfluenceReferences({
               prompt: cleanContent,
               response: botResponse,
@@ -5154,7 +11437,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               effectiveModel: structured.usage?.model || sendModel || null,
               provider: structured.routing?.provider_routed || null,
             };
-            updateBotMessage(pendingMessage.id, {
+            const structuredMessageSnapshot: ChatMessage = {
+              ...pendingMessage,
               content: botResponse,
               artifacts: structured.artifacts,
               wikiRefs,
@@ -5174,63 +11458,46 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               source: structuredSource,
               usage: structured.usage,
               isPending: false,
-            });
+              timestamp: new Date(),
+            };
+            const structuredPersistedMetadata: PersistedChatBotMetadata = {
+              ...projectPersistedChatBotMetadata(
+                structuredMessageSnapshot,
+                pendingMessage.agentSubjectMetadata
+                  || selectedAgentSubjectContext.agentSubjectMetadata,
+              ),
+              // Envelope-only proof stays in the snapshot so a later reaction
+              // cannot overwrite the row with a metadata subset.
+              modeOutcomeSummary: structured.modeOutcomeSummary || undefined,
+              observedEval: structured.observedEval || undefined,
+              verificationReceipt: structured.verificationReceipt || undefined,
+            };
+            structuredMessageSnapshot.persistedMetadataSnapshot = structuredPersistedMetadata;
+            updateBotMessage(pendingMessage.id, structuredMessageSnapshot);
             if (profileRef.current) {
               profileRef.current = updateProfileFromMessage(profileRef.current, botResponse, false);
               saveUserProfile(profileRef.current).catch(() => {});
             }
             if (activeThreadId) {
-              saveRecoverableChatMessage(activeThreadId, {
-                ...pendingMessage,
-                content: botResponse,
-                artifacts: structured.artifacts,
-                wikiRefs,
-                researchRefs,
-                memoriesUsed: structured.memoriesUsed,
-                memoryRefs: structured.memoryReferences,
-                memoryRecommendations: structured.memoryRecommendations,
-                executionStream,
-                browserPlans: structured.browserPlans,
-                browserPlanEvents: structured.browserPlanEvents,
-                runId: structured.runId,
-                taskPlan: structured.taskPlan,
-                toolEvents: runtimeToolEvents,
-                verificationResults: structured.verificationResults,
-                delegatedSubagents: structured.delegatedSubagents,
-                routing: structured.routing,
-                source: structuredSource,
-                usage: structured.usage,
-                isPending: false,
-                timestamp: new Date(),
-              });
+              saveRecoverableChatMessage(activeThreadId, structuredMessageSnapshot);
             }
             if (currentUserId && activeThreadId) {
-              persistMainChatBotMessageWithRetry({
+              persistChatTabBotMessageWithRetry({
                 circleId,
                 userId: currentUserId,
                 agentName,
                 content: botResponse,
                 threadId: activeThreadId,
-                localMessageId: pendingMessage.id,
-                source: structuredSource,
-                usage: structured.usage || null,
-                artifacts: structured.artifacts,
-                wikiRefs,
-                researchRefs,
-                memoriesUsed: structured.memoriesUsed,
-                memoryRefs: structured.memoryReferences,
-                memoryRecommendations: structured.memoryRecommendations,
-                executionStream,
-                browserPlans: structured.browserPlans,
-                browserPlanEvents: structured.browserPlanEvents,
-                routing: structured.routing,
+                metadata: structuredPersistedMetadata,
                 onError: (error) => {
                   console.error('[ChatTab] Unexpected error persisting bot msg:', error);
                 },
                 onPersisted: (dbId) => {
-                  void removePendingBotMessage(activeThreadId, pendingMessage.id).catch(() => {});
+                  void removePendingBotMessage(activeThreadId, pendingMessageId).catch(() => {});
                   setMessages(prev => prev.map((message) => (
-                    message.id === pendingMessage.id ? { ...message, dbId } : message
+                    message.id === pendingMessageId
+                      ? { ...message, dbId, persistedMetadataSnapshot: structuredPersistedMetadata }
+                      : message
                   )));
                 },
               });
@@ -5244,45 +11511,120 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setActiveDelegatedSubagents([]);
             setCurrentRunStep('');
           } catch (batchErr) {
+            const batchMessage = batchErr instanceof Error ? batchErr.message : String(batchErr || 'Unknown error');
+            const batchStack = batchErr instanceof Error ? batchErr.stack || null : null;
+            // W5/X1: classify this lane terminal through the unified boundary
+            // so the archive carries the two-axis recovery signal per lane
+            // (telemetry only — the recovery flow below stays authoritative).
+            let batchLaneTags: string[] = [];
+            try {
+              const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
+                await import('../../../lib/chatLaneOutcome');
+              const laneOutcome = normalizeThrownError('openswan_v2', batchErr);
+              batchLaneTags = buildChatLaneOutcomeTags(laneOutcome);
+              console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
+              // X7 (P48): registry + degradation-scope tags (lane-isolated vs multi-lane).
+              const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
+                await import('../../../lib/chatLaneHealthRegistry');
+              recordChatLaneOutcomeNow(laneOutcome);
+              batchLaneTags = [...batchLaneTags, ...buildChatLaneHealthTags('openswan_v2', Date.now())];
+            } catch {}
             recordSessionArchiveError(
-              batchErr instanceof Error ? `OpenSwan session failed: ${batchErr.message}` : 'OpenSwan session failed',
-              batchErr instanceof Error ? batchErr.stack || null : null,
-              ['surface:main_chat', 'runtime:openswan'],
+              `OpenSwan session failed: ${batchMessage}`,
+              batchStack,
+              ['surface:main_chat', 'runtime:openswan', ...batchLaneTags],
             );
+            const recovery = await startMainChatFailureRecoveryPayload({
+              task: cleanContent,
+              failureMessage: batchMessage,
+              failureStack: batchStack,
+              outcomeStatus: 'failed',
+              executionKind: 'run_openswan',
+              source: 'main_chat_openswan_batch',
+              launchIfMissing: true,
+              touched: ['surface:main_chat', 'runtime:openswan'],
+            });
+            const errorMessage = (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
+              ? "Build failed before OpenSwan could finish the draft."
+              : "OpenSwan failed before it could finish this chat task.";
+            const errorSource: ChatMessageSource = {
+              actor: agentName,
+              surface: 'main_chat_openswan_error',
+              selectedModel,
+              effectiveModel: sendModel || null,
+            };
+            const terminalContent = appendCustomerSafeRecoveryMessage(
+              `${errorMessage} Technical details were saved for recovery.`,
+              recovery.message,
+            );
+            if (pendingMessage) {
+              finalizeFailedBotMessage({
+                pendingMessage,
+                content: terminalContent,
+                recoveryOptions: recovery.recoveryOptions,
+                recoveryReliability: recovery.recoveryReliability,
+                source: errorSource,
+              });
+            } else {
+              addBotMessage(terminalContent, undefined, {
+                localOnly: true,
+                hadError: true,
+                recoveryOptions: recovery.recoveryOptions,
+                recoveryReliability: recovery.recoveryReliability,
+                source: errorSource,
+              });
+            }
             setRunStatus('idle');
             setActiveSubagent(null);
             setActiveDelegatedSubagents([]);
           }
         }
       } catch (err) {
+        const chatErrorMessage = err instanceof Error ? err.message : String(err || 'Unknown error');
+        const chatErrorStack = err instanceof Error ? err.stack || null : null;
+        // W5/X1: the outermost sendMessage boundary — normalize + tag so an
+        // unshaped failure is still legible as a lane terminal in the archive.
+        let outerLaneTags: string[] = [];
+        try {
+          const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
+            await import('../../../lib/chatLaneOutcome');
+          const laneOutcome = normalizeThrownError('send_message', err);
+          outerLaneTags = buildChatLaneOutcomeTags(laneOutcome);
+          console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
+          // X7 (P48): registry + degradation-scope tags.
+          const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
+            await import('../../../lib/chatLaneHealthRegistry');
+          recordChatLaneOutcomeNow(laneOutcome);
+          outerLaneTags = [...outerLaneTags, ...buildChatLaneHealthTags('send_message', Date.now())];
+        } catch {}
         recordSessionArchiveError(
-          err instanceof Error ? `Chat execution failed: ${err.message}` : 'Chat execution failed',
-          err instanceof Error ? err.stack || null : null,
-          ['surface:main_chat'],
+          `Chat execution failed: ${chatErrorMessage}`,
+          chatErrorStack,
+          ['surface:main_chat', ...outerLaneTags],
         );
         const errorMessage = (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
           ? "Build failed before OpenSwan could finish the draft. Try again."
           : "Something went wrong. Try again.";
-        setMessages((prev) => {
-          const pendingIndex = [...prev].reverse().findIndex((entry) => entry.isBot && entry.isPending);
-          if (pendingIndex === -1) {
-            return [...prev, {
-              id: `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-              content: errorMessage,
-              isBot: true,
-              isUser: false,
-              userName: agentName,
-              timestamp: new Date(),
-              reactions: {},
-              isPending: false,
-            }];
-          }
-          const actualIndex = prev.length - 1 - pendingIndex;
-          return prev.map((entry, index) => (
-            index === actualIndex
-              ? { ...entry, content: errorMessage, isPending: false }
-              : entry
-          ));
+        const recovery = await startMainChatFailureRecoveryPayload({
+          task: cleanContent,
+          failureMessage: chatErrorMessage,
+          failureStack: chatErrorStack,
+          outcomeStatus: 'failed',
+          executionKind: 'main_chat_execution',
+          source: 'main_chat_outer_catch',
+          launchIfMissing: true,
+          touched: ['surface:main_chat'],
+        });
+        finalizeFailedBotMessage({
+          pendingMessage,
+          content: appendCustomerSafeRecoveryMessage(errorMessage, recovery.message),
+          recoveryOptions: recovery.recoveryOptions,
+          recoveryReliability: recovery.recoveryReliability,
+          source: {
+            actor: agentName,
+            surface: 'main_chat_outer_error',
+            selectedModel,
+          },
         });
         setRunStatus('idle');
         setActiveSubagent(null);
@@ -5336,7 +11678,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             : '\n\nNo active wallet selected.';
           addBotMessage(`**Wallet status**\n\n${lines.join('\n')}${activeLine}`);
         } catch (error: any) {
-          addBotMessage(`Wallet status error: ${error?.message || 'Unknown error'}`);
+          addBotMessage('I could not load wallet status right now. Try again in a moment.');
         }
       })();
       return;
@@ -5361,45 +11703,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (actionText === '__PAIR_DESKTOP__') {
       if (Platform.OS !== 'web') return;
       (async () => {
-        const { getDesktopBridgeHealth, pairDesktopBridge } = await import('../../../lib/desktopBridge');
-        const health = await getDesktopBridgeHealth();
-        if (!health) {
-          addBotMessage(
-            "**Desktop bridge unreachable.**\n\n" +
-            "Start it in a terminal:\n\n```\nnode scripts/claude-bridge.js\n```\n\n" +
-            "Then tap **Pair Desktop Bridge** again.",
-            undefined,
-            { localOnly: true },
-          );
-          return;
+        try {
+          await addDesktopBridgeAutoConnectMessage('desktop_bridge_pairing');
+        } catch (error: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Desktop bridge pairing failed',
+            task: 'Pair the local desktop bridge from chat',
+            error,
+            executionKind: 'desktop_bridge_pairing',
+            source: 'pair_desktop_bridge_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/desktopBridge.ts', 'scripts/claude-bridge.js'],
+          });
         }
-        if (!health.supported) {
-          addBotMessage(
-            `**Bridge is on \`${health.platform}\` — desktop automation is macOS-only in Phase 1.** ` +
-            'Windows/Linux support is on the roadmap (see `docs/DESKTOP_AUTOMATION_PHASE_1_PLAN.md`).',
-            undefined,
-            { localOnly: true },
-          );
-          return;
-        }
-        const pair = await pairDesktopBridge();
-        if (!pair.ok) {
-          addBotMessage(
-            `**Pairing failed:** ${pair.error || 'unknown error'}. ` +
-            'Check that the bridge has write access to `~/.uc-desktop-token` and try again.',
-            undefined,
-            { localOnly: true },
-          );
-          return;
-        }
-        addBotMessage(
-          "**Desktop Bridge paired.** The agent can now inspect and control your Mac when you approve each sensitive action.\n\n" +
-          "Available tools include app launch/focus, typing, key combos, running apps, browser tabs, window state, screenshots, clipboard read/write, mouse click/move/drag/scroll, window management, local file list/read/write/search, and macOS Shortcuts.\n\n" +
-          "**First keystroke:** macOS will prompt for Accessibility permission for whichever Terminal/iTerm is running the bridge. Grant it in System Settings → Privacy & Security → Accessibility.\n\n" +
-          "**First browser-tab read:** macOS may prompt for Automation permission so the bridge can read tab titles and URLs from Chrome/Safari.",
-          undefined,
-          { localOnly: true },
-        );
       })();
       return;
     }
@@ -5434,7 +11749,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const props = await getProposals(circleId, 'active');
       setProposals(props);
     } else {
-      addBotMessage(`❌ Failed to create poll: ${result.error}`);
+      addBotMessage('I could not create that poll. Check the options and try again.');
     }
     setShowCreatePoll(false);
   };
@@ -5446,7 +11761,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const props = await getProposals(circleId, 'active');
       setProposals(props);
     } else {
-      addBotMessage(`❌ Failed to create proposal: ${result.error}`);
+      addBotMessage('I could not create that proposal. Check the title and try again.');
     }
     setShowCreateProposal(false);
   };
@@ -5458,7 +11773,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const props = await getProposals(circleId, 'active');
       setProposals(props);
     } else {
-      addBotMessage(`❌ Vote failed: ${result.error}`);
+      addBotMessage('I could not record that vote. Try again in a moment.');
     }
   };
 
@@ -5481,48 +11796,211 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
   };
 
+  // ─── Flywheel outcome signal (Cursor-Tab precedent) ─────────────────────────
+  // Stamp the machine-derived verdict and/or the user's accept/reject/edit-
+  // resend/steer signal onto a bot message so it becomes BlackSwan training
+  // data. Fully additive + non-blocking: it updates local state and best-effort
+  // re-persists the compact enums into the row metadata. A persistence failure
+  // must NEVER affect the chat UI, so everything below is wrapped/swallowed.
+  const stampOutcomeSignalRef = useRef<(messageId: string, patch: { verdict?: ChatOutcomeVerdict; signal?: ChatUserSignal }) => void>(() => {});
+  stampOutcomeSignalRef.current = (
+    messageId: string,
+    patch: { verdict?: ChatOutcomeVerdict; signal?: ChatUserSignal },
+  ) => {
+    if (!patch || (!patch.verdict && !patch.signal)) return;
+    const mergeSignal = (msg: ChatMessage): ChatMessage => {
+      const prior = msg.outcomeSignal || undefined;
+      // Never downgrade a real verdict back to 'unknown' (a later reaction
+      // carries no verdict); keep the strongest info we already have.
+      const nextVerdict = patch.verdict && patch.verdict !== 'unknown'
+        ? patch.verdict
+        : prior?.verdict || patch.verdict || 'unknown';
+      const merged: NonNullable<ChatMessage['outcomeSignal']> = {
+        verdict: nextVerdict,
+        signal: patch.signal || prior?.signal,
+        lane: prior?.lane || msg.source?.surface || undefined,
+        model: prior?.model
+          || msg.source?.effectiveModel
+          || msg.source?.selectedModel
+          || undefined,
+      };
+      return { ...msg, outcomeSignal: merged };
+    };
+    const current = messagesRef.current.find((message) => (
+      message.id === messageId && message.isBot
+    ));
+    if (!current) return;
+    const target = mergeSignal(current);
+    // Keep the synchronous snapshot current so two rapid reactions merge
+    // instead of racing on the previous render. React state remains the UI
+    // owner; this ref is only the persistence-safe lookup boundary.
+    messagesRef.current = messagesRef.current.map((message) => (
+      message.id === messageId ? target : message
+    ));
+    setMessages((prev) => prev.map((message) => (
+      message.id === messageId && message.isBot ? mergeSignal(message) : message
+    )));
+    // Re-persist the complete structured snapshot. Reading metadata from
+    // `target.content` would be wrong because in-memory content is the visible
+    // body without the persistence envelope, and would erase run/status/
+    // handoff lineage from the database row.
+    try {
+      if (!target.dbId || !target.outcomeSignal) return;
+      syncPersistedBotMessage(target);
+    } catch {
+      // swallow — telemetry must never break chat
+    }
+  };
+
   // ─── Reactions ────────────────────────────────────────────────────────────
 
+  const reactionMutationQueuesRef = useRef(new Map<string, Promise<void>>());
+  const reactionMutationVersionsRef = useRef(new Map<string, number>());
+
+  const replaceMountedMessageReactions = (
+    dbId: string,
+    reactions: Record<string, string[]>,
+    scope: { circleId: string; threadId: string | null },
+  ) => {
+    if (
+      activeThreadScopeRef.current.circleId !== scope.circleId
+      || activeThreadScopeRef.current.threadId !== scope.threadId
+    ) return;
+    messagesRef.current = messagesRef.current.map((message) => (
+      message.dbId === dbId ? { ...message, reactions } : message
+    ));
+    setMessages((current) => current.map((message) => (
+      message.dbId === dbId ? { ...message, reactions } : message
+    )));
+  };
+
   const toggleReaction = (messageId: string, emoji: string) => {
-    setMessages(prev => prev.map(msg => {
-      if (msg.id !== messageId) return msg;
-      const reactions = { ...msg.reactions };
-      const uid = currentUserId || 'me';
-      const users = reactions[emoji] || [];
-      if (users.includes(uid)) {
-        reactions[emoji] = users.filter(u => u !== uid);
-        if (reactions[emoji].length === 0) delete reactions[emoji];
-      } else {
-        reactions[emoji] = [...users, uid];
-        // Trigger floating emoji
-        addFloatingReaction(emoji, 200 + Math.random() * 100, 300 + Math.random() * 100);
-      }
-      return { ...msg, reactions };
-    }));
+    const current = messagesRef.current.find((message) => message.id === messageId);
+    if (!current || !currentUserId || !current.dbId) {
+      setShowReactions(null);
+      setThreadNavigationNotice('Wait for this message to finish saving, then try the reaction again.');
+      return;
+    }
+
+    const uid = currentUserId;
+    const previousReactions = Object.fromEntries(
+      Object.entries(current.reactions || {}).map(([key, users]) => [key, [...users]]),
+    );
+    const users = previousReactions[emoji] || [];
+    const addedReaction = !users.includes(uid);
+    const optimisticReactions = { ...previousReactions };
+    if (addedReaction) {
+      optimisticReactions[emoji] = [...users, uid];
+      addFloatingReaction(emoji, 200 + Math.random() * 100, 300 + Math.random() * 100);
+    } else {
+      const remaining = users.filter((userId) => userId !== uid);
+      if (remaining.length > 0) optimisticReactions[emoji] = remaining;
+      else delete optimisticReactions[emoji];
+    }
+
+    const mutationScope = { circleId, threadId: activeThreadId };
+    replaceMountedMessageReactions(current.dbId, optimisticReactions, mutationScope);
     setShowReactions(null);
+    // Flywheel: an ADDED 👍/👎 is an explicit accept/reject the user made —
+    // record it as training signal. Removing a reaction is ambiguous, so we
+    // leave any prior signal intact.
+    if (addedReaction) {
+      const signal = mapReactionToSignal(emoji);
+      if (signal) stampOutcomeSignalRef.current(messageId, { signal });
+    }
+
+    const dbId = current.dbId;
+    const nextVersion = (reactionMutationVersionsRef.current.get(dbId) || 0) + 1;
+    reactionMutationVersionsRef.current.set(dbId, nextVersion);
+    const priorMutation = reactionMutationQueuesRef.current.get(dbId) || Promise.resolve();
+    const mutation = priorMutation.catch(() => {}).then(async () => {
+      try {
+        const exactReactions = await setMessageReaction(dbId, emoji, addedReaction);
+        if (reactionMutationVersionsRef.current.get(dbId) === nextVersion) {
+          replaceMountedMessageReactions(dbId, exactReactions, mutationScope);
+        }
+      } catch (error) {
+        console.warn('[ChatTab] reaction mutation failed:', error);
+        if (reactionMutationVersionsRef.current.get(dbId) === nextVersion) {
+          replaceMountedMessageReactions(dbId, previousReactions, mutationScope);
+          setThreadNavigationNotice('Could not save that reaction. Chat restored the server state; try again.');
+          try {
+            const exactReactions = await loadMessageReactions(dbId);
+            if (reactionMutationVersionsRef.current.get(dbId) === nextVersion) {
+              replaceMountedMessageReactions(dbId, exactReactions, mutationScope);
+            }
+          } catch {
+            // The optimistic snapshot is already rolled back. Realtime or the
+            // next bounded catch-up will reconcile if the row changed remotely.
+          }
+        }
+      }
+    });
+    reactionMutationQueuesRef.current.set(dbId, mutation);
+    void mutation.finally(() => {
+      if (reactionMutationQueuesRef.current.get(dbId) === mutation) {
+        reactionMutationQueuesRef.current.delete(dbId);
+      }
+    });
   };
 
   // ─── Delete Message ───────────────────────────────────────────────────
 
   const deleteMessage = async (messageId: string, dbId?: string) => {
-    // Track deletion of bot messages for behavior learning
     const deletedMsg = messages.find(m => m.id === messageId);
-    if (deletedMsg?.isBot && profileRef.current) {
-      profileRef.current = updateProfileFromDeletion(profileRef.current);
-      saveUserProfile(profileRef.current).catch(() => {});
-    }
-    // Remove from local state immediately
-    setMessages(prev => prev.filter(m => m.id !== messageId));
-    // Delete from Supabase if persisted
-    if (dbId) {
-      await supabase.from('messages').delete().eq('id', dbId);
+    if (!deletedMsg) return;
+    const prompt = 'Delete this message? This cannot be undone.';
+    const confirmed = Platform.OS === 'web'
+      ? (typeof window !== 'undefined' && window.confirm(prompt))
+      : await new Promise<boolean>((resolve) => {
+          import('react-native')
+            .then(({ Alert }) => Alert.alert('Delete message?', prompt, [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
+            ]))
+            .catch(() => resolve(false));
+        });
+    if (!confirmed) return;
+
+    const messageCircleId = circleId;
+    const messageThreadId = activeThreadId;
+    setMessages(prev => {
+      const next = prev.filter(m => m.id !== messageId);
+      messagesRef.current = next;
+      return next;
+    });
+    try {
+      if (dbId) {
+        const { error } = await supabase.from('messages').delete().eq('id', dbId);
+        if (error) throw error;
+      }
+      if (deletedMsg.isBot && profileRef.current) {
+        profileRef.current = updateProfileFromDeletion(profileRef.current);
+        saveUserProfile(profileRef.current).catch(() => {});
+      }
+    } catch (error) {
+      console.warn('[ChatTab] delete message failed:', error);
+      if (
+        activeThreadScopeRef.current.circleId === messageCircleId
+        && activeThreadScopeRef.current.threadId === messageThreadId
+      ) {
+        setMessages(prev => {
+          if (prev.some((message) => message.id === deletedMsg.id || (dbId && message.dbId === dbId))) return prev;
+          const next = [...prev, deletedMsg].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+          messagesRef.current = next;
+          return next;
+        });
+        setThreadNavigationNotice('Could not delete that message. It was restored; try again.');
+      }
     }
   };
 
   // ─── Input & Mentions ────────────────────────────────────────────────────
 
   const handleInputChange = (text: string) => {
+    if (threadLoadState.status !== 'ready' || threadLoadState.threadId !== activeThreadId) return;
     setInput(text);
+    persistDraftForThread(activeThreadId, text);
     if (text.trimStart().startsWith('/')) {
       setShowMentions(false);
       return;
@@ -5560,7 +12038,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const insertMention = (member: any) => {
     const lastAt = input.lastIndexOf('@');
     const before = input.slice(0, lastAt);
-    setInput(`${before}@${member.username} `);
+    handleInputChange(`${before}@${member.username} `);
     setShowMentions(false);
     inputRef.current?.focus();
   };
@@ -5587,13 +12065,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             toolEvents: nextToolEvents,
             verificationResults: message.verificationResults || [],
           });
-          let nextMessageToPersist: ChatMessage | null = null;
-          setMessages((prev) => prev.map((entry) => {
-            if (entry.id !== message.id) return entry;
-            nextMessageToPersist = { ...entry, toolEvents: nextToolEvents, executionStream: nextExecutionStream };
-            return nextMessageToPersist;
-          }));
+          const currentMessage = messagesRef.current.find((entry) => entry.id === message.id) || message;
+          const nextMessageToPersist: ChatMessage = {
+            ...currentMessage,
+            toolEvents: nextToolEvents,
+            executionStream: nextExecutionStream,
+          };
+          messagesRef.current = messagesRef.current.map((entry) => (
+            entry.id === message.id ? nextMessageToPersist : entry
+          ));
+          setMessages((prev) => prev.map((entry) => (
+            entry.id === message.id ? { ...entry, ...nextMessageToPersist } : entry
+          )));
           syncSessionArchiveMessage(nextMessageToPersist);
+          syncPersistedBotMessage(nextMessageToPersist);
           if (message.runId && circleId) {
             void appendRunToolEvent({ runId: message.runId, circleId, event });
             void mergeRunMetadata(message.runId, { tool_events: nextToolEvents, execution_stream: nextExecutionStream });
@@ -5610,18 +12095,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         verificationResults: nextVerificationResults,
       });
 
-      let nextMessageToPersist: ChatMessage | null = null;
-      setMessages((prev) => prev.map((entry) => {
-        if (entry.id !== message.id) return entry;
-        nextMessageToPersist = {
-          ...entry,
-          toolEvents: nextToolEvents,
-          verificationResults: nextVerificationResults,
-          executionStream: nextExecutionStream,
-        };
-        return nextMessageToPersist;
-      }));
+      const currentMessage = messagesRef.current.find((entry) => entry.id === message.id) || message;
+      const nextMessageToPersist: ChatMessage = {
+        ...currentMessage,
+        toolEvents: nextToolEvents,
+        verificationResults: nextVerificationResults,
+        executionStream: nextExecutionStream,
+      };
+      messagesRef.current = messagesRef.current.map((entry) => (
+        entry.id === message.id ? nextMessageToPersist : entry
+      ));
+      setMessages((prev) => prev.map((entry) => (
+        entry.id === message.id ? { ...entry, ...nextMessageToPersist } : entry
+      )));
       syncSessionArchiveMessage(nextMessageToPersist);
+      syncPersistedBotMessage(nextMessageToPersist);
       recordSessionArchiveEvent({
         kind: 'verification',
         summary: result.summary,
@@ -5649,7 +12137,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         current?.messageId === message.id && current.checkId === checkId ? null : current
       ));
     }
-  }, [circleId, recordSessionArchiveEvent, syncSessionArchiveMessage]);
+  }, [circleId, recordSessionArchiveEvent, syncPersistedBotMessage, syncSessionArchiveMessage]);
 
   const handlePromoteMemoryRef = useCallback(async (ref: PromptMemoryReference) => {
     const ok = await promoteMemory(ref.id);
@@ -5665,15 +12153,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       source: 'chat_memory_influence',
     });
     setMemoryToast({ message: `Promoted "${ref.title.slice(0, 42)}"`, type: 'updated' });
-    if (activeSpiritId && currentUserId) {
-      getLatestSpiritMemoryReferences({
-        spiritId: activeSpiritId,
-        circleId,
-        userId: currentUserId,
-        limit: 4,
-      }).then(setSoulMemoryRefs).catch(() => {});
-    }
-  }, [activeSpiritId, circleId, currentUserId]);
+  }, [currentUserId]);
 
   const handlePinMemoryRef = useCallback(async (ref: PromptMemoryReference) => {
     const ok = await pinMemory(ref.id);
@@ -5715,15 +12195,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
     setMemoryToast({ message: `Forgot "${ref.title.slice(0, 42)}"`, type: 'forgotten' });
-    if (activeSpiritId) {
-      getLatestSpiritMemoryReferences({
-        spiritId: activeSpiritId,
-        circleId,
-        userId: currentUserId,
-        limit: 4,
-      }).then(setSoulMemoryRefs).catch(() => {});
-    }
-  }, [activeSpiritId, circleId, currentUserId]);
+  }, [currentUserId]);
 
   const handleRememberResponse = useCallback(async (message: ChatMessage) => {
     if (!currentUserId) return;
@@ -5743,8 +12215,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const ok = await applyOpenSwanMemoryRecommendation({
       circleId,
       userId: currentUserId,
-      agentId: 'openswan:main_chat',
-      agentName,
+      agentId: selectedAgentSubjectContext.agentSubjectKey || BLACKSWAN_ID,
+      agentName: selectedAgentSubjectContext.agentName || agentName,
       recommendation,
     });
     if (!ok) {
@@ -5757,19 +12229,332 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         : `Saved recommendation: "${recommendation.title.slice(0, 42)}"`,
       type: 'saved',
     });
-    if (activeSpiritId) {
-      getLatestSpiritMemoryReferences({
-        spiritId: activeSpiritId,
-        circleId,
-        userId: currentUserId,
-        limit: 4,
-      }).then(setSoulMemoryRefs).catch(() => {});
-    }
-  }, [activeSpiritId, agentName, circleId, currentUserId]);
+  }, [agentName, circleId, currentUserId, selectedAgentSubjectContext]);
 
   // ─── Render Helpers ──────────────────────────────────────────────────────
 
+  // Transcript rows stay immutable, but their presentation must distinguish
+  // the current plan from earlier turns. Exact lineage can mark a pending card
+  // Superseded; a newer human turn makes an otherwise actionable old card
+  // Historical without pretending that an unrelated run completed it.
+  const designTaskTimelineDispositions = useMemo(
+    () => classifyChatDesignTaskTimeline(messages),
+    [messages],
+  );
+  const isInactiveDesignTaskMessage = (message: ChatMessage): boolean => {
+    const disposition = designTaskTimelineDispositions.get(message.id);
+    return disposition === 'superseded' || disposition === 'historical';
+  };
+  const isMutationReplayBlockedMessage = (message: ChatMessage): boolean => (
+    message.computerHandoff?.replayPolicy === 'manual_verify_only'
+    && message.computerHandoff.mutationDispatched === true
+  );
+
   const renderContent = (item: ChatMessage) => {
+    const routeChips = buildMessageRouteChips(item);
+    const failoverBadge = failoverBadgeForMessage(item);
+    const handoffMetadata = item.computerHandoff || null;
+    const mutationReplayBlocked = isMutationReplayBlockedMessage(item);
+    const appChoiceCard = buildChatAppChoiceCard(handoffMetadata);
+    const baseDesignTaskCard = buildChatDesignTaskCardModel(handoffMetadata);
+    const designTaskTimelineDisposition = designTaskTimelineDispositions.get(item.id) ?? 'current';
+    const designTaskCard = baseDesignTaskCard
+      ? applyChatDesignTaskTimelineDisposition(
+          baseDesignTaskCard,
+          designTaskTimelineDisposition,
+        )
+      : null;
+    const isSupersededDesignTask = Boolean(designTaskCard?.isSuperseded);
+    const isLegacyHistoricalComputerPlan = !baseDesignTaskCard
+      && designTaskTimelineDisposition === 'historical';
+    const isHistoricalDesignTask = Boolean(designTaskCard?.isHistorical)
+      || isLegacyHistoricalComputerPlan;
+    const isInactiveDesignTask = isInactiveDesignTaskMessage(item);
+    // Engineering design/calc cards — structured tool captures ride the
+    // transient event metadata channel (same lane as browserPlan).
+    const engineeringCardModels = buildEngineeringCardModels(
+      extractEngineeringCapturesFromToolEvents((item.toolEvents as any) || []),
+    );
+    const recoveryReliabilityCard = buildRecoveryReliabilityCard(item.recoveryReliability);
+    const visibleContent = item.recoveryOptions && item.recoveryOptions.length > 0
+      ? stripChatFailureRecoveryOptionsText(item.content)
+      : item.content;
+    const bodyContent = appChoiceCard
+      ? stripChatAppChoiceLine(visibleContent, handoffMetadata?.requestNotice?.appChoiceLine)
+      : visibleContent;
+    const hasPlanCard = !!item.chatAutomationPlanPreview;
+    const hasRecoveryOptions = !isInactiveDesignTask
+      && !mutationReplayBlocked
+      && !!(item.recoveryOptions && item.recoveryOptions.length > 0);
+    // P22: computer/desktop/app-task messages collapse their explanatory cards
+    // behind ONE "Details" disclosure. Everything else renders byte-identical.
+    const isComputerTaskMessage = !!handoffMetadata
+      || !!recoveryReliabilityCard
+      || hasPlanCard
+      || isLegacyHistoricalComputerPlan;
+    const computerSummaryLine = isComputerTaskMessage
+      ? isInactiveDesignTask
+        ? isSupersededDesignTask
+          ? 'Superseded — a verified result replaced this earlier plan.'
+          : 'Historical — this plan belongs to an earlier chat turn.'
+        : buildComputerTaskSummaryLine({ handoff: handoffMetadata, appChoiceCard, body: bodyContent })
+      : '';
+    // Status cue comes only from data the metadata already carries.
+    const failedSummaryPrefix = !isInactiveDesignTask && (recoveryReliabilityCard || hasRecoveryOptions)
+      ? item.recoveryReliability?.userActionRequired
+        ? 'Needs your input'
+        : "Couldn't finish"
+      : null;
+    const disclosureStatusTone: 'neutral' | 'attention' | 'approval' | 'complete' = failedSummaryPrefix
+      ? item.recoveryReliability?.userActionRequired ? 'approval' : 'attention'
+      : 'neutral';
+    const disclosureStatusLabel = isInactiveDesignTask
+      ? isHistoricalDesignTask ? 'Historical' : 'Superseded'
+      : failedSummaryPrefix || undefined;
+    // Display-only Route override so the Plan card shows a desktop-accurate
+    // Route for desktop/app tasks (routeId semantics unchanged).
+    const planRouteLabelOverride = formatHandoffSurfaceRouteLabel(handoffMetadata);
+
+    // ── SIGNATURE Receipt (the #1 branding/capability gap) ──────────────────
+    // At-a-glance "what did the agent do → who approved → proof → verified?"
+    // assembled from data already on this bot message. Additive + non-blocking:
+    // plain chat replies yield null (shouldRenderReceipt === false) and render
+    // byte-identically. Retry re-sends the original user prompt when one is
+    // trivially recoverable AND the turn didn't cleanly complete; undo has no
+    // safe generic implementation, so it stays undefined (button hidden).
+    const priorUserPrompt = item.isBot ? findPriorUserPromptForMessage(messages, item.id) : null;
+    const verdictNeedsRetry = !isInactiveDesignTask && !mutationReplayBlocked && (
+      item.outcomeSignal?.verdict === 'failed'
+      || item.outcomeSignal?.verdict === 'partial'
+      || item.outcomeSignal?.verdict === 'blocked'
+      || hasRecoveryOptions
+    );
+    const agentReceipt = item.isBot
+      ? buildAgentReceipt({
+          content: item.content,
+          computerHandoff: handoffMetadata,
+          artifacts: item.artifacts,
+          computerFindings: item.computerFindings,
+          browserPlans: item.browserPlans,
+          toolEvents: item.toolEvents,
+          recoveryOptions: isInactiveDesignTask || mutationReplayBlocked ? undefined : item.recoveryOptions,
+          outcomeSignal: item.outcomeSignal,
+          canRetry: !!priorUserPrompt && verdictNeedsRetry,
+        })
+      : null;
+    const receiptBlock = agentReceipt && shouldRenderReceipt(agentReceipt) ? (
+      <AgentReceiptCard
+        receipt={agentReceipt}
+        onRetry={priorUserPrompt && agentReceipt.canRetry
+          ? () => { void sendMessage(priorUserPrompt); }
+          : undefined}
+      />
+    ) : null;
+
+    // ── Relocatable explanatory blocks (verbatim JSX; only their PLACEMENT
+    //    changes for computer-task messages — collapsed into the disclosure). ──
+    const appChoiceBlock = appChoiceCard ? (
+      <View style={styles.appChoiceSection}>
+        <View style={styles.appChoiceCard}>
+          <View style={styles.appChoiceHeader}>
+            <View style={styles.appChoiceTitleWrap}>
+              <Text style={styles.messageSourceLabel}>App Choice</Text>
+              <Text style={styles.appChoiceTitle} numberOfLines={1}>
+                Using {appChoiceCard.selectedAppName}
+              </Text>
+            </View>
+            <View style={styles.appChoicePill}>
+              <Text style={styles.appChoicePillText} numberOfLines={1}>
+                {appChoiceCard.availabilityLabel}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.appChoiceMeta} numberOfLines={1}>
+            {appChoiceCard.surfaceLabel}{appChoiceCard.openStep ? ` · ${appChoiceCard.openStep}` : ''}
+          </Text>
+          <Text style={styles.appChoiceReason} numberOfLines={2}>{appChoiceCard.reason}</Text>
+          {!isInactiveDesignTask && !mutationReplayBlocked && appChoiceCard.alternatives.length > 0 ? (
+            <View style={styles.appChoiceAlternativeRow}>
+              {appChoiceCard.alternatives.map((alternative) => (
+                <Pressable
+                  key={alternative}
+                  onPress={() => {
+                    setInput(`use ${alternative} instead`);
+                    inputRef.current?.focus();
+                  }}
+                  style={styles.appChoiceAlternative}
+                  accessibilityLabel={`Use ${alternative} instead`}
+                >
+                  <Text style={styles.appChoiceAlternativeText} numberOfLines={1}>
+                    Use {alternative}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : appChoiceCard.switchHint ? (
+            <Text style={styles.appChoiceHint} numberOfLines={1}>{appChoiceCard.switchHint}</Text>
+          ) : null}
+        </View>
+      </View>
+    ) : null;
+
+    const designTaskBlock = designTaskCard ? (
+      <View style={[styles.messageSourceSection, styles.designTaskSection]}>
+        <Text style={styles.messageSourceLabel}>Design Task</Text>
+        <View
+          style={[
+            styles.designTaskCard,
+            designTaskCard.statusTone === 'attention' && styles.designTaskCardAttention,
+            designTaskCard.statusTone === 'approval' && styles.designTaskCardApproval,
+            designTaskCard.statusTone === 'complete' && styles.designTaskCardComplete,
+          ]}
+        >
+          <View style={styles.designTaskHeader}>
+            <View style={styles.designTaskTitleWrap}>
+              <Text style={styles.designTaskTitle} numberOfLines={1}>{designTaskCard.title}</Text>
+              <Text style={styles.designTaskSubtitle} numberOfLines={1}>{designTaskCard.subtitle}</Text>
+            </View>
+            <View
+              style={[
+                styles.designTaskStatusPill,
+                designTaskCard.statusTone === 'attention' && styles.designTaskStatusAttention,
+                designTaskCard.statusTone === 'approval' && styles.designTaskStatusApproval,
+                designTaskCard.statusTone === 'complete' && styles.designTaskStatusComplete,
+              ]}
+            >
+              <Text style={styles.designTaskStatusText}>{designTaskCard.statusLabel}</Text>
+            </View>
+          </View>
+          {designTaskCard.timelineActionsEnabled === false ? (
+            <Text style={styles.designTaskNextAction} numberOfLines={2}>
+              {designTaskCard.isSuperseded
+                ? 'Historical plan — a verified result replaced this pending state.'
+                : 'Historical plan — a newer human turn moved the conversation forward.'}
+            </Text>
+          ) : null}
+          {designTaskCard.packageSummary ? (
+            <Text style={styles.designTaskMeta} numberOfLines={1}>Package: {designTaskCard.packageSummary}</Text>
+          ) : null}
+          {designTaskCard.creativeAiSummary ? (
+            <Text style={styles.designTaskMeta} numberOfLines={1}>AI: {designTaskCard.creativeAiSummary}</Text>
+          ) : null}
+          <View style={styles.designTaskOperationRow}>
+            {designTaskCard.operations.slice(0, 4).map((operation) => (
+              <View key={operation} style={styles.designTaskOperationPill}>
+                <Text style={styles.designTaskOperationText} numberOfLines={1}>{operation}</Text>
+              </View>
+            ))}
+          </View>
+          <View style={styles.designTaskPhaseRow}>
+            {designTaskCard.phases.map((phase) => (
+              <View key={phase.id} style={styles.designTaskPhaseItem}>
+                <View
+                  style={[
+                    styles.designTaskPhaseDot,
+                    phase.state === 'done' && styles.designTaskPhaseDone,
+                    phase.state === 'current' && styles.designTaskPhaseCurrent,
+                    phase.state === 'blocked' && styles.designTaskPhaseBlocked,
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.designTaskPhaseLabel,
+                    phase.state === 'current' && styles.designTaskPhaseLabelCurrent,
+                    phase.state === 'blocked' && styles.designTaskPhaseLabelBlocked,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {phase.label}
+                </Text>
+              </View>
+            ))}
+          </View>
+          <Text style={styles.designTaskNextAction} numberOfLines={2}>
+            {designTaskCard.timelineActionsEnabled === false ? 'Recorded next step' : 'Next'}: {designTaskCard.nextAction}
+          </Text>
+          {designTaskCard.proofSignals.length > 0 ? (
+            <Text style={styles.designTaskProof} numberOfLines={2}>
+              Proof: {designTaskCard.proofSignals.slice(0, 2).join('; ')}
+            </Text>
+          ) : null}
+          {designTaskCard.reviewChecklist.length > 0 ? (
+            <Text style={styles.designTaskReview} numberOfLines={2}>
+              Review: {designTaskCard.reviewChecklist.slice(0, 3).join('; ')}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+    ) : null;
+
+    // Render block-level markdown (code fences, headings, bullets, quotes) as
+    // real UI instead of raw ``` / # / - markers, delegating plain-text runs to
+    // ChatInlineRichText so @mentions + **bold** keep their styling. Falls back
+    // to the single ChatInlineRichText (byte-identical) when there's no markdown.
+    const bodyTextBlock = hasRenderableMarkdown(bodyContent) ? (
+      <ChatMarkdownBody
+        content={bodyContent}
+        accentColor={accentColor}
+        textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
+      />
+    ) : (
+      <ChatInlineRichText
+        content={bodyContent}
+        accentColor={accentColor}
+        textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
+      />
+    );
+
+    const recoveryReliabilityBlock = recoveryReliabilityCard ? (
+      <View style={styles.recoveryReliabilitySection}>
+        <Text style={styles.messageSourceLabel}>Recovery Status</Text>
+        <View
+          style={[
+            styles.recoveryReliabilityCard,
+            {
+              borderColor: `${recoveryReliabilityCard.color}55`,
+              backgroundColor: `${recoveryReliabilityCard.color}10`,
+            },
+          ]}
+        >
+          <View style={styles.recoveryReliabilityHeader}>
+            <View style={styles.recoveryReliabilityTitleWrap}>
+              <Text style={[styles.recoveryReliabilityTitle, { color: recoveryReliabilityCard.color }]} numberOfLines={1}>
+                {recoveryReliabilityCard.title}
+              </Text>
+              <Text style={styles.recoveryReliabilitySubtitle} numberOfLines={1}>
+                {recoveryReliabilityCard.subtitle}
+              </Text>
+            </View>
+            <View style={[styles.recoveryReliabilityPill, { borderColor: `${recoveryReliabilityCard.color}66` }]}>
+              <Text style={[styles.recoveryReliabilityPillText, { color: recoveryReliabilityCard.color }]}>
+                {recoveryReliabilityCard.statusLabel}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.recoveryReliabilityDetail} numberOfLines={2}>
+            {recoveryReliabilityCard.detail}
+          </Text>
+          {recoveryReliabilityCard.chips.length > 0 ? (
+            <View style={styles.recoveryReliabilityChipRow}>
+              {recoveryReliabilityCard.chips.map((chip) => (
+                <View key={chip} style={styles.recoveryReliabilityChip}>
+                  <Text style={styles.recoveryReliabilityChipText} numberOfLines={1}>{chip}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+        </View>
+      </View>
+    ) : null;
+
+    const planCardBlock = item.chatAutomationPlanPreview ? (
+      <ChatAutomationPlanCard
+        preview={item.chatAutomationPlanPreview}
+        accentColor={accentColor}
+        routeLabelOverride={planRouteLabelOverride}
+      />
+    ) : null;
+
     return (
       <View>
         {/* Pending "BUILDING NOW" chip removed — the rotating verb in
@@ -5796,11 +12581,108 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             ))}
           </View>
         ) : null}
-        <ChatInlineRichText
-          content={item.content}
-          accentColor={accentColor}
-          textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
-        />
+        {(routeChips.length > 0 || failoverBadge) ? (
+          <View style={styles.messageRouteStrip}>
+            {/* failover-badge: never-silent fallback provenance chip — first in
+                the strip; renders even when route chips are hidden. Inline
+                styles only (StyleSheet zone is foreign WIP; delegation badge
+                above is the precedent). */}
+            {failoverBadge ? (
+              <View
+                accessibilityLabel={failoverBadge.detail}
+                style={{
+                  maxWidth: 230,
+                  borderRadius: 999,
+                  borderWidth: 1,
+                  borderColor: failoverBadge.tone === 'warn' ? '#f59e0b40' : '#64748b40',
+                  backgroundColor: failoverBadge.tone === 'warn' ? '#f59e0b15' : '#64748b15',
+                  paddingHorizontal: 8,
+                  paddingVertical: 4,
+                }}
+              >
+                <Text
+                  style={{
+                    color: failoverBadge.tone === 'warn' ? '#f59e0b' : '#64748b',
+                    fontSize: 10,
+                    fontWeight: '800',
+                    fontFamily: 'monospace',
+                  }}
+                  numberOfLines={1}
+                >
+                  {failoverBadge.label}
+                </Text>
+              </View>
+            ) : null}
+            {routeChips.map((chip) => (
+              <View
+                key={`${chip.label}-${chip.value}`}
+                style={[
+                  styles.messageRouteChip,
+                  chip.tone === 'local' && styles.messageRouteChipLocal,
+                  chip.tone === 'model' && styles.messageRouteChipModel,
+                  chip.tone === 'provider' && styles.messageRouteChipProvider,
+                ]}
+              >
+                <Text style={styles.messageRouteChipLabel}>{chip.label}</Text>
+                <Text
+                  style={[
+                    styles.messageRouteChipValue,
+                    chip.tone === 'local' && styles.messageRouteChipValueLocal,
+                    chip.tone === 'model' && styles.messageRouteChipValueModel,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {chip.value}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+        {isComputerTaskMessage ? (
+          <>
+            {/* P22: always-visible compact summary line — one glance at what
+                this computer/desktop/app task is doing. */}
+            <Text
+              style={[styles.computerTaskSummaryLine, { color: messageDensity === 'compact' ? '#bbb' : '#ccc' }]}
+              numberOfLines={2}
+            >
+              {failedSummaryPrefix ? `${failedSummaryPrefix} — ${computerSummaryLine}` : computerSummaryLine}
+            </Text>
+            {/* P22: all explanatory cards collapse behind ONE Details toggle. */}
+            <ChatMessageDetailsDisclosure
+              summary="Details"
+              statusLabel={disclosureStatusLabel}
+              statusTone={disclosureStatusTone}
+              accentColor={accentColor}
+            >
+              {appChoiceBlock}
+              {designTaskBlock}
+              {bodyTextBlock}
+              {recoveryReliabilityBlock}
+              {planCardBlock}
+            </ChatMessageDetailsDisclosure>
+          </>
+        ) : (
+          <>
+            {appChoiceBlock}
+            {designTaskBlock}
+            {bodyTextBlock}
+          </>
+        )}
+        {/* SIGNATURE Receipt: the at-a-glance accountability summary. Rendered
+            once here (both branches) directly under the body/summary and above
+            the detailed artifact/run cards, so it is visible, not buried. It
+            does NOT duplicate the P22 Details disclosure (which shows the
+            verbose per-card breakdown) — this is the one-glance verdict. */}
+        {receiptBlock}
+        {engineeringCardModels.length > 0 && engineeringCardModels.map((model, index) => (
+          <EngineeringDesignCard
+            key={`eng-card-${item.id}-${index}`}
+            model={model}
+            accentColor={accentColor}
+            onSeedCommand={(text: string) => setInput(text)}
+          />
+        ))}
         <ChatArtifacts
           artifacts={item.artifacts}
           accentColor={accentColor}
@@ -5827,7 +12709,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           <View style={styles.messageSourcesWrap}>
             {item.wikiRefs && item.wikiRefs.length > 0 ? (
               <View style={styles.messageSourceSection}>
-                <Text style={styles.messageSourceLabel}>AI Wiki</Text>
+                <Text style={styles.messageSourceLabel}>Wiki</Text>
                 {item.wikiRefs.slice(0, 3).map((ref) => (
                   <Pressable
                     key={ref.id}
@@ -5871,12 +12753,97 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           browserSessions={item.browserSessions}
           delegatedSubagents={item.delegatedSubagents}
           accentColor={accentColor}
-          onLaunchBrowserPlan={(plan) => handleLaunchBrowserPlan(item, plan)}
+          onLaunchBrowserPlan={isInactiveDesignTask || mutationReplayBlocked
+            ? undefined
+            : (plan) => handleLaunchBrowserPlan(item, plan)}
           onOpenBrowserSession={handleOpenBrowserSession}
           onOpenBrowserSessionHistory={setSelectedBrowserSession}
-          onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
+          onRetryCheck={isInactiveDesignTask || mutationReplayBlocked
+            ? undefined
+            : (checkId) => handleRetryVerificationCheck(item, checkId)}
           retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
         />
+        {/* P22: the "Recovery Status" card moved into the Details disclosure
+            near the top of computer-task messages; the actionable Recovery
+            Options below stay always-visible. */}
+        {!isInactiveDesignTask && !mutationReplayBlocked && item.recoveryOptions && item.recoveryOptions.length > 0 ? (
+          <View style={styles.recoveryOptionSection}>
+            <Text style={styles.messageSourceLabel}>Recovery Options</Text>
+            {item.recoveryOptions.slice(0, 5).map((option) => {
+              const color = getRecoveryOptionAccent(option);
+              const executionPlan = buildChatFailureRecoveryExecutionPlan(option);
+              const policyBadges = getRecoveryOptionPolicyBadges(option);
+              const actionIntent = buildChatRecoveryActionIntent(option, {
+                sourceSurface: item.source?.surface || null,
+                platform: Platform.OS,
+              });
+              return (
+                <View
+                  key={option.id}
+                  style={[
+                    styles.recoveryOptionCard,
+                    { borderColor: `${color}55`, backgroundColor: `${color}10` },
+                  ]}
+                >
+                  <View style={styles.recoveryOptionHeader}>
+                    <View style={styles.recoveryOptionTitleWrap}>
+                      <Text style={[styles.recoveryOptionTitle, { color }]} numberOfLines={2}>
+                        {option.label}
+                      </Text>
+                      <Text style={styles.recoveryOptionMeta}>
+                        {[getRecoveryOptionActorLabel(option.actor).toUpperCase(), option.recommended ? 'RECOMMENDED' : '', ...policyBadges].filter(Boolean).join(' • ')}
+                      </Text>
+                    </View>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`${actionIntent.label}: ${actionIntent.detail}`}
+                      onPress={() => {
+                        if (actionIntent.kind === 'connect_desktop_bridge') {
+                          void (async () => {
+                            setBotTyping(true);
+                            try {
+                              await addDesktopBridgeAutoConnectMessage(item.source?.surface || 'desktop_bridge_recovery_card');
+                            } catch (error: any) {
+                              await addRecoverableChatErrorMessage({
+                                title: 'Desktop bridge recovery failed',
+                                task: 'Start or repair the local desktop bridge from a recovery option card',
+                                error,
+                                executionKind: 'desktop_bridge_recovery_card',
+                                source: 'desktop_bridge_recovery_card_error',
+                                touched: ['src/lib/desktopBridgeAutoConnect.ts', 'src/lib/desktopBridge.ts', 'scripts/claude-bridge.js'],
+                              });
+                            } finally {
+                              setBotTyping(false);
+                            }
+                          })();
+                          return;
+                        }
+                        const prompt = buildRecoveryOptionComposerPrompt(option, item);
+                        if (actionIntent.autoSendsPrompt) {
+                          void sendMessage(prompt, {
+                            displayText: formatChatRecoveryActionDisplayText(option, actionIntent),
+                          });
+                        } else {
+                          setInput(prompt);
+                          inputRef.current?.focus();
+                        }
+                      }}
+                      style={({ pressed }) => [
+                        styles.recoveryOptionButton,
+                        { borderColor: `${color}66`, backgroundColor: pressed ? `${color}24` : '#0b1220' },
+                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                      ]}
+                    >
+                      <Text style={[styles.recoveryOptionButtonText, { color }]}>{actionIntent.label}</Text>
+                    </Pressable>
+                  </View>
+                  <Text style={styles.recoveryOptionDetail} numberOfLines={3}>{option.detail}</Text>
+                  <Text style={styles.recoveryOptionPlan} numberOfLines={2}>{executionPlan.userSummary}</Text>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
         {(item.memoryRefs && item.memoryRefs.length > 0) || (item.memoriesUsed && item.memoriesUsed.length > 0) ? (
           <View style={styles.messageSourceSection}>
             <Text style={styles.messageSourceLabel}>Memory Influence</Text>
@@ -6083,6 +13050,111 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return curr.timestamp.getTime() - prev.timestamp.getTime() < 300000;
   };
 
+  // Shared tab jump (hoisted from handleFollowupChipPress so the reference
+  // chips below reuse it): web rides the existing uc:switch-tab event;
+  // native falls back to route params.
+  const goTab = (tab: string) => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab } })); } catch {}
+      return;
+    }
+    try {
+      navigation.setParams?.({ tab, _tabTs: Date.now() });
+    } catch {
+      navigation.navigate?.('CircleDetail', { circleId, tab, _tabTs: Date.now() });
+    }
+  };
+
+  // followup-chips: dispatch one tapped cross-surface follow-up chip
+  // (FollowupChipRow). create_feed_task mirrors /mission create's pending-key
+  // + event + tab-switch pattern (missionChatCommands) so FeedTab's already
+  // -listening uc:open-task-create consumer opens CreateTaskModal pre-filled;
+  // Office-surface chips ride the existing uc:switch-tab event; retry seeds
+  // the composer with the prior user prompt (onRaceAgain pattern).
+  const handleFollowupChipPress = (followup: CrossSurfaceFollowup, item: ChatMessage) => {
+    switch (followup.kind) {
+      case 'create_feed_task': {
+        const title = (followup.seedCommand || '').replace(/^\/task new\s*/i, '').trim();
+        if (Platform.OS === 'web' && typeof window !== 'undefined') {
+          try { window.localStorage.setItem('uc_pending_task_create', title); } catch {}
+          try { window.dispatchEvent(new CustomEvent('uc:open-task-create', { detail: { title } })); } catch {}
+        }
+        // Native has no uc:open-task-create listener; landing on FEED is the
+        // best-effort equivalent there.
+        goTab('FEED');
+        return;
+      }
+      case 'open_run':
+      case 'request_approval':
+        goTab('OFFICE');
+        return;
+      case 'retry_run': {
+        const priorPrompt = findPriorUserPromptForMessage(messages, item.id);
+        if (priorPrompt) {
+          setInput(priorPrompt);
+          inputRef.current?.focus();
+        } else if (followup.handle) {
+          goTab('OFFICE');
+        } else {
+          inputRef.current?.focus();
+        }
+        return;
+      }
+      default: {
+        // Future kinds (mission/room/task handles are not derived in ChatTab
+        // today): seed the command when one exists, else open the surface.
+        if (followup.seedCommand) {
+          setInput(followup.seedCommand);
+          inputRef.current?.focus();
+        } else if (followup.surface === 'feed') goTab('FEED');
+        else if (followup.surface === 'rooms') goTab('ROOMS');
+        else if (followup.surface === 'office') goTab('OFFICE');
+      }
+    }
+  };
+
+  // reference-nav-chips: dispatch a tapped jump-to chip on a USER message.
+  // mission/task ride the same localStorage deeplink keys the mention chips
+  // use (consumers: MissionsTab / FeedTab, web only — native lands on the tab
+  // best-effort); run lands on OFFICE only (no run-focus consumer exists —
+  // AgentRunsPanel is 3 UI layers deep, so the chip hint must not promise
+  // "opens the run"); room lands on ROOMS. We hold the typed handle here, so
+  // nothing on this path encodes/decodes the entity-handle string form
+  // (decodeEntityHandle stays consumer-less).
+  const handleReferenceChipPress = (match: SurfaceReferenceMatch) => {
+    const { kind, id, surface } = match.handle;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try {
+        if (kind === 'mission') window.localStorage.setItem('uc_pending_mission_deeplink', id);
+        else if (kind === 'task') window.localStorage.setItem('uc_pending_task_deeplink', id);
+      } catch {}
+    }
+    // Tab keys are the UPPERCASE surface names (CircleDetailScreen TABS).
+    goTab((surface || 'chat').toUpperCase());
+  };
+
+  // reference-nav-chips: bounded chip labels ("Open mission: Acme redesign").
+  const clampReferenceChipLabel = (text: string): string =>
+    (text.length > 48 ? `${text.slice(0, 47)}…` : text);
+
+  // followup-chips: suppress the retry chip when the message already renders a
+  // retry affordance — the recovery-options card or AgentReceiptCard's Retry
+  // button (prior prompt + failed/partial/blocked verdict, mirroring the
+  // receipt's own canRetry gate in renderContent).
+  const visibleFollowupChips = (item: ChatMessage): CrossSurfaceFollowup[] => {
+    if (isInactiveDesignTaskMessage(item) || isMutationReplayBlockedMessage(item)) return [];
+    const chips = item.crossSurfaceFollowups || [];
+    if (chips.length === 0) return chips;
+    return chips.filter((chip) => {
+      if (chip.kind !== 'retry_run') return true;
+      if ((item.recoveryOptions?.length || 0) > 0) return false;
+      const verdict = item.outcomeSignal?.verdict;
+      const receiptRetries = (verdict === 'failed' || verdict === 'partial' || verdict === 'blocked')
+        && !!findPriorUserPromptForMessage(messages, item.id);
+      return !receiptRetries;
+    });
+  };
+
   // ─── Render Message ──────────────────────────────────────────────────────
 
   const renderMessage = ({ item, index }: { item: ChatMessage; index: number }) => {
@@ -6090,6 +13162,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const reactionEntries = Object.entries(item.reactions).filter(([, u]) => u.length > 0);
     const messageAnim = newMessageAnims.get(item.id) || new Animated.Value(1);
     const isHighlighted = highlightedMessageId === item.id;
+    const mutationReplayBlocked = isMutationReplayBlockedMessage(item);
 
     return (
       <Animated.View
@@ -6136,9 +13209,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 proposal={item.automationProposal}
                 circleId={circleId}
                 userId={currentUserId}
+                agentSubjectMetadata={item.automationAgentSubjectMetadata || selectedAgentSubjectContext.agentSubjectMetadata}
                 accentColor={accentColor}
               />
             ) : null}
+            {/* P22: the Plan + Evidence-Contract card moved into renderContent's
+                Details disclosure (a message with a plan preview is always a
+                computer-task message), so it renders collapsed-by-default with
+                the other explanatory cards instead of expanded below the bubble. */}
             {item.searchResults ? (
               <SearchResultsCard
                 query={item.searchResults.query}
@@ -6179,14 +13257,121 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 }}
               />
             ) : null}
+            {item.computerPreflightBlockers
+              && item.computerPreflightBlockers.items.length > 0 ? (
+              <PreflightBlockersCard
+                items={item.computerPreflightBlockers.items}
+                accentColor={accentColor}
+                readOnly={isInactiveDesignTaskMessage(item) || mutationReplayBlocked}
+                onConnectBridge={() => { void addDesktopBridgeAutoConnectMessage(); }}
+                onOpenComputerUse={() => setShowComputerUseConsole(true)}
+                onRetry={() => {
+                  const retryTask = item.computerPreflightBlockers?.task;
+                  if (retryTask) void sendMessage(retryTask);
+                }}
+              />
+            ) : null}
+            {item.computerFindings
+              && (item.computerFindings.items?.length || 0) > 0 ? (
+              /* Plan §3a: numbered findings inline — tapping fires the same
+                 WI-5 follow-up the user would type. The card supersedes the
+                 bare "Book option N" quick-reply chips for these messages. */
+              <ChatComputerFindingsCard
+                findings={item.computerFindings}
+                accentColor={accentColor}
+                onPickOption={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : (optionNumber) => { void sendMessage(`Book option ${optionNumber}`); }}
+              />
+            ) : null}
+            {item.bestOfN
+              && (item.bestOfN.candidates?.length || 0) > 0 ? (
+              /* P11: interactive best-of-N — every candidate one tap to
+                 adopt; race again pre-fills the same command. */
+              <BestOfNResultCard
+                race={item.bestOfN}
+                accentColor={accentColor}
+                onAdopt={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : (candidateIndex) => {
+                    const candidate = item.bestOfN?.candidates?.[candidateIndex];
+                    if (candidate?.text) {
+                      addBotMessage(
+                        `✅ Adopted **${candidate.model}**'s answer:\n\n${candidate.text}`,
+                        undefined,
+                        { localOnly: true },
+                      );
+                    }
+                  }}
+                onRaceAgain={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : () => {
+                    const models = (item.bestOfN?.candidates || []).map((c) => c.model).join(',');
+                    setInput(`/bestof ${models} ${item.bestOfN?.task || ''}`.trim());
+                    inputRef.current?.focus();
+                  }}
+              />
+            ) : null}
+            {!isInactiveDesignTaskMessage(item)
+              && !mutationReplayBlocked
+              && item.quickReplies && item.quickReplies.length > 0
+              && !(item.computerFindings && (item.computerFindings.items?.length || 0) > 0) ? (
+              <QuickReplyChips
+                replies={item.quickReplies}
+                accentColor={accentColor}
+                label={item.quickRepliesLabel || undefined}
+                onPick={(reply) => { void sendMessage(reply); }}
+              />
+            ) : null}
+            {!isInactiveDesignTaskMessage(item)
+              && !mutationReplayBlocked
+              && item.crossSurfaceFollowups
+              && item.crossSurfaceFollowups.length > 0 ? (
+              /* followup-chips: cross-surface follow-up row derived by
+                 crossSurfaceFollowupCore at finalize time — create Feed task /
+                 open run / approve / retry. Renders null when the retry
+                 suppression filter empties the set. */
+              <FollowupChipRow
+                followups={visibleFollowupChips(item)}
+                accentColor={accentColor}
+                onPress={(followup) => handleFollowupChipPress(followup, item)}
+              />
+            ) : null}
+            {item.isBot ? (
+              /* Plan §3b: memory attribution + one-tap Remember (routes
+                 through the existing /remember path). */
+              <ChatMemoryAttributionRow
+                memoriesUsed={item.memoriesUsed}
+                memoryRefCount={item.memoryRefs?.length || 0}
+                canRemember={(item.content || '').length >= 120}
+                onOpenMemories={() => setShowMemoryViewer(true)}
+                onRemember={() => { void sendMessage(`/remember ${item.content.slice(0, 280)}`); }}
+                accentColor={accentColor}
+              />
+            ) : null}
+            {item.isBot && !item.isPending ? (
+              /* sources-row: exactly which files/URLs/commits/tools the
+                 answer drew on — derived in-memo from answer text + tool
+                 events (secret-safe in chatSourcesSurfaceCore); display-only.
+                 Covers v1 addBotMessage, v2 updateBotMessage, and reloaded
+                 history (metadata.toolEvents) uniformly. */
+              <ChatSourcesRow
+                content={item.content}
+                toolEvents={item.toolEvents}
+                accentColor={accentColor}
+              />
+            ) : null}
             {item.showRunTrace && item.runId ? (
               <RunTraceCard
                 runId={item.runId}
                 accentColor={accentColor}
-                onRunAgain={(run) => {
-                  setInput(run.goal || run.title || '');
-                  inputRef.current?.focus();
-                }}
+                readOnly={isInactiveDesignTaskMessage(item) || mutationReplayBlocked}
+                onRunAgain={isInactiveDesignTaskMessage(item) || mutationReplayBlocked
+                  ? undefined
+                  : (run) => {
+                      setInput(run.goal || run.title || '');
+                      inputRef.current?.focus();
+                    }}
               />
             ) : null}
             <MessageCitations
@@ -6202,6 +13387,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             />
           </View>
         )}
+        {item.isUser && item.referenceChips && item.referenceChips.length > 0 ? (
+          /* reference-nav-chips: jump-to chips for entities the user's own
+             message referenced ("open the Acme mission"), resolved fire-and-
+             forget in addUserMessage. Right-aligned so they read as part of
+             the user's row (the paddingLeft:44 stack above is bot-side);
+             transient — gone on reload. */
+          <View style={{ paddingLeft: 44, alignItems: 'flex-end' }}>
+            <FollowupChipRow
+              followups={item.referenceChips.map((match) => ({
+                kind: match.handle.kind,
+                label: clampReferenceChipLabel(`Open ${match.handle.kind}: ${match.title}`),
+                hint: match.matchedText,
+                match,
+              }))}
+              accentColor={accentColor}
+              label="Referenced"
+              onPress={(chip) => handleReferenceChipPress(chip.match)}
+            />
+          </View>
+        ) : null}
       </Animated.View>
     );
   };
@@ -6217,8 +13422,213 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           resizeMode="contain"
         />
       </View>
+      {/* First-run discoverability (2026-07-14 UX core): tappable starter
+          prompts drawn from the real capability catalog, so the primary
+          surface no longer shows just an image. Tapping sends it. */}
+      <Text style={styles.emptyStarterHint}>Try one of these, or just tell me what you need:</Text>
+      <View style={styles.emptyStarterWrap}>
+        {EMPTY_CHAT_STARTERS.map((starter) => (
+          <Pressable
+            key={starter}
+            style={[styles.emptyStarterChip, { borderColor: accentColor + '55' }]}
+            onPress={() => sendMessage(starter)}
+            accessibilityRole="button"
+          >
+            <Text style={[styles.emptyStarterChipText, { color: accentColor }]} numberOfLines={2}>{starter}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <Pressable onPress={() => sendMessage('what can you do?')} accessibilityRole="button">
+        <Text style={styles.emptyStarterMore}>See everything I can do →</Text>
+      </Pressable>
     </ScrollView>
   );
+
+  // ─── "Needs you" attention strip ─────────────────────────────────────────
+  // Phase 1c of docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md. Folds every
+  // waiting-on-the-user state (pending/expiring/expired approvals, parked
+  // clarifications, live computer-task questions, recovery choices,
+  // provider blockers) into one strip via `chatAttentionQueue`, so blocked
+  // work stops dying silently. State lives up near the other declarations;
+  // this derived block sits before the early `!loaded` return to keep hook
+  // order unconditional.
+  const attentionRecoverySource = (() => {
+    // Only the latest bot message: recovery is offered exactly while the
+    // failure is still the freshest state of the conversation.
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (!message.isBot) continue;
+      return (message.recoveryOptions?.length ?? 0) > 0 ? message : null;
+    }
+    return null;
+  })();
+  const latestCompletedComputerTaskAt = (() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (!message.isBot || message.computerTaskStatus !== 'completed') continue;
+      const timestamp = message.timestamp instanceof Date
+        ? message.timestamp.getTime()
+        : Date.parse(String(message.timestamp || ''));
+      return Number.isFinite(timestamp) ? timestamp : null;
+    }
+    return null;
+  })();
+  const isExactComputerApproval = (approval: (typeof pendingHitlApprovals)[number]): boolean => {
+    const actionType = String(approval.action_type || '');
+    return actionType === 'chat.run_computer_task'
+      || actionType.startsWith('chat.run_computer_task.');
+  };
+  const canResumeApprovalInMountedChat = (approval: (typeof pendingHitlApprovals)[number]): boolean => {
+    if (!isExactComputerApproval(approval)) return true;
+    return pendingExactPlanApprovalResumesRef.current.has(approval.id);
+  };
+  const approvalsForAttention = pendingHitlApprovals.map((approval) => (
+    isExactComputerApproval(approval)
+      ? { ...approval, resumable: canResumeApprovalInMountedChat(approval) }
+      : approval
+  ));
+  const chatAttention = buildChatAttentionState({
+    approvals: approvalsForAttention,
+    pendingClarification: pendingClarificationRef.current.get(activeThreadId || 'main') || null,
+    pendingTaskQuestion: computerUseTask.state.pendingConfirmation,
+    recoveryOptions: attentionRecoverySource?.recoveryOptions ?? null,
+    recoveryContextLabel: attentionRecoverySource?.recoveryReliability?.targetName
+      ?? attentionRecoverySource?.recoveryReliability?.taskFamily
+      ?? null,
+    recoveryRefId: attentionRecoverySource?.id ?? null,
+    providerBlockers: attentionProviderBlocker ? [attentionProviderBlocker] : null,
+  }, {
+    dismissedIds: dismissedAttentionIds,
+    latestCompletedComputerTaskAt,
+    latestCompletedComputerTaskSessionKey: chatAutomationApprovalSessionKey,
+  });
+  // Proactive surfacing: expose the CURRENT attention items to sendMessage
+  // (declared far above this derived block) through a ref — read at send
+  // time, so there is no TDZ on the render-scoped const and no stale
+  // closure. Unfiltered items on purpose: pending/expiring approvals are
+  // hidden from the strip rows (banners own them) but the agent should
+  // still open with them.
+  const chatAttentionItemsRef = useRef<ChatAttentionItem[]>([]);
+  chatAttentionItemsRef.current = chatAttention.items;
+  const chatAttentionItems = chatAttention.items.filter((item) =>
+    // Live pending approvals already render with approve/reject buttons in
+    // HitlApprovalBanner directly below the strip; keep them out of the row
+    // list (the status line still counts them) and show only the states
+    // that have no other surface. Dismissals are filtered inside the
+    // builder so the status line stays truthful.
+    item.kind !== 'approval_pending'
+      && item.kind !== 'approval_expiring',
+  );
+  const chatAttentionActive = chatAttention.statusLine !== null;
+  useEffect(() => {
+    // Reclassify countdowns/expiry while something is waiting on the user.
+    if (!chatAttentionActive) return;
+    const timer = setInterval(() => setAttentionTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, [chatAttentionActive]);
+  const handleChatAttentionAction = (item: ChatAttentionItem, action: ChatAttentionAction) => {
+    if (action.kind === 'dismiss') {
+      if (item.kind === 'clarification_waiting') {
+        pendingClarificationRef.current.delete(activeThreadId || 'main');
+        persistPendingClarifications();
+      }
+      setDismissedAttentionIds((prev) => new Set(prev).add(item.id));
+      return;
+    }
+    if (action.kind === 'refile_approval') {
+      // Re-run the original request. The approval gate flips the stale row
+      // to `expired` and files a fresh proposal with an explicit
+      // "your earlier approval expired" message.
+      const row = pendingHitlApprovals.find((approval) => approval.id === item.refId);
+      const commandText = (row?.payload as Record<string, any> | undefined)?.plan?.commandText;
+      setDismissedAttentionIds((prev) => new Set(prev).add(item.id));
+      if (typeof commandText === 'string' && commandText.trim()) {
+        void sendMessage(commandText);
+      } else {
+        addBotMessage(
+          'That approval expired and I could not recover the original request — please resend it and I will file a fresh approval.',
+          undefined,
+          { localOnly: true },
+        );
+      }
+      return;
+    }
+    if (action.kind === 'cancel_task' && item.kind === 'task_question_waiting') {
+      computerUseTask.cancel();
+      return;
+    }
+    if (action.kind === 'choose_recovery') {
+      // Same as the user typing the recommended option — the recovery seam
+      // handles the text like any other reply.
+      const option = attentionRecoverySource?.recoveryOptions?.find((candidate) => candidate.id === item.refId)
+        ?? attentionRecoverySource?.recoveryOptions?.[0];
+      setDismissedAttentionIds((prev) => new Set(prev).add(item.id));
+      if (option) void sendMessage(option.label);
+      return;
+    }
+    if (action.kind === 'open_marketplace') {
+      handleSidebarMarketplace();
+      return;
+    }
+    // answer_clarification / answer_task_question: answering happens in the
+    // composer / live task card — the strip only points the user there.
+  };
+
+  // ─── Room handoff suggestion (plan §4c) ──────────────────────────────────
+  // Conservative detector: several distinct files + user build intent in the
+  // trailing window. Dismissible per thread; accepting creates the room,
+  // seeds it with context, and jumps there — this thread stays usable.
+  const roomHandoffThreadKey = activeThreadId || 'main';
+  const roomHandoffSuggestion = useMemo(() => {
+    if (messages.length < 4) return null;
+    if (dismissedRoomHandoffThreads.has(roomHandoffThreadKey)) return null;
+    return detectRoomHandoffSuggestion(
+      messages.map((message) => ({ content: message.content || '', isBot: !!message.isBot })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, roomHandoffThreadKey, dismissedRoomHandoffThreads]);
+  const handleAcceptRoomHandoff = async () => {
+    if (!roomHandoffSuggestion || roomHandoffBusy || !circleId) return;
+    setRoomHandoffBusy(true);
+    try {
+      const { createRoom, sendAgentMessage } = await import('./rooms/roomRepository');
+      const roomId = await createRoom(
+        circleId,
+        roomHandoffSuggestion.suggestedRoomName,
+        'Continued from main chat',
+      );
+      if (!roomId) throw new Error('room creation failed');
+      const latestUserAsk = [...messages].reverse().find((message) => !message.isBot)?.content || null;
+      await sendAgentMessage(
+        roomId,
+        agentName,
+        buildRoomHandoffSeedMessage({
+          filesMentioned: roomHandoffSuggestion.filesMentioned,
+          latestUserAsk,
+        }),
+        { source: 'chat_handoff', threadId: activeThreadId || null },
+      );
+      const { primeRoomWorkspaceLaunch } = await import('../../../lib/roomWorkspaceLauncher');
+      primeRoomWorkspaceLaunch({ circleId, roomId });
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'ROOMS' } })); } catch {}
+      }
+      setDismissedRoomHandoffThreads((prev) => new Set(prev).add(roomHandoffThreadKey));
+      addBotMessage(
+        `Set up room **${roomHandoffSuggestion.suggestedRoomName}** with this conversation's context — continuing there. This thread stays available for follow-ups.`,
+        undefined,
+        { localOnly: true },
+      );
+    } catch {
+      addBotMessage(
+        'Could not create the room — try again, or create one from the Rooms tab and I will keep helping here.',
+        undefined,
+        { localOnly: true },
+      );
+    } finally {
+      setRoomHandoffBusy(false);
+    }
+  };
 
   // ─── Main Return ─────────────────────────────────────────────────────────
 
@@ -6231,7 +13641,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }
 
   return (
-    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: '#000' }}>
+    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: '#0A0A0A' }}>
       {Platform.OS === 'web' && globalFileDragActive ? (
         <View pointerEvents="none" style={styles.globalDropOverlay}>
           <View style={styles.globalDropCard}>
@@ -6240,24 +13650,31 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           </View>
         </View>
       ) : null}
+      {viewportWidth < 900 && compactSidebarOpen ? (
+        <Pressable
+          onPress={() => setCompactSidebarOpen(false)}
+          accessibilityRole="button"
+          accessibilityLabel="Close conversations sidebar"
+          style={[
+            StyleSheet.absoluteFillObject,
+            { zIndex: 40, backgroundColor: '#00000088' },
+          ]}
+        />
+      ) : null}
       {circleId && (
         <ChatThreadSidebar
           circleId={circleId}
           activeThreadId={activeThreadId}
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
-          onDeleteThread={async (threadId) => {
-            try {
-              const { deleteThread: dt } = await import('../../../lib/circleChatThreads');
-              await dt(threadId);
-              setThreadListRefreshToken(prev => prev + 1);
-              if (activeThreadId === threadId) setActiveThreadId(null);
-            } catch (err) {
-              console.warn('[ChatTab] delete thread failed:', err);
-            }
-          }}
+          onNewAgent={handleSidebarNewAgent}
+          onOpenAutomations={handleSidebarAutomations}
+          onOpenMarketplace={handleSidebarMarketplace}
+          onDeleteThread={handleDeleteThread}
+          onActiveThreadUnavailable={handleThreadMetaChanged}
           refreshToken={threadListRefreshToken}
-          collapsed={sidebarCollapsed}
+          collapsed={viewportWidth < 900 ? !compactSidebarOpen : sidebarCollapsed}
+          compact={viewportWidth < 900}
           onToggleCollapsed={handleToggleSidebar}
         />
       )}
@@ -6369,7 +13786,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               .map(r => `- **${r.task.slice(0, 60)}**${r.pid ? ` (PID ${r.pid})` : ''}`);
             addBotMessage(`Spawned ${result.spawned} agent${result.spawned !== 1 ? 's' : ''}:\n\n${lines.join('\n')}\n\nAgents will appear in the Office once detected.`);
           } else {
-            addBotMessage(`Agent spawn failed: ${result.message}`);
+            addBotMessage('I could not spawn those agents. Check the bridge connection and try again.');
           }
         }}
       />
@@ -6380,7 +13797,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         currentUserId={currentUserId}
         refreshToken={threadListRefreshToken}
         onThreadUpdated={handleThreadMetaChanged}
-        selectedModel={selectedModel}
         sessionProfile={sessionProfile}
         delegationMode={sessionDelegationMode}
         onSessionProfileChange={handleSessionProfileChange}
@@ -6390,6 +13806,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setShowOpenSwanConsole(true);
         }}
         onOpenRunHistory={() => setShowRunHistory(true)}
+        onOpenThread={handleSelectThread}
       />
       {showReopenBuilderPill ? (
         <View style={styles.builderReopenBar}>
@@ -6414,7 +13831,66 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         title="OpenSwan Run History"
         onClose={() => setShowRunHistory(false)}
       />
-      {messages.length === 0 ? renderEmptyState() : (
+      {threadNavigationNotice ? (
+        <View style={{
+          marginHorizontal: 12,
+          marginBottom: 8,
+          paddingHorizontal: 12,
+          paddingVertical: 9,
+          borderRadius: 10,
+          borderWidth: 1,
+          borderColor: '#f59e0b55',
+          backgroundColor: '#f59e0b12',
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 10,
+        }}>
+          <Text style={{ color: '#f8d38a', fontSize: 12, flex: 1 }}>{threadNavigationNotice}</Text>
+          <Pressable
+            onPress={() => setThreadNavigationNotice(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss conversation notice"
+            style={{ paddingHorizontal: 6, paddingVertical: 3 }}
+          >
+            <Text style={{ color: '#f59e0b', fontSize: 15, fontWeight: '800' }}>×</Text>
+          </Pressable>
+        </View>
+      ) : null}
+      {threadLoadState.status !== 'ready' ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 12 }}>
+          {threadLoadState.status === 'error' ? (
+            <>
+              <Text style={{ color: '#f8fafc', fontSize: 15, fontWeight: '800', textAlign: 'center' }}>
+                Could not refresh this conversation
+              </Text>
+              <Text style={{ color: '#94a3b8', fontSize: 12, textAlign: 'center', maxWidth: 520 }}>
+                {threadLoadState.message || 'Chat could not verify the current thread.'}
+              </Text>
+              <Pressable
+                onPress={retryActiveThreadLoad}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading this conversation"
+                style={{
+                  borderRadius: 9,
+                  borderWidth: 1,
+                  borderColor: accentColor + '88',
+                  backgroundColor: accentColor + '18',
+                  paddingHorizontal: 14,
+                  paddingVertical: 9,
+                  opacity: 1,
+                }}
+              >
+                <Text style={{ color: accentColor, fontSize: 11, fontWeight: '900', letterSpacing: 1 }}>RETRY</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <ChatLoadingWave />
+              <Text style={{ color: '#64748b', fontSize: 11 }}>Refreshing conversation…</Text>
+            </>
+          )}
+        </View>
+      ) : messages.length === 0 ? renderEmptyState() : (
         <View
           ref={Platform.OS === 'web' ? (node => { builderDragContainerRef.current = node as HTMLDivElement | null; }) : undefined}
           style={[styles.chatSurfaceRow, showWorkbenchSidecar && styles.chatSurfaceRowSplit]}
@@ -6468,47 +13944,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       {(ref.profileKey || ref.sourceType || 'research').toUpperCase()} • {ref.reviewStatus.toUpperCase()}
                     </Text>
                     <Text style={styles.soulLearningCardSubtitle} numberOfLines={2}>{ref.subtitle}</Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-            </View>
-          ) : null}
-
-          {soulMemoryRefs.length > 0 ? (
-            <View style={styles.soulLearningRail}>
-              <View style={styles.soulLearningHeader}>
-                <Text style={styles.soulLearningLabel}>
-                  {activeSpirit?.name || 'OpenSwan SOUL'} memory active
-                </Text>
-                <Pressable
-                  onPress={() => navigation.navigate('SoulMemory', {
-                    spiritId: activeSpiritId,
-                    circleId,
-                    userId: currentUserId,
-                  })}
-                  style={styles.soulLearningLink}
-                >
-                  <Text style={styles.soulLearningLinkText}>OPEN MEMORY</Text>
-                </Pressable>
-              </View>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.soulLearningScroll}>
-                {soulMemoryRefs.map((ref) => (
-                  <Pressable
-                    key={ref.id}
-                    onPress={() => navigation.navigate('SoulMemory', {
-                      spiritId: activeSpiritId,
-                      circleId,
-                      userId: currentUserId,
-                    })}
-                    style={[styles.soulLearningCard, styles.soulMemoryCard]}
-                  >
-                    <Text style={styles.soulMemoryCardTitle} numberOfLines={1}>{ref.title}</Text>
-                    <Text style={styles.soulLearningCardMeta}>
-                      {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}
-                    </Text>
-                    <Text style={styles.soulLearningCardSubtitle} numberOfLines={2}>
-                      {ref.retrievalMode === 'startup' ? 'Pinned as startup guidance.' : 'Available on demand for matching tasks.'}
-                    </Text>
                   </Pressable>
                 ))}
               </ScrollView>
@@ -6606,6 +14041,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             renderItem={renderMessage}
             style={styles.messageListScroll}
             contentContainerStyle={styles.messageList}
+            onEndReached={() => { void loadOlderMessages(); }}
+            onEndReachedThreshold={0.25}
+            ListFooterComponent={olderMessagesState.loading ? (
+              <Text style={{ color: '#64748b', fontSize: 11, textAlign: 'center', paddingVertical: 12 }}>
+                Loading earlier messages…
+              </Text>
+            ) : olderMessagesState.error ? (
+              <Pressable
+                onPress={() => { void loadOlderMessages(); }}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading earlier messages"
+                style={{ alignSelf: 'center', paddingHorizontal: 12, paddingVertical: 9 }}
+              >
+                <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '800' }}>{olderMessagesState.error}</Text>
+              </Pressable>
+            ) : null}
             onScroll={(e) => {
               scrollOffsetRef.current = e.nativeEvent.contentOffset.y;
               contentHeightRef.current = e.nativeEvent.contentSize.height;
@@ -6613,7 +14064,120 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             }}
             scrollEventThrottle={16}
           />
-          
+
+          {(() => {
+            // D6: completion/blocked notification banner. The persisted
+            // record carries unacknowledged notifications when the user
+            // walked away mid-task — show the newest one with VIEW (opens
+            // the console like the strip; terminal banners auto-acknowledge
+            // there) and DISMISS (acknowledges + persists).
+            const unacknowledged = listUnacknowledgedComputerTaskNotifications(computerTaskState);
+            if (unacknowledged.length === 0) return null;
+            const notice = unacknowledged[0];
+            const tint = notice.kind === 'completed' ? '#34d399'
+              : notice.kind === 'failed' ? '#ef4444'
+                : notice.kind === 'blocked' ? '#f59e0b'
+                  : notice.kind === 'partial_result' ? '#a78bfa'
+                    : '#e8b339';
+            return (
+              <View
+                style={{
+                  marginHorizontal: 12,
+                  marginBottom: 6,
+                  paddingVertical: 8,
+                  paddingHorizontal: 12,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: tint + '55',
+                  backgroundColor: tint + '14',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <Pressable onPress={() => setShowComputerUseConsole(true)} style={{ flex: 1 }}>
+                  <Text style={{ color: tint, fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
+                    {COMPUTER_TASK_NOTIFICATION_GLYPHS[notice.kind] || '⚑'} {notice.title}{unacknowledged.length > 1 ? `  (+${unacknowledged.length - 1} more)` : ''}
+                  </Text>
+                  {notice.body ? (
+                    <Text style={{ color: '#cfcfcf', fontSize: 12, marginTop: 2 }} numberOfLines={1}>
+                      {notice.body}
+                    </Text>
+                  ) : null}
+                </Pressable>
+                <Pressable
+                  onPress={() => setShowComputerUseConsole(true)}
+                  style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: tint + '66' }}
+                  accessibilityLabel="Open the computer task console"
+                >
+                  <Text style={{ color: tint, fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>VIEW</Text>
+                </Pressable>
+                <Pressable
+                  onPress={acknowledgeTaskNotifications}
+                  style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#334155' }}
+                  accessibilityLabel="Dismiss this task notification"
+                >
+                  <Text style={{ color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>DISMISS</Text>
+                </Pressable>
+              </View>
+            );
+          })()}
+
+          {(() => {
+            // D6: persisted needs-you strip. Derived from the durable task
+            // record (survives reload), so a task paused on MFA/approval is
+            // visible the moment the user returns — tap opens the console
+            // where the question/approval can be answered.
+            const checklist = buildComputerTaskChecklistCard(computerTaskState);
+            if (!checklist || !checklist.active || checklist.needsYou.length === 0) return null;
+            // Stale guard: a blocked/approval record from an old session must
+            // not nag forever — only surface needs-you for recent activity,
+            // and honor an explicit dismissal of this exact record state.
+            const updatedMs = Date.parse(checklist.updatedAt || '');
+            if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > 48 * 3_600_000) return null;
+            if (needsYouStripDismissedKey && needsYouStripDismissedKey === checklist.updatedAt) return null;
+            const first = checklist.needsYou[0];
+            const prefix = first.kind === 'question' ? 'Needs your answer' : first.kind === 'approval' ? 'Needs your approval' : 'Blocked';
+            const dismissStrip = () => {
+              setNeedsYouStripDismissedKey(checklist.updatedAt);
+              void Promise.resolve(storage.setItem(`uc_needs_you_strip_dismissed::${circleId}`, checklist.updatedAt)).catch(() => {});
+            };
+            return (
+              <View
+                style={{
+                  marginHorizontal: 12,
+                  marginBottom: 6,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: '#e8b33955',
+                  backgroundColor: '#e8b33914',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                }}
+              >
+                <Pressable
+                  onPress={() => setShowComputerUseConsole(true)}
+                  style={{ flex: 1, paddingVertical: 8, paddingLeft: 12, paddingRight: 4 }}
+                >
+                  <Text style={{ color: '#e8b339', fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
+                    ⚑ {checklist.title} — {prefix}
+                  </Text>
+                  <Text style={{ color: '#cfcfcf', fontSize: 12, marginTop: 2 }} numberOfLines={2}>
+                    {first.label}{checklist.needsYou.length > 1 ? `  (+${checklist.needsYou.length - 1} more)` : ''} — tap to open
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={dismissStrip}
+                  accessibilityRole="button"
+                  accessibilityLabel="Dismiss"
+                  style={{ paddingHorizontal: 12, paddingVertical: 10 }}
+                >
+                  <Text style={{ color: '#9a9a9a', fontSize: 14, fontWeight: '700' }}>×</Text>
+                </Pressable>
+              </View>
+            );
+          })()}
+
           {/* Quick actions moved to composer dropdown */}
         </>
           </View>
@@ -6710,7 +14274,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           instead of reading a static "is working" line. The dot pulses
           via the shared `uc-tab-dot-pulse` keyframe used on tab dots
           elsewhere (sibling of the Quick Actions button-dot pattern). */}
-      {botTyping && runStatus === 'idle' && (
+      {botTyping && (runStatus === 'idle' || runStatus === 'waiting_approval') && (
         <>
           {codingWorkbenchPrompt && !showWorkbenchSidecar && (
             <CodingWorkbenchPreview
@@ -6994,7 +14558,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       .eq('id', selectedAgent.id);
                   }
                 } catch (e: any) {
-                  addBotMessage(`**${selectedAgent.name}** failed to spawn a dedicated OpenSwan session: ${e.message || 'Unknown error'}`);
+                  await addRecoverableChatErrorMessage({
+                    title: `**${selectedAgent.name}** failed to spawn a dedicated OpenSwan session`,
+                    task: requestedTask || `Spawn a dedicated OpenSwan session for ${selectedAgent.name}`,
+                    error: e,
+                    executionKind: 'openswan_dedicated_session',
+                    source: 'dedicated_openswan_spawn_error',
+                    touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/openswanSessionRuntime.ts'],
+                  });
                 } finally {
                   setBotTyping(false);
                   setAssigning(false);
@@ -7040,21 +14611,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             <Pressable
               onPress={async () => {
                 if (!selectedAgent || !taskPrompt.trim()) return;
+                const assignedTask = taskPrompt.trim();
                 setAssigning(true);
-                addUserMessage(`@${selectedAgent.name}: ${taskPrompt.trim()}`);
+                addUserMessage(`@${selectedAgent.name}: ${assignedTask}`);
                 setBotTyping(true);
                 try {
                   if (selectedAgent.id && !selectedAgent.id.startsWith('bridge::') && selectedAgent.id !== DEFAULT_AGENT.id) {
                     await supabase.from('circle_office_agents')
                       .update({
-                        current_task: taskPrompt.trim().slice(0, 120),
+                        current_task: assignedTask.slice(0, 120),
                         status: 'building',
                         updated_at: new Date().toISOString(),
                         last_active_at: new Date().toISOString(),
                       })
                       .eq('id', selectedAgent.id);
                   }
-                  const response = await dispatchAssignedAgentTask(selectedAgent, taskPrompt.trim());
+                  const response = await dispatchAssignedAgentTask(selectedAgent, assignedTask);
                   addBotMessage(response);
                   if (selectedAgent.id && !selectedAgent.id.startsWith('bridge::') && selectedAgent.id !== DEFAULT_AGENT.id) {
                     await supabase.from('circle_office_agents')
@@ -7062,7 +14634,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       .eq('id', selectedAgent.id);
                   }
                 } catch (e: any) {
-                  addBotMessage(`**${selectedAgent.name}** failed: ${e.message || 'Unknown error'}`);
+                  await addRecoverableChatErrorMessage({
+                    title: `**${selectedAgent.name}** failed`,
+                    task: `Assign ${assignedTask} to ${selectedAgent.name}`,
+                    error: e,
+                    executionKind: 'assigned_agent_task',
+                    source: 'assign_panel_agent_error',
+                    touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/bridgeTaskDispatcher.ts'],
+                  });
                 } finally {
                   setBotTyping(false); setAssigning(false);
                   setTaskPrompt(''); setSelectedAgent(null); setShowAssignPanel(false);
@@ -7163,7 +14742,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
                 } : s);
                 finalizeBrowserPlanFromSession(updated, result);
-                addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
+                addBotMessage(result.success
+                  ? `**Computer Use** completed: ${result.message}`
+                  : '**Computer Use** could not complete that browser task. Technical details were saved for recovery.');
               }).catch(() => {
                 setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
                 finalizeBrowserPlanFromSession(updated, { success: false });
@@ -7195,7 +14776,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
                 } : s);
                 finalizeBrowserPlanFromSession(resumed, result);
-                addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
+                addBotMessage(result.success
+                  ? `**Computer Use** completed: ${result.message}`
+                  : '**Computer Use** could not complete that browser task. Technical details were saved for recovery.');
               }).catch(() => {
                 setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
                 finalizeBrowserPlanFromSession(resumed, { success: false });
@@ -7276,16 +14859,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const taskToRun = pendingComputerUseTask;
             const planToRun = pendingComputerUsePlan;
             const originToRun = pendingComputerUseOrigin;
+            const stickyScopeIdToRecord = pendingComputerUseStickyScopeId;
             const grantIdsToPersist = deriveGrantedScopesFromBrowserPermission(permission, pendingComputerUseGrantIds);
             await persistComputerTaskState({
               task: taskToRun,
               taskKind: 'browser_task',
               taskLabel: 'Browser task',
               phase: 'executing',
+              outcomeStatus: null,
               adapterId: 'browser_adapter',
               grantedAccess: Array.from(new Set([...pendingComputerUseGrantIds, ...grantIdsToPersist])),
               accessPlan: pendingComputerUseGrantSummary || null,
               nextSteps: ['Run browser task', 'Summarize findings'],
+              grounding: computerTaskState?.grounding || null,
+              capabilityBuildout: computerTaskState?.capabilityBuildout || null,
+              complexity: computerTaskState?.complexity || null,
+              checkpointRecovery: computerTaskState?.checkpointRecovery || null,
             });
             // Snapshot + clear pending state before handing off to the
             // agent runtime so re-clicks don't double-fire.
@@ -7296,17 +14885,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingComputerUseApprovalSummary('');
             setPendingComputerUseGrantIds([]);
             setPendingComputerUseOrigin(null);
+            setPendingComputerUseStickyScopeId(null);
             computerUsePostedKeyRef.current = null;
             await grantComputerTaskScopes(circleId, grantIdsToPersist).catch(() => {});
+            if (stickyScopeIdToRecord) {
+              // T7 sticky allow scopes: the approved browser plan is now
+              // actually launching (not previewing) — record use silently.
+              void import('../../../lib/computerGrantGateStore')
+                .then(({ recordStickyAllowScopeUse }) => recordStickyAllowScopeUse([stickyScopeIdToRecord]))
+                .catch(() => {});
+            }
             if (planToRun?.backend === 'playwright_bridge') {
               await runLocalBrowserPlan(planToRun, permission, originToRun);
               return;
             }
+            const taskPolicy = buildChatComputerUsePolicyInputs(taskToRun);
             const started = await computerUseTask.run(taskToRun, {
               model: resolveSendModel(taskToRun) || undefined,
+              userConstraints: taskPolicy.userConstraints,
+              alwaysConfirmCategories: taskPolicy.alwaysConfirmCategories,
             });
             if (!started.started) {
-              addBotMessage(`**Computer Use** could not start: ${started.reason || 'unknown error'}`);
+              addBotMessage('**Computer Use** could not start. Check the connection and try again.');
               return;
             }
             addBotMessage(`**Computer Use** starting — ${taskToRun}`);
@@ -7322,6 +14922,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingComputerUseApprovalSummary('');
             setPendingComputerUseGrantIds([]);
             setPendingComputerUseOrigin(null);
+            setPendingComputerUseStickyScopeId(null);
           }}
         />
       )}
@@ -7333,6 +14934,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           taskState={computerTaskState}
           onClose={() => setShowComputerUseConsole(false)}
           onSubmit={runComputerUseTaskFromConsole}
+          userId={currentUserId}
         />
       )}
 
@@ -7346,26 +14948,31 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             initialTask={openSwanInitialTask}
             circleId={circleId}
             userId={currentUserId}
+            agentSubjectMetadata={selectedAgentSubjectContext.agentSubjectMetadata}
             surface="main_chat"
             onClose={() => {
               setShowOpenSwanConsole(false);
               setOpenSwanInitialTask('');
             }}
-            onSubmit={({ task, mode, model: modelOverride }) => {
+            onSubmit={({ task, displayTask, mode, model: modelOverride }) => {
               setShowOpenSwanConsole(false);
               setOpenSwanInitialTask('');
               // Sync the mode into the chat state so the rest of the turn
               // renders with the right accent + response contract. The
-              // sendMessage path will see `chatMode === mode` and pass it
-              // into `buildChatAutomationPlan({ selectedMode })`.
+              // immediate send also gets `modeOverride` below so planner
+              // routing does not race React state.
               setChatMode(mode);
               if (modelOverride && modelOverride !== selectedModel) {
                 handleSessionModelChange(modelOverride);
               }
               // Fire the task through the normal send path so it goes
               // through the planner + dispatcher + HITL gate.
-              setInput(task);
-              sendMessage(task);
+              setInput(displayTask || task);
+              sendMessage(task, {
+                displayText: displayTask,
+                modeOverride: mode,
+                modelOverride,
+              });
 
               // Auto-attach a live trace card to chat. Modes that bypass
               // the run pipeline (talk / none) skip this since they
@@ -7378,24 +14985,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         </React.Suspense>
       )}
 
-      {Platform.OS === 'web' && computerUseTask.state.status !== 'idle' && (
-        <View
-          // Floating, draggable-feeling card pinned bottom-right while the
-          // Computer Use agent works. Collapses to summary when done.
-          style={{
-            position: 'fixed' as any,
-            bottom: 20,
-            right: 20,
-            width: 460,
-            maxWidth: 'calc(100vw - 40px)' as any,
-            maxHeight: '80vh' as any,
-            zIndex: 950,
-          }}
+      {Platform.OS === 'web' && agentMonitorTask && (
+        <AgentMonitorHost
+          task={agentMonitorTask}
+          accentColor={accentColor}
+          metrics={[
+            ...(agentMonitorTask.needsAttention ? [{ label: 'Needs', value: agentMonitorTask.attentionLabel || 'Review', tone: 'warning' as const }] : []),
+            ...(agentMonitorTask.liveUrl ? [{ label: 'Live', value: 'Ready', tone: 'info' as const }] : []),
+          ]}
+          onStop={() => computerUseTask.cancel()}
         >
           <React.Suspense fallback={null}>
             <ComputerUseLiveCard
               task={computerUseTask.state.task}
-              status={computerUseTask.state.status === 'starting' ? 'starting' : computerUseTask.state.status}
+              status={computerUseTask.state.status === 'idle' ? 'error' : computerUseTask.state.status}
               sessionId={computerUseTask.state.sessionId}
               liveUrl={computerUseTask.state.liveUrl}
               reasoning={computerUseTask.state.reasoning}
@@ -7409,13 +15012,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               onConfirmationPick={(id, choice) => {
                 if (!id) return;
                 resolveComputerUseConfirmation(id, choice).catch((err) => {
-                  addBotMessage(`Confirmation could not be recorded: ${err?.message || 'unknown error'}`);
+                  addBotMessage('I could not record that confirmation. Try again in a moment.');
                 });
               }}
               onCancel={() => computerUseTask.cancel()}
             />
           </React.Suspense>
-        </View>
+        </AgentMonitorHost>
       )}
 
       {/* Enhanced input with model selector + quick actions + mode selector */}
@@ -7441,13 +15044,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       />
 
       {/* Phase C1 — Supabase Storage attachment strip (drag-drop + multi-file) */}
-      {circleId && currentUserId && (
+      {circleId
+        && currentUserId
+        && threadLoadState.status === 'ready'
+        && threadLoadState.threadId === activeThreadId
+        && (
         <ChatAttachmentStrip
           circleId={circleId}
           threadId={activeThreadId}
           userId={currentUserId}
           staged={stagedFiles}
-          onStagedChange={setStagedFiles}
+          onStagedChange={(nextFiles) => {
+            const ownerThreadId = activeThreadId;
+            if (!ownerThreadId) return;
+            if (
+              activeThreadScopeRef.current.circleId === circleId
+              && activeThreadScopeRef.current.threadId === ownerThreadId
+            ) {
+              setStagedFiles((currentFiles) => (
+                resolveStateAction(currentFiles, nextFiles)
+              ));
+              return;
+            }
+            const saved = threadComposerSessionsRef.current.get(ownerThreadId) || { attachments: [], stagedFiles: [] };
+            const resolvedFiles = resolveStateAction(saved.stagedFiles, nextFiles);
+            threadComposerSessionsRef.current.set(ownerThreadId, { ...saved, stagedFiles: resolvedFiles });
+          }}
           accentColor={accentColor}
           showAttachButton={false}
         />
@@ -7458,11 +15080,222 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           reflects starts/stops from any tab. */}
       <RecordingBadge />
 
+      {/* Live Restore strip for the latest memory-bank checkpoint (plan §2c).
+          Success/refusal feedback renders in the strip; a restore also posts
+          a confirmation message via onRestored. */}
+      {latestMemoryCheckpointId && circleId ? (
+        <View style={{ marginHorizontal: 12 }}>
+          <ToolCallCheckpointStrip
+            circleId={circleId}
+            checkpointId={latestMemoryCheckpointId}
+            accentColor={accentColor}
+            onRestored={() => {
+              addBotMessage(
+                'Restored — the memory bank change was rolled back to the checkpoint.',
+                undefined,
+                { localOnly: true },
+              );
+              setLatestMemoryCheckpointId(null);
+            }}
+          />
+        </View>
+      ) : null}
+
+      {/* Mid-run steering (plan §4e) — visible while a computer task runs
+          and is NOT paused on a question (the confirmation card owns input
+          then). Notes are guidance-only; the approval floor is untouched. */}
+      {computerUseTask.state.status === 'running'
+        && !computerUseTask.state.pendingConfirmation
+        && computerUseTask.state.runId ? (
+        <ComputerTaskSteeringBar
+          taskLabel={(computerUseTask.state.task || 'computer task').slice(0, 80)}
+          accentColor={accentColor}
+          onSend={(note) => sendComputerUseSteeringNote(computerUseTask.state.runId!, note)}
+          onStop={() => computerUseTask.cancel()}
+        />
+      ) : null}
+
+      {/* Mid-run steering for OpenSwan typed-loop turns (plan §7b) — same
+          bar, in-memory bus instead of the DB channel. Hidden while a
+          computer task owns the bar above. Guidance-only; the typed loop's
+          approval gates are untouched. A controller is exposed here only for
+          loops that consume AbortSignal: OpenSwan session turns, or native
+          computer turns when the SwanBot v2 client-loop canary is enabled. */}
+      {botTyping
+        && runStatus === 'running'
+        && !!activeThreadId
+        && computerUseTask.state.status !== 'running'
+        && (
+          isOpenSwanSteeringScopeActive(activeThreadId)
+          || !!openSwanAbortRef.current
+        ) ? (
+        <ComputerTaskSteeringBar
+          taskLabel={(currentRunStep || 'OpenSwan run').slice(0, 80)}
+          accentColor={accentColor}
+          onSend={async (note) => pushOpenSwanSteeringNote(activeThreadId, note)}
+          onStop={openSwanAbortRef.current ? () => openSwanAbortRef.current?.abort() : undefined}
+        />
+      ) : null}
+
+      {/* Room handoff suggestion (plan §4c) — dismissible, never automatic. */}
+      {roomHandoffSuggestion ? (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', gap: 8,
+          marginHorizontal: 12, marginBottom: 6, paddingHorizontal: 10, paddingVertical: 8,
+          borderWidth: 1, borderColor: accentColor + '33', borderRadius: 10, backgroundColor: '#0d150d',
+        }}>
+          <Text style={{ flex: 1, color: '#d9e4d3', fontSize: 12 }} numberOfLines={2}>
+            {roomHandoffSuggestion.reason}
+          </Text>
+          <Pressable
+            disabled={roomHandoffBusy}
+            onPress={() => { void handleAcceptRoomHandoff(); }}
+            style={{ borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '22', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, opacity: roomHandoffBusy ? 0.5 : 1 }}
+          >
+            <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }} numberOfLines={1}>
+              {roomHandoffBusy ? 'Setting up…' : `Continue in room “${roomHandoffSuggestion.suggestedRoomName}”`}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setDismissedRoomHandoffThreads((prev) => new Set(prev).add(roomHandoffThreadKey))}
+            style={{ borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, backgroundColor: '#131d13' }}
+          >
+            <Text style={{ color: '#9fb29b', fontSize: 11, fontWeight: '600' }}>Not now</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* "Needs you" attention strip — chatAttentionQueue folds expiring/
+          expired approvals, parked clarifications, live computer-task
+          questions, recovery choices, and provider blockers into one summary
+          so blocked work stops dying silently. */}
+      <ChatAttentionStrip
+        state={chatAttention}
+        items={chatAttentionItems}
+        onAction={handleChatAttentionAction}
+        accentColor={accentColor}
+      />
+
+      {/* HITL pending chat approvals — `dispatchChatAutomationPlan` writes
+          these to agent_approvals through chatApprovalGate. Surface them in
+          Chat as well as Office so approval-gated requests do not disappear
+          after the Plan Card defers. Edit & Resend (plan §6c) rejects the
+          stale proposal and prefills the composer so the edited command
+          files a FRESH approval. */}
+      <HitlApprovalBanner
+        approvals={pendingHitlApprovals.filter((approval) => {
+          // P12 fix: rows past their timeout (nothing sweeps DB status)
+          // must not show live APPROVE buttons here while the attention
+          // strip above declares them expired — the strip's "Ask again"
+          // is the only affordance for those. Shared liveness predicate
+          // (approvalCardModelCore); no-timeout rows now age out at the
+          // 30-min staleness cap too — narrows-only.
+          return canResumeApprovalInMountedChat(approval)
+            && isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now());
+        })}
+        circleId={circleId}
+        onResolved={async (approval, status) => {
+          const pending = pendingExactPlanApprovalResumesRef.current.get(approval.id);
+          const approvalContext = exactApprovalResumeContextRef.current;
+          const approvalActionType = String(approval.action_type || '');
+          const exactComputerApproval = approvalActionType === 'chat.run_computer_task'
+            || approvalActionType.startsWith('chat.run_computer_task.');
+          // Delete before dispatch so a double click or callback retry cannot
+          // launch a second local executor. The approval gate's one-shot CAS
+          // remains the durable cross-client boundary.
+          if (pending) pendingExactPlanApprovalResumesRef.current.delete(approval.id);
+          if (
+            status !== 'approved'
+            || !pending
+            || !exactComputerApproval
+            || !approvalContext.mounted
+            || pending.circleId !== approvalContext.circleId
+            || pending.threadId !== approvalContext.threadId
+            || pending.expiresAt <= Date.now()
+          ) return;
+          await pending.originSettled;
+          const liveContext = exactApprovalResumeContextRef.current;
+          if (
+            !liveContext.mounted
+            || liveContext.generation !== approvalContext.generation
+            || pending.circleId !== liveContext.circleId
+            || pending.threadId !== liveContext.threadId
+            || pending.expiresAt <= Date.now()
+          ) return;
+          await executeSharedComputerTask(pending.task);
+        }}
+        onEditAndResend={(_approval, commandText) => {
+          setInput(commandText);
+          inputRef.current?.focus();
+          // Flywheel: Edit & Resend is an implicit "that wasn't quite it" —
+          // stamp edit_resend on the most recent persisted bot message (the
+          // proposal being edited) if we can identify one. Fire-and-forget.
+          const priorBot = [...messages].reverse().find((m) => m.isBot && !!m.dbId);
+          if (priorBot) stampOutcomeSignalRef.current(priorBot.id, { signal: 'edit_resend' });
+        }}
+      />
+
       {/* HITL pending approvals — v2 M3d writes to agent_run_approvals
           from `approvals.request`; surface inline so users can
-          approve/reject without leaving chat. */}
+          approve/reject without leaving chat. approval-resume: when the
+          user approves after the turn already finalized, auto-send a
+          continuation turn so the agent actually retries the gated tool
+          (cross-run approval honor in the runtime makes it pass) instead
+          of waiting for the user to guess they should type "continue". */}
       {currentUserId ? (
-        <RunApprovalBanner circleId={circleId} userId={currentUserId} accentColor={accentColor} />
+        <RunApprovalBanner
+          circleId={circleId}
+          userId={currentUserId}
+          accentColor={accentColor}
+          onPendingChange={setPendingApprovalCount}
+          onResolved={(approval, status) => {
+            if (status !== 'approved') return;
+            // Ownership gate (fail closed): getPendingRunApprovals is
+            // circle-wide, so this banner also shows approvals filed by
+            // OpenSwan console sessions, Office runs, automation-executor and
+            // other members' agents. Those origin runs resume THEMSELVES via
+            // the run-scoped approval pass — a chat continuation for a tool
+            // call this chat never made would double-execute it (cross-run
+            // honor) or mutate with improvised arguments. Only auto-resume
+            // when the approval's run is one this chat surface originated —
+            // i.e. its run_id is stamped on one of our own messages. (A
+            // payload surface tag is NOT trusted here: OpenSwanConsole also
+            // runs under surface 'main_chat', so a tag can't distinguish this
+            // tab from a console session.) Rows without a matching run just
+            // show the banner (fail closed — no auto-resume).
+            const approvalPayload = (approval.payload || null) as Record<string, unknown> | null;
+            const isChatOwnedRun = !!approval.run_id && messages.some((m) => m.runId === approval.run_id);
+            if (!isChatOwnedRun) return;
+            const payloadTool = approvalPayload?.tool;
+            const toolName = typeof payloadTool === 'string' && payloadTool ? payloadTool : 'the approved action';
+            // Multi-approve safety: queue + single combined continuation via
+            // the flush ref (declared next to the run pill state). Approvals
+            // granted mid-turn drain when the turn ends.
+            queuedApprovalResumesRef.current.push({ id: approval.id, tool: toolName });
+            flushQueuedApprovalResumesRef.current();
+          }}
+          onResolvedBatch={(batchApprovals, status) => {
+            // approval-batch: an "Approve all N" card delivers every resolved
+            // row in ONE callback so the whole bundle lands in a SINGLE
+            // combined continuation turn (per-row onResolved calls would
+            // dispatch the flush on the first row and split the batch into
+            // two continuations). Same fail-closed run-ownership gate as
+            // onResolved above: only rows whose run_id this chat surface
+            // originated auto-resume; foreign rows resolve without one.
+            if (status !== 'approved') return;
+            let queued = false;
+            for (const approval of batchApprovals) {
+              const isChatOwnedRun = !!approval.run_id && messages.some((m) => m.runId === approval.run_id);
+              if (!isChatOwnedRun) continue;
+              const approvalPayload = (approval.payload || null) as Record<string, unknown> | null;
+              const payloadTool = approvalPayload?.tool;
+              const toolName = typeof payloadTool === 'string' && payloadTool ? payloadTool : 'the approved action';
+              queuedApprovalResumesRef.current.push({ id: approval.id, tool: toolName });
+              queued = true;
+            }
+            if (queued) flushQueuedApprovalResumesRef.current();
+          }}
+        />
       ) : null}
 
       <EnhancedInput
@@ -7470,6 +15303,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         input={input}
         onInputChange={handleInputChange}
         onSend={sendMessage}
+        disabled={threadLoadState.status !== 'ready' || threadLoadState.threadId !== activeThreadId}
         webSearchEnabled={webSearchEnabled}
         onToggleWebSearch={handleToggleWebSearch}
         onFocusBot={() => {
@@ -7482,13 +15316,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         onModelChange={handleSessionModelChange}
         marketplaceModelGroups={marketplaceModelGroups}
         attachments={attachments}
+        hasStagedFiles={stagedFiles.length > 0}
         onPickImage={async () => {
+          const attachmentCircleId = circleId;
+          const attachmentThreadId = activeThreadId;
           const results = await pickAttachments();
-          if (results.length > 0) setAttachments(prev => [...prev, ...results]);
+          if (results.length === 0 || !attachmentThreadId) return;
+          if (
+            activeThreadScopeRef.current.circleId === attachmentCircleId
+            && activeThreadScopeRef.current.threadId === attachmentThreadId
+          ) {
+            setAttachments(prev => [...prev, ...results]);
+            return;
+          }
+          const saved = threadComposerSessionsRef.current.get(attachmentThreadId) || { attachments: [], stagedFiles: [] };
+          threadComposerSessionsRef.current.set(attachmentThreadId, {
+            ...saved,
+            attachments: [...saved.attachments, ...results],
+          });
         }}
         onRemoveAttachment={(id: string) => setAttachments(prev => prev.filter(a => a.id !== id))}
         chatMode={chatMode}
         onModeChange={setChatMode}
+        chatAgentTargets={chatAgentTargets}
+        selectedChatAgentTarget={selectedChatAgentTarget}
+        onSelectChatAgent={setSelectedChatAgentId}
+        onOpenAgentSetup={() => setSpawnModalOpen(true)}
         sessionProfile={sessionProfile}
         agentName={agentName}
         agentAvatarSource={agentAvatarSource}
@@ -7504,12 +15357,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setShowOpenSwanConsole(true);
         }}
         onResetMind={async () => {
+          const prompt = 'Reset OpenSwan\'s mind for this circle? This permanently deletes session memories and your user-scoped memories for this circle. The visible chat transcript will stay.';
+          const confirmed = Platform.OS === 'web'
+            ? window.confirm(prompt)
+            : await new Promise<boolean>((resolve) => {
+                import('react-native')
+                  .then(({ Alert }) => Alert.alert('Reset OpenSwan Mind', prompt, [
+                    { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+                    { text: 'Reset Mind', style: 'destructive', onPress: () => resolve(true) },
+                  ], { cancelable: true, onDismiss: () => resolve(false) }))
+                  .catch(() => resolve(false));
+              });
+          if (!confirmed) return false;
           const { resetAgentMind } = await import('../../../lib/swanbot');
           const { cleared } = await resetAgentMind(circleId);
-          setMessages([]);
-          addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}Starting fresh.`);
+          addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}The chat transcript is still here, but OpenSwan will start with fresh context.`);
+          return true;
         }}
-        onLocalBotMessage={(md: string) => addBotMessage(md)}
+        onLocalBotMessage={(md: string, extra?: ChatBotMessageExtra) => addBotMessage(md, undefined, extra)}
       />
       </KeyboardAvoidingView>
     </View>
@@ -7736,8 +15601,6 @@ function MessageRow({
   }, []);
 
   const messageStyle = Platform.OS === 'web' ? {
-    backdropFilter: hovered ? 'blur(8px)' : 'none',
-    backgroundColor: hovered ? (item.isBot ? accentColor + '08' : '#ffffff08') : 'transparent',
     transition: 'all 0.2s ease',
   } as any : {};
 
@@ -7808,7 +15671,26 @@ function MessageRow({
       )}
 
       <View style={styles.msgContentWrap}>
-        <View style={[styles.enhancedMsgBubble, item.isBot && { borderLeftColor: accentColor }]}>
+        <View
+          style={[
+            styles.enhancedMsgBubble,
+            item.isBot && {
+              borderColor: hovered ? accentColor : accentColor + 'aa',
+              backgroundColor: accentColor + '12',
+              ...(Platform.OS === 'web'
+                ? {
+                    boxShadow: `0 0 ${hovered ? '22px' : '14px'} ${accentColor}${hovered ? '55' : '2e'}`,
+                    transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
+                  } as any
+                : {
+                    shadowColor: accentColor,
+                    shadowOpacity: hovered ? 0.6 : 0.4,
+                    shadowRadius: hovered ? 16 : 11,
+                    shadowOffset: { width: 0, height: 0 },
+                  }),
+            },
+          ]}
+        >
           {renderContent(item)}
         </View>
         
@@ -8572,7 +16454,6 @@ const POPULAR_OPENROUTER_MODELS: ChatPickerModel[] = [
   { id: 'openrouter/deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', desc: '#6 OpenRouter weekly usage | deepseek | 870B tokens | +111% weekly', color: '#ef4444', icon: '6', group: 'popular', tags: ['speed', 'code'] },
   { id: 'openrouter/deepseek/deepseek-v3.2', label: 'DeepSeek V3.2', desc: '#7 OpenRouter weekly usage | deepseek | 809B tokens | -29% weekly', color: '#ef4444', icon: '7', group: 'popular', tags: ['code', 'text'] },
   { id: 'openrouter/minimax/minimax-m2.7', label: 'MiniMax M2.7', desc: '#8 OpenRouter weekly usage | minimax | 745B tokens | -1% weekly', color: '#fb7185', icon: '8', group: 'popular', tags: ['text', 'long'] },
-  { id: 'openrouter/x-ai/grok-4.1-fast', label: 'Grok 4.1 Fast', desc: '#9 OpenRouter weekly usage | x-ai | 719B tokens | +1% weekly', color: '#22d3ee', icon: '9', group: 'popular', tags: ['speed', 'web'] },
   { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', desc: '#10 OpenRouter weekly usage | deepseek | 652B tokens | +409% weekly', color: '#ef4444', icon: '10', group: 'popular', tags: ['reason', 'code'] },
   { id: 'openrouter/google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', desc: '#11 OpenRouter weekly usage | google | 645B tokens | +3% weekly', color: '#3b82f6', icon: '11', group: 'popular', tags: ['speed', 'vision'] },
   { id: 'openrouter/stepfun/step-3.5-flash', label: 'Step 3.5 Flash', desc: '#12 OpenRouter weekly usage | stepfun | 616B tokens | -27% weekly', color: '#22c55e', icon: '12', group: 'popular', tags: ['speed', 'text'] },
@@ -8625,35 +16506,58 @@ function popularRankingToChatModel(model: {
   };
 }
 
+const OPENROUTER_RANKINGS_FAILURE_KEY = 'openswan:openrouter_rankings_failed_until';
+const OPENROUTER_RANKINGS_FAILURE_COOLDOWN_MS = 60 * 60_000;
+
+function shouldRefreshOpenRouterRankings(): boolean {
+  try {
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    if (host === 'localhost' || host === '127.0.0.1') return false;
+    const failedUntil = Number(localStorage.getItem(OPENROUTER_RANKINGS_FAILURE_KEY) || 0);
+    return !Number.isFinite(failedUntil) || failedUntil <= Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function rememberOpenRouterRankingsFailure() {
+  try {
+    localStorage.setItem(OPENROUTER_RANKINGS_FAILURE_KEY, String(Date.now() + OPENROUTER_RANKINGS_FAILURE_COOLDOWN_MS));
+  } catch {}
+}
+
 const CHAT_MODELS: ChatPickerModel[] = [
   // ── Auto ──
-  // Default. Routes by detected intent + complexity:
-  //   casual / status     → Haiku 4.5 (cheap + fast)
-  //   question / debug    → Sonnet 4.6 (or Haiku if simple)
-  //   research / architect → Opus 4.7 (deep reasoning)
-  //   build / review      → Sonnet 4.6, Opus when complex
-  // Picks the cheapest model that meets the bar so the per-turn cost
-  // stays sane while one-off heavy turns still get the headroom.
-  { id: 'auto', label: 'Auto', desc: 'Defaults to Haiku — escalates to Opus only for research / architecture / heavy tasks', color: '#22c55e', icon: 'A', group: 'auto', tags: ['text', 'code', 'reason'] },
+  // Routes by detected intent + complexity, then lets SwanBot/OpenSwan
+  // activate tools, apps, and agents instead of bypassing the runtime.
+  { id: 'auto', label: 'Auto', desc: 'Picks the best connected model, then activates OpenSwan/tools/agents for the task.', color: '#22c55e', icon: 'A', group: 'auto', tags: ['text', 'code', 'reason'] },
   // ── Coding & Engineering ──
-  { id: 'claude-opus-4-6', label: 'Opus 4.6', desc: 'Best coder alive. Complex architecture.', color: '#a855f7', icon: 'O', group: 'code', tags: ['code', 'text', 'web'] },
+  { id: 'gpt-5.5', label: 'GPT-5.5', desc: 'OpenAI frontier. Professional coding, reasoning, and agent work.', color: '#10b981', icon: '55', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'gpt-5.5-pro', label: 'GPT-5.5 Pro', desc: 'Highest-compute GPT-5.5 for the hardest professional tasks.', color: '#059669', icon: '5P', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'claude-fable-5', label: 'Fable 5', desc: 'Claude top tier for demanding long-horizon agent work.', color: '#7c3aed', icon: 'F', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', desc: 'Claude Opus tier for complex architecture and agentic coding.', color: '#a855f7', icon: 'O', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7', desc: 'Claude Opus fallback for complex architecture.', color: '#a855f7', icon: 'O7', group: 'code', tags: ['code', 'text', 'web'] },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', desc: 'Fast coding. Great for iteration.', color: '#6366f1', icon: 'S', group: 'code', tags: ['code', 'text', 'web'] },
-  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'OpenAI flagship. Strong at code + reasoning.', color: '#10b981', icon: '5', group: 'code', tags: ['code', 'text', 'web'] },
-  { id: 'gpt-5.2', label: 'GPT-5.2', desc: 'Fast, reliable. Good balance.', color: '#10b981', icon: 'G', group: 'code', tags: ['code', 'text', 'web'] },
+  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'OpenAI affordable flagship for code and professional work.', color: '#10b981', icon: '54', group: 'code', tags: ['code', 'text', 'web'] },
+  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Strong mini model for coding, computer use, and subagents.', color: '#10b981', icon: '5m', group: 'code', tags: ['code', 'text', 'web'] },
   { id: 'codex-mini', label: 'Codex Mini', desc: 'Built for code. Cheap + fast.', color: '#10a37f', icon: 'Cx', group: 'code', tags: ['code'] },
   { id: 'deepseek-v3.2', label: 'DeepSeek V3.2', desc: 'MoE. Exceptional at code.', color: '#ef4444', icon: 'DS', group: 'code', tags: ['code', 'text'] },
   { id: 'qwen-3.5-coder', label: 'Qwen Coder', desc: 'Apache 2.0. Code specialist.', color: '#ec4899', icon: 'QC', group: 'code', tags: ['code'] },
 
   // ── Reasoning & Research ──
-  { id: 'o3', label: 'O3', desc: 'Deep reasoning. Math + science.', color: '#f59e0b', icon: 'o3', group: 'reason', tags: ['reason', 'code'] },
-  { id: 'o4-mini', label: 'O4 Mini', desc: 'Fast reasoning. Budget-friendly.', color: '#f59e0b', icon: 'o4', group: 'reason', tags: ['reason', 'code'] },
   { id: 'deepseek-r1', label: 'DeepSeek R1', desc: 'Chain-of-thought. Open source.', color: '#ef4444', icon: 'R1', group: 'reason', tags: ['reason', 'code'] },
-  { id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro', desc: 'Google. 2M context. Vision.', color: '#3b82f6', icon: 'G3', group: 'reason', tags: ['reason', 'vision', 'web'] },
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', desc: 'Google stable frontier model for agentic and coding tasks.', color: '#3b82f6', icon: 'G5', group: 'reason', tags: ['reason', 'vision', 'web'] },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', desc: 'Google preview. Advanced agentic and coding work.', color: '#3b82f6', icon: 'G3', group: 'reason', tags: ['reason', 'vision', 'web'] },
   { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', desc: 'Google. Long context king.', color: '#3b82f6', icon: 'Gm', group: 'reason', tags: ['reason', 'vision', 'web'] },
+  { id: 'sonar-deep-research', label: 'Sonar Deep Research', desc: 'Perplexity exhaustive web research with cited synthesis.', color: '#0ea5e9', icon: 'DR', group: 'reason', tags: ['reason', 'web', 'text'] },
+  { id: 'sonar-reasoning-pro', label: 'Sonar Reasoning Pro', desc: 'Perplexity search-grounded reasoning for structured answers.', color: '#0ea5e9', icon: 'SR', group: 'reason', tags: ['reason', 'web', 'text'] },
 
   // ── Speed & Cost ──
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', desc: 'Lightning fast. Cheapest Claude.', color: '#22d3ee', icon: 'H', group: 'speed', tags: ['text', 'code', 'web'] },
+  { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', desc: 'Google stable low-cost frontier-class speed.', color: '#3b82f6', icon: 'G1', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
   { id: 'gemini-2.5-flash', label: 'Gemini Flash', desc: 'Google. Fastest + free tier.', color: '#3b82f6', icon: 'Gf', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
+  { id: 'gemini-2.5-flash-lite', label: 'Gemini Flash-Lite', desc: 'Fastest budget model in the Gemini 2.5 family.', color: '#3b82f6', icon: 'Gl', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
+  { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano', desc: 'OpenAI cheapest GPT-5.4 class model for high-volume simple work.', color: '#10b981', icon: '5n', group: 'speed', tags: ['text', 'code'] },
   { id: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', desc: 'OpenAI cheapest. Edge tasks.', color: '#10b981', icon: 'Gn', group: 'speed', tags: ['text', 'code'] },
   { id: 'qwen-3.5-flash', label: 'Qwen Flash', desc: 'Fast. Free tier on Alibaba.', color: '#ec4899', icon: 'Qf', group: 'speed', tags: ['text', 'code'] },
 
@@ -8741,136 +16645,12 @@ function modelSectionAccent(sectionKey: string, fallback = '#22d3ee'): string {
   return MODEL_SECTION_FALLBACK_COLORS[hash % MODEL_SECTION_FALLBACK_COLORS.length] || fallback;
 }
 
-const MODEL_ROUTE_PREFIXES = new Set([
-  'anthropic',
-  'openai',
-  'openai_compatible',
-  'openrouter',
-  'google',
-  'google_ai',
-  'groq',
-  'mistral_ai',
-  'cohere',
-  'perplexity',
-  'together_ai',
-  'fireworks_ai',
-  'deepseek',
-  'z_ai',
-  'zai',
-  'minimax',
-  'huggingface',
-  'hugging_face',
-  'huggingface_endpoint',
-  'ollama',
-  'replicate',
-  'accounts',
-  'models',
-]);
-
-const MODEL_AUTHOR_SEGMENTS = new Set([
-  'anthropic',
-  'openai',
-  'google',
-  'deepseek',
-  'moonshotai',
-  'tencent',
-  'minimax',
-  'x-ai',
-  'nvidia',
-  'inclusionai',
-  'stepfun',
-  'z-ai',
-  'qwen',
-  'meta-llama',
-  'mistralai',
-  'fireworks',
-  'cswan801',
-]);
-
-function modelDisplayToken(token: string): string {
-  const lower = token.toLowerCase();
-  const brandMap: Record<string, string> = {
-    ai: 'AI',
-    api: 'API',
-    bm: 'BM',
-    claude: 'Claude',
-    codex: 'Codex',
-    deepseek: 'DeepSeek',
-    flash: 'Flash',
-    gemini: 'Gemini',
-    glm: 'GLM',
-    gpt: 'GPT',
-    grok: 'Grok',
-    haiku: 'Haiku',
-    kimi: 'Kimi',
-    llama: 'Llama',
-    minimax: 'MiniMax',
-    mistral: 'Mistral',
-    nemotron: 'Nemotron',
-    opus: 'Opus',
-    oss: 'OSS',
-    qwen: 'Qwen',
-    sonar: 'Sonar',
-    sonnet: 'Sonnet',
-    v: 'V',
-  };
-  if (brandMap[lower]) return brandMap[lower];
-  if (/^gpt$/i.test(token)) return 'GPT';
-  if (/^o\d+$/i.test(token)) return token.toUpperCase();
-  if (/^\d+[a-z]+$/i.test(token)) return token.toUpperCase();
-  if (/^[a-z]+[0-9.]+[a-z0-9.]*$/i.test(token)) {
-    return token.charAt(0).toUpperCase() + token.slice(1);
-  }
-  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
-}
-
-function compactVersionTokens(tokens: string[]): string[] {
-  const compacted: string[] = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    const current = tokens[i];
-    if (/^\d+$/.test(current) && /^\d+$/.test(tokens[i + 1] || '')) {
-      compacted.push(`${current}.${tokens[i + 1]}`);
-      i += 1;
-    } else {
-      compacted.push(current);
-    }
-  }
-  return compacted;
-}
-
-function autoModelDisplayName(modelId?: string | null): string | null {
-  if (!modelId) return null;
-  const withoutQuery = modelId.split(/[?#]/, 1)[0];
-  const parts = withoutQuery
-    .split('/')
-    .map((part) => part.trim())
-    .filter(Boolean);
-  let modelPart = parts[parts.length - 1] || withoutQuery;
-  if (parts.length > 1) {
-    for (let i = parts.length - 1; i >= 0; i -= 1) {
-      const part = parts[i];
-      const normalized = part.toLowerCase();
-      if (!MODEL_ROUTE_PREFIXES.has(normalized) && !MODEL_AUTHOR_SEGMENTS.has(normalized)) {
-        modelPart = part;
-        break;
-      }
-    }
-  }
-  const cleaned = modelPart
-    .replace(/:[a-z0-9_-]+$/i, '')
-    .replace(/\b(20\d{6}|20\d{4})\b/g, '')
-    .replace(/[_:.]+/g, '-')
-    .replace(/([a-z])([A-Z])/g, '$1-$2')
-    .trim();
-  const rawTokens = cleaned
-    .split(/[-\s]+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .filter((token) => !MODEL_ROUTE_PREFIXES.has(token.toLowerCase()) && !MODEL_AUTHOR_SEGMENTS.has(token.toLowerCase()));
-  const tokens = compactVersionTokens(rawTokens);
-  const label = tokens.map(modelDisplayToken).join(' ').replace(/\s+/g, ' ').trim();
-  return label || modelDisplayToken(cleaned || modelId);
-}
+// Model-display helpers (MODEL_ROUTE_PREFIXES, MODEL_AUTHOR_SEGMENTS,
+// modelDisplayToken, compactVersionTokens, autoModelDisplayName) extracted
+// verbatim to the pure, smoke-tested src/lib/chatModelDisplayCore.ts
+// (decomposition unit U4); autoModelDisplayName is imported above. The two
+// Platform-coupled style fns (modelSectionHoverStyle / modelSectionTransitionStyle)
+// stay below, in ChatTab.
 
 function modelSectionHoverStyle(color: string, hovered: boolean) {
   if (!hovered) return null;
@@ -9340,10 +17120,15 @@ function EnhancedInput({
   marketplaceModelGroups: marketplaceModelGroupsProp,
   onQuickAction,
   attachments,
+  hasStagedFiles,
   onPickImage,
   onRemoveAttachment,
   chatMode,
   onModeChange,
+  chatAgentTargets = [],
+  selectedChatAgentTarget,
+  onSelectChatAgent,
+  onOpenAgentSetup,
   agentName,
   agentAvatarSource,
   sessionProfile,
@@ -9363,6 +17148,7 @@ function EnhancedInput({
   currentRunStep,
   webSearchEnabled,
   onToggleWebSearch,
+  disabled: composerDisabled = false,
 }: any) {
   const [focused, setFocused] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -9394,6 +17180,8 @@ function EnhancedInput({
   const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popularRankingsLoadedRef = useRef(false);
+  const modeTriggerRef = useRef<any>(null);
+  const modeCloseRef = useRef<any>(null);
 
   // Load custom models on mount
   React.useEffect(() => {
@@ -9407,6 +17195,7 @@ function EnhancedInput({
   React.useEffect(() => {
     if (!showModelPicker || popularRankingsLoadedRef.current) return;
     popularRankingsLoadedRef.current = true;
+    if (!shouldRefreshOpenRouterRankings()) return;
     let cancelled = false;
 
     supabase.functions.invoke('openrouter-rankings', { body: { limit: 20 } })
@@ -9418,7 +17207,8 @@ function EnhancedInput({
         }
       })
       .catch((error) => {
-        console.warn('[ChatTab] OpenRouter popular ranking refresh failed; using seeded list.', error);
+        rememberOpenRouterRankingsFailure();
+        console.debug?.('[ChatTab] OpenRouter popular ranking refresh failed; using seeded list.', error);
       });
 
     return () => {
@@ -9448,6 +17238,11 @@ function EnhancedInput({
   const slashCommands = useMemo(() => getMatchingChatSlashCommands(input), [input]);
   const slashToken = input.trimStart().split(/\s+/, 1)[0] || '';
   const showSlashCommands = focused && /^\/[^\s]*$/.test(slashToken) && slashCommands.length > 0;
+  const canSend = !composerDisabled && Boolean(input.trim() || (attachments && attachments.length > 0) || hasStagedFiles);
+  // Keep deterministic command parsing available, but do not surface the
+  // predictive chip panel in the main chat composer.
+  const predictiveCommands = useMemo<PredictiveChatCommand[]>(() => [], []);
+  const showPredictiveCommands = false;
   const openControlPanelWith = useCallback((seed = '') => {
     const draft = String(input || '').trim();
     const task = seed
@@ -9465,6 +17260,22 @@ function EnhancedInput({
     if (!showModePicker) setShowControlAdvanced(false);
   }, [showModePicker]);
 
+  useEffect(() => {
+    if (!showModePicker || Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const focusFrame = requestAnimationFrame(() => modeCloseRef.current?.focus?.());
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setShowModePicker(false);
+      requestAnimationFrame(() => modeTriggerRef.current?.focus?.());
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [showModePicker]);
+
   const applySlashCommand = useCallback((command: ChatSlashCommand) => {
     if (blurTimeoutRef.current) {
       clearTimeout(blurTimeoutRef.current);
@@ -9472,6 +17283,18 @@ function EnhancedInput({
     }
     onInputChange(command.insertText);
     setHighlightedSlashIndex(0);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [inputRef, onInputChange]);
+
+  const applyPredictiveCommand = useCallback((command: PredictiveChatCommand) => {
+    if (blurTimeoutRef.current) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = null;
+    }
+    onInputChange(command.text);
+    setShowQuickActions(false);
+    setShowModelPicker(false);
+    setShowModePicker(false);
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [inputRef, onInputChange]);
 
@@ -9494,27 +17317,14 @@ function EnhancedInput({
         return;
       }
     }
-    // Tab toggles OpenSwan mode between `plan` (read-only by the
-    // dispatcher gate) and `execute` (act). Only fires when the slash
-    // palette is closed and the input is empty so it doesn't steal Tab
-    // from completion flows.
-    if (
-      Platform.OS === 'web' &&
-      e.nativeEvent?.key === 'Tab' &&
-      !e.nativeEvent?.shiftKey &&
-      !showSlashCommands &&
-      !input.trim() &&
-      onModeChange
-    ) {
-      e.preventDefault?.();
-      onModeChange(chatMode === 'plan' ? 'execute' : 'plan');
-      return;
-    }
+    // Bare Tab is intentionally not handled here. On web it must remain the
+    // browser's focus-navigation key; changing execution policy is only
+    // available through the explicit mode controls.
     if (Platform.OS === 'web' && e.nativeEvent?.key === 'Enter' && !e.nativeEvent?.shiftKey) {
       e.preventDefault?.();
-      if (input.trim()) onSend();
+      if (canSend) onSend();
     }
-  }, [applySlashCommand, highlightedSlashIndex, input, onSend, showSlashCommands, slashCommands, chatMode, onModeChange]);
+  }, [applySlashCommand, highlightedSlashIndex, onSend, showSlashCommands, slashCommands, canSend]);
 
   const allModels = [...CHAT_MODELS, ...popularModels, ...customModels];
   const marketplaceModelOptions = useMemo(() => {
@@ -9669,6 +17479,11 @@ function EnhancedInput({
         route?.intent,
         providerSetForTurn,
         route?.complexity,
+        // P12 fix: the picker preview must use the SAME hint as send-time
+        // resolution, or the dropdown shows a different model than the one
+        // that actually runs (BlackSwan app-question lane).
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+        draft,
       );
       return resolved;
     } catch {
@@ -9680,18 +17495,69 @@ function EnhancedInput({
     if (!autoResolvedModel) return null;
     return autoModelDisplayName(autoResolvedModel);
   }, [autoResolvedModel]);
+  // Auto defaults to Claude Sonnet; the routing ladder now RECOMMENDS an
+  // alternative (cheaper/specialist) instead of silently switching. Manual
+  // weak-tier picks get a Sonnet recommendation for action-shaped drafts.
+  const modelRecommendation = useMemo(() => {
+    try {
+      const draft = (input || '').trim();
+      if (selectedModel !== 'auto') {
+        return suggestModelForManualPick(selectedModel, draft);
+      }
+      const route = draft.length > 0
+        ? analyzeMessageRouting(draft, 'main_chat').route
+        : null;
+      const providerSetForTurn = looksLikeActionRequest(draft)
+        ? new Set(Array.from(connectedProviderSet).filter((provider) => provider !== 'blackswan'))
+        : connectedProviderSet;
+      return suggestAutoModelAlternative(
+        (sessionProfile as any) || 'senior',
+        route?.intent,
+        providerSetForTurn,
+        route?.complexity,
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+        draft,
+      );
+    } catch {
+      return null;
+    }
+  }, [selectedModel, input, sessionProfile, connectedProviderSet]);
+  const autoModelReason = useMemo(() => {
+    if (selectedModel !== 'auto') return null;
+    if (modelRecommendation) {
+      return `Tip: ${autoModelDisplayName(modelRecommendation.model)} — ${modelRecommendation.reason} Tap to use it.`;
+    }
+    return 'Sonnet is the Auto default; lighter or specialist models are suggested here when they fit better.';
+  }, [selectedModel, modelRecommendation]);
+  const activeModeConfig = CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk')) || CHAT_MODE_CONFIG[0];
+  const controlAccent = selectedChatAgentTarget?.color || activeModeConfig?.color || accentColor;
+  const draftText = String(input || '').trim();
+  const connectedAgentCount = chatAgentTargets.filter((target: ChatAgentTarget<AssignableAgent>) => target.connected).length;
+  const activePluginCount = Array.isArray(activePlugins) ? activePlugins.length : 0;
+  const selectedAgentPresentation = resolveChatAgentSelectorPresentation(chatMode, selectedChatAgentTarget);
+  // Availability and OpenSwan route activity are different state domains.
+  // Reuse the route-aware presentation here as well as in the compact trigger
+  // so the expanded control center cannot say Agent "active" beside Mode Off.
+  const selectedAgentStatusLabel = selectedAgentPresentation.stateLabel;
+  const selectedAgentDescription = selectedChatAgentTarget
+    ? selectedChatAgentTarget.connected
+      ? selectedChatAgentTarget.description
+      : selectedChatAgentTarget.setupHint || 'Connect this agent to route chat work.'
+    : 'Default OpenSwan routing with tools, memory, browser, and desktop support.';
+  const modelRouteLabel = selectedModel === 'auto'
+    ? autoResolvedShortLabel
+      ? `Auto -> ${autoResolvedShortLabel}`
+      : 'Auto routing'
+    : currentModel?.label || selectedModel || 'Selected model';
+  const draftStateLabel = draftText ? 'Draft loaded' : 'No draft';
+  const draftStateDetail = draftText
+    ? `${Math.min(draftText.length, 9999)} chars ready for handoff`
+    : 'Ready for a new task.';
   const soulActions = getMainChatSessionActions(sessionProfile || 'senior');
-  const controlStatusLabel = currentRunStep?.trim()
-    || (runStatus === 'running' ? 'thinking'
-      : runStatus === 'delegated' ? 'delegating'
-      : runStatus === 'waiting_approval' ? 'awaiting approval'
-      : 'ready');
-  const accordionCategories = [
-    { key: 'commands', category: PROMPT_CATEGORIES[0] },
-    { key: 'create', category: PROMPT_CATEGORIES[1] },
-    { key: 'publish', category: PROMPT_CATEGORIES[2] },
-    { key: 'wallet', category: PROMPT_CATEGORIES[3] },
-  ];
+  const accordionCategories = PROMPT_CATEGORIES.map((category) => ({
+    key: category.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
+    category,
+  }));
 
   const renderAutoModelAction = () => {
     const model = autoModelOption;
@@ -9725,7 +17591,7 @@ function EnhancedInput({
           <Text style={[styles.dropdownItemIconText, { color: sectionColor }]}>{model.icon}</Text>
         </View>
         <View style={styles.dropdownItemText}>
-          <Text style={[styles.dropdownItemLabel, { color: sectionColor }]}>
+          <Text style={[styles.dropdownItemLabel, { color: sectionColor }]} numberOfLines={1} ellipsizeMode="tail">
             {model.label}
             {autoResolvedShortLabel ? (
               <Text style={{ color: '#94a3b8', fontWeight: '500', fontSize: 11 }}>{`  ->  ${autoResolvedShortLabel}`}</Text>
@@ -10028,7 +17894,7 @@ function EnhancedInput({
             <View style={[styles.modelIconBox, { backgroundColor: currentModel.color + '20' }]}>
               <Text style={[styles.modelIconText, { color: currentModel.color }]}>{currentModel.icon}</Text>
             </View>
-            <Text style={[styles.modelButtonLabel, { color: currentModel.color }]}>
+            <Text style={[styles.modelButtonLabel, { color: currentModel.color }]} numberOfLines={1} ellipsizeMode="tail">
               {currentModel.label}
               {selectedModel === 'auto' && autoResolvedShortLabel ? (
                 <Text style={{ color: '#94a3b8', fontWeight: '500' }}>{` → ${autoResolvedShortLabel}`}</Text>
@@ -10260,62 +18126,176 @@ function EnhancedInput({
         {/* Mode Selector Dropdown */}
         <View style={{ position: 'relative' as const }}>
           <Pressable
+            ref={modeTriggerRef}
             onPress={() => { setShowModePicker(!showModePicker); setShowModelPicker(false); setShowQuickActions(false); }}
             accessibilityRole="button"
-            accessibilityLabel="Open OpenSwan control center"
+            accessibilityLabel="Open agent and OpenSwan control center"
+            accessibilityState={{ expanded: showModePicker }}
+            {...(Platform.OS === 'web' ? {
+              'aria-expanded': showModePicker,
+              'aria-haspopup': 'dialog',
+              'aria-controls': 'openswan-control-center-popup',
+            } as any : {})}
             style={({ hovered, pressed }: any) => [
               styles.modelButton,
-              { borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '50' },
+              styles.openswanTriggerButton,
+              { borderColor: controlAccent + '50' },
               hovered && {
-                borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '80',
-                backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '14',
-                ...(Platform.OS === 'web' ? { boxShadow: `0 10px 28px ${(CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor)}22`, transform: 'translateY(-1px)' } as any : {}),
+                borderColor: controlAccent + '80',
+                backgroundColor: controlAccent + '14',
+                ...(Platform.OS === 'web' ? { boxShadow: `0 10px 28px ${controlAccent}22`, transform: 'translateY(-1px)' } as any : {}),
               },
               pressed && { transform: [{ scale: 0.985 }] },
               ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
             ]}
           >
-            <View style={[styles.modelIconBox, { backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '20' }]}>
-              <Text style={[styles.modelIconText, { color: CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor }]}>
-                OS
+            <View style={[styles.modelIconBox, { backgroundColor: controlAccent + '20' }]}>
+              <Text style={[styles.modelIconText, { color: controlAccent }]}>
+                {selectedChatAgentTarget?.icon || 'OS'}
               </Text>
             </View>
-            <Text style={[styles.modelButtonLabel, { color: CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor }]}>
-              OpenSwan
-            </Text>
+            <View style={styles.openswanTriggerCopy}>
+              <Text
+                style={[styles.modelButtonLabel, styles.openswanTriggerLabel, { color: controlAccent }]}
+                numberOfLines={1}
+              >
+                {selectedChatAgentTarget?.label || 'OpenSwan'}
+              </Text>
+              <Text style={styles.openswanTriggerMeta} numberOfLines={1}>
+                {selectedAgentPresentation.summaryLabel}
+              </Text>
+            </View>
             <Text style={styles.modelChevron}>{showModePicker ? '▲' : '▼'}</Text>
           </Pressable>
 
           {showModePicker && (
-            <AnimatedPopup style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
-              <Text style={styles.dropdownTitle}>OpenSwan Control Panel</Text>
-              <View style={styles.controlCenterStatusBand}>
-                <View style={styles.controlCenterStatusHeader}>
-                  <View style={[styles.liveMiniDot, { backgroundColor: runStatus === 'idle' ? '#22c55e' : runStatus === 'waiting_approval' ? '#f59e0b' : '#6366f1' }]} />
-                  <Text style={styles.controlCenterStatusLabel}>STATUS</Text>
+            <AnimatedPopup
+              nativeID="openswan-control-center-popup"
+              accessibilityLabel="OpenSwan control center"
+              {...(Platform.OS === 'web' ? {
+                role: 'dialog',
+                'aria-label': 'OpenSwan control center',
+              } as any : {})}
+              style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}
+            >
+              <View style={styles.controlPanelHeader}>
+                <View style={[styles.controlPanelHeaderIcon, { backgroundColor: controlAccent + '20', borderColor: controlAccent + '55' }]}>
+                  <Text style={[styles.controlPanelHeaderIconText, { color: controlAccent }]}>OS</Text>
                 </View>
-                <Text style={styles.controlCenterStatusValue} numberOfLines={2}>{controlStatusLabel}</Text>
+                <View style={styles.controlPanelHeaderCopy}>
+                  <Text style={styles.controlPanelEyebrow}>OpenSwan Control</Text>
+                  <Text style={styles.controlPanelHeading} numberOfLines={1}>
+                    Route work from chat
+                  </Text>
+                </View>
+                <Pressable
+                  ref={modeCloseRef}
+                  onPress={() => {
+                    setShowModePicker(false);
+                    requestAnimationFrame(() => modeTriggerRef.current?.focus?.());
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close OpenSwan controls"
+                  style={({ hovered, pressed }: any) => [
+                    styles.controlPanelCloseButton,
+                    hovered && { borderColor: '#475569', backgroundColor: '#111827' },
+                    pressed && { transform: [{ scale: 0.95 }] },
+                    Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
+                  ]}
+                >
+                  <Text style={styles.controlPanelCloseText}>x</Text>
+                </Pressable>
               </View>
+              <View style={styles.controlPanelSummaryGrid}>
+                <View style={[styles.controlPanelSummaryItem, { borderColor: controlAccent + '3d' }]}>
+                  <Text style={styles.controlPanelSummaryLabel}>Agent</Text>
+                  <Text style={[styles.controlPanelSummaryValue, { color: controlAccent }]} numberOfLines={1}>
+                    {selectedChatAgentTarget?.label || 'OpenSwan'}
+                  </Text>
+                  <Text style={styles.controlPanelSummaryDetail} numberOfLines={1}>{selectedAgentStatusLabel}</Text>
+                </View>
+                <View style={[styles.controlPanelSummaryItem, { borderColor: (activeModeConfig?.color || accentColor) + '3d' }]}>
+                  <Text style={styles.controlPanelSummaryLabel}>Mode</Text>
+                  <Text style={[styles.controlPanelSummaryValue, { color: activeModeConfig?.color || accentColor }]} numberOfLines={1}>
+                    {activeModeConfig?.label || 'OpenSwan'}
+                  </Text>
+                  <Text style={styles.controlPanelSummaryDetail} numberOfLines={1}>
+                    {runStatus === 'waiting_approval' ? 'approval needed' : runStatus === 'running' || runStatus === 'delegated' ? 'run active' : 'ready'}
+                  </Text>
+                </View>
+                <View style={styles.controlPanelSummaryItem}>
+                  <Text style={styles.controlPanelSummaryLabel}>Model</Text>
+                  <Text style={styles.controlPanelSummaryValue} numberOfLines={1}>{modelRouteLabel}</Text>
+                  <Text style={styles.controlPanelSummaryDetail} numberOfLines={1}>
+                    {selectedModel === 'auto' ? 'resolved live' : 'manual pick'}
+                  </Text>
+                </View>
+                <View style={[styles.controlPanelSummaryItem, draftText ? { borderColor: '#22c55e55' } : null]}>
+                  <Text style={styles.controlPanelSummaryLabel}>{draftStateLabel}</Text>
+                  <Text style={styles.controlPanelSummaryValue} numberOfLines={1}>
+                    {draftText ? 'Ready' : 'Start point'}
+                  </Text>
+                  <Text style={styles.controlPanelSummaryDetail} numberOfLines={1}>{draftStateDetail}</Text>
+                </View>
+              </View>
+              {selectedModel === 'auto' && (autoResolvedShortLabel || autoModelReason) ? (
+                <View style={styles.controlAutoRouteBand}>
+                  <View style={styles.controlCenterStatusHeader}>
+                    <View style={[styles.liveMiniDot, { backgroundColor: '#f59e0b' }]} />
+                    <Text style={styles.controlCenterStatusLabel}>AUTO ROUTE</Text>
+                  </View>
+                  <Text style={styles.controlAutoRouteValue} numberOfLines={1}>
+                    Auto{autoResolvedShortLabel ? ` -> ${autoResolvedShortLabel}` : ''}
+                  </Text>
+                  {autoModelReason ? (
+                    <Pressable
+                      disabled={!modelRecommendation}
+                      onPress={() => { if (modelRecommendation) onModelChange(modelRecommendation.model); }}
+                      accessibilityRole="button"
+                      accessibilityLabel={modelRecommendation ? `Switch to ${modelRecommendation.model}` : 'Auto route detail'}
+                    >
+                      <Text style={styles.controlAutoRouteReason} numberOfLines={2}>{autoModelReason}</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+              {selectedModel !== 'auto' && modelRecommendation ? (
+                <View style={styles.controlAutoRouteBand}>
+                  <View style={styles.controlCenterStatusHeader}>
+                    <View style={[styles.liveMiniDot, { backgroundColor: '#f59e0b' }]} />
+                    <Text style={styles.controlCenterStatusLabel}>MODEL TIP</Text>
+                  </View>
+                  <Pressable
+                    onPress={() => onModelChange(modelRecommendation.model)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Switch to ${modelRecommendation.model}`}
+                  >
+                    <Text style={styles.controlAutoRouteReason} numberOfLines={3}>
+                      {modelRecommendation.reason} Tap to switch.
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
               <Pressable
                 onPress={() => openControlPanelWith('')}
                 accessibilityRole="button"
                 accessibilityLabel="Open OpenSwan Control Panel"
                 style={({ hovered, pressed }: any) => [
                   styles.controlPanelPrimaryAction,
-                  { borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '70' },
+                  { borderColor: controlAccent + '70' },
                   hovered && {
-                    borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor),
-                    backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '18',
+                    borderColor: controlAccent,
+                    backgroundColor: controlAccent + '18',
                   },
                   pressed && { transform: [{ scale: 0.99 }] },
                 ]}
               >
                 <View style={{ flex: 1 }}>
                   <Text style={styles.controlPanelPrimaryTitle}>
-                    {input.trim() ? 'Open draft in Control Panel' : 'Open Control Panel'}
+                    {draftText ? 'Open draft in full panel' : 'Open full control panel'}
                   </Text>
                   <Text style={styles.controlPanelPrimaryDesc}>
-                    Intent routing, access readiness, cost preview, tools, memory, and live runs.
+                    Check readiness, approvals, tools, memory, cost, and live run trace.
                   </Text>
                 </View>
                 <Text style={styles.controlPanelPrimaryArrow}>›</Text>
@@ -10339,6 +18319,100 @@ function EnhancedInput({
                   </Pressable>
                 ))}
               </View>
+              <View style={styles.controlAgentSection}>
+                <View style={styles.controlAgentSectionHeader}>
+                  <View style={styles.controlAgentSectionTitleWrap}>
+                    <Text style={styles.controlAgentSectionTitle}>Agents</Text>
+                    <Text style={styles.controlAgentSectionSubtitle} numberOfLines={1}>
+                      {selectedAgentDescription}
+                    </Text>
+                  </View>
+                  <Text style={styles.controlAgentSectionMeta}>{connectedAgentCount} connected</Text>
+                </View>
+                {chatAgentTargets.length > 0 ? (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.controlAgentRail}
+                  >
+                    {chatAgentTargets.map((target: ChatAgentTarget<AssignableAgent>) => {
+                      const isActive = selectedChatAgentTarget?.id === target.id;
+                      const statusColor = target.status === 'active' || target.status === 'building'
+                        ? '#22c55e'
+                        : target.status === 'idle'
+                          ? '#f59e0b'
+                          : target.status === 'setup_required'
+                            ? '#64748b'
+                            : '#ef4444';
+                      return (
+                        <Pressable
+                          key={target.id}
+                          onPress={() => {
+                            if (target.connected) {
+                              onSelectChatAgent?.(target.id);
+                              setShowModePicker(false);
+                              return;
+                            }
+                            onLocalBotMessage?.(buildChatAgentSetupMessage(target), {
+                              localOnly: true,
+                              durability: 'ephemeral',
+                              source: {
+                                actor: 'OpenSwan',
+                                surface: 'chat_agent_selector_setup',
+                                provider: target.provider,
+                                selectedModel,
+                              },
+                            });
+                            setShowModePicker(false);
+                            onOpenAgentSetup?.();
+                          }}
+                          accessibilityRole="button"
+                          accessibilityLabel={target.connected ? `Use ${target.label} for chat tasks` : `Connect ${target.label}`}
+                          accessibilityState={{ selected: isActive }}
+                          {...(Platform.OS === 'web' ? { 'aria-pressed': isActive } as any : {})}
+                          style={({ hovered, pressed }: any) => [
+                            styles.controlAgentCard,
+                            {
+                              borderColor: isActive ? `${target.color}88` : `${target.color}30`,
+                              backgroundColor: isActive ? `${target.color}18` : '#0f172a',
+                            },
+                            hovered && { borderColor: `${target.color}99`, backgroundColor: `${target.color}14` },
+                            pressed && { transform: [{ scale: 0.985 }] },
+                            Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
+                          ]}
+                        >
+                          <View style={styles.controlAgentCardHeader}>
+                            <View style={[styles.controlAgentIcon, { backgroundColor: `${target.color}22` }]}>
+                              <Text style={[styles.controlAgentIconText, { color: target.color }]} numberOfLines={1}>
+                                {target.icon}
+                              </Text>
+                            </View>
+                            <View style={[styles.liveMiniDot, { backgroundColor: statusColor }]} />
+                          </View>
+                          <Text style={[styles.controlAgentName, isActive && { color: target.color }]} numberOfLines={1}>
+                            {target.label}
+                          </Text>
+                          <Text style={styles.controlAgentDesc} numberOfLines={2}>
+                            {target.connected
+                              ? target.description
+                              : 'Connect to use from chat'}
+                          </Text>
+                          <Text style={[styles.controlAgentStatus, { color: statusColor }]} numberOfLines={1}>
+                            {target.connected ? target.status.replace('_', ' ') : 'setup'}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                ) : (
+                  <View style={styles.controlAgentEmpty}>
+                    <Text style={styles.controlAgentEmptyText}>OpenSwan is the active chat route.</Text>
+                  </View>
+                )}
+                <Text style={styles.controlAgentSelectedLabel} numberOfLines={1}>
+                  Current: {selectedChatAgentTarget?.label || 'OpenSwan'}
+                </Text>
+              </View>
               <Pressable
                 onPress={() => setShowControlAdvanced((v) => !v)}
                 style={({ hovered, pressed }: any) => [
@@ -10348,6 +18422,8 @@ function EnhancedInput({
                 ]}
                 accessibilityRole="button"
                 accessibilityLabel={showControlAdvanced ? 'Hide OpenSwan advanced controls' : 'Show OpenSwan advanced controls'}
+                accessibilityState={{ expanded: showControlAdvanced }}
+                {...(Platform.OS === 'web' ? { 'aria-expanded': showControlAdvanced } as any : {})}
               >
                 <Text style={styles.controlAdvancedToggleText}>
                   {showControlAdvanced ? 'Hide advanced controls' : 'Show advanced controls'}
@@ -10366,7 +18442,7 @@ function EnhancedInput({
                   <Text style={styles.controlCenterStatLabel}>memory</Text>
                 </View>
                 <View style={styles.controlCenterStatPill}>
-                  <Text style={styles.controlCenterStatValue}>{activePlugins?.length || 0}</Text>
+                  <Text style={styles.controlCenterStatValue}>{activePluginCount}</Text>
                   <Text style={styles.controlCenterStatLabel}>plugins</Text>
                 </View>
                 <View style={styles.controlCenterStatPill}>
@@ -10397,6 +18473,8 @@ function EnhancedInput({
               <View style={styles.controlCenterGrid}>
                 <Pressable
                   onPress={() => { onOpenPlugins?.(); setShowModePicker(false); }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open plugins, ${activePluginCount} active`}
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -10410,11 +18488,13 @@ function EnhancedInput({
                   </View>
                   <View style={styles.dropdownItemText}>
                     <Text style={styles.dropdownItemLabel}>Plugins</Text>
-                    <Text style={styles.dropdownItemDesc}>{activePlugins.length} active</Text>
+                    <Text style={styles.dropdownItemDesc}>{activePluginCount} active</Text>
                   </View>
                 </Pressable>
                 <Pressable
                   onPress={() => { onOpenMemory?.(); setShowModePicker(false); }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open OpenSwan memory"
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -10436,6 +18516,8 @@ function EnhancedInput({
                     onToggleBuilder?.();
                     setShowModePicker(false);
                   }}
+                  accessibilityRole="button"
+                  accessibilityLabel={showWorkbenchSidecar ? 'Open live Builder studio' : hasBuilderWork ? 'Open last Builder build' : 'Open Builder studio'}
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -10456,9 +18538,12 @@ function EnhancedInput({
                 </Pressable>
                 <Pressable
                   onPress={async () => {
-                    await onResetMind?.();
-                    setShowModePicker(false);
+                    const didReset = await onResetMind?.();
+                    if (didReset !== false) setShowModePicker(false);
                   }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Reset OpenSwan mind"
+                  accessibilityHint="Requires confirmation before deleting memories"
                   style={({ hovered, pressed }: any) => [
                     styles.dropdownItem,
                     styles.controlCenterCard,
@@ -10485,6 +18570,8 @@ function EnhancedInput({
                     onPress={() => { onModeChange?.(m.key); setShowModePicker(false); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Select ${m.label} mode`}
+                    accessibilityState={{ selected: isActive }}
+                    {...(Platform.OS === 'web' ? { 'aria-pressed': isActive } as any : {})}
                     style={({ hovered, pressed }: any) => [
                       styles.dropdownItem,
                       isActive && { backgroundColor: m.color + '18', borderColor: m.color + '40' },
@@ -10500,10 +18587,10 @@ function EnhancedInput({
                       <Text style={[styles.controlCenterModeLabel, isActive && { color: m.color }]}>{m.label}</Text>
                       <Text style={styles.controlCenterModeDesc}>{m.desc}</Text>
                     </View>
-	                    {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: m.color }]} />}
-	                  </Pressable>
-	                );
-	              })}
+                    {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: m.color }]} />}
+                  </Pressable>
+                );
+              })}
                 </>
               ) : null}
             </AnimatedPopup>
@@ -10522,7 +18609,30 @@ function EnhancedInput({
         )}
         <DesktopBridgeStatusChip
           accentColor={accentColor}
-          onMessage={(md) => onLocalBotMessage?.(md)}
+          onMessage={(payload) => {
+            if (typeof payload === 'string') {
+              onLocalBotMessage?.(payload, {
+                localOnly: true,
+                source: {
+                  actor: 'OpenSwan',
+                  surface: 'desktop_bridge_status_chip',
+                  selectedModel,
+                  effectiveModel: 'local-desktop-bridge',
+                },
+              });
+              return;
+            }
+            onLocalBotMessage?.(payload.content, {
+              localOnly: true,
+              recoveryOptions: payload.recoveryOptions,
+              source: {
+                actor: 'OpenSwan',
+                surface: 'desktop_bridge_status_chip',
+                selectedModel,
+                effectiveModel: 'local-desktop-bridge',
+              },
+            });
+          }}
         />
         <ChatCostFooter circleId={composerCircleId} accentColor={accentColor} />
       </View>
@@ -10553,26 +18663,70 @@ function EnhancedInput({
         </ScrollView>
       )}
 
+      {showPredictiveCommands && (
+        <View style={styles.predictiveCommandPanel}>
+          <View style={styles.predictiveCommandHeader}>
+            <Text style={styles.predictiveCommandTitle}>Predictive commands</Text>
+            <Text style={styles.predictiveCommandSubtitle}>
+              {predictiveCommands.some((cmd) => cmd.source === 'next_step') ? 'Next likely Adobe step' : 'Deterministic desktop routes'}
+            </Text>
+          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.predictiveCommandRow}>
+            {predictiveCommands.map((cmd) => (
+              <Pressable
+                key={cmd.id}
+                onPress={() => applyPredictiveCommand(cmd)}
+                accessibilityRole="button"
+                accessibilityLabel={`Use predictive command ${cmd.label}`}
+                style={({ hovered, pressed }: any) => [
+                  styles.predictiveCommandChip,
+                  { borderColor: cmd.color + '45', backgroundColor: cmd.color + '10' },
+                  hovered && { borderColor: cmd.color + '90', backgroundColor: cmd.color + '18' },
+                  pressed && { transform: [{ scale: 0.985 }] },
+                  ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
+                ]}
+              >
+                <View style={[styles.predictiveCommandAppDot, { backgroundColor: cmd.color }]} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={[styles.predictiveCommandLabel, { color: cmd.color }]} numberOfLines={1}>{cmd.label}</Text>
+                  <Text style={styles.predictiveCommandHint} numberOfLines={1}>{cmd.hint}</Text>
+                </View>
+                <Text style={styles.predictiveCommandSource}>{cmd.source === 'next_step' ? 'next' : cmd.app}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
       {/* Input row */}
       <View style={[styles.enhancedInputWrapper, inputStyle]}>
-        <Pressable onPress={onFocusBot} style={[styles.enhancedBotTrigger, { backgroundColor: accentColor + '30' }]}>
+        <Pressable
+          onPress={onFocusBot}
+          disabled={composerDisabled}
+          accessibilityState={{ disabled: composerDisabled }}
+          style={[styles.enhancedBotTrigger, { backgroundColor: accentColor + '30', opacity: composerDisabled ? 0.45 : 1 }]}
+        >
           <Image source={agentAvatarSource} style={styles.mainChatAgentComposerIcon} resizeMode="contain" />
         </Pressable>
         <Pressable
           onPress={onPickImage}
+          disabled={composerDisabled}
           style={[styles.enhancedBotTrigger, { backgroundColor: '#2a2a3e40' }]}
           accessibilityRole="button"
           accessibilityLabel="Attach files"
+          accessibilityState={{ disabled: composerDisabled }}
         >
           <Text style={{ fontSize: 16, color: '#a0a0b0' }}>+</Text>
         </Pressable>
         <TextInput
           ref={inputRef}
           style={styles.enhancedInput}
-          placeholder={`Ask ${agentName} anything...`}
+          placeholder={composerDisabled ? 'Conversation unavailable until refresh completes' : `Ask ${agentName} anything...`}
           placeholderTextColor="#444"
           value={input}
           onChangeText={onInputChange}
+          editable={!composerDisabled}
+          accessibilityState={{ disabled: composerDisabled }}
           onSubmitEditing={() => {
             if (Platform.OS === 'web') return;
             if (showSlashCommands) {
@@ -10605,7 +18759,7 @@ function EnhancedInput({
           }}
         />
         <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-          <EnhancedSendInputButton onPress={() => onSend()} disabled={!input.trim()} accentColor={accentColor} />
+          <EnhancedSendInputButton onPress={() => onSend()} disabled={!canSend} accentColor={accentColor} />
         </Animated.View>
       </View>
 
@@ -10763,7 +18917,7 @@ const checkInStyles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   title: { color: '#fff', fontSize: 13, fontWeight: '700' },
   close: { color: '#666', fontSize: 16, padding: 4 },
-  input: { backgroundColor: '#000000', borderWidth: 1, borderRadius: 12, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
+  input: { backgroundColor: '#0A0A0A', borderWidth: 1, borderRadius: 12, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
   footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
   charCount: { color: '#555', fontSize: 11 },
   submitBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12 },
@@ -10778,8 +18932,8 @@ const checkInStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   // Core layout
-  container: { flex: 1, backgroundColor: '#000000' },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  container: { flex: 1, backgroundColor: '#0A0A0A' },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0A0A0A' },
   loadingPulse: { alignItems: 'center' },
   loadingText: { fontSize: 28, letterSpacing: 6, fontWeight: '800' },
 
@@ -10824,6 +18978,11 @@ const styles = StyleSheet.create({
   // Empty state
   emptyContainer: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20, maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center', width: '100%' },
   heroSection: { alignItems: 'center', justifyContent: 'center', paddingTop: 40, paddingBottom: 40 },
+  emptyStarterHint: { fontSize: 13, color: '#9aa0a6', marginTop: 8, marginBottom: 12, textAlign: 'center' },
+  emptyStarterWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, maxWidth: 560 },
+  emptyStarterChip: { borderWidth: 1, borderRadius: 16, paddingVertical: 8, paddingHorizontal: 14, margin: 3, maxWidth: 260 },
+  emptyStarterChipText: { fontSize: 13, fontWeight: '500' },
+  emptyStarterMore: { fontSize: 13, color: '#9aa0a6', marginTop: 16, textDecorationLine: 'underline' },
   heroSectionWeb: {},
   heroBotAvatar: {
     justifyContent: 'center',
@@ -11151,14 +19310,64 @@ const styles = StyleSheet.create({
 
   msgContentWrap: { marginLeft: 46, position: 'relative' as any, overflow: 'visible' as any, zIndex: 1 },
   enhancedMsgBubble: {
-    padding: 12,
-    borderRadius: 12,
+    padding: 13,
+    borderRadius: 20,
     backgroundColor: '#11111180',
+    borderWidth: 2,
+    borderColor: '#2a2a2a',
+    ...(Platform.OS === 'web'
+      ? { backdropFilter: 'blur(8px)' } as any
+      : { shadowColor: '#000000', shadowOpacity: 0.35, shadowRadius: 10, shadowOffset: { width: 0, height: 4 } }),
+  },
+  messageRouteStrip: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 8,
+  },
+  messageRouteChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    maxWidth: 230,
+    borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#00000060',
-    borderLeftWidth: 3,
-    borderLeftColor: '#2a2a2a',
-    ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
+    borderColor: '#334155',
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  messageRouteChipLocal: {
+    borderColor: '#22c55e45',
+    backgroundColor: '#052e1628',
+  },
+  messageRouteChipModel: {
+    borderColor: '#38bdf845',
+    backgroundColor: '#082f4928',
+  },
+  messageRouteChipProvider: {
+    borderColor: '#a78bfa45',
+    backgroundColor: '#312e8128',
+  },
+  messageRouteChipLabel: {
+    color: '#64748b',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase' as any,
+    fontFamily: 'monospace',
+  },
+  messageRouteChipValue: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '800',
+    maxWidth: 150,
+  },
+  messageRouteChipValueLocal: {
+    color: '#86efac',
+  },
+  messageRouteChipValueModel: {
+    color: '#bae6fd',
   },
   messageSourcesWrap: {
     marginTop: 10,
@@ -11173,6 +19382,11 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 1,
     textTransform: 'uppercase' as any,
+  },
+  computerTaskSummaryLine: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '600',
   },
   messageSourceCard: {
     borderRadius: 12,
@@ -11195,6 +19409,380 @@ const styles = StyleSheet.create({
     color: '#cbd5e1',
     fontSize: 11,
     lineHeight: 15,
+  },
+  appChoiceSection: {
+    marginBottom: 8,
+  },
+  appChoiceCard: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#14b8a655',
+    backgroundColor: '#042f2e',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    gap: 6,
+  },
+  appChoiceHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  appChoiceTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  appChoiceTitle: {
+    color: '#ccfbf1',
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  appChoicePill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#5eead466',
+    backgroundColor: '#0f766e40',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    maxWidth: 110,
+    flexShrink: 0,
+  },
+  appChoicePillText: {
+    color: '#ccfbf1',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  appChoiceMeta: {
+    color: '#99f6e4',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  appChoiceReason: {
+    color: '#d1fae5',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '700',
+    letterSpacing: 0,
+  },
+  appChoiceAlternativeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  appChoiceAlternative: {
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#2dd4bf55',
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    maxWidth: 150,
+  },
+  appChoiceAlternativeText: {
+    color: '#a7f3d0',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  appChoiceHint: {
+    color: '#99f6e4',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  designTaskSection: {
+    marginBottom: 8,
+  },
+  designTaskCard: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#0ea5e966',
+    backgroundColor: '#07111d',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    gap: 8,
+  },
+  designTaskCardAttention: {
+    borderColor: '#f9731666',
+    backgroundColor: '#1c1008',
+  },
+  designTaskCardApproval: {
+    borderColor: '#eab30866',
+    backgroundColor: '#171307',
+  },
+  designTaskCardComplete: {
+    borderColor: '#22c55e66',
+    backgroundColor: '#06170d',
+  },
+  designTaskHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  designTaskTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  designTaskTitle: {
+    color: '#e0f2fe',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  designTaskSubtitle: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0,
+  },
+  designTaskStatusPill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#38bdf866',
+    backgroundColor: '#082f49',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    flexShrink: 0,
+  },
+  designTaskStatusAttention: {
+    borderColor: '#fb923c66',
+    backgroundColor: '#431407',
+  },
+  designTaskStatusApproval: {
+    borderColor: '#facc1566',
+    backgroundColor: '#422006',
+  },
+  designTaskStatusComplete: {
+    borderColor: '#4ade8066',
+    backgroundColor: '#052e16',
+  },
+  designTaskStatusText: {
+    color: '#f8fafc',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  designTaskMeta: {
+    color: '#bae6fd',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '700',
+  },
+  designTaskOperationRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  designTaskOperationPill: {
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#475569',
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    maxWidth: 150,
+  },
+  designTaskOperationText: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  designTaskPhaseRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+  },
+  designTaskPhaseItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    maxWidth: 110,
+    minWidth: 0,
+  },
+  designTaskPhaseDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+    backgroundColor: '#475569',
+    flexShrink: 0,
+  },
+  designTaskPhaseDone: {
+    backgroundColor: '#22c55e',
+  },
+  designTaskPhaseCurrent: {
+    backgroundColor: '#38bdf8',
+  },
+  designTaskPhaseBlocked: {
+    backgroundColor: '#fb923c',
+  },
+  designTaskPhaseLabel: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0,
+    flexShrink: 1,
+  },
+  designTaskPhaseLabelCurrent: {
+    color: '#bae6fd',
+  },
+  designTaskPhaseLabelBlocked: {
+    color: '#fed7aa',
+  },
+  designTaskNextAction: {
+    color: '#f8fafc',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '800',
+  },
+  designTaskProof: {
+    color: '#94a3b8',
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  designTaskReview: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '700',
+  },
+  recoveryOptionSection: {
+    marginTop: 10,
+    gap: 6,
+  },
+  recoveryReliabilitySection: {
+    marginTop: 10,
+    gap: 6,
+  },
+  recoveryReliabilityCard: {
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  recoveryReliabilityHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  recoveryReliabilityTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  recoveryReliabilityTitle: {
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  recoveryReliabilitySubtitle: {
+    color: '#94a3b8',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '700',
+    letterSpacing: 0,
+  },
+  recoveryReliabilityPill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    backgroundColor: '#020617',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    flexShrink: 0,
+  },
+  recoveryReliabilityPillText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  recoveryReliabilityDetail: {
+    color: '#d1d5db',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  recoveryReliabilityChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  recoveryReliabilityChip: {
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    maxWidth: 160,
+  },
+  recoveryReliabilityChipText: {
+    color: '#cbd5e1',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  recoveryOptionCard: {
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  recoveryOptionHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  recoveryOptionTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  recoveryOptionTitle: {
+    fontSize: 11,
+    fontWeight: '900',
+    lineHeight: 15,
+  },
+  recoveryOptionMeta: {
+    color: '#94a3b8',
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+  },
+  recoveryOptionDetail: {
+    color: '#d1d5db',
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  recoveryOptionPlan: {
+    color: '#94a3b8',
+    fontSize: 10,
+    lineHeight: 14,
+  },
+  recoveryOptionButton: {
+    borderRadius: 6,
+    borderWidth: 1,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    minWidth: 42,
+    alignItems: 'center',
+  },
+  recoveryOptionButtonText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
   },
   memoryInfluenceCard: {
     borderColor: '#334155',
@@ -11324,15 +19912,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 15,
   },
-  soulMemoryCard: {
-    borderColor: '#4338ca',
-    backgroundColor: '#1e1b4b',
-  },
-  soulMemoryCardTitle: {
-    color: '#c7d2fe',
-    fontSize: 11,
-    fontWeight: '800',
-  },
   // Enhanced hover actions
   enhancedHoverActions: {
     position: 'absolute',
@@ -11417,7 +19996,7 @@ const styles = StyleSheet.create({
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
-    backgroundColor: '#000000cc',
+    backgroundColor: '#0A0A0ACC',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(10px)' } as any : {}),
   },
   quickBarScroll: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
@@ -11444,7 +20023,7 @@ const styles = StyleSheet.create({
   },
   scrollArrowLeft: {
     left: 0,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     borderRightWidth: 1,
     borderRightColor: '#ffffff10',
     borderTopRightRadius: 8,
@@ -11452,7 +20031,7 @@ const styles = StyleSheet.create({
   },
   scrollArrowRight: {
     right: 0,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     borderLeftWidth: 1,
     borderLeftColor: '#ffffff10',
     borderTopLeftRadius: 8,
@@ -11466,7 +20045,7 @@ const styles = StyleSheet.create({
 
   // Enhanced crypto panel
   enhancedCryptoPanel: {
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     borderTopWidth: 1,
     padding: 20,
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
@@ -11583,7 +20162,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     overflow: 'hidden',
-    backgroundColor: '#000000f5',
+    backgroundColor: '#0A0A0AF5',
   },
   enhancedMentionItem: {
     flexDirection: 'row',
@@ -11616,7 +20195,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderTopWidth: 1,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
@@ -11648,7 +20227,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     borderTopWidth: 1,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
   },
   typingDot: { width: 10, height: 10, borderRadius: 5 },
@@ -11658,7 +20237,7 @@ const styles = StyleSheet.create({
   enhancedInputBar: {
     borderTopWidth: 1,
     padding: 16,
-    backgroundColor: '#000000f5',
+    backgroundColor: '#0A0A0AF5',
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
@@ -11674,13 +20253,36 @@ const styles = StyleSheet.create({
   modelButton: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
+    height: 36,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#2a2a3e',
     backgroundColor: '#0a0a10',
+  },
+  openswanTriggerButton: {
+    minWidth: 172,
+    maxWidth: 244,
+    justifyContent: 'flex-start',
+  },
+  openswanTriggerCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  openswanTriggerLabel: {
+    maxWidth: '100%',
+  },
+  openswanTriggerMeta: {
+    color: '#64748b',
+    fontSize: 9,
+    fontWeight: '800',
+    marginTop: 1,
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   modelIconBox: {
     width: 22,
@@ -11697,6 +20299,10 @@ const styles = StyleSheet.create({
   modelButtonLabel: {
     fontSize: 14,
     fontWeight: '600',
+    // Wide enough that the everyday "Auto → Claude Sonnet 4.6" renders whole;
+    // longer custom model ids ellipsize on one line instead of wrapping.
+    maxWidth: 210,
+    flexShrink: 1,
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
     letterSpacing: 0,
   },
@@ -11708,7 +20314,9 @@ const styles = StyleSheet.create({
   quickActionsButton: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 5,
+    height: 36,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 10,
@@ -11869,8 +20477,107 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   dropdownPanelControlCenter: {
-    width: 380,
-    maxHeight: 540,
+    width: 400,
+    maxWidth: 'calc(100vw - 32px)' as any,
+    maxHeight: 560,
+    paddingTop: 0,
+  },
+  controlPanelHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1e293b',
+    backgroundColor: '#08111f',
+  },
+  controlPanelHeaderIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  controlPanelHeaderIconText: {
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  controlPanelHeaderCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  controlPanelEyebrow: {
+    color: '#64748b',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  controlPanelHeading: {
+    color: '#f8fafc',
+    fontSize: 15,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  controlPanelCloseButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#0b1220',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  controlPanelCloseText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    fontWeight: '900',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  controlPanelSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 8,
+  },
+  controlPanelSummaryItem: {
+    width: '47.5%',
+    minHeight: 66,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#0b1220',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    justifyContent: 'space-between',
+  },
+  controlPanelSummaryLabel: {
+    color: '#64748b',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  controlPanelSummaryValue: {
+    color: '#f8fafc',
+    fontSize: 12,
+    fontWeight: '900',
+    marginTop: 4,
+  },
+  controlPanelSummaryDetail: {
+    color: '#7c8aa5',
+    fontSize: 10,
+    fontWeight: '700',
+    marginTop: 2,
   },
   dropdownTitle: {
     fontSize: 10,
@@ -11965,17 +20672,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#111827',
     ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px rgba(99,102,241,0.08), 0 8px 20px rgba(0,0,0,0.4)', transform: 'translateY(-1px)' } as any : {}),
   },
-  controlCenterStatusBand: {
-    marginHorizontal: 10,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#232336',
-    backgroundColor: '#111521',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 6,
-  },
   controlCenterStatusHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -11988,11 +20684,28 @@ const styles = StyleSheet.create({
     letterSpacing: 0.9,
     fontFamily: 'monospace',
   },
-  controlCenterStatusValue: {
-    color: '#e5eefc',
+  controlAutoRouteBand: {
+    marginHorizontal: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#f59e0b33',
+    backgroundColor: '#17110a',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 5,
+  },
+  controlAutoRouteValue: {
+    color: '#f8fafc',
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '900',
     fontFamily: 'monospace',
+  },
+  controlAutoRouteReason: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '700',
   },
   controlCenterStatsRow: {
     flexDirection: 'row',
@@ -12072,6 +20785,122 @@ const styles = StyleSheet.create({
     fontSize: 10,
     lineHeight: 13,
     marginTop: 3,
+  },
+  controlAgentSection: {
+    marginHorizontal: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#232336',
+    backgroundColor: '#0b1220',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  controlAgentSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  controlAgentSectionTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  controlAgentSectionTitle: {
+    color: '#e2e8f0',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    fontFamily: 'monospace',
+  },
+  controlAgentSectionSubtitle: {
+    color: '#7c8aa5',
+    fontSize: 10,
+    lineHeight: 13,
+    marginTop: 3,
+    fontWeight: '700',
+  },
+  controlAgentSectionMeta: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    paddingTop: 1,
+  },
+  controlAgentRail: {
+    gap: 8,
+    paddingRight: 6,
+  },
+  controlAgentCard: {
+    width: 128,
+    minHeight: 118,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    justifyContent: 'space-between',
+  },
+  controlAgentCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  controlAgentIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  controlAgentIconText: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    fontFamily: 'monospace',
+  },
+  controlAgentName: {
+    color: '#f8fafc',
+    fontSize: 12,
+    fontWeight: '900',
+    marginTop: 8,
+  },
+  controlAgentDesc: {
+    color: '#7c8aa5',
+    fontSize: 10,
+    lineHeight: 13,
+    marginTop: 4,
+  },
+  controlAgentStatus: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    fontFamily: 'monospace',
+    marginTop: 6,
+  },
+  controlAgentSelectedLabel: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+  },
+  controlAgentEmpty: {
+    minHeight: 58,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#08111f',
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  controlAgentEmptyText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   controlAdvancedToggle: {
     marginHorizontal: 10,
@@ -12235,6 +21064,76 @@ const styles = StyleSheet.create({
     right: 16,
     bottom: 88,
     zIndex: 120,
+  },
+  predictiveCommandPanel: {
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#08111f',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 8,
+    ...(Platform.OS === 'web' ? { boxShadow: '0 10px 28px rgba(0,0,0,0.28)' } as any : {}),
+  },
+  predictiveCommandHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 7,
+    gap: 8,
+  },
+  predictiveCommandTitle: {
+    color: '#e2e8f0',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  predictiveCommandSubtitle: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  predictiveCommandRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingRight: 2,
+  },
+  predictiveCommandChip: {
+    width: 210,
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  predictiveCommandAppDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  predictiveCommandLabel: {
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  predictiveCommandHint: {
+    color: '#94a3b8',
+    fontSize: 10,
+    lineHeight: 13,
+    marginTop: 2,
+  },
+  predictiveCommandSource: {
+    color: '#64748b',
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   mainChatAgentIdentityPressable: {
     width: 24,

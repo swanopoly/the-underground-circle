@@ -16,14 +16,26 @@ const os = require('os');
 const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
 const {
+  appendOpenSwanWorktreeConfigPrompt,
+  ensureOpenSwanWorktree,
   isAllowedPairOrigin,
   loadManagedTerminalSessions,
   makeTerminalTitle,
   saveManagedTerminalSession,
   sendToTerminalByTitle,
 } = require('./terminal-launch-utils');
+const {
+  buildCodexSessionRecentActions,
+  summarizeCodexJsonl,
+} = require('./codex-session-summary');
+const {
+  createPairingChallengeStore,
+  isBridgeRequestSourceAllowed,
+  isPairingRequestSourceAllowed,
+} = require('./desktop-bridge-security');
 
-const PORT = 7779;
+const PORT = Math.max(1024, Math.min(65535, Number(process.env.UC_CODEX_BRIDGE_PORT) || 7779));
+const BRIDGE_BIND_HOST = '127.0.0.1';
 const SCAN_INTERVAL = 5000;
 const ACTIVE_THRESHOLD = 120_000;   // 2min → active
 const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequently than Claude)
@@ -31,7 +43,7 @@ const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequen
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
   // Private Network Access (Chrome 116+) — required for the live HTTPS
   // app at app.chrisswanson.xyz to talk to localhost without silent
   // browser blocking.
@@ -45,6 +57,7 @@ const LAUNCHED_SESSION_TTL = 12 * 60 * 60_000;
 
 let cachedSessions = [];
 let lastScanTime = '';
+const pairingChallenges = createPairingChallengeStore({ ttlMs: 30_000, maxEntries: 64 });
 
 // ── Shared desktop bridge token ─────────────────────────────────────────────
 // The browser app pairs once and then sends this token to all local bridges.
@@ -133,6 +146,25 @@ function normalizeCliPrompt(value) {
 function promptPreview(value, max = 180) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function readFileTail(filePath, maxBytes = 512 * 1024) {
+  try {
+    const stat = fs.statSync(filePath);
+    const start = Math.max(0, stat.size - maxBytes);
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      const text = buffer.toString('utf8');
+      const firstNewline = text.indexOf('\n');
+      return start > 0 && firstNewline >= 0 ? text.slice(firstNewline + 1) : text;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
 }
 
 function safeProjectDir(input) {
@@ -249,15 +281,25 @@ async function launchCodexSessions(data) {
     const displayName = Array.isArray(data.names) && data.names[i]
       ? String(data.names[i])
       : `Codex #${i + 1}`;
+    // Per-session git-worktree isolation when requested (fail-open to shared cwd).
+    const { cwd: sessionCwd, branch, worktreeDir, isWorktree } = ensureOpenSwanWorktree({
+      baseCwd: cwd, useWorktree: data.useWorktree, index: i,
+    });
     const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
-    const cliPrompt = buildManagedCodexPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
-    const command = buildCodexCommand({ cwd, prompt: cliPrompt, model, fullAuto, search });
+    const cliPrompt = appendOpenSwanWorktreeConfigPrompt(
+      buildManagedCodexPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt }),
+      sessionCwd,
+    );
+    const command = buildCodexCommand({ cwd: sessionCwd, prompt: cliPrompt, model, fullAuto, search });
     const launchedAt = new Date().toISOString();
     const terminalTitle = makeTerminalTitle('Codex', displayName, sessionId);
     const terminalResult = await openTerminal(command, terminalTitle);
     const session = registerSession({
       sessionId,
-      projectDir: cwd,
+      projectDir: sessionCwd,
+      branch,
+      worktreeDir,
+      isWorktree,
       model: model || 'codex',
       status: terminalResult.ok ? 'active' : 'idle',
       task: promptPreview(cleanPrompt, 240),
@@ -447,33 +489,28 @@ function scanCodexFiles() {
         // Only include recently active files
         if (age > IDLE_THRESHOLD) continue;
 
-        // Try to extract model from last line of jsonl
-        let detectedModel = 'codex';
-        try {
-          const content = fs.readFileSync(filePath, 'utf8');
-          const lastLines = content.trim().split('\n').slice(-5);
-          for (const line of lastLines.reverse()) {
-            try {
-              const parsed = JSON.parse(line);
-              if (parsed.model) { detectedModel = parsed.model; break; }
-              if (parsed.payload?.model) { detectedModel = parsed.payload.model; break; }
-            } catch {}
-          }
-        } catch {}
+        const sessionSummary = summarizeCodexJsonl(readFileTail(filePath));
         const baseName = path.basename(file).replace(/\.\w+$/, '');
+        const sessionId = sessionSummary.sessionMarker || `codex-${baseName}`;
+        const task = sessionSummary.lastUserMessage
+          ? promptPreview(sessionSummary.lastUserMessage, 240)
+          : `Session: ${baseName}`;
         sessions.push({
-          sessionId: `codex-${baseName}`,
+          sessionId,
           projectDir: dir,
-          model: detectedModel,
+          model: sessionSummary.model || 'codex',
           status: age < ACTIVE_THRESHOLD ? 'active' : 'idle',
-          task: `Session: ${baseName}`,
+          task,
           lastActivity: stat.mtime.toISOString(),
           totalInputTokens: 0,
           totalOutputTokens: 0,
-          messageCount: 0,
-          recentActions: [],
+          messageCount: sessionSummary.messageCount || 0,
+          recentActions: buildCodexSessionRecentActions(sessionSummary),
           filesRead: 0,
           filesWritten: 0,
+          lastAssistantMessage: sessionSummary.lastAssistantMessage || undefined,
+          appCapabilityResultText: sessionSummary.appCapabilityResultText || undefined,
+          appCapabilityResultStatus: sessionSummary.appCapabilityResultStatus || undefined,
         });
       }
     } catch {}
@@ -491,6 +528,9 @@ function registerSession(data) {
   const session = {
     sessionId: data.sessionId || `codex-manual-${Date.now()}`,
     projectDir: data.projectDir || process.cwd(),
+    branch: data.branch || null,
+    worktree: data.worktreeDir || null,
+    isWorktree: Boolean(data.isWorktree),
     model: data.model || 'codex',
     status: data.status || 'active',
     task: data.task || 'Deep research',
@@ -510,6 +550,9 @@ function registerSession(data) {
     launchError: data.launchError,
     terminalTitle: data.terminalTitle,
     manageable: Boolean(data.terminalTitle),
+    lastAssistantMessage: data.lastAssistantMessage,
+    appCapabilityResultText: data.appCapabilityResultText,
+    appCapabilityResultStatus: data.appCapabilityResultStatus,
   };
 
   // Update existing or add new
@@ -541,14 +584,38 @@ async function scan() {
     return { ...s, status: age < ACTIVE_THRESHOLD ? s.status : 'idle' };
   });
 
-  // Merge all sources, dedup by sessionId
+  // Merge all sources, dedup by sessionId. File-backed Codex JSONL records may
+  // arrive after a managed terminal registration; keep the terminal controls
+  // from the managed record while adding transcript/result metadata from files.
   const allSessions = [...manualSessions, ...processSessions, ...fileSessions];
-  const seen = new Set();
-  cachedSessions = allSessions.filter(s => {
-    if (seen.has(s.sessionId)) return false;
-    seen.add(s.sessionId);
-    return true;
-  });
+  const byId = new Map();
+  for (const session of allSessions) {
+    if (!session?.sessionId) continue;
+    const existing = byId.get(session.sessionId);
+    if (!existing) {
+      byId.set(session.sessionId, session);
+      continue;
+    }
+    byId.set(session.sessionId, {
+      ...existing,
+      ...session,
+      terminalTitle: existing.terminalTitle || session.terminalTitle,
+      terminal: existing.terminal || session.terminal,
+      terminalPid: existing.terminalPid || session.terminalPid,
+      launchId: existing.launchId || session.launchId,
+      launchedAt: existing.launchedAt || session.launchedAt,
+      manageable: Boolean(existing.manageable || session.manageable),
+      recentActions: [
+        ...(existing.recentActions || []),
+        ...(session.recentActions || []),
+      ].filter(Boolean).slice(-8),
+      status: existing.status === 'active' || session.status === 'active' ? 'active' : session.status || existing.status,
+      lastActivity: new Date(existing.lastActivity || 0).getTime() > new Date(session.lastActivity || 0).getTime()
+        ? existing.lastActivity
+        : session.lastActivity,
+    });
+  }
+  cachedSessions = Array.from(byId.values());
 
   lastScanTime = new Date().toISOString();
 }
@@ -585,11 +652,57 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/pair' && req.method === 'POST') {
-    if (!isAllowedPairOrigin(req)) {
-      writeJson(res, 403, { ok: false, error: 'Pairing origin not allowlisted.' });
+    const sourceCheck = isPairingRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+    if (!sourceCheck.ok) {
+      writeJson(res, 403, {
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Pairing is available only through an allowed loopback bridge request.',
+      });
+      return;
+    }
+    let pairInput;
+    try {
+      pairInput = await readJsonBody(req, 2048);
+    } catch (err) {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'pairing_body_invalid',
+        error: String(err?.message || err || 'Invalid pairing request body.').slice(0, 300),
+      });
+      return;
+    }
+    const pairingChallenge = String(pairInput?.pairingChallenge || '').trim();
+    if (!pairingChallenge) {
+      const issued = pairingChallenges.issue(req.socket.remoteAddress);
+      writeJson(res, 428, {
+        ok: false,
+        code: 'pairing_challenge_required',
+        challenge: issued.challenge,
+        expiresAt: new Date(issued.expiresAt).toISOString(),
+        error: 'Retry pairing once with the short-lived challenge.',
+      });
+      return;
+    }
+    if (!pairingChallenges.consume(pairingChallenge, req.socket.remoteAddress)) {
+      writeJson(res, 403, {
+        ok: false,
+        code: 'pairing_challenge_invalid',
+        error: 'Pairing challenge is invalid, expired, already used, or belongs to another source.',
+      });
       return;
     }
     writeJson(res, 200, { ok: true, token: getOrCreateBridgeToken(), bridge: 'codex' });
+    return;
+  }
+
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  if (!sourceCheck.ok) {
+    writeJson(res, 403, {
+      ok: false,
+      code: sourceCheck.code,
+      error: 'Bridge access is available only through an allowed loopback or explicitly configured tunnel request.',
+    });
     return;
   }
 
@@ -666,8 +779,8 @@ const server = http.createServer(async (req, res) => {
 scan();
 setInterval(scan, SCAN_INTERVAL);
 
-server.listen(PORT, () => {
-  console.log(`\n🧠 Codex Bridge running on http://localhost:${PORT}`);
+server.listen(PORT, BRIDGE_BIND_HOST, () => {
+  console.log(`\n🧠 Codex Bridge running on http://${BRIDGE_BIND_HOST}:${PORT} (loopback only)`);
   console.log(`   Health:   http://localhost:${PORT}/health`);
   console.log(`   Pair:     POST http://localhost:${PORT}/pair`);
   console.log(`   Sessions: http://localhost:${PORT}/sessions`);

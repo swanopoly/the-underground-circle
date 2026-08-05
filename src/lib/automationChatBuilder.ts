@@ -8,10 +8,13 @@
  */
 
 import { supabase } from './supabase';
+import { buildAutomationProposalInsertRow } from './automationChatParser';
 import type { AutomationProposal } from './automationChatParser';
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 
 export type { AutomationProposal } from './automationChatParser';
 export {
+  buildAutomationProposalInsertRow,
   parseAutomationRequest,
   looksLikeAutomationRequest,
 } from './automationChatParser';
@@ -24,27 +27,11 @@ export async function createAutomationFromProposal(opts: {
   proposal: AutomationProposal;
   circleId: string;
   userId: string;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
 }): Promise<string | null> {
-  const { proposal, circleId, userId } = opts;
+  const { proposal, circleId, userId, agentSubjectMetadata } = opts;
   try {
-    const row: any = {
-      circle_id: circleId,
-      created_by: userId,
-      name: proposal.name,
-      description: proposal.description,
-      icon: '⚡',
-      trigger_type: proposal.triggerType,
-      agent: proposal.agent,
-      prompt: proposal.prompt,
-      output_target: proposal.outputTarget,
-      enabled: true,
-    };
-    if (proposal.triggerType === 'schedule' && proposal.cronExpression) {
-      row.cron_expression = proposal.cronExpression;
-    }
-    if (proposal.triggerType === 'event' && proposal.eventConfig) {
-      row.event_config = proposal.eventConfig;
-    }
+    const row = buildAutomationProposalInsertRow({ proposal, circleId, userId, agentSubjectMetadata });
     const { data, error } = await supabase
       .from('circle_automations')
       .insert(row)

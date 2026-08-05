@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
+import { subscribeWithReconnect } from './subscribeWithReconnect';
 
 export type ThreadVisibility = 'circle' | 'private' | 'shared';
 
@@ -29,6 +30,14 @@ export interface CircleChatThread {
   archived: boolean;
   created_at: string;
   updated_at: string;
+  /**
+   * Lineage (20260508_chat_threads_lineage.sql) — present in the DB since
+   * compression forks, but dropped from this interface until Phase 4b of
+   * docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md made lineage visible in the
+   * thread header. `select('*')` already returns them.
+   */
+  parent_thread_id?: string | null;
+  lineage_root_id?: string | null;
 }
 
 export interface CircleChatThreadMember {
@@ -217,27 +226,79 @@ export function useThreads(circleId: string | null, refreshToken = 0) {
       return;
     }
     let cancelled = false;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    let completedFirstSubscribeCatchUp = false;
     setLoading(true);
-    listVisibleThreads(circleId)
-      .then(rows => { if (!cancelled) setThreads(rows); })
-      .catch(err => console.warn('[circleChatThreads] listVisibleThreads failed:', err))
+
+    // Serialize and coalesce full snapshots. Realtime events, the first-subscribe
+    // race closer, and reconnect/staleness catch-ups can arrive close together;
+    // allowing those requests to race lets an older response overwrite a newer
+    // thread ordering. One in-flight fetch plus one queued replay is enough to
+    // converge on the latest durable snapshot without hammering PostgREST.
+    const refreshThreads = async (reason: string): Promise<void> => {
+      if (cancelled) return;
+      if (refreshInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        do {
+          refreshQueued = false;
+          try {
+            const rows = await listVisibleThreads(circleId);
+            if (!cancelled) setThreads(rows);
+          } catch (err) {
+            if (!cancelled) {
+              console.warn(`[circleChatThreads] listVisibleThreads failed (${reason}):`, err);
+            }
+          }
+        } while (refreshQueued && !cancelled);
+      } finally {
+        refreshInFlight = false;
+      }
+    };
+
+    // Initial-load semantics remain unchanged: only the mount/refresh-token
+    // snapshot owns `loading`. Background Realtime catch-ups retain the last
+    // good list and never flash the sidebar back into a loading state.
+    void refreshThreads('initial')
       .finally(() => { if (!cancelled) setLoading(false); });
 
-    const channel = supabase
-      .channel(`circle_chat_threads:${circleId}`)
-      .on('postgres_changes',
-          { event: '*', schema: 'public', table: 'circle_chat_threads', filter: `circle_id=eq.${circleId}` },
-          async () => {
-            try {
-              const rows = await listVisibleThreads(circleId);
-              if (!cancelled) setThreads(rows);
-            } catch {}
-          })
-      .subscribe();
+    const subscription = subscribeWithReconnect({
+      channelName: `circle_chat_threads:${circleId}`,
+      // Supabase cannot safely filter Postgres DELETE events. INSERT/UPDATE
+      // cover creation, rename, archive, sharing, and ordering changes; a
+      // bounded heartbeat snapshot repairs hard deletes without cross-circle
+      // DELETE fanout or false security assumptions.
+      setup: (channel) => channel
+        .on('postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'circle_chat_threads', filter: `circle_id=eq.${circleId}` },
+          () => { void refreshThreads('realtime insert'); })
+        .on('postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'circle_chat_threads', filter: `circle_id=eq.${circleId}` },
+          () => { void refreshThreads('realtime update'); }),
+      // The shared primitive invokes this after a reconnect and whenever a
+      // subscribed channel has gone silently stale, backfilling missed rows.
+      onCatchUp: () => { void refreshThreads('reconnect or silent staleness'); },
+      onStateChange: (state) => {
+        if (state !== 'subscribed' || completedFirstSubscribeCatchUp) return;
+        completedFirstSubscribeCatchUp = true;
+        // subscribeWithReconnect intentionally skips onCatchUp for the first
+        // subscription because most callers only need an initial fetch. Thread
+        // ordering needs one extra snapshot to close the fetch-to-subscribe gap.
+        void refreshThreads('first subscribe');
+      },
+      // Chat thread lists are often legitimately quiet. Two minutes preserves
+      // silent-staleness recovery without turning that quiet into a 30s poll.
+      heartbeatMs: 120_000,
+    });
 
     return () => {
       cancelled = true;
-      supabase.removeChannel(channel);
+      refreshQueued = false;
+      subscription.unsubscribe();
     };
   }, [circleId, refreshToken]);
 

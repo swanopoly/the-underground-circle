@@ -4,7 +4,7 @@
 //   const result = await openOAuthPopup('google', 'calendar,email', session.access_token);
 //   if (result.success) { /* connected! */ }
 
-import { supabase } from './supabase';
+import { safeGetSession } from './authSession';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
@@ -28,16 +28,17 @@ export function openOAuthPopup(
   jwt: string
 ): Promise<OAuthResult> {
   return new Promise((resolve) => {
-    const authorizeUrl = `${SUPABASE_URL}/functions/v1/email-calendar-oauth/authorize?provider=${provider}&scopes=${scopes}&state=${encodeURIComponent(jwt)}`;
-
-    // Open popup
+    // Open the popup synchronously (about:blank) so the browser keeps the click
+    // gesture and does not block it; we redirect it to the IdP once the
+    // authenticated init returns a URL. The OAuth state is a server-minted nonce
+    // — the user's JWT never travels through the IdP / browser history (advisory #6).
     const width = 500;
     const height = 700;
     const left = window.screenX + (window.innerWidth - width) / 2;
     const top = window.screenY + (window.innerHeight - height) / 2;
 
     const popup = window.open(
-      authorizeUrl,
+      'about:blank',
       `oauth-${provider}`,
       `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,location=yes,status=no`
     );
@@ -86,6 +87,35 @@ export function openOAuthPopup(
         error: 'Timeout',
       });
     }, 5 * 60 * 1000);
+
+    // Authenticated init: mint the IdP authorize URL (carrying a server-stored
+    // nonce state) with the bearer token in a header, then point the popup at it.
+    (async () => {
+      try {
+        const res = await fetch(
+          `${SUPABASE_URL}/functions/v1/email-calendar-oauth/authorize`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+            body: JSON.stringify({ provider, scopes }),
+          }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.url) {
+          window.removeEventListener('message', handleMessage);
+          clearInterval(checkClosed);
+          if (popup && !popup.closed) popup.close();
+          resolve({ success: false, provider, email: '', error: data.error || `Failed to start OAuth (${res.status})` });
+          return;
+        }
+        if (popup) popup.location.href = data.url;
+      } catch (e: any) {
+        window.removeEventListener('message', handleMessage);
+        clearInterval(checkClosed);
+        if (popup && !popup.closed) popup.close();
+        resolve({ success: false, provider, email: '', error: e?.message || 'Failed to start OAuth' });
+      }
+    })();
   });
 }
 
@@ -95,7 +125,7 @@ export function openOAuthPopup(
 export async function checkOAuthStatus(
   provider: OAuthProvider
 ): Promise<{ connected: boolean; email: string }> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return { connected: false, email: '' };
 
   try {
@@ -126,7 +156,7 @@ export async function checkOAuthStatus(
 export async function disconnectOAuth(
   provider: OAuthProvider
 ): Promise<boolean> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return false;
 
   try {
@@ -167,7 +197,7 @@ export async function fetchCalendarEvents(
   nextEvent: any;
   email: string;
 } | null> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return null;
 
   try {
@@ -210,7 +240,7 @@ export async function fetchEmails(
   total: number;
   email: string;
 } | null> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return null;
 
   try {

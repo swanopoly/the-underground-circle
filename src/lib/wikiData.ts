@@ -1,6 +1,7 @@
 // =============================================================================
-// AI Wiki Data Layer
-// Educational content about AI agents, tools, models, and design techniques.
+// Wiki Data Layer
+// Educational content about AI, technology, systems, science, cities, design,
+// and durable operating patterns.
 // Connects to the Schools education section via relatedLessonIds.
 // =============================================================================
 import { buildImpactDomainCoverageSummary, buildImpactDomainGuidance, inferImpactDomain } from './impactDomains';
@@ -8,7 +9,20 @@ import { getSpiritById } from './agentSpirits';
 import { getSpiritCareerProfile } from './spiritCareerProfiles';
 import { getSpiritOperationsProfile } from './spiritOperationsProfiles';
 
-export type WikiCategory = 'agents' | 'models' | 'frameworks' | 'design' | 'open-source' | 'mcp' | 'foundations' | 'landscape';
+export type WikiCategory =
+  | 'agents'
+  | 'models'
+  | 'frameworks'
+  | 'design'
+  | 'open-source'
+  | 'mcp'
+  | 'foundations'
+  | 'landscape'
+  | 'future-cities'
+  | 'science'
+  | 'infrastructure'
+  | 'health'
+  | 'energy-materials';
 
 export interface WikiArticle {
   id: string;
@@ -46,6 +60,50 @@ export interface WikiArticleReference {
   category: WikiCategory;
   color: string;
   tags: string[];
+}
+
+export interface WikiFuturePath {
+  id: string;
+  title: string;
+  subtitle: string;
+  description: string;
+  icon: string;
+  color: string;
+  articleIds: string[];
+  searchQuery: string;
+  outcome: string;
+}
+
+export interface WikiBuilderPrompt {
+  id: string;
+  label: string;
+  title: string;
+  prompt: string;
+  followUp: string;
+  articleIds: string[];
+  searchQuery: string;
+}
+
+export interface WikiResearchInsight {
+  id: string;
+  title: string;
+  sourceLabel: string;
+  sourceUrl: string;
+  principle: string;
+  addToWiki: string;
+  userAction: string;
+  searchQuery: string;
+  color: string;
+}
+
+export interface WikiArticleLearningLoopStep {
+  id: string;
+  label: string;
+  title: string;
+  prompt: string;
+  sourceLabel: string;
+  sourceUrl: string;
+  searchQuery: string;
 }
 
 // =============================================================================
@@ -109,6 +167,41 @@ export const WIKI_CATEGORIES: Omit<WikiCategoryInfo, 'articleCount'>[] = [
     icon: '>>',
     color: '#84cc16',
   },
+  {
+    id: 'future-cities',
+    title: 'Future Cities',
+    subtitle: 'Retrofuturism, EPCOT, mobility, civic systems, and built-world prototypes',
+    icon: 'CT',
+    color: '#f59e0b',
+  },
+  {
+    id: 'science',
+    title: 'Science + Universe',
+    subtitle: 'Space, cosmology, physics, biology, discovery systems, and scientific method',
+    icon: 'SC',
+    color: '#a855f7',
+  },
+  {
+    id: 'infrastructure',
+    title: 'Infrastructure',
+    subtitle: 'Civil systems, transportation, utilities, resilient operations, and public works',
+    icon: 'IF',
+    color: '#38bdf8',
+  },
+  {
+    id: 'health',
+    title: 'Health + Biotech',
+    subtitle: 'Medical AI, clinical decision support, biotechnology, and human health systems',
+    icon: 'HX',
+    color: '#ef4444',
+  },
+  {
+    id: 'energy-materials',
+    title: 'Energy + Materials',
+    subtitle: 'Renewables, batteries, manufacturing, materials science, and climate technology',
+    icon: 'EM',
+    color: '#22c55e',
+  },
 ];
 
 // =============================================================================
@@ -116,6 +209,864 @@ export const WIKI_CATEGORIES: Omit<WikiCategoryInfo, 'articleCount'>[] = [
 // =============================================================================
 
 export const WIKI_ARTICLES: WikiArticle[] = [
+  {
+    id: 'future-cities-epcot-systems',
+    title: 'Future Cities: EPCOT as a Systems Blueprint',
+    subtitle: 'How Walt Disney style future-city thinking maps into transit, civic technology, logistics, public learning, and digital-brain design.',
+    category: 'future-cities',
+    icon: 'CT',
+    color: '#f59e0b',
+    tags: ['future-cities', 'epcot', 'urban-design', 'transportation', 'systems-design', 'retrofuturism'],
+    content: [
+      {
+        title: 'Why Future Cities Belong In The Wiki',
+        content:
+          'The Wiki should not only explain AI tools. It should help users reason about whole systems. Future-city design is useful because it forces every layer to interact: movement, energy, housing, work, education, entertainment, logistics, governance, and public experience.',
+        bulletPoints: [
+          'A future city is an operating system for physical life',
+          'Transportation, utilities, interfaces, and governance have to be designed together',
+          'The same systems thinking applies to OpenSwan, Digital Brain, and multi-agent workflows',
+        ],
+      },
+      {
+        title: 'Disney Pattern: Prototype, Transit, Separation Of Flows',
+        content:
+          'The durable lesson from the original EPCOT idea is not a single building style. It is the concept of a continuously updated prototype community with clear movement layers. Pedestrians, transit, cars, deliveries, services, and public experiences should not fight for the same path.',
+        bulletPoints: [
+          'Use radial or hub-and-spoke maps when users need legible movement through a complex system',
+          'Separate high-trust/private flows from public-facing flows',
+          'Make infrastructure visible enough to teach, but hidden enough not to overwhelm daily use',
+        ],
+      },
+      {
+        title: 'How This Maps To The App',
+        content:
+          'The Digital Brain System Flow can use future-city language directly. Site surfaces are districts. Agents are workers. Database tables are utilities. Vault credentials are secure infrastructure. Chat is the transit terminal. Wiki and Backpack are public learning plus private memory.',
+        bulletPoints: [
+          'Map every feature into a district with clear inbound and outbound flows',
+          'Show data movement as transit instead of as static tables',
+          'Let users inspect the system like a city map before they automate work',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'universe-science-field-map',
+    title: 'Universe Science Field Map',
+    subtitle: 'A practical map for tracking space, cosmology, planetary science, and scientific uncertainty in the Digital Brain.',
+    category: 'science',
+    icon: 'SC',
+    color: '#a855f7',
+    tags: ['universe', 'science', 'space', 'cosmology', 'astronomy', 'scientific-method'],
+    content: [
+      {
+        title: 'Why Broad Science Matters',
+        content:
+          'A useful knowledge system needs broad exploratory memory, not just work-specific facts. Space science, cosmology, biology, physics, and systems research create analogies that can improve product design, agent architecture, and long-range planning.',
+        bulletPoints: [
+          'Separate observations, models, hypotheses, and speculation',
+          'Track source quality and publication date',
+          'Use science notes as inspiration unless they are validated for an operational decision',
+        ],
+      },
+      {
+        title: 'Good Intake Shape',
+        content:
+          'A science intake note should capture the question, evidence, method, uncertainty, and possible analogy. For example: what was observed, how it was measured, what changed from prior understanding, and what design idea it could inspire.',
+        bulletPoints: [
+          'Question: what does this source try to explain?',
+          'Evidence: what data or method supports it?',
+          'Uncertainty: what would falsify or weaken it?',
+          'Transfer: what analogy might help app, agent, or city design?',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'infrastructure-public-systems',
+    title: 'Infrastructure And Public Systems',
+    subtitle: 'How roads, utilities, drainage, transport, maintenance, and operations thinking improve software and agent systems.',
+    category: 'infrastructure',
+    icon: 'IF',
+    color: '#38bdf8',
+    tags: ['infrastructure', 'civil', 'transportation', 'resilience', 'operations', 'maintenance'],
+    content: [
+      {
+        title: 'Infrastructure Is Long-Term Software',
+        content:
+          'Infrastructure disciplines are useful for agent products because they optimize for safety, maintainability, capacity, inspection, and failure recovery. Those are the same properties needed when automations can touch real accounts, credentials, browsers, and computers.',
+        bulletPoints: [
+          'Design for inspection before autonomy',
+          'Track capacity, bottlenecks, and failure modes',
+          'Make maintenance routines explicit instead of relying on hero debugging',
+        ],
+      },
+      {
+        title: 'Operational Lessons',
+        content:
+          'A resilient system has routes, utilities, controls, maintenance schedules, permits, escalation paths, and shutoff valves. The app should mirror that: task routing, API budgets, vault controls, review queues, cron logs, and human approval boundaries.',
+        bulletPoints: [
+          'Every automation should have a clear owner and rollback path',
+          'Every repeated job should have observability and cost caps',
+          'Every critical credential path should be permissioned and auditable',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'health-biotech-knowledge-safety',
+    title: 'Health, Biotech, And Knowledge Safety',
+    subtitle: 'How to store medical and biotech knowledge without pretending research notes are clinical advice.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['health', 'biotech', 'medical-ai', 'clinical-safety', 'research', 'evidence'],
+    content: [
+      {
+        title: 'Use The Right Safety Boundary',
+        content:
+          'Health and biotech knowledge can be valuable in the Wiki, but it needs a hard boundary. The system can summarize research, organize hypotheses, help compare evidence, and support workflow design. It should not make diagnosis, treatment, or medication decisions.',
+        bulletPoints: [
+          'Label research support separately from clinical guidance',
+          'Keep human experts in the loop',
+          'Track evidence quality, source, date, and uncertainty',
+        ],
+      },
+      {
+        title: 'What To Capture',
+        content:
+          'Good notes include the research question, population or dataset, method, results, limitations, and practical relevance. Weak notes skip limitations. Dangerous notes turn early findings into confident instructions.',
+        bulletPoints: [
+          'Capture limitations as first-class data',
+          'Prefer review status and evidence score over raw excitement',
+          'Escalate high-stakes claims for human review',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'all-cancers-research-atlas',
+    title: 'All Cancers Research Atlas',
+    subtitle: 'A source-backed map of major cancer families, common cancer types, and the safest questions to ask before researching care.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'oncology', 'health', 'biotech', 'research', 'taxonomy', 'patient-safety'],
+    content: [
+      {
+        title: 'Educational Boundary',
+        content:
+          'Cancer content in the Wiki is research support, not medical advice. Cancer is not one disease. Care depends on the exact diagnosis, histology, stage, grade, biomarkers, health history, symptoms, goals, and clinician review.',
+        bulletPoints: [
+          'Use this article to organize research and questions',
+          'Do not use it to diagnose symptoms or choose treatment',
+          'Escalate treatment, medication, biopsy, imaging, or urgent symptom questions to qualified clinicians',
+        ],
+      },
+      {
+        title: 'Cancer Families',
+        content:
+          'A useful cancer map starts with tissue and cell origin. Body site alone is not enough because the same organ can contain very different cancer subtypes.',
+        tableData: {
+          headers: ['Family', 'Examples', 'Research Focus'],
+          rows: [
+            ['Carcinomas', 'Breast, lung, colorectal, prostate, pancreas, liver, stomach, bladder, kidney, thyroid, head and neck, cervical, uterine, ovarian', 'Stage, histology, grade, biomarkers, operability, recurrence risk, local versus systemic therapy'],
+            ['Sarcomas', 'Osteosarcoma, Ewing sarcoma, chondrosarcoma, leiomyosarcoma, liposarcoma, angiosarcoma, rhabdomyosarcoma, GIST', 'Expert pathology, imaging before biopsy when possible, margins, subtype-specific systemic therapy, specialty center review'],
+            ['Blood and immune cancers', 'Leukemia, lymphoma, multiple myeloma, MDS, MPN', 'Blood counts, marrow, flow cytometry, cytogenetics, molecular profile, measurable residual disease, transplant or cellular therapy fit'],
+            ['Brain and nervous system', 'Glioblastoma, astrocytoma, oligodendroglioma, ependymoma, medulloblastoma, meningioma, primary CNS lymphoma', 'MRI, surgical pathology, grade, IDH, 1p/19q, MGMT, neurologic function, radiation, trials'],
+            ['Skin cancers', 'Melanoma, basal cell carcinoma, squamous cell carcinoma, Merkel cell carcinoma, cutaneous lymphoma', 'Lesion change, biopsy, depth or local invasion, nodal risk, UV exposure, BRAF/NRAS/KIT in selected melanoma, immunotherapy'],
+            ['Pediatric and rare cancers', 'Neuroblastoma, Wilms tumor, retinoblastoma, hepatoblastoma, adrenal cortical carcinoma, thymic tumors, mesothelioma, ocular melanoma', 'Specialty review, age-specific protocols, rare tumor networks, genetic risk, trials'],
+          ],
+        },
+      },
+      {
+        title: 'Research Questions',
+        content:
+          'Before comparing treatments or papers, capture the basics. Missing stage, subtype, or biomarker data can make a confident answer unsafe.',
+        bulletPoints: [
+          'What is the exact diagnosis, body site, and histology?',
+          'Has pathology been reviewed, especially for rare cancer, sarcoma, lymphoma, or unusual findings?',
+          'What is the stage, grade, risk group, and spread pattern?',
+          'Which biomarkers or inherited risk tests are known, unknown, pending, or not applicable?',
+          'Is the goal cure, control, symptom relief, prevention of recurrence, surveillance, or trial matching?',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/all-cancers-research-atlas-2026-06-08.md and should be refreshed against official sources before clinical or product-policy use.',
+        bulletPoints: [
+          'NCI Cancer Types: https://www.cancer.gov/types',
+          'NCI Cancer Causes and Prevention: https://www.cancer.gov/about-cancer/causes-prevention',
+          'NCI Cancer Staging: https://www.cancer.gov/about-cancer/diagnosis-staging/staging',
+          'WHO Cancer fact sheet: https://www.who.int/news-room/fact-sheets/detail/cancer',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-screening-prevention-risk-guide',
+    title: 'Cancer Screening, Prevention, And Risk Guide',
+    subtitle: 'How to separate prevention, screening, symptoms, and diagnostic workups without turning general guidance into medical advice.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'screening', 'prevention', 'risk', 'cdc', 'uspstf', 'health-safety'],
+    content: [
+      {
+        title: 'Keep The Lanes Separate',
+        content:
+          'Prevention lowers risk before cancer develops. Screening looks for cancer or precancer before symptoms. Diagnostic testing investigates symptoms or abnormal screening results. Mixing these lanes creates unsafe answers.',
+        bulletPoints: [
+          'General screening guidance is not a personalized plan',
+          'Symptoms require clinical evaluation, not a screening shortcut',
+          'Risk can change with family history, genetics, prior results, immune status, anatomy, age, and exposures',
+        ],
+      },
+      {
+        title: 'Major Prevention Levers',
+        content:
+          'The strongest prevention content should focus on evidence-backed risk reduction and avoid cure-all claims.',
+        tableData: {
+          headers: ['Lever', 'Why It Matters'],
+          rows: [
+            ['Avoid tobacco and secondhand smoke', 'Tobacco is linked with many cancers, especially lung cancer and several head, neck, bladder, pancreas, kidney, cervix, stomach, liver, colorectal, and blood cancers.'],
+            ['HPV vaccination and screening', 'HPV vaccination lowers risk for HPV-related cancers, while cervical screening still matters for age-eligible people.'],
+            ['Hepatitis B vaccination and hepatitis care', 'Hepatitis B and C can raise liver cancer risk. Vaccination, testing, and treatment can reduce preventable harm.'],
+            ['UV protection', 'UV exposure raises risk for melanoma and nonmelanoma skin cancers.'],
+            ['Alcohol, weight, activity, and nutrition', 'Alcohol, obesity, and inactivity are population-level risk factors for multiple cancers.'],
+            ['Occupational and environmental controls', 'Asbestos, radon, certain chemicals, ionizing radiation, and workplace exposures require practical risk controls.'],
+          ],
+        },
+      },
+      {
+        title: 'Screening Snapshot',
+        content:
+          'Use current guideline sources before giving exact age or interval details. These examples reflect major U.S. screening lanes and should be personalized by a clinician.',
+        bulletPoints: [
+          'Breast: USPSTF recommends biennial mammography for women ages 40 to 74',
+          'Colorectal: USPSTF recommends screening adults ages 45 to 75 with accepted stool, scope, or imaging strategies',
+          'Cervical: screening depends on age, HPV/cytology strategy, cervix status, and prior results',
+          'Lung: USPSTF recommends annual low-dose CT for ages 50 to 80 with a 20 pack-year smoking history who currently smoke or quit within 15 years',
+          'Prostate: PSA screening is an individual decision for ages 55 to 69 and is not routinely recommended at age 70 or older',
+        ],
+      },
+      {
+        title: 'Agent Guardrails',
+        content:
+          'When a prompt asks about cancer prevention or symptoms, the chat should be calm, useful, and bounded.',
+        bulletPoints: [
+          'Do not diagnose from symptoms',
+          'Do not tell users to delay biopsy, imaging, prescribed treatment, or urgent care',
+          'Do link to CDC, USPSTF, NCI, WHO, and clinician review',
+          'Do flag persistent bleeding, unexplained weight loss, new lumps, changing lesions, neurologic symptoms, or severe new symptoms for medical attention',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/cancer-screening-prevention-and-risk-guide-2026-06-08.md.',
+        bulletPoints: [
+          'CDC Cancer Prevention: https://www.cdc.gov/cancer/prevention/',
+          'CDC Cancer Screening: https://www.cdc.gov/cancer/prevention/screening.html',
+          'USPSTF Cancer Screening Topics: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation-topics/cancer',
+          'NCI Risk Factors: https://www.cancer.gov/about-cancer/causes-prevention/risk',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-diagnosis-staging-biomarkers-treatment',
+    title: 'Cancer Diagnosis, Staging, Biomarkers, And Treatment',
+    subtitle: 'A practical guide to the oncology evidence loop: pathology, stage, grade, molecular data, treatment families, and proof.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'diagnosis', 'staging', 'biomarkers', 'treatment', 'oncology', 'clinical-trials'],
+    content: [
+      {
+        title: 'Evidence Loop',
+        content:
+          'The safest research path is not cancer name to treatment. It is presentation, diagnostic workup, tissue diagnosis, stage, grade, biomarkers, treatment goal, and verification.',
+        bulletPoints: [
+          'Stage often changes the purpose and sequence of treatment',
+          'Grade and histology can change risk and treatment intensity',
+          'Biomarkers can guide targeted therapy, immunotherapy, inherited-risk counseling, and trial matching',
+        ],
+      },
+      {
+        title: 'Biomarker Map',
+        content:
+          'Biomarkers are context-dependent. A marker that matters in one cancer may be irrelevant in another.',
+        tableData: {
+          headers: ['Type', 'Examples', 'Use'],
+          rows: [
+            ['Blood tumor markers', 'PSA, CA-125, CA 19-9, CEA, AFP, beta-hCG, LDH, thyroglobulin', 'Sometimes useful for monitoring or selected workups, but many are not general screening tests.'],
+            ['Hormone receptors', 'ER, PR, androgen receptor', 'Can guide endocrine or hormone-directed therapy.'],
+            ['Targetable genes and fusions', 'BRCA1/2, KRAS, NRAS, BRAF, EGFR, ALK, ROS1, RET, NTRK, IDH, KIT, PDGFRA', 'Can change therapy options, inherited-risk questions, or trial matching.'],
+            ['Immune and repair markers', 'MSI, mismatch repair, tumor mutational burden, PD-L1', 'Can help identify immunotherapy relevance in selected settings.'],
+            ['Blood cancer markers', 'Flow cytometry, cytogenetics, BCR-ABL, FLT3, NPM1, JAK2, myeloma cytogenetics', 'Can define subtype, prognosis, measurable residual disease, and treatment choices.'],
+          ],
+        },
+      },
+      {
+        title: 'Treatment Families',
+        content:
+          'Treatment families include surgery, radiation, chemotherapy, immunotherapy, targeted therapy, hormone therapy, stem cell transplant, interventional/local therapy, supportive and palliative care, surveillance, and clinical trials.',
+        bulletPoints: [
+          'The same treatment can be curative, adjuvant, palliative, or disease-controlling depending on context',
+          'Supportive and palliative care can run alongside active treatment',
+          'Clinical trials are especially important in rare, advanced, recurrent, or biomarker-defined cancers',
+        ],
+      },
+      {
+        title: 'Source Quality Check',
+        content:
+          'Cancer articles should be checked against their population, endpoint, comparison group, and harms. A cell study, animal study, phase 1 study, randomized trial, guideline, and marketing page do not carry the same weight.',
+        bulletPoints: [
+          'Ask what exact subtype and stage the source covers',
+          'Ask whether outcomes include survival, response, symptoms, toxicity, or quality of life',
+          'Ask whether the finding applies to the user age, biomarkers, prior treatments, and health context',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/cancer-diagnosis-staging-biomarkers-and-treatment-guide-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Cancer Staging: https://www.cancer.gov/about-cancer/diagnosis-staging/staging',
+          'NCI Tumor Markers: https://www.cancer.gov/about-cancer/diagnosis-staging/diagnosis/tumor-markers-fact-sheet',
+          'NCI Biomarker Testing: https://www.cancer.gov/about-cancer/treatment/types/biomarker-testing-cancer-treatment',
+          'NCI Treatment Types: https://www.cancer.gov/about-cancer/treatment/types',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-clinical-trials-care-navigation',
+    title: 'Cancer Clinical Trials And Care Navigation',
+    subtitle: 'A records checklist, clinical-trial primer, source hierarchy, and misinformation filter for cancer research tasks.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'clinical-trials', 'care-navigation', 'oncology', 'records', 'misinformation'],
+    content: [
+      {
+        title: 'Records First',
+        content:
+          'Trial matching and treatment research need the same core records: pathology, stage, scans, biomarkers, treatment history, response, side effects, current medications, health conditions, genetics when relevant, and practical constraints.',
+        bulletPoints: [
+          'Do not treat a trial listing as relevant until eligibility is checked',
+          'Capture prior lines of therapy and dates',
+          'Include travel, cost, caregiving, work, and support constraints',
+        ],
+      },
+      {
+        title: 'Trial Concepts',
+        content:
+          'Trials are research studies, not automatic proof that an approach works for a specific person.',
+        tableData: {
+          headers: ['Concept', 'Meaning'],
+          rows: [
+            ['Phase 1', 'Tests safety, dose, and early signals.'],
+            ['Phase 2', 'Tests activity in a more defined group.'],
+            ['Phase 3', 'Compares a new approach against a standard approach in a larger group.'],
+            ['Eligibility', 'Defines who can join based on cancer type, stage, biomarkers, prior treatment, organ function, age, and health.'],
+            ['Endpoint', 'Defines what the study measures, such as safety, response, survival, symptoms, or quality of life.'],
+          ],
+        },
+      },
+      {
+        title: 'Credible Source Hierarchy',
+        content:
+          'The strongest personal guidance comes from the treating oncology team and tumor board. Public sources like NCI, CDC, NIH, WHO, USPSTF, FDA, guidelines, peer-reviewed studies, and trial registries help users prepare questions and compare evidence.',
+        bulletPoints: [
+          'Use news, blogs, social media, and clinic marketing as leads to better sources, not as proof',
+          'Verify trial status and eligibility through official registries and trial teams',
+          'Ask what the standard option is if the user does not enroll',
+        ],
+      },
+      {
+        title: 'Misinformation Filter',
+        content:
+          'Escalate claims that advertise one cure for all cancers, require buying a supplement or secret protocol, rely only on testimonials, tell users to abandon care, or cite cell and animal studies as direct proof of human cure.',
+        bulletPoints: [
+          'Reject cure-all framing',
+          'Reject advice to delay urgent care or prescribed therapy',
+          'Ask for human evidence, comparison groups, harms, endpoints, and independent review',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/cancer-clinical-trials-and-care-navigation-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Clinical Trials: https://www.cancer.gov/research/participate/clinical-trials',
+          'NCI Find Cancer Clinical Trials: https://www.cancer.gov/research/participate/clinical-trials/search',
+          'ClinicalTrials.gov: https://clinicaltrials.gov/',
+          'NCI Questions to Ask about Treatment: https://www.cancer.gov/about-cancer/treatment/questions',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-decision-support-self-advocacy',
+    title: 'Cancer Decision Support And Self-Advocacy',
+    subtitle: 'A shared decision-making toolkit for comparing cancer options, preparing appointments, seeking second opinions, and naming personal priorities.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'decision-support', 'self-advocacy', 'shared-decision-making', 'second-opinion', 'questions'],
+    content: [
+      {
+        title: 'Decision Frame',
+        content:
+          'The best cancer decision is the one that fits the evidence, the exact cancer situation, the user values, practical limits, and clinician review. The chat should help users prepare for shared decision-making, not choose treatment for them.',
+        bulletPoints: [
+          'Capture medical facts: cancer type, stage, grade, subtype, biomarkers, and treatment line',
+          'List all reasonable options, including standard care, trials, monitoring, symptom-focused care, or no immediate treatment when appropriate',
+          'Compare benefits, harms, timing, logistics, proof, and follow-up',
+          'Ask what outcome matters most to the user',
+        ],
+      },
+      {
+        title: 'Option Comparison',
+        content:
+          'Every option should be compared across the same fields so users can see tradeoffs instead of only hearing a recommendation.',
+        tableData: {
+          headers: ['Field', 'What To Capture'],
+          rows: [
+            ['Goal', 'Cure, control, symptom relief, recurrence prevention, surveillance, clinical trial, or another goal'],
+            ['Benefit', 'Expected result and how it is measured: response, survival, symptoms, function, quality of life, or recurrence risk'],
+            ['Harms', 'Common side effects, serious risks, late effects, recovery, fertility, cognition, function, appearance, and independence'],
+            ['Logistics', 'Visit schedule, treatment length, travel, caregiver needs, work/school disruption, and monitoring'],
+            ['Cost', 'Coverage, prior authorization, in-network status, out-of-pocket estimate, assistance, and appeal path'],
+            ['Fallback', 'What happens if the option does not work, causes too much toxicity, or the user changes goals'],
+          ],
+        },
+      },
+      {
+        title: 'Questions To Bring',
+        content:
+          'A useful cancer decision aid turns confusion into direct questions for the oncology team.',
+        bulletPoints: [
+          'What information is still missing before we decide?',
+          'How urgent is this decision, and is it safe to wait for biomarkers, scans, fertility planning, or a second opinion?',
+          'What do you recommend and why does it fit my cancer and my goals?',
+          'What are the most common side effects and which symptoms require calling immediately?',
+          'How will this affect work, caregiving, fertility, sex, cognition, mobility, eating, sleep, pain, or independence?',
+          'Is a clinical trial reasonable for me?',
+        ],
+      },
+      {
+        title: 'Second Opinion Signals',
+        content:
+          'Second opinions can be especially valuable for rare, aggressive, advanced, recurrent, uncertain, or high-stakes cancers, and when several reasonable options exist.',
+        bulletPoints: [
+          'Gather pathology, imaging, biomarker, genetic, lab, medication, and treatment-history records',
+          'Ask the second-opinion team the exact question you want answered',
+          'Do not let a second opinion delay urgent care unless the care team says waiting is safe',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated toolkit lives at docs/wiki/cancer-decision-support-and-self-advocacy-toolkit-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Shared Decision Making: https://www.cancer.gov/publications/dictionaries/cancer-terms/def/shared-decision-making',
+          'NCI Questions to Ask about Cancer: https://www.cancer.gov/about-cancer/coping/questions',
+          'NCI Questions to Ask about Treatment: https://www.cancer.gov/about-cancer/treatment/questions',
+          'NCI Finding Cancer Care: https://www.cancer.gov/about-cancer/managing-care/finding-cancer-care',
+          'ACS Understanding Treatment Options: https://www.cancer.org/cancer/managing-cancer/making-treatment-decisions/making-decisions.html',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-quality-life-financial-survivorship',
+    title: 'Cancer Quality Of Life, Financial, And Survivorship Guide',
+    subtitle: 'A whole-person guide to side effects, palliative care, costs, caregiver support, records, and life after treatment.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'quality-of-life', 'financial-toxicity', 'survivorship', 'palliative-care', 'caregiver'],
+    content: [
+      {
+        title: 'Whole-Person Decision Map',
+        content:
+          'Cancer decisions are not only about shrinking tumors. Users also need to understand symptoms, pain, function, mental health, family roles, work, cost, fertility, sexuality, caregiver needs, and life after treatment.',
+        bulletPoints: [
+          'Ask how each option affects daily life, work, caregiving, mobility, cognition, eating, sleep, pain, intimacy, and independence',
+          'Track side effects and practical barriers early',
+          'Treat financial and transportation problems as care issues, not side notes',
+        ],
+      },
+      {
+        title: 'Palliative Care Boundary',
+        content:
+          'Palliative care focuses on symptom relief, side effects, distress, social needs, spiritual concerns, caregiver strain, and practical problems. It can happen alongside cancer-directed treatment.',
+        bulletPoints: [
+          'Consider asking about palliative care for pain, nausea, fatigue, appetite loss, breathlessness, insomnia, neuropathy, distress, advanced disease, or hard tradeoffs',
+          'Palliative care is not the same as giving up',
+          'The chat should explain the concept and suggest questions, not give medication orders',
+        ],
+      },
+      {
+        title: 'Financial Toxicity Questions',
+        content:
+          'Financial toxicity includes medical bills, drug costs, travel, lodging, childcare, lost income, debt, insurance problems, and skipped medication because of cost.',
+        bulletPoints: [
+          'Is the doctor, hospital, imaging center, lab, pharmacy, and treatment in network?',
+          'What prior authorization is needed?',
+          'What are the expected out-of-pocket costs?',
+          'Are there copay, foundation, hospital charity, manufacturer, social-work, travel, lodging, or transportation resources?',
+          'Who helps with insurance denials or appeals?',
+        ],
+      },
+      {
+        title: 'Survivorship And Records',
+        content:
+          'After treatment, users may need a survivorship plan covering follow-up visits, scans, labs, recurrence signs, late effects, primary care responsibilities, vaccines, rehab, mental health, work, and copies of treatment records.',
+        tableData: {
+          headers: ['Record', 'Why It Matters'],
+          rows: [
+            ['Pathology, stage, grade, subtype', 'Anchors future care and second opinions'],
+            ['Surgery, radiation, and systemic therapy summaries', 'Shows what was done, when, and with what dose or regimen'],
+            ['Biomarker and genetic test reports', 'Can guide future treatment, screening, family counseling, or trial matching'],
+            ['Side-effect log', 'Helps the team identify urgent symptoms, patterns, and quality-of-life needs'],
+            ['Insurance approvals, denials, and bills', 'Supports appeals, financial counseling, and cost tracking'],
+          ],
+        },
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated guide lives at docs/wiki/cancer-quality-of-life-financial-and-survivorship-guide-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Palliative Care: https://www.cancer.gov/about-cancer/advanced-cancer/care-choices/palliative-care-fact-sheet',
+          'NCI Managing Cancer Costs: https://www.cancer.gov/about-cancer/managing-care/track-care-costs',
+          'NCI Financial Toxicity: https://www.cancer.gov/about-cancer/managing-care/track-care-costs/financial-toxicity-pdq',
+          'NCI Caregiver Support: https://www.cancer.gov/about-cancer/coping/caregiver-support',
+          'NCI Survivorship Questions: https://www.cancer.gov/about-cancer/coping/survivorship/questions',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'energy-materials-systems',
+    title: 'Energy And Materials Systems',
+    subtitle: 'A non-AI knowledge lane for batteries, renewables, manufacturing, materials, and climate technology.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: ['energy', 'materials', 'renewables', 'batteries', 'manufacturing', 'climate-tech'],
+    content: [
+      {
+        title: 'Why This Domain Belongs Here',
+        content:
+          'Energy and materials shape what is physically possible. They also teach product teams to reason about constraints: cost, manufacturability, supply chains, lifecycle impact, safety, reliability, and deployment environment.',
+        bulletPoints: [
+          'Track performance and cost together',
+          'Separate lab results from deployable systems',
+          'Connect material constraints to manufacturing and infrastructure',
+        ],
+      },
+      {
+        title: 'How Agents Should Use It',
+        content:
+          'Agents can use this lane for research comparison, opportunity mapping, design inspiration, and technical learning. They should avoid presenting unreviewed material claims as validated engineering recommendations.',
+        bulletPoints: [
+          'Use source-backed summaries',
+          'Flag experimental maturity',
+          'Prefer review queues before operational use',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'nikola-tesla-projects-planetary-impact',
+    title: 'Nikola Tesla Projects And Planetary Impact',
+    subtitle: 'A grounded map of Tesla work in AC power, induction motors, high-frequency systems, wireless communication, remote control, and turbines.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: [
+      'nikola tesla',
+      'tesla',
+      'electricity',
+      'ac power',
+      'induction motors',
+      'wireless power',
+      'remote control',
+      'grid',
+      'climate tech',
+      'energy',
+      'infrastructure',
+    ],
+    content: [
+      {
+        title: 'Core Thesis',
+        content:
+          'The useful lesson from Nikola Tesla is systems engineering, not mythology. His strongest work connected generation, transmission, motors, lighting, high-frequency electronics, wireless signals, and remote control into whole operating systems. That same style of thinking helps modern teams build cleaner energy, resilient infrastructure, public technology, and safer automation.',
+        bulletPoints: [
+          'Build electrical systems end to end, from source to useful work',
+          'Use efficient motors because motor-driven systems are a major global electricity load',
+          'Treat wireless communication as public infrastructure for education, health, safety, and coordination',
+          'Use remote control and robotics to keep people out of dangerous work',
+          'Reject over-unity or free-energy claims unless they survive measurement, safety review, and independent replication',
+        ],
+      },
+      {
+        title: 'Project Map',
+        content:
+          'Tesla projects are most valuable when mapped to practical modern levers. AC power and induction motors are proven infrastructure. Wardenclyffe-scale wireless power remains unproven as a grid replacement, but wireless communication, targeted wireless power, and remote control became durable technology families.',
+        tableData: {
+          headers: ['Project', 'What It Explored', 'Modern Planetary Lever'],
+          rows: [
+            ['Polyphase AC power', 'Generators, transformers, transmission, motors, and lighting as one system', 'Move clean electricity from renewable and low-carbon sources to real demand'],
+            ['Induction motor', 'Rotating magnetic fields and brushless AC motor operation', 'Improve pumps, fans, compressors, HVAC, appliances, irrigation, and factory drives'],
+            ['Tesla coil and high-frequency systems', 'Resonance, high voltage, high frequency, lighting, and RF experiments', 'Teach electricity, improve RF/power-electronics literacy, and support targeted wireless-power research'],
+            ['Wardenclyffe and wireless transmission', 'Global wireless communication and attempted wireless energy transmission', 'Build universal connectivity, emergency communications, low-power sensor networks, and carefully bounded wireless charging'],
+            ['Radio-controlled teleautomaton', 'Remote control of a vessel with radio signals', 'Use robots and drones for inspection, disaster response, precision agriculture, and hazardous-site work'],
+            ['Bladeless turbine and pump', 'Boundary-layer fluid behavior in disk turbines and pumps', 'Study niche low-maintenance pumps, microturbines, and waste-heat experiments with real efficiency data'],
+          ],
+        },
+      },
+      {
+        title: 'How It Improves Lives',
+        content:
+          'The clearest Tesla-to-planet pathway is practical electrification. Cleaner grids, efficient motor systems, resilient communications, and remote inspection can reduce pollution, lower operating costs, improve safety, and bring useful infrastructure to underserved places.',
+        bulletPoints: [
+          'Expand clean power transmission and microgrids for schools, clinics, farms, homes, and transit',
+          'Retrofit motor systems with efficient motors, variable-speed drives, better controls, and predictive maintenance',
+          'Use wireless communication for rural access, public alerts, telemedicine, education, and disaster coordination',
+          'Deploy supervised robots for dangerous inspection and repair work',
+          'Teach the difference between inspiration, hypothesis, prototype, and deployable engineering',
+        ],
+      },
+      {
+        title: 'Evidence Boundary',
+        content:
+          'Tesla research attracts bad claims. The wiki should keep the real breakthroughs while filtering unsupported stories. Wardenclyffe was ambitious and historically important, but it was not completed as an industrial wireless power grid. Free energy should mean abundant renewable energy and fair access, not energy without source, loss, or cost.',
+        bulletPoints: [
+          'Cite patents, museum records, government energy data, standards bodies, and peer-reviewed engineering sources',
+          'Distinguish wireless communication from wireless power',
+          'Distinguish short-range resonant wireless power from planetary power broadcast',
+          'Mark uncompleted projects as uncompleted',
+          'Avoid using Tesla quotes unless the original publication is known',
+        ],
+      },
+      {
+        title: 'What To Build Or Research Next',
+        content:
+          'A Tesla-inspired Underground Circle program should focus on measurable public benefit: clean electrification maps, motor-efficiency retrofits, grid resilience planning, public communication infrastructure, robotics for inspection, and safe science education.',
+        bulletPoints: [
+          'Build a school lesson that maps AC grids, motors, wireless, robotics, and energy equity',
+          'Create student projects for motor retrofits, microgrids, and remote inspection workflows',
+          'Add research cards that label claims as proven, experimental, speculative, or false',
+          'Let agents produce climate-impact checklists for electrification and motor-efficiency opportunities',
+          'Use source, transmission, control, user benefit, safety, economics, and maintenance as the evaluation frame',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The full dated report lives at docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md. Recheck these source families before expanding the article.',
+        bulletPoints: [
+          'Smithsonian AC induction motor: https://americanhistory.si.edu/collections/object/nmah_713594',
+          'EIA electricity and Tesla history: https://www.eia.gov/energyexplained/electricity/ and https://www.eia.gov/kids/history-of-energy/famous-people/tesla.php',
+          'Tesla Museum patents: https://tesla-museum.org/en/nikola-tesla-2/patents/',
+          'Google Patents: US381968A, US382280A, US454622A, US645576A, US1119732A, US613809A, US1061206A',
+          'Tesla Science Center Wardenclyffe: https://teslasciencecenter.org/history/tower/',
+          'IEA motor-driven systems: https://www.iea.org/reports/energy-efficiency-policy-opportunities-for-electric-motor-driven-systems',
+          'NREL transmission planning: https://www.nrel.gov/grid/transmission-planning.html',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'nikola-tesla-systems-buildout-roadmap',
+    title: 'Nikola Tesla Systems Buildout Roadmap',
+    subtitle: 'A practical roadmap for turning Tesla-inspired systems thinking into motor audits, clean electrification, resilient grids, emergency communications, robotics, and safe science labs.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: [
+      'nikola tesla',
+      'tesla systems',
+      'motor audit',
+      'electrification',
+      'microgrid',
+      'wireless power',
+      'emergency communications',
+      'robotics',
+      'science education',
+      'climate tech',
+    ],
+    content: [
+      {
+        title: 'Buildout Principle',
+        content:
+          'Tesla-inspired work should make useful energy, communication, motion, sensing, and automation cheaper, safer, cleaner, more resilient, and more available. The roadmap turns the historical research into practical projects with measurement, safety, and claim hygiene built in.',
+        bulletPoints: [
+          'Use proven AC, motor, communication, and remote-control ideas as infrastructure patterns',
+          'Treat uncompleted wireless-power ambitions as research questions, not deployment claims',
+          'Measure source energy, useful output, losses, safety, reliability, and public benefit',
+          'Prefer projects that reduce bills, emissions, downtime, and danger for real communities',
+        ],
+      },
+      {
+        title: 'Seven Buildout Pillars',
+        content:
+          'The roadmap organizes Tesla-inspired work into seven practical pillars. Each pillar connects a historical Tesla theme to a modern public-benefit target.',
+        tableData: {
+          headers: ['Pillar', 'Modern Target', 'Public Benefit'],
+          rows: [
+            ['Clean electrification', 'Electrify heat, transport, tools, farms, schools, clinics, and industry where the grid is ready', 'Less pollution and better controllability'],
+            ['Motor efficiency', 'Audit motors, pumps, fans, compressors, HVAC, controls, and maintenance', 'Lower bills, lower emissions, less downtime'],
+            ['Grid reach and resilience', 'Transmission planning, HVDC where appropriate, microgrids, storage, demand response', 'Clean power reaches people reliably'],
+            ['Universal communication', 'Rural broadband, public alerts, emergency mesh, local knowledge mirrors', 'Better access to education, health, coordination, and safety'],
+            ['Targeted wireless power', 'Charging docks, sensors, robots, medical devices, and controlled power-beaming research', 'Power where wires or batteries are limiting'],
+            ['Remote inspection robotics', 'Drones, underwater robots, field robots, and supervised autonomy', 'Fewer people in hazardous work'],
+            ['Public science labs', 'Safe motors, fields, radio, wireless power, and grid simulations', 'Better technical literacy and fewer false claims'],
+          ],
+        },
+      },
+      {
+        title: 'First Project: Motor Efficiency Audit Kit',
+        content:
+          'The fastest practical project is a motor audit kit. Electric motor-driven systems are a large electricity load, so even small improvements across pumps, fans, compressors, HVAC, irrigation, and factory drives can compound into major savings.',
+        bulletPoints: [
+          'Inventory motor horsepower or kW, load type, runtime, controls, utility rate, and criticality',
+          'Flag variable-load systems as candidates for variable-frequency drives or better controls',
+          'Check belts, bearings, alignment, lubrication, heat, vibration, trips, and process throttling',
+          'Output a ranked action: meter, inspect, tune, add controls, replace, repair mechanical load, or leave unchanged',
+          'Label savings confidence as measured, estimated, or unknown',
+        ],
+      },
+      {
+        title: 'Claim Triage',
+        content:
+          'Tesla topics should be classified before they are recommended. Proven inventions, evolved modern technologies, plausible niche ideas, experimental systems, uncompleted historical projects, unsupported claims, and false or unsafe claims should not be mixed together.',
+        bulletPoints: [
+          'Proven: AC induction motor, polyphase concepts, radio remote control patent',
+          'Proven but evolved: AC transmission, high-frequency circuits, remote-control systems',
+          'Experimental: optical power beaming, dynamic wireless EV charging, some wireless-power applications',
+          'Uncompleted: Wardenclyffe as promised global wireless power infrastructure',
+          'Unsupported or false: over-unity machines, unlimited free-energy extraction, perpetual motion',
+        ],
+      },
+      {
+        title: 'App Build Targets',
+        content:
+          'The full roadmap lives at docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md. The best next product work is to make the roadmap interactive in the wiki, schools, and agent research tools.',
+        bulletPoints: [
+          'Add a Tesla Systems Lab school path',
+          'Add a motor-audit worksheet and calculator',
+          'Add a source-backed Tesla claim checker',
+          'Add microgrid and emergency-communications scenario templates',
+          'Add prompt blocks for agents to produce electrification and motor-efficiency checklists',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'Use official and primary sources first. The buildout should stay tied to the companion report, energy agencies, patents, museums, standards, and serious engineering programs.',
+        bulletPoints: [
+          'Companion report: docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md',
+          'Buildout roadmap: docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md',
+          'IEA motor-driven systems: https://www.iea.org/reports/energy-efficiency-policy-opportunities-for-electric-motor-driven-systems',
+          'EIA machine drives: https://www.eia.gov/todayinenergy/detail.php?id=13431',
+          'NREL transmission planning: https://www.nrel.gov/grid/transmission-planning.html',
+          'DARPA POWER: https://www.darpa.mil/news/2025/darpa-program-distance-record-power-beaming',
+          'Tesla Science Center Wardenclyffe: https://teslasciencecenter.org/history/tower/',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'nikola-tesla-operational-kits',
+    title: 'Nikola Tesla Operational Kits',
+    subtitle: 'Motor audits, claim triage, and a Tesla Systems Lab path for turning energy history into practical, safe, measurable projects.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: [
+      'nikola tesla',
+      'tesla systems lab',
+      'motor efficiency',
+      'motor audit',
+      'claim checker',
+      'source checker',
+      'wireless power safety',
+      'schools',
+      'energy education',
+      'climate projects',
+    ],
+    content: [
+      {
+        title: 'What Was Added',
+        content:
+          'The Tesla wiki now has three operational kits that move beyond history: a motor efficiency audit worksheet, a claim triage and source checker, and a Tesla Systems Lab school path. The goal is to make Tesla-inspired work measurable, safe, source-backed, and useful for real communities.',
+        bulletPoints: [
+          'Motor audit kit: inventory motors, runtime, controls, symptoms, and savings opportunities',
+          'Claim checker: classify Tesla claims as proven, evolved, niche, experimental, uncompleted, unsupported, or false/unsafe',
+          'Systems Lab path: teach source-to-load thinking, motors, grids, wireless boundaries, robotics safety, and claim hygiene',
+        ],
+      },
+      {
+        title: 'Motor Audit Output',
+        content:
+          'The motor audit kit turns Tesla induction-motor history into a practical facility worksheet. It focuses on the whole motor system, including pumps, fans, compressors, controls, maintenance, load profile, and runtime.',
+        bulletPoints: [
+          'Collect motor rating, load type, runtime, load pattern, existing control, symptoms, utility rate, and criticality',
+          'Score runtime, load variability, control mismatch, mechanical symptoms, energy exposure, and criticality',
+          'Recommend meter, inspect, tune, add controls, replace, repair mechanical load, or leave unchanged',
+          'Require qualified workers and lockout/tagout boundaries for electrical or maintenance work',
+        ],
+      },
+      {
+        title: 'Claim Checker Output',
+        content:
+          'The claim checker prevents Tesla content from collapsing into myth. It asks what was built, what was measured, what losses were included, whether replication exists, and which safety limits apply.',
+        tableData: {
+          headers: ['Class', 'Use'],
+          rows: [
+            ['Proven', 'Use as a reliable historical or engineering foundation'],
+            ['Proven but evolved', 'Use with notes about how modern systems differ'],
+            ['Plausible niche', 'Study in bounded cases with measurement'],
+            ['Experimental', 'Track as research, not broad deployment'],
+            ['Uncompleted', 'Study as history, do not present as delivered infrastructure'],
+            ['Unsupported', 'Reject until stronger evidence exists'],
+            ['False or unsafe', 'Reject and warn'],
+          ],
+        },
+      },
+      {
+        title: 'Tesla Systems Lab',
+        content:
+          'The school path organizes the topic into eight lessons: source to useful work, AC and rotating fields, motor audits, grid resilience, wireless communication versus wireless power, remote-control robotics, claim triage, and a planetary benefit project.',
+        bulletPoints: [
+          'Keep activities low-voltage or simulated unless trained supervision exists',
+          'Require source lists and evidence classes for claims',
+          'Use local facilities as living systems: energy, safety, maintenance, people, cost, and resilience',
+          'Export the final project as a research document with problem, people helped, measurement plan, safety boundary, and next step',
+        ],
+      },
+      {
+        title: 'Files',
+        content:
+          'These docs are the canonical operational extensions for the Tesla wiki cluster.',
+        bulletPoints: [
+          'docs/wiki/nikola-tesla-motor-efficiency-audit-kit-2026-06-01.md',
+          'docs/wiki/nikola-tesla-claim-triage-and-source-checker-2026-06-01.md',
+          'docs/wiki/nikola-tesla-systems-lab-school-path-2026-06-01.md',
+          'docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md',
+          'docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md',
+        ],
+      },
+    ],
+  },
   // ===========================================================================
   // FOUNDATIONS
   // ===========================================================================
@@ -292,6 +1243,711 @@ export const WIKI_ARTICLES: WikiArticle[] = [
           'Add a language-strategy lesson for product design decisions',
           'Teach users how app, agent, and infrastructure layers use different tools',
           'Tie wiki articles directly to school lessons so the app feels like a connected learning system',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'typescript-agent-best-practices',
+    title: 'TypeScript Best Practices For Agents',
+    subtitle: 'How contributing agents should write, review, and verify TypeScript in The Underground Circle.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: ['typescript', 'typescript strict', 'strict-mode', 'agents', 'react-native', 'expo', 'type-safety', 'verification'],
+    content: [
+      {
+        title: 'Baseline For This App',
+        content:
+          'The Underground Circle uses Expo / React Native with TypeScript strict mode for the app. Agents should treat strict typing as the floor, keep pure runtime modules testable from smoke scripts, and run the narrow typecheck before handing work back.',
+        bulletPoints: [
+          'Keep `strict` enabled and do not loosen TypeScript settings to make an edit pass',
+          'Use `npm run typecheck:app` for app-side changes',
+          'Use `npm run typecheck:functions` when Supabase function or shared edge code changes',
+          'Finish TypeScript changes with `git diff --check`',
+        ],
+      },
+      {
+        title: 'Type Safety Rules',
+        content:
+          'Agent code should make bad states difficult to represent. The strongest patterns are precise domain types, discriminated unions, boundary parsers, exhaustiveness checks, and type-only imports. Free-form strings should not be the only source of truth for route, bridge, provider, approval, or recovery state.',
+        bulletPoints: [
+          'Use `unknown` for untrusted input until it is narrowed',
+          'Prefer discriminated unions for planner, bridge, approval, recovery, and execution states',
+          'Use `satisfies` for checked config maps without losing literal inference',
+          'Avoid `any`, `as any`, double casts, and non-null assertions unless the invariant is local and obvious',
+          'Design indexed and optional access as if `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` were enabled',
+        ],
+      },
+      {
+        title: 'Boundary Parsing Pattern',
+        content:
+          'Every bridge response, provider payload, file upload manifest, URL param, local-storage read, or JSON parse should be validated once at the boundary. After that, downstream code should receive a typed value and should not repeat stringly typed checks.',
+        codeExample: `type Surface = 'browser' | 'desktop' | 'file' | 'hybrid';
+
+interface AutomationRequest {
+  surface: Surface;
+  userText: string;
+  requiresApproval: boolean;
+}
+
+function isSurface(value: unknown): value is Surface {
+  return value === 'browser' || value === 'desktop' || value === 'file' || value === 'hybrid';
+}
+
+function parseAutomationRequest(input: unknown): AutomationRequest | null {
+  if (!input || typeof input !== 'object') return null;
+  const value = input as { surface?: unknown; userText?: unknown; requiresApproval?: unknown };
+
+  if (!isSurface(value.surface)) return null;
+  if (typeof value.userText !== 'string' || value.userText.trim().length === 0) return null;
+
+  return {
+    surface: value.surface,
+    userText: value.userText.trim(),
+    requiresApproval: value.requiresApproval === true,
+  };
+}`,
+      },
+      {
+        title: 'Agent Runtime Modeling',
+        content:
+          'Automation code should return typed receipts, blockers, proof, and recovery options. Chat should render useful choices from structured data instead of parsing raw exception text.',
+        bulletPoints: [
+          'Return typed success and failure results from bridge and desktop app adapters',
+          'Include stable error codes, retryability, user-action requirements, and proof paths',
+          'Switch on discriminants and use a `never` exhaustiveness check',
+          'Keep UI labels separate from runtime discriminants',
+          'Map database rows into app DTOs before handing them to UI or planners',
+        ],
+      },
+      {
+        title: 'Verification Checklist',
+        content:
+          'A TypeScript change is not done when the editor looks quiet. Agents should prove the change with the smallest useful command set and call out any skipped coverage.',
+        bulletPoints: [
+          'Run `npm run typecheck:app` for app code',
+          'Run the focused smoke test for changed planner, bridge, recovery, provider, approval, persistence, or route behavior',
+          'Run `npm run typecheck:functions` for Supabase functions or shared edge code',
+          'Run `git diff --check` before final handoff',
+          'Document any forced cast, skipped smoke, or unresolved type-risk explicitly',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical agent document at docs/TYPESCRIPT_AGENT_BEST_PRACTICES.md keeps the longer standard and source list. Recheck official TypeScript, TSConfig, typescript-eslint, Expo, and React TypeScript docs when changing the baseline.',
+        bulletPoints: [
+          'TypeScript Handbook: https://www.typescriptlang.org/docs/handbook/2/everyday-types.html',
+          'TypeScript narrowing: https://www.typescriptlang.org/docs/handbook/2/narrowing.html',
+          'TSConfig strictness: https://www.typescriptlang.org/tsconfig/strict.html',
+          'typescript-eslint type-checked configs: https://typescript-eslint.io/users/configs/',
+          'Expo TypeScript guide: https://docs.expo.dev/guides/typescript/',
+          'React TypeScript guide: https://react.dev/learn/typescript',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agent-development-standards-index',
+    title: 'Agent Development Standards Index',
+    subtitle: 'Which coding, TypeScript, design, web-page, app automation, tool-contract, and UC style standards agents should read for each task.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'agent standards',
+      'development standards',
+      'coding standards',
+      'typescript standards',
+      'design standards',
+      'web design standards',
+      'app automation standards',
+      'tool contract standards',
+      'agents',
+      'verification',
+    ],
+    content: [
+      {
+        title: 'Why The Index Exists',
+        content:
+          'The standards index gives agents a short routing layer before implementation. Instead of guessing which guide applies, agents can choose the coding, TypeScript, design, web-page, computer/app automation, tool-contract/eval, or local style standard that matches the task.',
+        bulletPoints: [
+          'Start with AGENTS.md and docs/AGENTS_ROADMAP.md',
+          'Use docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md to choose the right standard',
+          'Use the roadmap when ownership or guidance conflicts',
+          'Keep app wiki standards mirrored with the canonical docs',
+        ],
+      },
+      {
+        title: 'Standards Map',
+        content:
+          'Each task type has a required reading set and a usual verification shape. This keeps broad agent work consistent across code, TypeScript, design, wiki, web-page, computer/app automation, and tool/eval changes.',
+        tableData: {
+          headers: ['Task', 'Read', 'Verify'],
+          rows: [
+            ['General code change', 'CODING_AGENT_BEST_PRACTICES', 'Focused smoke, typecheck:app, git diff --check'],
+            ['TypeScript change', 'CODING + TYPESCRIPT_AGENT_BEST_PRACTICES', 'Focused smoke when behavior changes, typecheck:app'],
+            ['Product UI or automation card', 'DESIGN_AGENT_BEST_PRACTICES + UC_STYLE_GUIDE', 'Typecheck plus focused UI/runtime smoke when available'],
+            ['Web page or dashboard', 'MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE + DESIGN + UC_STYLE_GUIDE', 'Mobile/desktop review, accessibility pass, typecheck'],
+            ['Browser, desktop, file, or app automation', 'AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE + CODING + TYPESCRIPT + DESIGN', 'Computer/app route smoke, app-family smoke when relevant, typecheck'],
+            ['OpenSwan, bridge, MCP, or connected-agent tool contract', 'AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE + CODING + TYPESCRIPT + AUTOMATION', 'Tool-specific smoke, approval/recovery negative-path smoke, typecheck'],
+            ['Standards wiki content', 'This index plus the topic guide', 'smoke:agent-standards-wiki, typecheck:app, git diff --check'],
+          ],
+        },
+      },
+      {
+        title: 'Worktree Integration Checklist',
+        content:
+          'The standards registry also builds hidden worktree-quality and SwanBot/OpenSwan configuration checks for delegated agents. It uses git status --porcelain=v1 -uall path snapshots, starts from AGENTS.md plus the roadmap and stack reference, maps changed files to canonical owners, checks required worktree docs/scripts/ignore rules with buildOpenSwanWorktreeConfigSnapshot, flags duplicate-path and verification risk, and recommends the narrowest smoke before typecheck and git diff --check.',
+        bulletPoints: [
+          'Use buildAgentWorktreeQualityChecklist when a bounded file list or git status output is available',
+          'Use buildAgentWorktreeQualityPromptBlock or pass changedPaths into applyAgentDevelopmentStandardsToPrompt when handing work to Codex, Claude Code, Cursor Composer, Gemini, or a custom connected agent',
+          'Use buildOpenSwanWorktreeConfigSnapshot and formatOpenSwanWorktreeConfigPromptBlock before SwanBot/OpenSwan hands a repo or .openswan-worktrees checkout to a connected agent, or pass the snapshot as worktreeConfigSnapshot into the standards prompt helpers',
+          'Managed terminal bridge launches append the hidden worktree config block through terminal-launch-utils when projectDir is this repo or an OpenSwan worktree',
+          'Run check:openswan-worktree-config before risky connected-agent handoffs when checkout state matters',
+          'Run check:openswan-lanes when SwanBot/OpenSwan/Chat work becomes broad so changes are grouped by delivery lane before review',
+          'Run check:swanbot-chat:daily for normal SwanBot/OpenSwan/Chat development and check:swanbot-chat:release before a larger delivery',
+          'Run report:swanbot-openswan-readiness with --smokes-passed after the local SwanBot v2 release gate when default-flip or customer handoff needs live production telemetry evidence',
+          'Run smoke:openswan-lane-report after changing the lane model or its package scripts',
+          'Run smoke:openswan-worktree-config when the worktree config helper, report script, package scripts, .gitignore runtime artifacts, or OpenSwan worktree notes change',
+          'Prefer extending mapped owners such as genericAppNavigator, appAutomationControlSurfaces, chat planning/metadata, chat computer runtime, OpenSwan runtime, product UI, second brain/research, standards/wiki, package scripts, or agent-runtime SQL before creating another file',
+          'Escalate to a new roadmap owner only when no existing owner fits the concern',
+        ],
+      },
+      {
+        title: 'Canonical Standards',
+        content:
+          'The current canonical standards are docs/CODING_AGENT_BEST_PRACTICES.md, docs/TYPESCRIPT_AGENT_BEST_PRACTICES.md, docs/DESIGN_AGENT_BEST_PRACTICES.md, docs/MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md, docs/AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE.md, docs/AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE.md, and docs/UC_STYLE_GUIDE.md.',
+        bulletPoints: [
+          'Coding: change shape, architecture, security, testing, review, handoff',
+          'TypeScript: strict typing, boundary parsing, unions, React Native / Expo, verification',
+          'Design: product flow, UX writing, design-system discipline, automation UI',
+          'Modern web: page structure, responsive layout, accessibility, performance, forms, media',
+          'Computer/app automation: browser, desktop, files, native apps, Adobe/CAD, bridge recovery, evidence, and connected-agent adapter buildout',
+          'Tool contracts and evals: schemas, structured results, approval metadata, recovery, redaction, retryability, and negative-path coverage',
+          'UC style: local tokens for color, typography, radius, buttons, inputs, cards, and dark surfaces',
+        ],
+      },
+      {
+        title: 'Conflict Rules',
+        content:
+          'The standards should reinforce each other. When they conflict, the most specific document wins for its domain, and docs/AGENTS_ROADMAP.md wins over all standards docs.',
+        bulletPoints: [
+          'TypeScript-specific guidance wins over general coding guidance for TypeScript details',
+          'Modern web guidance owns page structure and browser behavior',
+          'Design guidance owns product flow, UX writing, and automation UI',
+          'UC_STYLE_GUIDE owns local visual tokens',
+          'AGENTS_ROADMAP wins when ownership or canonical architecture conflicts',
+        ],
+      },
+      {
+        title: 'Maintenance Contract',
+        content:
+          'When agents change these standards, they must keep the repo docs, app wiki, and verification smoke in sync so future agents see the same guidance everywhere.',
+        bulletPoints: [
+          'Update docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md',
+          'Update AGENTS.md and docs/AGENTS_ROADMAP.md when discoverability or ownership changes',
+          'Update the matching article in src/lib/wikiData.ts',
+          'Update scripts/agent-standards-wiki-smoketest.ts',
+          'Run npm run smoke:agent-standards-wiki, npm run typecheck:app, and git diff --check',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agentic-computer-app-automation-for-agents',
+    title: 'Agentic Computer/App Automation For Agents',
+    subtitle: 'How agents should route, approve, execute, recover, and verify browser, desktop, local-file, and native-app tasks.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'computer app automation',
+      'desktop automation',
+      'browser automation',
+      'computer use',
+      'photoshop',
+      'indesign',
+      'adobe',
+      'cad',
+      'bridge',
+      'approval',
+      'recovery',
+      'agents',
+    ],
+    content: [
+      {
+        title: 'The Automation Standard',
+        content:
+          'Use docs/AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE.md when a chat request should operate another browser, desktop app, uploaded file, local file, Adobe project, CAD drawing, bridge, or unfamiliar app. The standard is a semantic, evidence-first automation ladder, not a blind click loop.',
+        bulletPoints: [
+          'Classify the surface and risk before action',
+          'Observe the browser, desktop, file, or app state before mutation',
+          'Prefer official APIs, scripts, plugins, file adapters, semantic locators, and accessibility trees before coordinates',
+          'Require approval for writes, exports, credentials, destructive actions, billing risk, private files, and low-confidence fallback',
+          'Return typed receipts, before/after proof, warnings, and recovery options',
+        ],
+      },
+      {
+        title: 'Surface Ladder',
+        content:
+          'Agents should choose the safest deterministic control surface available. For Photoshop and InDesign this usually means UXP or scripting APIs before accessibility automation. For websites it means semantic Playwright or Browserbase routes before visual fallback. For unfamiliar apps it means app API, file format, accessibility tree, then connected-agent buildout.',
+        tableData: {
+          headers: ['Surface', 'Use First When', 'Fallback'],
+          rows: [
+            ['Product API or file adapter', 'The app exposes a documented API, SDK, script runtime, or parseable file format', 'Native app script bridge'],
+            ['Native scripting or plugin API', 'Adobe, CAD, IDE, office, or design tools expose scripts/plugins/macros', 'Accessibility tree and menus'],
+            ['Browser automation', 'The task is on a website or web app', 'CDP inspection or guarded visual fallback'],
+            ['Desktop accessibility', 'The app lacks an API but exposes semantic UI controls', 'Coordinate fallback with approval'],
+            ['Connected-agent buildout', 'No safe route exists yet', 'Stop with recovery options until proof exists'],
+          ],
+        },
+      },
+      {
+        title: 'Typed Route Decision',
+        content:
+          'The helper buildAppAutomationRouteDecision(task, options) turns the research ladder into a compact execution gate. It returns ready_to_execute, needs_observation, needs_approval, needs_user_action, or needs_connected_agent_buildout before the chat mutates another app. formatAppAutomationRouteDecisionPromptBlock(decision) carries that decision into OpenSwan, SwanBot, Codex, Claude Code, Cursor Composer, or custom agents.',
+        bulletPoints: [
+          'Use the highest available deterministic surface and record stronger surfaces that were skipped',
+          'Block execution when install, version, active document, locator, permission, file grant, or app evidence is missing',
+          'Block writes, exports, uploads, generated scripts, destructive edits, and coordinates until approval exists',
+          'Delegate missing adapters through connected-agent buildout only with official source refs, smoke proof, and a bounded retry plan',
+        ],
+      },
+      {
+        title: 'Approval And Evidence',
+        content:
+          'The chat should stay quiet until the user needs to approve, unblock, choose, or inspect proof. Any write, export, credential, billing, private-file, destructive, or coordinate-fallback action needs an approval payload that explains scope, change, proof, and stop conditions.',
+        bulletPoints: [
+          'Before evidence proves the target was identified',
+          'Action receipts summarize commands, app operations, or browser steps',
+          'After evidence proves the requested change or records manual verification needed',
+          'Warnings list anything the agent could not verify',
+          'Local paths and private content stay hidden unless explicitly needed',
+        ],
+      },
+      {
+        title: 'Failure Recovery',
+        content:
+          'Failures should become selectable recovery options instead of raw error text. Good options include retry with fresh evidence, repair or start the bridge, ask the user to unblock permissions/MFA/file access, switch surface, hand off adapter buildout to a connected agent, or stop and show details.',
+        bulletPoints: [
+          'Each option needs an actor, safety mode, retry cap, and stop condition',
+          'Connected code agents build missing adapters only under a bounded scope',
+          'A retry is not ready until the buildout result includes source refs, verification, and a safe plan',
+          'Recovery context should include the failed message id, source surface, failure excerpt, and hidden guardrails',
+        ],
+      },
+      {
+        title: 'Research Basis',
+        content:
+          'The guide is grounded in current primary sources from Anthropic, MCP, NIST, OWASP, Playwright, Chrome DevTools Protocol, Apple UI scripting, Microsoft UI Automation, and Adobe UXP documentation.',
+        bulletPoints: [
+          'Anthropic agent and tool guidance: simple workflows first, clear tools, real evaluations, checkpoints, and stopping conditions',
+          'MCP tools: visible tool exposure, human denial path, structured outputs, validation, access control, and sanitized outputs',
+          'NIST AI RMF and OWASP: risk mapping, prompt injection, tool misuse, excessive agency, privilege abuse, data disclosure, and cascading failures',
+          'Playwright, Apple, Microsoft, and Chrome: semantic locators, actionability checks, accessibility/control trees, and structured state before low-level fallback',
+          'Adobe UXP: use documented Photoshop and InDesign scripting/plugin surfaces for layer, document, export, and text-frame work',
+        ],
+      },
+      {
+        title: 'Verification',
+        content:
+          'Agents should prove changes with the smallest command set that covers the risk. Standards/wiki edits need the standards smoke. Runtime app-automation changes need route, control-surface, evidence, and app-family smoke where relevant.',
+        bulletPoints: [
+          'Run npm run smoke:agent-standards-wiki for this article and the canonical guide',
+          'Run npm run smoke:chat-computer-request-router for routing changes',
+          'Run npm run smoke:app-automation-control-surfaces for control-surface metadata changes',
+          'Run npm run smoke:computer-task-evidence-contract for proof and receipt changes',
+          'Finish app-side changes with npm run typecheck:app and git diff --check',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agent-tool-contracts-and-evals-for-agents',
+    title: 'Agent Tool Contracts And Evals For Agents',
+    subtitle: 'How agents should design, review, approve, recover, redact, and evaluate OpenSwan, bridge, MCP, and connected-agent tools.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'tool contract',
+      'agent tool evals',
+      'mcp tool',
+      'openswan tool',
+      'bridge tool',
+      'structured result',
+      'approval metadata',
+      'recovery eval',
+      'redaction',
+      'negative path',
+      'agents',
+    ],
+    content: [
+      {
+        title: 'The Tool Standard',
+        content:
+          'Use docs/AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE.md when a change touches OpenSwan tools, desktop/browser bridge tools, MCP tools, connected-agent dispatch, recovery actions, approval metadata, redaction, or tool result contracts. The concrete helper is src/lib/agentToolContractStandards.ts. Tools should be agent-facing contracts with clear names, bounded schemas, typed results, recovery options, and proof coverage.',
+        bulletPoints: [
+          'One tool should expose one clear capability',
+          'Inputs should use strict schemas, enums, bounded strings, and required fields',
+          'Results should separate completed, blocked, unsafe, and failed states',
+          'Approval metadata should describe actor, target, risk, proof, retry limit, and stop condition',
+          'Negative-path evals should prove malformed input, missing permission, unsafe action, redaction, and recovery behavior',
+        ],
+      },
+      {
+        title: 'Contract Checklist',
+        content:
+          'A reliable tool contract names the domain and action, states purpose, validates untrusted inputs, annotates risk, defines idempotency, requires observation before side effects, returns structured evidence, and redacts private output before it reaches chat or prompts.',
+        tableData: {
+          headers: ['Contract Area', 'Requirement'],
+          rows: [
+            ['Name and purpose', 'Namespaced imperative action with one clear capability'],
+            ['Inputs', 'Strict schema, bounded fields, enums, and trust-boundary parsing'],
+            ['Risk and approval', 'Read/write/destructive/billing/credential/privacy annotation plus user-visible approval rule'],
+            ['Output shape', 'Stable completed, blocked, unsafe, and failed variants'],
+            ['Evidence', 'Before/after state, receipts, diffs, exports, hashes, or manual-verification marker'],
+            ['Eval coverage', 'Happy path plus malformed input, permission denial, unsafe target, redaction, retry, and prompt-injection cases'],
+          ],
+        },
+      },
+      {
+        title: 'Typed Self Review',
+        content:
+          'The helper reviewAgentToolContractDraft(description, draft, options) checks a proposed tool before agents mark it ready. It blocks missing schema fields, missing approval gates, missing recovery fields, missing evals, and missing redaction coverage. formatAgentToolContractReviewPromptBlock(review) turns those findings into a compact connected-agent handoff.',
+        bulletPoints: [
+          'Ready tools include purpose, inputs, trust boundary, risk tags, approval rule, idempotency, observation, output variants, evidence, redaction, eval ids, recovery fields, and smoke commands',
+          'Privileged tools are blocked unless approvalRequired is true',
+          'Missing evals and recovery fields are blockers because chat cannot recover safely from prose-only failures',
+          'Missing recommended smoke commands are warnings that need to be run or marked not applicable',
+        ],
+      },
+      {
+        title: 'Recovery Contract',
+        content:
+          'Recoverable failures need machine-readable fields so chat can show useful options without parsing prose. The recovery contract should include code, retryability, fresh-evidence requirement, approval requirement, actor, max attempts, recovery options, and stop condition.',
+        bulletPoints: [
+          'Retry only when idempotency or fresh evidence prevents duplicate side effects',
+          'Ask the user only for real blockers such as permissions, MFA, app install, file access, or approval',
+          'Use connected agents for bounded adapter or runtime repair with required proof',
+          'Stop instead of looping when the target stays ambiguous or the action becomes unsafe',
+        ],
+      },
+      {
+        title: 'Research Basis',
+        content:
+          'The standard is grounded in primary guidance from Anthropic, MCP, NIST, and OWASP. The shared direction is clear: tools should be narrow, visible, validated, permissioned, structured, evaluated, and resistant to untrusted content overriding policy.',
+        bulletPoints: [
+          'Anthropic: design tools for agents, use clear namespaces and descriptions, return useful context, and test with real tasks',
+          'MCP: tools are model-controlled capabilities that need visible exposure, user denial paths, structured outputs, input validation, access controls, rate limits, and sanitized output',
+          'NIST AI RMF: map context, measure risk, manage mitigations, and keep review visible',
+          'OWASP: defend against prompt injection, tool misuse, excessive agency, privilege abuse, data disclosure, supply-chain issues, and cascading failures',
+        ],
+      },
+      {
+        title: 'Verification',
+        content:
+          'Tool changes should prove both success and failure behavior. A passing happy path is not enough when the tool can touch files, browsers, apps, credentials, billing, connected agents, or recovery loops.',
+        bulletPoints: [
+          'Run npm run smoke:agent-tool-contract-standards for the reusable checklist and eval helper',
+          'Run npm run smoke:agent-standards-wiki for this article and the canonical guide',
+          'Run the tool-specific smoke for changed runtime behavior',
+          'Run approval and recovery negative-path smoke when the tool is privileged',
+          'Check redaction for secrets, private paths, screenshots, OCR, DOM, app state, and file snippets',
+          'Finish app-side changes with npm run typecheck:app and git diff --check',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'coding-best-practices-for-agents',
+    title: 'Coding Best Practices For Agents',
+    subtitle: 'A general engineering standard for agents writing, reviewing, testing, and handing off code.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'coding best practices',
+      'code quality',
+      'secure coding',
+      'testing',
+      'review',
+      'agents',
+      'handoff',
+      'engineering standards',
+    ],
+    content: [
+      {
+        title: 'The General Code Standard',
+        content:
+          'Good code in this app should be clear, reviewable, tested at the right risk level, validated at trust boundaries, secure by default, observable enough to debug, and consistent with the canonical owner in the roadmap.',
+        bulletPoints: [
+          'Read the owning files and roadmap table before editing',
+          'Extend existing helpers, types, adapters, and tests before adding parallel paths',
+          'Keep changes small enough to review and roll back',
+          'Separate refactors from behavior changes when practical',
+          'Use docs/CODING_AGENT_BEST_PRACTICES.md as the full agent guide',
+        ],
+      },
+      {
+        title: 'Architecture And Boundaries',
+        content:
+          'Agents should keep side effects obvious and boundaries typed. UI can call runtime helpers, but generic logic should not import UI frameworks unless it is explicitly a UI helper.',
+        bulletPoints: [
+          'Keep adapters thin and translate boundary data into typed core logic',
+          'Use one source of truth for route ids, provider ids, tool names, approvals, and statuses',
+          'Do not hide file writes, network calls, bridge actions, database writes, or external app actions in formatters',
+          'Validate configuration and boundary inputs before downstream code uses them',
+        ],
+      },
+      {
+        title: 'Security And Error Handling',
+        content:
+          'Secure coding is part of the agent standard because this app controls providers, browsers, files, desktop apps, memory, approvals, and user content. Unknown errors should become typed failures with safe user-facing recovery.',
+        bulletPoints: [
+          'Treat user input, provider output, uploaded files, bridge responses, URL params, local storage, and database rows as untrusted',
+          'Use least privilege and allowlists for tools, routes, domains, app actions, and file operations',
+          'Never log API keys, OAuth tokens, secret headers, private paths, or private file contents',
+          'Fail closed for permissions, auth, destructive actions, billing risk, and unclear targets',
+          'Return stable error codes when the UI or recovery layer needs to act',
+        ],
+      },
+      {
+        title: 'Testing And Verification',
+        content:
+          'Verification should match blast radius. A documentation-only change needs diff hygiene; planner, bridge, recovery, provider, approval, persistence, or route behavior needs focused smoke coverage plus typecheck.',
+        tableData: {
+          headers: ['Change Type', 'Expected Verification'],
+          rows: [
+            ['Documentation only', 'git diff --check'],
+            ['App TypeScript or wiki data', 'npm run typecheck:app'],
+            ['Supabase functions', 'npm run typecheck:functions'],
+            ['Planner, route, recovery, bridge, provider, approval, persistence', 'Focused smoke plus npm run typecheck:app'],
+            ['Security-sensitive logic', 'Negative-path smoke plus auth, redaction, and least-privilege review'],
+          ],
+        },
+      },
+      {
+        title: 'Review And Handoff',
+        content:
+          'A useful agent handoff says what changed, where the canonical files are, what verification ran, what was skipped, and what risk remains. Review findings should lead with concrete bugs or regressions, not summaries.',
+        bulletPoints: [
+          'Check that the change solves the actual user request',
+          'Call out unrelated or oversized diffs',
+          'Check for validated inputs, typed recoverable errors, and approval-gated writes',
+          'Check that secrets are redacted from logs, metadata, receipts, and chat',
+          'Check that docs, wiki entries, or roadmap ownership are updated when behavior becomes canonical',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical coding guide keeps the full source list. Recheck engineering practice, secure coding, testing, and commit convention sources when changing the baseline.',
+        bulletPoints: [
+          'Google Engineering Practices: https://google.github.io/eng-practices/',
+          'Google small changes: https://google.github.io/eng-practices/review/developer/small-cls.html',
+          'OWASP secure coding: https://owasp.org/www-project-secure-coding-practices-quick-reference-guide/stable-en/',
+          'Testing Library principles: https://testing-library.com/docs/guiding-principles',
+          'Conventional Commits: https://www.conventionalcommits.org/en/v1.0.0/',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'modern-web-page-design-for-agents',
+    title: 'Modern Web Page Design For Agents',
+    subtitle: 'A practical standard for agents building useful, accessible, responsive, and performant developer-facing web pages.',
+    category: 'design',
+    icon: '[]',
+    color: '#ec4899',
+    tags: [
+      'modern web design',
+      'web page design',
+      'responsive design',
+      'accessibility',
+      'wcag',
+      'core web vitals',
+      'agents',
+      'developer ux',
+    ],
+    content: [
+      {
+        title: 'What Modern Means Here',
+        content:
+          'Modern web design is not trend-chasing. For this app, it means a page is useful, fast, readable, accessible, responsive, visually coherent, and honest about what the user can do.',
+        bulletPoints: [
+          'Start app/tool pages with the working interface, not a marketing hero',
+          'Make the page purpose, current state, and primary action obvious',
+          'Use the local UC style guide for color, typography, radius, buttons, cards, and inputs',
+          'Design empty, loading, error, permission, and success states as part of the page',
+        ],
+      },
+      {
+        title: 'Page Build Blueprint',
+        content:
+          'A strong developer-facing page has a clear order: page purpose and state, primary action, real work area, supporting details, and recovery paths. This keeps agents from building decorative pages that do not help the user finish the job.',
+        codeExample: `<main>
+  <header>
+    <h1>Page purpose</h1>
+    <p>Current state or short value summary.</p>
+    <div>{/* primary action, secondary action */}</div>
+  </header>
+
+  <section aria-labelledby="work-area-heading">
+    <h2 id="work-area-heading">Work Area</h2>
+    {/* tool, form, table, editor, preview, or task list */}
+  </section>
+
+  <aside aria-label="Supporting details">
+    {/* filters, history, proof, metadata, or debug details */}
+  </aside>
+</main>`,
+      },
+      {
+        title: 'Responsive And Accessible By Default',
+        content:
+          'Agents should build from semantic structure and content constraints. Components should reflow when content stops fitting, support keyboard and touch users, keep labels persistent, and respect browser zoom and reduced-motion preferences.',
+        bulletPoints: [
+          'Use one clear h1 and meaningful heading order',
+          'Prefer responsive grids, minmax, clamp, max-width, aspect-ratio, and container-aware components',
+          'Keep interactive elements keyboard reachable with visible focus states',
+          'Use persistent form labels and recoverable inline validation',
+          'Do not hide essential actions behind hover-only UI',
+        ],
+      },
+      {
+        title: 'Performance Is A Design Constraint',
+        content:
+          'Core Web Vitals are part of the design standard. Agents should prevent layout shift, avoid oversized assets, keep initial JavaScript small, and render useful loading or empty states instead of blank panels.',
+        bulletPoints: [
+          'Protect Largest Contentful Paint by prioritizing primary visible content',
+          'Prevent Cumulative Layout Shift with image dimensions, aspect ratios, and stable placeholders',
+          'Protect Interaction to Next Paint by avoiding unnecessary heavy client-side code',
+          'Use responsive images and compress assets',
+          'Do not add heavy animation, chart, editor, or 3D libraries unless the page truly needs them',
+        ],
+      },
+      {
+        title: 'Review Checklist',
+        content:
+          'A page is not ready just because it looks polished at one desktop width. Review it against real task completion, mobile layout, keyboard use, accessibility, performance, and local style consistency.',
+        bulletPoints: [
+          'The first screen shows the real workflow or a clear path to it',
+          'Text wraps cleanly on mobile and with long labels',
+          'Forms have labels, instructions, and recoverable errors',
+          'Images have useful alt text or are marked decorative',
+          'Cards are not nested inside cards and page sections are not fake floating cards',
+          'The palette follows the UC style guide and does not become one-note',
+          'Relevant typecheck or smoke tests and `git diff --check` pass',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical agent guide at docs/MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md keeps the full standard. Recheck official web.dev, W3C WAI, MDN, NN/g, and Material accessibility references when changing the baseline.',
+        bulletPoints: [
+          'web.dev responsive design: https://web.dev/responsive-web-design-basics/',
+          'web.dev Core Web Vitals: https://web.dev/articles/vitals',
+          'W3C WCAG 2.2: https://www.w3.org/TR/WCAG22/',
+          'W3C WAI forms: https://www.w3.org/WAI/tutorials/forms/',
+          'MDN CSS layout: https://developer.mozilla.org/en-US/docs/Learn_web_development/Core/CSS_layout',
+          'NN/g usability heuristics: https://www.nngroup.com/articles/ten-usability-heuristics/',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'design-best-practices-for-agents',
+    title: 'Design Best Practices For Agents',
+    subtitle: 'A product design and design-system standard for agents building screens, flows, and automation UI.',
+    category: 'design',
+    icon: '[]',
+    color: '#ec4899',
+    tags: [
+      'design best practices',
+      'product design',
+      'design systems',
+      'ux writing',
+      'automation ui',
+      'accessibility',
+      'agents',
+      'developer ux',
+    ],
+    content: [
+      {
+        title: 'The Product Design Standard',
+        content:
+          'Good product design in this app helps the user understand their state, see the next useful action, recover from failure, and trust what an agent changed. Visual style should serve task clarity and repeated use.',
+        bulletPoints: [
+          'Show state, purpose, and primary action on the first useful screen',
+          'Reveal risk, approvals, blockers, and proof at the right time',
+          'Support repeated work instead of only first-time discovery',
+          'Use accessibility and responsive behavior as baseline requirements',
+          'Use docs/DESIGN_AGENT_BEST_PRACTICES.md as the full agent guide',
+        ],
+      },
+      {
+        title: 'Start With The User Job',
+        content:
+          'Before creating UI, agents should name the user job, actor, object, action, proof of completion, and failure path. That keeps design work grounded in what the user is trying to finish.',
+        bulletPoints: [
+          'Primary actor: user, agent, connected agent, bridge, browser, app, or provider',
+          'Primary object: message, file, app task, design asset, run, approval, wiki article, memory, provider, or automation',
+          'Primary action: create, review, approve, retry, inspect, edit, export, connect, recover, or compare',
+          'Proof: saved state, receipt, screenshot, file, export, run status, or visible UI change',
+          'Failure path: retry, recover, ask user, switch route, stop, or show details',
+        ],
+      },
+      {
+        title: 'Design System Discipline',
+        content:
+          'Agents should use semantic tokens, local components, complete interaction states, and component variants before adding one-off styles. The UC style guide owns visual tokens; this article owns product design decisions.',
+        bulletPoints: [
+          'Use existing spacing, radius, typography, color, button, input, card, and modal patterns',
+          'Cover default, hover, pressed, focused, selected, disabled, loading, empty, error, success, warning, and permission states',
+          'Prefer variants over duplicated components',
+          'Document why a new token or component is needed',
+          'Do not create a new visual language for one feature unless it is intentionally a distinct mode',
+        ],
+      },
+      {
+        title: 'Automation UX',
+        content:
+          'AI and automation UI needs enough structure for trust without flooding the user. Chat should stay quiet by default, but approvals, recovery choices, proof, and blockers must be clear and selectable.',
+        bulletPoints: [
+          'Show compact route, approval, blocker, and proof summaries',
+          'Hide raw prompts, local paths, run metadata, and stack traces behind details views',
+          'Make recovery options selectable so the user does not rewrite failure context',
+          'Make connected-agent handoffs explicit: actor, scope, retry limit, and stop condition',
+          'Use receipts and before/after evidence for file, app, browser, and design automation',
+        ],
+      },
+      {
+        title: 'Design Review Checklist',
+        content:
+          'Review design work against task completion, clarity, consistency, accessibility, and recovery. A screen can look polished and still fail if it hides the workflow or omits states.',
+        bulletPoints: [
+          'The workflow is visible and not buried behind explanation',
+          'Terminology is consistent for the same object or action',
+          'Empty, loading, error, disabled, permission, and success states exist',
+          'Controls do not jump when state changes',
+          'Developer/debug details are not the default user experience',
+          'The UI shows what the agent did and what proof exists',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical design guide keeps the full source list. Recheck product-design, design-system, accessibility, and token references when changing the baseline.',
+        bulletPoints: [
+          'NN/g usability heuristics: https://www.nngroup.com/articles/ten-usability-heuristics/',
+          'Figma components and shared libraries: https://www.figma.com/best-practices/components-styles-and-shared-libraries/',
+          'Figma variables: https://help.figma.com/hc/en-us/articles/15339657135383-Guide-to-variables-in-Figma',
+          'Figma design tokens: https://www.figma.com/resource-library/design-tokens/',
+          'Material accessibility: https://m3.material.io/foundations/accessible-design/overview',
+          'W3C WAI design tips: https://www.w3.org/WAI/tips/designing/',
         ],
       },
     ],
@@ -4509,6 +6165,188 @@ Better follow-up:
   },
 ];
 
+export const WIKI_FUTURE_PATHS: WikiFuturePath[] = [
+  {
+    id: 'future-builder-city-systems',
+    title: 'Design The City That Teaches',
+    subtitle: 'Future cities, infrastructure, energy, and public learning as one system.',
+    description:
+      'Use this path to imagine places where transit, schools, utilities, civic data, and AI helpers make everyday life easier to understand and improve.',
+    icon: 'CT',
+    color: '#f59e0b',
+    articleIds: [
+      'future-cities-epcot-systems',
+      'infrastructure-public-systems',
+      'energy-materials-systems',
+      'nikola-tesla-systems-buildout-roadmap',
+    ],
+    searchQuery: 'future cities infrastructure energy systems',
+    outcome: 'Sketch a city system that a student could walk through, question, and improve.',
+  },
+  {
+    id: 'future-builder-human-health',
+    title: 'Make Health Knowledge Usable',
+    subtitle: 'Medical AI, cancer literacy, trials, prevention, and patient navigation.',
+    description:
+      'Use this path to turn intimidating health information into calm decision support, better questions, and safer care navigation.',
+    icon: 'HX',
+    color: '#ef4444',
+    articleIds: [
+      'health-biotech-knowledge-safety',
+      'all-cancers-research-atlas',
+      'cancer-screening-prevention-risk-guide',
+      'cancer-decision-support-self-advocacy',
+    ],
+    searchQuery: 'health biotech cancer decision support safety',
+    outcome: 'Design a health explainer that helps someone prepare for a real conversation with a clinician.',
+  },
+  {
+    id: 'future-builder-agent-craft',
+    title: 'Build Trustworthy Agents',
+    subtitle: 'Tools, memory, evals, permission gates, and app automation.',
+    description:
+      'Use this path to learn how serious agent systems sense the world, ask for permission, use tools, verify work, and recover when plans fail.',
+    icon: '>_',
+    color: '#22c55e',
+    articleIds: [
+      'agentic-computer-app-automation-for-agents',
+      'agent-tool-contracts-and-evals-for-agents',
+      'evals-ai-reliability',
+      'ai-safety-permission-patterns',
+    ],
+    searchQuery: 'agent automation evals safety tools memory',
+    outcome: 'Write a reliability checklist for an agent that can operate apps without surprising the user.',
+  },
+  {
+    id: 'future-builder-open-tools',
+    title: 'Own The Tools You Learn With',
+    subtitle: 'Open models, MCP servers, vector search, and local-first systems.',
+    description:
+      'Use this path to understand how open infrastructure lets students, builders, and small teams make learning systems they can inspect and extend.',
+    icon: '<>',
+    color: '#a855f7',
+    articleIds: [
+      'open-source-model-serving-stack',
+      'mcp-overview',
+      'mcp-tools-resources-prompts',
+      'vector-databases',
+    ],
+    searchQuery: 'open source mcp vector databases local models',
+    outcome: 'Map a personal learning lab that can search its notes, use local tools, and explain its sources.',
+  },
+  {
+    id: 'future-builder-cosmic-curiosity',
+    title: 'Stay Curious At Planet Scale',
+    subtitle: 'Science, frontier labs, universe maps, robotics, and research translation.',
+    description:
+      'Use this path to connect wonder with disciplined inquiry, so big questions become experiments, models, and better product judgment.',
+    icon: 'SC',
+    color: '#a855f7',
+    articleIds: [
+      'universe-science-field-map',
+      'ai-university-research-fronts-2026',
+      'frontier-ai-labs-2026',
+      'physical-ai-robotics-fronts-2026',
+    ],
+    searchQuery: 'science universe robotics research fronts',
+    outcome: 'Turn one big question into a testable research map with evidence, unknowns, and next experiments.',
+  },
+];
+
+export const WIKI_RESEARCH_INSIGHTS: WikiResearchInsight[] = [
+  {
+    id: 'retrieval-practice',
+    title: 'Recall Before Rereading',
+    sourceLabel: 'Dunlosky et al. / retrieval practice',
+    sourceUrl: 'https://pubmed.ncbi.nlm.nih.gov/26173288/',
+    principle:
+      'Learners remember more when they actively retrieve ideas instead of only rereading or highlighting.',
+    addToWiki:
+      'Add short recall prompts, self-check questions, and answer-later cards to every article.',
+    userAction: 'Close the article for one minute, then write the three ideas you can still explain.',
+    searchQuery: 'retrieval practice testing effect learning',
+    color: '#38bdf8',
+  },
+  {
+    id: 'spaced-return',
+    title: 'Come Back On Purpose',
+    sourceLabel: 'Dunlosky et al. / distributed practice',
+    sourceUrl: 'https://www.aft.org/ae/fall2013/dunlosky',
+    principle:
+      'Spacing practice over time is one of the highest-utility learning techniques across age groups and materials.',
+    addToWiki:
+      'Give articles a return plan: today for orientation, tomorrow for recall, next week for transfer.',
+    userAction: 'Save one article as a return topic and revisit it after doing something else.',
+    searchQuery: 'distributed practice spaced repetition learning',
+    color: '#22c55e',
+  },
+  {
+    id: 'transfer-metacognition',
+    title: 'Transfer To A New Situation',
+    sourceLabel: 'National Academies / How People Learn',
+    sourceUrl: 'https://www.nationalacademies.org/read/9853/chapter/6',
+    principle:
+      'Deep learning shows up when people can extend what they learned into a new context.',
+    addToWiki:
+      'Attach transfer prompts that ask readers to apply an idea to a classroom, company, city, lab, or app.',
+    userAction: 'Name one place where this idea would behave differently, then explain why.',
+    searchQuery: 'learning transfer metacognition reflection',
+    color: '#f59e0b',
+  },
+  {
+    id: 'project-based-learning',
+    title: 'Build A Public Product',
+    sourceLabel: 'PBLWorks / Gold Standard PBL',
+    sourceUrl: 'https://www.pblworks.org/what-is-pbl/gold-standard-project-design',
+    principle:
+      'Project-based learning works best around meaningful problems, sustained inquiry, authenticity, reflection, critique, and a public product.',
+    addToWiki:
+      'Turn article clusters into quests with a question, artifact, critique checklist, and shareable result.',
+    userAction: 'Convert the article into a one-afternoon project someone else could inspect.',
+    searchQuery: 'project based learning public product sustained inquiry',
+    color: '#ec4899',
+  },
+  {
+    id: 'knowledge-building',
+    title: 'Improve Ideas Together',
+    sourceLabel: 'Scardamalia/Bereiter knowledge building',
+    sourceUrl: 'https://www.knowledgebuilders.net/what-is-knowledge-building',
+    principle:
+      'Knowledge communities treat ideas as improvable public objects, not private notes that stop after first draft.',
+    addToWiki:
+      'Add idea-improvement prompts: what is promising, what is missing, what evidence would raise the quality?',
+    userAction: 'Rewrite one weak idea from the article into a stronger shared explanation.',
+    searchQuery: 'knowledge building idea improvement community knowledge',
+    color: '#a855f7',
+  },
+  {
+    id: 'futures-literacy',
+    title: 'Imagine More Than One Future',
+    sourceLabel: 'UNESCO Futures of Education',
+    sourceUrl: 'https://www.unesco.org/en/futures-education',
+    principle:
+      'Future-ready learning should help people imagine multiple futures and act in the present with more agency.',
+    addToWiki:
+      'Give future-facing articles scenario prompts: hopeful future, brittle future, surprising future, and what to build now.',
+    userAction: 'Write two possible futures from this idea, then choose one action that helps the better one happen.',
+    searchQuery: 'futures literacy education student agency',
+    color: '#14b8a6',
+  },
+  {
+    id: 'faceted-wayfinding',
+    title: 'Make Discovery Multi-Dimensional',
+    sourceLabel: 'Nielsen Norman Group / facets',
+    sourceUrl: 'https://www.nngroup.com/articles/filters-vs-facets/',
+    principle:
+      'Faceted navigation helps users narrow large content sets through meaningful dimensions instead of relying on search alone.',
+    addToWiki:
+      'Add filters for topic, domain, skill level, buildable artifact, source type, and future path.',
+    userAction: 'Use at least two lenses when browsing: topic plus what you want to make with it.',
+    searchQuery: 'faceted navigation information architecture wiki search',
+    color: '#84cc16',
+  },
+];
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -4543,6 +6381,110 @@ export function getRelatedArticles(articleId: string): WikiArticle[] {
   return WIKI_ARTICLES.filter(a =>
     a.id !== articleId && a.tags.some(t => article.tags.includes(t))
   ).slice(0, 5);
+}
+
+export function getWikiFuturePaths(limit = WIKI_FUTURE_PATHS.length): WikiFuturePath[] {
+  return WIKI_FUTURE_PATHS
+    .filter(path => path.articleIds.some(articleId => Boolean(getArticle(articleId))))
+    .slice(0, limit);
+}
+
+export function getWikiResearchInsights(limit = WIKI_RESEARCH_INSIGHTS.length): WikiResearchInsight[] {
+  return WIKI_RESEARCH_INSIGHTS.slice(0, limit);
+}
+
+function insightById(id: string): WikiResearchInsight {
+  const insight = WIKI_RESEARCH_INSIGHTS.find(item => item.id === id);
+  if (!insight) throw new Error(`Missing wiki research insight: ${id}`);
+  return insight;
+}
+
+export function getWikiArticleLearningLoop(articleId: string): WikiArticleLearningLoopStep[] {
+  const article = getArticle(articleId);
+  if (!article) return [];
+
+  const recall = insightById('retrieval-practice');
+  const transfer = insightById('transfer-metacognition');
+  const project = insightById('project-based-learning');
+  const future = insightById('futures-literacy');
+
+  return [
+    {
+      id: `${article.id}-recall`,
+      label: 'Recall',
+      title: 'Pull it from memory',
+      prompt: `Without looking back, explain the main idea of ${article.title} in three sentences and list two details you almost forgot.`,
+      sourceLabel: recall.sourceLabel,
+      sourceUrl: recall.sourceUrl,
+      searchQuery: recall.searchQuery,
+    },
+    {
+      id: `${article.id}-transfer`,
+      label: 'Transfer',
+      title: 'Use it somewhere else',
+      prompt: `Apply ${article.title} to a different setting: a classroom, city, health system, lab, company, or personal project. What changes?`,
+      sourceLabel: transfer.sourceLabel,
+      sourceUrl: transfer.sourceUrl,
+      searchQuery: transfer.searchQuery,
+    },
+    {
+      id: `${article.id}-project`,
+      label: 'Project',
+      title: 'Make one inspectable artifact',
+      prompt: `Turn ${article.title} into a visible artifact: a map, checklist, prototype, explainer, experiment, or operating guide someone else can critique.`,
+      sourceLabel: project.sourceLabel,
+      sourceUrl: project.sourceUrl,
+      searchQuery: project.searchQuery,
+    },
+    {
+      id: `${article.id}-future`,
+      label: 'Future',
+      title: 'Compare two futures',
+      prompt: `Imagine a hopeful future and a brittle future shaped by ${article.title}. What present-day choice pushes toward the better one?`,
+      sourceLabel: future.sourceLabel,
+      sourceUrl: future.sourceUrl,
+      searchQuery: future.searchQuery,
+    },
+  ];
+}
+
+export function getWikiArticleBuilderPrompts(articleId: string, limit = 3): WikiBuilderPrompt[] {
+  const article = getArticle(articleId);
+  if (!article) return [];
+
+  const relatedIds = getRelatedArticles(articleId).slice(0, 2).map(item => item.id);
+  const primaryIdea = article.content[0]?.title || article.title;
+  const articleIds = [article.id, ...relatedIds];
+
+  return [
+    {
+      id: `${article.id}-imagine`,
+      label: 'Imagine',
+      title: 'Picture the world after this idea works',
+      prompt: `Imagine ${article.title} is normal in everyday life. What becomes easier, safer, more beautiful, or more understandable for a young person growing up with it?`,
+      followUp: `Use "${primaryIdea}" as the anchor, then name one risk that still needs adult-level judgment.`,
+      articleIds,
+      searchQuery: article.tags.slice(0, 4).join(' '),
+    },
+    {
+      id: `${article.id}-build`,
+      label: 'Build',
+      title: 'Turn the lesson into a small prototype',
+      prompt: `Design a small prototype, classroom activity, app feature, or field experiment that teaches the core idea behind ${article.title}.`,
+      followUp: 'Keep it small enough to test in one afternoon, and name the evidence that would prove it helped.',
+      articleIds,
+      searchQuery: `${article.category} prototype ${article.tags[0] || article.title}`,
+    },
+    {
+      id: `${article.id}-question`,
+      label: 'Question',
+      title: 'Ask the hard question before scaling it',
+      prompt: `What should a responsible builder ask before applying ${article.title} to real people, public systems, or shared data?`,
+      followUp: 'Separate curiosity, safety, access, incentives, and long-term maintenance.',
+      articleIds,
+      searchQuery: `${article.title} safety responsibility`,
+    },
+  ].slice(0, limit);
 }
 
 export function getArticlesForLesson(trackId: string, moduleId: string, lessonId: string): WikiArticle[] {
@@ -4653,7 +6595,7 @@ export function buildWikiKnowledgeBundle(query: string, limit = 6): string {
   const intro = `Wiki coverage map: ${categorySummary}. Impact domains: ${domainSummary}.`;
 
   if (relevant.length === 0) {
-    return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}No direct article match found for this query, but the AI wiki covers agents, models, frameworks, design, open-source AI, MCP, foundations, and landscape topics.`;
+    return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}No direct article match found for this query, but the Wiki covers AI, agents, models, frameworks, design, open-source tooling, MCP, future cities, science, infrastructure, health, energy, materials, foundations, and landscape topics.`;
   }
 
   const articleLines = relevant.map(article => {
@@ -4768,7 +6710,7 @@ export function buildWikiSearchResponse(query: string, limit = 5): string {
   const relevant = getRelevantWikiArticles(query, limit);
 
   if (relevant.length === 0) {
-    return `**AI Wiki Search:** No strong match for "${query}".\n\nTry a more specific topic like:\n- MCP\n- Playwright\n- coding agents\n- model families\n- evals\n- retrieval\n- multimodal\n- support agents`;
+    return `**Wiki Search:** No strong match for "${query}".\n\nTry a more specific topic like:\n- future cities\n- EPCOT\n- universe science\n- infrastructure\n- health and biotech\n- energy and materials\n- MCP\n- coding agents\n- model families`;
   }
 
   const lines = relevant.map((article, index) => {
@@ -4782,5 +6724,5 @@ export function buildWikiSearchResponse(query: string, limit = 5): string {
     ].filter(Boolean).join('\n');
   }).join('\n\n');
 
-  return `**AI Wiki Search: "${query}"**\n\n${lines}`;
+  return `**Wiki Search: "${query}"**\n\n${lines}`;
 }

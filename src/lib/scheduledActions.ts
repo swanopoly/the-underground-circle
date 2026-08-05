@@ -25,7 +25,7 @@ export type ScheduledActionKind =
   | 'reminder';
 
 export type ScheduledActionStatus =
-  | 'pending' | 'running' | 'succeeded' | 'failed' | 'canceled';
+  | 'pending' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'outcome_unknown';
 
 export interface ScheduledAction {
   id: string;
@@ -43,6 +43,10 @@ export interface ScheduledAction {
   max_retries: number;
   requires_approval: boolean;
   approval_id: string | null;
+  claim_token: string | null;
+  claimed_at: string | null;
+  dispatched_at: string | null;
+  outcome_unknown_at: string | null;
   recurrence: string | null;          // cron expression e.g. '0 9 * * 1'
   recurrence_label: string | null;    // human label e.g. 'Every Monday 9am'
   parent_action_id: string | null;
@@ -129,8 +133,12 @@ export async function scheduleAction<K extends ScheduledActionKind, P>(
     kind: input.kind,
     payload: input.payload as any,
     scheduled_for: scheduledFor,
-    requires_approval: input.requiresApproval ?? false,
-    max_retries: input.maxRetries ?? 3,
+    // Every scheduled kind in this queue can create an external or durable
+    // side effect. Omitted policy must fail closed into a fresh human gate.
+    requires_approval: true,
+    // Provider mutations do not have a universal idempotency guarantee.
+    // A timed-out/ambiguous dispatch must not be replayed automatically.
+    max_retries: 0,
   };
   // Recurring actions get a cron expression + optional label
   if ((input as any).recurrence) row.recurrence = (input as any).recurrence;
@@ -243,8 +251,11 @@ export async function createNextRecurrence(action: ScheduledAction): Promise<Sch
       kind: action.kind,
       payload: action.payload,
       scheduled_for: nextTime.toISOString(),
-      requires_approval: action.requires_approval,
-      max_retries: action.max_retries,
+      // Every occurrence is a distinct mutation. Never inherit a consumed
+      // approval or a retry budget from the previous occurrence.
+      requires_approval: true,
+      approval_id: null,
+      max_retries: 0,
       recurrence: action.recurrence,
       recurrence_label: action.recurrence_label,
       parent_action_id: action.id,
@@ -252,7 +263,7 @@ export async function createNextRecurrence(action: ScheduledAction): Promise<Sch
     .select('*')
     .single();
   if (error) {
-    console.warn('[scheduledActions] createNextRecurrence failed:', error.message);
+    console.warn('[scheduledActions] recurrence_creation_failed');
     return null;
   }
   return data as ScheduledAction;
@@ -289,18 +300,45 @@ export async function cancelAction(id: string): Promise<void> {
 }
 
 export async function retryAction(id: string, scheduledFor?: Date): Promise<void> {
-  const { error } = await supabase
+  const { data: current, error: lookupError } = await supabase
+    .from('scheduled_actions')
+    .select('id, status, dispatched_at')
+    .eq('id', id)
+    .maybeSingle();
+  if (lookupError) throw lookupError;
+  if (!current) throw new Error('Scheduled action was not found.');
+  if (current.status !== 'failed' || current.dispatched_at) {
+    throw new Error(
+      'Only a definitely pre-dispatch failure can be retried. Dispatched and outcome-unknown actions are sealed.',
+    );
+  }
+
+  const { data, error } = await supabase
     .from('scheduled_actions')
     .update({
       status: 'pending',
       error: null,
+      result: null,
       started_at: null,
       completed_at: null,
       scheduled_for: (scheduledFor ?? new Date()).toISOString(),
       retry_count: 0,
+      max_retries: 0,
+      requires_approval: true,
+      approval_id: null,
+      claim_token: null,
+      claimed_at: null,
+      dispatched_at: null,
+      outcome_unknown_at: null,
     })
-    .eq('id', id);
+    .eq('id', id)
+    .eq('status', 'failed')
+    .is('dispatched_at', null)
+    .select('id');
   if (error) throw error;
+  if (!Array.isArray(data) || data.length !== 1) {
+    throw new Error('The action changed while preparing a safe retry. Nothing was queued.');
+  }
 }
 
 export async function deleteAction(id: string): Promise<void> {
@@ -322,12 +360,12 @@ export function usePendingActions(circleId?: string) {
       try {
         const rows = await listScheduledActions({
           circleId,
-          statuses: ['pending', 'running', 'failed'],
+          statuses: ['pending', 'running', 'failed', 'outcome_unknown'],
           limit: 50,
         });
         if (!cancelled) setActions(rows);
-      } catch (err) {
-        console.warn('[scheduledActions] listScheduledActions failed:', err);
+      } catch {
+        console.warn('[scheduledActions] list_failed');
       } finally {
         if (!cancelled) setLoading(false);
       }

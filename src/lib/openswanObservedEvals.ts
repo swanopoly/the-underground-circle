@@ -1,5 +1,6 @@
 import type { AgentRun, RunArtifact, RunStatus } from './agentRunSystem';
 import { getOpenSwanSkillPlaybook } from './openswanSkillPlaybooks';
+import { computeVerificationCoverage } from './verificationCoverageCore';
 
 type VerificationLike = {
   ok?: boolean;
@@ -354,6 +355,13 @@ export function buildOpenSwanObservedEvalSummary(args: {
 
   const plannedVerification = Array.isArray(metadata.verificationPlan) ? metadata.verificationPlan.length : 0;
   const executedVerification = verificationResults.filter((result) => result.executed).length;
+  // Coverage vs only the AUTO-verifiable checks (audit): a run that ran every
+  // machine check (typecheck/tests/lint/…) should score 1.0 — manual-review
+  // checks must not drag the ratio down (and 0/0 must be 0, never NaN).
+  const autoCoverage = computeVerificationCoverage({
+    plannedChecks: metadata.verificationPlan,
+    executedCount: executedVerification,
+  });
   const passedVerification = verificationResults.filter((result) => result.status === 'passed' || result.ok).length;
   const failedVerification = verificationResults.filter((result) => result.status === 'failed').length;
   const manualVerification = verificationResults.filter((result) => result.status === 'manual_required').length;
@@ -395,7 +403,7 @@ export function buildOpenSwanObservedEvalSummary(args: {
     failed: failedVerification,
     manualRequired: manualVerification,
     blocked: blockedVerification,
-    coverageRatio: plannedVerification > 0 ? Number((executedVerification / plannedVerification).toFixed(2)) : 0,
+    coverageRatio: autoCoverage.coverageRatio,
   };
   const artifactsSummary = {
     total: totalArtifacts,

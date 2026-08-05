@@ -1,0 +1,91 @@
+{
+  "generatedAt": "2026-08-01T08:51:15.197Z",
+  "results": [
+    {
+      "level": "PASS",
+      "name": "no unreachable private rows (private + user_id IS NULL)",
+      "detail": "private_no_owner=0 of 0 active",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "agent-scope rows carry an agent_id",
+      "detail": "agent rows with no key=0 — these are invisible to the agent that earned them",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "every active row has a circle",
+      "detail": "no_circle=0",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "recent memories are traceable to the run that produced them",
+      "detail": "no run-attributable memories written since the writer was wired (2026-07-29T11:40:00Z) — nothing to grade yet | all-time 0/0 (0.0%) | 0 session-scope rollup(s) excluded (no single source run)",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "source_surface distribution",
+      "detail": "feed_task=0, distinct surfaces=0 (a high feed_task share is the known hardcode)",
+      "data": null
+    },
+    {
+      "level": "FAIL",
+      "name": "memories are reachable by semantic search",
+      "detail": "embedded 0/0 (0.0%) — un-embedded rows are invisible to match_memories",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "no orphaned satellite rows",
+      "detail": "soul_links=0 sources=0 access=0",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "memory_access_log is being written",
+      "detail": "rows=0 null_user=0 newest=never",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "no exact-content duplicate rows",
+      "detail": "0 redundant rows across 0 exact-content groups",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "content diversity (informational, NOT a defect)",
+      "detail": "0 distinct contents across 0 active rows — a shared title with many distinct contents is a category bucket, not duplication",
+      "data": null
+    },
+    {
+      "level": "PASS",
+      "name": "no SELECT policy exposes private rows without an owner check",
+      "detail": "0 SELECT policies, all owner-checked where private",
+      "data": []
+    },
+    {
+      "level": "FAIL",
+      "name": "hot-path indexes present",
+      "detail": "missing: idx_memory_entries_title_trgm, idx_memory_entries_content_trgm, idx_memory_entries_circle_rank, idx_memory_entries_pinned, idx_memory_entries_embedding",
+      "data": {
+        "missing": [
+          "idx_memory_entries_title_trgm",
+          "idx_memory_entries_content_trgm",
+          "idx_memory_entries_circle_rank",
+          "idx_memory_entries_pinned",
+          "idx_memory_entries_embedding"
+        ]
+      }
+    },
+    {
+      "level": "PASS",
+      "name": "match_memories is SECURITY INVOKER",
+      "detail": "INVOKER — semantic search honours RLS",
+      "data": null
+    }
+  ]
+}

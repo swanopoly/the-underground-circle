@@ -28,8 +28,8 @@ export const GRID = {
 // ─── Colors (GitHub Dark inspired palette) ───────────────────────────────────
 
 export const PIXEL_COLORS = {
-  // Backgrounds — pure black scale
-  bg0: '#000000',      // Deepest black (page bg)
+  // Backgrounds — near-black scale
+  bg0: '#0A0A0A',      // Page bg
   bg1: '#0a0a0a',      // Panel / main background
   bg2: '#161616',      // Card background
   bg3: '#252525',      // Elevated surface

@@ -25,6 +25,11 @@ import type {
   ChatMode,
 } from './chatAutomationPlanner';
 import { isPlanSafeForPlanMode, describePlanModeRefusal } from './chatAutomationPlanner';
+import { buildChatAutomationPlanPreview } from './chatAutomationPlanPreview';
+import {
+  buildChatAgentContextPack,
+  type ChatAgentContextPack,
+} from './chatAgentContextPack';
 
 /**
  * Outcome each transport reports back. Normalised so the caller can log
@@ -32,9 +37,13 @@ import { isPlanSafeForPlanMode, describePlanModeRefusal } from './chatAutomation
  */
 export type ChatAutomationOutcome = {
   /** Which transport ran (matches plan.execution.kind on success). */
-  executionKind: ChatAutomationExecutionKind | 'skipped' | 'deferred';
-  /** Coarse-grained status. `deferred` = HITL required, nothing ran yet. */
-  status: 'completed' | 'failed' | 'blocked' | 'deferred' | 'skipped';
+  executionKind: ChatAutomationExecutionKind | 'skipped' | 'deferred' | 'needs_input';
+  /**
+   * Coarse-grained status. `deferred` = HITL required, nothing ran yet.
+   * `needs_input` = the request was underspecified; a clarifying question was
+   * surfaced and nothing ran (the caller should wait for the user's reply).
+   */
+  status: 'completed' | 'failed' | 'blocked' | 'deferred' | 'skipped' | 'needs_input';
   /** Human-facing message the chat UI renders. */
   message: string;
   /** Optional structured payload — per-transport shape, documented there. */
@@ -60,6 +69,38 @@ export type ChatTransportHandler = (
   ctx: ChatTransportContext,
 ) => Promise<ChatAutomationOutcome>;
 
+/**
+ * R9 — one parked clarification for a thread. Mirrors exactly what
+ * ChatTab's `pendingClarificationRef` entries hold today (the refs remain
+ * the backing store; this is just the typed seam over them) so handlers can
+ * park/resume clarifications without reaching into component refs.
+ */
+export type ChatClarificationResumePending = {
+  /** The user's original (underspecified) message. */
+  originalMessage: string;
+  /** The conversational intent we'd run once the gap is filled. */
+  pendingIntent: string | null;
+  /** Which fields the planner could not resolve. */
+  missingParams: string[];
+  /** Epoch ms when the question was asked (freshness window on resume). */
+  askedAt: number;
+};
+
+/**
+ * R9 — clarification park/resume store handed to handlers through the
+ * dispatch context. `ask_clarification` parks via `setPending`; the resume
+ * path reads `pending` and `clearPending`s once consumed. Scoped by the
+ * caller to the active thread (the ctx carries one thread's store, not the
+ * whole map). Added so the upcoming `create_task` cutover — which also
+ * produces clarifications — can park/resume through the same seam instead
+ * of needing its own ref plumbing.
+ */
+export type ChatClarificationResumeStore = {
+  pending?: ChatClarificationResumePending | null;
+  setPending: (pending: ChatClarificationResumePending) => void;
+  clearPending: () => void;
+};
+
 /** Opaque per-dispatch context. Callers populate what they have. */
 export type ChatTransportContext = {
   circleId: string;
@@ -76,6 +117,14 @@ export type ChatTransportContext = {
    *  everything subject to the HITL gate. Defaults to `'act'` when the
    *  caller does not specify. */
   chatMode?: ChatMode;
+  /** R9 — thread-scoped clarification park/resume store (see type docs). */
+  clarificationResume?: ChatClarificationResumeStore;
+  /**
+   * Portable, redacted plan/guardrail/proof handoff. The dispatcher builds
+   * this before any approval or transport callback, so connected-agent
+   * handlers can consume the same bounded context later attached to outcome.
+   */
+  agentContextPack?: ChatAgentContextPack;
   /** Caller supplies app-specific extras (nav functions, state setters). */
   extras?: Record<string, unknown>;
 };
@@ -91,18 +140,75 @@ export type ChatTransportHandlers = Partial<
 >;
 
 /**
+ * Why a plan did not pass the approval gate. A bare `pass: false` lumps
+ * together situations the caller must treat differently — waiting on a
+ * human is not the same as a hard denial, and a transient lookup failure
+ * is the only one worth retrying. The category lets the tool loop / UI
+ * decide retry-vs-wait-vs-stop instead of guessing from the message text.
+ *
+ *   pending        — an existing proposal is awaiting a human decision.
+ *   filed          — a NEW proposal was just filed; awaiting a human.
+ *   rejected       — a human rejected it; needs a changed request to re-propose.
+ *   blocked_policy — circle auto-approve policy is set to `never` for this category.
+ *   error          — fail-closed: the gate could not verify/file (transient).
+ */
+export type ApprovalDeferralCategory =
+  | 'pending'
+  | 'filed'
+  | 'rejected'
+  | 'blocked_policy'
+  | 'error';
+
+/** True only for `error` — the sole category where re-running the same
+ *  plan unchanged could succeed (the others are waiting on a human or a
+ *  hard denial). Exported so callers branch on one source of truth. */
+export function isApprovalDeferralRetryable(category: ApprovalDeferralCategory): boolean {
+  return category === 'error';
+}
+
+/**
  * When a plan carries `approval.required = true`, dispatch consults this
  * callback to either: (a) file a pre-approval and return `deferred`, or
  * (b) confirm that an approval already exists and pass through. This
  * keeps the approval policy single-sourced in the caller (typically via
  * `hitlService`) while the dispatch envelope stays uniform.
+ *
+ * `deferred.category` + `deferred.retryable` are optional for backward
+ * compatibility (older inline gates omit them); when present, the
+ * dispatcher surfaces them on the outcome so the loop can branch.
  */
 export type ApprovalGate = (
   plan: ChatAutomationPlan,
   ctx: ChatTransportContext,
 ) => Promise<
-  | { pass: true }
-  | { pass: false; deferred: { approvalId: string; message: string } }
+  | {
+      pass: true;
+      /**
+       * User-facing note about WHY the gate passed when that isn't obvious —
+       * today: "an earlier approval covered this". Silent reuse of a prior
+       * approval surprised users (idempotency-key dedupe matches similar
+       * requests), so the gate says so and the dispatcher surfaces it on the
+       * outcome (`data.approvalNotice`).
+       */
+      notice?: string;
+      /** The pre-existing approval row that covered this pass, when any. */
+      approvalId?: string;
+    }
+  | {
+      pass: false;
+      deferred: {
+        approvalId: string;
+        message: string;
+        category?: ApprovalDeferralCategory;
+        retryable?: boolean;
+        /**
+         * Epoch ms when the pending/filed proposal auto-expires, when known.
+         * Lets the UI show a countdown and announce expiry instead of the
+         * card silently dying (surfaced as `data.approvalExpiresAt`).
+         */
+        expiresAt?: number | null;
+      };
+    }
 >;
 
 /**
@@ -123,6 +229,27 @@ export type DispatchOptions = {
   onOutcome?: ChatAutomationObserver;
 };
 
+function attachPlanPreview(
+  plan: ChatAutomationPlan,
+  outcome: ChatAutomationOutcome,
+  ctx: ChatTransportContext,
+): ChatAutomationOutcome {
+  return {
+    ...outcome,
+    data: {
+      ...(outcome.data || {}),
+      chatAutomationPlanPreview: buildChatAutomationPlanPreview(plan),
+      chatAgentContextPack: ctx.agentContextPack || buildChatAgentContextPack(plan, {
+          circleId: ctx.circleId,
+          userId: ctx.userId,
+          threadId: ctx.threadId,
+          model: ctx.model,
+          chatMode: ctx.chatMode,
+        }),
+    },
+  };
+}
+
 // ─── Dispatch ───────────────────────────────────────────────────────────────
 
 export async function dispatchChatAutomationPlan(
@@ -130,7 +257,16 @@ export async function dispatchChatAutomationPlan(
   opts: DispatchOptions,
 ): Promise<ChatAutomationOutcome> {
   const started = Date.now();
-  const ctx = opts.ctx;
+  const ctx: ChatTransportContext = {
+    ...opts.ctx,
+    agentContextPack: buildChatAgentContextPack(plan, {
+      circleId: opts.ctx.circleId,
+      userId: opts.ctx.userId,
+      threadId: opts.ctx.threadId,
+      model: opts.ctx.model,
+      chatMode: opts.ctx.chatMode,
+    }),
+  };
 
   // Plan vs Act mode gate — refuses destructive dispatches up-front,
   // BEFORE the HITL approval gate so plan-mode never even files a
@@ -143,26 +279,61 @@ export async function dispatchChatAutomationPlan(
       data: { planModeRefusal: true, executionKind: plan.execution.kind, risk: plan.risk },
       durationMs: Date.now() - started,
     };
-    try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-    return outcome;
+    const finalOutcome = attachPlanPreview(plan, outcome, ctx);
+    try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+    return finalOutcome;
   }
 
-  // Approval gate first. If the plan requires approval and the gate
-  // defers, we short-circuit — no transport runs.
-  if (plan.approval.required && opts.approvalGate) {
+  // Approval gate first. The gate may enforce category policy even when
+  // `plan.approval.required` is false (for example, a circle can set a
+  // normally-safe category to "never"). If the gate defers, we short-circuit
+  // and no transport runs.
+  let gateNotice: string | undefined;
+  let gateApprovalId: string | undefined;
+  if (opts.approvalGate) {
     const gate = await opts.approvalGate(plan, ctx);
     if (!gate.pass) {
+      // Resolve retryable: explicit flag wins; otherwise derive from the
+      // category; default false (waiting on a human / hard denial).
+      const category = gate.deferred.category;
+      const retryable = gate.deferred.retryable
+        ?? (category ? isApprovalDeferralRetryable(category) : false);
+      const expiresAt = gate.deferred.expiresAt ?? null;
+      const data: Record<string, unknown> = {};
+      if (category) {
+        data.approvalCategory = category;
+        data.approvalRetryable = retryable;
+      }
+      if (expiresAt !== null) data.approvalExpiresAt = expiresAt;
       const outcome: ChatAutomationOutcome = {
         executionKind: 'deferred',
         status: 'deferred',
         message: gate.deferred.message,
         approvalId: gate.deferred.approvalId,
         durationMs: Date.now() - started,
+        ...(Object.keys(data).length > 0 ? { data } : {}),
       };
-      try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-      return outcome;
+      const finalOutcome = attachPlanPreview(plan, outcome, ctx);
+      try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+      return finalOutcome;
     }
+    gateNotice = gate.notice;
+    gateApprovalId = gate.approvalId;
   }
+
+  // Carry the gate's pass-through transparency onto whatever outcome the
+  // transport produces: the reuse notice tells the user an earlier approval
+  // covered this run (instead of silent dedupe), and the approval id keeps
+  // the outcome linkable to the covering row.
+  const applyGateTransparency = (outcome: ChatAutomationOutcome): ChatAutomationOutcome => {
+    if (gateNotice) {
+      outcome.data = { ...(outcome.data || {}), approvalNotice: gateNotice };
+    }
+    if (gateApprovalId && outcome.approvalId === undefined) {
+      outcome.approvalId = gateApprovalId;
+    }
+    return outcome;
+  };
 
   const handler = opts.handlers[plan.execution.kind];
   if (!handler) {
@@ -172,8 +343,9 @@ export async function dispatchChatAutomationPlan(
       message: `No handler registered for execution kind "${plan.execution.kind}". Falling back to caller's legacy path.`,
       durationMs: Date.now() - started,
     };
-    try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-    return outcome;
+    const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome), ctx);
+    try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+    return finalOutcome;
   }
 
   let outcome: ChatAutomationOutcome;
@@ -186,13 +358,22 @@ export async function dispatchChatAutomationPlan(
     outcome = {
       executionKind: plan.execution.kind,
       status: 'failed',
-      message: `Transport threw: ${err instanceof Error ? err.message : String(err)}`,
+      // Treat arbitrary transport exceptions as untrusted: provider errors
+      // can contain credentials, paths, request bodies, or typed values.
+      // Persist only a bounded classification, never the raw exception.
+      message: 'That automation step hit an internal error. No uncertain action was replayed.',
+      warnings: ['Transport failed with a redacted internal error.'],
+      data: {
+        errorCode: 'transport_error',
+        redacted: true,
+      },
       durationMs: Date.now() - started,
     };
   }
 
-  try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-  return outcome;
+  const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome), ctx);
+  try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+  return finalOutcome;
 }
 
 // The canonical observer that writes `chatAutomationDecision` into

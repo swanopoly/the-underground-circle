@@ -97,7 +97,26 @@ async function runDispatchCases() {
       ctx: baseCtx,
     });
     assertEqual(outcome.status, 'failed', 'dispatch: failed when handler throws');
-    assert(outcome.message.includes('kaboom'), 'dispatch: surfaces thrown message');
+    // Transport exceptions are treated as UNTRUSTED and fully redacted: a
+    // provider error can carry credentials, file paths, request bodies or typed
+    // values, so only a bounded classification is persisted. This supersedes the
+    // older P12 shape, which retained the raw thrown text in `data.rawError` and
+    // in `warnings` — that retained copy was the leak.
+    assert(
+      outcome.message.includes('internal error') && !outcome.message.includes('kaboom'),
+      'dispatch: visible message is bounded and hides thrown internals',
+    );
+    assert(
+      (outcome.data as any)?.errorCode === 'transport_error'
+        && (outcome.data as any)?.redacted === true,
+      'dispatch: failure is classified (transport_error) and marked redacted',
+    );
+    // The strongest form of the assertion: the thrown text must not survive
+    // ANYWHERE in the outcome, not merely be absent from the visible message.
+    assert(
+      !JSON.stringify(outcome).includes('kaboom'),
+      'dispatch: thrown internals appear nowhere in the persisted outcome',
+    );
   }
 
   // ─── dispatch: deferred when approvalGate refuses ──────────────────────
@@ -120,6 +139,43 @@ async function runDispatchCases() {
     assertEqual(outcome.status, 'deferred', 'dispatch: deferred when gate denies');
     assertEqual(outcome.approvalId, 'a1', 'dispatch: approvalId passthrough');
     assert(outcome.message === 'pending review', 'dispatch: deferred message passthrough');
+    // Backward-compat: a gate that omits category emits no approvalCategory.
+    assert(outcome.data === undefined || (outcome.data as any).approvalCategory === undefined,
+      'dispatch: no category when gate omits it');
+  }
+
+  // ─── dispatch: deferral category + retryable propagate (C7) ────────────
+  {
+    // A retryable transient error category should surface retryable=true.
+    const errOutcome = await dispatchChatAutomationPlan(
+      makePlan({ approval: { required: true, reason: 'side effect' } }),
+      {
+        handlers: { run_openswan: async () => ({ executionKind: 'run_openswan', status: 'completed', message: 'ran' }) },
+        ctx: baseCtx,
+        approvalGate: async () => ({
+          pass: false,
+          deferred: { approvalId: '', message: 'lookup failed', category: 'error' as const },
+        }),
+      },
+    );
+    assertEqual(errOutcome.status, 'deferred', 'dispatch(C7): error category still defers');
+    assertEqual((errOutcome.data as any)?.approvalCategory, 'error', 'dispatch(C7): error category surfaced');
+    assertEqual((errOutcome.data as any)?.approvalRetryable, true, 'dispatch(C7): error derives retryable=true');
+
+    // A human-decision category (rejected) must NOT be retryable.
+    const rejOutcome = await dispatchChatAutomationPlan(
+      makePlan({ approval: { required: true, reason: 'side effect' } }),
+      {
+        handlers: { run_openswan: async () => ({ executionKind: 'run_openswan', status: 'completed', message: 'ran' }) },
+        ctx: baseCtx,
+        approvalGate: async () => ({
+          pass: false,
+          deferred: { approvalId: 'r1', message: 'rejected by human', category: 'rejected' as const },
+        }),
+      },
+    );
+    assertEqual((rejOutcome.data as any)?.approvalCategory, 'rejected', 'dispatch(C7): rejected category surfaced');
+    assertEqual((rejOutcome.data as any)?.approvalRetryable, false, 'dispatch(C7): rejected derives retryable=false');
   }
 
   // ─── dispatch: pass when approvalGate approves ─────────────────────────
@@ -140,6 +196,35 @@ async function runDispatchCases() {
     );
     assert(ran, 'dispatch: handler ran when gate passed');
     assertEqual(outcome.status, 'completed', 'dispatch: completed after gate pass');
+  }
+
+  // ─── dispatch: gate can enforce policy even when plan approval is false ─
+  {
+    let ran = false;
+    const outcome = await dispatchChatAutomationPlan(
+      makePlan({ approval: { required: false, reason: null } }),
+      {
+        handlers: {
+          run_openswan: async () => {
+            ran = true;
+            return { executionKind: 'run_openswan', status: 'completed', message: 'should not run' };
+          },
+        },
+        ctx: baseCtx,
+        approvalGate: async () => ({
+          pass: false,
+          deferred: {
+            approvalId: '',
+            message: 'blocked by category policy',
+            category: 'blocked_policy' as const,
+            retryable: false,
+          },
+        }),
+      },
+    );
+    assertEqual(ran, false, 'dispatch(C7): safe plan gate can prevent handler');
+    assertEqual(outcome.status, 'deferred', 'dispatch(C7): safe plan policy block defers');
+    assertEqual((outcome.data as any)?.approvalCategory, 'blocked_policy', 'dispatch(C7): safe plan policy category surfaced');
   }
 
   // ─── dispatch: observer fires for every path ──────────────────────────

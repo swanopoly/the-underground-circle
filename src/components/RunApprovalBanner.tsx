@@ -1,20 +1,37 @@
 /**
  * RunApprovalBanner — inline card for pending agent_run_approvals.
- * Sits just above the ChatTab composer. One card per pending row (cap
- * at 3 visible so it doesn't dominate the screen); each card exposes
- * Approve / Reject buttons. Tapping either calls into
- * `runApprovalsService.resolveRunApproval` and the realtime hook
- * re-pulls, so the card disappears.
+ * Sits just above the ChatTab composer. One card per pending row —
+ * except that same-tool, same-risk, runtime-stamped rows fold into ONE
+ * itemized "Approve all N" batch card (`approvalCardModelCore.
+ * planRunApprovalBatchCards`; floor/credential/destructive/external
+ * rows always stay solo, and "Review one-by-one" explodes a batch back
+ * to singles). Cap at 3 visible CARDS so the strip doesn't dominate
+ * the screen; each card exposes Approve / Reject buttons. Tapping
+ * either calls into `runApprovalsService.resolveRunApproval` and the
+ * realtime hook re-pulls, so the card disappears. Batch approvals are
+ * delivered to the host through ONE `onResolvedBatch` callback so
+ * ChatTab can dispatch a single combined continuation turn.
  *
  * Design: follows the UC rounded-dark style guide. Amber border for
  * pending (matches HITL-urgent conventions in this app), slate card
  * surface, 10px radius, 1px borders. Kind pill uses a fixed accent so
  * users can scan "publish" vs "external_send" quickly.
  */
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
 import { useAgentRunApprovals, resolveRunApproval, type AgentRunApproval, type ApprovalKind } from '../services/runApprovalsService';
 import { renderApprovalAction } from '../lib/approvalPayloadRenderer';
+import { classifyApprovalAge, type ApprovalStaleness } from '../lib/approvalPreviewCore';
+import { toolAutoApproveCategory } from '../lib/openswanToolRuntime';
+import { AUTO_APPROVE_CATEGORY_LABELS, writeUserAutoApprove } from '../lib/chatAutoApproveSettings';
+import {
+  mapPreviewRiskToTier,
+  shouldOfferRememberAutoApprove,
+  isApprovalRowLive,
+  planRunApprovalBatchCards,
+  RISK_TIER_CHIP_COLORS,
+} from '../lib/approvalCardModelCore';
+import { describeApprovalRiskChip, type ApprovalRiskTier } from '../lib/approvalIntentPreview';
 
 const KIND_ACCENTS: Record<ApprovalKind, { fg: string; bg: string; border: string; label: string }> = {
   publish:             { fg: '#fbbf24', bg: '#422006', border: '#92400e', label: 'PUBLISH' },
@@ -32,20 +49,67 @@ interface Props {
   circleId: string;
   userId: string;
   accentColor?: string;
+  /**
+   * approval-resume: fires after a resolveRunApproval succeeds, with the full
+   * approval row + the decision. ChatTab uses this to auto-send a continuation
+   * turn ("approval granted — retry that tool call") so Approve actually
+   * resumes the stalled task instead of waiting for the user to type
+   * "continue". Optional/additive — other mounts (OfficeTab) can omit it.
+   */
+  onResolved?: (approval: AgentRunApproval, status: 'approved' | 'rejected') => void;
+  /**
+   * approval-batch: fires ONCE with every row a batch card resolved (only the
+   * rows whose resolve succeeded), instead of N per-row `onResolved` calls.
+   * ChatTab's resume flush dispatches on its first invocation, so N
+   * sequential per-row calls would split one approval batch into two
+   * continuation turns — the batch callback lets the host queue every row and
+   * flush a SINGLE combined continuation. Optional/additive: when absent, the
+   * banner falls back to per-row `onResolved` calls (OfficeTab passes
+   * neither, so its mount resolves without any continuation).
+   */
+  onResolvedBatch?: (approvals: AgentRunApproval[], status: 'approved' | 'rejected') => void;
+  /**
+   * approval-resume: reports the live pending-approval count (including 0) so
+   * the host can reflect "needs your approval" state — e.g. ChatTab's
+   * runStatus pill. Optional/additive.
+   */
+  onPendingChange?: (pendingCount: number) => void;
 }
 
-function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; userId: string; onResolve: (id: string, status: 'approved' | 'rejected') => Promise<void>; }) {
+function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; userId: string; onResolve: (item: AgentRunApproval, status: 'approved' | 'rejected') => Promise<void>; }) {
   const [busy, setBusy] = useState<'approving' | 'rejecting' | null>(null);
+  const [remember, setRemember] = useState(false);
   const accent = KIND_ACCENTS[item.approval_kind] || KIND_ACCENTS.privileged_action;
+
+  // auto-approve-memory: derive the tool's auto-approve category from the
+  // SAME exported helper the tool-loop gate uses (toolAutoApproveCategory),
+  // so ticking the checkbox here is honored by maybeRequestToolApproval on
+  // the next call. Null (uncategorized tool, credential fill, no payload
+  // tool) → no checkbox; those always ask.
+  const rememberCategory = useMemo(() => {
+    const tool = (item.payload as any)?.tool;
+    const cat = typeof tool === 'string' ? toolAutoApproveCategory(tool) : null;
+    // Floor suppression (approvalCardModelCore): never offer a standing
+    // auto-approve for pay/delete/login/grant or credential entry — the
+    // request-side gate would refuse to honor it anyway. Narrows-only:
+    // the user can still approve this one action.
+    return cat && shouldOfferRememberAutoApprove(cat, tool) ? cat : null;
+  }, [item.payload]);
 
   const handle = useCallback(async (status: 'approved' | 'rejected') => {
     setBusy(status === 'approved' ? 'approving' : 'rejecting');
     try {
-      await onResolve(item.id, status);
+      await onResolve(item, status);
+      // "Remember this" — approve + ticked checkbox persists the category as
+      // auto-approved for future tool calls (mirrors HitlApprovalBanner).
+      // Reject + remember is deliberately not offered — never auto-deny.
+      if (status === 'approved' && remember && rememberCategory) {
+        await writeUserAutoApprove(userId, rememberCategory, 'auto').catch(() => {});
+      }
     } finally {
       setBusy(null);
     }
-  }, [item.id, onResolve]);
+  }, [item, onResolve, remember, rememberCategory, userId]);
 
   const ageLabel = useMemo(() => {
     const ms = Date.now() - new Date(item.requested_at).getTime();
@@ -54,6 +118,27 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
     if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
     return `${Math.floor(sec / 3600)}h ago`;
   }, [item.requested_at]);
+
+  // Staleness (findings 10/11): a card that has sat unanswered gets a "still
+  // waiting" hint; a very old one is flagged so the user knows it may no longer
+  // apply, instead of silently piling up as a dead card.
+  const staleness: ApprovalStaleness = useMemo(
+    () => classifyApprovalAge(Date.now() - new Date(item.requested_at).getTime()),
+    [item.requested_at],
+  );
+
+  // Risk pill from the approval preview payload (secret-safe; set upstream).
+  // Shared vocab (approvalCardModelCore): fold the preview's read/write/
+  // destructive triple into the same tier chips HitlApprovalBanner uses, so
+  // destructive shows the red IRREVERSIBLE chip in both banners. Legacy rows
+  // without an approvalPreview.risk render NO chip (never a default badge).
+  const risk = useMemo(() => {
+    const r = (item.payload as any)?.approvalPreview?.risk;
+    if (r !== 'read' && r !== 'write' && r !== 'destructive') return null;
+    const chip = describeApprovalRiskChip(mapPreviewRiskToTier(r));
+    const colors = RISK_TIER_CHIP_COLORS[chip.tone];
+    return { ...colors, label: chip.label };
+  }, [item.payload]);
 
   // UC-1b: when the approval payload includes semantic info (tool +
   // label/url/text), render "Click **Send** in Safari" instead of the
@@ -70,19 +155,50 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
   const headlineDisplay = useMemo(() => action.headline.replace(/\*\*/g, ''), [action.headline]);
 
   return (
-    <View style={[styles.card, { borderColor: accent.border }]} nativeID={`approval-card-${item.id.slice(0, 8)}`}>
+    <View style={[styles.card, { borderColor: accent.border }, staleness === 'expired' && styles.cardExpired]} nativeID={`approval-card-${item.id.slice(0, 8)}`}>
       <View style={styles.cardHeader}>
-        <View style={[styles.kindPill, { backgroundColor: accent.bg, borderColor: accent.border }]}>
-          <Text style={[styles.kindText, { color: accent.fg }]}>{accent.label}</Text>
+        <View style={styles.pillRow}>
+          <View style={[styles.kindPill, { backgroundColor: accent.bg, borderColor: accent.border }]}>
+            <Text style={[styles.kindText, { color: accent.fg }]}>{accent.label}</Text>
+          </View>
+          {risk ? (
+            <View style={[styles.kindPill, { backgroundColor: risk.bg, borderColor: risk.border }]}>
+              <Text style={[styles.kindText, { color: risk.fg }]}>{risk.label}</Text>
+            </View>
+          ) : null}
         </View>
-        <Text style={styles.ageText}>{ageLabel}</Text>
+        <Text style={[styles.ageText, staleness === 'expired' && styles.ageExpired]}>
+          {staleness === 'expired' ? `${ageLabel} · stale` : ageLabel}
+        </Text>
       </View>
       <Text style={styles.titleText} numberOfLines={2}>{headlineDisplay}</Text>
+      {staleness !== 'fresh' ? (
+        <Text style={styles.staleHint} numberOfLines={1}>
+          {staleness === 'expired'
+            ? 'Waiting a while — this may no longer be relevant. Reject to clear it.'
+            : 'Still waiting on you.'}
+        </Text>
+      ) : null}
       {action.detail ? (
         <Text style={styles.detailText} numberOfLines={1}>{action.detail}</Text>
       ) : null}
       {item.description && item.description !== action.headline ? (
         <Text style={styles.descriptionText} numberOfLines={3}>{item.description}</Text>
+      ) : null}
+      {rememberCategory ? (
+        <Pressable
+          onPress={() => setRemember((prev) => !prev)}
+          style={styles.rememberRow}
+          accessibilityRole="button"
+          accessibilityLabel={`Remember: auto-approve ${AUTO_APPROVE_CATEGORY_LABELS[rememberCategory]}`}
+        >
+          <View style={[styles.rememberBox, remember && styles.rememberBoxChecked]}>
+            {remember ? <Text style={styles.rememberCheck}>{'✓'}</Text> : null}
+          </View>
+          <Text style={styles.rememberLabel} numberOfLines={1}>
+            Remember: auto-approve {AUTO_APPROVE_CATEGORY_LABELS[rememberCategory].toLowerCase()}
+          </Text>
+        </Pressable>
       ) : null}
       <View style={styles.buttonRow}>
         <Pressable
@@ -106,21 +222,205 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
   );
 }
 
-export default function RunApprovalBanner({ circleId, userId }: Props) {
+/**
+ * approval-batch: one itemized card covering ≥2 same-tool, same-risk pending
+ * rows (grouping decided by the pure `planRunApprovalBatchCards`). Shows a
+ * per-row one-line audit trail so "Approve all N" is informed consent, plus a
+ * "Review one-by-one" escape hatch that explodes the batch back into single
+ * cards (fail-open: reviewing more granularly is always allowed). NO remember
+ * checkbox here — a standing auto-approve must be granted on a single,
+ * concrete action card, never on a bundle.
+ */
+function ApprovalBatchCard({ rows, tool, tier, onResolveBatch, onReviewIndividually }: {
+  rows: AgentRunApproval[];
+  tool: string;
+  tier: ApprovalRiskTier;
+  onResolveBatch: (rows: AgentRunApproval[], status: 'approved' | 'rejected') => Promise<void>;
+  onReviewIndividually: (rows: AgentRunApproval[]) => void;
+}) {
+  const [busy, setBusy] = useState<'approving' | 'rejecting' | null>(null);
+  // Same-tool rows share an approval kind in practice; pill from the first row.
+  const firstKind = rows[0]?.approval_kind;
+  const accent = (firstKind && KIND_ACCENTS[firstKind]) || KIND_ACCENTS.tool_use;
+  const n = rows.length;
+
+  // Tier chip — same describeApprovalRiskChip vocabulary as the single card.
+  // The plan only ever emits 'read'/'reversible' batches, so this chip can
+  // never show IRREVERSIBLE (destructive rows stay solo by construction).
+  const chip = useMemo(() => {
+    const described = describeApprovalRiskChip(tier);
+    return { ...RISK_TIER_CHIP_COLORS[described.tone], label: described.label };
+  }, [tier]);
+
+  // Per-row one-line audit trail (bounded: the service reads ≤10 pending
+  // rows). Markdown bold markers stripped for the RN Text render, matching
+  // the single card's headline handling.
+  const lines = useMemo(
+    () => rows.map((row) => renderApprovalAction(row.payload as any, row.title).headline.replace(/\*\*/g, '')),
+    [rows],
+  );
+
+  const handleAll = useCallback(async (status: 'approved' | 'rejected') => {
+    setBusy(status === 'approved' ? 'approving' : 'rejecting');
+    try {
+      await onResolveBatch(rows, status);
+    } finally {
+      setBusy(null);
+    }
+  }, [rows, onResolveBatch]);
+
+  return (
+    <View style={[styles.card, { borderColor: accent.border }]} nativeID={`approval-batch-card-${rows[0]?.id?.slice(0, 8) || 'none'}`}>
+      <View style={styles.cardHeader}>
+        <View style={styles.pillRow}>
+          <View style={[styles.kindPill, { backgroundColor: accent.bg, borderColor: accent.border }]}>
+            <Text style={[styles.kindText, { color: accent.fg }]}>{accent.label}</Text>
+          </View>
+          <View style={[styles.kindPill, { backgroundColor: chip.bg, borderColor: chip.border }]}>
+            <Text style={[styles.kindText, { color: chip.fg }]}>{chip.label}</Text>
+          </View>
+        </View>
+        <Text style={styles.ageText}>{`×${n}`}</Text>
+      </View>
+      <Text style={styles.titleText} numberOfLines={2}>{`${n}× ${tool}`}</Text>
+      <Text style={styles.detailText} numberOfLines={1}>Same tool, same risk — approve together or review each one.</Text>
+      {rows.map((row, i) => (
+        <Text key={row.id} style={styles.batchLineText} numberOfLines={1}>
+          {`${i + 1}. ${lines[i]}`}
+        </Text>
+      ))}
+      <View style={styles.buttonRow}>
+        <Pressable
+          style={({ pressed }) => [styles.rejectButton, pressed && styles.buttonPressed, busy && styles.buttonDisabled]}
+          onPress={() => handleAll('rejected')}
+          disabled={!!busy}
+        >
+          <Text style={styles.rejectButtonText}>{busy === 'rejecting' ? 'Rejecting…' : `Reject all ${n}`}</Text>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [styles.approveButton, { backgroundColor: accent.fg + '22', borderColor: accent.fg }, pressed && styles.buttonPressed, busy && styles.buttonDisabled]}
+          onPress={() => handleAll('approved')}
+          disabled={!!busy}
+        >
+          <Text style={[styles.approveButtonText, { color: accent.fg }]}>
+            {busy === 'approving' ? 'Approving…' : `Approve all ${n}`}
+          </Text>
+        </Pressable>
+      </View>
+      <Pressable
+        style={({ pressed }) => [styles.reviewOneByOneRow, pressed && styles.buttonPressed, busy && styles.buttonDisabled]}
+        onPress={() => onReviewIndividually(rows)}
+        disabled={!!busy}
+        accessibilityRole="button"
+        accessibilityLabel={`Review these ${n} approvals one-by-one`}
+      >
+        <Text style={styles.reviewOneByOneText}>Review one-by-one</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+/** A card position in the rendered strip after batch planning + explosion. */
+type RenderCard =
+  | { key: string; kind: 'single'; row: AgentRunApproval }
+  | { key: string; kind: 'batch'; rows: AgentRunApproval[]; tool: string; tier: ApprovalRiskTier };
+
+export default function RunApprovalBanner({ circleId, userId, onResolved, onResolvedBatch, onPendingChange }: Props) {
   const { approvals, pendingCount, refresh } = useAgentRunApprovals(circleId);
 
-  const onResolve = useCallback(async (id: string, status: 'approved' | 'rejected') => {
-    await resolveRunApproval(id, status, userId);
+  // approval-resume: surface the pending count (incl. 0) so the host can
+  // reflect a "needs your approval" state. Must run before the early return
+  // below so a drop back to 0 is still reported.
+  useEffect(() => {
+    onPendingChange?.(pendingCount);
+  }, [pendingCount, onPendingChange]);
+
+  const onResolve = useCallback(async (item: AgentRunApproval, status: 'approved' | 'rejected') => {
+    const result = await resolveRunApproval(item.id, status, userId);
     // Optimistic — realtime will confirm; this keeps the UI snappy if
     // the channel is lagging.
     refresh();
-  }, [userId, refresh]);
+    if (result.ok) onResolved?.(item, status);
+  }, [userId, refresh, onResolved]);
+
+  // approval-batch: resolve every covered row, then hand the successes to the
+  // host in ONE callback. Per-row `resolveRunApproval` keeps the per-row
+  // resolved_by/resolved_at audit trail and its pending-only idempotence (a
+  // row another approver already resolved just drops out of okRows).
+  const onResolveBatch = useCallback(async (rows: AgentRunApproval[], status: 'approved' | 'rejected') => {
+    // Approve-all fail-closed: nothing sweeps stale DB rows to 'expired'
+    // (timeout_seconds is stored but unenforced), so re-check liveness at tap
+    // time — a row whose window lapsed while the card sat on screen must not
+    // be granted under a bundle tap. Reject-all intentionally skips the
+    // filter: rejecting a dead-but-still-pending row only clears it.
+    const now = Date.now();
+    const target = status === 'approved'
+      ? rows.filter((row) => isApprovalRowLive(row.requested_at, row.timeout_seconds, now))
+      : rows;
+    const settled = await Promise.all(target.map(async (row) => ({
+      row,
+      ok: (await resolveRunApproval(row.id, status, userId)).ok,
+    })));
+    refresh();
+    const okRows = settled.filter((s) => s.ok).map((s) => s.row);
+    if (okRows.length === 0) return;
+    // CRITICAL: one batch callback, never N per-row calls — ChatTab's resume
+    // flush dispatches on its first invocation, so per-row delivery would
+    // split one approval batch into two continuation turns. Per-row
+    // `onResolved` remains only as the fallback for mounts without the batch
+    // callback (reject-all never resumes: hosts gate on status there).
+    if (onResolvedBatch) onResolvedBatch(okRows, status);
+    else if (onResolved) for (const row of okRows) onResolved(row, status);
+  }, [userId, refresh, onResolvedBatch, onResolved]);
+
+  // approval-batch: rows the user chose to review individually. Sticky for
+  // the life of the mount (fail-open — exploding a batch only ever adds
+  // per-row consent), so a batch stays exploded even after a sibling row
+  // resolves and the plan recomputes.
+  const [reviewIndividuallyIds, setReviewIndividuallyIds] = useState<Set<string>>(() => new Set());
+  const onReviewIndividually = useCallback((rows: AgentRunApproval[]) => {
+    setReviewIndividuallyIds((prev) => {
+      const next = new Set(prev);
+      for (const row of rows) next.add(row.id);
+      return next;
+    });
+  }, []);
+
+  // Card strip = pure batch plan (planRunApprovalBatchCards; anything not
+  // provably batch-safe stays a solo card) with user explosions applied on
+  // top. Every pending row appears in exactly one card.
+  const renderCards = useMemo<RenderCard[]>(() => {
+    const plan = planRunApprovalBatchCards(approvals);
+    const cards: RenderCard[] = [];
+    for (const entry of plan) {
+      if (entry.kind === 'single') {
+        const row = approvals[entry.index];
+        if (row) cards.push({ key: row.id, kind: 'single', row });
+        continue;
+      }
+      const rows = entry.indices
+        .map((i) => approvals[i])
+        .filter((row): row is AgentRunApproval => !!row);
+      const kept = rows.filter((row) => !reviewIndividuallyIds.has(row.id));
+      if (kept.length >= 2) {
+        cards.push({ key: `batch:${kept.map((row) => row.id).join('|')}`, kind: 'batch', rows: kept, tool: entry.tool, tier: entry.tier });
+        for (const row of rows) {
+          if (reviewIndividuallyIds.has(row.id)) cards.push({ key: row.id, kind: 'single', row });
+        }
+      } else {
+        for (const row of rows) cards.push({ key: row.id, kind: 'single', row });
+      }
+    }
+    return cards;
+  }, [approvals, reviewIndividuallyIds]);
 
   if (pendingCount === 0) return null;
 
-  // Show at most 3 cards; surface overflow as a counter.
-  const visible = approvals.slice(0, 3);
-  const overflow = pendingCount - visible.length;
+  // Show at most 3 CARDS; the overflow counter reports the ROWS the visible
+  // cards don't cover (a batch card covers several rows at once).
+  const visible = renderCards.slice(0, 3);
+  const coveredRows = visible.reduce((sum, card) => sum + (card.kind === 'batch' ? card.rows.length : 1), 0);
+  const overflow = Math.max(0, pendingCount - coveredRows);
 
   return (
     <View style={styles.container} nativeID="section-chat-run-approvals">
@@ -136,8 +436,17 @@ export default function RunApprovalBanner({ circleId, userId }: Props) {
         contentContainerStyle={visible.length > 1 ? styles.scrollStripContent : undefined}
         style={visible.length > 1 ? styles.scrollStrip : undefined}
       >
-        {visible.map((item) => (
-          <ApprovalCard key={item.id} item={item} userId={userId} onResolve={onResolve} />
+        {visible.map((card) => card.kind === 'batch' ? (
+          <ApprovalBatchCard
+            key={card.key}
+            rows={card.rows}
+            tool={card.tool}
+            tier={card.tier}
+            onResolveBatch={onResolveBatch}
+            onReviewIndividually={onReviewIndividually}
+          />
+        ) : (
+          <ApprovalCard key={card.key} item={card.row} userId={userId} onResolve={onResolve} />
         ))}
       </ScrollView>
     </View>
@@ -186,10 +495,27 @@ const styles = StyleSheet.create({
     minWidth: 260,
     maxWidth: 320,
   },
+  cardExpired: {
+    opacity: 0.62,
+  },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  pillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  ageExpired: {
+    color: '#f59e0b',
+  },
+  staleHint: {
+    color: '#f59e0b',
+    fontSize: 10,
+    fontStyle: 'italic',
     marginBottom: 6,
   },
   kindPill: {
@@ -227,10 +553,57 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     marginBottom: 8,
   },
+  batchLineText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 16,
+    marginBottom: 2,
+  },
+  reviewOneByOneRow: {
+    marginTop: 6,
+    paddingVertical: 4,
+    alignItems: 'center',
+  },
+  reviewOneByOneText: {
+    color: '#64748b',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    letterSpacing: 0.3,
+    textDecorationLine: 'underline',
+  },
   buttonRow: {
     flexDirection: 'row',
     gap: 6,
     marginTop: 2,
+  },
+  rememberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 2,
+    marginBottom: 8,
+    paddingVertical: 4,
+  },
+  rememberBox: {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    borderWidth: 1,
+    borderColor: '#475569',
+    backgroundColor: '#0a0f1c',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rememberBoxChecked: {
+    borderColor: '#22c55e',
+    backgroundColor: '#22c55e22',
+  },
+  rememberCheck: { color: '#22c55e', fontSize: 10, fontWeight: '800', lineHeight: 12 },
+  rememberLabel: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    letterSpacing: 0.3,
   },
   rejectButton: {
     flex: 1,

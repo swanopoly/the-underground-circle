@@ -5,12 +5,20 @@ import {
   corsHeaders,
   createServiceRoleClient,
   errResponse,
+  isServiceRoleRequest,
   jsonResponse,
 } from "../_shared/edge.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  // Service-role only: this sweeps every circle on the RLS-bypassing client.
+  // The pg_cron path sends Bearer <service_role_key>; block anyone else so it
+  // cannot be used as an unauthenticated DB/cost-amplification lever.
+  if (!isServiceRoleRequest(req)) {
+    return errResponse(401, "unauthorized", "aggregate-analytics requires service-role authorization");
   }
 
   try {

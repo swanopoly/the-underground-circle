@@ -1,7 +1,7 @@
 # AGENT.md - Codex Notes
 
 > Codex-specific repo guidance.
-> Last reviewed: 2026-05-11
+> Last reviewed: 2026-07-13
 
 Start with `AGENTS.md`. Do not use this file as an alternate roadmap.
 `docs/AGENTS_ROADMAP.md` is the authority for ownership, phase status, SQL

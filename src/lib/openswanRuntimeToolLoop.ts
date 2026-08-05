@@ -4,6 +4,12 @@ import type { OpenSwanExecutionStatus } from './openswanExecution';
 import { buildOpenSwanTaskPlan, type OpenSwanTaskKind, type OpenSwanToolName } from './openswanTaskPlanner';
 import type { OpenSwanToolSurface, OpenSwanRuntimeToolName } from './openswanToolRuntime';
 import { analyzeMessageRouting } from './messageRouting';
+import { sanitizeToolActionMetadataForPersistence } from './agentRunPersistence';
+import {
+  PERSISTED_TOOL_FAILURE_TEXT,
+  summarizeToolInputForPersistence,
+  summarizeToolResultForPersistence,
+} from './eventBoundCore';
 
 export type OpenSwanRuntimeToolLoopOptions = {
   circleId: string;
@@ -83,11 +89,17 @@ function toToolActions(toolEvents: Array<{ tool: string; input: unknown; result:
     tool_name: event.tool,
     title: event.tool.replace(/_/g, ' '),
     status: mapToolActionStatus(event.status),
-    input_preview: JSON.stringify(event.input ?? {}).slice(0, 500),
-    output_preview: event.result.slice(0, 1200),
+    input_preview: JSON.stringify(
+      summarizeToolInputForPersistence(event.tool, event.input),
+    ).slice(0, 500),
+    output_preview: event.status === 'failed'
+      ? PERSISTED_TOOL_FAILURE_TEXT
+      : JSON.stringify(
+          summarizeToolResultForPersistence(event.tool, event.result, event.status),
+        ).slice(0, 1200),
     metadata: {
       source: 'openswan_runtime_tool_loop',
-      ...(event.metadata || {}),
+      ...(sanitizeToolActionMetadataForPersistence(event.metadata) || {}),
     },
   }));
 }

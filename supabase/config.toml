@@ -436,6 +436,15 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/github-oauth/index.ts"
 
+[functions.google-oauth]
+# Browser status/token calls send Authorization and therefore preflight. The
+# hosted router must let OPTIONS reach the function, and Google's callback has
+# no app JWT. The function authenticates status/token/revoke/authorize itself
+# with auth.getUser(); callback integrity is bound by the stored OAuth state.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/google-oauth/index.ts"
+
 [functions.github-webhook]
 # GitHub webhook POSTs never carry a JWT — the integrity check uses the shared
 # HMAC secret on the X-Hub-Signature-256 header instead.
