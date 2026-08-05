@@ -465,6 +465,15 @@ import_map = "./functions/swanbot-ai/deno.json"
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
 entrypoint = "./functions/swanbot-ai/index.ts"
 
+[functions.swanbot-v2-ai]
+# v2 keeps the platform JWT check enabled. Unlike v1, its authenticated
+# continuation protocol is deployed and verified with the canonical router
+# mode, and the production readiness report detects any hosted drift.
+enabled = true
+verify_jwt = true
+import_map = "./functions/swanbot-v2-ai/deno.json"
+entrypoint = "./functions/swanbot-v2-ai/index.ts"
+
 [functions.llm-proxy]
 # verify_jwt = false for the same ES256 reason as swanbot-ai. The function
 # itself resolves and verifies the user JWT at index.ts:462-478 using the

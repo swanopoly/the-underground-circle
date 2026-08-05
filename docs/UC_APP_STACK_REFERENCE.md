@@ -59,7 +59,7 @@ ownership. This file maps the app.
 | SwanBot edge path | `supabase/functions/swanbot-ai/index.ts` |
 | SwanBot v2 typed loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts`, `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `src/lib/swanbotV2BatchRuntime.ts`, `src/lib/swanbotV2BatchPolicy.ts`, `src/lib/swanbotV2ClientLoopFlag.ts` |
 | SwanBot continuation checkpoint privacy | `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/migrations/20260726_swanbot_continuation_privacy.sql`, `docs/RUN_THIS_SQL.sql` §29 |
-| SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts`, `scripts/swanbot-openswan-readiness-report.ts` |
+| SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts`, `scripts/swanbot-openswan-readiness-report.ts`, `supabase/migrations/20260805_openswan_production_readiness_contract.sql`, `docs/RUN_THIS_SQL.sql` §32 |
 | Typed agent loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan session runtime | `src/lib/openswanSessionRuntime.ts` |
 | Agent runtime subject identity | `src/lib/agentRuntimeSubject.ts`, `src/lib/agentIdentityKey.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentInvocation.ts`, `src/lib/agentRuntime.ts`, `src/lib/swanbotV2BatchRuntimeCore.ts` |
@@ -713,16 +713,19 @@ integration provider registry aligned.
   and title to one exact process/context/page/URL. The model sees an HTTP(S)
   origin-only display URL; exact actionability drift checks use a
   process-scoped HMAC URL identity. HMAC identities rotate on bridge restart,
-  and raw/forged legacy URL identities plus non-HTTP snapshots fail closed. The device-local typed client remains opt-in/default-off; current
-  SwanBot v2 edge source has not been deployed/re-verified, production
-  telemetry is missing, and §26/§29 have not been applied. There is no live
-  proof yet for encrypted resume/key rotation, claim races, three-minute cron
-  expiry, or historical checkpoint scrubbing. Pre-deployment plaintext/legacy
-  continuations fail closed or are scrubbed only after the edge is deployed
-  and §29 is applied. The updated `computer-use-agent` edge is also
-  source-only: it has not been deployed/re-verified. No live Browserbase/DB
-  confirmation integration or generic native-input GUI run was performed. Its HTTP
-  400 for authenticated legacy callers without a v1 policy is intentional.
+  and raw/forged legacy URL identities plus non-HTTP snapshots fail closed. The
+  device-local typed client remains opt-in/default-off. The current SwanBot v1
+  and v2 Edge functions, canonical JWT modes, required secret names,
+  production-origin CORS, §31 Chat catalog, and §32 readiness RPC were
+  deployed/re-verified on 2026-08-05; the live report passed all 18 dependency
+  checks. Historical production telemetry is incomplete and still blocks a
+  default flip. §29 remains unapplied, so encrypted resume/key rotation, claim
+  races, three-minute cron expiry, and historical checkpoint scrubbing remain
+  unproven. A live exact Photoshop run created and app-natively verified a
+  600x600 scratch document while Photoshop stayed frontmost; arbitrary native
+  semantic input, Browserbase/confirmation integration, and the updated
+  `computer-use-agent` deployment remain unproven. Its HTTP 400 for
+  authenticated legacy callers without a v1 policy is intentional.
 - Native `desktop.click_element` is a narrow semantic-press canary, not a
   general desktop click gateway. It observes a fresh indexed accessibility
   tree, binds exact app/PID/path/role/label/fingerprint identity, proposes one
@@ -995,9 +998,10 @@ integration provider registry aligned.
 - Local migrations are append-only in `supabase/migrations/`.
 - Consolidated idempotent agent SQL is in `docs/RUN_THIS_SQL.sql`.
 - Roadmap section 5 owns applied/pending status.
-- `20260726_agent_action_calls.sql` is mirrored as §26 but is **not applied or
-  live-DB verified**. Apply and verify its table/RPC contract before relying on
-  cross-process guarded-action replay prevention.
+- `20260726_agent_action_calls.sql` (§26) is **applied and catalog-verified**:
+  the live table and claim/start/finish RPCs were rechecked on 2026-08-05.
+  A real two-worker claim/start contention race remains unproven, so catalog
+  presence alone is not cross-process no-replay proof.
 - `20260726_scheduled_action_mutation_guard.sql` is mirrored as §27 but is
   **not applied or live-DB verified**. Apply it before relying on the durable
   scheduled claim/dispatch/outcome-unknown state machine.
@@ -1008,14 +1012,21 @@ integration provider registry aligned.
 - `20260726_swanbot_continuation_privacy.sql` is mirrored as §29 but is **not
   applied or live-DB verified**. Source verification does not prove encrypted
   resume/key rotation, live claim races, cron expiry, or the historical scrub.
-- `20260805_messages_thread_rls_and_reactions.sql` is mirrored as §31 but is
-  **not applied to or verified against the target Supabase project**. The
-  224-assertion focused smoke and disposable PostgreSQL 14 adversarial run
-  applied it twice successfully; production still needs authenticated
-  private/shared/circle visibility, revocation, reply/reaction concurrency, and
-  two-client message/thread Realtime proof. Current compatibility deliberately
-  permits a creator to author/finalize their own `is_bot=true` row until a
-  trusted server/RPC bot-write lane replaces it.
+- `20260805_messages_thread_rls_and_reactions.sql` (§31) is **applied and
+  catalog-verified on the target project as of 2026-08-05**. The service-role
+  readiness contract proves the canonical table/column, four message policies,
+  mutation trigger, reaction RPC grant, and Realtime publication. Authenticated
+  private/shared/circle behavior, revocation, reply/reaction contention, and
+  two-client Realtime delivery still need live behavioral proof. Current
+  compatibility deliberately permits a creator to author/finalize their own
+  `is_bot=true` row until a trusted server/RPC bot-write lane replaces it.
+- `20260805_openswan_production_readiness_contract.sql` (§32) is **applied and
+  live-verified on 2026-08-05**. Its service-role RPC returns booleans only.
+  The report combines those booleans with hosted function/JWT metadata,
+  required secret names, the production web origin, browser CORS, source
+  smokes/parity, and real telemetry. An authenticated Supabase CLI may supply a
+  service key transiently when no explicit key is exported; no key or secret
+  value is printed.
 - Use `NOTIFY pgrst, 'reload schema';` after schema changes when relevant.
 
 ## Validation
@@ -1051,7 +1062,7 @@ canonical readiness. Exact approval, direct-handoff, open-path, automation,
 scheduled-action, Office broadcast, and database-authority guards share that
 same exactly-once gate contract. This does not prove a deployed edge, live
 Browserbase/confirmation-database integration, or live native-app execution.
-It also does not prove §26/§27/§28/§29/§31 application, live Realtime/RLS behavior,
+It also does not prove §26/§27/§28/§29 application or live two-client Realtime/RLS behavior,
 encrypted resume/key rotation or cron expiry, concurrent claims, external
 provider dispatch, or automation/scheduler edge deployment.
 
@@ -1068,7 +1079,8 @@ app.
 Use focused smoke scripts from `package.json` for runtime changes. Use
 `npm run check:swanbot-chat:release` before bundling a larger
 SwanBot/OpenSwan/Chat delivery. Use the SwanBot/OpenSwan readiness report only
-for production/default-flip evidence because it requires Supabase service-role
-credentials and real `agent_runs` rows:
+for production/default-flip evidence because it requires either an explicit
+Supabase service-role key or authenticated CLI access, plus real `agent_runs`
+rows. Its live dependency section must pass separately from telemetry:
 `npm run report:swanbot-openswan-readiness -- --smokes-passed --since <iso>`.
 `smoke:all` is the integration sweep, not the daily default.

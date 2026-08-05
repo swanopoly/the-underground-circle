@@ -76,6 +76,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | BlackSwan response path | `src/lib/swanbot.ts`, `src/lib/swanbotClientToolDispatcher.ts`, `supabase/functions/swanbot-ai/index.ts` |
 | v2 SwanBot tool loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts`, `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `src/lib/swanbotV2BatchRuntime.ts`, `src/lib/swanbotV2BatchPolicy.ts`, `src/lib/swanbotV2ClientLoopFlag.ts` |
 | SwanBot continuation checkpoint privacy | `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/migrations/20260726_swanbot_continuation_privacy.sql`, `docs/RUN_THIS_SQL.sql` §29 |
+| SwanBot/OpenSwan production readiness | `src/lib/swanbotOpenSwanReadiness.ts`, `scripts/swanbot-openswan-readiness-report.ts`, `supabase/migrations/20260805_openswan_production_readiness_contract.sql`, `docs/RUN_THIS_SQL.sql` §32 |
 | Typed model/tool loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan sessions | `src/lib/openswanSessionRuntime.ts` |
 | Agent subject identity | `src/lib/agentRuntimeSubject.ts`, `src/lib/agentIdentityKey.ts`, `src/lib/agentIdentity.ts` |
@@ -790,17 +791,19 @@ retry, and a local loop failure cannot replay through v1 text-only chat. Ask
 tools defer only to their own durable exact-call runtime approval boundary,
 never to a generic plan approval. Compiler-owned exact programs are different:
 their full local program and authorization mode are already fixed, so only
-their post-policy handler receives execution authority. Current
-SwanBot v2 edge source has not been deployed/re-verified, and production
-telemetry still gates a default flip. Section 29 is authored/mirrored but has
-not been applied or live-DB verified. Consequently there is no live proof yet
-for encrypted resume/key rotation, claim races, three-minute cron expiry, or
-historical checkpoint scrubbing. Pre-deployment plaintext/legacy continuations
-fail closed or are scrubbed only after the edge is deployed and §29 is applied.
-The updated `computer-use-agent` edge is also source-only and has not been
-deployed/re-verified. No live Browserbase/DB confirmation integration or
-generic native-input GUI run was performed. Its HTTP 400 response for authenticated
-legacy callers without a v1 policy is intentional.
+their post-policy handler receives execution authority. The current SwanBot
+v1/v2 Edge functions, canonical JWT modes, required secret names,
+production-origin CORS, §31 Chat catalog, and §32 readiness RPC were
+deployed/re-verified on 2026-08-05; the production report passed all 18 live
+dependency checks. Historical v1/v2 `agent_runs` telemetry is incomplete and
+still blocks a default flip. Section 29 is authored/mirrored but has not been
+applied or live-DB verified, so encrypted resume/key rotation, claim races,
+three-minute cron expiry, and historical checkpoint scrubbing remain unproven.
+A live exact Photoshop run created and app-natively verified a 600x600 scratch
+document while Photoshop stayed frontmost. The updated `computer-use-agent`
+deployment, arbitrary native semantic input, and live Browserbase/confirmation
+integration remain unproven. Its HTTP 400 response for authenticated legacy
+callers without a v1 policy is intentional.
 
 Native `desktop.launch_app` and `desktop.focus_app` also converge on one
 proof-bearing helper across the app adapter, typed OpenSwan, and SwanBot v2:
@@ -1018,14 +1021,21 @@ changes must follow the HITL/approval rules in the roadmap.
   applied or live-DB verified**. Its source checks do not prove encrypted
   continuation resume/key rotation, live claim races, cron expiry, or the
   historical scrub against Postgres.
-- `20260805_messages_thread_rls_and_reactions.sql` is mirrored as §31 but is
-  **not applied to or verified against the target Supabase project**. A focused
-  224-assertion smoke and disposable PostgreSQL 14 adversarial run applied it
-  twice successfully. Production still needs authenticated private/shared/
-  circle visibility, revocation, reply/reaction concurrency, and two-client
-  message/thread Realtime proof. It deliberately preserves creator-owned bot
-  persistence compatibility; trusted bot provenance still needs a later
-  server/RPC writer.
+- `20260805_messages_thread_rls_and_reactions.sql` (§31) is **applied and
+  catalog-verified on the target project as of 2026-08-05**. The service-role
+  contract proves the canonical table/column, four message policies, mutation
+  trigger, reaction RPC grant, and Realtime publication. Authenticated
+  private/shared/circle behavior, revocation, reply/reaction contention, and
+  two-client Realtime delivery still need live behavioral proof. It preserves
+  creator-owned bot persistence compatibility; trusted bot provenance still
+  needs a later server/RPC writer.
+- `20260805_openswan_production_readiness_contract.sql` (§32) is **applied and
+  live-verified as of 2026-08-05**. Its service-role RPC returns booleans only;
+  the report combines them with hosted function/JWT metadata, required secret
+  names, production-origin reachability/CORS, source smokes/parity, and real
+  telemetry. It can retrieve a service key transiently from an authenticated
+  Supabase CLI when no explicit key is exported and never prints key or secret
+  values.
 - After schema changes, use `NOTIFY pgrst, 'reload schema';` when relevant.
 
 Schema gotchas:
@@ -1095,8 +1105,11 @@ computer-app grounding, `swanbot-v2-batch-policy`,
 `swanbot-v2-continuation`, `swanbot-v2-edge-fill-schema`,
 `computer-use-mutation-handoff`, `chat-recording`, readiness, and typed-runtime
 invariant smokes plus app typecheck. Locator actionability remains advisory and
-cannot authorize or bind a later mutation. That is not a current-edge deployment,
-live Postgres migration/contention check, or live browser/native GUI proof.
+cannot authorize or bind a later mutation. The 2026-08-05 production contract
+separately proves current v1/v2 deployment metadata, required JWT modes, secret
+names, §31 catalog state, production-origin reachability, and CORS; it does not
+prove Postgres contention, provider behavior, or arbitrary browser/native GUI
+completion.
 `openswan-generic-native-ui-runtime`, `browser-dom-snapshot-privacy`, and
 `swanbot-v2-terminal-integrity` each run exactly once in both Chat/SwanBot daily
 and release chains and in `smoke:all`; these are source/contract gates, not live
@@ -1109,9 +1122,9 @@ canonical readiness. Exact approval, direct-handoff, open-path, automation,
 scheduled-action, Office broadcast, and database-authority guards share that
 same exactly-once gate contract. This is not evidence of a deployed edge, live
 Browserbase/confirmation-database integration, or live native-app execution.
-It also does not prove §26/§27/§28/§29 application, live Realtime/RLS behavior,
-encrypted continuation/key-rotation or cron-expiry behavior, concurrent claims,
-external provider dispatch, or updated edge deployment.
+It also does not prove §26/§27/§28/§29 application or live two-client
+Realtime/RLS behavior, encrypted continuation/key-rotation or cron-expiry
+behavior, concurrent claims, or external provider dispatch.
 
 The 2026-08-05 unfamiliar-app slice is source/contract-checked by
 `smoke:generic-app-navigator`, `smoke:universal-app-task-eval`,
@@ -1138,8 +1151,9 @@ every human action in every app.
 - The universal browser/desktop mutation gateway remains incomplete; the five
   guarded canaries and current-catalog interception must not be generalized into a
   claim that arbitrary apps can already be operated safely end to end.
-- Current SwanBot v2 encrypted-continuation edge changes are source-only until
-  deployed and re-verified; §29 is source-only until applied and live-DB
-  verified. Old plaintext/legacy pending continuations fail closed or are
-  scrubbed only after those steps, so deployment must account for in-flight
-  turns and explicitly provision the dedicated encryption secret/key version.
+- Current SwanBot v2 deployment metadata, JWT mode, production CORS, and the
+  dedicated encryption secret/key-version names were re-verified on 2026-08-05.
+  §29 remains source-only until applied and live-DB verified. Old
+  plaintext/legacy pending continuations fail closed or are scrubbed only after
+  that migration, so rollout must still account for in-flight turns and prove
+  key rotation plus claim races before the typed client becomes default.
