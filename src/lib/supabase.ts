@@ -36,7 +36,12 @@ if (!_global.__supabaseClient) {
       storage,
       autoRefreshToken: true,
       persistSession: true,
-      detectSessionInUrl: false,
+      // MUST be true on web with PKCE: OAuth/SSO return to the app with
+      // ?code=..., and this flag is what makes GoTrue exchange it for a
+      // session. It was false since the initial scaffold, which made
+      // "Continue with Google" / SSO silently bounce back to the login
+      // screen — nothing in the app calls exchangeCodeForSession manually.
+      detectSessionInUrl: Platform.OS === 'web',
       flowType: 'pkce',
       // Disable navigator.locks on web — prevents AbortError from GoTrueClient
       lock: Platform.OS === 'web'

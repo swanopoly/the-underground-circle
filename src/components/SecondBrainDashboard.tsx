@@ -109,9 +109,11 @@ function shouldCacheDbStatError(error: any): boolean {
   const status = Number(error?.status || error?.statusCode || 0);
   const code = String(error?.code || '');
   const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
-  return status === 404
+  return status === 400
+    || status === 404
     || status >= 500
     || code === '42P01'
+    || code === '22P02'
     || code === 'PGRST204'
     || code === 'PGRST205'
     || code.startsWith('XX')
@@ -1586,6 +1588,12 @@ export default function SecondBrainDashboard({
       }
       if ((cfg.filter === 'user' || cfg.filter === 'owner') && !userId) {
         return [cfg.table, { table: cfg.table, label: cfg.label, count: null, ok: false, error: 'No user session' }] as const;
+      }
+      // Same guard for circle/id-scoped probes: an empty circleId serialized
+      // to `circle_id=eq.` — a PostgREST 400 (invalid uuid) on EVERY mount,
+      // twice (the userId hydration re-keys the callback). Skip until known.
+      if ((cfg.filter === 'circle' || cfg.filter === 'id') && !circleId) {
+        return [cfg.table, { table: cfg.table, label: cfg.label, count: null, ok: false, error: 'No circle in scope' }] as const;
       }
       const unavailableUntil = dbStatUnavailableUntil.get(cfg.table) || 0;
       if (unavailableUntil > Date.now()) {

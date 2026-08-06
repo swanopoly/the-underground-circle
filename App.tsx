@@ -394,6 +394,13 @@ export default function App() {
         stopAgentAutoConnectDeferred();
         setShowOnboarding(false);
         setHasCircles(false);
+        // Clear per-user persisted UI state so the NEXT account on this
+        // browser doesn't inherit the previous user's last route (an
+        // RLS-empty screen) or their onboarding-done flag.
+        try {
+          localStorage.removeItem(NAV_STATE_KEY);
+          localStorage.removeItem(ONBOARDING_KEY);
+        } catch {}
       }
     });
 

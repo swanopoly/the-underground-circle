@@ -318,15 +318,23 @@ export default function ProfileScreen({ navigation, route }: any) {
   };
 
   const handleSignOut = async () => {
+    // scope:'local' — sign out THIS device only. The default scope is
+    // 'global', which revokes refresh tokens on every device the user has
+    // (this screen was silently logging people out of their phone too).
+    // Matches EditProfileScreen/useAuth. Errors are swallowed on purpose: a
+    // failed revoke should not strand the UI in a half-logged-in state.
+    const signOutLocal = async () => {
+      try { await supabase.auth.signOut({ scope: 'local' }); } catch {}
+    };
     if (Platform.OS === 'web') {
       if (window.confirm('You sure you want to sign out?')) {
-        await supabase.auth.signOut();
+        await signOutLocal();
       }
     } else {
       const { Alert } = require('react-native');
       Alert.alert('Leave?', 'You sure you want to sign out?', [
         { text: 'Stay', style: 'cancel' },
-        { text: 'Sign Out', style: 'destructive', onPress: () => supabase.auth.signOut() },
+        { text: 'Sign Out', style: 'destructive', onPress: () => { void signOutLocal(); } },
       ]);
     }
   };

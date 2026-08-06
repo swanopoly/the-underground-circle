@@ -21,9 +21,35 @@ import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import { shouldRefreshAccessToken } from './authSessionRefreshPolicy';
 
+/**
+ * Hang guard. try/catch converts a REJECTION into a null result, but a GoTrue
+ * call that never settles (backgrounded-tab AbortController limbo, no-op web
+ * lock collisions, a wedged network socket) hangs the awaiting caller forever
+ * — the catch never runs. Every export here races the auth call against a
+ * bounded timer and settles with the fallback, so "safe" means hang-safe, not
+ * just rejection-safe. The underlying promise is left to resolve in the void.
+ */
+const AUTH_CALL_TIMEOUT_MS = 6_000;
+
+function withAuthTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs = AUTH_CALL_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; resolve(fallback); }
+    }, timeoutMs);
+    promise.then(
+      (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } },
+      () => { if (!settled) { settled = true; clearTimeout(timer); resolve(fallback); } },
+    );
+  });
+}
+
 export async function getFreshAccessToken(): Promise<string | null> {
   try {
-    const { data } = await supabase.auth.getSession();
+    const { data } = await withAuthTimeout(
+      supabase.auth.getSession(),
+      { data: { session: null } } as Awaited<ReturnType<typeof supabase.auth.getSession>>,
+    );
     const session = data.session;
     if (!session?.access_token) return null;
 
@@ -47,7 +73,10 @@ export async function getFreshAccessToken(): Promise<string | null> {
     // hiccup.
     let refreshedToken: string | null = null;
     try {
-      const { data: refreshed, error } = await supabase.auth.refreshSession();
+      const { data: refreshed, error } = await withAuthTimeout(
+        supabase.auth.refreshSession(),
+        { data: { session: null, user: null }, error: null } as Awaited<ReturnType<typeof supabase.auth.refreshSession>>,
+      );
       if (!error) refreshedToken = refreshed.session?.access_token ?? null;
     } catch {
       refreshedToken = null;
@@ -68,10 +97,13 @@ export async function getFreshAccessToken(): Promise<string | null> {
 
 export type SafeAuthResult<T> = { value: T | null; error: Error | null };
 
-/** Resolves to the current user or null. Never throws. */
+/** Resolves to the current user or null. Never throws, never hangs. */
 export async function safeGetUser(): Promise<SafeAuthResult<User>> {
   try {
-    const { data, error } = await supabase.auth.getUser();
+    const { data, error } = await withAuthTimeout(
+      supabase.auth.getUser(),
+      { data: { user: null }, error: new Error('auth call timed out') } as unknown as Awaited<ReturnType<typeof supabase.auth.getUser>>,
+    );
     if (error) return { value: null, error };
     return { value: data.user ?? null, error: null };
   } catch (e) {
@@ -79,10 +111,13 @@ export async function safeGetUser(): Promise<SafeAuthResult<User>> {
   }
 }
 
-/** Resolves to the current session or null. Never throws. */
+/** Resolves to the current session or null. Never throws, never hangs. */
 export async function safeGetSession(): Promise<SafeAuthResult<Session>> {
   try {
-    const { data, error } = await supabase.auth.getSession();
+    const { data, error } = await withAuthTimeout(
+      supabase.auth.getSession(),
+      { data: { session: null }, error: new Error('auth call timed out') } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>,
+    );
     if (error) return { value: null, error };
     return { value: data.session ?? null, error: null };
   } catch (e) {

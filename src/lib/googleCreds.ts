@@ -31,12 +31,24 @@ export interface GoogleAuthStatus {
   updated_at?: string;
 }
 
+/**
+ * Bounded fetch: every googleCreds call already degrades cleanly on
+ * REJECTION, but a fetch against a hung edge function never rejects — it
+ * pinned useGoogleAuthStatus at loading:true forever. 8s cap; AbortController
+ * (not AbortSignal.timeout) for RN/Hermes compatibility.
+ */
+function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 8_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 /** One-shot fetch — current connection status for the signed-in user. */
 export async function getGoogleAuthStatus(): Promise<GoogleAuthStatus> {
   const accessToken = await getFreshAccessToken();
   if (!accessToken) return { connected: false };
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth?action=status`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/functions/v1/google-oauth?action=status`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!res.ok) return { connected: false };
@@ -59,7 +71,7 @@ export async function getGoogleAuthStatusAuthoritative(): Promise<GoogleAuthStat
   const accessToken = await getFreshAccessToken();
   if (!accessToken) return null;
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth?action=status`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/functions/v1/google-oauth?action=status`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!res.ok) return null;
@@ -82,7 +94,7 @@ export async function fetchGoogleWorkspaceAccessToken(): Promise<string | null> 
   const accessToken = await getFreshAccessToken();
   if (!accessToken) return null;
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth?action=token`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/functions/v1/google-oauth?action=token`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!res.ok) return null;
@@ -117,7 +129,7 @@ export async function startGoogleWorkspaceOAuth(
       action: 'authorize',
       services: services.join(','),
     });
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth?${params}`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/functions/v1/google-oauth?${params}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!res.ok) {
@@ -142,7 +154,7 @@ export async function revokeGoogleWorkspace(): Promise<boolean> {
   const accessToken = await getFreshAccessToken();
   if (!accessToken) return false;
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth?action=revoke`, {
+    const res = await fetchWithTimeout(`${SUPABASE_URL}/functions/v1/google-oauth?action=revoke`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}` },
     });

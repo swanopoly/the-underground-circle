@@ -15,6 +15,7 @@ import {
 import { supabase } from '../../lib/supabase';
 import { signInWithSSO } from '../../lib/sso';
 import { signInWithGoogle, readOAuthErrorFromUrl } from '../../lib/googleCreds';
+import ErrorBoundary from '../../components/ErrorBoundary';
 
 // LoginBackground3D pulls in three, @react-three/fiber, @react-three/postprocessing
 // (~1-2MB of JS). It only renders on the web login screen, so code-split it out
@@ -214,7 +215,16 @@ export default function LoginScreen({ navigation }: any) {
       // Sign in once screen is black
       await new Promise(resolve => setTimeout(resolve, 800));
 
-      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+      // HANG GUARD: without a timeout, a sign-in request that never settles
+      // (captive portal, DNS blackhole, paused Supabase project) leaves the
+      // portal overlay holding a solid black screen forever with no error and
+      // no control. Race a hard cap that resets the UI with a message.
+      const signInResult = await Promise.race([
+        supabase.auth.signInWithPassword({ email, password }),
+        new Promise<{ error: { message: string } }>((resolve) =>
+          setTimeout(() => resolve({ error: { message: 'Sign-in timed out. Check your connection and try again.' } }), 15_000)),
+      ]);
+      const signInError = (signInResult as { error?: { message: string } | null }).error;
 
       if (signInError) {
         // Auth failed — reverse the animation
@@ -240,11 +250,18 @@ export default function LoginScreen({ navigation }: any) {
     }
 
     setLoading(true);
-    const { error: ssoError } = await signInWithSSO(ssoDomain.trim());
-    setLoading(false);
-
-    if (ssoError) {
-      setError(ssoError);
+    try {
+      // signInWithSSO can THROW (network/AbortError), not just return an
+      // error — without the finally, a throw left `loading` stuck true and
+      // disabled both the SSO and email submit buttons until a page refresh.
+      const { error: ssoError } = await signInWithSSO(ssoDomain.trim());
+      if (ssoError) {
+        setError(ssoError);
+      }
+    } catch {
+      setError('SSO sign-in failed to start. Check the domain and try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -301,11 +318,18 @@ export default function LoginScreen({ navigation }: any) {
       <View style={styles.container}>
         {/* Three.js background — web only, renders behind everything.
             Suspense fallback is an empty View so the login form paints
-            immediately while three/postprocessing stream in. */}
+            immediately while three/postprocessing stream in. The
+            ErrorBoundary is load-bearing: Suspense does NOT catch a rejected
+            lazy import (stale immutable-cached index.html after a deploy →
+            chunk 404), and without it the throw reached the app-root boundary
+            and replaced the whole LOGIN FORM with the crash card. A failed
+            background must cost the background only. */}
         {Platform.OS === 'web' && (
-          <Suspense fallback={null}>
-            <LoginBackground3D />
-          </Suspense>
+          <ErrorBoundary scope="login-background" fallback={null}>
+            <Suspense fallback={null}>
+              <LoginBackground3D />
+            </Suspense>
+          </ErrorBoundary>
         )}
 
         {/* Portal overlay — fades to black */}
@@ -521,15 +545,22 @@ export default function LoginScreen({ navigation }: any) {
                         if (googleLoading) return;
                         setError('');
                         setGoogleLoading(true);
-                        const { ok, reason } = await signInWithGoogle();
-                        if (!ok) {
+                        try {
+                          const { ok, reason } = await signInWithGoogle();
+                          if (!ok) {
+                            setGoogleLoading(false);
+                            if (reason) setError(reason);
+                          }
+                          // If ok, Supabase has already triggered the
+                          // window-level redirect to Google. Leave
+                          // googleLoading on so the button stays disabled
+                          // until the navigation completes.
+                        } catch {
+                          // A THROW (network/AbortError) previously left the
+                          // button wedged at "Redirecting to Google…" forever.
                           setGoogleLoading(false);
-                          if (reason) setError(reason);
+                          setError('Could not start Google sign-in. Try again.');
                         }
-                        // If ok, Supabase has already triggered the
-                        // window-level redirect to Google. Leave
-                        // googleLoading on so the button stays disabled
-                        // until the navigation completes.
                       }}
                     >
                       {Platform.OS === 'web' && hoveredAction === 'googleSignin' && !googleLoading && (

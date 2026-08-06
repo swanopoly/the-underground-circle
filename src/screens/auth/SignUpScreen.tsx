@@ -14,6 +14,7 @@ import { supabase } from '../../lib/supabase';
 import { showAlert } from '../../lib/alert';
 import { validateUsername, validateEmail, validatePassword, sanitizeString, LENGTH_LIMITS } from '../../lib/validation';
 import { signInWithGoogle, readOAuthErrorFromUrl } from '../../lib/googleCreds';
+import ErrorBoundary from '../../components/ErrorBoundary';
 
 // Same 3D backdrop as the login screen — keeps the auth flow visually
 // continuous instead of bouncing between three different surfaces.
@@ -53,27 +54,36 @@ export default function SignUpScreen({ navigation }: any) {
     if (!passwordValidation.isValid) { setError(passwordValidation.error!); return; }
 
     setLoading(true);
-    const { error: signUpError } = await supabase.auth.signUp({
-      email: sanitizedEmail,
-      password,
-      options: { data: { username: sanitizedUsername, display_name: sanitizedUsername } },
-    });
-    setLoading(false);
-    if (signUpError) {
-      setError(signUpError.message);
-      return;
+    try {
+      // signUp can THROW (network/AbortError) — without the finally, a throw
+      // left `loading` stuck true and the CTA permanently disabled.
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: sanitizedEmail,
+        password,
+        options: { data: { username: sanitizedUsername, display_name: sanitizedUsername } },
+      });
+      if (signUpError) {
+        setError(signUpError.message);
+        return;
+      }
+      showAlert('Welcome to the Circle', 'Check your email to verify, then log in.');
+      navigation.navigate('Login');
+    } catch {
+      setError('Sign-up failed to reach the server. Check your connection and try again.');
+    } finally {
+      setLoading(false);
     }
-    showAlert('Welcome to the Circle', 'Check your email to verify, then log in.');
-    navigation.navigate('Login');
   };
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={styles.root}>
         {Platform.OS === 'web' && (
-          <Suspense fallback={null}>
-            <LoginBackground3D />
-          </Suspense>
+          <ErrorBoundary scope="signup-background" fallback={null}>
+            <Suspense fallback={null}>
+              <LoginBackground3D />
+            </Suspense>
+          </ErrorBoundary>
         )}
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           <View style={styles.card}>
@@ -166,10 +176,15 @@ export default function SignUpScreen({ navigation }: any) {
                 if (googleLoading) return;
                 setError('');
                 setGoogleLoading(true);
-                const { ok, reason } = await signInWithGoogle();
-                if (!ok) {
+                try {
+                  const { ok, reason } = await signInWithGoogle();
+                  if (!ok) {
+                    setGoogleLoading(false);
+                    if (reason) setError(reason);
+                  }
+                } catch {
                   setGoogleLoading(false);
-                  if (reason) setError(reason);
+                  setError('Could not start Google sign-in. Try again.');
                 }
               }}
               disabled={loading || googleLoading}

@@ -299,6 +299,13 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
   useEffect(() => {
     loadCircleData();
+    // Escape hatch: `circleLoaded` flips in loadCircleData's finally, but
+    // Promise.allSettled never SETTLES while one query hangs (allSettled is
+    // rejection-proof, not hang-proof) — the workspace then spins forever
+    // with no recovery. Mirror App.tsx's splash timer: after 10s, render
+    // with whatever we have (cached circle or the error state).
+    const escape = setTimeout(() => setCircleLoaded(true), 10_000);
+    return () => clearTimeout(escape);
   }, [circleId]);
 
 

@@ -21,16 +21,27 @@ export interface SSOProvider {
 // ─── Sign In ─────────────────────────────────────────────────────────
 
 export async function signInWithSSO(domain: string): Promise<{ error?: string }> {
-  const { data, error } = await supabase.auth.signInWithSSO({ domain });
+  try {
+    const { data, error } = await supabase.auth.signInWithSSO({ domain });
 
-  if (error) return { error: error.message };
+    if (error) return { error: error.message };
 
-  // Supabase returns a URL to redirect to the IdP
-  if (data?.url) {
-    Linking.openURL(data.url);
+    // Supabase returns a URL to redirect to the IdP. Same-tab navigation so
+    // the PKCE code returns to THIS app instance for exchange.
+    if (data?.url) {
+      if (typeof window !== 'undefined' && window.location) {
+        window.location.assign(data.url);
+      } else {
+        Linking.openURL(data.url);
+      }
+    }
+
+    return {};
+  } catch (e) {
+    // signInWithSSO can THROW (network/AbortError) — callers treat a thrown
+    // promise as unrecoverable UI state, so convert it to the error contract.
+    return { error: e instanceof Error ? e.message : 'SSO sign-in failed to start.' };
   }
-
-  return {};
 }
 
 // ─── Config ──────────────────────────────────────────────────────────
