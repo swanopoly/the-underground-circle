@@ -77,7 +77,12 @@ export function useGoals(circleId: string) {
       target_count: fields.target_count || 0,
       created_by: user.id,
     });
-    if (!error) fetchGoals();
+    // Report the outcome — `if (!error) fetchGoals()` with no else branch
+    // meant a denied write was indistinguishable from success, so the create
+    // form closed and the goal simply never appeared.
+    if (error) { console.error('createGoal error:', error); return false; }
+    fetchGoals();
+    return true;
   };
 
   const updateGoal = async (goalId: string, fields: Partial<Goal>) => {
@@ -85,12 +90,16 @@ export function useGoals(circleId: string) {
       .from('goals')
       .update({ ...fields, updated_at: new Date().toISOString() })
       .eq('id', goalId);
-    if (!error) fetchGoals();
+    if (error) { console.error('updateGoal error:', error); return false; }
+    fetchGoals();
+    return true;
   };
 
   const deleteGoal = async (goalId: string) => {
     const { error } = await supabase.from('goals').delete().eq('id', goalId);
-    if (!error) fetchGoals();
+    if (error) { console.error('deleteGoal error:', error); return false; }
+    fetchGoals();
+    return true;
   };
 
   return { goals, loading, fetchGoals, createGoal, updateGoal, deleteGoal };

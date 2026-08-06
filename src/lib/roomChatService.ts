@@ -121,7 +121,15 @@ export async function sendRoomStructuredChatMessage({
     ...(activeFile ? { attached_file: activeFile.name } : {}),
     ...(extraMetadata || {}),
   };
-  await sendMessage(roomId, userId, content, 'chat', attachedMetadata);
+  // sendMessage swallows its failure and returns null, and this return value
+  // used to be discarded — so an RLS denial produced: composer clears, agent
+  // types and replies, and the user's own message was never saved. After a
+  // refresh the thread showed only the agent's half of the conversation.
+  // Stop the turn instead; dispatchAiPrompt's catch surfaces it.
+  const sentMessageId = await sendMessage(roomId, userId, content, 'chat', attachedMetadata);
+  if (!sentMessageId) {
+    throw new Error('Your message could not be saved to this room — nothing was sent.');
+  }
 
   // Insert a placeholder agent_output message immediately so the team
   // sees the AI bubble appear as soon as they hit send. We update the

@@ -243,6 +243,10 @@ export async function awardMasteryXP(
       agentMasteryMissing = true;
       return null;
     }
+    // Any OTHER error (RLS denial, constraint) also means the XP was not
+    // written. Falling through emitted a real LEVEL UP popup for a level the
+    // user does not have and will not have next session.
+    if (updateError) return null;
   } else {
     const { error: insertMasteryError } = await supabase.from('agent_mastery').insert({
       circle_id: circleId,
@@ -257,6 +261,7 @@ export async function awardMasteryXP(
       agentMasteryMissing = true;
       return null;
     }
+    if (insertMasteryError) return null;
   }
 
   // Check for mastery level-up and emit RPG event

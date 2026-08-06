@@ -26,6 +26,11 @@ const TABLES: Record<string, Row[]> = {
   circle_memory_history: [],
 };
 
+// Tables whose WRITES should be refused, so a test can simulate the real
+// failure mode this file exists to catch: RLS denial. supabase-js reports
+// this as a resolved `{ error }`, never a throw.
+const DENY_WRITES = new Set<string>();
+
 function deepClone<T>(v: T): T { return JSON.parse(JSON.stringify(v)); }
 
 function makeQuery(table: string) {
@@ -40,6 +45,9 @@ function makeQuery(table: string) {
   let op: 'select' | 'insert' | 'update' | 'delete' = 'select';
 
   const exec = async (): Promise<{ data: any; error: null | { message: string } }> => {
+    if (op !== 'select' && DENY_WRITES.has(table)) {
+      return { data: null, error: { message: `permission denied for table ${table}` } };
+    }
     if (op === 'insert') {
       for (const r of inserts) {
         const row = { id: `uuid-${Math.random().toString(36).slice(2, 10)}`, ...r };
@@ -291,6 +299,44 @@ async function main() {
       fail('case5: expected content to be restored, got ' + restored?.content);
     }
     pass('case5: memory_bank.write update → restore writes before content back');
+  }
+
+  // ─── Case 6: a REFUSED restore must not report success ──────────────
+  // The regression this pins: every write inside the restore handlers was
+  // unchecked (`await supabase.from(...).update(...)`), and supabase-js
+  // RESOLVES with `{ error }` instead of throwing. So an RLS denial ran to
+  // completion, `restored_at` was stamped, and restoreCheckpoint returned
+  // ok:true — while the user's data was untouched. Worse, the stamp is
+  // terminal ("checkpoint already restored"), so the one-shot undo was spent.
+  {
+    reset();
+    const before = { id: 'mem-deny', title: 'Before', content: 'original', memory_kind: 'note' };
+    TABLES.memory_entries.push({ ...before });
+
+    const { checkpointId } = await withCheckpoint<any, any, any>({
+      circleId: 'c-deny',
+      toolKind: 'memory.write',
+      targetKind: 'memory_entries',
+      targetId: 'mem-deny',
+      readBefore: async () => deepClone(TABLES.memory_entries[0]),
+      run: async () => { TABLES.memory_entries[0].content = 'agent edit'; },
+      readAfter: async () => deepClone(TABLES.memory_entries[0]),
+    });
+
+    DENY_WRITES.add('memory_entries');
+    const outcome = await restoreCheckpoint(checkpointId!);
+    DENY_WRITES.delete('memory_entries');
+
+    if (outcome.ok) fail('case6: a denied restore must NOT report ok:true');
+    if (TABLES.memory_entries[0].content !== 'agent edit') {
+      fail('case6: nothing should have been restored');
+    }
+    const cp = TABLES.chat_checkpoints.find((r) => r.id === checkpointId);
+    if (cp?.restored_at) {
+      fail('case6: restored_at must stay null so the user can retry — the undo is one-shot');
+    }
+    if (!cp?.restore_error) fail('case6: the failure should be recorded on the checkpoint row');
+    pass('case6: denied write → restore reports failure, undo stays available');
   }
 
   if (failures > 0) {

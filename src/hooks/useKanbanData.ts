@@ -53,9 +53,9 @@ export interface KanbanData {
   agents: CircleOfficeAgent[];
   currentUserId: string | null;
   loading: boolean;
-  createTask: (fields: CreateTaskFields) => Promise<void>;
+  createTask: (fields: CreateTaskFields) => Promise<boolean | undefined>;
   moveTask: (taskId: string, newStatus: TaskStatus) => Promise<void>;
-  updateTask: (taskId: string, fields: TaskUpdateFields) => Promise<void>;
+  updateTask: (taskId: string, fields: TaskUpdateFields) => Promise<boolean>;
   deleteTask: (taskId: string) => Promise<void>;
   approveTask: (taskId: string, agentId: string) => Promise<void>;
   requestChanges: (taskId: string) => Promise<void>;
@@ -1088,7 +1088,10 @@ export function useKanbanData(circleId: string): KanbanData {
 
     if (insertResult.error) {
       console.error('createTask error:', insertResult.error);
-      return;
+      // Report failure so the caller can keep the compose modal open with the
+      // user's typed fields. It used to return void indistinguishably from
+      // success, so the modal closed on an RLS denial and the task was gone.
+      return false;
     }
 
     if (desiredAgentIds.length > 0 && insertResult.data?.id) {
@@ -1102,6 +1105,7 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     fetchTasks();
+    return true;
   }, [circleId, currentUserId, fetchTasks, syncTaskAssignments, tasks]);
 
   const moveTask = useCallback(async (taskId: string, newStatus: TaskStatus) => {
@@ -1190,7 +1194,7 @@ export function useKanbanData(circleId: string): KanbanData {
 
     if (updateResult.error) {
       console.error('updateTask error:', updateResult.error);
-      return;
+      return false;
     }
 
     if ((managesAssignments || shouldInheritRoomAgents) && desiredAgentIds) {
@@ -1208,6 +1212,7 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     fetchTasks();
+    return true;
   }, [fetchTasks, syncTaskAssignments, tasks]);
 
   const deleteTask = useCallback(async (taskId: string) => {

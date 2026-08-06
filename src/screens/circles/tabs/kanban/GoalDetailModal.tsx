@@ -22,7 +22,7 @@ interface Props {
   onClose: () => void;
   onUpdate: (goalId: string, fields: Partial<Goal>) => void;
   onDelete: (goalId: string) => void;
-  onCreateTask?: (fields: CreateTaskFields) => Promise<void>;
+  onCreateTask?: (fields: CreateTaskFields) => Promise<void | boolean>;
 }
 
 const GOAL_STATUS_COLORS: Record<string, string> = {

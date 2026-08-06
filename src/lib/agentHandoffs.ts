@@ -136,15 +136,22 @@ export async function executeHandoff(
       });
 
       if (error) {
-        // Retry without is_bot column (schema migration may be pending)
-        try {
-          await supabase.from('messages').insert({
-            circle_id: circleId,
-            user_id: userId,
-            content: escalationContent,
-          });
-        } catch {
-          // best-effort — ignore
+        // Retry without is_bot column (schema migration may be pending).
+        // supabase-js resolves with `{ error }` rather than throwing, so the
+        // old `catch {}` here caught nothing and a hard RLS denial still
+        // returned "Escalated to circle owner. They will be notified." on the
+        // one channel that exists for urgent attention. HandoffCard has a
+        // catch that renders "Failed: …" and leaves the card un-completed —
+        // let it fire.
+        const { error: retryError } = await supabase.from('messages').insert({
+          circle_id: circleId,
+          user_id: userId,
+          content: escalationContent,
+        });
+        if (retryError) {
+          throw new Error(
+            `could not post the escalation to circle chat (${retryError.message || error.message}) — nobody was notified`,
+          );
         }
       }
 
