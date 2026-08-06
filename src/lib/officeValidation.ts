@@ -124,6 +124,17 @@ export function validateOfficeLayout(layout: any): LayoutValidationResult {
             const urlResult = validateOfficeUrl(item.videoCallLink, 'videoCallLink');
             if (!urlResult.valid) item.videoCallLink = null;
           }
+          // tvContentUrl was the one office URL field never wired into this
+          // validator, while it IS embedded in an unsandboxed iframe and
+          // passed to window.open/Linking.openURL (OfficeTab.tsx:3406,3408).
+          // The embed check in InteractiveFurniture is a substring test
+          // (`url.includes('youtube.com/embed/')`), so
+          // `javascript:/*youtube.com/embed/*/…` satisfied it and executed on
+          // the app origin. Validate it like every sibling field.
+          if (item.tvContentUrl) {
+            const urlResult = validateOfficeUrl(item.tvContentUrl, 'tvContentUrl');
+            if (!urlResult.valid) item.tvContentUrl = null;
+          }
         }
       }
       if (floor.agentIds && Array.isArray(floor.agentIds)) {

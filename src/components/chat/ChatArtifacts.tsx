@@ -397,10 +397,26 @@ export default function ChatArtifacts({ artifacts, accentColor, circleId, sessio
               {Platform.OS === 'web' && artifact.url.startsWith('data:') ? (
                 <Pressable
                   onPress={() => {
+                    // Build the node with DOM APIs, never by interpolating the
+                    // URL into an HTML string. The old
+                    // `document.write(\`<img src="${'${url}'}">\`)` let a crafted
+                    // data: URL close the src attribute and add its own
+                    // onerror handler — and because about:blank inherits the
+                    // OPENER's origin, that handler ran on the app origin with
+                    // access to localStorage (Supabase access + refresh token).
+                    // Artifacts persist in message metadata and render for
+                    // every circle member, so this was cross-user reachable.
+                    // A property assignment is not parsed, so there is nothing
+                    // to break out of.
                     const w = window.open('');
                     if (w) {
-                      w.document.write(`<img src="${artifact.url}" style="max-width:100%;background:#000">`);
                       w.document.title = artifact.title;
+                      w.document.body.style.margin = '0';
+                      const img = w.document.createElement('img');
+                      img.src = artifact.url!;
+                      img.style.maxWidth = '100%';
+                      img.style.background = '#000';
+                      w.document.body.appendChild(img);
                     }
                   }}
                   style={styles.actionButton}
@@ -424,11 +440,31 @@ export default function ChatArtifacts({ artifacts, accentColor, circleId, sessio
               <View style={styles.webActions}>
                 <Pressable
                   onPress={() => {
+                    // The inline preview above is correctly sandboxed, but this
+                    // button used to `document.write` the SAME untrusted HTML
+                    // into a fresh about:blank — which inherits the opener's
+                    // origin, so the sandbox was bypassed entirely and the
+                    // content ran as the app (localStorage holds the Supabase
+                    // access AND refresh token). Artifacts render for every
+                    // circle member, so any member could take over another's
+                    // account with one artifact.
+                    //
+                    // Now the new tab holds only OUR shell; the untrusted HTML
+                    // goes into a sandboxed iframe (no allow-same-origin ⇒
+                    // opaque origin) via the srcdoc PROPERTY, so it is never
+                    // parsed as part of a string we built.
                     const w = window.open('');
                     if (w) {
-                      w.document.write(artifact.content!);
-                      w.document.close();
                       w.document.title = artifact.title;
+                      w.document.body.style.margin = '0';
+                      const frame = w.document.createElement('iframe');
+                      frame.setAttribute('sandbox', SANDBOXED_PREVIEW_PERMISSIONS);
+                      frame.style.width = '100vw';
+                      frame.style.height = '100vh';
+                      frame.style.border = 'none';
+                      frame.style.background = '#0a0a10';
+                      frame.srcdoc = artifact.content!;
+                      w.document.body.appendChild(frame);
                     }
                   }}
                   style={styles.actionButton}
