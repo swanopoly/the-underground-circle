@@ -13,6 +13,10 @@ const os   = require('os');
 const WebSocket = require('./node_modules/ws');
 const WebSocketServer = WebSocket.Server;
 const { URL } = require('url');
+const {
+  isAllowedBridgeHostHeader,
+  isLoopbackRequest,
+} = require('./scripts/desktop-bridge-security');
 
 const GATEWAY_HOST = 'localhost';
 const GATEWAY_PORT = 18789;
@@ -77,6 +81,32 @@ function corsHeadersFor(origin) {
   };
 }
 
+// ─── Request source gate ───────────────────────────────────────────────────
+//
+// The Origin allowlist alone is NOT sufficient, because it only inspects a
+// header the attacker can simply omit:
+//
+//   * A same-origin GET carries no Origin at all. A page on evil.com whose DNS
+//     re-resolves to 127.0.0.1 (classic DNS rebinding) therefore reaches this
+//     proxy as a same-origin request, passes the `origin &&` gate by having no
+//     Origin, and gets the real gateway token attached. Verified reachable
+//     2026-08-06: `Host: evil.com:18790` with no Origin returned HTTP 200.
+//   * Any non-browser client sends no Origin either.
+//
+// Validating the Host header is what actually stops rebinding: the browser
+// sends the name the page was loaded from, and only a genuine
+// localhost/127.0.0.1/[::1] address can name this listener. This mirrors
+// `isBridgeRequestSourceAllowed`, which the four bridges already use.
+function checkProxyRequestSource(req) {
+  if (!isLoopbackRequest(req)) return { ok: false, code: 'proxy_non_loopback_source' };
+  if (!isAllowedBridgeHostHeader(req?.headers?.host, PROXY_PORT)) {
+    return { ok: false, code: 'proxy_host_blocked' };
+  }
+  const origin = req?.headers?.origin || '';
+  if (origin && !isAllowedOrigin(origin)) return { ok: false, code: 'proxy_origin_blocked' };
+  return { ok: true };
+}
+
 // ─── HTTP server ───────────────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
@@ -85,7 +115,7 @@ const server = http.createServer((req, res) => {
 
   // Preflight
   if (req.method === 'OPTIONS') {
-    if (origin && !isAllowedOrigin(origin)) {
+    if (!checkProxyRequestSource(req).ok) {
       res.writeHead(403);
       res.end();
       return;
@@ -95,12 +125,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Refuse cross-origin browser requests from non-allow-listed sites BEFORE
-  // the trusted gateway token is attached — this is the CSRF/SSRF gate.
-  if (origin && !isAllowedOrigin(origin)) {
-    console.warn(`[proxy] HTTP rejected disallowed origin: ${origin}`);
+  // Refuse anything that is not a genuine loopback request naming this
+  // listener BEFORE the trusted gateway token is attached — this is the
+  // CSRF/SSRF/DNS-rebinding gate.
+  const sourceCheck = checkProxyRequestSource(req);
+  if (!sourceCheck.ok) {
+    console.warn(`[proxy] HTTP rejected (${sourceCheck.code}) origin=${origin || '(none)'} host=${req.headers.host || '(none)'}`);
     res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'origin_not_allowed' }));
+    res.end(JSON.stringify({ error: sourceCheck.code }));
     return;
   }
 
@@ -147,10 +179,13 @@ const wss = new WebSocketServer({
   // Reject WS upgrades from non-allow-listed browser origins before the gateway
   // token is injected. Native clients send no Origin and pass through.
   verifyClient: (info, done) => {
-    const origin = info.req.headers.origin || '';
-    if (origin && !isAllowedOrigin(origin)) {
-      console.warn(`[proxy] WS rejected disallowed origin: ${origin}`);
-      return done(false, 403, 'origin_not_allowed');
+    // Same gate as the HTTP path. A WebSocket upgrade from a browser always
+    // carries Origin, but a non-browser client (or a rebound page reaching a
+    // raw socket) does not — Host validation is what closes that.
+    const sourceCheck = checkProxyRequestSource(info.req);
+    if (!sourceCheck.ok) {
+      console.warn(`[proxy] WS rejected (${sourceCheck.code}) origin=${info.req.headers.origin || '(none)'} host=${info.req.headers.host || '(none)'}`);
+      return done(false, 403, sourceCheck.code);
     }
     return done(true);
   },

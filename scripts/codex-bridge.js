@@ -29,9 +29,11 @@ const {
   summarizeCodexJsonl,
 } = require('./codex-session-summary');
 const {
+  buildBridgeCorsHeaders,
   createPairingChallengeStore,
   isBridgeRequestSourceAllowed,
   isPairingRequestSourceAllowed,
+  timingSafeTokenEqual,
 } = require('./desktop-bridge-security');
 
 const PORT = Math.max(1024, Math.min(65535, Number(process.env.UC_CODEX_BRIDGE_PORT) || 7779));
@@ -40,16 +42,21 @@ const SCAN_INTERVAL = 5000;
 const ACTIVE_THRESHOLD = 120_000;   // 2min → active
 const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequently than Claude)
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
+// Base headers only. `Access-Control-Allow-Origin` and the Private Network
+// Access grant are added per request by buildBridgeCorsHeaders, and ONLY for an
+// allow-listed origin — a static `*` plus a static PNA grant let any website
+// the user visits read this bridge's responses.
+const CORS_BASE = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
-  // Private Network Access (Chrome 116+) — required for the live HTTPS
-  // app at app.chrisswanson.xyz to talk to localhost without silent
-  // browser blocking.
-  'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
+
+/** Per-response CORS headers, stamped on the response at handler entry.
+ *  Falls back to a header set with no ACAO, so a missed stamp fails closed. */
+function corsFor(res) {
+  return (res && res.__ucCors) || { ...CORS_BASE, Vary: 'Origin' };
+}
 
 const TOKEN_FILE = path.join(os.homedir(), '.uc-desktop-token');
 const MAX_LAUNCH_COUNT = 20;
@@ -80,11 +87,11 @@ function getOrCreateBridgeToken() {
 function hasBridgeAuth(req) {
   const token = getOrCreateBridgeToken();
   const supplied = req.headers['x-uc-desktop-token'];
-  return typeof supplied === 'string' && supplied === token;
+  return timingSafeTokenEqual(supplied, token);
 }
 
 function writeJson(res, status, body) {
-  res.writeHead(status, CORS);
+  res.writeHead(status, corsFor(res));
   res.end(JSON.stringify(body));
 }
 
@@ -130,7 +137,20 @@ function shellTextArg(value) {
 }
 
 function appleScriptString(value) {
-  return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
+  // Escape order matters: backslash FIRST, then the double quote, or the
+  // backslashes introduced by the quote step get double-escaped and the
+  // literal reopens.
+  //
+  // The line-terminator class must include a BARE \r. `\r?\n` leaves a lone
+  // carriage return untouched, and AppleScript treats CR as a statement
+  // terminator, so an unescaped one makes the generated script fail to
+  // compile. That is a launch/send denial of service rather than an injection
+  // (the double quote is still escaped, so the string cannot be closed), but
+  // it is reachable from fields that skip normalizeCliPrompt.
+  return `"${String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r\n|[\r\n\u2028\u2029]/g, '\\n')}"`;
 }
 
 function clampLaunchCount(value) {
@@ -317,7 +337,7 @@ async function launchCodexSessions(data) {
           : `Launch failed: ${terminalResult.error || 'unknown error'}`,
         `Prompt: ${promptPreview(cleanPrompt, 160)}`,
       ],
-    });
+    }, { trusted: true });
     sessions.push(session);
     if (!terminalResult.ok) failed.push({ sessionId, displayName, error: terminalResult.error || 'Launch failed' });
   }
@@ -376,7 +396,7 @@ async function sendToManagedCodexSession(data) {
       ...(session.recentActions || []).slice(-4),
       `Chat sent: ${promptPreview(message, 120)}`,
     ],
-  });
+  }, { trusted: true });
   await scan();
   return {
     ok: true,
@@ -524,9 +544,23 @@ function scanCodexFiles() {
 
 let manualSessions = loadManagedTerminalSessions('codex');
 
-function registerSession(data) {
+function registerSession(data, { trusted = false } = {}) {
+  const sessionId = data.sessionId || `codex-manual-${Date.now()}`;
+  // `terminalTitle` is a code-execution parameter, not a label: it is the sole
+  // guard in sendToManagedCodexSession, and sendToTerminalByTitle feeds the
+  // matched tab to AppleScript `do script`, which runs text as a shell command.
+  // Accepting it from a request body let a caller name any existing Terminal
+  // tab — including tabs owned by the other bridges, whose title format is
+  // predictable, or a tab the user renamed while running something else — and
+  // then execute in it. It may therefore only originate from an internal launch
+  // (makeTerminalTitle) or be carried forward from the stored session.
+  const priorSession = manualSessions.find((s) => s.sessionId === sessionId) || null;
+  const terminalTitle = trusted
+    ? data.terminalTitle
+    : (priorSession ? priorSession.terminalTitle : undefined);
+
   const session = {
-    sessionId: data.sessionId || `codex-manual-${Date.now()}`,
+    sessionId,
     projectDir: data.projectDir || process.cwd(),
     branch: data.branch || null,
     worktree: data.worktreeDir || null,
@@ -548,8 +582,8 @@ function registerSession(data) {
     terminal: data.terminal,
     terminalPid: data.terminalPid,
     launchError: data.launchError,
-    terminalTitle: data.terminalTitle,
-    manageable: Boolean(data.terminalTitle),
+    terminalTitle,
+    manageable: Boolean(terminalTitle),
     lastAssistantMessage: data.lastAssistantMessage,
     appCapabilityResultText: data.appCapabilityResultText,
     appCapabilityResultStatus: data.appCapabilityResultStatus,
@@ -633,14 +667,32 @@ const server = http.createServer(async (req, res) => {
     catch { return req.url; }
   })();
 
+  // Stamp the response with origin-scoped CORS headers before any route runs,
+  // so every writer below (including error paths) inherits them.
+  res.__ucCors = buildBridgeCorsHeaders(req, isAllowedPairOrigin, CORS_BASE);
+
   // CORS preflight
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, CORS);
+    res.writeHead(204, corsFor(res));
     res.end();
     return;
   }
 
+  // `/health` ran ahead of the source guard, so any website could read the
+  // bridge name, version, capability list, and live session count — reliable
+  // fingerprinting of the user's machine, and a DNS-rebinding target because no
+  // Host check applied either. It is unauthenticated by design (the app probes
+  // for bridge presence before pairing) but it is not public.
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
   if (pathname === '/health') {
+    if (!sourceCheck.ok) {
+      writeJson(res, 403, {
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Bridge access is available only through an allowed loopback request.',
+      });
+      return;
+    }
     writeJson(res, 200, {
       ok: true,
       bridge: 'codex',
@@ -696,7 +748,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  // Same guard result computed once at handler entry (see `/health` above).
   if (!sourceCheck.ok) {
     writeJson(res, 403, {
       ok: false,

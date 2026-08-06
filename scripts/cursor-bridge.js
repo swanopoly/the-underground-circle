@@ -34,9 +34,11 @@ const {
   saveManagedTerminalSession,
 } = require('./terminal-launch-utils');
 const {
+  buildBridgeCorsHeaders,
   createPairingChallengeStore,
   isBridgeRequestSourceAllowed,
   isPairingRequestSourceAllowed,
+  timingSafeTokenEqual,
 } = require('./desktop-bridge-security');
 
 const PORT = Math.max(1024, Math.min(65535, Number(process.env.UC_CURSOR_BRIDGE_PORT) || 7781));
@@ -47,13 +49,21 @@ const SCAN_INTERVAL = 5000;
 const TAIL_BYTES = 32768;           // Read last 32KB of each transcript
 const TOKEN_FILE = path.join(os.homedir(), '.uc-desktop-token');
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
+// Base headers only. `Access-Control-Allow-Origin` and the Private Network
+// Access grant are added per request by buildBridgeCorsHeaders, and ONLY for an
+// allow-listed origin — a static `*` plus a static PNA grant let any website
+// the user visits read this bridge's responses.
+const CORS_BASE = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
-  'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
+
+/** Per-response CORS headers, stamped on the response at handler entry.
+ *  Falls back to a header set with no ACAO, so a missed stamp fails closed. */
+function corsFor(res) {
+  return (res && res.__ucCors) || { ...CORS_BASE, Vary: 'Origin' };
+}
 
 let cachedSessions = [];
 let lastScanTime = '';
@@ -80,11 +90,11 @@ function getOrCreateBridgeToken() {
 function hasBridgeAuth(req) {
   const token = getOrCreateBridgeToken();
   const supplied = req.headers['x-uc-desktop-token'];
-  return typeof supplied === 'string' && supplied === token;
+  return timingSafeTokenEqual(supplied, token);
 }
 
 function writeJson(res, status, body) {
-  res.writeHead(status, CORS);
+  res.writeHead(status, corsFor(res));
   res.end(JSON.stringify(body));
 }
 
@@ -320,11 +330,46 @@ function runExecFile(command, args, timeout = 5000) {
 }
 
 function appleScriptString(value) {
-  return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
+  // Escape order matters: backslash FIRST, then the double quote, or the
+  // backslashes introduced by the quote step get double-escaped and the
+  // literal reopens.
+  //
+  // The line-terminator class must include a BARE \r. `\r?\n` leaves a lone
+  // carriage return untouched, and AppleScript treats CR as a statement
+  // terminator, so an unescaped one makes the generated script fail to
+  // compile. That is a launch/send denial of service rather than an injection
+  // (the double quote is still escaped, so the string cannot be closed), but
+  // it is reachable from fields that skip normalizeCliPrompt.
+  return `"${String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r\n|[\r\n\u2028\u2029]/g, '\\n')}"`;
 }
 
 async function runOsascript(lines, timeout = 8000) {
   return runExecFile('osascript', lines.flatMap((line) => ['-e', line]), timeout);
+}
+
+// This handoff ends in `key code 36` — a literal Return keypress into whatever
+// application is frontmost. That makes the target application name a
+// code-execution parameter, not a cosmetic one: `open -a Terminal` followed by
+// paste + Return runs the prompt as a shell command. The request body must
+// therefore never choose the target. Only Cursor's own shipping application
+// names are accepted; anything else is refused before `open` is invoked.
+const CURSOR_ALLOWED_APP_NAMES = new Set(['cursor', 'cursor nightly']);
+
+function resolveCursorAppName(rawAppName) {
+  if (rawAppName === undefined || rawAppName === null || rawAppName === '') {
+    return { ok: true, appName: 'Cursor' };
+  }
+  const requested = String(rawAppName).trim();
+  if (!CURSOR_ALLOWED_APP_NAMES.has(requested.toLowerCase())) {
+    return {
+      ok: false,
+      error: 'Unsupported appName for the Cursor Composer handoff. This bridge automates Cursor only.',
+    };
+  }
+  return { ok: true, appName: requested };
 }
 
 async function sendPromptToCursorComposer({ prompt, projectDir, appName }) {
@@ -333,15 +378,18 @@ async function sendPromptToCursorComposer({ prompt, projectDir, appName }) {
   if (process.platform !== 'darwin') {
     return { ok: false, error: 'Cursor Composer handoff currently supports macOS Cursor.app automation only.' };
   }
+  const resolvedApp = resolveCursorAppName(appName);
+  if (!resolvedApp.ok) return resolvedApp;
+  const targetApp = resolvedApp.appName;
 
   const cwd = safeProjectDir(projectDir || process.cwd());
-  const openResult = await runExecFile('open', ['-a', appName || 'Cursor', cwd], 7000);
+  const openResult = await runExecFile('open', ['-a', targetApp, cwd], 7000);
   if (!openResult.ok) return openResult;
 
   const scriptResult = await runOsascript([
     'set previousClipboard to the clipboard',
     `set the clipboard to ${appleScriptString(message)}`,
-    `tell application ${appleScriptString(appName || 'Cursor')} to activate`,
+    `tell application ${appleScriptString(targetApp)} to activate`,
     'delay 0.7',
     'tell application "System Events"',
     'keystroke "i" using command down',
@@ -549,15 +597,32 @@ setInterval(doScan, SCAN_INTERVAL);
 // ── HTTP server ──────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
+  // Stamp the response with origin-scoped CORS headers before any route runs,
+  // so every writer below (including error paths) inherits them.
+  res.__ucCors = buildBridgeCorsHeaders(req, isAllowedPairOrigin, CORS_BASE);
+
   if (req.method === 'OPTIONS') {
-    res.writeHead(200, CORS);
+    res.writeHead(200, corsFor(res));
     res.end();
     return;
   }
 
   const url = req.url.split('?')[0];
 
+  // `/health` ran ahead of the source guard, so any website could read the
+  // bridge name, version, capability list, and live session count. It is
+  // unauthenticated by design (the app probes for bridge presence before
+  // pairing) but it is not public.
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
   if (url === '/health') {
+    if (!sourceCheck.ok) {
+      writeJson(res, 403, {
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Bridge access is available only through an allowed loopback request.',
+      });
+      return;
+    }
     writeJson(res, 200, {
       ok: true,
       bridge: 'cursor',
@@ -613,7 +678,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  // Same guard result computed once at handler entry (see `/health` above).
   if (!sourceCheck.ok) {
     writeJson(res, 403, {
       ok: false,

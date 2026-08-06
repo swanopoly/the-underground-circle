@@ -22,7 +22,20 @@ function shellTextArg(value) {
 }
 
 function appleScriptString(value) {
-  return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
+  // Escape order matters: backslash FIRST, then the double quote, or the
+  // backslashes introduced by the quote step get double-escaped and the
+  // literal reopens.
+  //
+  // The line-terminator class must include a BARE \r. `\r?\n` leaves a lone
+  // carriage return untouched, and AppleScript treats CR as a statement
+  // terminator, so an unescaped one makes the generated script fail to
+  // compile. That is a launch/send denial of service rather than an injection
+  // (the double quote is still escaped, so the string cannot be closed), but
+  // it is reachable from fields that skip normalizeCliPrompt.
+  return `"${String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r\n|[\r\n\u2028\u2029]/g, '\\n')}"`;
 }
 
 function clampLaunchCount(value) {
