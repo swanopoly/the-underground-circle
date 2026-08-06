@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { getAuthenticatedUser, isServiceRoleRequest } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -265,6 +266,25 @@ Deno.serve(async (req) => {
 
     // ── POST: Refresh models from provider APIs ────────────────────────────
     if (req.method === "POST") {
+      // AUTHENTICATION — this branch spends money and writes with the service
+      // role. It previously ran for ANY caller holding the public anon key,
+      // which ships in the web bundle: `{"action":"refresh"}` triggered
+      // outbound provider calls billed to the PLATFORM keys plus a ~100-row
+      // service-role upsert that bypasses model_registry's SELECT-only RLS,
+      // with no rate limit. Verified live 2026-08-06: an anon-key POST reached
+      // the action validator, proving no identity was required.
+      //
+      // GET (the cached catalog) stays public — that is the read path the app
+      // and the model picker rely on.
+      const caller = await getAuthenticatedUser(req);
+      const callerIsService = isServiceRoleRequest(req);
+      if (!caller && !callerIsService) {
+        return new Response(
+          JSON.stringify({ error: "unauthorized" }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
       const body = await req.json().catch(() => ({}));
       const { action, provider: targetProvider } = body;
 
