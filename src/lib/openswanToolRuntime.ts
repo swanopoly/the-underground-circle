@@ -121,12 +121,18 @@ import {
 } from './messagingNotify';
 import { sanitizeErrorForModel } from './errorSanitizer';
 import { redactSecrets } from './secretRedactionCore';
+import type {
+  BrowserSemanticScrollInput,
+  BrowserSemanticWaitInput,
+} from './browserPrimitives';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 export type OpenSwanRuntimeToolName =
   | OpenSwanToolName
   | 'browser.plan_task'
   | 'browser.locator_actionability'
+  | 'browser.wait_for'
+  | 'browser.scroll'
   | 'search_memories'
   | 'save_memory'
   | 'fetch_url'
@@ -381,14 +387,30 @@ export type OpenSwanToolPolicyFamily =
 
 export type OpenSwanToolApprovalMode = 'auto' | 'ask';
 
+/**
+ * Closed-world authority for every catalog mutation at the typed runtime
+ * boundary. `approvalMode` answers whether a person must approve a call;
+ * `mutationAuthority` answers whether the call has a replay-safe dispatch
+ * authority at all. Approval alone is never mutation authority.
+ */
+export type OpenSwanMutationAuthority =
+  | 'read_only'
+  | 'action_ledger'
+  | 'provider_idempotency'
+  | 'proposal_only'
+  | 'unsupported';
+
 export type OpenSwanToolPolicy = {
   family: OpenSwanToolPolicyFamily;
   approvalMode: OpenSwanToolApprovalMode;
   mutatesState: boolean;
   externalSideEffect: boolean;
+  mutationAuthority: OpenSwanMutationAuthority;
   approvalKind?: ApprovalKind;
   summary: string;
 };
+
+type OpenSwanBaseToolPolicy = Omit<OpenSwanToolPolicy, 'mutationAuthority'>;
 
 export type OpenSwanToolEvent = {
   tool: OpenSwanRuntimeToolName;
@@ -402,6 +424,7 @@ export type OpenSwanRuntimeToolContext = {
   circleId: string;
   userId: string;
   surface?: OpenSwanToolSurface;
+  /** Exact active Chat thread supplied by an authenticated caller, never by the model. */
   threadId?: string;
   activeSoulKey?: string;
   runId?: string;
@@ -420,6 +443,55 @@ export type OpenSwanRuntimeToolContext = {
    */
   userConstraints?: ChatComputerUserConstraints | null;
 };
+
+const CHAT_THREAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export type OpenSwanMessagesCreateThreadBinding =
+  | { ok: true; threadId: string }
+  | {
+      ok: false;
+      code: 'missing_thread_identity' | 'thread_identity_mismatch';
+      message: string;
+    };
+
+/**
+ * Bind `messages.create` to the authenticated active Chat thread.
+ *
+ * The model may omit `threadId` or repeat the exact authenticated value for
+ * compatibility, but it can never select a different target — even another
+ * thread the same user can see in the same circle. A model argument also
+ * cannot establish authority when the caller supplied no valid context id.
+ */
+export function resolveOpenSwanMessagesCreateThreadBinding(
+  contextThreadId: unknown,
+  modelInput: unknown,
+): OpenSwanMessagesCreateThreadBinding {
+  if (typeof contextThreadId !== 'string' || !CHAT_THREAD_ID_RE.test(contextThreadId)) {
+    return {
+      ok: false,
+      code: 'missing_thread_identity',
+      message: 'active Chat thread identity required',
+    };
+  }
+
+  const hasModelThreadId = (
+    modelInput !== null
+    && typeof modelInput === 'object'
+    && Object.prototype.hasOwnProperty.call(modelInput, 'threadId')
+  );
+  if (
+    hasModelThreadId
+    && (modelInput as { threadId?: unknown }).threadId !== contextThreadId
+  ) {
+    return {
+      ok: false,
+      code: 'thread_identity_mismatch',
+      message: 'messages.create cannot write outside the active Chat thread',
+    };
+  }
+
+  return { ok: true, threadId: contextThreadId };
+}
 
 export type OpenSwanApprovalReceiptMetadata =
   Omit<OpenSwanRuntimeApprovalReceipt, 'approvalKey'> & {
@@ -750,7 +822,23 @@ export type OpenSwanToolExecutionArgs = {
     | { name: string; selector?: never }
     | { name?: never; selector: string }
   );
-  'browser.fill_credential_field': { item?: string; credentialId?: string; credentialField: 'username' | 'email' | 'password'; vault?: string; siteUrl?: string; expectedOrigin?: string; role?: string; name?: string; selector?: string; submit?: boolean; exact?: boolean; nth?: number; timeoutMs?: number; taskContext?: string };
+  'browser.fill_credential_field': {
+    credentialField: 'username' | 'email' | 'password';
+    vault?: string;
+    siteUrl?: string;
+    expectedOrigin?: string;
+    role?: string;
+    name?: string;
+    selector?: string;
+    submit?: boolean;
+    exact?: boolean;
+    nth?: number;
+    timeoutMs?: number;
+    taskContext?: string;
+  } & (
+    | { credentialId: string; item?: never }
+    | { credentialId?: never; item: string }
+  );
   'browser.select_option': {
     role?: 'combobox';
     name?: string;
@@ -764,6 +852,8 @@ export type OpenSwanToolExecutionArgs = {
   };
   'browser.upload_file': { filePath: string; name?: string; selector?: string; buttonRole?: string; buttonName?: string; buttonSelector?: string; exact?: boolean; timeoutMs?: number; taskContext?: string };
   'browser.press_key': { combo: string; taskContext?: string };
+  'browser.wait_for': BrowserSemanticWaitInput;
+  'browser.scroll': BrowserSemanticScrollInput;
   'browser.screenshot': { fullPage?: boolean };
   'browser.close': Record<string, never>;
   search_memories: SearchMemoriesArgs;
@@ -946,6 +1036,51 @@ export type OpenSwanToolExecutionArgs = {
   [key: string]: Record<string, unknown>;
 };
 
+export type OpenSwanBrowserCredentialSourceDecision =
+  | { ok: true; kind: 'circle_vault'; credentialId: string; item: '' }
+  | { ok: true; kind: 'one_password'; credentialId: ''; item: string }
+  | { ok: false; message: string };
+
+/**
+ * Resolve one and only one saved-login source from an untrusted tool payload.
+ *
+ * Provider-side JSON Schema normally enforces this XOR, but the local runtime
+ * is the last side-effect boundary and must not rely on caller validation. An
+ * own-property check also rejects ambiguous payloads where one key is blank or
+ * undefined instead of silently preferring the 1Password branch.
+ */
+export function resolveOpenSwanBrowserCredentialSource(
+  input: unknown,
+): OpenSwanBrowserCredentialSourceDecision {
+  const record = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const hasCredentialId = Object.prototype.hasOwnProperty.call(record, 'credentialId');
+  const hasItem = Object.prototype.hasOwnProperty.call(record, 'item');
+  if (hasCredentialId === hasItem) {
+    return {
+      ok: false,
+      message: hasCredentialId
+        ? 'Pass exactly one credential source: credentialId (circle vault) or item (1Password), not both.'
+        : 'Pass exactly one credential source: credentialId (circle vault) or item (1Password).',
+    };
+  }
+
+  if (hasCredentialId) {
+    const credentialId = typeof record.credentialId === 'string'
+      ? record.credentialId.trim()
+      : '';
+    return credentialId
+      ? { ok: true, kind: 'circle_vault', credentialId, item: '' }
+      : { ok: false, message: 'credentialId must be a non-empty circle vault credential id.' };
+  }
+
+  const item = typeof record.item === 'string' ? record.item.trim() : '';
+  return item
+    ? { ok: true, kind: 'one_password', credentialId: '', item }
+    : { ok: false, message: 'item must be a non-empty 1Password item name.' };
+}
+
 type VerificationExecutionResult = {
   ok: boolean;
   executed: boolean;
@@ -961,6 +1096,9 @@ type BrowserToolExecutionResult = {
   errorCode?: DesktopBridgeError;
   recoveryHint?: string;
   requiredEvidence?: string[];
+  completionVerified?: boolean;
+  outcomeUnknown?: boolean;
+  proof?: Record<string, unknown>;
 };
 
 type CredentialOriginExpectation = {
@@ -1068,6 +1206,8 @@ export type OpenSwanToolExecutionResultMap = {
   'browser.select_option': BrowserToolExecutionResult;
   'browser.upload_file': BrowserToolExecutionResult;
   'browser.press_key': BrowserToolExecutionResult;
+  'browser.wait_for': BrowserToolExecutionResult;
+  'browser.scroll': BrowserToolExecutionResult;
   'browser.screenshot': BrowserToolExecutionResult & { base64?: string; mimeType?: string; sizeBytes?: number };
   'browser.close': BrowserToolExecutionResult;
   search_memories: { ok: boolean; resultsText: string };
@@ -1486,7 +1626,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'browser.fill_field',
     label: 'Fill Browser Field',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Draft non-secret text into one exact browser field by exactly one locator: accessible name OR selector, never both. Then verify the value without submitting. Use after browser.dom_snapshot to pick the target; use browser.select_option for dropdowns and the dedicated vault tool for credentials. This canary never submits and never fills login, OTP, MFA, CAPTCHA, or bot-check fields. Approval-gated browser action.',
+    description: 'Draft non-secret text into one exact browser field by exactly one locator: accessible name OR selector, never both. Then verify the value without submitting. Use after browser.dom_snapshot to pick the target; use browser.select_option for dropdowns. Saved credential injection is currently withheld, so ask the user to enter login secrets manually. This canary never submits and never fills login, OTP, MFA, CAPTCHA, or bot-check fields. Approval-gated browser action.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1510,12 +1650,12 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'browser.fill_credential_field',
     label: 'Fill Saved Login Field',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Safely fill a browser username/email/password field from a saved credential without returning the raw secret to the model — pass credentialId (circle vault entry from vault.resolve_for_task/vault.find; requires login in its allowed actions, an active grant, and an allowed-origin match) or item (1Password). Use for approved login forms after browser.verification_state and browser.dom_snapshot. Never use for OTP, MFA, CAPTCHA, or bot-check fields; pause for the human instead. Approval-gated browser and credential action.',
+    description: 'Temporarily fail-closed until the runtime binds and rechecks an exact browser process/context/page/opaque-URL plus exact field fingerprint at handler entry. Raw secrets are never returned to the model. Ask the user to enter credentials manually; OTP, MFA, CAPTCHA, and bot checks always require the human.',
     inputSchema: {
       type: 'object',
       properties: {
-        credentialId: { type: 'string', description: 'Circle vault credential id (from vault.resolve_for_task / vault.find). Preferred when the login lives in the circle vault.' },
-        item: { type: 'string', description: '1Password item name holding the saved login (alternative to credentialId).' },
+        credentialId: { type: 'string', minLength: 1, description: 'Circle vault credential id (from vault.resolve_for_task / vault.find). Preferred when the login lives in the circle vault.' },
+        item: { type: 'string', minLength: 1, description: '1Password item name holding the saved login (alternative to credentialId).' },
         vault: { type: 'string', description: 'Optional 1Password vault name. Omit to use the default vault/search scope.' },
         siteUrl: { type: 'string', description: 'Expected site URL for origin binding before the saved credential is fetched and filled.' },
         expectedOrigin: { type: 'string', description: 'Expected browser origin or hostname, e.g. https://example.com or example.com. Overrides siteUrl when provided.' },
@@ -1525,11 +1665,16 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         selector: { type: 'string', description: 'CSS selector fallback when role/name cannot identify the field.' },
         submit: { type: 'boolean', description: 'Press Enter after filling to submit.' },
         exact: { type: 'boolean', description: 'Match the accessible name exactly instead of substring.' },
-        nth: { type: 'number', description: 'Zero-based disambiguator when multiple fields match.' },
-        timeoutMs: { type: 'number', description: 'Locator wait timeout in milliseconds.' },
+        nth: { type: 'integer', minimum: 0, description: 'Zero-based disambiguator when multiple fields match.' },
+        timeoutMs: { type: 'integer', minimum: 500, maximum: 30_000, description: 'Locator wait timeout in milliseconds.' },
         taskContext: { type: 'string', description: 'Original user task or login context for guarded browser popup decisions.' },
       },
-      required: ['item', 'credentialField'],
+      required: ['credentialField'],
+      oneOf: [
+        { required: ['credentialId'], not: { required: ['item'] } },
+        { required: ['item'], not: { required: ['credentialId'] } },
+      ],
+      additionalProperties: false,
     },
   },
   {
@@ -1584,6 +1729,88 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description: 'Press a key or key combo in the persistent browser page. Use for keyboard-driven steps such as Enter, Escape, or Tab when no clickable control fits. Approval-gated browser action.',
     inputSchema: { type: 'object', properties: { combo: { type: 'string', description: 'Playwright key or combo, e.g. "Enter", "Escape", "Control+A".' }, taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' } }, required: ['combo'] },
+  },
+  {
+    name: 'browser.wait_for',
+    label: 'Wait For Browser Condition',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Wait on the exact browser document from one fresh browser.dom_snapshot without polling screenshots. Copy its opaque process/context/page/url identity into expected* fields, then choose a named page lifecycle condition, an exact ARIA role plus accessible name for element visibility, or an explicit short delay. Raw selectors, missing identity, tab drift, navigation, and unknown fields are refused. The receipt never returns the element name, raw URL, title, or page status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        condition: {
+          type: 'string',
+          enum: ['page_loaded', 'dom_ready', 'network_idle', 'element_visible', 'element_hidden', 'delay'],
+          description: 'Exact condition to await. Prefer a page or element condition over delay.',
+        },
+        role: { type: 'string', minLength: 1, maxLength: 100, description: 'Exact ARIA role; required only for element_visible or element_hidden.' },
+        name: { type: 'string', minLength: 1, maxLength: 500, description: 'Exact accessible name; required only for element_visible or element_hidden.' },
+        exact: { type: 'boolean', enum: [true], description: 'Element waits always use exact accessible-name matching.' },
+        timeoutMs: { type: 'integer', minimum: 0, maximum: 60_000, description: 'Bounded wait budget. Delay requires this field and is capped at 30 seconds; all other waits default to 15 seconds.' },
+        expectedBrowserProcessId: { type: 'string', minLength: 20, maxLength: 180, pattern: '^[A-Za-z0-9_-]+$', description: 'Opaque browser process id from the fresh DOM snapshot.' },
+        expectedBrowserContextId: { type: 'string', minLength: 20, maxLength: 180, pattern: '^[A-Za-z0-9_-]+$', description: 'Opaque browser context id from the same DOM snapshot.' },
+        expectedPageId: { type: 'string', minLength: 20, maxLength: 180, pattern: '^[A-Za-z0-9_-]+$', description: 'Opaque page/document id from the same DOM snapshot.' },
+        expectedUrl: { type: 'string', minLength: 79, maxLength: 79, pattern: '^uc_browser_url_[a-f0-9]{64}$', description: 'Opaque exact-URL HMAC identity from the same DOM snapshot; never pass a raw URL.' },
+      },
+      required: [
+        'condition',
+        'expectedBrowserProcessId',
+        'expectedBrowserContextId',
+        'expectedPageId',
+        'expectedUrl',
+      ],
+      oneOf: [
+        {
+          properties: {
+            condition: { enum: ['page_loaded', 'dom_ready', 'network_idle'] },
+            timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000 },
+          },
+          not: { anyOf: [{ required: ['role'] }, { required: ['name'] }, { required: ['exact'] }] },
+        },
+        {
+          properties: {
+            condition: { enum: ['element_visible', 'element_hidden'] },
+            exact: { type: 'boolean', enum: [true] },
+            timeoutMs: { type: 'integer', minimum: 100, maximum: 60_000 },
+          },
+          required: ['role', 'name'],
+        },
+        {
+          properties: {
+            condition: { enum: ['delay'] },
+            timeoutMs: { type: 'integer', minimum: 0, maximum: 30_000 },
+          },
+          required: ['timeoutMs'],
+          not: { anyOf: [{ required: ['role'] }, { required: ['name'] }, { required: ['exact'] }] },
+        },
+      ],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'browser.scroll',
+    label: 'Scroll Browser Page',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Move the exact browser document from one fresh browser.dom_snapshot by one bounded semantic direction and coarse amount. Copy its opaque process/context/page/url identity into expected* fields. Missing identity, tab drift, or navigation fails closed. This reversible action never accepts coordinates, clicks, types, navigates, or returns raw URL/title/page-status data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['up', 'down', 'left', 'right'], description: 'Direction of the one-step viewport movement.' },
+        amount: { type: 'string', enum: ['small', 'medium', 'large'], description: 'Coarse bounded distance. Defaults to medium.' },
+        expectedBrowserProcessId: { type: 'string', minLength: 20, maxLength: 180, pattern: '^[A-Za-z0-9_-]+$', description: 'Opaque browser process id from the fresh DOM snapshot.' },
+        expectedBrowserContextId: { type: 'string', minLength: 20, maxLength: 180, pattern: '^[A-Za-z0-9_-]+$', description: 'Opaque browser context id from the same DOM snapshot.' },
+        expectedPageId: { type: 'string', minLength: 20, maxLength: 180, pattern: '^[A-Za-z0-9_-]+$', description: 'Opaque page/document id from the same DOM snapshot.' },
+        expectedUrl: { type: 'string', minLength: 79, maxLength: 79, pattern: '^uc_browser_url_[a-f0-9]{64}$', description: 'Opaque exact-URL HMAC identity from the same DOM snapshot; never pass a raw URL.' },
+      },
+      required: [
+        'direction',
+        'expectedBrowserProcessId',
+        'expectedBrowserContextId',
+        'expectedPageId',
+        'expectedUrl',
+      ],
+      additionalProperties: false,
+    },
   },
   {
     name: 'browser.screenshot',
@@ -1877,7 +2104,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       type: 'object',
       properties: {
         content: { type: 'string', description: 'Message text to post.' },
-        threadId: { type: 'string', description: 'Optional thread UUID. Omit for the current thread.' },
+        threadId: { type: 'string', description: 'Optional compatibility echo of the authenticated current thread UUID. If supplied, it must match exactly and cannot select another thread.' },
         replyToId: { type: 'string', description: 'Optional message id this message replies to.' },
       },
       required: ['content'],
@@ -2256,7 +2483,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'credentials.get',
     label: 'Get Credentials',
     surfaces: ['main_chat', 'room_chat', 'office'],
-    description: 'Fetch credentials from 1Password. Returns field values for the named item. Never exposes credentials to the user.',
+    description: 'Unavailable to model-side tools. Raw credential values must never enter model-visible tool results; use a future exact-target saved-login flow or enter the credential manually.',
     inputSchema: { type: 'object', properties: { item: { type: 'string', description: '1Password item name' }, vault: { type: 'string', description: '1Password vault name. Omit to search the default vault.' }, fields: { type: 'array', items: { type: 'string' }, description: 'Specific field names to return. Omit for the default fields.' } }, required: ['item'] },
   },
   // ── Circle Vault Automation Access ───────────────────────────────────────
@@ -2849,7 +3076,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'approvals.resolve',
     label: 'Resolve Approval',
     surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
-    description: 'Approve or reject a pending approval request on the user\'s explicit instruction, unblocking or stopping the waiting run. Cannot approve a request created by the current run — the human approval banner owns those (self-approval is blocked).',
+    description: 'Unavailable to model-side tools. A human must resolve approvals through the signed approval UI or another authenticated operator flow.',
     inputSchema: { type: 'object', properties: { approvalId: { type: 'string', description: 'Approval id from approvals.list.' }, status: { type: 'string', description: 'Resolution: approved or rejected.' } }, required: ['approvalId', 'status'] },
   },
   // ─── Skill library / user memory / transcript search (O2 migration) ─────
@@ -4442,6 +4669,217 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
 ];
 
 /**
+ * Explicit mutation-authority manifest.
+ *
+ * This list is intentionally closed-world. A new catalog mutation is not
+ * executable merely because it has an approval policy or a handler: it must
+ * be placed in exactly one group below. Missing and duplicate entries resolve
+ * to `unsupported`, and the catalog smoke makes either condition release-
+ * blocking.
+ *
+ * `action_ledger` means the current handler is sealed by the durable agent
+ * action ledger either directly in this runtime or in the invoked edge
+ * function. `proposal_only` means the handler may persist only a reviewable
+ * proposal/draft, never the proposed underlying action. Everything else stays
+ * unavailable until its real mutation gateway is migrated; this avoids
+ * overstating the current universal-computer-use coverage.
+ */
+const ACTION_LEDGER_MUTATION_TOOLS = [
+  // Exact browser target mutations using the local durable dispatcher.
+  'browser.fill_field',
+  'browser.open_url',
+  'browser.select_option',
+  'browser.set_toggle',
+  // Exact native/file mutations using the local durable dispatcher.
+  'desktop.open_path',
+  'desktop.click_element',
+  'desktop.set_element_value',
+  'desktop.type_text',
+  'desktop.paste_text',
+  'desktop.press_keys',
+  'desktop.menu_click',
+  'desktop.click_at',
+  'desktop.mouse_move',
+  'desktop.mouse_click',
+  'desktop.mouse_down',
+  'desktop.mouse_up',
+  'desktop.mouse_drag',
+  'desktop.mouse_scroll',
+  // Edge handlers claim/finalize the same durable action ledger before I/O.
+  'custom_api.request',
+  'messaging.notify',
+] as const satisfies readonly OpenSwanRuntimeToolName[];
+
+const PROPOSAL_ONLY_MUTATION_TOOLS = [
+  'approvals.request',
+  'code.generate',
+  'skills.manage',
+] as const satisfies readonly OpenSwanRuntimeToolName[];
+
+const UNSUPPORTED_MUTATION_TOOLS = [
+  'agent.build_app_capability',
+  'agent.codex_acquire_asset',
+  'agent.recover_failed_task',
+  'agent.rename',
+  'agent.set_spirit',
+  'agent.update_appearance',
+  'approvals.resolve',
+  'automations.toggle_enabled',
+  'browser.click_role',
+  'browser.close',
+  'browser.fill_credential_field',
+  'browser.press_key',
+  'browser.upload_file',
+  'check_ins.log',
+  'circle.toggle_public',
+  'circle.update_budget_caps',
+  'circle.update_office_theme',
+  'circle.update_settings',
+  'codebase.index',
+  'desktop.cad_compile',
+  'desktop.clipboard_clear',
+  'desktop.clipboard_write',
+  'desktop.convert_image',
+  'desktop.design_export',
+  'desktop.edit_file',
+  'desktop.file_copy',
+  'desktop.file_mkdir',
+  'desktop.file_rename',
+  'desktop.file_trash',
+  'desktop.file_write_text',
+  'desktop.focus_app',
+  'desktop.illustrator_export_proof',
+  'desktop.illustrator_set_layer_state',
+  'desktop.illustrator_update_text_layer',
+  'desktop.indesign_batch_find_change',
+  'desktop.indesign_batch_update_text_layers',
+  'desktop.indesign_export_proof',
+  'desktop.indesign_package_document',
+  'desktop.indesign_relink_asset',
+  'desktop.indesign_set_layer_state',
+  'desktop.indesign_update_text_layer',
+  'desktop.launch_app',
+  'desktop.open_url',
+  'desktop.photoshop_apply_adjustment_layer',
+  'desktop.photoshop_apply_selection_or_mask',
+  'desktop.photoshop_convert_color_mode',
+  'desktop.photoshop_create_document',
+  'desktop.photoshop_export_proof',
+  'desktop.photoshop_manage_layers',
+  'desktop.photoshop_place_asset',
+  'desktop.photoshop_resize_canvas_or_image',
+  'desktop.photoshop_set_layer_state',
+  'desktop.photoshop_transform_layer',
+  'desktop.photoshop_update_text_layer',
+  'desktop.run_applescript',
+  'desktop.shortcuts_run',
+  'desktop.window_manage',
+  'docs.create_document',
+  'gcal.write',
+  'gdocs.append',
+  'gmail.write',
+  'goals.create',
+  'goals.update_progress',
+  'goals.update_status',
+  'gsheets.write',
+  'memory.forget',
+  'memory.pin',
+  'memory.unpin',
+  'messages.create',
+  'missions.assign_agent',
+  'missions.complete_task',
+  'missions.create',
+  'missions.create_task',
+  'missions.remove_task',
+  'missions.unassign_agent',
+  'missions.update_status',
+  'missions.update_task',
+  'research.save',
+  'rooms.archive',
+  'rooms.create',
+  'rooms.create_file',
+  'rooms.create_task',
+  'rooms.rename',
+  'rooms.send_message',
+  'rooms.unarchive',
+  'rooms.update_file',
+  'save_memory',
+  'schedule_action',
+  'tasks.add_artifact',
+  'tasks.assign',
+  'tasks.comment',
+  'tasks.create',
+  'tasks.update_status',
+  'team.deploy_agents',
+  'user_memory.manage',
+  'vault.grant',
+  'vault.revoke',
+  'workspace.apply_artifacts',
+  'workspace.create_room',
+  'wp.create_slide',
+  'wp.trash_post',
+  'wp.update_post',
+  'wp.upload_media',
+] as const satisfies readonly OpenSwanRuntimeToolName[];
+
+const OPEN_SWAN_CATALOG_TOOL_NAMES = new Set<string>(
+  TOOL_DEFINITIONS.map((definition) => definition.name),
+);
+
+function buildOpenSwanMutationAuthorityManifest(): {
+  authorityByTool: ReadonlyMap<OpenSwanRuntimeToolName, Exclude<OpenSwanMutationAuthority, 'read_only'>>;
+  duplicateTools: ReadonlySet<OpenSwanRuntimeToolName>;
+} {
+  const authorityByTool = new Map<
+    OpenSwanRuntimeToolName,
+    Exclude<OpenSwanMutationAuthority, 'read_only'>
+  >();
+  const duplicateTools = new Set<OpenSwanRuntimeToolName>();
+  const register = (
+    tools: readonly OpenSwanRuntimeToolName[],
+    authority: Exclude<OpenSwanMutationAuthority, 'read_only'>,
+  ): void => {
+    for (const tool of tools) {
+      if (authorityByTool.has(tool)) duplicateTools.add(tool);
+      authorityByTool.set(tool, authority);
+    }
+  };
+  register(ACTION_LEDGER_MUTATION_TOOLS, 'action_ledger');
+  register(PROPOSAL_ONLY_MUTATION_TOOLS, 'proposal_only');
+  register(UNSUPPORTED_MUTATION_TOOLS, 'unsupported');
+  return { authorityByTool, duplicateTools };
+}
+
+const OPEN_SWAN_MUTATION_AUTHORITY_MANIFEST =
+  buildOpenSwanMutationAuthorityManifest();
+
+/** Testable release invariant for catalog mutation coverage. */
+export function hasExplicitOpenSwanMutationAuthorityClassification(
+  tool: OpenSwanRuntimeToolName,
+): boolean {
+  return (
+    OPEN_SWAN_CATALOG_TOOL_NAMES.has(tool)
+    && OPEN_SWAN_MUTATION_AUTHORITY_MANIFEST.authorityByTool.has(tool)
+    && !OPEN_SWAN_MUTATION_AUTHORITY_MANIFEST.duplicateTools.has(tool)
+  );
+}
+
+function resolveOpenSwanMutationAuthority(
+  tool: OpenSwanRuntimeToolName,
+  base: OpenSwanBaseToolPolicy,
+): OpenSwanMutationAuthority {
+  // Unknown names are never read-only by inference: callers must use an exact
+  // catalog definition before the typed dispatcher grants any authority.
+  if (!OPEN_SWAN_CATALOG_TOOL_NAMES.has(tool)) return 'unsupported';
+  if (!base.mutatesState) return 'read_only';
+  if (!hasExplicitOpenSwanMutationAuthorityClassification(tool)) {
+    return 'unsupported';
+  }
+  return OPEN_SWAN_MUTATION_AUTHORITY_MANIFEST.authorityByTool.get(tool)
+    || 'unsupported';
+}
+
+/**
  * Approval-kind categorization for the mutating coordination-family tools
  * that fall through to the catch-all policy at the bottom of
  * `getBaseOpenSwanToolPolicy`. These tools are auto-approved in-app writes,
@@ -4521,7 +4959,7 @@ const COORDINATION_APPROVAL_KINDS: Partial<Record<OpenSwanRuntimeToolName, Appro
   'rooms.update_file': 'file_write',
 };
 
-function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolPolicy {
+function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanBaseToolPolicy {
   if (tool.startsWith('code.')) {
     return {
       family: 'code',
@@ -4563,7 +5001,29 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       mutatesState: true,
       externalSideEffect: true,
       approvalKind: 'browser_action',
-      summary: 'Fills a browser login field from a saved credential without returning raw secret values to the model. Requires approval.',
+      summary: 'Saved credential fill is temporarily unavailable until exact browser document and field identity can be bound and rechecked without exposing the secret.',
+    };
+  }
+
+  if (tool === 'browser.wait_for') {
+    return {
+      family: 'browser',
+      approvalMode: 'auto',
+      mutatesState: false,
+      externalSideEffect: false,
+      summary: 'Synchronizes on one bounded semantic condition for an exact opaque browser-page identity without exposing raw page identity or content.',
+    };
+  }
+
+  if (tool === 'browser.scroll') {
+    return {
+      family: 'browser',
+      approvalMode: 'auto',
+      // Viewport position is transient observation state, not an external or
+      // durable mutation. Parallel dispatch still treats this as a barrier.
+      mutatesState: false,
+      externalSideEffect: false,
+      summary: 'Moves only one exact observed browser viewport by a bounded semantic gesture; it does not click, type, submit, or navigate.',
     };
   }
 
@@ -4603,17 +5063,16 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
   }
 
   if (tool === 'credentials.get') {
-    // Secret-returning 1Password read. It does not mutate state, but it
-    // returns raw field values for automation use, so it is approval-gated
-    // (unlike redacted vault reads which stay auto). approvalKind stays
-    // 'privileged_action' — identical to the prior catch-all fingerprint.
+    // Model-visible secret retrieval is disabled at every dispatcher. Keep
+    // the ask classification as an additional fail-closed policy boundary so
+    // an older caller cannot silently treat this name as an ordinary read.
     return {
       family: 'vault',
       approvalMode: 'ask',
       mutatesState: false,
       externalSideEffect: false,
       approvalKind: 'privileged_action',
-      summary: 'Fetches secret field values from 1Password for automation use. Requires approval; never reveals secrets to the user.',
+      summary: 'Unavailable to model-side tools because raw secret values must never enter model-visible results.',
     };
   }
 
@@ -5109,15 +5568,21 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  const approvalKind = COORDINATION_APPROVAL_KINDS[tool] || 'privileged_action';
+  // Closed-world default: only explicitly classified low-risk in-app writes
+  // may remain auto. Public/external/file/governance writes and any future
+  // unclassified tool fail closed to an exact-call approval instead of
+  // inheriting broad coordination authority by accident.
+  const classifiedLowRiskMutation = approvalKind === 'tool_use';
   return {
     family: 'coordination',
-    approvalMode: 'auto',
+    approvalMode: classifiedLowRiskMutation ? 'auto' : 'ask',
     mutatesState: true,
     externalSideEffect: false,
-    // Per-tool audit category; unknown/governance tools fail closed to
-    // 'privileged_action' (see COORDINATION_APPROVAL_KINDS above).
-    approvalKind: COORDINATION_APPROVAL_KINDS[tool] || 'privileged_action',
-    summary: 'Coordinates app state and work execution inside the circle.',
+    approvalKind,
+    summary: classifiedLowRiskMutation
+      ? 'Performs an explicitly classified low-risk in-app coordination write.'
+      : 'Requires exact-call approval because this write is public, external, file-affecting, governance-sensitive, or not explicitly classified.',
   };
 }
 
@@ -5140,7 +5605,17 @@ export function getOpenSwanToolPolicy(
 ): OpenSwanToolPolicy {
   const base = getBaseOpenSwanToolPolicy(tool);
   const override = resolveApprovalModeOverride(tool, base.family, activePluginIds);
-  return override ? { ...base, approvalMode: override } : base;
+  const policy: OpenSwanToolPolicy = {
+    ...base,
+    mutationAuthority: resolveOpenSwanMutationAuthority(tool, base),
+  };
+  // Plugins may tighten policy, never weaken a mandatory ask boundary. This
+  // is a safety floor, not a preference merge. Plugins have no mutation-
+  // authority override: activation can never turn proposal-only/unsupported
+  // work into an executable state mutation.
+  return override === 'ask' && base.approvalMode === 'auto'
+    ? { ...policy, approvalMode: 'ask' }
+    : policy;
 }
 
 /**
@@ -5295,6 +5770,8 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   'browser.select_option': { writes: ['browser_page'] },
   'browser.upload_file': { writes: ['browser_page'] },
   'browser.press_key': { writes: ['browser_page'] },
+  'browser.wait_for': { reads: ['browser_page'] },
+  'browser.scroll': { writes: ['browser_page'] },
   'browser.close': { writes: ['browser_page'] },
   'browser.dom_snapshot': { reads: ['browser_page'] },
   'browser.wp_admin_source_intelligence': { reads: ['browser_page'] },
@@ -5341,15 +5818,18 @@ export function getOpenSwanToolParallelPolicy(
   toolName: string,
   activePluginIds?: string[],
 ): ToolParallelPolicy {
-  // desktop.wait_for_app is a temporal synchronization primitive, not an
-  // order-free read: same-round calls the model emits AFTER it depend on the
-  // wait having completed (e.g. wait_for_app(Photoshop) then
-  // photoshop_document_status). Its BASE policy stays read-only/auto — no
-  // HITL/banner change for any base-policy consumer — but for parallel
-  // dispatch it must be a singleton barrier: mutating with NO declared
-  // mutationTargets is exactly what isParallelEligibleToolPolicy rejects,
-  // so partitionParallelSafeBatch never groups it with round-neighbours.
-  if (toolName === 'desktop.wait_for_app') {
+  // Temporal waits and semantic scrolling are sequence primitives, not
+  // order-free reads: same-round calls the model emits after them depend on
+  // the wait/viewport move having completed. Their base policies stay
+  // auto-approved, but parallel dispatch treats them as singleton barriers.
+  // Mutating with NO declared mutationTargets is exactly what
+  // isParallelEligibleToolPolicy rejects, so partitionParallelSafeBatch never
+  // groups them with round-neighbours.
+  if (
+    toolName === 'desktop.wait_for_app'
+    || toolName === 'browser.wait_for'
+    || toolName === 'browser.scroll'
+  ) {
     return { approvalMode: 'auto', mutatesState: true, externalSideEffect: false };
   }
   const base = getOpenSwanToolPolicy(toolName as OpenSwanRuntimeToolName, activePluginIds);
@@ -5434,6 +5914,8 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'browser.select_option': ['execute'],
   'browser.upload_file': ['execute'],
   'browser.press_key': ['execute'],
+  'browser.wait_for': ['execute'],
+  'browser.scroll': ['execute'],
   'browser.close': ['execute', 'support'],
   // Fixed read-only diagnostics; package scripts and mutations are not
   // executable through these tools.
@@ -5593,10 +6075,11 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'browser.click_role',
   'browser.set_toggle',
   'browser.fill_field',
-  'browser.fill_credential_field',
   'browser.select_option',
   'browser.upload_file',
   'browser.press_key',
+  'browser.wait_for',
+  'browser.scroll',
   'browser.screenshot',
   'browser.close',
   'code.generate',
@@ -5668,7 +6151,6 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'agent.build_app_capability',
   'approvals.list',
   'approvals.request',
-  'approvals.resolve',
   'vault.list',
   'vault.find',
   'vault.grants',
@@ -6477,6 +6959,25 @@ export function toolAutoApproveCategory(tool: string): AutoApproveCategory | nul
   // (args-gated by shellCommandPolicy); these two must not ride the
   // "Desktop apps (launch / type / keys)" checkbox either — always ask.
   if (t === 'desktop.run_applescript' || t === 'desktop.shortcuts_run') return null;
+  // Destructive-by-argument native input. The `desktop_action` checkbox reads
+  // "Desktop apps (launch / type / keys)" and the always-confirm floor scans
+  // tool NAME + args for pay/delete/login/grant verbs — but these tools express
+  // destruction entirely through arguments the floor vocabulary cannot see:
+  //   menu_click {menuPath:["File","Move to Trash"]}   ('trash' is deliberately
+  //   press_keys {keys:["cmd","delete"]}                excluded from the delete
+  //   click_at   on a "Delete" button                   verb list so that
+  //   open_path  on an arbitrary .app/.command          "remove the background"
+  //   mouse_*    drag-to-trash                          isn't over-blocked)
+  // A single "Remember: auto-approve desktop apps" tick would otherwise grant
+  // standing consent to all of them. Launch/focus/observe/type still ride the
+  // category — those are what the checkbox copy actually promises.
+  if (
+    t === 'desktop.menu_click'
+    || t === 'desktop.press_keys'
+    || t === 'desktop.click_at'
+    || t === 'desktop.open_path'
+    || t.startsWith('desktop.mouse_')
+  ) return null;
   if (t.startsWith('desktop.')) return 'desktop_action';
   if (t.startsWith('browser.')) return 'browser_click';
   if (t.startsWith('wp.')) return 'external_publish';
@@ -7131,6 +7632,8 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'browser.select_option':
     case 'browser.upload_file':
     case 'browser.press_key':
+    case 'browser.wait_for':
+    case 'browser.scroll':
     case 'browser.screenshot':
     case 'browser.close':
     case 'desktop.launch_app':
@@ -7307,6 +7810,57 @@ export async function executeOpenSwanTool<T extends OpenSwanToolName>(
   }
 }
 
+const OPEN_SWAN_COLD_BROWSER_CONTEXT_ID = 'uc_browser_context_explicitly_absent';
+const OPEN_SWAN_COLD_BROWSER_PAGE_ID = 'uc_browser_page_explicitly_absent';
+const OPEN_SWAN_COLD_BROWSER_URL_IDENTITY = 'uc_browser_url_explicitly_absent';
+
+export type OpenSwanBrowserOpenUrlHealthBinding = {
+  mode: 'warm' | 'cold';
+  browserProcessId: string;
+  browserContextId: string | null;
+  pageId: string | null;
+  urlIdentity: string;
+  observedAt: string;
+  evidenceId: string;
+};
+
+export type OpenSwanBrowserOpenUrlProof = {
+  browserProcessId: string;
+  browserContextId: string;
+  previousPageId: string | null;
+  pageId: string;
+  pageIdRotated: true;
+  url: string;
+  displayUrl: string;
+  title: string;
+  observedAt: string;
+  evidenceId: string;
+};
+
+type PreparedGuardedBrowserOpenUrl = {
+  dispatchArgs: {
+    url: string;
+    timeoutMs: number;
+    waitUntil: 'load' | 'domcontentloaded' | 'networkidle';
+    taskContext?: string;
+  };
+  approvalArgs: {
+    approvalSchemaVersion: 2;
+    operation: 'guarded_browser_navigation';
+    destinationOrigin: string;
+    destinationUrlSha256: string;
+    beforeMode: 'warm' | 'cold';
+    beforeUrlIdentity: string;
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+    timeoutMs: number;
+    waitUntil: 'load' | 'domcontentloaded' | 'networkidle';
+  };
+  before: OpenSwanBrowserOpenUrlHealthBinding;
+  beforeEpoch: ReturnType<typeof createComputerAppObservationEpoch>;
+};
+
 type PreparedGuardedBrowserFill = {
   dispatchArgs: {
     targetId: string;
@@ -7465,6 +8019,323 @@ function browserApprovalOrigin(rawUrl: string): string {
     return `${parsed.protocol || 'opaque:'}//opaque`.slice(0, 300);
   } catch {
     return 'opaque://invalid';
+  }
+}
+
+function isBoundedBrowserOpenUrlIdentity(value: unknown): value is string {
+  return (
+    typeof value === 'string'
+    && value.length >= 20
+    && value.length <= 180
+    && /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function isBoundedBrowserOpenUrlTime(value: unknown): value is string {
+  return (
+    typeof value === 'string'
+    && value.length >= 10
+    && value.length <= 64
+    && Number.isFinite(Date.parse(value))
+  );
+}
+
+/**
+ * Convert browser health into a raw-URL-free warm/cold navigation binding.
+ * A cold browser is represented explicitly; it is never confused with a
+ * missing or malformed observation.
+ */
+export async function bindOpenSwanBrowserOpenUrlHealth(
+  health: unknown,
+): Promise<OpenSwanBrowserOpenUrlHealthBinding | null> {
+  if (!health || typeof health !== 'object' || Array.isArray(health)) return null;
+  const candidate = health as Record<string, unknown>;
+  if (
+    candidate.ok !== true
+    || !isBoundedBrowserOpenUrlIdentity(candidate.browserProcessId)
+    || !isBoundedBrowserOpenUrlIdentity(candidate.evidenceId)
+    || !isBoundedBrowserOpenUrlTime(candidate.observedAt)
+  ) {
+    return null;
+  }
+  if (candidate.contextOpen === false) {
+    if (
+      candidate.browserContextId !== null
+      || candidate.pageId !== null
+      || candidate.currentUrl !== null
+    ) {
+      return null;
+    }
+    return {
+      mode: 'cold',
+      browserProcessId: candidate.browserProcessId,
+      browserContextId: null,
+      pageId: null,
+      urlIdentity: OPEN_SWAN_COLD_BROWSER_URL_IDENTITY,
+      observedAt: candidate.observedAt,
+      evidenceId: candidate.evidenceId,
+    };
+  }
+  if (
+    candidate.contextOpen !== true
+    || !isBoundedBrowserOpenUrlIdentity(candidate.browserContextId)
+    || !isBoundedBrowserOpenUrlIdentity(candidate.pageId)
+    || typeof candidate.currentUrl !== 'string'
+    || candidate.currentUrl.length < 1
+    || candidate.currentUrl.length > 100_000
+    || candidate.url !== candidate.currentUrl
+  ) {
+    return null;
+  }
+  return {
+    mode: 'warm',
+    browserProcessId: candidate.browserProcessId,
+    browserContextId: candidate.browserContextId,
+    pageId: candidate.pageId,
+    urlIdentity: await sha256HexForGuardedApproval(candidate.currentUrl),
+    observedAt: candidate.observedAt,
+    evidenceId: candidate.evidenceId,
+  };
+}
+
+function browserOpenUrlBindingsMatch(
+  expected: OpenSwanBrowserOpenUrlHealthBinding,
+  actual: OpenSwanBrowserOpenUrlHealthBinding | null,
+): boolean {
+  return Boolean(
+    actual
+    && actual.mode === expected.mode
+    && actual.browserProcessId === expected.browserProcessId
+    && actual.browserContextId === expected.browserContextId
+    && actual.pageId === expected.pageId
+    && actual.urlIdentity === expected.urlIdentity
+  );
+}
+
+/**
+ * Validate post-navigation bridge evidence without returning the raw final
+ * URL. Warm navigation must rotate document/page identity; cold navigation
+ * must replace explicit absence with one coherent context/page identity.
+ */
+export function resolveOpenSwanBrowserOpenUrlProof(input: {
+  before: OpenSwanBrowserOpenUrlHealthBinding;
+  openResult: unknown;
+  snapshot: unknown;
+}): OpenSwanBrowserOpenUrlProof | null {
+  if (
+    !input.openResult
+    || typeof input.openResult !== 'object'
+    || Array.isArray(input.openResult)
+    || !input.snapshot
+    || typeof input.snapshot !== 'object'
+    || Array.isArray(input.snapshot)
+  ) {
+    return null;
+  }
+  const opened = input.openResult as Record<string, unknown>;
+  const snapshot = input.snapshot as Record<string, unknown>;
+  if (
+    !isBoundedBrowserOpenUrlIdentity(opened.browserProcessId)
+    || !isBoundedBrowserOpenUrlIdentity(opened.browserContextId)
+    || !isBoundedBrowserOpenUrlIdentity(opened.pageId)
+    || !isBoundedBrowserOpenUrlIdentity(opened.evidenceId)
+    || !isBoundedBrowserOpenUrlTime(opened.observedAt)
+    || typeof opened.url !== 'string'
+    || opened.url.length < 1
+    || opened.url.length > 100_000
+    || typeof opened.title !== 'string'
+    || opened.title.length > 2_000
+    || !isBoundedBrowserOpenUrlIdentity(snapshot.browserProcessId)
+    || !isBoundedBrowserOpenUrlIdentity(snapshot.browserContextId)
+    || !isBoundedBrowserOpenUrlIdentity(snapshot.pageId)
+    || !isBoundedBrowserOpenUrlIdentity(snapshot.evidenceId)
+    || !isBoundedBrowserOpenUrlTime(snapshot.observedAt)
+    || typeof snapshot.url !== 'string'
+    || !/^uc_browser_url_[a-f0-9]{64}$/.test(snapshot.url)
+    || typeof snapshot.displayUrl !== 'string'
+    || snapshot.displayUrl.length < 1
+    || snapshot.displayUrl.length > 300
+    || typeof snapshot.title !== 'string'
+    || snapshot.title.length > 2_000
+  ) {
+    return null;
+  }
+  let openedUrl: URL;
+  try {
+    openedUrl = new URL(opened.url);
+  } catch {
+    return null;
+  }
+  if (
+    (openedUrl.protocol !== 'http:' && openedUrl.protocol !== 'https:')
+    || browserApprovalOrigin(opened.url) !== snapshot.displayUrl.toLowerCase()
+    || opened.title !== snapshot.title
+    || opened.browserProcessId !== input.before.browserProcessId
+    || snapshot.browserProcessId !== opened.browserProcessId
+    || snapshot.browserContextId !== opened.browserContextId
+    || snapshot.pageId !== opened.pageId
+    || Date.parse(snapshot.observedAt) < Date.parse(opened.observedAt)
+  ) {
+    return null;
+  }
+  if (
+    input.before.mode === 'warm'
+    && (
+      opened.browserContextId !== input.before.browserContextId
+      || opened.pageId === input.before.pageId
+    )
+  ) {
+    return null;
+  }
+  if (
+    input.before.mode === 'cold'
+    && (
+      input.before.browserContextId !== null
+      || input.before.pageId !== null
+      || opened.browserContextId === OPEN_SWAN_COLD_BROWSER_CONTEXT_ID
+      || opened.pageId === OPEN_SWAN_COLD_BROWSER_PAGE_ID
+    )
+  ) {
+    return null;
+  }
+  return {
+    browserProcessId: snapshot.browserProcessId,
+    browserContextId: snapshot.browserContextId,
+    previousPageId: input.before.pageId,
+    pageId: snapshot.pageId,
+    pageIdRotated: true,
+    url: snapshot.url,
+    displayUrl: snapshot.displayUrl.toLowerCase(),
+    title: snapshot.title,
+    observedAt: snapshot.observedAt,
+    evidenceId: snapshot.evidenceId,
+  };
+}
+
+async function prepareGuardedBrowserOpenUrl(
+  input: unknown,
+  context: OpenSwanRuntimeToolContext,
+): Promise<
+  | { ok: true; prepared: PreparedGuardedBrowserOpenUrl }
+  | { ok: false; result: OpenSwanToolExecutionResultMap['browser.open_url'] }
+> {
+  const durableActionId = `${context.runId || ''}:${context.toolUseId || ''}:browser-open-url-v1`;
+  if (
+    durableActionId.length > 180
+    || !(await hasAuthenticatedPersistedOpenSwanCallIdentity('browser.open_url', context))
+  ) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: 'Browser navigation stopped before observation because authenticated persisted run and exact provider tool-call identity were unavailable. No navigation was attempted.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      },
+    };
+  }
+  const record = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const rawUrl = typeof record.url === 'string' ? record.url.trim() : '';
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch {
+    return { ok: false, result: { ok: false, resultsText: 'browser.open_url requires one valid absolute HTTP(S) URL. No navigation was attempted.' } };
+  }
+  if (
+    (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:')
+    || parsedUrl.username.length > 0
+    || parsedUrl.password.length > 0
+    || rawUrl.length > 100_000
+  ) {
+    return { ok: false, result: { ok: false, resultsText: 'browser.open_url accepts only an absolute HTTP(S) URL without embedded credentials. No navigation was attempted.' } };
+  }
+  const timeoutMs = Number.isFinite(Number(record.timeoutMs))
+    ? Math.max(1_000, Math.min(60_000, Math.floor(Number(record.timeoutMs))))
+    : 30_000;
+  const waitUntil: 'load' | 'domcontentloaded' | 'networkidle' = (
+    record.waitUntil === 'domcontentloaded'
+    || record.waitUntil === 'networkidle'
+    || record.waitUntil === 'load'
+  )
+    ? record.waitUntil
+    : 'load';
+  const taskContext = typeof record.taskContext === 'string'
+    ? record.taskContext.trim()
+    : '';
+  if (taskContext.length > 4_000) {
+    return { ok: false, result: { ok: false, resultsText: 'browser.open_url taskContext exceeds the bounded runtime limit. No navigation was attempted.' } };
+  }
+  try {
+    const { getBrowserHealth } = await import('./browserBridge');
+    const before = await bindOpenSwanBrowserOpenUrlHealth(await getBrowserHealth());
+    if (!before) {
+      return {
+        ok: false,
+        result: {
+          ok: false,
+          resultsText: 'Browser navigation stopped because fresh browser health did not prove one coherent warm page or explicit cold-context absence. Repair/pair the browser bridge, then retry once.',
+          completionVerified: false,
+          outcomeUnknown: false,
+        },
+      };
+    }
+    const dispatchArgs = {
+      url: rawUrl,
+      timeoutMs,
+      waitUntil,
+      ...(taskContext ? { taskContext } : {}),
+    };
+    const destinationUrlSha256 = await sha256HexForGuardedApproval(rawUrl);
+    const expectedBrowserContextId = before.browserContextId
+      || OPEN_SWAN_COLD_BROWSER_CONTEXT_ID;
+    const expectedPageId = before.pageId || OPEN_SWAN_COLD_BROWSER_PAGE_ID;
+    const beforeEpoch = createComputerAppObservationEpoch({
+      id: before.evidenceId,
+      surface: 'browser',
+      capturedAt: before.observedAt,
+      freshnessMs: 15_000,
+      target: {
+        browserProcessId: before.browserProcessId,
+        browserSessionId: expectedBrowserContextId,
+        browserTabId: expectedPageId,
+        url: before.urlIdentity,
+      },
+      evidenceIds: [before.evidenceId],
+    });
+    return {
+      ok: true,
+      prepared: {
+        dispatchArgs,
+        approvalArgs: {
+          approvalSchemaVersion: 2,
+          operation: 'guarded_browser_navigation',
+          destinationOrigin: browserApprovalOrigin(rawUrl),
+          destinationUrlSha256,
+          beforeMode: before.mode,
+          beforeUrlIdentity: before.urlIdentity,
+          expectedBrowserProcessId: before.browserProcessId,
+          expectedBrowserContextId,
+          expectedPageId,
+          timeoutMs,
+          waitUntil,
+        },
+        before,
+        beforeEpoch,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        resultsText: sanitizeErrorForModel(error, { context: 'browser navigation observation' }),
+        completionVerified: false,
+        outcomeUnknown: false,
+      },
+    };
   }
 }
 
@@ -8372,6 +9243,193 @@ async function dispatchDurableComputerAppMutation<T, TArgs>(input: {
       durableStateSealed,
     };
   }
+}
+
+async function executeGuardedBrowserOpenUrl(
+  prepared: PreparedGuardedBrowserOpenUrl,
+  approvalReceipt: OpenSwanRuntimeApprovalReceipt,
+  context: OpenSwanRuntimeToolContext,
+): Promise<OpenSwanRuntimeToolResultWithMetadata<'browser.open_url'>> {
+  const expectedApprovalKey = buildOpenSwanToolApprovalKey(
+    'browser.open_url',
+    prepared.approvalArgs,
+  );
+  if (
+    approvalReceipt.approvalKey !== expectedApprovalKey
+    || !approvalReceipt.approvalId
+    || (approvalReceipt.status !== 'approved' && approvalReceipt.status !== 'auto_approved')
+    || approvalReceipt.toolName !== 'browser.open_url'
+    || approvalReceipt.userId !== context.userId
+    || approvalReceipt.circleId !== context.circleId
+    || approvalReceipt.runId !== context.runId
+    || approvalReceipt.toolUseId !== context.toolUseId
+    || approvalReceipt.iteration !== context.iteration
+  ) {
+    return {
+      ok: false,
+      resultsText: 'Browser navigation stopped before durable handler entry because no genuine approval receipt was bound to the exact destination digest, wait policy, and warm/cold browser identity. No navigation was attempted.',
+      completionVerified: false,
+      outcomeUnknown: false,
+    };
+  }
+  const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+    prepared.dispatchArgs,
+  );
+  if (!toolArgsFingerprint) {
+    return {
+      ok: false,
+      resultsText: 'Browser navigation stopped because cryptographic argument binding was unavailable. No navigation was attempted.',
+      completionVerified: false,
+      outcomeUnknown: false,
+    };
+  }
+  const actionId = `${context.runId}:${context.toolUseId}`;
+  const action: ComputerAppMutationContract = {
+    schemaVersion: 1,
+    actionId,
+    tool: 'browser.open_url',
+    surface: 'browser',
+    observationEpochId: prepared.beforeEpoch.id,
+    expectedTarget: prepared.beforeEpoch.target,
+    toolArgsFingerprint,
+    risk: 'medium',
+    approvalRequired: true,
+    idempotencyKey: `${actionId}:browser-open-url-v1`,
+    verification: {
+      kind: 'browser_dom',
+      predicate: 'Fresh post-navigation DOM evidence matches the returned process/context/new-document identity, opaque URL identity, origin-only display URL, and title.',
+      evidenceTools: ['browser.open_url:response-identity', 'browser.dom_snapshot:opaque-after-identity'],
+    },
+    outcomeUnknownPolicy: 'never_retry',
+  };
+  const policy = await resolveComputerAppMutationPolicy({
+    action,
+    approvalGate: async (request) => ({
+      decision: approvalReceipt.status,
+      approvalId: approvalReceipt.approvalId,
+      approvalKey: request.approvalKey,
+    }),
+  });
+  const authorization = authorizeComputerAppMutation({
+    action,
+    policy,
+    epoch: prepared.beforeEpoch,
+  });
+  if (!authorization.allowed) {
+    return {
+      ok: false,
+      resultsText: `Browser navigation stopped before durable handler entry: ${authorization.blockers
+        .map((blocker) => blocker.code)
+        .join(', ') || 'authorization unavailable'}. Collect fresh browser health and issue a new exact tool call. No navigation was attempted.`,
+      completionVerified: false,
+      outcomeUnknown: false,
+    };
+  }
+
+  const dispatched = await dispatchDurableComputerAppMutation({
+    action,
+    authorization,
+    approvalId: approvalReceipt.approvalId,
+    context,
+    normalizedArgs: prepared.dispatchArgs,
+    handler: async (sealedArgs) => {
+      const {
+        domSnapshot,
+        getBrowserHealth,
+        openUrl,
+      } = await import('./browserBridge');
+      // Re-bind the exact warm page or explicit cold absence immediately after
+      // the ledger's claim -> dispatched transition and immediately before the
+      // single navigation call. No second open/navigation path exists here.
+      const entryBinding = await bindOpenSwanBrowserOpenUrlHealth(
+        await getBrowserHealth(),
+      );
+      if (!browserOpenUrlBindingsMatch(prepared.before, entryBinding)) {
+        throw new Error('Browser warm/cold identity changed before the one-shot navigation handler.');
+      }
+      const opened = await openUrl(sealedArgs.url, {
+        timeoutMs: sealedArgs.timeoutMs,
+        waitUntil: sealedArgs.waitUntil,
+        ...(sealedArgs.taskContext ? { taskContext: sealedArgs.taskContext } : {}),
+      });
+      if (!opened.ok || !opened.data) {
+        throw new Error('The one-shot browser navigation returned no complete response; its outcome must be verified manually.');
+      }
+      const after = await domSnapshot({ maxNodes: 100, interestingOnly: true });
+      if (!after.ok || !after.data) {
+        throw new Error('The browser navigation response could not be matched to a fresh opaque DOM observation.');
+      }
+      const proof = resolveOpenSwanBrowserOpenUrlProof({
+        before: prepared.before,
+        openResult: opened.data,
+        snapshot: after.data,
+      });
+      if (!proof) {
+        throw new Error('The browser navigation response and fresh DOM identity did not prove one coherent new document.');
+      }
+      return proof;
+    },
+  });
+  if (!dispatched.ok) {
+    const result: OpenSwanToolExecutionResultMap['browser.open_url'] = {
+      ok: false,
+      resultsText: dispatched.priorState === 'verified'
+        ? 'This exact browser navigation call is already durably verified and was not executed again.'
+        : dispatched.priorState === 'failed'
+          ? 'This exact browser navigation call is already durably recorded as a pre-dispatch failure and was not executed again. Collect fresh browser health before issuing any new call.'
+          : dispatched.outcomeUnknown
+            ? 'Browser navigation reached the durable dispatch boundary, but its outcome is unknown. Inspect the current page manually; this exact call is replay-blocked and must never be submitted again.'
+            : 'Browser navigation stopped before app-handler entry because its durable action claim could not be safely completed. No navigation was attempted.',
+      completionVerified: false,
+      outcomeUnknown: dispatched.outcomeUnknown,
+    };
+    return dispatched.dispatchReceipt
+      ? attachComputerAppMutationMetadata<'browser.open_url'>(
+          result,
+          dispatched.dispatchReceipt,
+        )
+      : result;
+  }
+
+  const proof = dispatched.value;
+  const durableStateSealed = await finishDurableAgentAction(
+    dispatched.lease,
+    'verified',
+    {
+      surface: action.surface,
+      risk: action.risk,
+      approvalId: approvalReceipt.approvalId,
+      observationEpochId: action.observationEpochId,
+      verificationKind: action.verification.kind,
+      evidenceCount: 2,
+      pageIdRotated: true,
+      completionVerified: true,
+      outcomeUnknown: false,
+      source: 'openswan_tool_runtime',
+    },
+  );
+  const titleEvidence = proof.title
+    ? `\n${fenceUntrustedObservationText(`Verified page title: ${proof.title}`)}`
+    : '\nVerified page title: (empty)';
+  const result: OpenSwanToolExecutionResultMap['browser.open_url'] = durableStateSealed
+    ? {
+        ok: true,
+        resultsText: `Opened and verified ${proof.displayUrl}. The browser document identity rotated and the exact opaque URL identity was captured.${titleEvidence}`,
+        completionVerified: true,
+        outcomeUnknown: false,
+        proof: proof as unknown as Record<string, unknown>,
+      }
+    : {
+        ok: false,
+        resultsText: 'Browser navigation returned coherent fresh proof, but durable finalization acknowledgement was unavailable. Inspect the page manually; this exact call remains replay-blocked and must not be submitted again.',
+        completionVerified: false,
+        outcomeUnknown: true,
+        proof: proof as unknown as Record<string, unknown>,
+      };
+  return attachComputerAppMutationMetadata<'browser.open_url'>(
+    result,
+    dispatched.dispatchReceipt,
+  );
 }
 
 async function executeGuardedBrowserFill(
@@ -11169,6 +12227,18 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
   args: OpenSwanToolExecutionArgs[T],
   context: OpenSwanRuntimeToolContext,
 ): Promise<OpenSwanRuntimeToolResultWithMetadata<T>> {
+  if (tool === 'credentials.get') {
+    return {
+      ok: false,
+      resultsText: 'credentials.get is disabled for model-side tools. Use redacted vault metadata or a target-bound vault injection flow; no secret was fetched.',
+    } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  if (tool === 'approvals.resolve') {
+    return {
+      ok: false,
+      resultsText: 'approvals.resolve is disabled for model-side tools. A human must use the signed approval UI or another authenticated operator flow. No approval was changed.',
+    } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
   if (
     tool === 'browser.click_role'
     && ['checkbox', 'switch', 'radio', 'combobox', 'listbox', 'option'].includes(
@@ -11198,6 +12268,35 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
     } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
   }
   const runtimeArgs = sealedMutationArgs as OpenSwanToolExecutionArgs[T];
+  if (tool === 'browser.fill_credential_field') {
+    const credentialSource = resolveOpenSwanBrowserCredentialSource(runtimeArgs);
+    if (!credentialSource.ok) {
+      return {
+        ok: false,
+        resultsText: `${credentialSource.message} Nothing was filled.`,
+      } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    return {
+      ok: false,
+      resultsText: 'Saved credential fill is temporarily unavailable until the runtime can bind and recheck the exact browser process, context, page, opaque URL, and field fingerprint at handler entry. Enter the credential manually; no secret was fetched and nothing was filled.',
+    } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
+  if (
+    initialDispatchPolicy.mutationAuthority === 'unsupported'
+    || (
+      initialDispatchPolicy.mutatesState
+      && initialDispatchPolicy.mutationAuthority === 'read_only'
+    )
+    || (
+      !initialDispatchPolicy.mutatesState
+      && initialDispatchPolicy.mutationAuthority !== 'read_only'
+    )
+  ) {
+    return {
+      ok: false,
+      resultsText: `${tool} stopped before approval because the typed runtime has no supported mutation authority for this exact catalog operation. Nothing was run. Migrate this handler to the durable action ledger, a verified provider-idempotency contract, or a proposal-only flow before enabling it.`,
+    } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+  }
   // QW1 defense-in-depth: HARD constraint/floor backstop runs FIRST, before the
   // approval gate — a user-forbidden or unconfirmed floored (pay/delete/login/
   // grant) action never dispatches from the runtime chokepoint even if an
@@ -11249,11 +12348,20 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
     );
     return guardedResult as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
   }
+  let preparedBrowserOpenUrl: PreparedGuardedBrowserOpenUrl | null = null;
   let preparedBrowserFill: PreparedGuardedBrowserFill | null = null;
   let preparedBrowserToggle: PreparedGuardedBrowserToggle | null = null;
   let preparedBrowserSelect: PreparedGuardedBrowserSelect | null = null;
   let preparedGenericNativeUi: PreparedGenericNativeUiMutation | null = null;
   let approvalArgs = runtimeArgs as Record<string, unknown>;
+  if (tool === 'browser.open_url') {
+    const prepared = await prepareGuardedBrowserOpenUrl(runtimeArgs, context);
+    if (!prepared.ok) {
+      return prepared.result as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    preparedBrowserOpenUrl = prepared.prepared;
+    approvalArgs = preparedBrowserOpenUrl.approvalArgs as unknown as Record<string, unknown>;
+  }
   if (isGenericNativeUiMutationTool(tool)) {
     const prepared = await prepareGuardedGenericNativeUiMutation(
       tool,
@@ -11316,6 +12424,27 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
   const approvalReceipt = approvalGate.kind === 'allowed'
     ? approvalGate.receipt
     : floorApprovalReceipt;
+  if (tool === 'browser.open_url') {
+    if (!preparedBrowserOpenUrl || !approvalReceipt) {
+      return {
+        ok: false,
+        resultsText: 'Browser navigation stopped before durable handler entry because no genuine exact-call approval receipt was available. No navigation was attempted.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      } as unknown as OpenSwanRuntimeToolResultWithMetadata<T>;
+    }
+    const guardedResult = await executeGuardedBrowserOpenUrl(
+      preparedBrowserOpenUrl,
+      approvalReceipt,
+      context,
+    );
+    return attachOpenSwanApprovalReceiptMetadata(
+      tool,
+      guardedResult as unknown as OpenSwanToolExecutionResultMap[T],
+      approvalReceipt,
+      context,
+    );
+  }
   if (tool === 'desktop.launch_app' || tool === 'desktop.focus_app') {
     if (!(await hasAuthenticatedPersistedOpenSwanCallIdentity(tool, context))) {
       return {
@@ -11567,13 +12696,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } as OpenSwanToolExecutionResultMap[T];
     }
     case 'browser.open_url': {
-      try {
-        const { openUrl } = await import('./browserBridge');
-        const a = args as OpenSwanToolExecutionArgs['browser.open_url'];
-        const r = await openUrl(String(a.url || ''), { timeoutMs: a.timeoutMs, waitUntil: a.waitUntil, taskContext: a.taskContext });
-        if (!r.ok) return browserToolFailureResult(r, 'Browser navigation failed.') as any;
-        return { ok: true, resultsText: `Opened ${r.data?.url || a.url}${r.data?.title ? ` — ${r.data.title}` : ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
+      return {
+        ok: false,
+        resultsText: 'browser.open_url is available only through the authenticated typed runtime, exact approval, durable action ledger, and fresh post-navigation proof gateway.',
+        completionVerified: false,
+        outcomeUnknown: false,
+      } as any;
     }
     case 'browser.dom_snapshot': {
       try {
@@ -11729,19 +12857,28 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.fill_credential_field': {
+      const legacyCredentialFillEnabled: boolean = false;
+      if (!legacyCredentialFillEnabled) {
+        return {
+          ok: false,
+          resultsText: 'Saved credential fill is disabled at the inner dispatcher until an exact browser process, context, page, opaque URL, and field fingerprint can be rechecked at handler entry. No secret was fetched and nothing was filled.',
+        } as any;
+      }
       try {
         const a = args as OpenSwanToolExecutionArgs['browser.fill_credential_field'];
         const credentialField = String(a.credentialField || '').trim().toLowerCase();
         if (!['username', 'email', 'password'].includes(credentialField)) {
           return { ok: false, resultsText: 'credentialField must be username, email, or password. MFA/OTP fields require human verification.' } as any;
         }
+        const credentialSource = resolveOpenSwanBrowserCredentialSource(a);
+        if (!credentialSource.ok) {
+          return { ok: false, resultsText: `${credentialSource.message} Nothing was filled.` } as any;
+        }
+        const { item, credentialId } = credentialSource;
         const gate = detectAutomationVerificationGate([a.role, a.name, a.selector, credentialField]);
         if (gate) {
           return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
         }
-        const item = String(a.item || '').trim();
-        const credentialId = String(a.credentialId || '').trim();
-        if (!item && !credentialId) return { ok: false, resultsText: 'Pass credentialId (circle vault — from vault.resolve_for_task/vault.find) or item (1Password).' } as any;
         const expectedOrigin = normalizeCredentialOriginExpectation(a.expectedOrigin || a.siteUrl);
         const [{ getCredentials: getCreds }, { fillField, verificationState }] = await Promise.all([
           import('./credentialService'),
@@ -11764,7 +12901,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const fieldsToTry = credentialField === 'email' ? ['email', 'username'] : [credentialField];
         let value = '';
         let resolvedField = credentialField;
-        if (credentialId && !item) {
+        if (credentialSource.kind === 'circle_vault') {
           // Circle-vault path (LOCKSTEP with the remote fill_saved_login gates
           // in computer-use-agent): the entry must allow 'login', carry an
           // active login-capable automation grant (vault.grant, ask-gated),
@@ -11869,6 +13006,36 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (!r.ok) return browserToolFailureResult(r, 'Browser key press failed.') as any;
         return { ok: true, resultsText: `Pressed browser key ${r.data?.combo || a.combo}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
+    }
+    case 'browser.wait_for': {
+      try {
+        const { waitFor } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.wait_for'];
+        const r = await waitFor(a);
+        if (!r.ok || !r.data) return browserToolFailureResult(r, 'Browser wait could not complete.') as any;
+        return {
+          ok: true,
+          resultsText: `Browser wait completed for ${r.data.condition} within the bounded ${r.data.timeoutMs} ms budget.`,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser wait' }) } as any;
+      }
+    }
+    case 'browser.scroll': {
+      try {
+        const { scrollPage } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.scroll'];
+        const r = await scrollPage(a);
+        if (!r.ok || !r.data || r.data.movementVerified !== true) {
+          return browserToolFailureResult(r, 'Browser scroll could not complete.') as any;
+        }
+        return {
+          ok: true,
+          resultsText: `Verified the exact observed browser viewport moved ${r.data.direction} by one ${r.data.amount} scroll step.`,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser scroll' }) } as any;
+      }
     }
     case 'browser.screenshot': {
       try {
@@ -12280,13 +13447,17 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     }
     case 'messages.create': {
       try {
+        const threadBinding = resolveOpenSwanMessagesCreateThreadBinding(context.threadId, args);
+        if (!threadBinding.ok) {
+          return { ok: false, resultsText: threadBinding.message } as any;
+        }
         const { persistChatMessage } = await import('./chatService');
-        const a = args as any;
+        const a = args as OpenSwanToolExecutionArgs['messages.create'];
         const id = await persistChatMessage({
           circleId: context.circleId,
           userId: context.userId,
           content: String(a.content || '').trim(),
-          threadId: a.threadId || context.threadId || null,
+          threadId: threadBinding.threadId,
           replyToId: a.replyToId || null,
           isBot: false,
         });
@@ -15261,6 +16432,13 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'approvals.resolve': {
+      const legacyModelApprovalResolveEnabled: boolean = false;
+      if (!legacyModelApprovalResolveEnabled) {
+        return {
+          ok: false,
+          resultsText: 'approvals.resolve is disabled at the inner model dispatcher. A human must use the signed approval UI or another authenticated operator flow. No approval was changed.',
+        } as any;
+      }
       try {
         const approvalId = String((args as any).approvalId || '').trim();
         const status = (args as any).status;
@@ -17269,14 +18447,10 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'credentials.get': {
-      try {
-        const { getCredentials: getCreds } = await import('./credentialService');
-        const a = args as any;
-        const { ok, fields, error } = await getCreds({ item: a.item, vault: a.vault, fields: a.fields });
-        if (!ok) return { ok: false, resultsText: error || 'Failed to fetch credentials' } as any;
-        const keys = Object.keys(fields);
-        return { ok: true, resultsText: `Retrieved ${keys.length} field(s) for "${a.item}": ${keys.join(', ')}. Credentials are available for use.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      return {
+        ok: false,
+        resultsText: 'credentials.get is disabled at the inner model dispatcher. No secret was fetched.',
+      } as any;
     }
     default:
       return executeOpenSwanTool(

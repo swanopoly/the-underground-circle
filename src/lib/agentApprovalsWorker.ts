@@ -124,6 +124,33 @@ export async function applyApprovedAction(approvalId: string): Promise<ApprovalA
     return buildIdempotentSkipResult({ ...data, action_type: actionType });
   }
 
+  // ATOMIC CLAIM — must happen BEFORE any handler runs.
+  //
+  // The read above is a snapshot: `applyAllPendingApprovals` (mount sweep) and
+  // a user's approve tap can both observe `applied_at = null` and both proceed,
+  // producing the side effect TWICE (a duplicate GitHub PR comment, a repeated
+  // memory write). The handlers stamp `applied_at` only AFTER their side
+  // effect, with no CAS and no rowcount check, so the stamp cannot arbitrate.
+  //
+  // Claim first with a guarded UPDATE and require exactly one row: the loser of
+  // the race gets 0 rows and returns the idempotent skip instead of executing.
+  // Mirrors the correct pattern already used by chatApprovalGate,
+  // consumeOpenSwanApprovalAuthority, and scheduled-action-runner.
+  const claimedAt = new Date().toISOString();
+  const { data: claimedRows, error: claimError } = await supabase
+    .from('agent_approvals')
+    .update({ applied_at: claimedAt })
+    .eq('id', approvalId)
+    .is('applied_at', null)
+    .select('id');
+  if (claimError) {
+    return { ok: false, actionType, error: 'Could not claim the approval for execution.' };
+  }
+  if (!claimedRows || claimedRows.length !== 1) {
+    // Another worker/tab won the claim — treat exactly like a replay.
+    return buildIdempotentSkipResult({ ...data, applied_at: claimedAt, action_type: actionType });
+  }
+
   // Route by action_type prefix so we can add more kinds without touching
   // call sites that already work.
   try {
