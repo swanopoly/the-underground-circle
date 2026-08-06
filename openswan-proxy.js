@@ -225,8 +225,24 @@ server.on('error', (err) => {
 process.on('uncaughtException', (err) => console.error('[proxy] Uncaught:', err.message));
 process.on('unhandledRejection', (r) => console.error('[proxy] Unhandled rejection:', r));
 
-server.listen(PROXY_PORT, () => {
-  console.log(`🦢 OpenSwan CORS+WS Proxy → http://localhost:${PROXY_PORT}`);
+// SECURITY: bind LOOPBACK ONLY.
+//
+// `server.listen(PORT)` with no host binds 0.0.0.0/:: — every network
+// interface. This proxy injects the real gateway bearer token into every
+// forwarded request, and the Origin allowlist is its only gate. A browser
+// always sends Origin (so a malicious page is blocked), but any NON-browser
+// client sends none and was therefore forwarded WITH FULL GATEWAY
+// CREDENTIALS. Verified exploitable 2026-08-06: an unauthenticated POST to
+// http://<this-machine-LAN-IP>:18790/tools/invoke from the local network
+// returned live session data. Anyone on the same Wi-Fi (coffee shop, office,
+// hotel) had credentialed access to the coding/file tool surface.
+//
+// The four bridges already hardcode 127.0.0.1; this was the one listener that
+// did not. The app connects via http://localhost:18790, so loopback binding
+// is behavior-identical for every legitimate caller.
+const PROXY_BIND_HOST = '127.0.0.1';
+server.listen(PROXY_PORT, PROXY_BIND_HOST, () => {
+  console.log(`🦢 OpenSwan CORS+WS Proxy → http://localhost:${PROXY_PORT} (loopback only)`);
   console.log(`   Forwarding to ws://${GATEWAY_HOST}:${GATEWAY_PORT}`);
   console.log(`   Use http://localhost:${PROXY_PORT} as your endpoint in the app`);
 });
