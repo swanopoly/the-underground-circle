@@ -52,6 +52,10 @@ catch (e) { console.warn('[bridge] playwright unavailable — /browser/* will 50
 
 const PORT = Number.parseInt(process.env.UC_CLAUDE_BRIDGE_PORT || '', 10) || 7778;
 const BRIDGE_BIND_HOST = '127.0.0.1';
+// Per-process, non-secret identity used to bind a task and its later
+// read-only recovery observation to the same local bridge instance. A restart
+// intentionally changes this value so stale cards fail closed.
+const DESKTOP_BRIDGE_INSTANCE_ID = crypto.randomBytes(16).toString('hex');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
 // Also scan Windows-side Claude sessions when running in WSL
 const CLAUDE_DIRS = [CLAUDE_DIR];
@@ -2669,6 +2673,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({
       ok: true,
+      instanceId: DESKTOP_BRIDGE_INSTANCE_ID,
       platform: process.platform,
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
@@ -8561,6 +8566,8 @@ end tell
       if (p === '/browser/select' && req.method === 'POST') return browserBridge.handleSelect(req, res, CORS);
       if (p === '/browser/upload_file' && req.method === 'POST') return browserBridge.handleUploadFile(req, res, CORS);
       if (p === '/browser/press' && req.method === 'POST') return browserBridge.handlePress(req, res, CORS);
+      if (p === '/browser/wait_for' && req.method === 'POST') return browserBridge.handleWaitFor(req, res, CORS);
+      if (p === '/browser/scroll' && req.method === 'POST') return browserBridge.handleScroll(req, res, CORS);
       if (p === '/browser/screenshot' && req.method === 'POST') return browserBridge.handleScreenshot(req, res, CORS);
       if (p === '/browser/close' && req.method === 'POST') return browserBridge.handleClose(req, res, CORS);
     } catch (err) {
@@ -10374,8 +10381,14 @@ function validateDesktopUrlServer(raw) {
   let parsed;
   try { parsed = new URL(trimmed); } catch { return { ok: false, error: 'url does not parse' }; }
   const scheme = String(parsed.protocol || '').replace(/:$/, '').toLowerCase();
-  if (!['http', 'https', 'file', 'mailto'].includes(scheme)) {
-    return { ok: false, error: `url scheme "${scheme}:" not allowed — use http, https, file, or mailto` };
+  // `file:` is deliberately NOT allowed here. `open file:///…` launches apps
+  // and opens documents in their default handler — the same effect as
+  // desktop.open_path, which the runtime gates with fresh stat/path digests,
+  // exact approval, a §26 claim, and frontmost-app proof. Allowing it on the
+  // URL route was a way around every one of those. Local paths must go
+  // through open_path.
+  if (!['http', 'https', 'mailto'].includes(scheme)) {
+    return { ok: false, error: `url scheme "${scheme}:" not allowed — use http, https, or mailto (local paths go through open_path)` };
   }
   if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: 'url contains control characters' };
   return { ok: true, url: trimmed, scheme };
@@ -10668,6 +10681,17 @@ function finalizeGrantRoot(candidate, kind = 'directory') {
     return {
       ok: false,
       error: 'filesystem-root local file grants are refused; request exact project, folder, or file paths',
+    };
+  }
+  // A grant on any ANCESTOR of $HOME (/Users, /Users/../Users, /System/Volumes/
+  // Data/Users, …) recursively covers the whole home directory — ~/.ssh,
+  // ~/.aws, ~/.uc-desktop-token — which is exactly what the home-wide refusal
+  // above exists to prevent. Refusing the exact home path while allowing its
+  // parent was a one-word bypass.
+  if (home && (home === root || isPathInsideRoot(home, root))) {
+    return {
+      ok: false,
+      error: 'local file grants covering the home directory (or a parent of it) are refused; request exact project, folder, or file paths',
     };
   }
   return { ok: true, root, kind };
@@ -14508,14 +14532,17 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
     return stringifyPhotoshopStatus(out);
   }
 
-  var doc = findTargetDocument();
-  if (!doc) {
+  // Status is a read-only endpoint. Inspect only the document that is already
+  // active; never activate a different open document to satisfy an expected
+  // name/path because that changes visible app state and focus.
+  var doc = null;
+  try { doc = app.activeDocument; } catch (_) {}
+  if (!doc || !documentMatches(doc)) {
     out.status = "document_mismatch";
     try { out.activeDocumentName = String(app.activeDocument.name || ""); } catch (_) {}
-    out.error = "Expected Photoshop document is not active or open.";
+    out.error = "Expected Photoshop document is not active.";
     return stringifyPhotoshopStatus(out);
   }
-  try { app.activeDocument = doc; } catch (_) {}
 
   out.activeDocumentName = String(doc.name || "");
   out.activeDocumentPath = documentPath(doc);
