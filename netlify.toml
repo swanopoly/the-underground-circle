@@ -14,7 +14,8 @@
 # Environment variables (set these in Netlify UI: Site Settings → Environment variables)
 # EXPO_PUBLIC_SUPABASE_URL
 # EXPO_PUBLIC_SUPABASE_ANON_KEY
-# EXPO_PUBLIC_GEMINI_API_KEY
+# Never configure provider/server credentials under EXPO_PUBLIC_*. The
+# prebuild public-env security gate rejects them before Expo can inline them.
 
 # Environment variables must be configured in Netlify UI (Site Settings → Environment variables)
 # Never hardcode API keys here
@@ -27,13 +28,15 @@
     X-Content-Type-Options = "nosniff"
     X-XSS-Protection = "1; mode=block"
     Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+    Cross-Origin-Opener-Policy = "same-origin-allow-popups"
     # connect-src allows localhost / 127.0.0.1 over both http and ws so the
     # web app at app.chrisswanson.xyz can talk to the user's locally-running
     # bridges (claude-bridge :7778, codex :7779, gemini :7780, cursor :7781,
     # openswan-proxy :18790). Without these the browser silently blocks the
     # fetch and bridges look offline. localhost is exempt from mixed-content
     # restrictions but CSP still applies.
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://api.mainnet-beta.solana.com https://api.devnet.solana.com https://solana-rpc.publicnode.com https://rpc.ankr.com https://*.infura.io https://*.alchemy.com https://*.quicknode.pro https://generativelanguage.googleapis.com https://api.openai.com https://api.anthropic.com https://api.coinbase.com https://api.coingecko.com https://cdn-icons-png.freepik.com; frame-src 'self';"
+    Content-Security-Policy = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://rjkniqiqdtroeholxacg.supabase.co wss://rjkniqiqdtroeholxacg.supabase.co http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://api.mainnet-beta.solana.com https://api.devnet.solana.com https://solana-rpc.publicnode.com https://rpc.ankr.com https://*.infura.io https://*.alchemy.com https://*.quicknode.pro https://api.coinbase.com https://api.coingecko.com https://cdn-icons-png.freepik.com; frame-src 'self'; form-action 'self' https://rjkniqiqdtroeholxacg.supabase.co; upgrade-insecure-requests;"
 
 # Cache static assets
 [[headers]]
@@ -44,7 +47,13 @@
 [[headers]]
   for = "*.js"
   [headers.values]
-    Cache-Control = "public, max-age=31536000, immutable"
+    # Expo/Metro can keep an entry-chunk filename stable while changing the
+    # dynamic-import path table embedded in that chunk. Treating every JS file
+    # as immutable can therefore mix old and new module graphs after a deploy
+    # and produce runtime errors such as "export is not a function". Always
+    # revalidate JS; images and other truly content-addressed assets stay
+    # immutable below.
+    Cache-Control = "public, max-age=0, must-revalidate"
 
 [[headers]]
   for = "*.css"

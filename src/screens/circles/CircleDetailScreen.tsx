@@ -279,7 +279,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
   useEffect(() => {
     if (!activeTab || !TABS.includes(activeTab)) return;
-    recordWorkspaceTabVisit(circleId, activeTab as any).catch(() => {});
+    // Adaptation telemetry is best-effort. A stale browser chunk must never
+    // turn a non-critical visit counter into a fatal Circle/Chat render error.
+    if (typeof recordWorkspaceTabVisit !== 'function') return;
+    try {
+      void Promise.resolve(recordWorkspaceTabVisit(circleId, activeTab as any)).catch(() => {});
+    } catch {
+      // Synchronous legacy/mixed-chunk implementations are non-fatal too.
+    }
   }, [circleId, activeTab]);
 
   useEffect(() => {

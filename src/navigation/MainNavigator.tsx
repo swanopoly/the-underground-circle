@@ -3,6 +3,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 const Stack = createNativeStackNavigator();
+const WEB_MODULE_GRAPH_REVISION = '2026-08-06-chat-cache-v2';
 
 function ScreenFallback() {
   return (
@@ -21,7 +22,7 @@ function lazyScreen(loader: () => Promise<{ default: React.ComponentType<any> }>
       </Suspense>
     );
   }
-  LazyScreen.displayName = `Lazy${name}`;
+  LazyScreen.displayName = `Lazy${name}@${WEB_MODULE_GRAPH_REVISION}`;
   return LazyScreen;
 }
 
