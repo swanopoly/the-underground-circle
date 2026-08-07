@@ -4791,7 +4791,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         circleInitGenerationRef.current += 1;
       }
     };
-  }, [circleId]);
+  }, [circleId, circleInitRetryToken]);
 
   // ── Thread-scoped composer + transcript transition ───────────────────────
   // Draft text is durable per circle/thread/user. In-memory attachment buckets

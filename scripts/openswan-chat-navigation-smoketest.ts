@@ -37,6 +37,16 @@ const menu = readFileSync(
   join(repoRoot, 'src/screens/circles/tabs/chat/OpenSwanServiceMenu.tsx'),
   'utf8',
 );
+const chatTab = readFileSync(
+  join(repoRoot, 'src/screens/circles/tabs/ChatTab.tsx'),
+  'utf8',
+);
+
+assert(
+  chatTab.includes('setCircleInitRetryToken((value) => value + 1);')
+    && chatTab.includes('}, [circleId, circleInitRetryToken]);'),
+  'retrying an unresolved conversation reruns circle and default-thread initialization',
+);
 
 assert(
   !header.includes('if (isCircleThread) return null')
