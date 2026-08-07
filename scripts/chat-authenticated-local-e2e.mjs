@@ -67,6 +67,9 @@ const pending = new Map();
 const exceptions = [];
 const consoleErrors = [];
 const webSearchRequests = [];
+const openSwanTaskRequests = [];
+const greetingToolPayloads = [];
+let greetingSubmitted = false;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -215,12 +218,35 @@ async function connectChrome() {
     if (message.method === 'Network.requestWillBeSent') {
       const request = message.params?.request;
       if (
+        greetingSubmitted
+        && typeof request?.url === 'string'
+        && /\/functions\/v1\/(?:chat-stream|llm-proxy)(?:[/?]|$)/i.test(request.url)
+        && typeof request.postData === 'string'
+      ) {
+        try {
+          const payload = JSON.parse(request.postData);
+          const hasTools = Array.isArray(payload?.tools) && payload.tools.length > 0;
+          const hasPlugins = Array.isArray(payload?.plugins) && payload.plugins.length > 0;
+          if (hasTools || hasPlugins) greetingToolPayloads.push(request.url);
+        } catch {
+          // An unreadable request body cannot prove a tool-less greeting.
+          greetingToolPayloads.push(request.url);
+        }
+      }
+      if (
         typeof request?.url === 'string'
         && request.url.includes('/functions/v1/llm-proxy')
         && typeof request.postData === 'string'
         && request.postData.includes('openrouter:web_search')
       ) {
         webSearchRequests.push(request.url);
+      }
+      if (
+        greetingSubmitted
+        && typeof request?.url === 'string'
+        && /\/functions\/v1\/(?:swanbot-ai|swanbot-v2-ai|automation-executor|room-task-executor)(?:[/?]|$)/i.test(request.url)
+      ) {
+        openSwanTaskRequests.push(request.url);
       }
     }
   };
@@ -311,6 +337,7 @@ async function runChatCanary(session) {
 
   const sentAt = new Date(Date.now() - 1_000).toISOString();
   await delay(400);
+  greetingSubmitted = expectedOutcome === 'greeting-routing';
   let sendControl = await evaluate(`(() => {
     const candidates = [...document.querySelectorAll('button,[role=button]')];
     const button = candidates.find((candidate) => /send/i.test([
@@ -368,6 +395,8 @@ async function runChatCanary(session) {
       || (/Pinned Messages/i.test(browserState.body) && /Search chat history\./i.test(browserState.body)),
     lazyModuleFailures: lazyModuleFailures.length,
     webSearchRequestCount: webSearchRequests.length,
+    openSwanTaskRequestCount: openSwanTaskRequests.length,
+    greetingToolPayloadCount: greetingToolPayloads.length,
     webSearchFailureVisible: /Web search failed|Web search.+non-2xx status code/i.test(browserState.body),
     connectedRepairVisible: /Let connected agent repair it|CONNECTED AGENT\s*[•·-]\s*RECOMMENDED/i.test(browserState.body),
     failedReceiptVisible: /RECEIPT\s+FAILED\s+Action did not complete/i.test(browserState.body),
@@ -462,6 +491,15 @@ try {
     }
     if (!result.assistantReplyPersisted) {
       throw new Error(`A normal assistant reply was not finalized and persisted: ${JSON.stringify(result)}`);
+    }
+    if (result.openSwanTaskRequestCount > 0) {
+      throw new Error(`A social greeting called an OpenSwan task endpoint: ${JSON.stringify(result)}`);
+    }
+    if (result.greetingToolPayloadCount > 0) {
+      throw new Error(`A social greeting advertised tools or plugins to its model: ${JSON.stringify(result)}`);
+    }
+    if (!['main_chat_stream', 'main_chat_plain_model'].includes(result.assistantReplySurface)) {
+      throw new Error(`A social greeting persisted through a non-plain surface: ${JSON.stringify(result)}`);
     }
   }
   if (result.lazyModuleFailures > 0) {

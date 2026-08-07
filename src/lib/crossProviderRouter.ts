@@ -380,6 +380,85 @@ function providerFromModelPrefix(modelId: string): LLMProvider | null {
   return null;
 }
 
+export interface PlainChatModelRoute {
+  provider: LLMProvider;
+  model: string;
+}
+
+// Only providers with a fixed, code-owned destination in llm-proxy belong in
+// the browser's hosted text-only lane. Ollama and OpenAI-compatible endpoints
+// are intentionally local-bridge concerns (the hosted edge rejects arbitrary
+// destinations), while Replicate is not a chat provider there at all.
+const HOSTED_PLAIN_CHAT_PROVIDERS: ReadonlySet<LLMProvider> = new Set([
+  'anthropic',
+  'openai',
+  'openrouter',
+  'groq',
+  'github-models',
+  'huggingface',
+  'zai',
+  'minimax',
+  'google_ai',
+  'mistral_ai',
+  'cohere',
+  'perplexity',
+  'together_ai',
+  'fireworks_ai',
+  'deepseek',
+]);
+
+/**
+ * Resolve one user-selected text model to exactly one no-tools provider route.
+ * Unlike resolveProviderRoutes this never builds a fallback chain: a pinned
+ * model stays pinned, and an unknown/local-only id fails visibly to its caller.
+ */
+export function resolvePlainChatModelRoute(
+  modelId: string | null | undefined,
+): PlainChatModelRoute | null {
+  const normalized = String(modelId || '').trim();
+  if (!normalized || normalized === 'auto') {
+    return { provider: 'anthropic', model: 'claude-haiku-4-5' };
+  }
+
+  if (/^claude-/i.test(normalized)) return { provider: 'anthropic', model: normalized };
+  if (/^cswan801\/blackswan/i.test(normalized)) {
+    return { provider: 'huggingface', model: normalized };
+  }
+  if (/^hf:/i.test(normalized)) {
+    const huggingFaceModel = normalized.slice(3).trim();
+    return huggingFaceModel
+      ? { provider: 'huggingface', model: huggingFaceModel }
+      : null;
+  }
+
+  const slashIndex = normalized.indexOf('/');
+  if (slashIndex > 0) {
+    const rawProvider = normalized.slice(0, slashIndex).toLowerCase();
+    const provider = rawProvider === 'huggingface_endpoint' || rawProvider === 'hugging_face'
+      ? 'huggingface'
+      : rawProvider === 'z_ai'
+        ? 'zai'
+        : rawProvider;
+    if (HOSTED_PLAIN_CHAT_PROVIDERS.has(provider as LLMProvider)) {
+      return { provider: provider as LLMProvider, model: normalized };
+    }
+  }
+
+  if (/^(?:gpt-|o[134]\b|chatgpt-)/i.test(normalized)) {
+    return { provider: 'openai', model: normalized };
+  }
+  if (/^gemini[-_./]/i.test(normalized)) return { provider: 'google_ai', model: normalized };
+  if (/^sonar(?:-|$)/i.test(normalized)) return { provider: 'perplexity', model: normalized };
+  if (/^(?:mistral-|codestral-)/i.test(normalized)) return { provider: 'mistral_ai', model: normalized };
+  if (/^deepseek-/i.test(normalized)) return { provider: 'deepseek', model: normalized };
+  if (/^(?:glm-5|glm-)/i.test(normalized)) return { provider: 'zai', model: normalized };
+  if (/^minimax-/i.test(normalized)) return { provider: 'minimax', model: normalized };
+  if (/^(?:llama-3\.3-70b-versatile|mixtral-)/i.test(normalized)) {
+    return { provider: 'groq', model: normalized };
+  }
+  return null;
+}
+
 /**
  * Build an ordered fallback chain for a logical model id. Caller
  * walks the list, trying each route until one succeeds.

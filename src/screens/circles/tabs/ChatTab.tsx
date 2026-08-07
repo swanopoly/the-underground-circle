@@ -327,6 +327,7 @@ import type { PredictiveChatCommand } from '../../../lib/predictiveChatCommands'
 import { dispatchChatAutomationPlan, type ChatAutomationOutcome, type ChatClarificationResumeStore } from '../../../lib/runChatAutomationPlan';
 import { createChatTransportHandlers, getOutcomeStateRequests, type ChatTransportStateRequests } from '../../../lib/chatTransportHandlers';
 import { chooseChatTerminalTransport, looksLikeTerminalActionRequest as looksLikeActionRequest } from '../../../lib/chatTerminalTransportPolicy';
+import { isConversationOnlyTurn } from '../../../lib/webSearchAutoDetect';
 import { decideChatOrchestration } from '../../../lib/aiFirstChatPolicy';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import {
@@ -8385,7 +8386,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return staged;
   }, []);
 
-  const sendMessage = async (
+  const sendMessageUnsafe = async (
     overrideText?: string,
     options?: {
       displayText?: string;
@@ -8407,6 +8408,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const requestedContent = (overrideText || input).trim();
     const hasPendingAttachments = attachments.length > 0 || stagedFiles.length > 0;
     const content = requestedContent || (hasPendingAttachments ? 'Open the attached file.' : '');
+    const conversationOnlyTurn = !hasPendingAttachments && isConversationOnlyTurn(content);
     // Pre-send guard: a friendly hint instead of silently swallowing an empty
     // send. Only 'block' is enforced (an empty message with no attachment);
     // confirm/send both proceed so no new hoop is added to normal sends.
@@ -8426,7 +8428,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // If we recently asked the user for a missing detail, treat this reply as
     // the answer: reconstruct a well-specified request and route THAT, while
     // still displaying the user's actual words. Cancel words abort cleanly.
-    if (!overrideText?.startsWith('__') && !content.startsWith('/') && !resolvingClarificationRef.current) {
+    if (
+      !conversationOnlyTurn
+      && !overrideText?.startsWith('__')
+      && !content.startsWith('/')
+      && !resolvingClarificationRef.current
+    ) {
       const clarifyKey = activeThreadId || 'main';
       const pendingClarify = pendingClarificationRef.current.get(clarifyKey);
       if (pendingClarify) {
@@ -8466,7 +8473,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // live confirmation is open) — matchBookingFollowup fails closed to none
     // for unrelated chat, so a false positive can't hijack a normal message.
     if (
-      !overrideText?.startsWith('__')
+      !conversationOnlyTurn
+      && !overrideText?.startsWith('__')
       && !content.startsWith('/')
       && !resolvingClarificationRef.current
     ) {
@@ -8555,7 +8563,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     }
 
-    const recoverySelectionForDisplay = options?.displayText
+    const recoverySelectionForDisplay = conversationOnlyTurn || options?.displayText
       ? null
       : parseChatFailureRecoveryOptionSelection(content);
     const displayContent = (options?.displayText || (recoverySelectionForDisplay
@@ -8674,7 +8682,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       recordChatActivity(circleId, 'slash').catch(() => {});
     }
     const lowerContent = content.toLowerCase().trim();
-    const directRecoverySelection = parseChatFailureRecoveryOptionSelection(content);
+    const directRecoverySelection = conversationOnlyTurn
+      ? null
+      : parseChatFailureRecoveryOptionSelection(content);
     if (isDesktopBridgeRecoverySelection(directRecoverySelection)) {
       setBotTyping(true);
       try {
@@ -8989,7 +8999,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // The OpenSwan composer button can pin a connected agent for the next chat
     // turns. Slash commands and explicit multi-agent requests still keep their
     // deterministic handlers; ordinary task text goes to the selected agent.
-    if (!content.startsWith('/') && selectedChatAgentTarget && !isOpenSwanChatAgentTarget(selectedChatAgentTarget)) {
+    if (
+      !conversationOnlyTurn
+      && !content.startsWith('/')
+      && selectedChatAgentTarget
+      && !isOpenSwanChatAgentTarget(selectedChatAgentTarget)
+    ) {
       if (!selectedChatAgentTarget.connected || !selectedChatAgentTarget.agent) {
         addBotMessage(buildChatAgentSetupMessage(selectedChatAgentTarget), undefined, {
           localOnly: true,
@@ -9189,7 +9204,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Plan mode is first-class now: Chat classifies the request, SwanBot
     // stays in planner posture, OpenSwan contributes tools/verification,
     // and the result is persisted for Office/run-ledger handoff.
-    if (shouldCreateAgentPlanForMessage(content, effectiveChatMode)) {
+    if (!conversationOnlyTurn && shouldCreateAgentPlanForMessage(content, effectiveChatMode)) {
       const explicitPlanTask = content.replace(/^\/plan\s*/i, '').trim();
       const taskText = lowerContent.startsWith('/plan') ? explicitPlanTask : content;
       if (!taskText) {
@@ -11121,35 +11136,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // ─── Model capability routing — images, webpages, etc. ──────────────────
-    try {
-      const { routeByCapability } = await import('../../../lib/modelCapabilities');
-      const attachmentPromptContext = buildAttachmentPromptContext(currentAttachments);
-      const contentWithAttachments = [content, attachmentPromptContext, figmaPromptContext].filter(Boolean).join('\n\n');
-      const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
-      if (shouldShowWorkbench) startCodingWorkbench(contentWithAttachments);
-      setBotTyping(true);
-      const capResult = await routeByCapability(contentWithAttachments, selectedModel);
-      setBotTyping(false);
-      if (shouldShowWorkbench) stopCodingWorkbench();
-      if (capResult.handled) {
-        const arts: SwanBotStructuredArtifact[] = (capResult.artifacts || []).map(a => ({
-          kind: a.kind as any,
-          title: a.title,
-          content: a.html || a.content || null,
-          url: a.url || null,
-          metadata: a.metadata,
-        }));
-        addBotMessage(capResult.response, arts.length > 0 ? arts : undefined);
-        return;
+    if (!conversationOnlyTurn) {
+      try {
+        const { routeByCapability } = await import('../../../lib/modelCapabilities');
+        const attachmentPromptContext = buildAttachmentPromptContext(currentAttachments);
+        const contentWithAttachments = [content, attachmentPromptContext, figmaPromptContext].filter(Boolean).join('\n\n');
+        const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
+        if (shouldShowWorkbench) startCodingWorkbench(contentWithAttachments);
+        setBotTyping(true);
+        const capResult = await routeByCapability(contentWithAttachments, selectedModel);
+        setBotTyping(false);
+        if (shouldShowWorkbench) stopCodingWorkbench();
+        if (capResult.handled) {
+          const arts: SwanBotStructuredArtifact[] = (capResult.artifacts || []).map(a => ({
+            kind: a.kind as any,
+            title: a.title,
+            content: a.html || a.content || null,
+            url: a.url || null,
+            metadata: a.metadata,
+          }));
+          addBotMessage(capResult.response, arts.length > 0 ? arts : undefined);
+          return;
+        }
+        if (capResult.fallbackNotice) {
+          // A capability backend (image gen) failed — say why before the normal
+          // model answers in text, so the missing artifact isn't a silent mystery.
+          addBotMessage(capResult.fallbackNotice);
+        }
+      } catch (capErr) {
+        setBotTyping(false);
+        console.warn('[Chat] Capability routing error:', capErr);
       }
-      if (capResult.fallbackNotice) {
-        // A capability backend (image gen) failed — say why before the normal
-        // model answers in text, so the missing artifact isn't a silent mystery.
-        addBotMessage(capResult.fallbackNotice);
-      }
-    } catch (capErr) {
-      setBotTyping(false);
-      console.warn('[Chat] Capability routing error:', capErr);
     }
 
     // Trigger Agent AI — always responds UNLESS the user is @mentioning another member
@@ -11159,7 +11176,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!isAtMentioningSomeoneElse) {
       let cleanContent = content.replace(new RegExp(`@(agent|blackswan|swanbot|swan|${escapedName})\\s*`, 'gi'), '').trim() || content;
       const latestRecoveryOptionsMessage = findLatestRecoveryOptionsMessage(messages);
-      const recoveryFollowup = latestRecoveryOptionsMessage
+      const recoveryFollowup = !conversationOnlyTurn && latestRecoveryOptionsMessage
         ? resolveChatFailureRecoveryOptionFollowup(cleanContent, latestRecoveryOptionsMessage.recoveryOptions)
         : null;
       if (recoveryFollowup) {
@@ -11167,7 +11184,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
 
       // Build chat context with OpenSwan envelope wrapping for temporal awareness
-      const selectedRecoveryOption = parseChatFailureRecoveryOptionSelection(cleanContent);
+      const selectedRecoveryOption = conversationOnlyTurn
+        ? null
+        : parseChatFailureRecoveryOptionSelection(cleanContent);
       const selectedRecoveryExecutionPlan = selectedRecoveryOption
         ? buildChatFailureRecoveryExecutionPlan(selectedRecoveryOption)
         : null;
@@ -11330,7 +11349,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
 
         // Use unified agent runtime only when user explicitly selects a specialized mode
-        if (effectiveChatMode !== 'none' && effectiveChatMode !== 'talk') {
+        if (!conversationOnlyTurn && effectiveChatMode !== 'none' && effectiveChatMode !== 'talk') {
           const result = await executeAgentRun({
             surface: 'main_chat',
             circleId,
@@ -11408,6 +11427,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               isCodingGenerationRequest: isCodingGenerationRequest(cleanContent, sessionProfile),
               looksLikeActionRequest: looksLikeActionRequest(cleanContent),
               canStreamAnthropic: canUseAnthropicChatStream(streamCandidateModel),
+              conversationOnly: conversationOnlyTurn,
             });
             // AI-first telemetry (NO behavior change): annotate which orchestration
             // tier the product policy would pick for this turn — plain_model (stream
@@ -11445,7 +11465,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               // Telemetry only — never let the tier annotation affect a chat turn.
               console.warn('[ChatTab] orchestration tier annotation failed:', orchestrationErr);
             }
-            // Phase 2 seam (DEFAULT OFF): `stream_then_escalate` streams the
+            // Phase 2 seam (DEFAULT ON): `stream_then_escalate` streams the
             // turn plainly AND advertises the tiny pinned tool core + tools.search
             // so the model can signal mid-turn that it needs a capability; on that
             // signal this turn upgrades into the OpenSwan tool loop. The transport
@@ -11453,6 +11473,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // flag is ON, so when the flag is OFF `escalateOnToolUse` is false and
             // every branch below is byte-for-byte the legacy `stream_plain_chat`.
             const escalateOnToolUse = terminalTransport.path === 'stream_then_escalate';
+            const conversationOnlyPlainChat = terminalTransport.reason === 'conversation_only_plain_chat';
+            let usePlainModelFallback = terminalTransport.path === 'batch_plain_chat';
             const canStream = terminalTransport.path === 'stream_plain_chat' || escalateOnToolUse;
 
             if (canStream) {
@@ -11510,7 +11532,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 // Falls back to platform Sonnet if the helper somehow
                 // returns null so we never send an unresolved 'auto'.
                 const streamModel = streamCandidateModel;
-                // Phase 2 seam (DEFAULT OFF): only when the transport chose
+                // Phase 2 seam (DEFAULT ON): only when the transport chose
                 // `stream_then_escalate` do we advertise the pinned tool palette
                 // on the stream. `getStreamEscalationPinnedToolNames` resolves the
                 // same surface-pinned core + tools.search used by the batch
@@ -11541,7 +11563,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 streamPendingMsgId = pendingMsg.id;
                 streamPendingMsg = pendingMsg;
                 streamUiOwner = ++chatUiOwnerRef.current;
-                setRunStatus('running');
+                if (!conversationOnlyPlainChat) setRunStatus('running');
                 let accumulated = '';
                 let streamingUsage: SwanBotStructuredResponse['usage'] | undefined;
                 // Captured only on the escalation path: the SSE parser exposes the
@@ -11755,7 +11777,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 if (streamingBuildCleanupRef.current === streamHandleCancel) {
                   streamingBuildCleanupRef.current = null;
                 }
-                // Phase 2 seam (DEFAULT OFF): if this escalation-capable stream
+                // Phase 2 seam (DEFAULT ON): if this escalation-capable stream
                 // produced a tool_use (or stopped with stop_reason==='tool_use'),
                 // upgrade THIS turn into the OpenSwan tool loop, reusing every
                 // existing reliability layer. `maybeEscalateStreamedTurnToToolLoop`
@@ -12002,9 +12024,83 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   setMessages(prev => prev.filter((message) => message.id !== orphanId));
                   if (activeThreadId) void removePendingBotMessage(activeThreadId, orphanId).catch(() => {});
                 }
-                console.warn('[ChatTab] Streaming failed, falling back to batch:', streamErr);
-                // Fall through to batch path below
+                if (conversationOnlyPlainChat) {
+                  usePlainModelFallback = true;
+                  console.warn('[ChatTab] Greeting stream failed, retrying through plain model chat:', streamErr);
+                } else {
+                  console.warn('[ChatTab] Streaming failed, falling back to batch:', streamErr);
+                }
+                // Fall through to the selected plain-model fallback for a
+                // conversation-only turn, or the OpenSwan batch path for a
+                // substantive task.
               }
+            }
+
+            if (usePlainModelFallback) {
+              try {
+                const plainModel = sendModel || streamCandidateModel;
+                const plainMessages: Array<{
+                  role: 'system' | 'user' | 'assistant';
+                  content: string;
+                }> = [
+                  {
+                    role: 'system',
+                    content: `You are ${agentName}. Reply naturally and briefly to this social conversation. This is text-only Chat: do not call tools, start tasks, claim actions, or propose recovery workflows.`,
+                  },
+                  ...recentMessages.slice(-6).map((message) => ({
+                    role: message.isBot ? 'assistant' as const : 'user' as const,
+                    content: message.content,
+                  })),
+                  { role: 'user', content: cleanContent },
+                ];
+                let plainResponse: string;
+                if (isLocalOllamaBlackSwan(plainModel)) {
+                  const { callBlackSwan } = await import('../../../lib/blackswanLLM');
+                  const result = await callBlackSwan(plainMessages, { maxTokens: 512 });
+                  plainResponse = result.content;
+                } else {
+                  const { invokePlainChatModel } = await import('../../../lib/llmProviders');
+                  const result = await invokePlainChatModel({
+                    modelId: plainModel,
+                    messages: plainMessages,
+                    circleId,
+                    maxTokens: 512,
+                  });
+                  plainResponse = result.response;
+                }
+                addBotMessage(plainResponse, undefined, {
+                  source: {
+                    actor: agentName,
+                    surface: 'main_chat_plain_model',
+                    selectedModel,
+                    effectiveModel: plainModel,
+                  },
+                });
+                if (profileRef.current) {
+                  profileRef.current = updateProfileFromMessage(profileRef.current, plainResponse, false);
+                  saveUserProfile(profileRef.current).catch(() => {});
+                }
+              } catch (plainModelError) {
+                const modelLabel = sendModel || effectiveSelectedModel || 'the selected model';
+                console.warn('[ChatTab] Plain model greeting failed:', plainModelError);
+                addBotMessage(
+                  `I couldn't reach ${modelLabel} for that reply. Try again in a moment or choose another model.`,
+                  undefined,
+                  {
+                    quickReplies: ['Try again'],
+                    source: {
+                      actor: agentName,
+                      surface: 'main_chat_plain_model_error',
+                      selectedModel,
+                      effectiveModel: sendModel || null,
+                    },
+                  },
+                );
+              }
+              setRunStatus('idle');
+              setBotTyping(false);
+              stopCodingWorkbench();
+              return;
             }
 
             setRunStatus('running');
@@ -12224,6 +12320,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           } catch (batchErr) {
             const batchMessage = batchErr instanceof Error ? batchErr.message : String(batchErr || 'Unknown error');
             const batchStack = batchErr instanceof Error ? batchErr.stack || null : null;
+            if (conversationOnlyTurn) {
+              console.warn('[ChatTab] Plain greeting failed without starting recovery:', batchErr);
+              addBotMessage(
+                `I couldn't reach ${sendModel || effectiveSelectedModel || 'the selected model'} for that reply. Try again in a moment or choose another model.`,
+                undefined,
+                {
+                  quickReplies: ['Try again'],
+                  source: {
+                    actor: agentName,
+                    surface: 'main_chat_plain_model_error',
+                    selectedModel,
+                    effectiveModel: sendModel || null,
+                  },
+                },
+              );
+              setRunStatus('idle');
+              setActiveSubagent(null);
+              setActiveDelegatedSubagents([]);
+              setCurrentRunStep('');
+              setBotTyping(false);
+              stopCodingWorkbench();
+              return;
+            }
             // W5/X1: classify this lane terminal through the unified boundary
             // so the archive carries the two-axis recovery signal per lane
             // (telemetry only — the recovery flow below stays authoritative).
@@ -12293,6 +12412,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } catch (err) {
         const chatErrorMessage = err instanceof Error ? err.message : String(err || 'Unknown error');
         const chatErrorStack = err instanceof Error ? err.stack || null : null;
+        if (conversationOnlyTurn) {
+          console.warn('[ChatTab] Greeting setup failed without starting recovery:', err);
+          addBotMessage(
+            `I couldn't reach ${effectiveSelectedModel || 'the selected model'} for that reply. Try again in a moment or choose another model.`,
+            undefined,
+            {
+              quickReplies: ['Try again'],
+              source: {
+                actor: agentName,
+                surface: 'main_chat_plain_model_error',
+                selectedModel,
+                effectiveModel: effectiveSelectedModel || null,
+              },
+            },
+          );
+          setRunStatus('idle');
+          setActiveSubagent(null);
+          setActiveDelegatedSubagents([]);
+          setCurrentRunStep('');
+          setBotTyping(false);
+          stopCodingWorkbench();
+          return;
+        }
         // W5/X1: the outermost sendMessage boundary — normalize + tag so an
         // unshaped failure is still legible as a lane terminal in the archive.
         let outerLaneTags: string[] = [];
@@ -12344,6 +12486,79 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
       setBotTyping(false);
       stopCodingWorkbenchAfter((isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest) ? 2600 : 0);
+    }
+  };
+
+  // Keep one boundary around the complete send pipeline. Several lightweight
+  // intent and context modules are loaded before the main agent branch's
+  // existing catch block; if Metro or a network-backed lazy chunk is briefly
+  // unavailable, that import must not escape as an unhandled rejection and
+  // leave Chat looking permanently unresponsive.
+  const sendMessage = async (
+    overrideText?: string,
+    options?: {
+      displayText?: string;
+      modeOverride?: string | null;
+      modelOverride?: string | null;
+    },
+  ): Promise<void> => {
+    try {
+      await sendMessageUnsafe(overrideText, options);
+    } catch (error) {
+      sendLockRef.current = false;
+      setBotTyping(false);
+      setRunStatus('idle');
+      setActiveSubagent(null);
+      setActiveDelegatedSubagents([]);
+      setCurrentRunStep('');
+
+      const boundaryMessage = (overrideText || input).trim();
+      const boundaryConversationOnly = attachments.length === 0
+        && stagedFiles.length === 0
+        && isConversationOnlyTurn(boundaryMessage);
+      if (boundaryConversationOnly) {
+        console.warn('[ChatTab] Greeting send boundary failed without starting recovery:', error);
+        addBotMessage(
+          `I couldn't reach ${selectedModel || 'the selected model'} for that reply. Try again in a moment or choose another model.`,
+          undefined,
+          {
+            quickReplies: ['Try again'],
+            source: {
+              actor: agentName,
+              surface: 'main_chat_plain_model_error',
+              selectedModel: selectedModel || null,
+            },
+          },
+        );
+        return;
+      }
+
+      try {
+        await addRecoverableChatErrorMessage({
+          title: 'Chat could not load a required part of the conversation',
+          task: (overrideText || input).trim() || 'Send a chat message',
+          error,
+          executionKind: 'chat_send_boundary',
+          source: 'chat_send_boundary_error',
+          launchIfMissing: false,
+          touched: ['src/screens/circles/tabs/ChatTab.tsx'],
+        });
+      } catch (recoveryError) {
+        console.warn('[ChatTab] send boundary recovery failed:', recoveryError);
+        addBotMessage(
+          'Chat could not load a required module. Refresh the app, then try your message again.',
+          undefined,
+          {
+            localOnly: true,
+            hadError: true,
+            source: {
+              actor: 'OpenSwan',
+              surface: 'chat_send_boundary_fallback',
+              selectedModel: selectedModel || null,
+            },
+          },
+        );
+      }
     }
   };
 

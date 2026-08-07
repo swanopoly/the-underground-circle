@@ -13,6 +13,7 @@ import {
   normalizeLLMProxyErrorPayload,
   readLLMProxyInvokeError,
 } from './llmProxyErrorCore';
+import { resolvePlainChatModelRoute } from './crossProviderRouter';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -361,6 +362,33 @@ export async function invokeLLMProxy(params: {
     throw new LLMProxyInvocationError(normalizeLLMProxyErrorPayload(data, data.error));
   }
   return data as LLMProxyResponse;
+}
+
+/**
+ * Invoke a single selected model as text-only Chat. No tools, plugins,
+ * OpenSwan sessions, agent runs, or cross-provider fallback are permitted.
+ */
+export async function invokePlainChatModel(params: {
+  modelId: string | null | undefined;
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  circleId?: string;
+  maxTokens?: number;
+}): Promise<LLMProxyResponse> {
+  const route = resolvePlainChatModelRoute(params.modelId);
+  if (!route) {
+    throw new Error(`The selected model ${String(params.modelId || 'unknown')} has no text-only Chat route.`);
+  }
+  const result = await invokeLLMProxy({
+    provider: route.provider,
+    model: route.model,
+    messages: params.messages,
+    circleId: params.circleId,
+    maxTokens: params.maxTokens ?? 512,
+  });
+  if (!result?.response?.trim()) {
+    throw new Error(`The selected model ${route.model} returned no text.`);
+  }
+  return result;
 }
 
 /**
