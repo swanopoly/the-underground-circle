@@ -618,6 +618,7 @@
     "smoke:memory-extraction-core": "npx tsx scripts/memory-extraction-core-smoketest.ts",
     "smoke:memory-retrieval-policy-core": "npx tsx scripts/memory-retrieval-policy-core-smoketest.ts",
     "smoke:memory-embedding-policy-core": "npx tsx scripts/memory-embedding-policy-core-smoketest.ts",
+    "smoke:memory-embedding-credential-pause": "npx tsx scripts/memory-embedding-credential-pause-smoketest.ts",
     "smoke:run-outcome-memory-core": "npx tsx scripts/run-outcome-memory-core-smoketest.ts",
     "smoke:v2-memory-injection": "npx tsx scripts/v2-memory-injection-core-smoketest.ts",
     "smoke:v2-save-memory-core": "npx tsx scripts/v2-save-memory-core-smoketest.ts",

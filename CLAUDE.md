@@ -218,6 +218,13 @@ submitted key before saving, stores it only in the user's encrypted model-key
 vault, then validates the stored/decrypted credential through the same
 `llm-proxy` route Chat uses before reporting success.
 
+Semantic-memory embeddings follow the same user-owned rule for OpenAI. A
+`key_missing` or `credential_unreadable` embedding response pauses that
+signed-in account after one serialized, timeout-bounded probe while the null
+rows remain on the durable repair path. A successful OpenAI Marketplace write
+invalidates stale in-flight failures and forces one bounded repair; unrelated
+provider writes do not retry embeddings.
+
 Model IDs may be provider-prefixed, such as `openrouter/auto`,
 `google_ai/gemini-2.5-pro`, `deepseek/deepseek-reasoner`, or
 `huggingface_endpoint/cswan801/BlackSwan-v5`. Normalize aliases carefully:

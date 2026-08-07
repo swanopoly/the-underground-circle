@@ -41,6 +41,7 @@ import {
   storeApiKey,
   testApiKey,
   testStoredApiKey,
+  type UserApiKeyProvider,
 } from '../../../lib/llmProviders';
 import { getTeamsConfig } from '../../../lib/teams';
 import DiscordTab from './DiscordTab';
@@ -168,7 +169,7 @@ const GENERIC_MARKETPLACE_PROVIDERS: GenericMarketplaceProvider[] = [
   'blackswan',
 ];
 
-const MODEL_USER_API_PROVIDER_BY_MARKETPLACE_PROVIDER: Partial<Record<GenericMarketplaceProvider, string>> = {
+const MODEL_USER_API_PROVIDER_BY_MARKETPLACE_PROVIDER: Partial<Record<GenericMarketplaceProvider, UserApiKeyProvider>> = {
   anthropic: 'anthropic',
   openai: 'openai',
   openrouter: 'openrouter',
@@ -227,7 +228,7 @@ const CHAT_READY_MODEL_USER_API_PROVIDERS = new Set([
   'deepseek',
 ]);
 
-function marketplaceProviderToUserApiProvider(provider: GenericMarketplaceProvider): string | null {
+function marketplaceProviderToUserApiProvider(provider: GenericMarketplaceProvider): UserApiKeyProvider | null {
   return MODEL_USER_API_PROVIDER_BY_MARKETPLACE_PROVIDER[provider] || null;
 }
 
@@ -677,7 +678,7 @@ function GenericIntegrationManager({
         }
 
         setSecrets({});
-        notifyUserApiKeyChanges();
+        notifyUserApiKeyChanges('anthropic');
         setMessage('Anthropic connected. Claude Sonnet 4.6 was verified through your signed-in Marketplace credential.');
         onRefresh();
         return;
@@ -717,6 +718,7 @@ function GenericIntegrationManager({
             } else {
               modelKeyMessage = ' API key also saved to your encrypted model key vault; direct chat routing for this provider still needs backend routing.';
             }
+            if (!error) notifyUserApiKeyChanges(userApiProvider);
           } else if (definition.requiredSecretKeys.length > 0) {
             modelKeyMessage = ' Add the API key above to save it for chat, agents, and automations.';
           }

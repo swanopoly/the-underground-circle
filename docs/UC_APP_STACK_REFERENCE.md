@@ -283,6 +283,14 @@ stores it only in the signed-in user's encrypted model-key vault, and finally
 probes the stored credential through `llm-proxy`; the UI reports Connected only
 after both checks pass.
 
+OpenAI semantic-memory embeddings use the same personal Marketplace boundary.
+A missing or unreadable OpenAI credential is terminal setup state, not a
+transient outage: the client makes one serialized, 30-second-bounded probe,
+preserves every null-vector row for the resumable repair sweep, and pauses for
+that signed-in account without repeating 400/409 requests. Saving a replacement
+OpenAI key invalidates any old in-flight response and starts one bounded repair;
+Anthropic or other provider changes do not wake the embedding worker.
+
 ## Computer Use Flow
 
 - Chat/browser tasks plan through `src/lib/computerUse.ts`.
