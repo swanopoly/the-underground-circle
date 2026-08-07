@@ -39,10 +39,30 @@ function LandingWrapper({ navigation }: any) {
   );
 }
 
-export default function AuthNavigator() {
+type AuthNavigatorProps = {
+  passwordRecovery?: boolean;
+  onPasswordRecoveryComplete?: () => void;
+};
+
+export default function AuthNavigator({
+  passwordRecovery = false,
+  onPasswordRecoveryComplete,
+}: AuthNavigatorProps) {
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }} initialRouteName="Login">
+    <Stack.Navigator
+      screenOptions={{ headerShown: false }}
+      initialRouteName={passwordRecovery ? 'ResetPassword' : 'Login'}
+    >
       <Stack.Screen name="Login" component={Login} />
+      <Stack.Screen name="PasswordRecovery" component={Login} />
+      <Stack.Screen name="ResetPassword">
+        {(screenProps) => (
+          <Login
+            {...screenProps}
+            onPasswordRecoveryComplete={onPasswordRecoveryComplete}
+          />
+        )}
+      </Stack.Screen>
       <Stack.Screen name="Landing" component={LandingWrapper} />
       <Stack.Screen name="SignUp" component={SignUp} />
     </Stack.Navigator>
