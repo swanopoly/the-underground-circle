@@ -226,6 +226,34 @@ async function main() {
       `chunk ${failedChunk} failure does not switch authority slots`);
   }
 
+  const setFailureLegacy = new MemoryStorage();
+  const setFailureSecure = new FaultInjectingSecureStore();
+  const setFailureStorage = createNativeSecureAuthStorage({
+    legacyStorage: setFailureLegacy,
+    loadSecureStore: async () => setFailureSecure,
+  });
+  await setFailureStorage.setItem(authKey, oldSession);
+  await setFailureLegacy.setItem(authKey, 'stale-plaintext-before-write-failure');
+  setFailureSecure.failNextSet(`${secureKey}_1_0`);
+  await assert.rejects(() => setFailureStorage.setItem(authKey, newSession),
+    'a secure chunk write failure is surfaced');
+  assert.equal(await setFailureLegacy.getItem(authKey), null,
+    'a secure chunk write failure still removes stale plaintext authority');
+
+  const setManifestReadLegacy = new MemoryStorage();
+  const setManifestReadSecure = new ThrowingReadSecureStore();
+  const setManifestReadStorage = createNativeSecureAuthStorage({
+    legacyStorage: setManifestReadLegacy,
+    loadSecureStore: async () => setManifestReadSecure,
+  });
+  await setManifestReadStorage.setItem(authKey, oldSession);
+  await setManifestReadLegacy.setItem(authKey, 'stale-plaintext-before-manifest-read-failure');
+  setManifestReadSecure.failReadsFor(secureKey);
+  await assert.rejects(() => setManifestReadStorage.setItem(authKey, newSession),
+    'a manifest read failure during secure replacement is surfaced');
+  assert.equal(await setManifestReadLegacy.getItem(authKey), null,
+    'a replacement manifest read failure still removes stale plaintext authority');
+
   const manifestFaultSecure = new FaultInjectingSecureStore();
   const manifestFaultStorage = createNativeSecureAuthStorage({
     legacyStorage: new MemoryStorage(),

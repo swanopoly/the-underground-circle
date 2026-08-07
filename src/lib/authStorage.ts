@@ -407,8 +407,19 @@ export function createNativeSecureAuthStorage(
           return;
         }
         authStorageCoordination.volatileFallback.delete(secureAuthStorageKey(key));
-        await writeSecure(secureStore, key, value);
-        await legacyStorage.removeItem(key);
+        try {
+          await writeSecure(secureStore, key, value);
+          await legacyStorage.removeItem(key);
+        } catch (secureWriteError) {
+          const cleanupError = await cleanupUnprotectedAuthority(key);
+          if (cleanupError) {
+            throw new AggregateError(
+              [secureWriteError, cleanupError],
+              'Secure session persistence failed and stale plaintext cleanup also failed.',
+            );
+          }
+          throw secureWriteError;
+        }
       });
     },
 
