@@ -15,7 +15,13 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { computeCostUsd, checkCircleClaudeBudget, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
-import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
+import {
+  byokMissingMessage,
+  byokUnreadableMessage,
+  resolveUserModelApiKey,
+  type ResolvedApiKey,
+  StoredApiKeyLookupError,
+} from "../_shared/edge.ts";
 import { splitPromptAtCacheBoundary, buildCacheableSystemBlocks } from "../../../src/lib/promptCacheSplitCore.ts";
 
 const corsHeaders = {
@@ -36,6 +42,17 @@ interface ChatStreamRequest {
   // tools, so this is the safety boundary for the stream->tool seam.
   tools?: unknown[];
   tool_choice?: unknown;
+}
+
+function credentialErrorResponse(
+  status: 400 | 409,
+  code: "key_missing" | "credential_unreadable",
+  message: string,
+): Response {
+  return new Response(JSON.stringify({ error: message, code }), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
 }
 
 Deno.serve(async (req: Request) => {
@@ -84,20 +101,31 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const anthropicKey = await resolveUserModelApiKey({
-    supabase: svc,
-    userId,
-    provider: "anthropic",
-    envVarName: "ANTHROPIC_API_KEY",
-  });
-  if (!anthropicKey) {
-    return new Response(JSON.stringify({
-      error: byokMissingMessage("anthropic"),
-      code: "key_missing",
-    }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+  let anthropicKey: ResolvedApiKey | null;
+  try {
+    anthropicKey = await resolveUserModelApiKey({
+      supabase: svc,
+      userId,
+      provider: "anthropic",
+      label: null,
+      credentialPolicy: "user_required",
     });
+  } catch (error) {
+    if (error instanceof StoredApiKeyLookupError) {
+      return credentialErrorResponse(
+        409,
+        "credential_unreadable",
+        byokUnreadableMessage("anthropic"),
+      );
+    }
+    throw error;
+  }
+  if (!anthropicKey) {
+    return credentialErrorResponse(
+      400,
+      "key_missing",
+      byokMissingMessage("anthropic"),
+    );
   }
 
   // Circle attribution guard — circleId is caller-supplied and drives the

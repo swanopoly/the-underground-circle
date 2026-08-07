@@ -33,11 +33,11 @@
 export const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
 
 /**
- * Default chat model id. 'auto' engages the runtime resolver in
- * serviceProfileSouls (Haiku for casual/status, Sonnet for general code/design,
- * Opus for research/architecture) instead of pinning a static model.
+ * Default chat model id for newly created or otherwise unconfigured threads.
+ * A thread that explicitly stores `auto` still passes through unchanged and
+ * continues to engage the runtime resolver in serviceProfileSouls.
  */
-export const DEFAULT_CHAT_MODEL = 'auto';
+export const DEFAULT_CHAT_MODEL = 'claude-sonnet-4-6';
 
 /**
  * Low-signal words dropped when deriving a session title from a message, so the
@@ -124,9 +124,10 @@ export function isAutoNamedSession(title: string | null | undefined): boolean {
 
 /**
  * Normalize a thread's stored model preference: blank / whitespace / the legacy
- * 'openswan' sentinel become DEFAULT_CHAT_MODEL ('auto'); any other value is
- * returned unchanged (original casing/whitespace preserved). null/undefined/
- * non-string input yields DEFAULT_CHAT_MODEL. Never throws.
+ * 'openswan' sentinel become DEFAULT_CHAT_MODEL ('claude-sonnet-4-6'); any
+ * other value is returned unchanged (original casing/whitespace preserved),
+ * including an explicitly stored 'auto'. null/undefined/non-string input
+ * yields DEFAULT_CHAT_MODEL. Never throws.
  */
 export function normalizeThreadModelPreference(model: string | null | undefined): string {
   const raw = typeof model === 'string' ? model : '';

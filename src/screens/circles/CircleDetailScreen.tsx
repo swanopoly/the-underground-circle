@@ -177,6 +177,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   // Circle-scoped global search modal state. Effect hooks that depend on
   // setActiveTab are declared below, after setActiveTab itself.
   const [searchOpen, setSearchOpen] = useState(false);
+  const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
   const setActiveTab = useCallback((tab: Tab) => {
     setActiveTabRaw(tab);
     saveTab(circleId, tab);
@@ -227,7 +228,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     // correct tab is active before the target modal tries to render.
     const onSwitchTab = (e: any) => {
       const target = normalizeTabKey((e?.detail?.tab || '').toString());
-      if (target) setActiveTab(target);
+      if (!target) return;
+      const marketplaceItemId = typeof e?.detail?.marketplaceItemId === 'string'
+        ? e.detail.marketplaceItemId.trim()
+        : '';
+      if (target === 'INTEGRATIONS' && marketplaceItemId) {
+        setMarketplaceFocus({ itemId: marketplaceItemId, groupKey: null, ts: Date.now() });
+      }
+      setActiveTab(target);
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('uc:toggle-search', onToggle as any);
@@ -257,7 +265,6 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   // Chat pop-out state — renders FloatingChat overlay that persists across tabs
   const [chatPopout, setChatPopout] = useState(false);
   const [chatMountKey, setChatMountKey] = useState(0);
-  const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
 
   // Loading gate: show the screen as soon as circle data is ready. Do NOT
   // block on OfficeTab — it runs ~18 queries + realtime subscriptions and

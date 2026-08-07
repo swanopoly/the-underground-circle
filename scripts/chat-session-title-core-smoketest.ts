@@ -16,8 +16,9 @@
  *   a real title is not; bare 'openswan' is not.
  *
  *   MODEL PREF (normalizeThreadModelPreference): blank / whitespace / the
- *   legacy 'openswan' sentinel -> DEFAULT_CHAT_MODEL ('auto'); any other value
- *   passes through with original casing/whitespace preserved.
+ *   legacy 'openswan' sentinel -> DEFAULT_CHAT_MODEL
+ *   ('claude-sonnet-4-6'); any other value (including explicit 'auto') passes
+ *   through with original casing/whitespace preserved.
  *
  *   And: deterministic (no Date.now/Math.random), output bounded, and every
  *   export is total — degenerate/hostile input never throws.
@@ -62,7 +63,7 @@ const SESSION_TITLE_MAX = 120;
 function main(): void {
   // (1) constants + shared invariants
   assertEq(SESSION_FALLBACK_TITLE, 'OpenSwan Session', 'SESSION_FALLBACK_TITLE value');
-  assertEq(DEFAULT_CHAT_MODEL, 'auto', 'DEFAULT_CHAT_MODEL value');
+  assertEq(DEFAULT_CHAT_MODEL, 'claude-sonnet-4-6', 'DEFAULT_CHAT_MODEL value');
   assert(TITLE_STOP_WORDS instanceof Set, 'TITLE_STOP_WORDS is a Set');
   assertEq(TITLE_STOP_WORDS.size, 31, 'TITLE_STOP_WORDS has the expected stop words');
   assert(TITLE_STOP_WORDS.has('the') && TITLE_STOP_WORDS.has('please') && TITLE_STOP_WORDS.has('build'), 'stop words include filler tokens');
@@ -116,14 +117,14 @@ function main(): void {
   assert(!isAutoNamedSession('openswan'), 'bare "openswan" is NOT auto-named (precision)');
   assert(!isAutoNamedSession('OpenSwan Session Two'), 'suffixed fallback is NOT auto-named');
 
-  // (6) normalizeThreadModelPreference — sentinel -> auto, else passthrough
-  assertEq(normalizeThreadModelPreference(''), DEFAULT_CHAT_MODEL, 'empty pref -> auto');
-  assertEq(normalizeThreadModelPreference('   '), DEFAULT_CHAT_MODEL, 'whitespace pref -> auto');
-  assertEq(normalizeThreadModelPreference(null), DEFAULT_CHAT_MODEL, 'null pref -> auto');
-  assertEq(normalizeThreadModelPreference(undefined), DEFAULT_CHAT_MODEL, 'undefined pref -> auto');
-  assertEq(normalizeThreadModelPreference('openswan'), DEFAULT_CHAT_MODEL, 'legacy openswan sentinel -> auto');
-  assertEq(normalizeThreadModelPreference('OpenSwan'), DEFAULT_CHAT_MODEL, 'cased openswan sentinel -> auto');
-  assertEq(normalizeThreadModelPreference('  openswan  '), DEFAULT_CHAT_MODEL, 'padded openswan sentinel -> auto');
+  // (6) normalizeThreadModelPreference — unconfigured/legacy -> Sonnet, else passthrough
+  assertEq(normalizeThreadModelPreference(''), DEFAULT_CHAT_MODEL, 'empty pref -> Sonnet default');
+  assertEq(normalizeThreadModelPreference('   '), DEFAULT_CHAT_MODEL, 'whitespace pref -> Sonnet default');
+  assertEq(normalizeThreadModelPreference(null), DEFAULT_CHAT_MODEL, 'null pref -> Sonnet default');
+  assertEq(normalizeThreadModelPreference(undefined), DEFAULT_CHAT_MODEL, 'undefined pref -> Sonnet default');
+  assertEq(normalizeThreadModelPreference('openswan'), DEFAULT_CHAT_MODEL, 'legacy openswan sentinel -> Sonnet default');
+  assertEq(normalizeThreadModelPreference('OpenSwan'), DEFAULT_CHAT_MODEL, 'cased openswan sentinel -> Sonnet default');
+  assertEq(normalizeThreadModelPreference('  openswan  '), DEFAULT_CHAT_MODEL, 'padded openswan sentinel -> Sonnet default');
   assertEq(normalizeThreadModelPreference('auto'), 'auto', 'auto pref passes through');
   assertEq(normalizeThreadModelPreference('gpt-4o'), 'gpt-4o', 'model id passes through');
   assertEq(normalizeThreadModelPreference('GPT-4o'), 'GPT-4o', 'original casing preserved on passthrough');
@@ -183,8 +184,8 @@ function main(): void {
   assertEq(typeof formatSessionTitleWord(null as unknown as string), 'string', 'format always returns a string');
   assertEq(isAutoNamedSession(123 as unknown as string), true, 'non-string title treated as unnamed');
   assertEq(isAutoNamedSession({} as unknown as string), true, 'object title treated as unnamed');
-  assertEq(normalizeThreadModelPreference(123 as unknown as string), DEFAULT_CHAT_MODEL, 'non-string pref -> auto');
-  assertEq(normalizeThreadModelPreference([] as unknown as string), DEFAULT_CHAT_MODEL, 'array pref -> auto');
+  assertEq(normalizeThreadModelPreference(123 as unknown as string), DEFAULT_CHAT_MODEL, 'non-string pref -> Sonnet default');
+  assertEq(normalizeThreadModelPreference([] as unknown as string), DEFAULT_CHAT_MODEL, 'array pref -> Sonnet default');
   assertEq(typeof normalizeThreadModelPreference(Symbol('m') as unknown as string), 'string', 'normalize always returns a string');
 
   if (failures > 0) {

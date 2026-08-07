@@ -354,11 +354,16 @@ import {
   getMemoryFamilyLabel,
 } from '../../../lib/chatMemoryLabelCore';
 import {
+  DEFAULT_CHAT_MODEL,
   deriveSessionTitleFromMessage,
   isAutoNamedSession,
   normalizeThreadModelPreference,
 } from '../../../lib/chatSessionTitleCore';
 import { autoModelDisplayName } from '../../../lib/chatModelDisplayCore';
+import {
+  getLLMProxyCredentialRecoveryPresentation,
+  LLMProxyInvocationError,
+} from '../../../lib/llmProxyErrorCore';
 import { decayMemoryImportance, pinMemory, promoteMemory, recordMemoryFeedback, softDeleteMemory } from '../../../lib/memoryActions';
 import {
   getLatestSpiritResearchReferences,
@@ -475,7 +480,7 @@ import {
   normalizeComputerTaskOutcomeStatus,
   type ComputerTaskOutcomeStatus,
 } from '../../../lib/computerTaskOutcome';
-import { listApiKeys } from '../../../lib/llmProviders';
+import { listApiKeys, subscribeUserApiKeyChanges } from '../../../lib/llmProviders';
 import { isPendingClarificationFresh } from '../../../lib/chatSessionResumptionCore';
 import {
   buildImplicitBusinessModelProfiles,
@@ -557,12 +562,62 @@ const LEGACY_EPHEMERAL_CHAT_SURFACES = new Set([
 function isLegacyEphemeralChatSurface(surface?: string | null): boolean {
   return LEGACY_EPHEMERAL_CHAT_SURFACES.has(String(surface || '').trim());
 }
-// Auto is the default — the runtime resolver in serviceProfileSouls
-// picks Haiku for casual / status / clarifying turns, Sonnet for
-// general code + design, and Opus for research / architecture / deep
-// debugging. Pinning a static Sonnet default meant Auto was almost
-// never engaged and users paid Sonnet rates for "hi" and "thanks".
-const DEFAULT_CHAT_MODEL = 'auto';
+
+type PlainChatFailurePresentation = {
+  message: string;
+  quickReplies: string[];
+  quickRepliesLabel?: string;
+};
+
+function buildPlainChatFailurePresentation(
+  error: unknown,
+  modelLabel: string,
+): PlainChatFailurePresentation {
+  const credentialRecovery = error instanceof LLMProxyInvocationError
+    ? getLLMProxyCredentialRecoveryPresentation(error)
+    : null;
+  if (credentialRecovery) {
+    return {
+      message: credentialRecovery.message,
+      quickReplies: [credentialRecovery.actionLabel],
+      quickRepliesLabel: 'Fix model connection',
+    };
+  }
+  return {
+    message: `I couldn't reach ${modelLabel} for that reply. Try again in a moment or choose another model.`,
+    quickReplies: ['Try again'],
+  };
+}
+
+function resolveMarketplaceCredentialAction(reply: string): {
+  handled: boolean;
+  itemId: string | null;
+} {
+  const match = /^(?:connect|reconnect)\s+(.+)$/i.exec(String(reply || '').trim());
+  if (!match) return { handled: false, itemId: null };
+  const itemByLabel: Record<string, string> = {
+    anthropic: 'anthropic',
+    openai: 'openai',
+    openrouter: 'openrouter',
+    groq: 'groq',
+    'google ai': 'google_ai',
+    'mistral ai': 'mistral_ai',
+    cohere: 'cohere',
+    perplexity: 'perplexity',
+    'together ai': 'together_ai',
+    'fireworks ai': 'fireworks_ai',
+    deepseek: 'deepseek',
+    'hugging face': 'hugging_face',
+    'z.ai': 'z_ai',
+    minimax: 'minimax',
+    replicate: 'replicate',
+  };
+  return {
+    handled: true,
+    itemId: itemByLabel[match[1].trim().toLowerCase()] || null,
+  };
+}
+
 function shortenAddress(address: string | null | undefined): string {
   const value = String(address || '');
   if (value.length <= 12) return value;
@@ -1698,6 +1753,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // (for resolving 'auto' → concrete model id with provider bias) need
   // to know which integrations are connected.
   const [marketplaceModelGroups, setMarketplaceModelGroups] = useState<ModelGroup[]>([]);
+  const [modelProviderRefreshToken, setModelProviderRefreshToken] = useState(0);
+  useEffect(
+    () => subscribeUserApiKeyChanges(() => setModelProviderRefreshToken((token) => token + 1)),
+    [],
+  );
   useEffect(() => {
     let cancelled = false;
     if (!circleId) {
@@ -1712,7 +1772,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [circleId, circleInitRetryToken]);
+  }, [circleId, circleInitRetryToken, modelProviderRefreshToken]);
   const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
     return new Set(
       marketplaceModelGroups
@@ -11695,9 +11755,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     // W5 (P39): the second argument carries the interrupted
                     // terminal result (partial toolUses/stopReason) — capture
                     // it so the catch can tell pre-handshake from mid-stream.
-                    onError: (msg, result) => {
+                    onError: (msg, result, structuredError) => {
                       streamInterruptedResult = result;
-                      settleReject(new Error(msg));
+                      settleReject(structuredError || new Error(msg));
                     },
                   });
                   streamHandleCancel = handle.cancel;
@@ -12014,6 +12074,42 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   }
                   return;
                 }
+                // A missing or unreadable Marketplace credential is a stable
+                // user-action boundary, not a transient transport failure.
+                // Retrying the same request through llm-proxy/OpenSwan only
+                // repeats the failure and can start an unrelated recovery
+                // agent. Stop here, remove the empty stream bubble, and send
+                // the user directly to the provider connection.
+                const credentialRecovery = streamErr instanceof LLMProxyInvocationError
+                  ? getLLMProxyCredentialRecoveryPresentation(streamErr)
+                  : null;
+                if (credentialRecovery) {
+                  if (streamPendingMsgId) {
+                    const orphanId = streamPendingMsgId;
+                    setMessages(prev => prev.filter((message) => message.id !== orphanId));
+                    if (activeThreadId) void removePendingBotMessage(activeThreadId, orphanId).catch(() => {});
+                  }
+                  console.warn('[ChatTab] Model credential needs Marketplace reconnect; automatic fallback suppressed:', streamErr);
+                  addBotMessage(credentialRecovery.message, undefined, {
+                    quickReplies: [credentialRecovery.actionLabel],
+                    quickRepliesLabel: 'Fix model connection',
+                    source: {
+                      actor: agentName,
+                      surface: 'main_chat_plain_model_error',
+                      selectedModel,
+                      effectiveModel: streamCandidateModel,
+                    },
+                  });
+                  if (streamingBuildCleanupRef.current === streamHandleCancel) {
+                    streamingBuildCleanupRef.current = null;
+                  }
+                  if (chatUiOwnerRef.current === streamUiOwner) {
+                    setRunStatus('idle');
+                    setBotTyping(false);
+                    stopCodingWorkbench();
+                  }
+                  return;
+                }
                 // P62: pre-handshake failure / zero-text interruption → batch
                 // fallback. Remove the stream's empty pending bubble first —
                 // the batch path creates and resolves its OWN bubble, so the
@@ -12082,12 +12178,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 }
               } catch (plainModelError) {
                 const modelLabel = sendModel || effectiveSelectedModel || 'the selected model';
+                const failure = buildPlainChatFailurePresentation(plainModelError, modelLabel);
                 console.warn('[ChatTab] Plain model greeting failed:', plainModelError);
                 addBotMessage(
-                  `I couldn't reach ${modelLabel} for that reply. Try again in a moment or choose another model.`,
+                  failure.message,
                   undefined,
                   {
-                    quickReplies: ['Try again'],
+                    quickReplies: failure.quickReplies,
+                    quickRepliesLabel: failure.quickRepliesLabel,
                     source: {
                       actor: agentName,
                       surface: 'main_chat_plain_model_error',
@@ -12321,12 +12419,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const batchMessage = batchErr instanceof Error ? batchErr.message : String(batchErr || 'Unknown error');
             const batchStack = batchErr instanceof Error ? batchErr.stack || null : null;
             if (conversationOnlyTurn) {
+              const failure = buildPlainChatFailurePresentation(
+                batchErr,
+                sendModel || effectiveSelectedModel || 'the selected model',
+              );
               console.warn('[ChatTab] Plain greeting failed without starting recovery:', batchErr);
               addBotMessage(
-                `I couldn't reach ${sendModel || effectiveSelectedModel || 'the selected model'} for that reply. Try again in a moment or choose another model.`,
+                failure.message,
                 undefined,
                 {
-                  quickReplies: ['Try again'],
+                  quickReplies: failure.quickReplies,
+                  quickRepliesLabel: failure.quickRepliesLabel,
                   source: {
                     actor: agentName,
                     surface: 'main_chat_plain_model_error',
@@ -12413,12 +12516,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const chatErrorMessage = err instanceof Error ? err.message : String(err || 'Unknown error');
         const chatErrorStack = err instanceof Error ? err.stack || null : null;
         if (conversationOnlyTurn) {
+          const failure = buildPlainChatFailurePresentation(
+            err,
+            effectiveSelectedModel || 'the selected model',
+          );
           console.warn('[ChatTab] Greeting setup failed without starting recovery:', err);
           addBotMessage(
-            `I couldn't reach ${effectiveSelectedModel || 'the selected model'} for that reply. Try again in a moment or choose another model.`,
+            failure.message,
             undefined,
             {
-              quickReplies: ['Try again'],
+              quickReplies: failure.quickReplies,
+              quickRepliesLabel: failure.quickRepliesLabel,
               source: {
                 actor: agentName,
                 surface: 'main_chat_plain_model_error',
@@ -12517,12 +12625,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         && stagedFiles.length === 0
         && isConversationOnlyTurn(boundaryMessage);
       if (boundaryConversationOnly) {
+        const failure = buildPlainChatFailurePresentation(
+          error,
+          selectedModel || 'the selected model',
+        );
         console.warn('[ChatTab] Greeting send boundary failed without starting recovery:', error);
         addBotMessage(
-          `I couldn't reach ${selectedModel || 'the selected model'} for that reply. Try again in a moment or choose another model.`,
+          failure.message,
           undefined,
           {
-            quickReplies: ['Try again'],
+            quickReplies: failure.quickReplies,
+            quickRepliesLabel: failure.quickRepliesLabel,
             source: {
               actor: agentName,
               surface: 'main_chat_plain_model_error',
@@ -14246,7 +14359,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 replies={item.quickReplies}
                 accentColor={accentColor}
                 label={item.quickRepliesLabel || undefined}
-                onPick={(reply) => { void sendMessage(reply); }}
+                onPick={(reply) => {
+                  const marketplaceAction = resolveMarketplaceCredentialAction(reply);
+                  if (marketplaceAction.handled) {
+                    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                      try {
+                        window.dispatchEvent(new CustomEvent('uc:switch-tab', {
+                          detail: {
+                            tab: 'INTEGRATIONS',
+                            marketplaceItemId: marketplaceAction.itemId,
+                          },
+                        }));
+                      } catch {}
+                    } else {
+                      goTab('INTEGRATIONS');
+                    }
+                    return;
+                  }
+                  void sendMessage(reply);
+                }}
               />
             ) : null}
             {!isInactiveDesignTaskMessage(item)

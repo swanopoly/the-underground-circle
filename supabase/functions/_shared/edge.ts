@@ -67,6 +67,15 @@ export async function getAuthenticatedUser(req: Request) {
 
 export type ApiKeySource = "request" | "user" | "platform";
 
+/**
+ * Credential source policy for server-side model calls.
+ *
+ * `user_then_platform` preserves the legacy owner/test fallback behavior.
+ * Public BYOK surfaces should opt into `user_required` so an authenticated
+ * user's request can never silently spend a platform credential.
+ */
+export type CredentialPolicy = "user_required" | "user_then_platform";
+
 export interface ResolvedApiKey {
   apiKey: string;
   endpoint?: string | null;
@@ -82,8 +91,8 @@ export interface ResolvedApiKey {
 export class StoredApiKeyLookupError extends Error {
   readonly code = "credential_unreadable" as const;
 
-  constructor() {
-    super("A saved provider credential could not be read. Re-enter or reconnect it in Office > Customize > API Keys.");
+  constructor(provider?: string) {
+    super(byokUnreadableMessage(provider));
     this.name = "StoredApiKeyLookupError";
   }
 }
@@ -136,14 +145,21 @@ export function providerDisplayName(provider: string): string {
 }
 
 export function byokMissingMessage(provider: string): string {
-  return `Add your own ${providerDisplayName(provider)} API key in Office > Customize > API Keys to use this model. Platform model keys are reserved for owner/test accounts.`;
+  return `Connect your ${providerDisplayName(provider)} API key in Marketplace → Models, then retry.`;
+}
+
+export function byokUnreadableMessage(provider?: string): string {
+  const credential = provider
+    ? `saved ${providerDisplayName(provider)} API key`
+    : "saved provider API key";
+  return `Your ${credential} could not be read. Replace it in Marketplace → Models, then retry.`;
 }
 
 export async function getUserStoredApiKey(
   supabase: any,
   userId: string,
   provider: string,
-  label = "default",
+  label: string | null = "default",
 ): Promise<{ apiKey: string; endpoint?: string | null } | null> {
   const { data, error } = await supabase.rpc("get_user_api_key", {
     p_user_id: userId,
@@ -151,7 +167,7 @@ export async function getUserStoredApiKey(
     p_label: label,
   });
 
-  if (error) throw new StoredApiKeyLookupError();
+  if (error) throw new StoredApiKeyLookupError(provider);
   if (!data) return null;
   const row = Array.isArray(data) ? data[0] : data;
   if (typeof row === "string" && row.trim()) return { apiKey: row.trim() };
@@ -166,9 +182,12 @@ export async function resolveUserModelApiKey(opts: {
   userId: string;
   provider: string;
   storageProvider?: string;
-  label?: string;
+  /** Omitted selects `default`; explicit null selects the latest active row. */
+  label?: string | null;
   requestApiKey?: string | null;
   envVarName?: string;
+  /** Defaults to the legacy user-first, allowlisted-platform-fallback policy. */
+  credentialPolicy?: CredentialPolicy;
   /**
    * Opt-in while callers migrate to a structured credential-health response.
    * Legacy functions keep their prior null/missing behavior instead of
@@ -181,6 +200,8 @@ export async function resolveUserModelApiKey(opts: {
     return { apiKey: requestKey, source: "request" };
   }
 
+  const credentialPolicy = opts.credentialPolicy ?? "user_then_platform";
+  const lookupLabel = opts.label === undefined ? "default" : opts.label;
   let stored: { apiKey: string; endpoint?: string | null } | null = null;
   let storedLookupError: StoredApiKeyLookupError | null = null;
   try {
@@ -188,15 +209,22 @@ export async function resolveUserModelApiKey(opts: {
       opts.supabase,
       opts.userId,
       opts.storageProvider || opts.provider,
-      opts.label || "default",
+      lookupLabel,
     );
   } catch (error) {
-    if (error instanceof StoredApiKeyLookupError) storedLookupError = error;
-    else throw error;
+    if (!(error instanceof StoredApiKeyLookupError)) throw error;
+    // A user-required call must surface damaged/unreadable ciphertext now. It
+    // must not inspect a platform environment variable or hide the condition
+    // behind an owner/test fallback.
+    if (credentialPolicy === "user_required") throw error;
+    storedLookupError = error;
   }
   if (stored?.apiKey) {
     return { ...stored, source: "user" };
   }
+
+  // This return intentionally precedes every Deno.env/platform-key read.
+  if (credentialPolicy === "user_required") return null;
 
   const platformKey = opts.envVarName ? Deno.env.get(opts.envVarName) : null;
   if (platformKey && canUsePlatformModelKey(opts.userId)) {

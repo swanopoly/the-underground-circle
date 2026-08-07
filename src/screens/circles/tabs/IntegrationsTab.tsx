@@ -36,6 +36,12 @@ import { getCircleDiscordConfig } from '../../../lib/discord';
 import { getSlackConfig } from '../../../lib/slack';
 import { supabase } from '../../../lib/supabase';
 import { loadCircleSiteCredentials, loadSiteCredentials, type SiteCredential } from '../../../lib/siteAutomation';
+import {
+  notifyUserApiKeyChanges,
+  storeApiKey,
+  testApiKey,
+  testStoredApiKey,
+} from '../../../lib/llmProviders';
 import { getTeamsConfig } from '../../../lib/teams';
 import DiscordTab from './DiscordTab';
 import GitHubTab from './GitHubTab';
@@ -630,6 +636,53 @@ function GenericIntegrationManager({
     setSaving(true);
     setMessage('');
     try {
+      // Anthropic Chat is a personal BYOK connection. Validate the submitted
+      // key, store it only in the signed-in user's encrypted model-key vault,
+      // then prove the stored ciphertext can be read by the exact Chat path.
+      // Do not duplicate a personal Anthropic key into circle-wide integration
+      // secrets where another circle manager could later reveal it.
+      if (provider === 'anthropic') {
+        const apiKey = getMarketplaceProviderUserApiSecret(provider, secrets);
+        if (!apiKey) {
+          setMessage('Paste a fresh Anthropic API key to connect or replace this Chat credential.');
+          return;
+        }
+
+        const submittedProbe = await testApiKey(
+          'anthropic',
+          apiKey,
+          undefined,
+          'claude-sonnet-4-6',
+        );
+        if (!submittedProbe.success) {
+          setMessage(`Anthropic rejected the key: ${submittedProbe.error || 'validation failed'}. Nothing was saved.`);
+          return;
+        }
+
+        const stored = await storeApiKey('anthropic', apiKey, 'default', undefined, { notify: false });
+        if (stored.error) {
+          setMessage(`Anthropic key validation passed, but encrypted Marketplace storage failed: ${stored.error}`);
+          return;
+        }
+
+        const storedProbe = await testStoredApiKey(
+          'anthropic',
+          'claude-sonnet-4-6',
+          circleId,
+        );
+        if (!storedProbe.success) {
+          setMessage(`Anthropic was saved, but Chat could not read the stored connection: ${storedProbe.error || 'stored-key validation failed'}. Replace the key and try once more.`);
+          onRefresh();
+          return;
+        }
+
+        setSecrets({});
+        notifyUserApiKeyChanges();
+        setMessage('Anthropic connected. Claude Sonnet 4.6 was verified through your signed-in Marketplace credential.');
+        onRefresh();
+        return;
+      }
+
       const integration = await connectGenericCircleIntegration({
         circleId,
         provider,
@@ -701,11 +754,15 @@ function GenericIntegrationManager({
           <Text style={styles.detailSummaryText}>
             {provider === 'brave'
               ? 'Enter the Brave Search API key here. Saving writes the circle integration and syncs the key into your encrypted user key vault so chat can run current web searches server-side.'
+              : provider === 'anthropic'
+              ? 'Enter your Anthropic API key here. Saving validates Claude Sonnet first, stores the key only in your encrypted user model-key vault, then verifies that Chat can read and use the stored connection.'
               : 'Enter the provider key in this setup form. Saving writes the circle integration and encrypted secrets to the database, then syncs the key into your encrypted user model key vault.'}
           </Text>
           <Text style={styles.detailSummaryText}>
             {provider === 'brave'
               ? 'This provider is wired for direct chat search and research tool usage.'
+              : provider === 'anthropic'
+              ? 'This is a personal BYOK connection for your signed-in account; it is not copied into circle-wide integration secrets.'
               : modelProviderChatReady
               ? 'This provider is wired for direct chat and agent usage.'
               : userApiProvider === 'replicate'
@@ -864,7 +921,9 @@ function GenericIntegrationManager({
       </View>
 
       <Pressable onPress={handleSave} style={[styles.genericSaveBtn, { borderColor: accentColor + '55', backgroundColor: accentColor + '18' }, saving && { opacity: 0.6 }]}>
-        <Text style={[styles.genericSaveBtnText, { color: accentColor }]}>{saving ? 'Saving...' : `Save ${definition.label}`}</Text>
+        <Text style={[styles.genericSaveBtnText, { color: accentColor }]}>
+          {saving ? 'Saving...' : provider === 'anthropic' ? 'Save & verify Anthropic' : `Save ${definition.label}`}
+        </Text>
       </Pressable>
 
       {message ? <Text style={styles.genericStatus}>{message}</Text> : null}
@@ -1420,10 +1479,9 @@ export default function MarketplaceTab({
           </View>
 
           {/* Model providers live in the marketplace card grid below.
-              Select a Models card, open Setup & connect, and save the
-              provider key there. Model keys are also synced to
-              user_api_keys so chat and agents can use the user's own
-              billing account instead of platform keys. */}
+              Personal BYOK credentials are validated and stored in the
+              signed-in user's encrypted model-key vault so Chat bills the
+              user's provider account, not a platform or circle credential. */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
             {([
               { key: 'all', label: 'All' },
@@ -1478,7 +1536,7 @@ export default function MarketplaceTab({
             <View style={styles.modelsKeyHint}>
               <Text style={styles.modelsKeyHintTitle}>Model API keys save to the database</Text>
               <Text style={styles.modelsKeyHintText}>
-                Select a provider card, open Setup & connect, and paste its API key. Saving creates the circle integration, stores encrypted integration secrets, and syncs supported providers into your user model key vault for chat and agents.
+                Select a provider card, open Setup & connect, and paste its API key. Personal Chat keys are validated and stored in your encrypted user model-key vault; circle-wide workflow credentials stay in their separate integration scope.
               </Text>
             </View>
           ) : null}

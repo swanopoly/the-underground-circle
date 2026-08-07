@@ -477,12 +477,14 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
     });
   }
 
-  // Pull the live OpenRouter catalog when the integration is connected so
+  // Pull the live OpenRouter catalog when this signed-in user has a personal
+  // OpenRouter key. A circle integration alone is not a valid credential for
+  // the direct Chat proxy and must never make a model look ready.
   // the picker reflects the real ~200-model lineup (and current prices)
   // rather than a stale 10-item shortlist. Catalog is public, so no auth
   // is needed — we only fetch when the team has actually connected the
   // integration to keep the request budget tight.
-  const openRouterConnected = connectedSet.has('openrouter') || activeUserApiProviders.has('openrouter');
+  const openRouterConnected = activeUserApiProviders.has('openrouter');
   const openRouterModels = openRouterConnected
     ? (await loadLiveOpenRouterCatalog()) || OPENROUTER_MODELS
     : OPENROUTER_MODELS;
@@ -522,7 +524,13 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
       : entry.provider === 'replicate' ? 'replicate'
       : entry.provider === 'openrouter' ? 'openrouter'
       : null;
-    const isConnected = connectedSet.has(entry.provider) || (userProvider ? activeUserApiProviders.has(userProvider as LLMProvider) : false);
+    // These groups route through the authenticated user's model proxy. Keep
+    // circle-shared integration readiness out of this decision; otherwise the
+    // picker advertises a usable model that the exact user credential lookup
+    // cannot call.
+    const isConnected = userProvider
+      ? activeUserApiProviders.has(userProvider as LLMProvider)
+      : connectedSet.has(entry.provider);
     const degradedReason = degradedMessages.get(entry.provider);
     const isDegraded = !isConnected && !!degradedReason;
     if (!isConnected && !isDegraded && !opts.includeDisconnected) continue;

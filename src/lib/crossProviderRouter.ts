@@ -417,7 +417,7 @@ export function resolvePlainChatModelRoute(
 ): PlainChatModelRoute | null {
   const normalized = String(modelId || '').trim();
   if (!normalized || normalized === 'auto') {
-    return { provider: 'anthropic', model: 'claude-haiku-4-5' };
+    return { provider: 'anthropic', model: 'claude-sonnet-4-6' };
   }
 
   if (/^claude-/i.test(normalized)) return { provider: 'anthropic', model: normalized };

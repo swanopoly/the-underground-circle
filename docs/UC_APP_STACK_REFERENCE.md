@@ -253,8 +253,12 @@ OpenSwan saved automations, specialized Chat/OpenSwan mode runs,
   execution path for Custom API marketplace connectors; OpenSwan tools call it
   instead of exposing saved API secrets to the model/client.
 - `supabase/functions/llm-proxy/index.ts` calls OpenAI-compatible providers and
-  Anthropic branches with user-stored keys. An unreadable stored ciphertext is
-  fail-visible as `credential_unreadable`, not misreported as a missing key.
+  Anthropic branches with user-owned keys. Its authenticated public dispatches
+  and `chat-stream` opt into `_shared/edge.ts` `user_required` policy, so they
+  never inspect or spend a platform environment key. Missing rows remain
+  `key_missing`; failed stored-key lookup/decryption is
+  `credential_unreadable`. Other shared-helper callers retain their explicit
+  policy until migrated.
 - `supabase/functions/swanbot-ai/index.ts` can relay marketplace-prefixed
   models with tools.
 - `src/lib/billingPriority.ts` controls provider preference modes:
@@ -268,6 +272,16 @@ stay on plain Chat even when the saved toggle is on. A search-provider failure
 adds a bounded not-web-verified notice and continues through the canonical Chat
 transport once; it does not create a failed action receipt or connected-agent
 repair card.
+
+The 2026-08-07 Chat/Marketplace source contract makes
+`claude-sonnet-4-6` the default for future or unconfigured threads without
+backfilling existing rows; an explicit `auto` preference still invokes model
+resolution. A `key_missing` or `credential_unreadable` response stops
+same-turn stream/proxy retries and gives the user a focused Marketplace model
+connect/reconnect action. Anthropic setup first probes the submitted key, then
+stores it only in the signed-in user's encrypted model-key vault, and finally
+probes the stored credential through `llm-proxy`; the UI reports Connected only
+after both checks pass.
 
 ## Computer Use Flow
 

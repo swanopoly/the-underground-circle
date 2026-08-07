@@ -13,6 +13,7 @@ import {
 } from "../_claude/anthropic.ts";
 import {
   byokMissingMessage,
+  byokUnreadableMessage,
   createServiceRoleClient,
   getAuthenticatedUser,
   resolveUserModelApiKey,
@@ -68,7 +69,7 @@ function mapUpstreamError(error: unknown): Response {
     return errResponse(
       409,
       "credential_unreadable",
-      "A saved provider credential could not be read. Re-enter or reconnect it in Office > Customize > API Keys.",
+      byokUnreadableMessage(),
     );
   }
   if (error instanceof UpstreamFailure) {
@@ -923,8 +924,8 @@ Deno.serve(async (req: Request) => {
         userId,
         provider: "openai",
         requestApiKey: body.api_key,
-        envVarName: "OPENAI_API_KEY",
-        failOnStoredLookupError: true,
+        label: null,
+        credentialPolicy: "user_required",
       });
       if (!embedKey) {
         return errResponse(
@@ -966,20 +967,13 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const envVarName = provider === "anthropic"
-      ? "ANTHROPIC_API_KEY"
-      : provider === "zai"
-      ? "ZAI_API_KEY"
-      : provider === "minimax"
-      ? "MINIMAX_API_KEY"
-      : undefined;
     const keyData = await resolveUserModelApiKey({
       supabase,
       userId,
       provider,
       requestApiKey: body.api_key,
-      envVarName,
-      failOnStoredLookupError: true,
+      label: null,
+      credentialPolicy: "user_required",
     });
     if (!keyData) {
       return errResponse(400, "key_missing", byokMissingMessage(provider));

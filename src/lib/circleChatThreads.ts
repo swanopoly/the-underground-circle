@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { DEFAULT_CHAT_MODEL } from './chatSessionTitleCore';
 import { supabase } from './supabase';
 import { subscribeWithReconnect } from './subscribeWithReconnect';
 
@@ -122,7 +123,7 @@ export async function createPrivateThread(
   const { data: threadId, error: rpcError } = await supabase.rpc('create_private_chat_thread', {
     p_circle_id: circleId,
     p_title: trimmedTitle,
-    p_default_model: 'auto',
+    p_default_model: DEFAULT_CHAT_MODEL,
   });
 
   if (!rpcError && threadId) {
@@ -139,7 +140,7 @@ export async function createPrivateThread(
       created_by: auth.user.id,
       title: trimmedTitle,
       visibility: 'private',
-      default_model: 'auto',
+      default_model: DEFAULT_CHAT_MODEL,
     })
     .select('*')
     .single();
@@ -159,7 +160,7 @@ export async function renameThread(threadId: string, title: string): Promise<voi
 }
 
 export async function updateThreadDefaultModel(threadId: string, defaultModel: string | null): Promise<void> {
-  const nextModel = defaultModel?.trim() || 'auto';
+  const nextModel = defaultModel?.trim() || DEFAULT_CHAT_MODEL;
   const { error } = await supabase
     .from('circle_chat_threads')
     .update({ default_model: nextModel, updated_at: new Date().toISOString() })

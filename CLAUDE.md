@@ -205,6 +205,19 @@ Provider failures keep stable public codes across the Edge/browser boundary.
 stored ciphertext or key-version problem and directs the owner to reconnect or
 re-enter the credential, never to a connected code-repair agent.
 
+The 2026-08-07 plain-Chat credential contract is user-owned BYOK end to end.
+Future or unconfigured threads default to `claude-sonnet-4-6`; an explicitly
+stored `auto` remains `auto`, and the forward migration does not rewrite
+existing thread rows. Authenticated `chat-stream` and public `llm-proxy`
+dispatches require the signed-in user's Marketplace credential and cannot fall
+through to a platform environment key. `key_missing` and
+`credential_unreadable` are terminal setup states for that turn: Chat does not
+repeat the same call through another transport, and instead opens the matching
+Marketplace model connection. Anthropic connect/reconnect validates the
+submitted key before saving, stores it only in the user's encrypted model-key
+vault, then validates the stored/decrypted credential through the same
+`llm-proxy` route Chat uses before reporting success.
+
 Model IDs may be provider-prefixed, such as `openrouter/auto`,
 `google_ai/gemini-2.5-pro`, `deepseek/deepseek-reasoner`, or
 `huggingface_endpoint/cswan801/BlackSwan-v5`. Normalize aliases carefully:

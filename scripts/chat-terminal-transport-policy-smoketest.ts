@@ -83,6 +83,11 @@ assertEqual(
   'plain model route: native Claude stays on Anthropic',
 );
 assertEqual(
+  resolvePlainChatModelRoute('auto'),
+  { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+  'plain model route: Auto resolves to the explicit Sonnet default',
+);
+assertEqual(
   resolvePlainChatModelRoute('openrouter/anthropic/claude-sonnet-4.6'),
   { provider: 'openrouter', model: 'openrouter/anthropic/claude-sonnet-4.6' },
   'plain model route: OpenRouter selection stays on OpenRouter',

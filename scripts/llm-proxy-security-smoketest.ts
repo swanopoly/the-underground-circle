@@ -85,20 +85,49 @@ check(
   "imports the typed unreadable-credential boundary",
 );
 check(
-  /if \(error instanceof StoredApiKeyLookupError\) \{\s*return errResponse\(\s*409,\s*"credential_unreadable",\s*"A saved provider credential could not be read\./s.test(source),
+  source.includes("byokUnreadableMessage,"),
+  "uses the shared Marketplace recovery copy",
+);
+check(
+  /if \(error instanceof StoredApiKeyLookupError\) \{\s*return errResponse\(\s*409,\s*"credential_unreadable",\s*byokUnreadableMessage\(\)/s.test(source),
   "unreadable ciphertext is distinct from a missing provider key",
 );
 check(
-  sharedEdgeSource.includes("if (error) throw new StoredApiKeyLookupError();"),
+  sharedEdgeSource.includes("if (error) throw new StoredApiKeyLookupError(provider);"),
   "stored-key RPC failures never collapse to an absent key",
 );
-ordered(sharedEdgeSource, [
-  "if (platformKey && canUsePlatformModelKey(opts.userId))",
-  "if (storedLookupError && opts.failOnStoredLookupError === true) throw storedLookupError",
-], "owner/test platform fallback remains available before surfacing stored-key corruption");
 check(
-  (source.match(/failOnStoredLookupError: true/g) || []).length === 2,
-  "both llm-proxy credential lookups opt into fail-visible ciphertext errors",
+  sharedEdgeSource.includes(
+    'export type CredentialPolicy = "user_required" | "user_then_platform";',
+  ),
+  "credential source policy is explicit",
+);
+const credentialResolver = sharedEdgeSource.slice(
+  sharedEdgeSource.indexOf("export async function resolveUserModelApiKey("),
+  sharedEdgeSource.indexOf("/**\n * True if `userId` belongs", sharedEdgeSource.indexOf("export async function resolveUserModelApiKey(")),
+);
+ordered(credentialResolver, [
+  'const credentialPolicy = opts.credentialPolicy ?? "user_then_platform"',
+  'const lookupLabel = opts.label === undefined ? "default" : opts.label',
+  'if (credentialPolicy === "user_required") throw error',
+  'if (credentialPolicy === "user_required") return null',
+  "const platformKey = opts.envVarName ? Deno.env.get(opts.envVarName) : null",
+], "user-required lookup fails visibly and exits before platform environment access");
+check(
+  (source.match(/credentialPolicy: "user_required"/g) || []).length === 2,
+  "both public llm-proxy credential lookups require the authenticated user's key",
+);
+check(
+  (source.match(/label: null/g) || []).length === 2,
+  "both public llm-proxy lookups select the latest active exact-provider key",
+);
+check(
+  !source.includes("envVarName"),
+  "public llm-proxy never offers a platform environment-key fallback",
+);
+check(
+  sharedEdgeSource.includes("Marketplace → Models"),
+  "credential recovery copy points to the current Marketplace model surface",
 );
 
 const membership = section(

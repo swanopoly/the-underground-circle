@@ -75,6 +75,20 @@ export interface LLMProxyResponse {
 
 export type ThinkingLevel = 'fast' | 'balanced' | 'deep';
 
+const userApiKeyChangeListeners = new Set<() => void>();
+
+/** Subscribe to same-runtime Marketplace key changes (web and native). */
+export function subscribeUserApiKeyChanges(listener: () => void): () => void {
+  userApiKeyChangeListeners.add(listener);
+  return () => { userApiKeyChangeListeners.delete(listener); };
+}
+
+export function notifyUserApiKeyChanges(): void {
+  for (const listener of userApiKeyChangeListeners) {
+    try { listener(); } catch { /* observers must not break credential writes */ }
+  }
+}
+
 // ─── Model catalogs per provider ────────────────────────────────────────────
 
 export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
@@ -255,6 +269,7 @@ export async function storeApiKey(
   apiKey: string,
   label?: string,
   endpoint?: string,
+  options: { notify?: boolean } = {},
 ): Promise<{ id?: string; error?: string }> {
   const { data, error } = await supabase.rpc('store_user_api_key', {
     p_provider: provider,
@@ -264,6 +279,7 @@ export async function storeApiKey(
   });
 
   if (error) return { error: error.message };
+  if (options.notify !== false) notifyUserApiKeyChanges();
   return { id: data };
 }
 
@@ -284,6 +300,7 @@ export async function listApiKeys(): Promise<ProviderKey[]> {
 
 export async function deleteApiKey(keyId: string): Promise<{ error?: string }> {
   const { error } = await supabase.rpc('delete_user_api_key', { p_key_id: keyId });
+  if (!error) notifyUserApiKeyChanges();
   return error ? { error: error.message } : {};
 }
 
@@ -314,6 +331,37 @@ export async function testApiKey(
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Verify the credential after it has been stored, without sending the raw key
+ * again. This exercises the same authenticated user-key lookup and decryption
+ * boundary that Chat uses, so Marketplace cannot call a key "Connected" only
+ * because the provider accepted the pre-save probe.
+ */
+export async function testStoredApiKey(
+  provider: LLMProvider,
+  modelOverride?: string,
+  circleId?: string,
+): Promise<{ success: boolean; error?: string }> {
+  if (shouldBlockExternalAiProvider(provider)) {
+    return { success: false, error: getStrictLocalAiModeMessage(provider) };
+  }
+  try {
+    await invokeLLMProxy({
+      provider,
+      model: modelOverride || getDefaultModel(provider),
+      messages: [{ role: 'user', content: 'Say "ok" in one word.' }],
+      circleId,
+      maxTokens: 5,
+    });
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Stored credential validation failed.',
+    };
   }
 }
 
@@ -357,9 +405,11 @@ export async function invokeLLMProxy(params: {
     },
   });
 
-  if (error) throw new LLMProxyInvocationError(await readLLMProxyInvokeError(error));
+  if (error) throw new LLMProxyInvocationError(await readLLMProxyInvokeError(error, params.provider));
   if (data?.error) {
-    throw new LLMProxyInvocationError(normalizeLLMProxyErrorPayload(data, data.error));
+    throw new LLMProxyInvocationError(
+      normalizeLLMProxyErrorPayload(data, data.error, undefined, params.provider),
+    );
   }
   return data as LLMProxyResponse;
 }

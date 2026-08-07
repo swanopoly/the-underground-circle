@@ -19,6 +19,10 @@
 
 import { supabase } from './supabase';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
+import {
+  LLMProxyInvocationError,
+  normalizeLLMProxyErrorResponseText,
+} from './llmProxyErrorCore';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 
@@ -117,9 +121,16 @@ export interface StreamChatOpts {
    * text was already delivered via `onDelta`. The optional second argument
    * carries the interrupted terminal result (partial `toolUses`/`stopReason`,
    * `incomplete:true`) so a caller can inspect what it got before falling back.
+   * A pre-stream HTTP failure may also provide a structured third argument;
+   * direct chat-stream requests use `LLMProxyInvocationError` so callers can
+   * inspect safe code/status/provider metadata without parsing display copy.
    * Existing callers that take only `message` are unaffected.
    */
-  onError: (message: string, result?: StreamChatResult) => void;
+  onError: (
+    message: string,
+    result?: StreamChatResult,
+    error?: LLMProxyInvocationError,
+  ) => void;
 }
 
 export interface StreamHandle {
@@ -255,10 +266,10 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
    * and it's the layer the caller/SDK retries normally. Guarded so a later
    * terminal can't double-fire.
    */
-  const finishPreStreamError = (message: string) => {
+  const finishPreStreamError = (message: string, error?: LLMProxyInvocationError) => {
     if (settled) return;
     settled = true;
-    opts.onError(message);
+    opts.onError(message, undefined, error);
     resolveDone(null);
   };
 
@@ -301,13 +312,14 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
       });
 
       if (!res.ok) {
-        const errText = await res.text().catch(() => `HTTP ${res.status}`);
-        try {
-          const parsed = JSON.parse(errText);
-          finishPreStreamError(String(parsed.error || parsed.message || errText).slice(0, 300));
-        } catch {
-          finishPreStreamError(errText.slice(0, 300));
-        }
+        const errText = await res.text().catch(() => '');
+        const details = normalizeLLMProxyErrorResponseText(
+          errText,
+          `Chat stream request failed (HTTP ${res.status}).`,
+          res.status,
+          'anthropic',
+        );
+        finishPreStreamError(details.message, new LLMProxyInvocationError(details));
         return;
       }
 
