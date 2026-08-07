@@ -31,6 +31,7 @@
     "smoke:agent-standards-wiki": "npx tsx scripts/agent-standards-wiki-smoketest.ts",
     "smoke:agent-tool-contract-standards": "npx tsx scripts/agent-tool-contract-standards-smoketest.ts",
     "smoke:auth-session": "npx tsx scripts/auth-session-smoketest.ts",
+    "smoke:auth-storage-security": "npx tsx scripts/auth-storage-security-smoketest.ts",
     "smoke:file-edit-core": "npx tsx scripts/file-edit-core-smoketest.ts",
     "smoke:agent-file-lease-core": "npx tsx scripts/agent-file-lease-core-smoketest.ts",
     "smoke:agent-coordination-cli": "npx tsx scripts/agent-coordination-cli-smoketest.ts",
