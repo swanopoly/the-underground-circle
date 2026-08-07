@@ -2280,6 +2280,8 @@ async function dispatchOneClientTool(
     case 'browser.select_option':
     case 'browser.click_role':
     case 'browser.press_key':
+    case 'browser.wait_for':
+    case 'browser.scroll':
     case 'desktop.launch_app':
     case 'desktop.focus_app':
     case 'desktop.type_text':

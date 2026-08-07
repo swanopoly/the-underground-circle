@@ -2430,6 +2430,161 @@ const TOOLS: ToolDef[] = [
       },
     },
     {
+      name: "browser.wait_for",
+      description:
+        "Waits on the exact browser document from one fresh browser.dom_snapshot. Copy its opaque process/context/page/url identity into expected* fields, then use a named lifecycle condition, an exact ARIA role plus accessible name for element visibility, or an explicit short delay. Raw selectors, missing identity, tab drift, navigation, and unknown fields are refused. The result never returns the element name, raw URL, title, or page status.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          condition: {
+            type: "string",
+            enum: ["page_loaded", "dom_ready", "network_idle", "element_visible", "element_hidden", "delay"],
+            description: "Exact condition to await. Prefer a page or element condition over delay.",
+          },
+          role: {
+            type: "string",
+            minLength: 1,
+            maxLength: 100,
+            description: "Exact ARIA role; required only for element_visible or element_hidden.",
+          },
+          name: {
+            type: "string",
+            minLength: 1,
+            maxLength: 500,
+            description: "Exact accessible name; required only for element_visible or element_hidden.",
+          },
+          exact: {
+            type: "boolean",
+            enum: [true],
+            description: "Element waits always use exact accessible-name matching.",
+          },
+          timeoutMs: {
+            type: "integer",
+            minimum: 0,
+            maximum: 60000,
+            description: "Bounded wait budget. Delay requires this field and is capped at 30 seconds; all other waits default to 15 seconds.",
+          },
+          expectedBrowserProcessId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser process id from the fresh DOM snapshot.",
+          },
+          expectedBrowserContextId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser context id from the same DOM snapshot.",
+          },
+          expectedPageId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque page/document id from the same DOM snapshot.",
+          },
+          expectedUrl: {
+            type: "string",
+            minLength: 79,
+            maxLength: 79,
+            pattern: "^uc_browser_url_[a-f0-9]{64}$",
+            description: "Opaque exact-URL HMAC identity from the same DOM snapshot; never pass a raw URL.",
+          },
+        },
+        required: [
+          "condition",
+          "expectedBrowserProcessId",
+          "expectedBrowserContextId",
+          "expectedPageId",
+          "expectedUrl",
+        ],
+        oneOf: [
+          {
+            properties: {
+              condition: { enum: ["page_loaded", "dom_ready", "network_idle"] },
+              timeoutMs: { type: "integer", minimum: 100, maximum: 60000 },
+            },
+            not: { anyOf: [{ required: ["role"] }, { required: ["name"] }, { required: ["exact"] }] },
+          },
+          {
+            properties: {
+              condition: { enum: ["element_visible", "element_hidden"] },
+              exact: { type: "boolean", enum: [true] },
+              timeoutMs: { type: "integer", minimum: 100, maximum: 60000 },
+            },
+            required: ["role", "name"],
+          },
+          {
+            properties: {
+              condition: { enum: ["delay"] },
+              timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
+            },
+            required: ["timeoutMs"],
+            not: { anyOf: [{ required: ["role"] }, { required: ["name"] }, { required: ["exact"] }] },
+          },
+        ],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "browser.scroll",
+      description:
+        "Moves the exact browser document from one fresh browser.dom_snapshot by one bounded semantic direction and coarse amount. Copy its opaque process/context/page/url identity into expected* fields. Missing identity, tab drift, or navigation fails closed. This reversible local action never accepts coordinates, clicks, types, navigates, or returns raw URL, title, or page-status data.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          direction: {
+            type: "string",
+            enum: ["up", "down", "left", "right"],
+            description: "Direction of the one-step viewport movement.",
+          },
+          amount: {
+            type: "string",
+            enum: ["small", "medium", "large"],
+            description: "Coarse bounded distance. Defaults to medium.",
+          },
+          expectedBrowserProcessId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser process id from the fresh DOM snapshot.",
+          },
+          expectedBrowserContextId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser context id from the same DOM snapshot.",
+          },
+          expectedPageId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque page/document id from the same DOM snapshot.",
+          },
+          expectedUrl: {
+            type: "string",
+            minLength: 79,
+            maxLength: 79,
+            pattern: "^uc_browser_url_[a-f0-9]{64}$",
+            description: "Opaque exact-URL HMAC identity from the same DOM snapshot; never pass a raw URL.",
+          },
+        },
+        required: [
+          "direction",
+          "expectedBrowserProcessId",
+          "expectedBrowserContextId",
+          "expectedPageId",
+          "expectedUrl",
+        ],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "browser.screenshot",
       description:
         "Captures the current browser viewport (or full page with `fullPage: true`) as base64 PNG. Use sparingly — prefer `browser.dom_snapshot` for deciding what to click. Useful only to verify visual state after a mutation.",
@@ -2593,9 +2748,9 @@ const TOOL_GROUPS: Record<string, string[]> = {
   rooms: ["rooms.list", "rooms.create", "rooms.send_message", "workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "approvals.request"],
   workspace: ["workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "verification.typecheck", "verification.tests", "verification.lint", "approvals.request"],
   approvals: ["approvals.list", "approvals.request"],
-  browser: ["browser.open_url", "browser.dom_snapshot", "browser.wp_admin_source_intelligence", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.press_key", "browser.screenshot", "approvals.request"],
+  browser: ["browser.open_url", "browser.dom_snapshot", "browser.wp_admin_source_intelligence", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.press_key", "browser.wait_for", "browser.scroll", "browser.screenshot", "approvals.request"],
   desktop: ["fetch_url", "desktop.launch_app", "desktop.focus_app", "desktop.type_text", "desktop.paste_text", "desktop.run_applescript", "desktop.press_keys", "desktop.menu_click", "desktop.list_running_apps", "desktop.wait_for_app", "desktop.screenshot", "desktop.open_url", "desktop.open_path", "desktop.file_search", "desktop.file_stat", "desktop.convert_image", "desktop.click_at", "desktop.mouse_move", "desktop.mouse_click", "desktop.mouse_down", "desktop.mouse_up", "desktop.mouse_drag", "desktop.mouse_scroll", "desktop.screen_size", "desktop.read_a11y_tree", "desktop.click_element", "desktop.set_element_value", "approvals.request"],
-  wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence", "wp.upload_media", "wp.create_slide", "wp.update_post", "wp.trash_post", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "approvals.request"],
+  wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence", "wp.upload_media", "wp.create_slide", "wp.update_post", "wp.trash_post", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.wait_for", "browser.scroll", "approvals.request"],
   credentials: ["credentials.get", "browser.fill_credential_field", "browser.verification_state", "approvals.request"],
   rewards: ["rewards.summary", "rewards.leaderboard", "getMemberStatus", "check_ins.list", "tasks.list"],
   verification: ["verification.typecheck", "verification.tests", "verification.lint"],
@@ -2716,7 +2871,7 @@ async function buildFrozenBlock(
     // because screenshots are the most familiar pattern. Making the
     // order explicit cuts token spend + misclicks.
     "1. For ON-SCREEN app automation, observe with **desktop.read_a11y_tree** first (or the client runtime's **desktop.window_state / desktop.observe_app** when available). Every generic native UI mutation requires the exact resolved frontmost `appName` from that fresh observation; never infer an app name from task text. Use **desktop.click_element** only for its narrow approval-gated low-consequence presentation/help/settings press canary, supplying the exact app/PID/path/role/label from the tree. For one named non-secret text field, prefer **desktop.set_element_value** and supply exact app/PID/path/role/label/current value from the same full observation; its one-shot runtime verifies the requested value by hash and length on the same field. Use **desktop.menu_click** before coordinates when the action exists in the app menu. Use **desktop.paste_text** for long/multiline text only when the semantic setter cannot cover the field and the exact focus target is freshly verified, and **desktop.mouse_down + desktop.mouse_up** only for held interactions such as dragging handles, painting, selecting, or scrubbing.",
-    "2. For WEB automation, prefer **browser.dom_snapshot + browser.locator_actionability + browser.set_toggle / browser.select_option / browser.click_role / browser.fill_field** (ARIA-backed selectors, same benefits). Use browser.locator_actionability with fresh browser identity for advisory target certainty; it is read-only and returns only bounded structural checks, but it does not authorize or bind a later mutation. Re-observe after DOM changes and use every mutation path's own approval/proof gate. Use browser.set_toggle for an exact non-consequential checkbox/switch/radio state and browser.select_option for an exact bounded preference on a native single-value HTML select; neither tool submits or navigates. For WordPress/wp-admin or Dealer Inspire work, use **wp.discover_types / wp.list_posts / wp.update_post** for supported REST operations and call **browser.wp_admin_source_intelligence** before wp-admin UI decisions so only bounded redacted admin facts reach the model.",
+    "2. For WEB automation, prefer **browser.dom_snapshot + browser.locator_actionability + browser.set_toggle / browser.select_option / browser.click_role / browser.fill_field** (ARIA-backed selectors, same benefits). Use **browser.wait_for** after actions that trigger dynamic loading and **browser.scroll** only as one coarse reversible viewport step; copy all four opaque process/context/page/url identity fields from one fresh browser.dom_snapshot into either call. Both fail closed on tab or navigation drift, neither is a page mutation, and both stay sequential barriers so later observations see their result. Use browser.locator_actionability with fresh browser identity for advisory target certainty; it is read-only and returns only bounded structural checks, but it does not authorize or bind a later mutation. Re-observe after DOM changes and use every mutation path's own approval/proof gate. Use browser.set_toggle for an exact non-consequential checkbox/switch/radio state and browser.select_option for an exact bounded preference on a native single-value HTML select; neither tool submits or navigates. For WordPress/wp-admin or Dealer Inspire work, use **wp.discover_types / wp.list_posts / wp.update_post** for supported REST operations and call **browser.wp_admin_source_intelligence** before wp-admin UI decisions so only bounded redacted admin facts reach the model.",
     "3. Fall back to **desktop.screenshot + desktop.click_at** (vision) only for a reversible low-risk target when the a11y tree omits it after two reads, the app is a canvas/image editor (Photoshop, Figma, games), or an exact path became stale. Never use coordinates to bypass a semantic safety/approval rejection, protected control, or uncertain consequential action. Say out loud that you're switching to vision so the user can audit the fallback.",
     "4. Before any click_at/mouse_move/mouse_click/mouse_down/mouse_up/mouse_drag/mouse_scroll call, always obtain a fresh exact app observation and call desktop.screenshot or desktop.screen_size first. Pass that exact `appName` with the bounded coordinates; never guess either the app or coordinates.",
     "5. Before browser clicks/fills on login, signup, checkout, admin, or suspicious pages, call browser.verification_state. If CAPTCHA, bot verification, MFA, or 'not a robot' is detected, DO NOT click or solve it; tell the user to complete it manually and wait for confirmation.",

@@ -39,6 +39,7 @@ function normalizeExplicitCode(value: unknown): DesktopBridgeError | null {
     case 'browser_fill_verification_failed':
     case 'browser_toggle_canary_blocked':
     case 'browser_toggle_verification_failed':
+    case 'browser_scroll_verification_failed':
     case 'bridge_offline':
     case 'not_paired':
     case 'token_rejected':
@@ -150,6 +151,8 @@ export function browserBridgeRecoveryHint(errorCode: DesktopBridgeError): string
       return 'Do not use the toggle canary for this control. Use a dedicated reviewed action, or pause for the user when authentication or human verification is involved.';
     case 'browser_toggle_verification_failed':
       return 'Collect a fresh DOM snapshot and inspect the exact state control before deciding whether one bounded retry is safe.';
+    case 'browser_scroll_verification_failed':
+      return 'Collect a fresh DOM snapshot or screenshot and inspect whether the viewport is already at its boundary. Do not replay the scroll without fresh evidence.';
     case 'ambiguous_locator':
       return 'Pick a candidate by nth (0-based) or a more specific role+name/selector; do not click the first match.';
     case 'uncertain_ui_target':
@@ -214,6 +217,7 @@ export function browserBridgeRequiredEvidence(errorCode: DesktopBridgeError): st
     case 'browser_identity_mismatch':
     case 'browser_fill_verification_failed':
     case 'browser_toggle_verification_failed':
+    case 'browser_scroll_verification_failed':
       return ['browser.dom_snapshot'];
     case 'browser_target_required':
     case 'browser_target_mismatch':
@@ -298,6 +302,7 @@ export function browserBridgeRetryability(errorCode: DesktopBridgeError): Browse
     case 'browser_target_capacity':
     case 'browser_fill_verification_failed':
     case 'browser_toggle_verification_failed':
+    case 'browser_scroll_verification_failed':
     case 'a11y_tree_empty':
     case 'a11y_path_stale':
     case 'stale_bridge':

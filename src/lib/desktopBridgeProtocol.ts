@@ -35,6 +35,7 @@ export type DesktopBridgeError =
   | 'browser_fill_verification_failed'
   | 'browser_toggle_canary_blocked'
   | 'browser_toggle_verification_failed'
+  | 'browser_scroll_verification_failed'
   | 'selector_not_found'
   | 'uncertain_ui_target'
   | 'auth_required'
