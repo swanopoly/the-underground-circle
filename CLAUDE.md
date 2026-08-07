@@ -1,7 +1,7 @@
 # CLAUDE.md - The Underground Circle
 
 > Project context for Claude Code, OpenSwan, Codex, Gemini, and other agents.
-> Last reviewed: 2026-08-05
+> Last reviewed: 2026-08-06
 
 Start with `AGENTS.md`. `docs/AGENTS_ROADMAP.md` is canonical for ownership,
 phase status, SQL status, and runtime rules. This file is a current app review
@@ -36,6 +36,11 @@ unless they strengthen the accountability loop.
 | Runtime | BlackSwan/OpenSwan, Claude Code/Codex bridges, Browserbase Computer Use |
 | LLM routing | `llm-proxy`, `swanbot-ai`, `swanbot-v2-ai`, provider marketplace, BYOK |
 | Local bridges | app dev server 8081, OpenSwan proxy 18790, Claude bridge 7778 |
+
+Production JavaScript uses `max-age=0, must-revalidate`, not immutable
+caching. Expo/Metro may retain a parent chunk name while changing its lazy
+module graph, so a stale entry chunk can otherwise load incompatible children.
+Content-addressed assets may remain immutable.
 
 Core commands:
 
@@ -92,6 +97,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | App observation epochs and mutation receipts | `src/lib/computerAppGrounding.ts` |
 | Unfamiliar-app semantic workflow | `src/lib/genericAppNavigator.ts` (`buildGenericAppSemanticWorkflow`) |
 | Guarded browser mutation canaries | typed `browser.fill_field`, `browser.set_toggle`, and `browser.select_option` in `src/lib/openswanToolRuntime.ts`, `src/lib/browserBridge.ts`, `scripts/browser-bridge.js` |
+| Identity-bound semantic browser barriers | typed `browser.wait_for` and `browser.scroll` in `src/lib/browserPrimitives.ts`, `src/lib/browserBridge.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/swanbot.ts`, `supabase/functions/swanbot-v2-ai/index.ts` |
 | Narrow native semantic-press canary | typed `desktop.click_element` in `src/lib/openswanToolRuntime.ts`, `src/lib/computerAppAdapter.ts`, `src/lib/desktopBridge.ts` |
 | Sealed native semantic-value lane | typed `desktop.set_element_value` in `src/lib/openswanToolRuntime.ts`, `src/lib/computerAppAdapter.ts`, `src/lib/desktopBridge.ts`, `scripts/claude-bridge.js` |
 | Durable exact action-call ledger | `src/lib/agentActionCalls.ts`, `supabase/migrations/20260726_agent_action_calls.sql`, `docs/RUN_THIS_SQL.sql` §26 |
@@ -184,6 +190,7 @@ browser/computer providers such as Browserbase and Stagehand.
 When adding or changing a provider, keep these files aligned:
 
 - `src/lib/llmProviders.ts`
+- `src/lib/llmProxyErrorCore.ts`
 - `src/lib/circleIntegrations.ts`
 - `src/lib/serviceProfileSouls.ts`
 - `src/lib/crossProviderRouter.ts`
@@ -193,10 +200,21 @@ When adding or changing a provider, keep these files aligned:
 - `supabase/functions/swanbot-ai/index.ts`
 - provider CHECK constraints in migrations
 
+Provider failures keep stable public codes across the Edge/browser boundary.
+`key_missing` means no applicable credential; `credential_unreadable` means a
+stored ciphertext or key-version problem and directs the owner to reconnect or
+re-enter the credential, never to a connected code-repair agent.
+
 Model IDs may be provider-prefixed, such as `openrouter/auto`,
 `google_ai/gemini-2.5-pro`, `deepseek/deepseek-reasoner`, or
 `huggingface_endpoint/cswan801/BlackSwan-v5`. Normalize aliases carefully:
 `hugging_face` -> `huggingface`, `z_ai` -> `zai`.
+
+Chat Web Search is optional enrichment, not the terminal owner of ordinary
+conversation. Pure greetings stay on plain Chat even when the saved toggle is
+on. If search fails, Chat shows a bounded not-web-verified notice and continues
+through the canonical plain transport exactly once; it does not create a FAILED
+action receipt or offer a connected code-repair agent for that optional lane.
 
 ## BlackSwan And OpenSwan
 

@@ -1,7 +1,7 @@
 # The Underground Circle - App Stack Reference
 
 > Current app map for agents before writing code.
-> Last reviewed: 2026-08-05
+> Last reviewed: 2026-08-06
 
 `AGENTS.md` and `docs/AGENTS_ROADMAP.md` own agent workflow and runtime
 ownership. This file maps the app.
@@ -31,6 +31,9 @@ ownership. This file maps the app.
 6. Before adding a new helper path, check the roadmap owner and the worktree
    checklist in `src/lib/agentDevelopmentStandards.ts`.
 7. Office placement stays on the 16px grid.
+8. Netlify JavaScript uses `max-age=0, must-revalidate`; do not restore
+   immutable caching for Expo/Metro module entry points whose lazy-import table
+   may change without a new parent filename.
 
 ## Main Surfaces
 
@@ -81,6 +84,7 @@ ownership. This file maps the app.
 | App observation epochs and mutation receipts | `src/lib/computerAppGrounding.ts` |
 | Unfamiliar-app semantic workflow | `src/lib/genericAppNavigator.ts` (`buildGenericAppSemanticWorkflow`) |
 | Guarded browser mutation canaries | typed `browser.fill_field`, `browser.set_toggle`, and `browser.select_option` in `src/lib/openswanToolRuntime.ts`, `src/lib/browserBridge.ts`, `scripts/browser-bridge.js` |
+| Identity-bound semantic browser barriers | typed `browser.wait_for` and `browser.scroll` in `src/lib/browserPrimitives.ts`, `src/lib/browserBridge.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/swanbot.ts`, `supabase/functions/swanbot-v2-ai/index.ts` |
 | Narrow native semantic-press canary | typed `desktop.click_element` in `src/lib/openswanToolRuntime.ts`, `src/lib/computerAppAdapter.ts`, `src/lib/desktopBridge.ts` |
 | Sealed native semantic-value lane | typed `desktop.set_element_value` in `src/lib/openswanToolRuntime.ts`, `src/lib/computerAppAdapter.ts`, `src/lib/desktopBridge.ts`, `scripts/claude-bridge.js` |
 | Durable exact action-call ledger | `src/lib/agentActionCalls.ts`, `supabase/migrations/20260726_agent_action_calls.sql`, `docs/RUN_THIS_SQL.sql` §26 |
@@ -241,13 +245,16 @@ OpenSwan saved automations, specialized Chat/OpenSwan mode runs,
 ## Provider And Marketplace Flow
 
 - `src/lib/llmProviders.ts` defines provider types, default model lists, key
-  CRUD, and `invokeLLMProxy`.
+  CRUD, and `invokeLLMProxy`; `src/lib/llmProxyErrorCore.ts` preserves bounded
+  structured non-2xx codes such as `key_missing` and
+  `credential_unreadable` across the browser boundary.
 - `src/lib/circleIntegrations.ts` owns circle-level integrations.
 - `supabase/functions/custom-api-proxy/index.ts` is the guarded server-side
   execution path for Custom API marketplace connectors; OpenSwan tools call it
   instead of exposing saved API secrets to the model/client.
 - `supabase/functions/llm-proxy/index.ts` calls OpenAI-compatible providers and
-  Anthropic branches with user-stored keys.
+  Anthropic branches with user-stored keys. An unreadable stored ciphertext is
+  fail-visible as `credential_unreadable`, not misreported as a missing key.
 - `supabase/functions/swanbot-ai/index.ts` can relay marketplace-prefixed
   models with tools.
 - `src/lib/billingPriority.ts` controls provider preference modes:
@@ -255,6 +262,12 @@ OpenSwan saved automations, specialized Chat/OpenSwan mode runs,
 
 Keep provider enums, model prefixes, UI cards, edge support, and the open-ended
 integration provider registry aligned.
+
+Web Search is optional Chat enrichment. Pure greetings and acknowledgements
+stay on plain Chat even when the saved toggle is on. A search-provider failure
+adds a bounded not-web-verified notice and continues through the canonical Chat
+transport once; it does not create a failed action receipt or connected-agent
+repair card.
 
 ## Computer Use Flow
 
