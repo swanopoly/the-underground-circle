@@ -11072,11 +11072,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // only — the persistent toggle stays at whatever the user set.
     // The bot reply gets a small "auto-enabled because: <reason>"
     // footer so the override isn't surprising.
-    const { decideWebSearchForTurn } = await import('../../../lib/webSearchAutoDetect');
+    const { decideWebSearchForTurn, runOptionalWebSearchLane } = await import('../../../lib/webSearchAutoDetect');
     const webDecision = decideWebSearchForTurn(content, webSearchEnabled);
+    let webSearchDegradationContext = '';
     if (webDecision.attach) {
       setBotTyping(true);
-      try {
+      const webSearchOutcome = await runOptionalWebSearchLane(webDecision, async () => {
         const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
         const recent = transcriptChatMessages(messages).slice(-6).map(m => ({
           role: m.isBot ? ('assistant' as const) : ('user' as const),
@@ -11088,7 +11089,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           conversation: recent,
           systemPrompt: 'You are a helpful assistant in a chat. Use the web_search tool when the question needs current information. Cite sources inline as markdown links when you do.',
         });
-        setBotTyping(false);
+        return result;
+      });
+      setBotTyping(false);
+
+      if (webSearchOutcome.status === 'completed') {
         // Auto-detection footer — only surfaced when the heuristic
         // (not the manual toggle) triggered the route. Tells the
         // user why their question got web search even though they
@@ -11096,54 +11101,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const autoFooter = webDecision.auto && webDecision.reason
           ? `\n\n_🌐 Auto-enabled web search — ${webDecision.reason}._`
           : '';
-        addBotMessage((result.response || '(No response from OpenRouter web search.)') + autoFooter);
-      } catch (err: any) {
-        // Cross-provider fallback for the non-search path is wired in
-        // `invokeAnyChat`; web search itself stays OR-only because no
-        // other provider exposes a server-side search tool today.
-        // When OR is missing or rate-limited, fall back to the
-        // unified router WITHOUT the search tool — at least the user
-        // gets an answer (possibly from HF or Anthropic direct), with
-        // a note that web search wasn't applied.
-        try {
-          const { invokeAnyChat } = await import('../../../lib/universalInvoke');
-          const { listApiKeys } = await import('../../../lib/llmProviders');
-          const userKeys = await listApiKeys();
-          const recent = transcriptChatMessages(messages).slice(-6).map(m => ({
-            role: m.isBot ? ('assistant' as const) : ('user' as const),
-            content: m.content,
-          }));
-          const fallback = await invokeAnyChat({
-            modelId: resolveSendModel(content) || 'claude-haiku-4-5',
-            messages: [
-              { role: 'system', content: 'Web search is unavailable for this turn. Answer from training knowledge and clearly note when information may be out of date.' },
-              ...recent,
-              { role: 'user', content },
-            ],
-            circleId,
-            userKeys,
-            maxTokens: 1024,
-          });
-          setBotTyping(false);
-          addBotMessage(
-            `${fallback.response}\n\n_Web search unavailable (${err?.message || 'OpenRouter error'}); answered from ${fallback.servedBy.label}._`,
-            undefined,
-            { localOnly: true },
-          );
-        } catch (fallbackErr: any) {
-          setBotTyping(false);
-          const msg = err?.message || fallbackErr?.message || 'Web search failed';
-          await addRecoverableChatErrorMessage({
-            title: 'Web search failed',
-            task: `Answer with web search: ${content.slice(0, 240)}`,
-            error: new Error(`${msg}. Connect OpenRouter in Marketplace > AI Models & APIs for web search, or any other provider for plain chat.`),
-            executionKind: 'web_search_command',
-            source: 'web_search_failure',
-            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/llmProviders.ts', 'src/lib/universalInvoke.ts'],
-          });
-        }
+        addBotMessage((webSearchOutcome.value.response || '(No response from OpenRouter web search.)') + autoFooter);
+        return;
       }
-      return;
+
+      if (webSearchOutcome.status === 'degraded') {
+        webSearchDegradationContext = webSearchOutcome.promptContext;
+        addBotMessage(webSearchOutcome.userNotice, undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+          source: {
+            actor: 'OpenSwan',
+            surface: 'web_search_degraded',
+            selectedModel,
+            effectiveModel: 'plain-chat-fallback',
+          },
+        });
+      }
     }
 
     // ─── Model capability routing — images, webpages, etc. ──────────────────
@@ -11302,6 +11276,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         wpImageDirective,
         replyContext,
         recoveryOptionPromptContext,
+        webSearchDegradationContext,
         cleanContent,
       ].filter(Boolean).join('\n');
 

@@ -91,6 +91,17 @@ async function main() {
   assert(toolUnsupported.runbook.nextActor === 'openswan', 'tool unsupported runbook returns control to OpenSwan route selection');
   assert(toolUnsupported.runbook.steps.some((step) => step.id === 'select-safe-route'), 'tool unsupported runbook includes safe route selection');
 
+  const missingProviderKey = policyFor('key_missing: Add your own OpenRouter API key in Office > Customize > API Keys.');
+  assert(missingProviderKey.assessment.failureClass === 'missing_user_key', 'structured key_missing is classified as provider setup');
+  assert(missingProviderKey.action === 'request_user_action', 'missing provider key requests user setup');
+  assert(missingProviderKey.runbook.nextActor === 'user', 'missing provider key assigns the next step to the user');
+  assert(!shouldLaunchConnectedAgentRecovery(missingProviderKey), 'missing provider key never launches a connected coding agent');
+
+  const unreadableProviderKey = policyFor('credential_unreadable: A saved provider credential could not be read. Re-enter it.');
+  assert(unreadableProviderKey.assessment.failureClass === 'missing_user_key', 'unreadable provider ciphertext is classified as user credential setup');
+  assert(unreadableProviderKey.runbook.nextActor === 'user', 'unreadable provider ciphertext assigns recovery to the user');
+  assert(!shouldLaunchConnectedAgentRecovery(unreadableProviderKey), 'unreadable provider ciphertext never launches a connected coding agent');
+
   const complex = buildAgentFailureRecoveryPolicy({
     task: 'Research the launch page in the browser, update the local design file on desktop, save proof to memory, schedule a follow-up automation, then verify the full workflow.',
     failureMessage: 'Provider 429 while browser task was waiting for desktop bridge checkpoint evidence.',

@@ -8,7 +8,13 @@
  * Run: npm run smoke:web-search-auto-detect
  */
 
-import { shouldAutoAttachWebSearch, decideWebSearchForTurn } from '../src/lib/webSearchAutoDetect';
+import {
+  shouldAutoAttachWebSearch,
+  decideWebSearchForTurn,
+  isConversationOnlyTurn,
+  runOptionalWebSearchLane,
+} from '../src/lib/webSearchAutoDetect';
+import fs from 'node:fs';
 
 let failures = 0;
 function fail(m: string) { failures += 1; console.error('FAIL:', m); }
@@ -17,7 +23,7 @@ function assert(cond: unknown, name: string, detail?: string) {
   if (cond) pass(name); else fail(`${name}${detail ? ' — ' + detail : ''}`);
 }
 
-function main() {
+async function main() {
   // ── Strong positives — should trigger ──────────────────────────
   const shouldTrigger = [
     'What were the major AI announcements this week?',
@@ -56,6 +62,10 @@ function main() {
     'What\'s 17 * 23',                                                 // math
     'Explain monads',
     'Born in 1985, what year would they be 40',                        // historical anchor
+    'hello',                                                           // pure conversation
+    'Hey there!',                                                      // pure conversation
+    'Thanks',                                                          // acknowledgement
+    'How are you?',                                                    // social question
   ];
   for (const msg of shouldNotTrigger) {
     const r = shouldAutoAttachWebSearch(msg);
@@ -74,10 +84,22 @@ function main() {
     `got reason="${r1.reason}"`);
 
   // ── decideWebSearchForTurn — toggle integration ────────────────
-  // Toggle on → always attach, never auto.
+  // Toggle on → attach for substantive turns, never auto.
   {
     const d = decideWebSearchForTurn('How does useEffect work', true);
     assert(d.attach && !d.auto, 'toggle on + code question → attach (manual), auto=false');
+  }
+  // A persistent toggle must not turn a greeting into a required tool call.
+  for (const greeting of ['hello', 'Hi!', 'hey there', 'Good morning OpenSwan', 'Thanks', 'How are you?']) {
+    const d = decideWebSearchForTurn(greeting, true);
+    assert(!d.attach && !d.auto, `toggle on + conversation-only turn stays plain chat: "${greeting}"`);
+    assert(isConversationOnlyTurn(greeting), `classifies conversation-only turn: "${greeting}"`);
+  }
+  // A greeting prefix must not hide a substantive current-information request.
+  {
+    const msg = 'Hello, what is the latest AI news today?';
+    const d = decideWebSearchForTurn(msg, true);
+    assert(d.attach && !d.auto && !isConversationOnlyTurn(msg), 'greeting plus real request still honors manual web search');
   }
   // Toggle off + current-events question → attach via auto.
   {
@@ -91,6 +113,59 @@ function main() {
     assert(!d.attach && !d.auto, 'toggle off + code question → no attach');
   }
 
+  // ── Optional lane terminal contract ─────────────────────────────────
+  {
+    let calls = 0;
+    const result = await runOptionalWebSearchLane(
+      { attach: false, auto: false },
+      async () => { calls += 1; return 'unexpected'; },
+    );
+    assert(result.status === 'skipped' && calls === 0, 'optional lane skips without invoking search');
+  }
+  {
+    let calls = 0;
+    const result = await runOptionalWebSearchLane(
+      { attach: true, auto: true, reason: 'current state' },
+      async () => { calls += 1; return { response: 'fresh answer' }; },
+    );
+    assert(result.status === 'completed' && calls === 1, 'optional lane returns one successful search result');
+  }
+  {
+    const missingKey = Object.assign(
+      new Error('key_missing: Add your own OpenRouter API key.'),
+      { code: 'key_missing', status: 400 },
+    );
+    const result = await runOptionalWebSearchLane(
+      { attach: true, auto: false },
+      async () => { throw missingKey; },
+    );
+    assert(result.status === 'degraded', 'search rejection resolves to degraded instead of throwing');
+    assert(
+      result.status === 'degraded'
+        && result.failureCode === 'key_missing'
+        && /plain Chat/i.test(result.userNotice)
+        && /not claim.*web-verified/i.test(result.promptContext),
+      'degraded key_missing keeps a safe provider notice and verification caveat',
+    );
+  }
+
+  // Chat wiring: optional search failure must fall through to the canonical
+  // path, not create a second provider router or a failed-action receipt.
+  {
+    const chatSource = fs.readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8');
+    const start = chatSource.indexOf('// ─── Web Search routing (Phase 0 + auto-detect)');
+    const end = chatSource.indexOf('// ─── Model capability routing', start);
+    const webBlock = start >= 0 && end > start ? chatSource.slice(start, end) : '';
+    assert(webBlock.includes('runOptionalWebSearchLane(webDecision'), 'Chat runs the injected optional Web Search lane');
+    assert(!webBlock.includes("import('../../../lib/universalInvoke')"), 'search degradation does not start a duplicate provider router');
+    assert(!webBlock.includes('addRecoverableChatErrorMessage({'), 'search-only failure does not create action recovery or a failed receipt');
+    assert(webBlock.includes("surface: 'web_search_degraded'"), 'search degradation is visible as an ephemeral Chat notice');
+    assert(
+      chatSource.includes('webSearchDegradationContext,\n        cleanContent,'),
+      'canonical Chat receives the not-web-verified degradation context',
+    );
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} web-search-auto-detect smoke-test failure(s)`);
     process.exit(1);
@@ -98,4 +173,7 @@ function main() {
   console.log('\nAll web-search-auto-detect smoke cases passed.');
 }
 
-main();
+void main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

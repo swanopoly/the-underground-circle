@@ -8,6 +8,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from './supabase';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
+import {
+  LLMProxyInvocationError,
+  normalizeLLMProxyErrorPayload,
+  readLLMProxyInvokeError,
+} from './llmProxyErrorCore';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -351,8 +356,10 @@ export async function invokeLLMProxy(params: {
     },
   });
 
-  if (error) throw new Error(error.message);
-  if (data?.error) throw new Error(data.error);
+  if (error) throw new LLMProxyInvocationError(await readLLMProxyInvokeError(error));
+  if (data?.error) {
+    throw new LLMProxyInvocationError(normalizeLLMProxyErrorPayload(data, data.error));
+  }
   return data as LLMProxyResponse;
 }
 
