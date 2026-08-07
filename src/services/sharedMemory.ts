@@ -55,6 +55,21 @@ export interface MemoryHistory {
   doc_kind: MemoryDocKind;
 }
 
+export type MemoryDocBeforeMutationResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+export type UpdateMemoryDocOptions = {
+  guardBaseContent?: string | null;
+  /**
+   * Optional one-shot authority gate invoked after the read-only write plan has
+   * ruled out refusal/no-op, and immediately before the first database write.
+   * Once it passes, bounded optimistic-concurrency retries reuse that authority
+   * within this invocation instead of trying to claim it a second time.
+   */
+  beforeMutation?: () => Promise<MemoryDocBeforeMutationResult>;
+};
+
 export async function getMemoryDoc(
   circleId: string,
   docKind: MemoryDocKind = 'brief',
@@ -118,10 +133,41 @@ export async function updateMemoryDoc(
   content: string,
   userId: string,
   docKind: MemoryDocKind = 'brief',
-  opts?: { guardBaseContent?: string | null },
+  opts?: UpdateMemoryDocOptions,
 ): Promise<MemoryDocWriteResult> {
   let attempt = 0;
   let lastMessage = 'Write did not run.';
+  let mutationAuthorized = !opts?.beforeMutation;
+
+  const authorizeFirstMutation = async (
+    plannedDocKind: MemoryDocKind,
+    currentVersion: number | null,
+    currentAttempt: number,
+  ): Promise<MemoryDocWriteResult | null> => {
+    if (mutationAuthorized) return null;
+
+    let gate: MemoryDocBeforeMutationResult;
+    try {
+      gate = await opts!.beforeMutation!();
+    } catch {
+      gate = { ok: false, error: 'Pre-mutation authorization failed.' };
+    }
+    if (!gate.ok) {
+      return {
+        ok: false,
+        status: 'error',
+        docKind: plannedDocKind,
+        version: currentVersion,
+        conflict: null,
+        refusedReason: null,
+        historyRecorded: false,
+        attempts: currentAttempt,
+        message: gate.error,
+      };
+    }
+    mutationAuthorized = true;
+    return null;
+  };
 
   while (attempt < MEMORY_WRITE_MAX_ATTEMPTS) {
     attempt += 1;
@@ -152,6 +198,12 @@ export async function updateMemoryDoc(
     }
 
     if (plan.action === 'insert') {
+      const gateFailure = await authorizeFirstMutation(
+        plan.docKind,
+        existing?.version ?? null,
+        attempt,
+      );
+      if (gateFailure) return gateFailure;
       const { error } = await supabase.from('circle_memory').insert(plan.patch as Record<string, unknown>);
       if (!error) {
         return {
@@ -169,6 +221,12 @@ export async function updateMemoryDoc(
     // action === 'update'. Archive the undo row FIRST: if the guarded update
     // then loses the race it writes nothing, so a spare history row is the
     // harmless failure direction. Losing the undo row is not.
+    const gateFailure = await authorizeFirstMutation(
+      plan.docKind,
+      existing?.version ?? null,
+      attempt,
+    );
+    if (gateFailure) return gateFailure;
     let historyRecorded = false;
     if (plan.history) {
       const { error: historyError } = await supabase

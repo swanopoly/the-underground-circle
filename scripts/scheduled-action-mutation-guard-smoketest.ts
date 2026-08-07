@@ -237,7 +237,7 @@ lacks(runner, 'error: message', 'raw handler errors must never be returned');
 // The generic approval worker must not pre-consume either runtime-owned lane.
 const runtimeDeferral = worker.slice(
   worker.indexOf('if (isRuntimeOwnedAgentApprovalActionType(actionType))'),
-  worker.indexOf('// ── Idempotency guard'),
+  worker.indexOf('// ── Durable one-shot consumption guard'),
 );
 has(
   worker,
