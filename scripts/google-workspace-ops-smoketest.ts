@@ -264,10 +264,45 @@ function main(): void {
   );
   const dr8q = okPlan(planGdriveSearch({ query: "O'Brien notes" }), '(8) quote search ok');
   assert(dr8q.url.includes(encodeURIComponent("name contains 'O\\'Brien notes'")), "(8) single quotes escaped as \\' in wrapped q", dr8q.url);
+  // SECURITY: a query containing a Drive operator used to be forwarded VERBATIM
+  // as the `q` expression. Drive reads are auto-approved, so a model- or
+  // injection-controlled query could silently widen its own scope. Operators
+  // are now inert text inside the quoted literal, never structure.
   const dr8op = okPlan(planGdriveSearch({ query: "mimeType='application/pdf' and name contains 'x'" }), '(8) operator search ok');
-  assert(dr8op.url.includes(`q=${encodeURIComponent("mimeType='application/pdf' and name contains 'x'")}`), '(8) operator query passes through verbatim');
+  assert(
+    !dr8op.url.includes(`q=${encodeURIComponent("mimeType='application/pdf' and name contains 'x'")}`),
+    '(8) an operator-bearing query is NOT passed through verbatim',
+  );
+  assert(
+    dr8op.url.includes(encodeURIComponent("name contains 'mimeType=\\'application/pdf\\' and name contains \\'x\\''")),
+    '(8) operator text is escaped into the name-contains literal',
+  );
   const dr8op2 = okPlan(planGdriveSearch({ query: "name contains 'foo'" }), '(8) contains-operator ok');
-  assert(dr8op2.url.includes(`q=${encodeURIComponent("name contains 'foo'")}`), '(8) contains operator passthrough (not double-wrapped)');
+  assert(
+    !dr8op2.url.includes(`q=${encodeURIComponent("name contains 'foo'")}`),
+    '(8) a bare contains operator is NOT passed through verbatim',
+  );
+  // Scope-widening attempts stay inside the literal: every quote is escaped, so
+  // the four structural quotes of the wrapper are the only unescaped ones.
+  for (const hostile of [
+    "x' or trashed = true or name contains '",
+    "' or '1'='1",
+    "a\\",
+    "x' and 'me' in writers or name contains '",
+  ]) {
+    const plan = okPlan(planGdriveSearch({ query: hostile }), '(8) hostile drive query still plans');
+    const q = decodeURIComponent((/[?&]q=([^&]*)/.exec(plan.url) as RegExpExecArray)[1]);
+    let unescaped = 0;
+    for (let i = 0; i < q.length; i += 1) {
+      if (q[i] === "'") {
+        let slashes = 0;
+        let j = i - 1;
+        while (j >= 0 && q[j] === '\\') { slashes += 1; j -= 1; }
+        if (slashes % 2 === 0) unescaped += 1;
+      }
+    }
+    assert(unescaped === 4, `(8) hostile drive query cannot break out of the literal: ${hostile}`);
+  }
   assert(okPlan(planGdriveSearch({ query: 'x', maxResults: 99 }), '(8)').url.includes('pageSize=25'), '(8) pageSize clamps to 25');
   assert(isErr(planGdriveSearch({ query: '' })), '(8) empty drive query → error');
   const ex8 = okPlan(planGdriveExport({ fileId: 'f_1' }), '(8) export ok');
