@@ -102,7 +102,6 @@ import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
 import { fetchBridgeAuthenticated } from '../../../lib/bridgeAuth';
 import RunTraceCard from './chat/RunTraceCard';
 import RunCostDrawer from './chat/RunCostDrawer';
-import ChatSourcesRow from './chat/ChatSourcesRow';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
 import { createStagedFile, getSignedUrl, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
@@ -209,7 +208,6 @@ import {
   CHAT_SLASH_COMMANDS,
   type ChatSlashCommand,
 } from '../../../lib/chatSlashCommands';
-import { buildEmptyChatSuggestions } from '../../../lib/capabilityOverviewCore';
 import { matchStopResolution as matchChatStopResolution, resolveChatStopMessage } from '../../../lib/chatStopMessageCore';
 import { assessStreamDegeneracy, describeStreamDegeneracy } from '../../../lib/streamDegeneracyCore';
 import { formatVerificationReceipt } from '../../../lib/verificationReceiptCore';
@@ -528,7 +526,6 @@ const LOGIN_NEON = '#b8ff61';
 const CHAT_SURFACE_MAX_WIDTH = 1680;
 // First-run starter prompts, computed once from the pure capability catalog
 // (deterministic + bounded) so the empty chat surfaces real, tappable examples.
-const EMPTY_CHAT_STARTERS = buildEmptyChatSuggestions({ max: 5 });
 const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
 type ChatThreadLoadState = {
   status: 'resolving' | 'loading' | 'ready' | 'error';
@@ -14395,26 +14392,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               />
             ) : null}
             {item.isBot ? (
-              /* Plan §3b: memory attribution + one-tap Remember (routes
-                 through the existing /remember path). */
+              /* Memory attribution ("Used memory: …"). The one-tap Remember
+                 chip that used to sit beside it was removed by request
+                 (2026-08-07) — /remember still works as a typed command.
+                 The Sources (N) disclosure that followed was removed at the
+                 same time. */
               <ChatMemoryAttributionRow
                 memoriesUsed={item.memoriesUsed}
                 memoryRefCount={item.memoryRefs?.length || 0}
-                canRemember={(item.content || '').length >= 120}
                 onOpenMemories={() => setShowMemoryViewer(true)}
-                onRemember={() => { void sendMessage(`/remember ${item.content.slice(0, 280)}`); }}
-                accentColor={accentColor}
-              />
-            ) : null}
-            {item.isBot && !item.isPending ? (
-              /* sources-row: exactly which files/URLs/commits/tools the
-                 answer drew on — derived in-memo from answer text + tool
-                 events (secret-safe in chatSourcesSurfaceCore); display-only.
-                 Covers v1 addBotMessage, v2 updateBotMessage, and reloaded
-                 history (metadata.toolEvents) uniformly. */
-              <ChatSourcesRow
-                content={item.content}
-                toolEvents={item.toolEvents}
                 accentColor={accentColor}
               />
             ) : null}
@@ -14479,22 +14465,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           resizeMode="contain"
         />
       </View>
-      {/* First-run discoverability (2026-07-14 UX core): tappable starter
-          prompts drawn from the real capability catalog, so the primary
-          surface no longer shows just an image. Tapping sends it. */}
-      <Text style={styles.emptyStarterHint}>Try one of these, or just tell me what you need:</Text>
-      <View style={styles.emptyStarterWrap}>
-        {EMPTY_CHAT_STARTERS.map((starter) => (
-          <Pressable
-            key={starter}
-            style={[styles.emptyStarterChip, { borderColor: accentColor + '55' }]}
-            onPress={() => sendMessage(starter)}
-            accessibilityRole="button"
-          >
-            <Text style={[styles.emptyStarterChipText, { color: accentColor }]} numberOfLines={2}>{starter}</Text>
-          </Pressable>
-        ))}
-      </View>
+      {/* The starter-prompt chips that used to sit here (2026-07-14 UX core)
+          were removed by request — a fresh chat now shows the swan and a
+          single way in, not a menu of suggestions. The one-line link below
+          still reaches the full capability overview. */}
       <Pressable onPress={() => sendMessage('what can you do?')} accessibilityRole="button">
         <Text style={styles.emptyStarterMore}>See everything I can do →</Text>
       </Pressable>
@@ -20183,10 +20157,6 @@ const styles = StyleSheet.create({
   // Empty state
   emptyContainer: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20, maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center', width: '100%' },
   heroSection: { alignItems: 'center', justifyContent: 'center', paddingTop: 40, paddingBottom: 40 },
-  emptyStarterHint: { fontSize: 13, color: '#9aa0a6', marginTop: 8, marginBottom: 12, textAlign: 'center' },
-  emptyStarterWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, maxWidth: 560 },
-  emptyStarterChip: { borderWidth: 1, borderRadius: 16, paddingVertical: 8, paddingHorizontal: 14, margin: 3, maxWidth: 260 },
-  emptyStarterChipText: { fontSize: 13, fontWeight: '500' },
   emptyStarterMore: { fontSize: 13, color: '#9aa0a6', marginTop: 16, textDecorationLine: 'underline' },
   heroSectionWeb: {},
   heroBotAvatar: {

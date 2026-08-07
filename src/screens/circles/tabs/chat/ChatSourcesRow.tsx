@@ -1,4 +1,10 @@
 /**
+ * NOT RENDERED as of 2026-08-07 — the "Sources (N)" disclosure was removed
+ * from chat replies by request. Kept (not deleted) because the component is
+ * self-contained and its pure derivation core, `chatSourcesSurfaceCore`, is
+ * still smoke-pinned; re-mounting it in ChatTab is a one-line change. Delete
+ * both if the surface is not coming back.
+ *
  * ChatSourcesRow — sources-row. Shows a "▸ Sources (N)" pill under bot
  * answers listing exactly which files, URLs, commits, and tools the answer
  * drew on. Derivation is pure + secret-safe via

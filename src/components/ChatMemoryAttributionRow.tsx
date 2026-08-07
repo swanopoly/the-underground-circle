@@ -7,10 +7,11 @@ import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
  *
  * `memoriesUsed` / `memoryRefs` have been carried on persisted messages all
  * along but never rendered — users couldn't tell which memories informed a
- * response or save a good answer for next time. This row shows the memory
- * titles (tap → memory viewer) and a one-tap Remember that routes through
- * the existing `/remember` path, so it inherits that path's behavior
- * exactly.
+ * response. This row shows the memory titles (tap → memory viewer).
+ *
+ * The one-tap "＋ Remember" chip that used to sit beside them was removed by
+ * request (2026-08-07). `/remember` remains available as a typed command, so
+ * no capability was lost — only the per-message affordance.
  */
 
 interface Props {
@@ -18,19 +19,14 @@ interface Props {
   memoriesUsed?: string[] | null;
   /** Count of prompt memory references when titles are unavailable. */
   memoryRefCount?: number;
-  /** Show the one-tap Remember action for this message. */
-  canRemember?: boolean;
   onOpenMemories?: () => void;
-  onRemember?: () => void;
   accentColor?: string;
 }
 
 export default function ChatMemoryAttributionRow({
   memoriesUsed,
   memoryRefCount = 0,
-  canRemember = false,
   onOpenMemories,
-  onRemember,
   accentColor = '#22c55e',
 }: Props) {
   const titles = (memoriesUsed || []).filter(Boolean);
@@ -40,7 +36,7 @@ export default function ChatMemoryAttributionRow({
       ? `Used ${memoryRefCount} saved ${memoryRefCount === 1 ? 'memory' : 'memories'}`
       : null;
 
-  if (!attributionText && !canRemember) return null;
+  if (!attributionText) return null;
 
   return (
     <View style={styles.row}>
@@ -55,18 +51,6 @@ export default function ChatMemoryAttributionRow({
           ]}
         >
           <Text style={styles.chipText} numberOfLines={1}>🧠 {attributionText}</Text>
-        </Pressable>
-      ) : null}
-      {canRemember && onRemember ? (
-        <Pressable
-          onPress={onRemember}
-          style={({ hovered }: any) => [
-            styles.chip,
-            hovered && { borderColor: accentColor + '66', backgroundColor: accentColor + '10' },
-            Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
-          ]}
-        >
-          <Text style={[styles.chipText, { color: accentColor }]}>＋ Remember</Text>
         </Pressable>
       ) : null}
     </View>
