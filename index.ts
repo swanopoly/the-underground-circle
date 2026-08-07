@@ -1,7 +1,6 @@
 import { registerRootComponent } from 'expo';
 
 import App from './App';
-import { relayOAuthCallbackFromAppOrigin } from './src/lib/oauthCallbackRelay';
 
 // One-time production cache recovery marker. Metro chunk filenames do not
 // include external split-bundle references, so this value deliberately changes
@@ -16,6 +15,4 @@ if (typeof globalThis !== 'undefined') {
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,
 // the environment is set up appropriately
-if (!relayOAuthCallbackFromAppOrigin()) {
-  registerRootComponent(App);
-}
+registerRootComponent(App);

@@ -27,12 +27,6 @@ function withSuspense(Component: React.ComponentType<any>, name: string) {
 
 const Login = withSuspense(LoginScreen, 'Login');
 const SignUp = withSuspense(SignUpScreen, 'SignUp');
-const PasswordRecoveryCompleteContext = React.createContext<(() => void) | undefined>(undefined);
-
-function ResetPasswordRoute(props: any) {
-  const onPasswordRecoveryComplete = React.useContext(PasswordRecoveryCompleteContext);
-  return <Login {...props} onPasswordRecoveryComplete={onPasswordRecoveryComplete} />;
-}
 
 function LandingWrapper({ navigation }: any) {
   return (
@@ -45,26 +39,13 @@ function LandingWrapper({ navigation }: any) {
   );
 }
 
-export default function AuthNavigator({
-  passwordRecovery = false,
-  onPasswordRecoveryComplete,
-}: {
-  passwordRecovery?: boolean;
-  onPasswordRecoveryComplete?: () => void;
-}) {
+export default function AuthNavigator() {
   return (
-    <PasswordRecoveryCompleteContext.Provider value={onPasswordRecoveryComplete}>
-      <Stack.Navigator
-        screenOptions={{ headerShown: false }}
-        initialRouteName={passwordRecovery ? 'ResetPassword' : 'Login'}
-      >
-        <Stack.Screen name="Login" component={Login} />
-        <Stack.Screen name="Landing" component={LandingWrapper} />
-        <Stack.Screen name="SignUp" component={SignUp} />
-        <Stack.Screen name="PasswordRecovery" component={Login} />
-        <Stack.Screen name="ResetPassword" component={ResetPasswordRoute} />
-      </Stack.Navigator>
-    </PasswordRecoveryCompleteContext.Provider>
+    <Stack.Navigator screenOptions={{ headerShown: false }} initialRouteName="Login">
+      <Stack.Screen name="Login" component={Login} />
+      <Stack.Screen name="Landing" component={LandingWrapper} />
+      <Stack.Screen name="SignUp" component={SignUp} />
+    </Stack.Navigator>
   );
 }
 
