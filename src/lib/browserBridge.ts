@@ -3,7 +3,7 @@
  * endpoints. Mirrors the shape of `desktopBridge.ts` so agents see a
  * unified surface: probe with `isBrowserBridgeAvailable`, then
  * `openUrl`, `domSnapshot`, `locatorActionability`, `clickRole`, `fillField`, `pressKey`,
- * `screenshot`, `closeBrowser`.
+ * `waitFor`, `scrollPage`, `screenshot`, `closeBrowser`.
  *
  * Why a separate module: browser automation talks DOM/ARIA instead of
  * AX, has a different lifetime (persistent context + page), and uses
@@ -27,9 +27,16 @@ import type { AutomationVerificationGate } from './desktopAutomationSafety';
 import {
   normalizeTabList,
   buildDownloadProof,
+  normalizeBrowserSemanticWait,
+  normalizeBrowserSemanticScroll,
   type BrowserTabInfo,
   type NormalizedTabList,
   type DownloadProof,
+  type BrowserSemanticWaitCondition,
+  type BrowserSemanticWaitInput,
+  type BrowserSemanticScrollInput,
+  type BrowserScrollDirection,
+  type BrowserScrollAmount,
 } from './browserPrimitives';
 import {
   buildWordPressAdminSourceTaskHints,
@@ -357,13 +364,33 @@ export interface BrowserDownloadResult {
   proof: DownloadProof;
 }
 
-/** Result of a waitFor call — echoes what was awaited. */
-export interface BrowserWaitForResult {
-  mode: 'selector' | 'state' | 'timeout';
-  selector?: string;
-  state?: string;
+/**
+ * Privacy-bounded proof that the bridge rechecked one exact observed document
+ * after an operation. The raw URL/title remain local; `urlMatchesExpected`
+ * attests the opaque expected URL still matched.
+ */
+export interface BrowserSemanticPageIdentityReceipt {
+  browserProcessId: string;
+  browserContextId: string;
+  pageId: string;
+  observedAt: string;
+  evidenceId: string;
+  urlMatchesExpected: true;
+}
+
+/** Privacy-bounded wait receipt with exact page-identity after-proof. */
+export interface BrowserWaitForResult extends BrowserSemanticPageIdentityReceipt {
+  condition: BrowserSemanticWaitCondition;
   timeoutMs: number;
-  awaited: string;
+  completed: true;
+}
+
+/** Privacy-bounded semantic scroll receipt — no raw coordinates/page text. */
+export interface BrowserScrollResult extends BrowserSemanticPageIdentityReceipt {
+  direction: BrowserScrollDirection;
+  amount: BrowserScrollAmount;
+  movementVerified: true;
+  completed: true;
 }
 
 function isBoundedOpaqueBrowserId(value: unknown): value is string {
@@ -440,6 +467,48 @@ const BROWSER_URL_IDENTITY_PATTERN = /^uc_browser_url_[a-f0-9]{64}$/;
 
 export function isOpaqueBrowserUrlIdentity(value: unknown): value is string {
   return typeof value === 'string' && BROWSER_URL_IDENTITY_PATTERN.test(value);
+}
+
+function extractBrowserSemanticPageIdentityReceipt(
+  value: unknown,
+  expected: {
+    expectedBrowserProcessId: string;
+    expectedBrowserContextId: string;
+    expectedPageId: string;
+  },
+): BrowserSemanticPageIdentityReceipt | null {
+  if (!value || typeof value !== 'object') return null;
+  try {
+    const candidate = value as Record<string, unknown>;
+    const observedAt = candidate.observedAt;
+    const observedMs = typeof observedAt === 'string' ? Date.parse(observedAt) : NaN;
+    if (
+      candidate.browserProcessId !== expected.expectedBrowserProcessId
+      || candidate.browserContextId !== expected.expectedBrowserContextId
+      || candidate.pageId !== expected.expectedPageId
+      || !isBoundedOpaqueBrowserId(candidate.browserProcessId)
+      || !isBoundedOpaqueBrowserId(candidate.browserContextId)
+      || !isBoundedOpaqueBrowserId(candidate.pageId)
+      || !isBoundedOpaqueBrowserId(candidate.evidenceId)
+      || typeof observedAt !== 'string'
+      || observedAt.length < 10
+      || observedAt.length > 64
+      || !Number.isFinite(observedMs)
+      || candidate.urlMatchesExpected !== true
+    ) {
+      return null;
+    }
+    return {
+      browserProcessId: candidate.browserProcessId,
+      browserContextId: candidate.browserContextId,
+      pageId: candidate.pageId,
+      observedAt,
+      evidenceId: candidate.evidenceId,
+      urlMatchesExpected: true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function splitBrowserTextUrlTrailingPunctuation(value: string): {
@@ -2256,31 +2325,110 @@ export async function closeTab(index: number): Promise<DesktopResult<{ closed: n
 }
 
 /**
- * Explicit, bounded wait so the model can synchronize on dynamic content
- * instead of polling screenshots. Exactly one intent is used, in order:
- *   - `selector` → wait for that element (state defaults to 'visible');
- *   - `state` ('load'|'domcontentloaded'|'networkidle') → wait for that
- *     page lifecycle event;
- *   - otherwise a plain bounded `timeoutMs` delay.
- * Timeouts are clamped on the bridge (selector/state ≤60s, delay ≤30s).
+ * Explicit, bounded semantic wait so the model can synchronize on dynamic
+ * content instead of polling screenshots. Element conditions use one exact
+ * ARIA role + accessible name; page conditions use a named lifecycle state.
+ * Raw selectors and unknown fields fail closed locally before dispatch.
  */
-export async function waitFor(args: {
-  selector?: string;
-  state?: 'load' | 'domcontentloaded' | 'networkidle' | 'attached' | 'detached' | 'visible' | 'hidden';
-  timeoutMs?: number;
-}): Promise<DesktopResult<BrowserWaitForResult>> {
-  return callBrowser('POST', '/browser/wait_for', args || {});
+export async function waitFor(args: BrowserSemanticWaitInput): Promise<DesktopResult<BrowserWaitForResult>> {
+  const normalized = normalizeBrowserSemanticWait(args);
+  if (!normalized.ok) {
+    return browserFailureResult(describeBrowserBridgeFailure(normalized.error, 'invalid_input'));
+  }
+  const spec = normalized.value;
+  const request = spec.mode === 'element'
+    ? {
+        expectedBrowserProcessId: spec.expectedBrowserProcessId,
+        expectedBrowserContextId: spec.expectedBrowserContextId,
+        expectedPageId: spec.expectedPageId,
+        expectedUrl: spec.expectedUrl,
+        condition: spec.condition,
+        role: spec.role,
+        name: spec.name,
+        exact: true,
+        timeoutMs: spec.timeoutMs,
+      }
+    : {
+        expectedBrowserProcessId: spec.expectedBrowserProcessId,
+        expectedBrowserContextId: spec.expectedBrowserContextId,
+        expectedPageId: spec.expectedPageId,
+        expectedUrl: spec.expectedUrl,
+        condition: spec.condition,
+        timeoutMs: spec.timeoutMs,
+      };
+  const response = await callBrowser<BrowserWaitForResult>('POST', '/browser/wait_for', request);
+  if (!response.ok || !response.data) return response;
+  const data = response.data as unknown as Record<string, unknown>;
+  const identityReceipt = extractBrowserSemanticPageIdentityReceipt(data, spec);
+  if (
+    !identityReceipt
+    || data.condition !== spec.condition
+    || data.timeoutMs !== spec.timeoutMs
+    || data.completed !== true
+  ) {
+    return browserFailureResult(describeBrowserBridgeFailure(
+      'Browser wait returned an invalid privacy-bounded receipt.',
+      'stale_bridge',
+    ));
+  }
+  return {
+    ok: true,
+    data: {
+      ...identityReceipt,
+      condition: spec.condition,
+      timeoutMs: spec.timeoutMs,
+      completed: true,
+    },
+  };
 }
 
 /**
- * Real mouse-wheel scroll (Playwright `mouse.wheel`) so infinite-scroll
- * and lazy-loaded content actually advances — unlike scrollIntoView on a
- * known element. Deltas are clamped to ±5000 px per gesture; a bare call
- * nudges the page down ~600px. Positive `dy` scrolls down, negative up.
+ * One semantic, bounded browser-page scroll. The model supplies direction and
+ * a coarse amount; raw dx/dy coordinates are never accepted or returned.
  */
-export async function scrollWheel(args?: { dx?: number; dy?: number }): Promise<DesktopResult<{ dx: number; dy: number }>> {
-  return callBrowser('POST', '/browser/scroll', args || {});
+export async function scrollPage(args: BrowserSemanticScrollInput): Promise<DesktopResult<BrowserScrollResult>> {
+  const normalized = normalizeBrowserSemanticScroll(args);
+  if (!normalized.ok) {
+    return browserFailureResult(describeBrowserBridgeFailure(normalized.error, 'invalid_input'));
+  }
+  const spec = normalized.value;
+  const response = await callBrowser<BrowserScrollResult>('POST', '/browser/scroll', {
+    expectedBrowserProcessId: spec.expectedBrowserProcessId,
+    expectedBrowserContextId: spec.expectedBrowserContextId,
+    expectedPageId: spec.expectedPageId,
+    expectedUrl: spec.expectedUrl,
+    direction: spec.direction,
+    amount: spec.amount,
+  });
+  if (!response.ok || !response.data) return response;
+  const data = response.data as unknown as Record<string, unknown>;
+  const identityReceipt = extractBrowserSemanticPageIdentityReceipt(data, spec);
+  if (
+    !identityReceipt
+    || data.direction !== spec.direction
+    || data.amount !== spec.amount
+    || data.movementVerified !== true
+    || data.completed !== true
+  ) {
+    return browserFailureResult(describeBrowserBridgeFailure(
+      'Browser scroll returned an invalid privacy-bounded receipt.',
+      'stale_bridge',
+    ));
+  }
+  return {
+    ok: true,
+    data: {
+      ...identityReceipt,
+      direction: spec.direction,
+      amount: spec.amount,
+      movementVerified: true,
+      completed: true,
+    },
+  };
 }
+
+/** @deprecated Use scrollPage; retained as a semantic-signature compatibility alias. */
+export const scrollWheel = scrollPage;
 
 /**
  * Trigger a download and save it to a scoped downloads dir under the UC
