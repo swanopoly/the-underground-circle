@@ -73,6 +73,21 @@ export interface ResolvedApiKey {
   source: ApiKeySource;
 }
 
+/**
+ * A stored credential row exists or its lookup failed, but the Edge runtime
+ * could not safely read it. Keep this distinct from an absent key so callers
+ * never tell the user to add a duplicate key when the actual problem is
+ * ciphertext/key-version or database health.
+ */
+export class StoredApiKeyLookupError extends Error {
+  readonly code = "credential_unreadable" as const;
+
+  constructor() {
+    super("A saved provider credential could not be read. Re-enter or reconnect it in Office > Customize > API Keys.");
+    this.name = "StoredApiKeyLookupError";
+  }
+}
+
 function envList(name: string): string[] {
   return (Deno.env.get(name) || "")
     .split(",")
@@ -136,7 +151,8 @@ export async function getUserStoredApiKey(
     p_label: label,
   });
 
-  if (error || !data) return null;
+  if (error) throw new StoredApiKeyLookupError();
+  if (!data) return null;
   const row = Array.isArray(data) ? data[0] : data;
   if (typeof row === "string" && row.trim()) return { apiKey: row.trim() };
   if (row?.api_key && typeof row.api_key === "string") {
@@ -153,18 +169,31 @@ export async function resolveUserModelApiKey(opts: {
   label?: string;
   requestApiKey?: string | null;
   envVarName?: string;
+  /**
+   * Opt-in while callers migrate to a structured credential-health response.
+   * Legacy functions keep their prior null/missing behavior instead of
+   * unexpectedly turning an existing deployment into an unhandled 500.
+   */
+  failOnStoredLookupError?: boolean;
 }): Promise<ResolvedApiKey | null> {
   const requestKey = opts.requestApiKey?.trim();
   if (requestKey) {
     return { apiKey: requestKey, source: "request" };
   }
 
-  const stored = await getUserStoredApiKey(
-    opts.supabase,
-    opts.userId,
-    opts.storageProvider || opts.provider,
-    opts.label || "default",
-  );
+  let stored: { apiKey: string; endpoint?: string | null } | null = null;
+  let storedLookupError: StoredApiKeyLookupError | null = null;
+  try {
+    stored = await getUserStoredApiKey(
+      opts.supabase,
+      opts.userId,
+      opts.storageProvider || opts.provider,
+      opts.label || "default",
+    );
+  } catch (error) {
+    if (error instanceof StoredApiKeyLookupError) storedLookupError = error;
+    else throw error;
+  }
   if (stored?.apiKey) {
     return { ...stored, source: "user" };
   }
@@ -173,6 +202,8 @@ export async function resolveUserModelApiKey(opts: {
   if (platformKey && canUsePlatformModelKey(opts.userId)) {
     return { apiKey: platformKey, source: "platform" };
   }
+
+  if (storedLookupError && opts.failOnStoredLookupError === true) throw storedLookupError;
 
   return null;
 }

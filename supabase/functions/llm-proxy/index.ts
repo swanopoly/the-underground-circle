@@ -6,19 +6,31 @@
 //
 // Deploy: npx supabase functions deploy llm-proxy
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-import { computeCostUsd, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
-import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
+import {
+  computeCostUsd,
+  logClaudeUsage,
+  type UsageBreakdown,
+} from "../_claude/anthropic.ts";
+import {
+  byokMissingMessage,
+  createServiceRoleClient,
+  getAuthenticatedUser,
+  resolveUserModelApiKey,
+  StoredApiKeyLookupError,
+} from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
 };
 
 type ErrorCode =
   | "validation"
   | "unauthenticated"
+  | "forbidden"
   | "key_missing"
+  | "credential_unreadable"
   | "unsupported_provider"
   | "upstream_error"
   | "internal";
@@ -30,15 +42,116 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function errResponse(status: number, code: ErrorCode, message: string): Response {
+function errResponse(
+  status: number,
+  code: ErrorCode,
+  message: string,
+): Response {
   return jsonResponse({ error: message, code }, status);
 }
 
-function mapUpstreamError(message: string): Response {
-  if (/ API \d{3}: /.test(message)) {
-    return errResponse(502, "upstream_error", message);
+type UpstreamFailureKind = "http" | "redirect" | "network" | "invalid_response";
+
+class UpstreamFailure extends Error {
+  constructor(
+    readonly provider: string,
+    readonly kind: UpstreamFailureKind,
+    readonly status?: number,
+  ) {
+    super("Upstream provider request failed");
+    this.name = "UpstreamFailure";
   }
-  return errResponse(500, "internal", message);
+}
+
+function mapUpstreamError(error: unknown): Response {
+  if (error instanceof StoredApiKeyLookupError) {
+    return errResponse(
+      409,
+      "credential_unreadable",
+      "A saved provider credential could not be read. Re-enter or reconnect it in Office > Customize > API Keys.",
+    );
+  }
+  if (error instanceof UpstreamFailure) {
+    const statusDetail = error.kind === "http" && error.status
+      ? ` (HTTP ${error.status})`
+      : "";
+    return errResponse(
+      502,
+      "upstream_error",
+      `The selected model provider could not complete the request${statusDetail}.`,
+    );
+  }
+  return errResponse(
+    500,
+    "internal",
+    "The model request could not be completed.",
+  );
+}
+
+function logProxyError(error: unknown): void {
+  if (error instanceof UpstreamFailure) {
+    console.error("llm-proxy upstream failure", {
+      provider: error.provider,
+      kind: error.kind,
+      status: error.status || null,
+    });
+    return;
+  }
+  console.error("llm-proxy internal failure", {
+    name: error instanceof Error ? error.name : typeof error,
+  });
+}
+
+async function fetchUpstream(
+  provider: string,
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...init,
+      // Never allow a provider response to move credentials or request data to
+      // a second, unvetted host. None of the fixed provider APIs require 3xx.
+      redirect: "manual",
+    });
+  } catch {
+    throw new UpstreamFailure(provider, "network");
+  }
+
+  if (
+    (response.status >= 300 && response.status < 400) ||
+    response.type === "opaqueredirect"
+  ) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // Body disposal is best effort; the redirect remains blocked.
+    }
+    throw new UpstreamFailure(provider, "redirect", response.status);
+  }
+  return response;
+}
+
+async function parseUpstreamJson(
+  response: Response,
+  provider: string,
+): Promise<any> {
+  if (!response.ok) {
+    // Do not read, log, or return the upstream body. Provider errors can echo
+    // prompts, credentials, internal request IDs, or attacker-controlled HTML.
+    try {
+      await response.body?.cancel();
+    } catch {
+      // Body disposal is best effort; no body data crosses the trust boundary.
+    }
+    throw new UpstreamFailure(provider, "http", response.status);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new UpstreamFailure(provider, "invalid_response", response.status);
+  }
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -78,15 +191,13 @@ interface LLMProxyRequest {
   thinking_level?: "fast" | "balanced" | "deep";
   // Optional caller-supplied key for one-off testing before saving.
   api_key?: string;
-  // Optional caller-supplied endpoint for one-off OpenAI-compatible key tests.
-  endpoint?: string;
   // Embedding-mode input (only used when provider === 'openai-embed').
   // Accepts either a single string or a batch; batches are more efficient.
   input?: string | string[];
 }
 
 interface EmbeddingProxyResponse {
-  embeddings: number[][];          // one vector per input string
+  embeddings: number[][]; // one vector per input string
   model: string;
   provider: "openai-embed";
   dimensions: number;
@@ -129,7 +240,8 @@ const PROVIDER_ENDPOINTS: Record<string, string> = {
   huggingface: "https://router.huggingface.co/v1/chat/completions",
   zai: "https://api.z.ai/api/paas/v4/chat/completions",
   minimax: "https://api.minimax.io/v1/chat/completions",
-  google_ai: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  google_ai:
+    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
   mistral_ai: "https://api.mistral.ai/v1/chat/completions",
   cohere: "https://api.cohere.ai/compatibility/v1/chat/completions",
   perplexity: "https://api.perplexity.ai/chat/completions",
@@ -138,13 +250,29 @@ const PROVIDER_ENDPOINTS: Record<string, string> = {
   deepseek: "https://api.deepseek.com/chat/completions",
 };
 
-// OpenAI-compatible providers (same request/response format)
+const PROVIDER_HOSTNAMES: Record<string, string> = {
+  openai: "api.openai.com",
+  openrouter: "openrouter.ai",
+  groq: "api.groq.com",
+  "github-models": "models.inference.ai.azure.com",
+  huggingface: "router.huggingface.co",
+  zai: "api.z.ai",
+  minimax: "api.minimax.io",
+  google_ai: "generativelanguage.googleapis.com",
+  mistral_ai: "api.mistral.ai",
+  cohere: "api.cohere.ai",
+  perplexity: "api.perplexity.ai",
+  together_ai: "api.together.xyz",
+  fireworks_ai: "api.fireworks.ai",
+  deepseek: "api.deepseek.com",
+};
+
+// Hosted OpenAI-compatible providers with fixed, code-owned destinations.
+// Arbitrary Ollama/OpenAI-compatible URLs are deliberately excluded below.
 const OPENAI_COMPATIBLE: Provider[] = [
   "openai",
-  "openai_compatible",
   "openrouter",
   "groq",
-  "ollama",
   "github-models",
   "huggingface",
   "zai",
@@ -158,51 +286,39 @@ const OPENAI_COMPATIBLE: Provider[] = [
   "deepseek",
 ];
 
-// ─── SSRF guard for caller-supplied endpoints (ollama / openai_compatible) ───
-// A caller-controlled endpoint URL must never resolve to a loopback, private,
-// link-local, CGNAT, or cloud-metadata host from the hosted edge server.
-// (Mirrors the guard in custom-api-proxy/index.ts.)
-function isPrivateIpv4(hostname: string): boolean {
-  const match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!match) return false;
-  const nums = match.slice(1).map(Number);
-  if (nums.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  const [a, b] = nums;
-  return a === 10
-    || a === 127
-    || a === 0
-    || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168)
-    || (a === 100 && b >= 64 && b <= 127);
-}
-function isBlockedHostname(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  return host === "localhost"
-    || host.endsWith(".localhost")
-    || host.endsWith(".local")
-    || host.endsWith(".internal")
-    || host === "::1"
-    || host.startsWith("fc")
-    || host.startsWith("fd")
-    || host.startsWith("fe80")
-    || host === "169.254.169.254"
-    || isPrivateIpv4(host);
-}
-/** True when a resolved endpoint must NOT be fetched (bad scheme or blocked host). */
-function endpointIsBlocked(rawUrl: string): boolean {
-  let u: URL;
-  try { u = new URL(rawUrl); } catch { return true; }
-  if (u.protocol !== "http:" && u.protocol !== "https:") return true;
-  return isBlockedHostname(u.hostname);
-}
+/**
+ * Return a code-owned provider endpoint only when every authority component
+ * still matches its exact checked-in contract. This is defense in depth for a
+ * future endpoint edit: HTTPS is mandatory, credentials/fragments/custom ports
+ * are refused, and the hostname must exactly match the provider allowlist.
+ *
+ * The hosted edge function intentionally does not accept arbitrary endpoint
+ * hostnames. Standard fetch cannot pin a pre-resolved address through the TLS
+ * connection, so DNS validation alone cannot fully close rebinding/TOCTOU for
+ * attacker-owned domains. Local Ollama/custom endpoints belong on the local
+ * authenticated bridge, never on this public hosted network boundary. That
+ * also excludes every literal loopback/private/link-local/CGNAT/metadata IPv4,
+ * IPv6, and IPv4-mapped IPv6 form without maintaining a bypass-prone parser.
+ */
+function getTrustedProviderEndpoint(provider: Provider): string {
+  const endpoint = PROVIDER_ENDPOINTS[provider];
+  const expectedHostname = PROVIDER_HOSTNAMES[provider];
+  if (!endpoint || !expectedHostname) {
+    throw new Error("Provider endpoint is not configured.");
+  }
 
-function normalizeOpenAICompatibleEndpoint(endpoint: string): string {
-  const trimmed = endpoint.trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
-  if (/\/chat\/completions(?:\?|$)/i.test(trimmed)) return endpoint.trim();
-  if (/\/v1$/i.test(trimmed)) return `${trimmed}/chat/completions`;
-  return `${trimmed}/v1/chat/completions`;
+  const parsed = new URL(endpoint);
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.hash !== "" ||
+    (parsed.port !== "" && parsed.port !== "443") ||
+    parsed.hostname.toLowerCase() !== expectedHostname
+  ) {
+    throw new Error("Provider endpoint configuration is invalid.");
+  }
+  return parsed.toString();
 }
 
 function normalizeProviderModel(provider: Provider, model: string): string {
@@ -210,8 +326,8 @@ function normalizeProviderModel(provider: Provider, model: string): string {
   const prefixes = provider === "huggingface"
     ? ["huggingface_endpoint/", "huggingface/", "hugging_face/"]
     : provider === "zai"
-      ? ["zai/", "z_ai/"]
-      : [`${provider}/`];
+    ? ["zai/", "z_ai/"]
+    : [`${provider}/`];
   for (const prefix of prefixes) {
     if (model.startsWith(prefix)) return model.slice(prefix.length);
   }
@@ -279,7 +395,11 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "MiniMax-Text-01": [0.20, 1.10],
 };
 
-function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
+function estimateCost(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+): number {
   // Try exact match first, then partial match
   let costs = MODEL_COSTS[model];
   if (!costs) {
@@ -311,7 +431,10 @@ const MAX_TOKENS_CEILING = 16384;
  *  to [1, MAX_TOKENS_CEILING]); absent/invalid falls back to the
  *  thinking-level default — today's behavior unchanged. */
 function resolveMaxTokens(requested: unknown, thinkingDefault: number): number {
-  if (typeof requested === "number" && Number.isFinite(requested) && requested >= 1) {
+  if (
+    typeof requested === "number" && Number.isFinite(requested) &&
+    requested >= 1
+  ) {
     return Math.min(Math.floor(requested), MAX_TOKENS_CEILING);
   }
   return thinkingDefault;
@@ -332,13 +455,15 @@ function normalizeToolCalls(raw: unknown): NormalizedToolCall[] | undefined {
       ? tc.function
       : tc) as Record<string, unknown>;
     const name = typeof fn.name === "string" ? fn.name : "";
-    if (!name) continue;
+    if (!name) {
+      continue;
+    }
     const rawArgs = fn.arguments;
     const args = typeof rawArgs === "string"
       ? rawArgs
       : rawArgs == null
-        ? "{}"
-        : JSON.stringify(rawArgs);
+      ? "{}"
+      : JSON.stringify(rawArgs);
     out.push({
       id: typeof tc.id === "string" && tc.id ? tc.id : `tool_call_${i}`,
       name,
@@ -368,7 +493,10 @@ async function loadPersonality(
 
 // ─── Gather light circle context ────────────────────────────────────────────
 
-async function gatherLightContext(supabase: any, circleId: string): Promise<string> {
+async function gatherLightContext(
+  supabase: any,
+  circleId: string,
+): Promise<string> {
   const { data: circle } = await supabase
     .from("circles")
     .select("name, description")
@@ -397,13 +525,31 @@ async function gatherLightContext(supabase: any, circleId: string): Promise<stri
     timeZone: "America/New_York",
   });
 
-  return `Circle: ${circle.name}\nDate: ${dateStr}\nMembers: ${memberCount || 0}\nChecked in today: ${checkinCount || 0}/${memberCount || 0}`;
+  return `Circle: ${circle.name}\nDate: ${dateStr}\nMembers: ${
+    memberCount || 0
+  }\nChecked in today: ${checkinCount || 0}/${memberCount || 0}`;
+}
+
+async function verifyExactCircleMembership(
+  supabase: any,
+  userId: string,
+  circleId: string,
+): Promise<"member" | "not_member" | "unavailable"> {
+  const { data, error } = await supabase
+    .from("circle_members")
+    .select("circle_id")
+    .eq("circle_id", circleId)
+    .eq("user_id", userId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return "unavailable";
+  return data?.circle_id === circleId ? "member" : "not_member";
 }
 
 // ─── Call OpenAI-compatible API ─────────────────────────────────────────────
 
 async function callOpenAICompatible(
-  endpoint: string,
   apiKey: string,
   model: string,
   messages: Array<{ role: string; content: string }>,
@@ -425,6 +571,7 @@ async function callOpenAICompatible(
     tool_choice?: unknown;
   },
 ): Promise<LLMProxyResponse> {
+  const endpoint = getTrustedProviderEndpoint(provider);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${apiKey}`,
@@ -448,23 +595,19 @@ async function callOpenAICompatible(
       requestBody.tool_choice = extra.tool_choice;
     }
   }
-  if (extra?.plugins && Array.isArray(extra.plugins) && extra.plugins.length > 0) {
+  if (
+    extra?.plugins && Array.isArray(extra.plugins) && extra.plugins.length > 0
+  ) {
     requestBody.plugins = extra.plugins;
   }
 
-  const res = await fetch(endpoint, {
+  const res = await fetchUpstream(provider, endpoint, {
     method: "POST",
     headers,
     body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(60_000),
   });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`${provider} API ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
+  const data = await parseUpstreamJson(res, provider);
   const choice = data.choices?.[0];
   const usage = data.usage || {};
   const inputTokens = usage.prompt_tokens || 0;
@@ -475,7 +618,8 @@ async function callOpenAICompatible(
   const toolCalls = normalizeToolCalls(choice?.message?.tool_calls);
 
   return {
-    response: choice?.message?.content || (toolCalls ? "" : "No response generated."),
+    response: choice?.message?.content ||
+      (toolCalls ? "" : "No response generated."),
     ...(toolCalls ? { toolCalls } : {}),
     usage: {
       model: data.model || model,
@@ -533,7 +677,11 @@ async function callAnthropic(
     // cache_control so BYO-proxy callers with stable system prompts get
     // ephemeral cache reads on repeat calls.
     body.system = [
-      { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
+      {
+        type: "text",
+        text: systemPrompt,
+        cache_control: { type: "ephemeral" },
+      },
     ];
   }
 
@@ -542,29 +690,27 @@ async function callAnthropic(
     body.temperature = temperature;
   }
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
+  const res = await fetchUpstream(
+    "anthropic",
+    "https://api.anthropic.com/v1/messages",
+    {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
     },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60_000),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Anthropic API ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
+  );
+  const data = await parseUpstreamJson(res, "anthropic");
   const u = data.usage || {};
   const usage: UsageBreakdown = {
-    uncachedIn:  u.input_tokens                ?? 0,
+    uncachedIn: u.input_tokens ?? 0,
     cacheCreate: u.cache_creation_input_tokens ?? 0,
-    cacheRead:   u.cache_read_input_tokens     ?? 0,
-    output:      u.output_tokens               ?? 0,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    output: u.output_tokens ?? 0,
   };
 
   return {
@@ -574,14 +720,15 @@ async function callAnthropic(
       provider: "anthropic",
       // `input_tokens` stays the uncached count for backwards-compat with
       // BYO-key dashboards that sum `input_tokens + output_tokens`.
-      input_tokens:          usage.uncachedIn,
-      output_tokens:         usage.output,
+      input_tokens: usage.uncachedIn,
+      output_tokens: usage.output,
       cache_creation_tokens: usage.cacheCreate,
-      cache_read_tokens:     usage.cacheRead,
-      total_tokens:          usage.uncachedIn + usage.cacheCreate + usage.cacheRead + usage.output,
+      cache_read_tokens: usage.cacheRead,
+      total_tokens: usage.uncachedIn + usage.cacheCreate + usage.cacheRead +
+        usage.output,
       // Cache-aware cost via the shared pricing table. Replaces the old
       // `estimateCost(...)` call that ignored cache tokens entirely.
-      estimated_cost:        computeCostUsd(resolvedModel, usage),
+      estimated_cost: computeCostUsd(resolvedModel, usage),
     },
   };
 }
@@ -597,22 +744,20 @@ async function callOpenAIEmbed(
   model: string,
   inputs: string[],
 ): Promise<EmbeddingProxyResponse> {
-  const res = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+  const res = await fetchUpstream(
+    "openai-embed",
+    "https://api.openai.com/v1/embeddings",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model, input: inputs }),
+      signal: AbortSignal.timeout(60_000),
     },
-    body: JSON.stringify({ model, input: inputs }),
-    signal: AbortSignal.timeout(60_000),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`openai-embed API ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
+  );
+  const data = await parseUpstreamJson(res, "openai-embed");
   // Response: { data: [{ embedding: number[], index: number }, ...], usage: { prompt_tokens } }
   const embeddings: number[][] = (data.data || [])
     .sort((a: any, b: any) => a.index - b.index)
@@ -636,16 +781,59 @@ Deno.serve(async (req: Request) => {
   }
 
   if (req.method === "GET") {
-    return jsonResponse({ status: "ok", service: "llm-proxy", providers: Object.keys(PROVIDER_ENDPOINTS).concat(["anthropic", "ollama"]) });
+    return jsonResponse({ status: "ok", service: "llm-proxy" });
+  }
+
+  if (req.method !== "POST") {
+    return errResponse(405, "validation", "Method not allowed.");
   }
 
   try {
-    const body: LLMProxyRequest & {
+    // Authenticate before parsing or validating an attacker-controlled body.
+    // This keeps the public no-JWT router setting from becoming a free JSON
+    // parsing/validation CPU surface. The request body userId remains ignored.
+    const user = await getAuthenticatedUser(req);
+    if (!user?.id) {
+      return errResponse(
+        401,
+        "unauthenticated",
+        "Not authenticated — valid JWT required.",
+      );
+    }
+    const userId = user.id;
+
+    let body: LLMProxyRequest & {
       tools?: Array<Record<string, unknown>>;
       plugins?: Array<Record<string, unknown>>;
       tool_choice?: unknown;
-    } = await req.json();
-    const { provider, model: rawModel, messages, circleId, thinkingLevel } = body;
+    };
+    try {
+      body = await req.json();
+    } catch {
+      return errResponse(400, "validation", "Invalid JSON body.");
+    }
+    const provider = typeof body.provider === "string"
+      ? body.provider as Provider
+      : null;
+    const rawModel = typeof body.model === "string" ? body.model.trim() : "";
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const thinkingLevel = body.thinkingLevel;
+    if (!provider) {
+      return errResponse(400, "validation", "provider must be a string.");
+    }
+    const requestedCircleId = body.circleId;
+    if (requestedCircleId != null && typeof requestedCircleId !== "string") {
+      return errResponse(400, "validation", "circleId must be a string.");
+    }
+    const circleId = typeof requestedCircleId === "string"
+      ? requestedCircleId.trim()
+      : "";
+    if (requestedCircleId != null && !circleId) {
+      return errResponse(400, "validation", "circleId cannot be empty.");
+    }
+    if (body.api_key != null && typeof body.api_key !== "string") {
+      return errResponse(400, "validation", "api_key must be a string.");
+    }
     const model = rawModel && provider !== "openai-embed"
       ? normalizeProviderModel(provider, rawModel)
       : rawModel;
@@ -653,36 +841,65 @@ Deno.serve(async (req: Request) => {
     // Embedding requests use a completely different request shape — validate
     // and dispatch early so the chat-path guards don't reject `!messages`.
     const isEmbed = provider === "openai-embed";
-    if (!isEmbed && (!provider || !model || !messages?.length)) {
-      return errResponse(400, "validation", "Missing provider, model, or messages.");
+    if (!isEmbed && (!model || messages.length === 0)) {
+      return errResponse(
+        400,
+        "validation",
+        "Missing provider, model, or messages.",
+      );
     }
     if (isEmbed && !body.input) {
-      return errResponse(400, "validation", "openai-embed requires `input` (string or string[]).");
-    }
-
-    // Create service role client
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    );
-
-    // Resolve the user from JWT — never trust userId from request body
-    const authHeader = req.headers.get("Authorization") || "";
-    const token = authHeader.replace("Bearer ", "");
-    let userId: string | null = null;
-
-    if (token) {
-      const anonClient = createClient(
-        Deno.env.get("SUPABASE_URL")!,
-        Deno.env.get("SUPABASE_ANON_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-        { global: { headers: { Authorization: `Bearer ${token}` } } },
+      return errResponse(
+        400,
+        "validation",
+        "openai-embed requires `input` (string or string[]).",
       );
-      const { data: { user } } = await anonClient.auth.getUser();
-      userId = user?.id || null;
     }
 
-    if (!userId) {
-      return errResponse(401, "unauthenticated", "Not authenticated — valid JWT required.");
+    // Do not create or use a service-role client until authentication succeeds.
+    const supabase = createServiceRoleClient();
+
+    // circleId drives service-role context reads, credential use, and usage
+    // attribution. Fail closed on the exact (circle_id, authenticated user_id)
+    // pair before any of that work — including the embedding fast-path.
+    if (circleId) {
+      const membership = await verifyExactCircleMembership(
+        supabase,
+        userId,
+        circleId,
+      );
+      if (membership === "unavailable") {
+        return errResponse(
+          503,
+          "internal",
+          "Circle access could not be verified.",
+        );
+      }
+      if (membership !== "member") {
+        return errResponse(
+          403,
+          "forbidden",
+          "You are not a member of this circle.",
+        );
+      }
+    }
+
+    // The public edge runtime cannot safely connect to caller-controlled DNS:
+    // Deno fetch cannot bind TLS to a pre-resolved address, leaving a DNS
+    // rebinding window even after address checks. Keep custom/OpenAI-compatible
+    // and Ollama endpoints on the authenticated local bridge instead.
+    if (provider === "ollama" || provider === "openai_compatible") {
+      return errResponse(
+        400,
+        "unsupported_provider",
+        "Local and custom model endpoints are not available through the hosted proxy. Use the local OpenSwan bridge.",
+      );
+    }
+    if (
+      !isEmbed && provider !== "anthropic" &&
+      !OPENAI_COMPATIBLE.includes(provider)
+    ) {
+      return errResponse(400, "unsupported_provider", "Unsupported provider.");
     }
 
     // ── Embedding fast-path ────────────────────────────────────────────────
@@ -693,7 +910,10 @@ Deno.serve(async (req: Request) => {
       const inputs = Array.isArray(rawInput) ? rawInput : [rawInput];
       // Truncate per-item to 8k tokens worth (~30k chars). OpenAI's limit is
       // 8192 tokens for text-embedding-3-small; we leave slack for safety.
-      const bounded = inputs.map(s => (s || "").slice(0, 30000)).filter(Boolean);
+      const bounded = inputs
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.slice(0, 30000))
+        .filter(Boolean);
       if (bounded.length === 0) {
         return errResponse(400, "validation", "openai-embed input is empty.");
       }
@@ -704,6 +924,7 @@ Deno.serve(async (req: Request) => {
         provider: "openai",
         requestApiKey: body.api_key,
         envVarName: "OPENAI_API_KEY",
+        failOnStoredLookupError: true,
       });
       if (!embedKey) {
         return errResponse(
@@ -715,7 +936,11 @@ Deno.serve(async (req: Request) => {
 
       const embedModel = model || "text-embedding-3-small";
       try {
-        const result = await callOpenAIEmbed(embedKey.apiKey, embedModel, bounded);
+        const result = await callOpenAIEmbed(
+          embedKey.apiKey,
+          embedModel,
+          bounded,
+        );
 
         // Light usage tracking — reuse the existing table
         try {
@@ -735,37 +960,38 @@ Deno.serve(async (req: Request) => {
         } catch { /* non-critical */ }
 
         return jsonResponse(result);
-      } catch (err: any) {
-        return mapUpstreamError(err?.message || "Embedding call failed");
+      } catch (error) {
+        logProxyError(error);
+        return mapUpstreamError(error);
       }
     }
 
-    let apiKey: string | null | undefined;
-    let customEndpoint: string | undefined;
-
-    const envVarName =
-      provider === "anthropic" ? "ANTHROPIC_API_KEY" :
-      provider === "zai" ? "ZAI_API_KEY" :
-      provider === "minimax" ? "MINIMAX_API_KEY" :
-      undefined;
+    const envVarName = provider === "anthropic"
+      ? "ANTHROPIC_API_KEY"
+      : provider === "zai"
+      ? "ZAI_API_KEY"
+      : provider === "minimax"
+      ? "MINIMAX_API_KEY"
+      : undefined;
     const keyData = await resolveUserModelApiKey({
       supabase,
       userId,
       provider,
       requestApiKey: body.api_key,
       envVarName,
+      failOnStoredLookupError: true,
     });
     if (!keyData) {
       return errResponse(400, "key_missing", byokMissingMessage(provider));
     }
-    apiKey = keyData.apiKey;
-    customEndpoint = body.endpoint || keyData.endpoint || undefined;
+    const apiKey = keyData.apiKey;
 
     // Apply thinking level config. `thinking_level` is an accepted
     // snake-case alias; camelCase wins if both are present, and unknown
     // level strings fall back to balanced instead of crashing.
     const requestedLevel = thinkingLevel || body.thinking_level;
-    const thinkConfig = THINKING_LEVELS[requestedLevel || "balanced"] ?? THINKING_LEVELS.balanced;
+    const thinkConfig = THINKING_LEVELS[requestedLevel || "balanced"] ??
+      THINKING_LEVELS.balanced;
     const temperature = body.temperature ?? thinkConfig.temperature;
     // Explicit request max_tokens beats the thinking-level default,
     // clamped to MAX_TOKENS_CEILING; absent -> prior behavior unchanged.
@@ -796,7 +1022,10 @@ Deno.serve(async (req: Request) => {
           content: `${systemParts.join("\n\n")}\n\n${finalMessages[0].content}`,
         };
       } else {
-        finalMessages.unshift({ role: "system", content: systemParts.join("\n\n") });
+        finalMessages.unshift({
+          role: "system",
+          content: systemParts.join("\n\n"),
+        });
       }
     }
 
@@ -804,54 +1033,48 @@ Deno.serve(async (req: Request) => {
     let result: LLMProxyResponse;
 
     if (provider === "anthropic") {
-      result = await callAnthropic(apiKey!, model, finalMessages, temperature, maxTokens);
+      result = await callAnthropic(
+        apiKey,
+        model,
+        finalMessages,
+        temperature,
+        maxTokens,
+      );
     } else if (OPENAI_COMPATIBLE.includes(provider)) {
-      let endpoint: string;
-      if (provider === "ollama") {
-        endpoint = (customEndpoint || "http://localhost:11434") + "/v1/chat/completions";
-      } else if (provider === "openai_compatible") {
-        endpoint = customEndpoint ? normalizeOpenAICompatibleEndpoint(customEndpoint) : "";
-        if (!endpoint) {
-          return errResponse(400, "validation", "OpenAI-compatible provider requires a saved endpoint URL.");
-        }
-      } else {
-        endpoint = PROVIDER_ENDPOINTS[provider];
-      }
-      // SSRF guard: only the caller-controlled endpoints (ollama /
-      // openai_compatible) are attacker-influenced. Built-in PROVIDER_ENDPOINTS
-      // are trusted public hosts and are left unchecked.
-      if ((provider === "ollama" || provider === "openai_compatible") && endpointIsBlocked(endpoint)) {
-        return errResponse(400, "validation", "Endpoint host is not allowed.");
-      }
       result = await callOpenAICompatible(
-        endpoint,
-        apiKey!,
+        apiKey,
         model,
         finalMessages,
         temperature,
         maxTokens,
         provider,
-        { tools: body.tools, plugins: body.plugins, tool_choice: body.tool_choice },
+        {
+          tools: body.tools,
+          plugins: body.plugins,
+          tool_choice: body.tool_choice,
+        },
       );
     } else {
-      return errResponse(400, "unsupported_provider", `Unsupported provider: ${provider}`);
+      return errResponse(400, "unsupported_provider", "Unsupported provider.");
     }
 
     // Track usage in both ledgers. Keep these independent so a missing legacy
     // table cannot suppress the canonical Anthropic cost row.
     const usageLogs: Promise<unknown>[] = [
-      Promise.resolve(supabase.from("user_ai_usage").insert({
-        user_id: userId,
-        circle_id: circleId || null,
-        model: result.usage.model,
-        provider: result.usage.provider,
-        input_tokens: result.usage.input_tokens,
-        output_tokens: result.usage.output_tokens,
-        cache_creation_tokens: result.usage.cache_creation_tokens,
-        cache_read_tokens: result.usage.cache_read_tokens,
-        estimated_cost: result.usage.estimated_cost,
-        source: "llm-proxy",
-      })),
+      Promise.resolve(
+        supabase.from("user_ai_usage").insert({
+          user_id: userId,
+          circle_id: circleId || null,
+          model: result.usage.model,
+          provider: result.usage.provider,
+          input_tokens: result.usage.input_tokens,
+          output_tokens: result.usage.output_tokens,
+          cache_creation_tokens: result.usage.cache_creation_tokens,
+          cache_read_tokens: result.usage.cache_read_tokens,
+          estimated_cost: result.usage.estimated_cost,
+          source: "llm-proxy",
+        }),
+      ),
     ];
     if (provider === "anthropic") {
       usageLogs.push(
@@ -861,10 +1084,10 @@ Deno.serve(async (req: Request) => {
           source: "llm-proxy",
           model: result.usage.model,
           usage: {
-            uncachedIn:  result.usage.input_tokens || 0,
-            output:      result.usage.output_tokens || 0,
+            uncachedIn: result.usage.input_tokens || 0,
+            output: result.usage.output_tokens || 0,
             cacheCreate: result.usage.cache_creation_tokens || 0,
-            cacheRead:   result.usage.cache_read_tokens || 0,
+            cacheRead: result.usage.cache_read_tokens || 0,
           },
           metadata: { proxy: true },
         }),
@@ -873,8 +1096,8 @@ Deno.serve(async (req: Request) => {
     await Promise.allSettled(usageLogs);
 
     return jsonResponse(result);
-  } catch (err: any) {
-    console.error("llm-proxy error:", err);
-    return mapUpstreamError(err?.message || "Internal server error");
+  } catch (error) {
+    logProxyError(error);
+    return mapUpstreamError(error);
   }
 });
