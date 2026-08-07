@@ -1,11 +1,11 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Platform } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createNativeSecureAuthStorage, type AuthKeyValueStorage } from './authStorage';
 
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
 
-let storage: any;
+let storage: AuthKeyValueStorage;
 
 if (Platform.OS === 'web') {
   storage = {
@@ -25,7 +25,7 @@ if (Platform.OS === 'web') {
     },
   };
 } else {
-  storage = AsyncStorage;
+  storage = createNativeSecureAuthStorage();
 }
 
 // Deduplicate across HMR reloads — prevents "concurrent storage key" warning
