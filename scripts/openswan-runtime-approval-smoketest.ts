@@ -470,8 +470,9 @@ assert(
 );
 assert(
   runtimeSource.includes("name: 'browser.fill_credential_field'")
-    && runtimeSource.includes('without returning raw secret values to the model'),
-  'credential fill remains cataloged with its no-secret-return policy',
+    && runtimeSource.includes('Saved credential fill is temporarily unavailable')
+    && runtimeSource.includes('no secret was fetched and nothing was filled'),
+  'credential fill is cataloged but fails closed before secret retrieval until exact target binding exists',
 );
 
 if (failures > 0) {
