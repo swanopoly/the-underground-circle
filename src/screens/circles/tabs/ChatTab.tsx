@@ -11178,17 +11178,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
 
       if (webSearchOutcome.status === 'degraded') {
+        // Backend-only by request (2026-08-07). A failed enrichment lane is
+        // pipeline detail, not something to narrate — saying "web search is
+        // unavailable…" ahead of a reply to "sup" is noise about a lane the
+        // user never asked for. The degradation still reaches the MODEL via
+        // promptContext, which is what actually matters: it keeps the answer
+        // from claiming current facts were web-verified. The notice text is
+        // deliberately left unread here rather than deleted upstream, so the
+        // lane can surface it again if a caller ever needs it.
         webSearchDegradationContext = webSearchOutcome.promptContext;
-        addBotMessage(webSearchOutcome.userNotice, undefined, {
-          localOnly: true,
-          durability: 'ephemeral',
-          source: {
-            actor: 'OpenSwan',
-            surface: 'web_search_degraded',
-            selectedModel,
-            effectiveModel: 'plain-chat-fallback',
-          },
-        });
       }
     }
 

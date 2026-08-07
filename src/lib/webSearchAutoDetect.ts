@@ -92,10 +92,10 @@ const TRIGGER_THRESHOLD = 1;
 // narrow: a greeting followed by an actual request ("hello, latest news?")
 // does not match and can still use search.
 const CONVERSATION_ONLY_PATTERNS: RegExp[] = [
-  /^(?:hi|hello|hey|hiya|howdy|yo)(?:\s+(?:there|everyone|everybody|team|openswan|swan))?[\s!.,?]*$/i,
+  /^(?:hi|hello|hey|hiya|howdy|yo|sup|wassup|whassup|yo\s+yo)(?:\s+(?:there|everyone|everybody|team|openswan|swan))?[\s!.,?]*$/i,
   /^good\s+(?:morning|afternoon|evening)(?:\s+(?:there|everyone|everybody|team|openswan|swan))?[\s!.,?]*$/i,
   /^(?:thanks|thank\s+you|thank\s+you\s+very\s+much|thx|got\s+it|okay|ok|cool|sounds\s+good|great|awesome|perfect)[\s!.,?]*$/i,
-  /^(?:how\s+are\s+you|how(?:'s|\s+is)\s+it\s+going|what(?:'s|\s+is)\s+up|nice\s+to\s+meet\s+you)[\s!.,?]*$/i,
+  /^(?:how\s+are\s+you|how(?:'s|\s+is)\s+it\s+going|what(?:'s|\s+is)\s+up|what(?:'s|\s+is)\s+good|nice\s+to\s+meet\s+you)[\s!.,?]*$/i,
 ];
 
 export function isConversationOnlyTurn(rawMessage: string): boolean {

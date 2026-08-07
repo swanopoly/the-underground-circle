@@ -90,7 +90,13 @@ async function main() {
     assert(d.attach && !d.auto, 'toggle on + code question → attach (manual), auto=false');
   }
   // A persistent toggle must not turn a greeting into a required tool call.
-  for (const greeting of ['hello', 'Hi!', 'hey there', 'Good morning OpenSwan', 'Thanks', 'How are you?']) {
+  // 'sup'/'wassup'/"what's good" added 2026-08-07: a real "sup" reached the
+  // search lane, failed on the OpenRouter key, and prefixed the reply with a
+  // paragraph about API keys. The greeting list is the thing that stops that.
+  for (const greeting of [
+    'hello', 'Hi!', 'hey there', 'Good morning OpenSwan', 'Thanks', 'How are you?',
+    'sup', 'Sup!', 'wassup', "what's good", 'yo',
+  ]) {
     const d = decideWebSearchForTurn(greeting, true);
     assert(!d.attach && !d.auto, `toggle on + conversation-only turn stays plain chat: "${greeting}"`);
     assert(isConversationOnlyTurn(greeting), `classifies conversation-only turn: "${greeting}"`);
@@ -159,7 +165,15 @@ async function main() {
     assert(webBlock.includes('runOptionalWebSearchLane(webDecision'), 'Chat runs the injected optional Web Search lane');
     assert(!webBlock.includes("import('../../../lib/universalInvoke')"), 'search degradation does not start a duplicate provider router');
     assert(!webBlock.includes('addRecoverableChatErrorMessage({'), 'search-only failure does not create action recovery or a failed receipt');
-    assert(webBlock.includes("surface: 'web_search_degraded'"), 'search degradation is visible as an ephemeral Chat notice');
+    // Reversed 2026-08-07 by request: a failed enrichment lane is pipeline
+    // detail, not chat copy. The user hit it by typing "sup" and got a
+    // paragraph about OpenRouter keys before the reply. What must survive is
+    // the MODEL-side context (asserted next), not a user-visible bubble.
+    assert(
+      !webBlock.includes("surface: 'web_search_degraded'")
+        && !webBlock.includes('webSearchOutcome.userNotice'),
+      'search degradation stays backend-only and is never rendered as a Chat notice',
+    );
     assert(
       chatSource.includes('webSearchDegradationContext,\n        cleanContent,'),
       'canonical Chat receives the not-web-verified degradation context',
