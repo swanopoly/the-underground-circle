@@ -128,13 +128,18 @@ const COMPUTER_ACTION_RECEIPT_FIELDS: readonly ReceiptFieldSpec[] = [
 
 const MUTATION_DISPATCH_RECEIPT_FIELDS: readonly ReceiptFieldSpec[] = [
   ['schemaVersion', 'number'],
+  ['actionId', 'string'],
   ['tool', 'string'],
+  ['epochId', 'string'],
   ['authorizedAt', 'string'],
   ['dispatchedAt', 'string'],
 ] as const;
 
 const COMPUTER_APP_VERIFICATION_RECEIPT_FIELDS: readonly ReceiptFieldSpec[] = [
   ['schemaVersion', 'number'],
+  ['actionId', 'string'],
+  ['beforeEpochId', 'string'],
+  ['afterEpochId', 'nullable_string'],
   ['status', 'string'],
   ['checkedAt', 'string'],
   ['canComplete', 'boolean'],
@@ -188,6 +193,8 @@ function boundedReceiptString(value: unknown): string | undefined {
 }
 
 const RECEIPT_TOOL_RE = /^[A-Za-z][A-Za-z0-9_-]{0,79}\.[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+const RECEIPT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
+const RECEIPT_SECRET_ID_RE = /^(?:sk-|ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|xox[baprs]-|AIza)/i;
 const RECEIPT_FINGERPRINT_RE = /^args-v2:sha256:[0-9a-f]{64}$/;
 const RECEIPT_COMMIT_RE = /^[0-9a-f]{7,64}$/;
 const RECEIPT_SURFACES = new Set([
@@ -230,6 +237,16 @@ function validatedReceiptString(field: string, value: unknown): string | undefin
   const bounded = boundedReceiptString(value);
   if (!bounded) return undefined;
   if (field === 'tool') return RECEIPT_TOOL_RE.test(bounded) ? bounded : undefined;
+  if (
+    field === 'actionId'
+    || field === 'epochId'
+    || field === 'beforeEpochId'
+    || field === 'afterEpochId'
+  ) {
+    return RECEIPT_ID_RE.test(bounded) && !RECEIPT_SECRET_ID_RE.test(bounded)
+      ? bounded
+      : undefined;
+  }
   if (field === 'toolArgsFingerprint' || field === 'argsFingerprint') {
     return RECEIPT_FINGERPRINT_RE.test(bounded) ? bounded : undefined;
   }
@@ -370,6 +387,12 @@ function sanitizeVerificationReceipt(value: unknown): PersistedReceiptSubset | u
   return receipt && Object.keys(receipt).length > 0 ? receipt : undefined;
 }
 
+function persistedReceiptTimestamp(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 /**
  * Return a compact, primitive-only proof/receipt subset from hidden tool result
  * metadata. Unknown namespaces and free-form fields are intentionally dropped.
@@ -413,6 +436,37 @@ export function sanitizeToolResultMetadataForPersistence(
     'blockers',
     'blockerCount',
   );
+  if (computerAppVerificationReceipt) {
+    const dispatchActionId = mutationDispatchReceipt?.actionId;
+    const verificationActionId = computerAppVerificationReceipt.actionId;
+    const dispatchEpochId = mutationDispatchReceipt?.epochId;
+    const beforeEpochId = computerAppVerificationReceipt.beforeEpochId;
+    const afterEpochId = computerAppVerificationReceipt.afterEpochId;
+    const authorizedAt = persistedReceiptTimestamp(mutationDispatchReceipt?.authorizedAt);
+    const dispatchedAt = persistedReceiptTimestamp(mutationDispatchReceipt?.dispatchedAt);
+    const checkedAt = persistedReceiptTimestamp(computerAppVerificationReceipt.checkedAt);
+    const correlated = (
+      typeof dispatchActionId === 'string'
+      && dispatchActionId === verificationActionId
+      && typeof dispatchEpochId === 'string'
+      && dispatchEpochId === beforeEpochId
+    );
+    const coherentVerified = computerAppVerificationReceipt.status !== 'verified' || (
+      computerAppVerificationReceipt.canComplete === true
+      && typeof afterEpochId === 'string'
+      && afterEpochId !== beforeEpochId
+      && authorizedAt !== null
+      && dispatchedAt !== null
+      && checkedAt !== null
+      && authorizedAt <= dispatchedAt
+      && dispatchedAt <= checkedAt
+      && Number(computerAppVerificationReceipt.evidenceCount || 0) > 0
+      && Number(computerAppVerificationReceipt.blockerCount || 0) === 0
+    );
+    if (!correlated || !coherentVerified) {
+      computerAppVerificationReceipt = undefined;
+    }
+  }
   if (computerAppVerificationReceipt) {
     out.computerAppVerificationReceipt = computerAppVerificationReceipt;
   }

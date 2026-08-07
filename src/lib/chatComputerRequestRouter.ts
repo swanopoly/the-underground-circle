@@ -422,7 +422,7 @@ export interface ChatComputerModelOrchestration {
 export interface ChatComputerDeterministicLifecycleReadStep {
   tool: 'desktop.observe_app' | 'desktop.launch_app' | 'desktop.wait_for_app' | 'desktop.focus_app';
   args: Record<string, unknown>;
-  when: 'always' | 'if_not_running' | 'if_launched' | 'if_not_frontmost';
+  when: 'always' | 'if_not_running' | 'if_launched' | 'if_not_frontmost' | 'if_initially_running_not_frontmost';
   note: string;
 }
 
@@ -539,8 +539,9 @@ function buildChatComputerModelOrchestration(input: {
       activationPath: [
         `compile strict ${program.operation === 'focus' ? 'focus' : 'open/launch'} program for ${program.targetAppName}`,
         'dispatch through the paired local desktop bridge',
-        program.operation === 'open_or_launch' ? 'launch only when not running' : 'require the app to already be running',
-        'focus when not frontmost',
+        program.operation === 'open_or_launch'
+          ? 'use one activation: launch when initially stopped, otherwise focus when initially in the background'
+          : 'require the app to already be running, then focus only when needed',
         'verify fresh exact process and foreground proof',
       ],
       modelSelectionHint: 'Do not call the selected-model or SwanBot AI relay; return only verified lifecycle proof, cancellation, or the exact local blocker.',
@@ -1292,8 +1293,12 @@ export function buildDeterministicNamedAppLifecycleReadProgram(
     {
       tool: 'desktop.focus_app',
       args: { appName: dispatchAppName },
-      when: 'if_not_frontmost',
-      note: `Focus ${exactNamedPhrase} when it is running but not frontmost.`,
+      when: operation === 'open_or_launch'
+        ? 'if_initially_running_not_frontmost'
+        : 'if_not_frontmost',
+      note: operation === 'open_or_launch'
+        ? `Focus ${exactNamedPhrase} only when the initial observation reports it already running but not frontmost; never focus after a launch.`
+        : `Focus ${exactNamedPhrase} when it is running but not frontmost.`,
     },
     observeStep(`Verify ${exactNamedPhrase} is running and frontmost; otherwise return the exact local blocker.`),
   ];

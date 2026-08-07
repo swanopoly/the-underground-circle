@@ -967,35 +967,15 @@ ${ctx.wikiContext}`;
   return { frozen, volatile };
 }
 
-// ─── Call BlackSwan LLM (local/self-hosted, zero cost) ───────────────────────
+// ─── Hosted BlackSwan routing boundary ──────────────────────────────────────
 
-async function callBlackSwanLLM(systemPrompt: string, userMessage: string): Promise<string | null> {
-  const blackswanUrl = Deno.env.get("BLACKSWAN_API_URL");
-  if (!blackswanUrl) return null;
-
-  try {
-    const response = await fetch(`${blackswanUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "blackswan",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userMessage },
-        ],
-        temperature: 0.7,
-        max_tokens: 1024,
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-
-    if (!response.ok) return null;
-
-    const data = await response.json();
-    return stripBlackSwanReasoningText(data.choices?.[0]?.message?.content || null);
-  } catch {
-    return null;
-  }
+async function callBlackSwanLLM(_systemPrompt: string, _userMessage: string): Promise<string | null> {
+  // The hosted edge runtime must never fetch an operator-, user-, or
+  // integration-supplied model URL. Deno fetch cannot bind a pre-resolved IP
+  // through TLS, so a private-address check alone still leaves DNS-rebinding
+  // and redirect paths. Self-hosted BlackSwan belongs on the authenticated
+  // local OpenSwan bridge; hosted chat falls through to a fixed provider below.
+  return null;
 }
 
 // ─── Call Claude ──────────────────────────────────────────────────────────────
@@ -1585,6 +1565,71 @@ function estimateDirectUsage(message: string, response: string, model?: string |
   };
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TASK_UPDATE_STATUSES = new Set([
+  "backlog",
+  "todo",
+  "in_progress",
+  "peer_review",
+  "review",
+  "approved",
+  "done",
+]);
+const TASK_UPDATE_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
+
+type ValidatedTaskUpdate =
+  | { ok: true; taskId: string; changes: Record<string, string | null> }
+  | { ok: false; code: "invalid_task_id" | "invalid_task_changes" };
+
+function validateTaskUpdateInput(value: unknown): ValidatedTaskUpdate {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, code: "invalid_task_changes" };
+  }
+  const input = value as Record<string, unknown>;
+  const taskId = typeof input.task_id === "string" ? input.task_id.trim().toLowerCase() : "";
+  if (!UUID_PATTERN.test(taskId)) return { ok: false, code: "invalid_task_id" };
+
+  const allowedKeys = new Set(["task_id", "status", "priority", "assigned_agent_id"]);
+  if (Object.keys(input).some((key) => !allowedKeys.has(key))) {
+    return { ok: false, code: "invalid_task_changes" };
+  }
+
+  const changes: Record<string, string | null> = {};
+  if (Object.prototype.hasOwnProperty.call(input, "status")) {
+    if (typeof input.status !== "string" || !TASK_UPDATE_STATUSES.has(input.status)) {
+      return { ok: false, code: "invalid_task_changes" };
+    }
+    changes.status = input.status;
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "priority")) {
+    if (typeof input.priority !== "string" || !TASK_UPDATE_PRIORITIES.has(input.priority)) {
+      return { ok: false, code: "invalid_task_changes" };
+    }
+    changes.priority = input.priority;
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "assigned_agent_id")) {
+    if (input.assigned_agent_id === null) {
+      changes.assigned_agent_id = null;
+    } else if (typeof input.assigned_agent_id === "string") {
+      const assignedAgentId = input.assigned_agent_id.trim();
+      if (
+        !assignedAgentId
+        || assignedAgentId.length > 180
+        || /[\u0000-\u001f\u007f-\u009f]/.test(assignedAgentId)
+      ) {
+        return { ok: false, code: "invalid_task_changes" };
+      }
+      changes.assigned_agent_id = assignedAgentId;
+    } else {
+      return { ok: false, code: "invalid_task_changes" };
+    }
+  }
+
+  return Object.keys(changes).length > 0
+    ? { ok: true, taskId, changes }
+    : { ok: false, code: "invalid_task_changes" };
+}
+
 const BLACKSWAN_TOOLS = [
   {
     name: "create_task",
@@ -1608,7 +1653,7 @@ const BLACKSWAN_TOOLS = [
       type: "object",
       properties: {
         task_id: { type: "string", description: "Task UUID" },
-        status: { type: "string", enum: ["backlog", "todo", "in_progress", "peer_review", "review", "done"] },
+        status: { type: "string", enum: ["backlog", "todo", "in_progress", "peer_review", "review", "approved", "done"] },
         priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
         assigned_agent_id: { type: "string", description: "Agent ID to reassign to" },
       },
@@ -1625,18 +1670,6 @@ const BLACKSWAN_TOOLS = [
         type: { type: "string", enum: ["info", "alert", "celebration", "summary"], description: "Message type" },
       },
       required: ["content"],
-    },
-  },
-  {
-    name: "fetch_url",
-    description: "Fetch content from a URL. Use when the user asks about a webpage, article, or API endpoint.",
-    input_schema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "URL to fetch" },
-        max_chars: { type: "number", description: "Max characters to return (default 4000)" },
-      },
-      required: ["url"],
     },
   },
   {
@@ -1946,15 +1979,25 @@ async function executeToolCall(
       }
 
       case "update_task": {
-        const { task_id, ...updates } = toolInput;
-        const updateData: any = {};
-        if (updates.status) updateData.status = updates.status;
-        if (updates.priority) updateData.priority = updates.priority;
-        if (updates.assigned_agent_id) updateData.assigned_agent_id = updates.assigned_agent_id;
-        if (updates.status === "done") updateData.completed_at = new Date().toISOString();
-        const { error } = await supabase.from("tasks").update(updateData).eq("id", task_id);
-        if (error) return JSON.stringify({ error: error.message });
-        return JSON.stringify({ success: true, updated: task_id });
+        const validated = validateTaskUpdateInput(toolInput);
+        if (!validated.ok) return JSON.stringify({ error: validated.code });
+        const updateData: Record<string, string | null> = { ...validated.changes };
+        if (typeof updateData.status === "string") {
+          updateData.completed_at = updateData.status === "done"
+            ? new Date().toISOString()
+            : null;
+        }
+        const { data: updated, error } = await supabase
+          .from("tasks")
+          .update(updateData)
+          .eq("id", validated.taskId)
+          .eq("circle_id", circleId)
+          .select("id")
+          .maybeSingle();
+        if (error || !updated) {
+          return JSON.stringify({ error: "task_not_found_or_unavailable" });
+        }
+        return JSON.stringify({ success: true, updated: validated.taskId });
       }
 
       case "post_activity": {
@@ -1975,26 +2018,10 @@ async function executeToolCall(
       }
 
       case "fetch_url": {
-        const { url, max_chars } = toolInput;
-        const limit = max_chars || 4000;
-        try {
-          const resp = await fetch(url, {
-            headers: { "User-Agent": "BlackSwan/1.0" },
-            signal: AbortSignal.timeout(10000),
-          });
-          if (!resp.ok) return JSON.stringify({ error: `HTTP ${resp.status}` });
-          const text = await resp.text();
-          // Strip HTML tags for readability
-          const clean = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-            .replace(/<[^>]+>/g, " ")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, limit);
-          return JSON.stringify({ success: true, content: clean, url });
-        } catch (e: any) {
-          return JSON.stringify({ error: e.message || "Fetch failed" });
-        }
+        // Defense in depth for stale tool schemas or replayed tool calls. The
+        // built-in schema no longer advertises this tool. Arbitrary web reads
+        // must use search excerpts or the authenticated local/browser bridge.
+        return JSON.stringify({ error: "hosted_fetch_url_disabled" });
       }
 
       case "store_memory": {
@@ -2056,7 +2083,11 @@ async function executeToolCall(
           if (resolvedLang) params.set("search_lang", resolvedLang);
           const resp = await fetch(
             `https://api.search.brave.com/res/v1/web/search?${params.toString()}`,
-            { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey.apiKey } },
+            {
+              headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey.apiKey },
+              redirect: "manual",
+              signal: AbortSignal.timeout(10_000),
+            },
           );
           if (!resp.ok) return JSON.stringify({ error: `Brave API ${resp.status}` });
           const data = await resp.json();
@@ -2249,6 +2280,8 @@ async function executeToolCall(
               method: "POST",
               headers: { "Authorization": `Bearer ${gbToken}`, "Content-Type": "application/json" },
               body: JSON.stringify({ question: toolInput.question }),
+              redirect: "manual",
+              signal: AbortSignal.timeout(10_000),
             });
             if (resp.ok) {
               const data = await resp.json();
@@ -2259,19 +2292,7 @@ async function executeToolCall(
           } catch {}
         }
 
-        // Fallback: try llms.txt endpoint
-        const gbUrl = Deno.env.get("GITBOOK_DOCS_URL");
-        if (gbUrl) {
-          try {
-            const resp = await fetch(`${gbUrl}/llms.txt`, { signal: AbortSignal.timeout(10000) });
-            if (resp.ok) {
-              const docsIndex = await resp.text();
-              return JSON.stringify({ success: true, docs_index: docsIndex.slice(0, 4000), note: "Docs index loaded from llms.txt. Search this for the answer." });
-            }
-          } catch {}
-        }
-
-        return JSON.stringify({ error: "GitBook not configured. Set GITBOOK_API_TOKEN + GITBOOK_ORG_ID + GITBOOK_SITE_ID, or GITBOOK_DOCS_URL." });
+        return JSON.stringify({ error: "GitBook not configured. Set GITBOOK_API_TOKEN + GITBOOK_ORG_ID + GITBOOK_SITE_ID." });
       }
 
       case "gitbook_search": {
@@ -2282,6 +2303,8 @@ async function executeToolCall(
           try {
             const resp = await fetch(`https://api.gitbook.com/v1/spaces/${gbSpaceId}/search?query=${encodeURIComponent(toolInput.query)}`, {
               headers: { "Authorization": `Bearer ${gbToken}` },
+              redirect: "manual",
+              signal: AbortSignal.timeout(10_000),
             });
             if (resp.ok) {
               const data = await resp.json();
@@ -2402,6 +2425,8 @@ async function callHfProxy(
         "Authorization": `Bearer ${serviceKey}`,
       },
       body: JSON.stringify({ task, inputs, model, options, userId }),
+      redirect: "manual",
+      signal: AbortSignal.timeout(90_000),
     });
 
     if (!resp.ok) {
@@ -2525,6 +2550,67 @@ type MarketplaceProviderKey =
   | "ollama"
   | "github-models";
 
+const HOSTED_MARKETPLACE_ENDPOINTS: Partial<Record<MarketplaceProviderKey, string>> = {
+  openai: "https://api.openai.com/v1/chat/completions",
+  "github-models": "https://models.inference.ai.azure.com/chat/completions",
+  openrouter: "https://openrouter.ai/api/v1/chat/completions",
+  hugging_face: "https://router.huggingface.co/v1/chat/completions",
+  groq: "https://api.groq.com/openai/v1/chat/completions",
+  google_ai: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  mistral_ai: "https://api.mistral.ai/v1/chat/completions",
+  cohere: "https://api.cohere.ai/compatibility/v1/chat/completions",
+  perplexity: "https://api.perplexity.ai/chat/completions",
+  together_ai: "https://api.together.xyz/v1/chat/completions",
+  fireworks_ai: "https://api.fireworks.ai/inference/v1/chat/completions",
+  deepseek: "https://api.deepseek.com/v1/chat/completions",
+  z_ai: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  minimax: "https://api.minimax.io/v1/chat/completions",
+};
+
+const HOSTED_MARKETPLACE_HOSTS: Partial<Record<MarketplaceProviderKey, string>> = {
+  openai: "api.openai.com",
+  "github-models": "models.inference.ai.azure.com",
+  openrouter: "openrouter.ai",
+  hugging_face: "router.huggingface.co",
+  groq: "api.groq.com",
+  google_ai: "generativelanguage.googleapis.com",
+  mistral_ai: "api.mistral.ai",
+  cohere: "api.cohere.ai",
+  perplexity: "api.perplexity.ai",
+  together_ai: "api.together.xyz",
+  fireworks_ai: "api.fireworks.ai",
+  deepseek: "api.deepseek.com",
+  z_ai: "open.bigmodel.cn",
+  minimax: "api.minimax.io",
+};
+
+function getTrustedHostedMarketplaceEndpoint(provider: MarketplaceProviderKey): string | null {
+  const endpoint = HOSTED_MARKETPLACE_ENDPOINTS[provider];
+  const expectedHost = HOSTED_MARKETPLACE_HOSTS[provider];
+  if (!endpoint || !expectedHost) return null;
+  try {
+    const parsed = new URL(endpoint);
+    if (
+      parsed.protocol !== "https:"
+      || parsed.hostname.toLowerCase() !== expectedHost
+      || (parsed.port !== "" && parsed.port !== "443")
+      || parsed.username !== ""
+      || parsed.password !== ""
+      || parsed.hash !== ""
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isHostedCustomEndpointModel(model: unknown): boolean {
+  return typeof model === "string"
+    && /^(?:openai_compatible|ollama|huggingface_endpoint)\//i.test(model.trim());
+}
+
 function userApiProviderForMarketplaceProvider(provider: MarketplaceProviderKey): string {
   if (provider === "hugging_face") return "huggingface";
   if (provider === "z_ai") return "zai";
@@ -2537,12 +2623,6 @@ function userApiProviderForMarketplaceProvider(provider: MarketplaceProviderKey)
 function modelPrefixForMarketplaceProvider(provider: MarketplaceProviderKey): string {
   if (provider === "hugging_face") return "huggingface";
   return provider;
-}
-
-function normalizeOpenAICompatibleChatEndpoint(endpoint: string): string {
-  const base = endpoint.replace(/\/+$/, "");
-  if (/\/(?:v1\/)?chat\/completions$/i.test(base)) return base;
-  return `${base}/v1/chat/completions`;
 }
 
 function isBlackSwanTextModel(modelId: string | null | undefined): boolean {
@@ -2645,6 +2725,28 @@ async function loadMarketplaceProviderApiKey(
 // `{ prompt, system_prompt, max_tokens }` as input and stream tokens as a
 // string array which we join. Tool calling isn't standardised across
 // Replicate models, so the relay path doesn't expose tools to it.
+function getTrustedReplicatePollUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== "https:"
+      || parsed.hostname.toLowerCase() !== "api.replicate.com"
+      || (parsed.port !== "" && parsed.port !== "443")
+      || parsed.username !== ""
+      || parsed.password !== ""
+      || parsed.hash !== ""
+      || parsed.search !== ""
+      || !/^\/v1\/predictions\/[A-Za-z0-9_-]+$/.test(parsed.pathname)
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 async function callReplicateProvider(opts: {
   modelId: string;          // owner/name (we use the model-based predictions endpoint so no version hash needed)
   systemPrompt: string;
@@ -2653,7 +2755,17 @@ async function callReplicateProvider(opts: {
   maxTokens: number;
 }): Promise<{ text: string | null; usage: any; error?: string }> {
   const { modelId, systemPrompt, userMessage, apiKey, maxTokens } = opts;
-  const startUrl = `https://api.replicate.com/v1/models/${modelId}/predictions`;
+  const modelParts = modelId.split("/");
+  if (
+    modelId.length > 200
+    || modelParts.length !== 2
+    || modelParts.some((part) =>
+      !/^[A-Za-z0-9_.-]{1,100}$/.test(part) || part === "." || part === ".."
+    )
+  ) {
+    return { text: null, usage: {}, error: "replicate: invalid model id" };
+  }
+  const startUrl = `https://api.replicate.com/v1/models/${modelParts[0]}/${modelParts[1]}/predictions`;
   let startData: any;
   try {
     const startResp = await fetch(startUrl, {
@@ -2671,6 +2783,8 @@ async function callReplicateProvider(opts: {
           max_new_tokens: maxTokens,
         },
       }),
+      redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
     });
     if (!startResp.ok) {
       const errBody = await startResp.text();
@@ -2681,8 +2795,8 @@ async function callReplicateProvider(opts: {
     return { text: null, usage: {}, error: e?.message || "replicate start failed" };
   }
 
-  const pollUrl: string | undefined = startData?.urls?.get;
-  if (!pollUrl) return { text: null, usage: {}, error: "replicate: missing poll url" };
+  const pollUrl = getTrustedReplicatePollUrl(startData?.urls?.get);
+  if (!pollUrl) return { text: null, usage: {}, error: "replicate: invalid poll url" };
 
   let status: string = startData.status;
   let output: any = startData.output;
@@ -2695,6 +2809,8 @@ async function callReplicateProvider(opts: {
     try {
       const pollResp = await fetch(pollUrl, {
         headers: { "Authorization": `Bearer ${apiKey}` },
+        redirect: "manual",
+        signal: AbortSignal.timeout(15_000),
       });
       if (!pollResp.ok) continue;
       const pollData = await pollResp.json();
@@ -2827,9 +2943,9 @@ async function callMarketplaceProvider(opts: {
   apiKey: string;
   maxTokens?: number;
   /**
-   * When set, POST to this URL + /v1/chat/completions instead of the
-   * provider's default endpoint. Used to route BlackSwan through a
-   * dedicated HF Inference Endpoint when the team has paid for one.
+   * Retained only for wire compatibility with older callers. Hosted execution
+   * rejects every override; dedicated/custom endpoints belong on the
+   * authenticated local OpenSwan bridge.
    */
   endpointOverride?: string;
 }): Promise<{ text: string | null; usage: any; error?: string }> {
@@ -2840,76 +2956,22 @@ async function callMarketplaceProvider(opts: {
     { role: "user", content: userMessage },
   ];
 
-  let endpoint = "";
-  let extraHeaders: Record<string, string> = {};
-  if (opts.endpointOverride) {
-    // Dedicated HF Inference Endpoint — base URL + /v1/chat/completions.
-    // Strip a trailing slash so we don't end up with a //v1 path.
-    endpoint = normalizeOpenAICompatibleChatEndpoint(opts.endpointOverride);
-  } else {
-    switch (provider) {
-      case "openai":
-        endpoint = "https://api.openai.com/v1/chat/completions";
-        break;
-      case "openai_compatible":
-        return { text: null, usage: {}, error: "openai_compatible: missing endpoint override" };
-      case "github-models":
-        endpoint = "https://models.inference.ai.azure.com/chat/completions";
-        break;
-      case "openrouter":
-        endpoint = "https://openrouter.ai/api/v1/chat/completions";
-        extraHeaders = {
-          "HTTP-Referer": "https://app.chrisswanson.xyz",
-          "X-Title": "Underground Circle",
-        };
-        break;
-      case "hugging_face":
-        endpoint = "https://router.huggingface.co/v1/chat/completions";
-        break;
-      case "replicate":
-        return await callReplicateProvider({ modelId, systemPrompt, userMessage, apiKey, maxTokens });
-      // ── Wave 2 native BYOK providers (OpenAI-compatible) ──
-      case "groq":
-        endpoint = "https://api.groq.com/openai/v1/chat/completions";
-        break;
-      case "google_ai":
-        // Google AI Studio's OpenAI-compatible endpoint expects the
-        // model id in the body; the auth header is the API key.
-        endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-        break;
-      case "mistral_ai":
-        endpoint = "https://api.mistral.ai/v1/chat/completions";
-        break;
-      case "cohere":
-        endpoint = "https://api.cohere.ai/compatibility/v1/chat/completions";
-        break;
-      case "perplexity":
-        endpoint = "https://api.perplexity.ai/chat/completions";
-        break;
-      case "together_ai":
-        endpoint = "https://api.together.xyz/v1/chat/completions";
-        break;
-      case "fireworks_ai":
-        endpoint = "https://api.fireworks.ai/inference/v1/chat/completions";
-        break;
-      case "deepseek":
-        endpoint = "https://api.deepseek.com/v1/chat/completions";
-        break;
-      case "z_ai":
-        // Zhipu / Z.AI's OpenAI-compatible endpoint at the Open
-        // Platform — same auth shape, expects glm-* model ids in body.
-        endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-        break;
-      case "minimax":
-        endpoint = "https://api.minimax.io/v1/chat/completions";
-        break;
-      case "ollama":
-        // Ollama runs locally on the team's machine. Base URL must be
-        // present on the integration metadata; we noop here and let
-        // the ollamaBaseUrl override path below handle it.
-        return { text: null, usage: {}, error: "ollama: missing baseUrl override" };
-    }
+  if (opts.endpointOverride || provider === "openai_compatible" || provider === "ollama") {
+    return { text: null, usage: {}, error: "hosted_custom_endpoint_blocked" };
   }
+  if (provider === "replicate") {
+    return await callReplicateProvider({ modelId, systemPrompt, userMessage, apiKey, maxTokens });
+  }
+  const endpoint = getTrustedHostedMarketplaceEndpoint(provider);
+  if (!endpoint) {
+    return { text: null, usage: {}, error: "hosted_provider_endpoint_unavailable" };
+  }
+  const extraHeaders: Record<string, string> = provider === "openrouter"
+    ? {
+      "HTTP-Referer": "https://app.chrisswanson.xyz",
+      "X-Title": "Underground Circle",
+    }
+    : {};
 
   try {
     const resp = await fetch(endpoint, {
@@ -2920,6 +2982,8 @@ async function callMarketplaceProvider(opts: {
         ...extraHeaders,
       },
       body: JSON.stringify({ model: modelId, messages, max_tokens: maxTokens }),
+      redirect: "manual",
+      signal: AbortSignal.timeout(90_000),
     });
     if (!resp.ok) {
       const errBody = await resp.text();
@@ -3093,80 +3157,28 @@ async function callMarketplaceProviderWithTools(opts: {
   tools?: any[];        // OpenAI shape
   apiKey: string;
   maxTokens?: number;
-  /** Same role as in callMarketplaceProvider — overrides the provider's
-   *  default endpoint when set, so dedicated HF Inference Endpoints
-   *  pick up tool calls just like the public Inference API would. */
+  /** Retained for wire compatibility only; hosted execution rejects it. */
   endpointOverride?: string;
 }): Promise<{ data: any | null; error?: string }> {
   const { provider, modelId, systemPrompt, messages, tools, apiKey } = opts;
   const maxTokens = opts.maxTokens ?? 4096;
 
-  let endpoint: string;
-  let extraHeaders: Record<string, string> = {};
-  if (opts.endpointOverride) {
-    endpoint = normalizeOpenAICompatibleChatEndpoint(opts.endpointOverride);
-  } else {
-    switch (provider) {
-      case "openai":
-        endpoint = "https://api.openai.com/v1/chat/completions";
-        break;
-      case "openai_compatible":
-        return { data: null, error: "openai_compatible relay requires endpoint override" };
-      case "github-models":
-        endpoint = "https://models.inference.ai.azure.com/chat/completions";
-        break;
-      case "openrouter":
-        endpoint = "https://openrouter.ai/api/v1/chat/completions";
-        extraHeaders = {
-          "HTTP-Referer": "https://app.chrisswanson.xyz",
-          "X-Title": "Underground Circle",
-        };
-        break;
-      case "hugging_face":
-        endpoint = "https://router.huggingface.co/v1/chat/completions";
-        break;
-      case "replicate":
-        // Replicate's chat endpoints are model-specific and prediction-based.
-        // Tool calling is largely OSS-model dependent and not consistently
-        // exposed, so for the relay path we skip Replicate and let the
-        // caller fall back to Anthropic.
-        return { data: null, error: "replicate relay not yet wired" };
-      case "groq":
-        endpoint = "https://api.groq.com/openai/v1/chat/completions";
-        break;
-      case "google_ai":
-        endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-        break;
-      case "mistral_ai":
-        endpoint = "https://api.mistral.ai/v1/chat/completions";
-        break;
-      case "cohere":
-        endpoint = "https://api.cohere.ai/compatibility/v1/chat/completions";
-        break;
-      case "perplexity":
-        endpoint = "https://api.perplexity.ai/chat/completions";
-        break;
-      case "together_ai":
-        endpoint = "https://api.together.xyz/v1/chat/completions";
-        break;
-      case "fireworks_ai":
-        endpoint = "https://api.fireworks.ai/inference/v1/chat/completions";
-        break;
-      case "deepseek":
-        endpoint = "https://api.deepseek.com/chat/completions";
-        break;
-      case "z_ai":
-        endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-        break;
-      case "minimax":
-        endpoint = "https://api.minimax.io/v1/chat/completions";
-        break;
-      case "ollama":
-        return { data: null, error: "ollama relay requires baseUrl override" };
-      default:
-        return { data: null, error: `unsupported marketplace relay provider: ${provider}` };
-    }
+  if (opts.endpointOverride || provider === "openai_compatible" || provider === "ollama") {
+    return { data: null, error: "hosted_custom_endpoint_blocked" };
   }
+  if (provider === "replicate") {
+    return { data: null, error: "replicate relay not yet wired" };
+  }
+  const endpoint = getTrustedHostedMarketplaceEndpoint(provider);
+  if (!endpoint) {
+    return { data: null, error: "hosted_provider_endpoint_unavailable" };
+  }
+  const extraHeaders: Record<string, string> = provider === "openrouter"
+    ? {
+      "HTTP-Referer": "https://app.chrisswanson.xyz",
+      "X-Title": "Underground Circle",
+    }
+    : {};
 
   const body: any = {
     model: modelId,
@@ -3190,6 +3202,7 @@ async function callMarketplaceProviderWithTools(opts: {
         ...extraHeaders,
       },
       body: JSON.stringify(body),
+      redirect: "manual",
       signal: AbortSignal.timeout(90_000),
     });
     if (!resp.ok) {
@@ -3308,6 +3321,8 @@ async function callClaude(frozenPrompt: string, volatilePrompt: string, userMess
         "content-type": "application/json",
       },
       body: JSON.stringify(requestBody),
+      redirect: "manual",
+      signal: AbortSignal.timeout(90_000),
     });
 
     if (!response.ok) {
@@ -3771,36 +3786,142 @@ async function extractAndStoreMemories(
 
 // ─── Main Handler ────────────────────────────────────────────────────────────
 
+async function requireSwanBotCircleMembership(
+  supabase: any,
+  input: { circleId: string; userId: string },
+): Promise<Response | null> {
+  const { data: membership, error } = await supabase
+    .from("circle_members")
+    .select("user_id")
+    .eq("circle_id", input.circleId)
+    .eq("user_id", input.userId)
+    .maybeSingle();
+
+  // The service-role client used below bypasses RLS. Treat lookup errors,
+  // missing rows, and non-members identically, before any budget lookup,
+  // provider-key resolution, model dispatch, run write, or circle read.
+  if (error || !membership) {
+    return errResponse(403, "forbidden", "Not authorized for this circle.");
+  }
+
+  return null;
+}
+
+const MAX_SWANBOT_REQUEST_BYTES = 2_000_000;
+const MAX_SWANBOT_MESSAGE_CHARS = 200_000;
+
+async function readBoundedSwanBotRequest(req: Request): Promise<
+  | { ok: true; body: RequestBody }
+  | { ok: false; response: Response }
+> {
+  const declaredLength = Number(req.headers.get("content-length") || "0");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_SWANBOT_REQUEST_BYTES) {
+    return { ok: false, response: errResponse(413, "payload_too_large", "Request body is too large.") };
+  }
+  const reader = req.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_SWANBOT_REQUEST_BYTES) {
+        await reader.cancel("payload_too_large").catch(() => {});
+        return { ok: false, response: errResponse(413, "payload_too_large", "Request body is too large.") };
+      }
+      chunks.push(value);
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return { ok: false, response: errResponse(400, "validation", "Invalid request body.") };
+  }
+  try {
+    const body = JSON.parse(raw) as RequestBody;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new Error("invalid shape");
+    }
+    return { ok: true, body };
+  } catch {
+    return { ok: false, response: errResponse(400, "validation", "Invalid JSON body.") };
+  }
+}
+
 Deno.serve(async (req: Request) => {
   // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
+  if (req.method !== "POST") {
+    return errResponse(405, "method_not_allowed", "POST required.");
+  }
+
+  // Router JWT verification is intentionally disabled for ES256 compatibility,
+  // so authenticate before reading attacker-controlled bytes.
+  const user = await getAuthenticatedUser(req);
+  if (!user) {
+    return errResponse(401, "unauthenticated", "Valid JWT required.");
+  }
+  const parsedRequest = await readBoundedSwanBotRequest(req);
+  if (!parsedRequest.ok) return parsedRequest.response;
+  const body = parsedRequest.body;
 
   let swanBotV1RunSupabase: any = null;
   let swanBotV1RunId: string | null = null;
   let swanBotV1TargetAgentMetadata: Record<string, unknown> = {};
 
   try {
-    const body: RequestBody = await req.json();
-    const { message, circleId, userId: _ignoredUserId, model, thinkingLevel, maxTokens, targetAgentName, wikiContext, systemDirective } = body;
+    const { message, circleId, userId: _ignoredUserId, model, thinkingLevel, targetAgentName, wikiContext, systemDirective } = body;
+    const maxTokens = typeof body.maxTokens === "number" && Number.isFinite(body.maxTokens)
+      ? Math.min(Math.max(Math.floor(body.maxTokens), 1), 8_192)
+      : undefined;
     const targetAgentDisplayName = targetAgentName || "BlackSwan";
     swanBotV1TargetAgentMetadata = normalizeSwanBotTargetAgentMetadata(body as unknown as Record<string, unknown>, targetAgentDisplayName);
-    const user = await getAuthenticatedUser(req);
 
-    if (!user) {
-      return errResponse(401, "unauthenticated", "Valid JWT required.");
-    }
-
-    if (!message || !circleId) {
-      return new Response(
-        JSON.stringify({ error: "Missing required fields: message, circleId" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    if (
+      typeof message !== "string"
+      || message.length === 0
+      || message.length > MAX_SWANBOT_MESSAGE_CHARS
+      || typeof circleId !== "string"
+      || !UUID_PATTERN.test(circleId)
+      || (model != null && (typeof model !== "string" || model.length > 300))
+      || (thinkingLevel != null && !["fast", "balanced", "deep"].includes(thinkingLevel))
+      || (body.maxTokens != null && (typeof body.maxTokens !== "number" || !Number.isFinite(body.maxTokens)))
+      || (targetAgentName != null && (typeof targetAgentName !== "string" || targetAgentName.length > 180))
+      || (wikiContext != null && (typeof wikiContext !== "string" || wikiContext.length > 200_000))
+      || (systemDirective != null && (typeof systemDirective !== "string" || systemDirective.length > 50_000))
+      || (body.tools != null && (!Array.isArray(body.tools) || body.tools.length > 128))
+      || (body.tool_messages != null && (!Array.isArray(body.tool_messages) || body.tool_messages.length > 256))
+      || (body.system_override != null && (typeof body.system_override !== "string" || body.system_override.length > 200_000))
+    ) {
+      return errResponse(400, "validation", "Invalid SwanBot request.");
     }
 
     const userId = user.id;
     const supabase = createServiceRoleClient();
+    const membershipRejection = await requireSwanBotCircleMembership(supabase, {
+      circleId,
+      userId,
+    });
+    if (membershipRejection) return membershipRejection;
+    if (isHostedCustomEndpointModel(model)) {
+      return errResponse(
+        400,
+        "hosted_custom_endpoint_blocked",
+        "Custom, local, and dedicated model endpoints require the authenticated local OpenSwan bridge.",
+      );
+    }
+
     swanBotV1RunSupabase = supabase;
     const marketplaceRequested = !!model && /^(openai|openai_compatible|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama|github-models)\//.test(model);
     // Umbrella Claude budget cap only applies before known-Claude routes.
@@ -4140,6 +4261,7 @@ Deno.serve(async (req: Request) => {
         method: "POST",
         headers: relayHeaders,
         body: JSON.stringify(relayBody),
+        redirect: "manual",
         signal: AbortSignal.timeout(90_000),
       });
 
@@ -4196,16 +4318,6 @@ Deno.serve(async (req: Request) => {
       );
     }
     // ─── End relay mode ───────────────────────────────────────────────
-
-    const { data: membership } = await supabase
-      .from("circle_members")
-      .select("user_id")
-      .eq("circle_id", circleId)
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (!membership) {
-      return errResponse(403, "forbidden", "Not authorized for this circle.");
-    }
 
     swanBotV1RunId = await createSwanBotV1Run(supabase, {
       circleId,

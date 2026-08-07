@@ -72,6 +72,12 @@ export interface DesktopHealth {
   platform: string;
   supported: boolean;
   tools: string[];
+  /**
+   * Random identifier minted once per local bridge process. Recovery actions
+   * bind to this value so a restart or a different computer cannot satisfy a
+   * read that was authorized against an earlier desktop state.
+   */
+  instanceId?: string;
 }
 
 export interface DesktopResult<T = unknown> {

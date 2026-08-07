@@ -25,10 +25,7 @@ export interface TrendingData {
 
 const STORAGE_KEY = 'uc_trending_content';
 const TTL_MS = 60 * 60 * 1000; // 1 hour — fresh content every hour
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-  : '';
-const GEMINI_MODEL = 'gemini-2.5-flash';
+let providerWarningLogged = false;
 
 // Module-level cache — synchronous reads
 let cachedData: TrendingData = { hn: [], xTrending: [], techmeme: [], perplexity: [], fetchedAt: 0, hnItems: [], xItems: [], techmemeItems: [], perplexityItems: [] };
@@ -180,187 +177,87 @@ async function fetchHackerNews(): Promise<TrendingItem[]> {
   }
 }
 
-// ─── X/Twitter Trends (via Gemini with Google Search grounding) ─
-// Now asks for 12 trends with more variety
+// ─── Server-side web-search enrichment ─────────────────────
+
+function isSafeTrendUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+function parseTrendItems(text: string, limit: number): TrendingItem[] {
+  try {
+    const cleaned = text.replace(/```json?\n?/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.flatMap((item): TrendingItem[] => {
+      const itemText = typeof item === 'string'
+        ? item.trim()
+        : typeof item?.text === 'string' ? item.text.trim() : '';
+      if (itemText.length <= 10) return [];
+      const url = typeof item === 'object' && isSafeTrendUrl(item?.url) ? item.url : undefined;
+      return [{ text: itemText.slice(0, 160), ...(url ? { url } : {}) }];
+    }).slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchServerSideTrendItems(prompt: string, limit: number): Promise<TrendingItem[]> {
+  try {
+    // Dynamic import keeps the background Office feed from eagerly loading
+    // the Marketplace catalog. The request still crosses authenticated
+    // llm-proxy; the user's OpenRouter key never reaches this browser module.
+    const { webSearchViaOpenRouter } = await import('./llmProviders');
+    const result = await webSearchViaOpenRouter({ query: prompt, maxTokens: 1200 });
+    return parseTrendItems(result.response, limit);
+  } catch {
+    if (!providerWarningLogged) {
+      console.warn('[TrendingContent] Live trend enrichment is unavailable. Connect or verify an OpenRouter key in Marketplace; Hacker News remains available.');
+      providerWarningLogged = true;
+    }
+    return [];
+  }
+}
+
+// ─── X/Twitter Trends (server-side web search) ─────────────
 
 async function fetchXTrending(): Promise<TrendingItem[]> {
-  if (!GEMINI_API_KEY) return [];
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+  const hourStr = now.getUTCHours().toString().padStart(2, '0');
+  return fetchServerSideTrendItems(`It is ${dateStr} ${hourStr}:00 UTC. Find the top 12 trending topics on X/Twitter right now.
 
-  try {
-    const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
-    const hourStr = now.getHours().toString().padStart(2, '0');
+Include a mix of tech/AI, general viral topics, breaking news, memes, and active debates. For each topic, provide a concise thought-bubble text and a relevant X/Twitter post or search URL.
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: `It is ${dateStr} ${hourStr}:00 UTC. What are the top 12 trending topics on X/Twitter RIGHT NOW?
-
-Include a mix of:
-- Tech/AI trending topics
-- General viral topics and memes
-- Breaking news people are discussing
-- Hot takes and debates
-
-For each topic, provide the thought bubble text AND a relevant X/Twitter post URL or search URL.
-
-Return ONLY a JSON array of objects. Each has "text" (max 100 chars, agent thought style) and "url" (a specific viral tweet URL like https://x.com/username/status/123, or search URL like https://x.com/search?q=topic).
-Example: [{"text": "X is buzzing about GPT-5 rumors. Timeline is on fire.", "url": "https://x.com/search?q=GPT-5"}]`
-            }]
-          }],
-          tools: [{ google_search: {} }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 1200,
-          },
-        }),
-        signal: AbortSignal.timeout(15000),
-      }
-    );
-
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-
-    if (Array.isArray(parsed)) {
-      return parsed
-        .filter((s: any) => (typeof s === 'string' && s.length > 10) || (s?.text && s.text.length > 10))
-        .map((s: any) => typeof s === 'string' ? { text: s } : { text: s.text, url: s.url })
-        .slice(0, 12);
-    }
-    return [];
-  } catch {
-    return [];
-  }
+Return ONLY a JSON array of objects with "text" (max 100 chars) and "url" (an https://x.com URL).`, 12);
 }
 
-// ─── Techmeme (via Gemini with Google Search grounding) ─────
-// Real Techmeme headlines, not curated static lists
+// ─── Techmeme (server-side web search) ─────────────────────
 
 async function fetchTechmeme(): Promise<TrendingItem[]> {
-  if (!GEMINI_API_KEY) return [];
+  const dateStr = new Date().toISOString().split('T')[0];
+  return fetchServerSideTrendItems(`Find the top 10 headlines on Techmeme.com right now (${dateStr}). Include today's actual tech-industry news, deals, product launches, and controversies.
 
-  try {
-    const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
+For each story, provide a concise headline prefixed with "Techmeme:" and the original source article URL.
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: `What are the top 10 headlines on Techmeme.com right now (${dateStr})?
-
-Search techmeme.com for today's actual top stories. Include the most important tech industry news, deals, product launches, and controversies.
-
-For each story, provide a thought bubble text AND the source article URL.
-
-Return ONLY a JSON array of objects. Each object has "text" (headline, max 120 chars, prefixed with "Techmeme:") and "url" (the original article URL, NOT techmeme.com).
-Example: [{"text": "Techmeme: OpenAI reportedly in talks to acquire Windsurf for $3B.", "url": "https://www.theinformation.com/articles/..."}]`
-            }]
-          }],
-          tools: [{ google_search: {} }],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 1200,
-          },
-        }),
-        signal: AbortSignal.timeout(15000),
-      }
-    );
-
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-
-    if (Array.isArray(parsed)) {
-      return parsed
-        .filter((s: any) => (typeof s === 'string' && s.length > 10) || (s?.text && s.text.length > 10))
-        .map((s: any) => typeof s === 'string' ? { text: s } : { text: s.text, url: s.url })
-        .slice(0, 10);
-    }
-    return [];
-  } catch {
-    return [];
-  }
+Return ONLY a JSON array of objects with "text" (max 120 chars) and "url" (the original https article URL).`, 10);
 }
 
-// ─── Perplexity Trending / AI News (via Gemini grounding) ───
-// Covers what's trending on Perplexity, AI research, and emerging tech
+// ─── Perplexity Trending / AI News (server-side web search) ─
 
 async function fetchPerplexityTrending(): Promise<TrendingItem[]> {
-  if (!GEMINI_API_KEY) return [];
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0];
+  const hourStr = now.getUTCHours().toString().padStart(2, '0');
+  return fetchServerSideTrendItems(`It is ${dateStr} ${hourStr}:00 UTC. Find the 10 biggest current AI and technology stories, including Perplexity topics, AI research, product launches, developer tools, funding, and acquisitions.
 
-  try {
-    const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
-    const hourStr = now.getHours().toString().padStart(2, '0');
+For each item, provide a concise thought-bubble text and the primary source URL.
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: `It is ${dateStr} ${hourStr}:00 UTC. What are the biggest AI and technology stories being discussed right now?
-
-Search for:
-1. Perplexity AI trending searches and popular topics
-2. Latest AI research papers and breakthroughs (arxiv, etc)
-3. Major tech product launches or updates from today
-4. Developer tool releases and updates
-5. Startup funding news and acquisitions
-
-Give me 10 items. For each, provide the thought bubble text AND a source URL (article, paper, or product page).
-
-Return ONLY a JSON array of objects. Each has "text" (max 120 chars, agent thought style) and "url" (source article/paper URL).
-Example: [{"text": "AI news: New paper shows 10x speedup for transformer inference.", "url": "https://arxiv.org/abs/..."}]`
-            }]
-          }],
-          tools: [{ google_search: {} }],
-          generationConfig: {
-            temperature: 0.5,
-            maxOutputTokens: 1200,
-          },
-        }),
-        signal: AbortSignal.timeout(15000),
-      }
-    );
-
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-
-    if (Array.isArray(parsed)) {
-      return parsed
-        .filter((s: any) => (typeof s === 'string' && s.length > 10) || (s?.text && s.text.length > 10))
-        .map((s: any) => typeof s === 'string' ? { text: s } : { text: s.text, url: s.url })
-        .slice(0, 10);
-    }
-    return [];
-  } catch {
-    return [];
-  }
+Return ONLY a JSON array of objects with "text" (max 120 chars) and "url" (an https source URL).`, 10);
 }

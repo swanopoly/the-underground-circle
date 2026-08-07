@@ -1192,36 +1192,10 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
 
   const isGitHubFile = (file: RoomFile) => file.id.startsWith('gh_');
 
-  // Shared helper: get a working GitHub token (PAT or OAuth)
+  // Shared helper: only client-held PATs are returned. OAuth tokens remain
+  // server-only and operations using them must go through an edge action.
   const getGitHubToken = async (): Promise<string | null> => {
-    // 1. Try PAT token (local storage)
-    const pat = await getStoredToken(room.circle_id);
-    if (pat) return pat;
-    // 2. Try OAuth token from user_github_tokens table
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return null;
-      // Use maybeSingle() — returns null if no row exists instead of erroring
-      const { data: tokenRow } = await supabase
-        .from('user_github_tokens')
-        .select('access_token')
-        .eq('user_id', user.id)
-        .maybeSingle();
-      if (tokenRow?.access_token) return tokenRow.access_token;
-    } catch {}
-    // 3. Try via edge function with auth header
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return null;
-      const res = await fetch(
-        `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/github-oauth?action=status&user_id=${session.user.id}`,
-        { headers: { Authorization: `Bearer ${session.access_token}` } },
-      );
-      if (!res.ok) return null;
-      const status = await res.json();
-      if (status.connected && status.access_token) return status.access_token;
-    } catch {}
-    return null;
+    return (await getStoredToken(room.circle_id)) || null;
   };
 
   const openFile = useCallback((file: RoomFile) => {

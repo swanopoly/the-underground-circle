@@ -233,6 +233,12 @@ const manualVerificationHandoff = buildChatComputerHandoffContext({
   replayPolicy: 'manual_verify_only',
   mutationDispatched: true,
   verificationOnlyTools: ['desktop.photoshop_document_status'],
+  verificationBridgeInstanceId: 'bridge-instance-aaaaaaaaaaaaaaaa',
+  verificationTarget: {
+    appName: 'Photoshop',
+    expectedWidthPx: 600,
+    expectedHeightPx: 600,
+  },
   blockers: ['Create result could not be verified after dispatch.'],
 }).metadata;
 const manualVerificationMessage = formatPersistedChatBotMessage(
@@ -245,6 +251,16 @@ const manualVerificationMessage = formatPersistedChatBotMessage(
     computerHandoff: manualVerificationHandoff,
   },
 );
+const manualVerificationNormalReloaded = readPersistedChatBotMetadata(manualVerificationMessage);
+assert(
+  manualVerificationNormalReloaded?.computerHandoff?.verificationBridgeInstanceId === 'bridge-instance-aaaaaaaaaaaaaaaa',
+  'normal persisted handoff keeps the exact originating bridge process identity',
+);
+assert(
+  manualVerificationNormalReloaded?.computerHandoff?.verificationTarget?.expectedWidthPx === 600
+    && manualVerificationNormalReloaded?.computerHandoff?.verificationTarget?.expectedHeightPx === 600,
+  'normal persisted handoff keeps the exact expected Photoshop dimensions',
+);
 const manualVerificationFallback = buildLegacyPersistedChatFallback(manualVerificationMessage, 1000);
 const manualVerificationReloaded = readPersistedChatBotMetadata(manualVerificationFallback.content);
 assert(manualVerificationFallback.metadataRoundTrips, 'manual-verification-only handoff survives the legacy content cap');
@@ -253,6 +269,11 @@ assert(manualVerificationReloaded?.computerHandoff?.mutationDispatched === true,
 assert(
   JSON.stringify(manualVerificationReloaded?.computerHandoff?.verificationOnlyTools) === JSON.stringify(['desktop.photoshop_document_status']),
   'only the read-only Photoshop status tool persists as a recovery surface',
+);
+assert(
+  !manualVerificationReloaded?.computerHandoff?.verificationBridgeInstanceId
+    && !manualVerificationReloaded?.computerHandoff?.verificationTarget,
+  'emergency legacy envelope drops executable bridge/target binding so the verifier hides fail-closed',
 );
 
 const legacyCompactCompletion = formatPersistedChatBotMessage(
@@ -660,6 +681,69 @@ assert(raceWithBigPlanMessage.length <= 9000, 'best-of-n + oversized plan messag
 const raceWithBigPlanRace = readPersistedBestOfNRace(readPersistedChatBotMetadata(raceWithBigPlanMessage));
 assert((raceWithBigPlanRace?.candidates.length || 0) === 4, 'best-of-n survives byte-cap compaction tiers');
 assert(raceWithBigPlanRace?.winnerIndex === 1, 'best-of-n winner survives byte-cap compaction tiers');
+
+// Durable universal-task correlation must survive a Chat reload without ever
+// expanding into approval/dispatch authority or retaining raw task text.
+const inertRootPointer = {
+  schemaVersion: 1,
+  rootRowId: '11111111-1111-4111-8111-111111111111',
+  runId: '22222222-2222-4222-8222-222222222222',
+  rootId: `computer_task_${'a'.repeat(64)}`,
+  rootFingerprint: `args-v2:sha256:${'b'.repeat(64)}`,
+  requestIdentityFingerprint: `args-v2:sha256:${'c'.repeat(64)}`,
+  taskFingerprint: `args-v2:sha256:${'d'.repeat(64)}`,
+};
+const pointerRoundTripMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  'Browser plan is ready.',
+  {
+    browserPlans: [{
+      ...hugePlan,
+      task: 'Bounded browser task',
+      computerTaskRootPointer: inertRootPointer,
+    } as any],
+    browserSessions: [{
+      id: 'session-root-pointer',
+      task: 'Bounded browser task',
+      intent: {},
+      backend: 'browserbase_stagehand',
+      backendLabel: 'Browserbase Stagehand',
+      status: 'awaiting_approval',
+      startedAt: new Date(0).toISOString(),
+      actions: [],
+      computerTaskRootPointer: inertRootPointer,
+    } as any],
+  },
+);
+const pointerRoundTrip = readPersistedChatBotMetadata(pointerRoundTripMessage);
+assert(
+  JSON.stringify(pointerRoundTrip?.browserPlans?.[0]?.computerTaskRootPointer) === JSON.stringify(inertRootPointer),
+  'browser plan keeps the inert task-root pointer across saved Chat reload',
+);
+assert(
+  JSON.stringify(pointerRoundTrip?.browserSessions?.[0]?.computerTaskRootPointer) === JSON.stringify(inertRootPointer),
+  'browser session keeps the inert task-root pointer across saved Chat reload',
+);
+assert(
+  !pointerRoundTripMessage.includes('normalizedTask'),
+  'saved root correlation never contains raw normalized task text',
+);
+
+const malformedPointerMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  'Malformed pointer must be discarded.',
+  {
+    browserPlans: [{
+      ...hugePlan,
+      computerTaskRootPointer: { ...inertRootPointer, dispatchAuthority: true },
+    } as any],
+  },
+);
+const malformedPointerRoundTrip = readPersistedChatBotMetadata(malformedPointerMessage);
+assert(
+  !malformedPointerRoundTrip?.browserPlans?.[0]?.computerTaskRootPointer,
+  'saved Chat drops malformed or authority-bearing root pointers',
+);
 
 if (failures > 0) {
   console.error(`\n${failures} persisted-chat metadata smoke-test failure(s)`);

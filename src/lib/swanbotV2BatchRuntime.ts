@@ -60,7 +60,11 @@ import {
 } from './v2AgentEventActivityCore';
 import { buildSnapshotAwareInitialMessages } from './circleSnapshotContextInjection';
 import { getOpenSwanToolsForSurface, createOpenSwanToolParallelPolicyProvider } from './openswanBridge';
-import type { OpenSwanRuntimeToolContext } from './openswanToolRuntime';
+import {
+  getOpenSwanToolPolicy,
+  type OpenSwanRuntimeToolContext,
+  type OpenSwanRuntimeToolName,
+} from './openswanToolRuntime';
 import {
   evaluateTaskExecutionSurfaceToolCall,
   taskExecutionSurfaceAllowsTool,
@@ -70,6 +74,11 @@ import {
   resolveChatComputerConstraintInputs,
   type ChatComputerConstraintCategory,
 } from './chatComputerRequestRouter';
+import {
+  summarizeComputerTaskTurnEvidence,
+  type ComputerTaskToolEvidenceInput,
+  type ComputerTaskTurnEvidenceSummary,
+} from './computerTaskOutcome';
 import {
   createSwanbotV2BatchToolResultStopGuard,
   createSwanbotV2BatchToolConstraintGuard,
@@ -108,7 +117,12 @@ export type SwanbotV2BatchBodyError = { code?: string; message: string };
  * Structurally identical, so the Phase-2 `return runSwanbotV2Batch(...)` inside
  * `callSwanBotV2` type-checks with no cast.
  */
-export type SwanbotV2BatchResult = { text: string | null; bodyError?: SwanbotV2BatchBodyError };
+export type SwanbotV2BatchResult = {
+  text: string | null;
+  bodyError?: SwanbotV2BatchBodyError;
+  /** Runtime-owned, value-free proof summary for the parent task outcome. */
+  executionSummary?: ComputerTaskTurnEvidenceSummary;
+};
 
 /**
  * The caller-supplied context the edge built server-side and the drop-in
@@ -142,7 +156,7 @@ export type SwanbotV2BatchContext = {
   toolApprovalGate?: LegacyToolApprovalGate;
   /** Optional live-narration sink ("Reading the screen…") — §2.8 UX parity. */
   onActivity?: (row: AgentActivityRow) => void;
-  /** Optional thread id (steering scope / tool ctx). */
+  /** Exact authenticated visible Chat thread; forwarded verbatim and never model-derived. */
   threadId?: string;
   /** Optional active plugin ids (tool ctx). */
   activePluginIds?: string[];
@@ -187,6 +201,10 @@ export async function runSwanbotV2Batch(
   const resolved = resolveV2BatchModel(model);
   if ('bodyError' in resolved) return { text: null, bodyError: resolved.bodyError };
   const loopModel = resolved.model;
+  // Capture the authenticated caller value once before any async work. The
+  // canonical tool context and provider session must observe one exact identity
+  // even if the caller retains and later mutates the `extra` object.
+  const authenticatedThreadId = extra.threadId;
 
   const mode = (typeof extra.mode === 'string' && extra.mode) || resolveV2BatchMode(thinkingLevel);
   const targetAgentName = extra.targetAgentName || V2_BATCH_DEFAULT_TARGET_AGENT;
@@ -254,6 +272,11 @@ export async function runSwanbotV2Batch(
   // events. We also stream every event into the persistence handle (durable
   // agent_run_events parity) and, optionally, into the live-narration sink.
   const turnEndEvents: AgentEvent[] = [];
+  const toolEvidence: ComputerTaskToolEvidenceInput[] = [];
+  let toolPolicyLookup: ((toolName: string) => {
+    mutatesState?: boolean;
+    externalSideEffect?: boolean;
+  } | null) | null = null;
   // ── DE-RISK #5 (HIGH — relay-failure double-execution, runbook §0.5.5). ──
   // Once ANY registered tool handler has actually been entered, a later
   // relay/loop failure must NOT
@@ -266,6 +289,21 @@ export async function runSwanbotV2Batch(
   let anyToolExecuted = false;
   const onEvent = (event: AgentEvent) => {
     if (event.kind === 'turn_end') turnEndEvents.push(event);
+    if (event.kind === 'tool_call_result' && toolEvidence.length < 2_000) {
+      const toolPolicy = toolPolicyLookup?.(event.toolName) || null;
+      toolEvidence.push({
+        toolName: event.toolName,
+        toolUseId: event.toolUseId,
+        // Unknown catalog policy is conservatively mutation-capable. It can
+        // never disappear beside a later verified call and create a false
+        // whole-task completion.
+        mutatesState: !toolPolicy
+          || toolPolicy.mutatesState === true
+          || toolPolicy.externalSideEffect === true,
+        dispatched: event.dispatched === true,
+        result: event.result,
+      });
+    }
     // tool_call_start is emitted before registration, constraint, and approval
     // checks. Only the result's runtime-owned dispatched bit proves a handler
     // was entered and a retry could duplicate an outcome-unknown side effect.
@@ -315,7 +353,7 @@ export async function runSwanbotV2Batch(
       userId,
       surface: V2_BATCH_RUN_SURFACE,
       runId: handle?.run.id,
-      threadId: extra.threadId,
+      threadId: authenticatedThreadId,
       activePluginIds: extra.activePluginIds,
       userConstraints,
     };
@@ -398,6 +436,14 @@ export async function runSwanbotV2Batch(
     const toolParallelPolicyProvider = createOpenSwanToolParallelPolicyProvider({
       activePluginIds: extra.activePluginIds,
     });
+    // Task evidence uses the base side-effect policy. The parallel provider
+    // intentionally projects waits/scrolls as synthetic mutations to make
+    // them singleton barriers; that scheduling bit must not become a false
+    // mutation receipt in the parent task outcome.
+    toolPolicyLookup = (toolName) => getOpenSwanToolPolicy(
+      toolName as OpenSwanRuntimeToolName,
+      extra.activePluginIds,
+    );
     const runtimeApprovalToolNames = new Set(
       tools
         .map((tool) => tool.name)
@@ -434,7 +480,7 @@ export async function runSwanbotV2Batch(
         circleId,
         userId,
         runId: handle?.run.id,
-        threadId: extra.threadId,
+        threadId: authenticatedThreadId,
         surface: V2_BATCH_RUN_SURFACE,
         mode,
       },
@@ -488,7 +534,14 @@ export async function runSwanbotV2Batch(
       // return the stop copy instead. First-round failures (no tools yet) keep
       // the harmless v1 fallback.
       return anyToolExecuted
-        ? { text: resolveChatStopMessage('continuation_failed').message }
+        ? {
+            text: resolveChatStopMessage('continuation_failed').message,
+            executionSummary: summarizeComputerTaskTurnEvidence({
+              toolEvidence,
+              cleanTerminal: false,
+              runtimeFailed: true,
+            }),
+          }
         : { text: null };
     }
 
@@ -541,12 +594,30 @@ export async function runSwanbotV2Batch(
         text: resolveChatStopMessage(
           runResult.hitMaxIterations ? 'continuation_cap' : 'continuation_failed',
         ).message,
+        executionSummary: summarizeComputerTaskTurnEvidence({
+          toolEvidence,
+          cleanTerminal: false,
+          cancelled: runResult.aborted === true,
+        }),
       };
     }
 
-    // §2.7: return text only — the caller resolves friendly stop copy via
-    // resolveChatStopMessage, exactly as it did for the edge terminal body.
-    return { text: v2.text || null };
+    // Preserve the text contract while carrying a separate runtime-only proof
+    // seam. No tool arguments, result values, screenshots, or model prose enter
+    // this summary.
+    return {
+      text: v2.text || null,
+      executionSummary: summarizeComputerTaskTurnEvidence({
+        toolEvidence,
+        cleanTerminal: (
+          runResult.stopReason === 'end_turn'
+          && runResult.hitMaxIterations !== true
+          && runResult.stoppedEarly !== true
+          && runResult.aborted !== true
+        ),
+        cancelled: runResult.aborted === true,
+      }),
+    };
   } catch (err) {
     // DE-RISK #2: orphan finalizer — stamp the crashed run as a failed error
     // run (keeping the cohort tag) so it can never masquerade as a completion.
@@ -577,7 +648,14 @@ export async function runSwanbotV2Batch(
     // catch). Otherwise fail closed to the same terminal `null` a transport
     // failure yields — the caller's v1 safety net + breaker handle it (§4).
     if (anyToolExecuted) {
-      return { text: resolveChatStopMessage('continuation_failed').message };
+      return {
+        text: resolveChatStopMessage('continuation_failed').message,
+        executionSummary: summarizeComputerTaskTurnEvidence({
+          toolEvidence,
+          cleanTerminal: false,
+          runtimeFailed: true,
+        }),
+      };
     }
     return { text: null };
   } finally {

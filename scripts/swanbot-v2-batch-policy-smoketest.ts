@@ -25,6 +25,7 @@ import {
   mergeSwanbotV2BatchUserConstraints,
 } from '../src/lib/swanbotV2BatchPolicy';
 import type { AgentEvent, AgentRoundToolResult } from '../src/lib/agentExecutionCore';
+import { partitionClientToolBatch } from '../src/lib/clientToolBatchCore';
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const batchSource = readFileSync(
@@ -359,6 +360,22 @@ const neutral = callGuard(false, 'browser.dom_snapshot', {});
 assert(neutral === undefined, 'neutral read remains allowed without an approval gate');
 const neutralPlanner = callGuard(false, 'browser.plan_task', {});
 assert(neutralPlanner === undefined, 'read-only browser planning remains available under a turn floor');
+const neutralWait = callGuard(false, 'browser.wait_for', { condition: 'network_idle' });
+assert(neutralWait === undefined, 'semantic browser wait remains non-mutating under a turn floor');
+const neutralScroll = callGuard(false, 'browser.scroll', { direction: 'down', amount: 'small' });
+assert(neutralScroll === undefined, 'semantic viewport scroll remains non-mutating under a turn floor');
+
+const waitScrollBarrier = partitionClientToolBatch([
+  { id: 'before', name: 'browser.dom_snapshot' },
+  { id: 'wait', name: 'browser.wait_for' },
+  { id: 'scroll', name: 'browser.scroll' },
+  { id: 'after', name: 'browser.dom_snapshot' },
+]);
+assert(
+  waitScrollBarrier.groups.map((group) => group.length).join('|') === '1|1|1|1'
+    && waitScrollBarrier.groups.flat().map((call) => call.id).join(',') === 'before,wait,scroll,after',
+  'edge client keeps semantic wait and scroll as ordered singleton barriers',
+);
 
 // The default edge continuation consumes the same policy through an executable
 // helper, including the real async review callback and fail-closed exceptions.
@@ -370,13 +387,13 @@ const edgeCall = {
   iteration: 1,
 };
 const edgeNeutral = await authorizeSwanbotV2EdgeClientToolCall(
-  { userConstraints: null, alwaysConfirmFloor: [] },
+  { userConstraints: null, alwaysConfirmFloor: [], toolApprovalMode: 'auto' },
   edgeCall,
 );
 assert(edgeNeutral.allowed === true, 'default edge helper permits a neutral read without a review gate');
 
 const edgeFloor = await authorizeSwanbotV2EdgeClientToolCall(
-  { userConstraints: null, alwaysConfirmFloor: ['pay'] },
+  { userConstraints: null, alwaysConfirmFloor: ['pay'], toolApprovalMode: 'ask' },
   { ...edgeCall, toolName: 'browser.click_role', input: { name: 'Buy now' } },
 );
 assert(
@@ -385,7 +402,7 @@ assert(
 );
 
 const edgeBlandFloor = await authorizeSwanbotV2EdgeClientToolCall(
-  { userConstraints: null, alwaysConfirmFloor: ['pay'] },
+  { userConstraints: null, alwaysConfirmFloor: ['pay'], toolApprovalMode: 'ask' },
   { ...edgeCall, toolName: 'browser.press_key', input: { combo: 'Enter' } },
 );
 assert(
@@ -398,6 +415,7 @@ const edgeBlandFloorApproved = await authorizeSwanbotV2EdgeClientToolCall(
   {
     userConstraints: null,
     alwaysConfirmFloor: ['pay'],
+    toolApprovalMode: 'ask',
     toolApprovalGate: async ({ name, input }) => {
       exactFloorReviewCalls += 1;
       return name === 'browser.press_key'
@@ -418,6 +436,7 @@ const edgeForbidden = await authorizeSwanbotV2EdgeClientToolCall(
   {
     userConstraints: merged,
     alwaysConfirmFloor: [],
+    toolApprovalMode: 'ask',
     toolApprovalGate: async () => {
       edgeGateCalls += 1;
       return 'approve';
@@ -434,6 +453,7 @@ const edgeApproved = await authorizeSwanbotV2EdgeClientToolCall(
   {
     userConstraints: null,
     alwaysConfirmFloor: [],
+    toolApprovalMode: 'ask',
     toolApprovalGate: async ({ name, input }) => {
       edgeGateCalls += 1;
       return name === 'browser.fill_field' && (input as { text?: string }).text === 'draft'
@@ -449,9 +469,10 @@ const edgeRejected = await authorizeSwanbotV2EdgeClientToolCall(
   {
     userConstraints: null,
     alwaysConfirmFloor: [],
+    toolApprovalMode: 'ask',
     toolApprovalGate: async () => 'reject',
   },
-  edgeCall,
+  { ...edgeCall, toolName: 'workspace.create_room' },
 );
 assert(
   edgeRejected.allowed === false && edgeRejected.kind === 'rejected',
@@ -462,15 +483,77 @@ const edgeGateError = await authorizeSwanbotV2EdgeClientToolCall(
   {
     userConstraints: null,
     alwaysConfirmFloor: [],
+    toolApprovalMode: 'ask',
     toolApprovalGate: async () => {
       throw new Error('review UI closed');
+    },
+  },
+  { ...edgeCall, toolName: 'workspace.create_room' },
+);
+assert(
+  edgeGateError.allowed === false && edgeGateError.kind === 'rejected',
+  'default edge review callback exceptions fail closed',
+);
+
+let autoReadGateCalls = 0;
+const edgeAutoReadWithGate = await authorizeSwanbotV2EdgeClientToolCall(
+  {
+    userConstraints: null,
+    alwaysConfirmFloor: [],
+    toolApprovalMode: 'auto',
+    toolApprovalGate: async () => {
+      autoReadGateCalls += 1;
+      return 'reject';
     },
   },
   edgeCall,
 );
 assert(
-  edgeGateError.allowed === false && edgeGateError.kind === 'rejected',
-  'default edge review callback exceptions fail closed',
+  edgeAutoReadWithGate.allowed === true && autoReadGateCalls === 0,
+  'a review callback does not prompt or reject a canonical auto/read call',
+);
+
+const edgeRuntimeOwnedAsk = await authorizeSwanbotV2EdgeClientToolCall(
+  {
+    userConstraints: null,
+    alwaysConfirmFloor: [],
+    toolApprovalMode: 'ask',
+    runtimeApprovalToolNames: new Set(['browser.fill_field']),
+  },
+  { ...edgeCall, toolName: 'browser.fill_field', input: { text: 'draft' } },
+);
+assert(
+  edgeRuntimeOwnedAsk.allowed === true,
+  'canonical runtime-owned ask calls do not receive a duplicate surface prompt',
+);
+
+let disabledGateCalls = 0;
+const edgeDisabled = await authorizeSwanbotV2EdgeClientToolCall(
+  {
+    userConstraints: null,
+    alwaysConfirmFloor: [],
+    toolApprovalMode: 'blocked',
+    toolApprovalGate: async () => {
+      disabledGateCalls += 1;
+      return 'approve';
+    },
+  },
+  { ...edgeCall, toolName: 'credentials.get' },
+);
+assert(
+  edgeDisabled.allowed === false
+    && edgeDisabled.kind === 'policy_error'
+    && disabledGateCalls === 0,
+  'disabled model tools fail before review or handler entry',
+);
+
+const edgeUnknown = await authorizeSwanbotV2EdgeClientToolCall(
+  { userConstraints: null, alwaysConfirmFloor: [], toolApprovalMode: 'unknown' },
+  { ...edgeCall, toolName: 'browser.future_tool' },
+);
+assert(
+  edgeUnknown.allowed === false && edgeUnknown.kind === 'policy_error',
+  'missing canonical client-tool policy fails closed',
 );
 })();
 
@@ -593,6 +676,11 @@ includes(
 );
 includes(
   swanbotSource,
+  'activePluginIds: clientLoopContext?.activePluginIds?.slice(0, 32),',
+  'default edge continuation snapshots the active plugin policy set',
+);
+includes(
+  swanbotSource,
   'userConstraints: mergedUserConstraints,',
   'default edge continuation receives merged user constraints',
 );
@@ -601,10 +689,35 @@ includes(
   'alwaysConfirmFloor: mergedAlwaysConfirmFloor,',
   'default edge continuation receives the merged always-confirm floor',
 );
+includes(
+  swanbotSource,
+  'toolApprovalMode,',
+  'default edge continuation supplies the current canonical approval mode',
+);
+includes(
+  swanbotSource,
+  'runtimeApprovalToolNames: SWANBOT_V2_EDGE_CANONICAL_APPROVAL_TOOL_NAMES',
+  'default edge continuation names handlers that own exact runtime approval',
+);
+includes(
+  swanbotSource,
+  'SWANBOT_V2_EDGE_DISABLED_MODEL_TOOL_NAMES',
+  'default edge continuation blocks raw-secret and model-side approval tools',
+);
+includes(
+  swanbotSource,
+  'activePluginIds: context?.activePluginIds,',
+  'default edge runtime dispatch preserves active plugin approval tightening',
+);
 
 const clientDispatchStart = swanbotSource.indexOf('async function executeClientToolCalls(');
 const clientDispatchEnd = swanbotSource.indexOf('type SwanBotClientToolReceiptPrimitive', clientDispatchStart);
 const clientDispatchSource = swanbotSource.slice(clientDispatchStart, clientDispatchEnd);
+includes(
+  clientDispatchSource,
+  'context?.activePluginIds,',
+  'default edge policy lookup applies active plugin approval tightening',
+);
 const authorizationIndex = clientDispatchSource.indexOf(
   'const authorization = await authorizeSwanbotV2EdgeClientToolCall(',
 );
@@ -624,6 +737,11 @@ includes(
   'User declined this exact tool call. It was not performed.',
   'default edge approval rejection is explicit and non-dispatching',
 );
+includes(
+  policySource,
+  "approvalMode === 'ask' && !runtimeOwnsExactApproval",
+  'default edge review is policy-aware and avoids duplicate runtime prompts',
+);
 const edgePolicyStart = policySource.indexOf('export async function authorizeSwanbotV2EdgeClientToolCall(');
 const edgePolicySource = policySource.slice(edgePolicyStart);
 assert(
@@ -633,8 +751,8 @@ assert(
 );
 includes(
   clientDispatchSource,
-  'partition.groups.flat().map((call) => [call])',
-  'live approval prompts force sequential exact-call dispatch',
+  'const hasSurfaceReviewedCall = Boolean(context?.toolApprovalGate)',
+  'only calls that can reach a live review force sequential exact-call dispatch',
 );
 
 const oneClientToolStart = swanbotSource.indexOf('async function dispatchOneClientTool(');
@@ -670,6 +788,8 @@ for (const toolName of [
   'browser.select_option',
   'browser.click_role',
   'browser.press_key',
+  'browser.wait_for',
+  'browser.scroll',
   'desktop.launch_app',
   'desktop.focus_app',
   'desktop.type_text',

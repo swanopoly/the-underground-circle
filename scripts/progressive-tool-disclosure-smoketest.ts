@@ -109,7 +109,7 @@ async function main() {
     `case2: pinned core size in the 25–40 target band (${progressiveNames.length})`,
   );
   for (const expected of [
-    'tools.search', 'approvals.list', 'approvals.request', 'approvals.resolve',
+    'tools.search', 'approvals.list', 'approvals.request',
     'search_memories', 'save_memory', 'fetch_url', 'list_circle_members',
     'schedule_action', 'browser.plan_task', 'messages.list', 'messages.create',
     'tasks.list', 'goals.list', 'missions.list', 'context.search',
@@ -148,8 +148,8 @@ async function main() {
 
   const savedLoginSearch = runtime.searchOpenSwanToolCatalog('saved login', { family: 'browser', surface: 'task_run' });
   assert(
-    savedLoginSearch.some((m) => m.name === 'browser.fill_credential_field'),
-    'case3: saved-login search finds browser.fill_credential_field',
+    !savedLoginSearch.some((m) => m.name === 'browser.fill_credential_field'),
+    'case3: saved-login search cannot unlock disabled credential fill',
   );
 
   // ── Case 3b — natural-phrasing search QUALITY (P24 ranking regressions) ───
@@ -262,7 +262,7 @@ async function main() {
   );
 
   // ── Case 6 — always-pinned guarantees + deferred-only invisibility ────────
-  for (const name of ['tools.search', 'context.search', 'approvals.list', 'approvals.request', 'approvals.resolve'] as const) {
+  for (const name of ['tools.search', 'context.search', 'approvals.list', 'approvals.request'] as const) {
     assert(runtime.getOpenSwanToolDisclosure(name) === 'pinned', `case6: ${name} is always pinned`);
   }
   assert(
@@ -275,19 +275,21 @@ async function main() {
   );
   assert(
     runtime.getOpenSwanToolDisclosure('browser.fill_credential_field') === 'deferred',
-    'case6: browser.fill_credential_field is searchable/deferred, not pinned',
+    'case6: browser.fill_credential_field keeps its dormant disclosure metadata',
   );
   assert(
     !progressiveNames.includes('browser.fill_credential_field'),
     'case6: browser.fill_credential_field absent from the initial progressive set',
   );
   assert(
-    fullMain.includes('browser.fill_credential_field'),
-    'case6: browser.fill_credential_field still present on the default full path',
+    !fullMain.includes('browser.fill_credential_field')
+      && !fullMain.includes('approvals.resolve')
+      && !fullMain.includes('credentials.get'),
+    'case6: disabled approval and credential tools are absent from the full model catalog',
   );
   assert(
     fullMain.includes('desktop.photoshop_export_proof'),
-    'case6: same tool still present on the default full path',
+    'case6: ordinary deferred tools remain available on the default full path',
   );
 
   // ── Case 7 — token evidence: full catalog vs pinned core, per surface ─────

@@ -30,6 +30,10 @@ import {
   screenshot as localBrowserScreenshot,
 } from './browserBridge';
 import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import {
+  sanitizeComputerTaskRootPointer,
+  type ComputerTaskRootPointerV1,
+} from './computerUseAgent';
 
 export type ComputerUsePermission = 'none' | 'ask_every_time' | 'ask_for_new_sites' | 'trusted';
 export type ComputerUseBackend = 'playwright_bridge' | 'browserbase_stagehand';
@@ -118,6 +122,8 @@ export interface ComputerUseSession {
   sourceMessageId?: string;
   sourceRunId?: string | null;
   sourcePlanId?: string;
+  /** Inert durable-root correlation; never action or approval authority. */
+  computerTaskRootPointer?: ComputerTaskRootPointerV1;
   recommendedPermission?: ComputerUsePermission;
 }
 
@@ -183,6 +189,8 @@ export interface BrowserPlanCardData {
   completedAt?: string;
   backendSessionId?: string;
   backendLiveUrl?: string;
+  /** Bounded seven-field root correlation copied from authenticated Chat admission. */
+  computerTaskRootPointer?: ComputerTaskRootPointerV1;
   actions: Array<Pick<BrowserAction, 'id' | 'type' | 'target' | 'value' | 'description' | 'requiresApproval' | 'approvalReason' | 'blockedReason' | 'runtimeHandoff'>>;
   computerAppPreflight?: ComputerAppPreflight | null;
   computerAppGroundingTrace?: ComputerAppGroundingTrace | null;
@@ -225,6 +233,8 @@ export interface BrowserSessionRecord {
   currentUrl?: string;
   backendSessionId?: string;
   backendLiveUrl?: string;
+  /** Inert correlation only; execution must re-read/CAS the durable root. */
+  computerTaskRootPointer?: ComputerTaskRootPointerV1;
   recommendedPermission?: ComputerUsePermission;
   actions: BrowserAction[];
 }
@@ -465,11 +475,17 @@ export async function createSession(
   agentName: string,
   task: string,
   permission: ComputerUsePermission,
-  opts?: { circleId?: string; intent?: BrowserTaskIntent; recommendedPermission?: ComputerUsePermission }
+  opts?: {
+    circleId?: string;
+    intent?: BrowserTaskIntent;
+    recommendedPermission?: ComputerUsePermission;
+    computerTaskRootPointer?: ComputerTaskRootPointerV1 | null;
+  }
 ): Promise<ComputerUseSession> {
   const intent = opts?.intent || analyzeBrowserTask(task);
   const backend = await resolveComputerUseBackend(opts?.circleId, intent);
   const backendPreference = chooseBrowserAutomationBackendPreference(intent);
+  const computerTaskRootPointer = sanitizeComputerTaskRootPointer(opts?.computerTaskRootPointer);
   return {
     id: generateId(),
     agentName,
@@ -485,6 +501,7 @@ export async function createSession(
     backendLabel: backend.label,
     backendDetails: backend.details,
     backendPreference,
+    ...(computerTaskRootPointer ? { computerTaskRootPointer } : {}),
     recommendedPermission: opts?.recommendedPermission,
   };
 }
@@ -607,6 +624,8 @@ export async function createSessionFromBrowserPlan(
   session.sourceMessageId = opts?.sourceMessageId;
   session.sourceRunId = opts?.sourceRunId || null;
   session.sourcePlanId = plan.planId;
+  const computerTaskRootPointer = sanitizeComputerTaskRootPointer(plan.computerTaskRootPointer);
+  if (computerTaskRootPointer) session.computerTaskRootPointer = computerTaskRootPointer;
   session.recommendedPermission = plan.recommendedPermission;
   return session;
 }
@@ -1365,6 +1384,7 @@ export function toBrowserSessionRecord(
     || projectedStatus === 'failed'
     || projectedStatus === 'blocked'
     || projectedStatus === 'cancelled';
+  const computerTaskRootPointer = sanitizeComputerTaskRootPointer(session.computerTaskRootPointer);
   return {
     id: session.backendSessionId || session.id,
     planId: session.sourcePlanId,
@@ -1380,12 +1400,17 @@ export function toBrowserSessionRecord(
     currentUrl: session.currentUrl,
     backendSessionId: session.backendSessionId,
     backendLiveUrl: session.backendLiveUrl,
+    ...(computerTaskRootPointer ? { computerTaskRootPointer } : {}),
     recommendedPermission: session.recommendedPermission,
     actions: session.actions.map(withoutPersistedMutationInput),
   };
 }
 
-export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlanCardData {
+export function toBrowserPlanCardData(
+  plan: ComputerUsePlanSummary,
+  rootPointer?: ComputerTaskRootPointerV1 | null,
+): BrowserPlanCardData {
+  const computerTaskRootPointer = sanitizeComputerTaskRootPointer(rootPointer);
   return {
     planId: `browser-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     task: plan.task,
@@ -1397,6 +1422,7 @@ export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlan
     requiresApproval: plan.requiresApproval,
     recommendedPermission: plan.recommendedPermission,
     status: 'planned',
+    ...(computerTaskRootPointer ? { computerTaskRootPointer } : {}),
     computerAppPreflight: plan.computerAppPreflight || null,
     computerAppGroundingTrace: plan.computerAppGroundingTrace || null,
     actions: plan.actions.map((action) => {

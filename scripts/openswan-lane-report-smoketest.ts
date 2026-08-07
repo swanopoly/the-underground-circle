@@ -10,6 +10,7 @@
 import {
   buildOpenSwanLaneReport,
   formatOpenSwanLaneReport,
+  isValidOpenSwanLaneBaseRef,
 } from './openswan-lane-report';
 
 function assert(condition: unknown, message: string): void {
@@ -100,6 +101,63 @@ const runtimePlanReport = buildOpenSwanLaneReport({
 assert(runtimePlanReport.status === 'narrow', 'runtime integration plan report is narrow');
 assert(runtimePlanReport.buckets[0]?.lane.id === 'lane3_openswan_typed_core', 'runtime integration plan maps to OpenSwan typed core lane');
 assert(runtimePlanReport.unmappedPaths.length === 0, 'runtime integration plan is not unmapped');
+
+const universalTaskKernelReport = buildOpenSwanLaneReport({
+  maxActiveLanes: 2,
+  maxChangedPaths: 10,
+  statusLines: [
+    ' M docs/UC_APP_TASK_RELIABILITY_ARCHITECTURE.md',
+    '?? scripts/exact-program-authority-smoketest.ts',
+    '?? scripts/thinking-label-hook-order-smoketest.ts',
+  ],
+});
+
+assert(universalTaskKernelReport.status === 'narrow', 'universal task kernel ownership stays reviewable');
+assert(universalTaskKernelReport.activeLaneCount === 2, 'universal task kernel artifacts map to two declared lanes');
+assert(
+  universalTaskKernelReport.buckets.some((bucket) => bucket.lane.id === 'lane5_computer_app_evidence'),
+  'kernel architecture and exact-authority smoke map to computer/app evidence',
+);
+assert(
+  universalTaskKernelReport.buckets.some((bucket) => bucket.lane.id === 'lane8_product_ui_console'),
+  'thinking-label hook smoke maps to product UI',
+);
+assert(universalTaskKernelReport.unmappedPaths.length === 0, 'universal task kernel artifacts are not unmapped');
+
+const databaseAuthorityReport = buildOpenSwanLaneReport({
+  maxActiveLanes: 2,
+  maxChangedPaths: 10,
+  statusLines: [
+    ' M scripts/database-authority-guards-smoketest.ts',
+    '?? supabase/migrations/20260806_chat_v2_approval_auto_approve_category.sql',
+  ],
+});
+
+assert(databaseAuthorityReport.status === 'narrow', 'database authority artifacts stay reviewable');
+assert(databaseAuthorityReport.activeLaneCount === 1, 'database authority artifacts share the Edge SQL lane');
+assert(databaseAuthorityReport.buckets[0]?.lane.id === 'lane10_edge_sql', 'database authority smoke maps to Edge SQL');
+assert(databaseAuthorityReport.unmappedPaths.length === 0, 'database authority artifacts are not unmapped');
+assert(isValidOpenSwanLaneBaseRef('origin/main'), 'CI lane base accepts a remote branch');
+assert(isValidOpenSwanLaneBaseRef('a'.repeat(40)), 'CI lane base accepts an exact commit SHA');
+assert(!isValidOpenSwanLaneBaseRef('--output=/tmp/file'), 'CI lane base rejects Git options');
+assert(!isValidOpenSwanLaneBaseRef('main...HEAD'), 'CI lane base rejects revision expressions');
+assert(!isValidOpenSwanLaneBaseRef('main HEAD'), 'CI lane base rejects whitespace injection');
+
+const exactApprovalContinuityReport = buildOpenSwanLaneReport({
+  maxActiveLanes: 2,
+  maxChangedPaths: 10,
+  statusLines: [
+    ' M src/lib/exactPlanApprovalContinuityCore.ts',
+    ' M src/screens/circles/tabs/ChatTab.tsx',
+  ],
+});
+assert(exactApprovalContinuityReport.status === 'narrow', 'exact approval continuity stays in one review lane');
+assert(exactApprovalContinuityReport.activeLaneCount === 1, 'exact approval continuity maps to one declared lane');
+assert(
+  exactApprovalContinuityReport.buckets[0]?.lane.id === 'lane2_chat_dispatcher',
+  'exact approval continuity maps to the Chat dispatcher lane',
+);
+assert(exactApprovalContinuityReport.unmappedPaths.length === 0, 'exact approval continuity has no unmapped path');
 
 const cleanReport = buildOpenSwanLaneReport({
   statusLines: [],

@@ -78,12 +78,6 @@ export default function CreateCircleScreen({ route, navigation }: any) {
       return;
     }
 
-    await supabase.from('circle_members').insert({
-      circle_id: circle.id,
-      user_id: user.id,
-      role: 'creator',
-    });
-
     awardXP(user.id, getXPForAction('circle_create'), 'circle_create', { circle_id: circle.id }).catch(
       console.error,
     );

@@ -111,6 +111,21 @@ assert(
   }),
   'tool argument fingerprint is stable across object key ordering',
 );
+const nestedArrayFingerprint = await buildComputerAppToolArgsFingerprintAsync({
+  steps: [
+    { args: ['Photoshop', 600, 600], kind: 'launch' },
+    [true, null, { height: 600, width: 600 }],
+  ],
+});
+assert(
+  nestedArrayFingerprint === await buildComputerAppToolArgsFingerprintAsync({
+    steps: [
+      { kind: 'launch', args: ['Photoshop', 600, 600] },
+      [true, null, { width: 600, height: 600 }],
+    ],
+  }),
+  'tool argument fingerprint preserves nested array order while canonicalizing nested object keys',
+);
 assert(
   normalizedFillFingerprint !== await buildComputerAppToolArgsFingerprintAsync({
     exact: true,
@@ -131,6 +146,76 @@ cyclicFingerprintInput.self = cyclicFingerprintInput;
 assert(
   await buildComputerAppToolArgsFingerprintAsync(cyclicFingerprintInput) === '',
   'unsupported cyclic handler args fail closed instead of receiving a reusable fingerprint',
+);
+class FingerprintClassInput {
+  width = 600;
+}
+for (const unsupportedFingerprintInput of [
+  new Date('2026-07-24T16:00:00.000Z'),
+  new Map([['width', 600]]),
+  new Set([600]),
+  new FingerprintClassInput(),
+]) {
+  assert(
+    await buildComputerAppToolArgsFingerprintAsync(unsupportedFingerprintInput) === '',
+    'non-plain object prototypes fail closed instead of collapsing to an empty object fingerprint',
+  );
+}
+let getterCalls = 0;
+const getterFingerprintInput = Object.defineProperty({}, 'width', {
+  enumerable: true,
+  get() {
+    getterCalls += 1;
+    return 600;
+  },
+});
+assert(
+  await buildComputerAppToolArgsFingerprintAsync(getterFingerprintInput) === '',
+  'accessor-backed handler args fail closed',
+);
+assert(getterCalls === 0, 'fingerprint canonicalization never invokes an input getter');
+const symbolFingerprintInput: Record<string | symbol, unknown> = { width: 600 };
+symbolFingerprintInput[Symbol('hidden')] = 'mutation';
+assert(
+  await buildComputerAppToolArgsFingerprintAsync(symbolFingerprintInput) === '',
+  'symbol-keyed handler args fail closed instead of being omitted from the fingerprint',
+);
+const sparseFingerprintInput = new Array(2);
+sparseFingerprintInput[1] = 600;
+assert(
+  await buildComputerAppToolArgsFingerprintAsync(sparseFingerprintInput) === '',
+  'sparse array handler args fail closed instead of treating holes as null',
+);
+const extraPropertyArray: unknown[] & { hidden?: string } = [600, 600];
+extraPropertyArray.hidden = 'mutation';
+assert(
+  await buildComputerAppToolArgsFingerprintAsync(extraPropertyArray) === '',
+  'arrays with extra properties fail closed instead of omitting unbound values',
+);
+const throwingProxyInput = new Proxy({ width: 600 }, {
+  ownKeys() {
+    throw new Error('untrusted traversal');
+  },
+});
+let throwingProxyFingerprint = 'not-called';
+try {
+  throwingProxyFingerprint = await buildComputerAppToolArgsFingerprintAsync(throwingProxyInput);
+} catch {
+  throwingProxyFingerprint = 'threw';
+}
+assert(
+  throwingProxyFingerprint === '',
+  'proxy traversal failures resolve to an empty fingerprint instead of rejecting the async call',
+);
+assert(
+  await buildComputerAppToolArgsFingerprintAsync(new Proxy({ width: 600 }, {})) === '',
+  'otherwise transparent Proxy handler args fail closed at the structured-clone boundary',
+);
+assert(
+  await buildComputerAppToolArgsFingerprintAsync(undefined) === ''
+    && await buildComputerAppToolArgsFingerprintAsync(1n) === ''
+    && await buildComputerAppToolArgsFingerprintAsync(() => 600) === '',
+  'unsupported non-JSON values fail closed',
 );
 assert(
   await buildComputerAppToolArgsFingerprintAsync('x'.repeat(256_001)) === '',

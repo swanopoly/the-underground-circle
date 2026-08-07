@@ -9,9 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { webcrypto } from 'node:crypto';
-import {
-  buildComputerAppToolArgsFingerprintAsync,
-} from '../src/lib/computerAppGrounding';
+import { buildChatPlanApprovalIntentFingerprint } from '../src/lib/runChatAutomationPlan';
 
 if (!globalThis.crypto?.subtle) {
   Object.defineProperty(globalThis, 'crypto', {
@@ -49,22 +47,12 @@ async function main(): Promise<void> {
     circleId: '11111111-1111-4111-8111-111111111111',
     userId: '22222222-2222-4222-8222-222222222222',
     threadId: '33333333-3333-4333-8333-333333333333',
+    requestIdentity: 'user-1720000000000-request-a',
   };
 
-  const fingerprint = (plan: any, context: any) => buildComputerAppToolArgsFingerprintAsync({
-    schemaVersion: 2,
-    circleId: context.circleId,
-    userId: context.userId,
-    threadId: context.threadId ?? null,
-    roomId: context.roomId ?? null,
-    source: plan.source,
-    intent: plan.intent,
-    execution: plan.execution,
-    approval: plan.approval,
-    risk: plan.risk,
-    confidence: plan.confidence,
-    notes: plan.notes,
-  });
+  const fingerprint = (plan: any, context: any) => (
+    buildChatPlanApprovalIntentFingerprint(plan, context)
+  );
 
   const first = await fingerprint(basePlan, baseContext);
   assert(/^args-v2:sha256:[0-9a-f]{64}$/.test(first), 'fingerprint is cryptographic SHA-256');
@@ -87,17 +75,18 @@ async function main(): Promise<void> {
     await fingerprint(basePlan, changedScope) !== first,
     'thread scope changes invalidate approval authority',
   );
+  assert(
+    await fingerprint(basePlan, { ...baseContext, requestIdentity: 'user-1720000000000-request-b' }) !== first,
+    'a separately submitted Chat message cannot reuse the first request authority',
+  );
 
   const source = fs.readFileSync(
     path.join(process.cwd(), 'src/lib/chatApprovalGate.ts'),
     'utf8',
   );
   assert(
-    source.includes('return buildComputerAppToolArgsFingerprintAsync({')
-      && source.includes('intent: plan.intent')
-      && source.includes('execution: plan.execution')
-      && source.includes('notes: plan.notes'),
-    'gate fingerprints the complete plan with the canonical SHA-256 helper',
+    source.includes('return buildChatPlanApprovalIntentFingerprint(plan, ctx);'),
+    'gate delegates complete plan/program/request binding to the shared fingerprint helper',
   );
   assert(
     source.includes(".is('applied_at', null)")
@@ -150,6 +139,13 @@ async function main(): Promise<void> {
       && source.includes('approvalIntentFingerprint'),
     'lookup and inserted audit payload use the v2 exact-intent binding',
   );
+  assert(
+    source.includes("kind: 'policy_auto_waiver'")
+      && source.includes('approvalIntentFingerprint,')
+      && source.includes('policyCategory: category')
+      && !source.includes("approvalId: 'policy_auto_waiver'"),
+    'standing auto policy emits explicit semantic authority without fabricating an approval row id',
+  );
   const insertedApprovalPayload = source.slice(
     source.indexOf(".from('agent_approvals')\n      .insert({"),
     source.indexOf('timeout_seconds: timeoutSeconds'),
@@ -183,6 +179,13 @@ async function main(): Promise<void> {
     !dispatcherSource.includes('data.rawError')
       && !dispatcherSource.includes('rawError:'),
     'transport exceptions are not persisted verbatim',
+  );
+  assert(
+    dispatcherSource.includes('gateAuthority.approvalIntentFingerprint !== approvalIntentFingerprint')
+      && dispatcherSource.includes('programFingerprint')
+      && dispatcherSource.includes('requestIdentityFingerprint')
+      && dispatcherSource.includes('issuedChatPlanApprovalAuthorities.has'),
+    'dispatcher-issued capability is bound to exact approval intent, request, and compiler program',
   );
 
   console.log(`chat-approval-single-use-smoketest: ${passed} assertions passed`);

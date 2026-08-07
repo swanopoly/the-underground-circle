@@ -80,6 +80,7 @@ interface CliOptions {
   failOnBroad: boolean;
   maxActiveLanes: number;
   maxChangedPaths: number;
+  baseRef: string | null;
 }
 
 const DEFAULT_MAX_ACTIVE_LANES = 2;
@@ -101,6 +102,7 @@ export const OPENSWAN_AGENT_LANES: OpenSwanLaneDefinition[] = [
       /^docs\/AGENT_DEVELOPMENT_STANDARDS_INDEX\.md$/,
       /^docs\/SWANBOT_OPENSWAN_AGENT_LANES_/,
       /^package(?:-lock)?\.json$/,
+      /^\.github\/workflows\/.+\.ya?ml$/,
       /^scripts\/openswan-(?:lane|worktree)/,
       /^src\/lib\/(?:agentDevelopmentStandards|openswanWorktreeConfig)\.ts$/,
     ],
@@ -164,6 +166,7 @@ export const OPENSWAN_AGENT_LANES: OpenSwanLaneDefinition[] = [
     ownerRuleIds: ['chat_task_planning_metadata'],
     matchers: [
       /^src\/lib\/chat/,
+      /^src\/lib\/exactPlanApprovalContinuityCore\.ts$/,
       /^src\/lib\/runChatAutomationPlan/,
       /^src\/lib\/conversationalRouter\.ts$/,
       /^src\/screens\/circles\/tabs\/ChatTab\.tsx$/,
@@ -231,6 +234,8 @@ export const OPENSWAN_AGENT_LANES: OpenSwanLaneDefinition[] = [
     matchers: [
       /^src\/lib\/(?:appAutomation|appAdapter|agentAppCapability|genericApp|knownApp|scriptableMac|desktop|browser|computer|direct|localComputer|useComputerUse)/,
       /^scripts\/(?:app-|a11y|browser-|computer-|desktop-|direct-|generic-app|known-app|local-desktop|photoshop|scriptable-mac)/,
+      /^scripts\/exact-program-authority-smoketest\.ts$/,
+      /^docs\/UC_APP_TASK_RELIABILITY_ARCHITECTURE\.md$/,
       /^docs\/(?:DIRECT_DESKTOP|EXECUTION_LADDER|LEARNING_LOOP|DESKTOP|UNIVERSAL_CONTROL|COMPUTER|WORDPRESS_BROWSER_AUTOMATION_RESEARCH)/,
     ],
     canonicalDocs: ['docs/AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE.md'],
@@ -300,6 +305,7 @@ export const OPENSWAN_AGENT_LANES: OpenSwanLaneDefinition[] = [
       /^src\/services\/hitlService\.ts$/,
       /^src\/lib\/(?:office|approvalPayloadRenderer)/,
       /^scripts\/(?:office-|approval-payload)/,
+      /^scripts\/thinking-label-hook-order-smoketest\.ts$/,
     ],
     canonicalDocs: ['docs/DESIGN_AGENT_BEST_PRACTICES.md', 'docs/UC_STYLE_GUIDE.md'],
     dailyVerification: ['npm run smoke:office-bridge-readiness'],
@@ -337,6 +343,7 @@ export const OPENSWAN_AGENT_LANES: OpenSwanLaneDefinition[] = [
       /^supabase\/functions\//,
       /^supabase\/migrations\//,
       /^docs\/RUN_THIS_SQL\.sql$/,
+      /^scripts\/database-authority-guards-smoketest\.ts$/,
     ],
     canonicalDocs: ['docs/RUN_THIS_SQL.sql', 'docs/AGENTS_ROADMAP.md'],
     dailyVerification: ['npm run typecheck:functions'],
@@ -382,6 +389,50 @@ function gitStatusLines(repoRoot: string): string[] {
   } catch {
     return [];
   }
+}
+
+export function isValidOpenSwanLaneBaseRef(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  return trimmed.length > 0
+    && trimmed.length <= 200
+    && /^[A-Za-z0-9][A-Za-z0-9._/@~^:+-]*$/.test(trimmed)
+    && !trimmed.includes('..')
+    && !trimmed.includes('@{');
+}
+
+/**
+ * CI has a clean worktree, so `git status` cannot describe the PR's scope.
+ * Resolve the exact merge base and project committed paths into the same
+ * status-line shape used by the local report. `execFileSync` receives each
+ * value as a distinct argument; the strict ref validator prevents option or
+ * revision-expression injection before Git is invoked.
+ */
+export function gitDiffLines(repoRoot: string, baseRef: string): string[] {
+  const normalizedBaseRef = baseRef.trim();
+  if (!isValidOpenSwanLaneBaseRef(normalizedBaseRef)) {
+    throw new Error('invalid OpenSwan lane base ref');
+  }
+  const mergeBase = execFileSync('git', ['merge-base', normalizedBaseRef, 'HEAD'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+  if (!/^[0-9a-f]{40,64}$/i.test(mergeBase)) {
+    throw new Error('OpenSwan lane merge base was unavailable');
+  }
+  return execFileSync(
+    'git',
+    ['diff', '--name-only', '--diff-filter=ACDMRTUXB', '-z', mergeBase, 'HEAD'],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
+  )
+    .split('\0')
+    .filter((path) => path.length > 0)
+    .map((path) => ` M ${path}`);
 }
 
 function addUnique<T>(items: T[], value: T): void {
@@ -565,6 +616,7 @@ function parseArgs(argv: string[]): CliOptions {
     failOnBroad: false,
     maxActiveLanes: DEFAULT_MAX_ACTIVE_LANES,
     maxChangedPaths: DEFAULT_MAX_CHANGED_PATHS,
+    baseRef: null,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -580,6 +632,14 @@ function parseArgs(argv: string[]): CliOptions {
       i += 1;
     } else if (arg === '--max-paths') {
       options.maxChangedPaths = parseNumber(argv[i + 1], options.maxChangedPaths);
+      i += 1;
+    } else if (arg === '--base-ref') {
+      const value = argv[i + 1] || '';
+      if (!isValidOpenSwanLaneBaseRef(value)) {
+        console.error('Invalid --base-ref. Use an exact branch, tag, or commit ref.');
+        process.exit(1);
+      }
+      options.baseRef = value.trim();
       i += 1;
     } else if (arg === '--json') {
       options.format = 'json';
@@ -607,6 +667,7 @@ function printHelp(): void {
     '  --task <text>       Task label printed in the report.',
     '  --max-lanes <n>     Active lane limit before status becomes broad. Default: 2.',
     '  --max-paths <n>     Changed path limit before status becomes broad. Default: 40.',
+    '  --base-ref <ref>     Inspect committed merge-base..HEAD scope (for CI/PRs).',
     '  --json              Print the full report as JSON.',
     '  --fail-on-broad     Exit 2 when the worktree is too broad.',
   ].join('\n'));
@@ -614,9 +675,19 @@ function printHelp(): void {
 
 function main(): void {
   const options = parseArgs(process.argv.slice(2));
+  let statusLines: string[] | undefined;
+  if (options.baseRef) {
+    try {
+      statusLines = gitDiffLines(options.repoRoot, options.baseRef);
+    } catch {
+      console.error('Could not resolve the requested OpenSwan lane base ref.');
+      process.exit(1);
+    }
+  }
   const report = buildOpenSwanLaneReport({
     repoRoot: options.repoRoot,
     taskDescription: options.taskDescription,
+    statusLines,
     maxActiveLanes: options.maxActiveLanes,
     maxChangedPaths: options.maxChangedPaths,
   });

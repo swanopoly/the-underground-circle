@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,16 @@ import { supabase } from '../../lib/supabase';
 import { signInWithSSO } from '../../lib/sso';
 import { signInWithGoogle, readOAuthErrorFromUrl } from '../../lib/googleCreds';
 import ErrorBoundary from '../../components/ErrorBoundary';
+import { safeGetSession } from '../../lib/authSession';
+import { LENGTH_LIMITS, validateEmail, validatePassword } from '../../lib/validation';
+import {
+  buildPasswordResetRedirect,
+  getSafeAuthErrorMessage,
+  installAuthFocusStyles,
+  normalizeAuthEmail,
+} from '../../lib/authUiPolicy';
+import { showAlert } from '../../lib/alert';
+import { secureSignOut } from '../../lib/authLogout';
 
 // LoginBackground3D pulls in three, @react-three/fiber, @react-three/postprocessing
 // (~1-2MB of JS). It only renders on the web login screen, so code-split it out
@@ -27,10 +37,22 @@ const ACCENT_STRONG = '#9be234';
 const CARD_BG = 'rgba(11, 15, 12, 0.45)';
 const CARD_BORDER = 'rgba(184, 255, 97, 0.18)';
 
-type FocusField = 'email' | 'password' | 'sso' | null;
-type HoverAction = 'login' | 'showSso' | 'submitSso' | 'backToEmail' | 'signup' | 'googleSignin' | null;
+type FocusField = 'email' | 'password' | 'sso' | 'newPassword' | 'confirmPassword' | null;
+type HoverAction =
+  | 'login'
+  | 'showSso'
+  | 'submitSso'
+  | 'backToEmail'
+  | 'signup'
+  | 'googleSignin'
+  | 'forgotPassword'
+  | 'resetRequest'
+  | 'updatePassword'
+  | null;
+type AuthScreenMode = 'login' | 'request-reset' | 'update-password';
 
-// Inject global CSS for focus ring removal + button hover effects (web only, once)
+// Inject button animations (web only, once). Keyboard focus styling is
+// installed separately and remains visible for accessibility.
 let _loginCssInjected = false;
 function injectLoginCSS() {
   if (Platform.OS !== 'web' || _loginCssInjected) return;
@@ -38,14 +60,6 @@ function injectLoginCSS() {
   try {
     const style = document.createElement('style');
     style.textContent = `
-      /* Kill all browser focus outlines */
-      input:focus, textarea:focus, [role="button"]:focus, button:focus, a:focus, div:focus {
-        outline: none !important;
-        -webkit-tap-highlight-color: transparent !important;
-      }
-      *:focus { outline: none !important; }
-      *:focus-visible { outline: none !important; }
-
       /* Glowing border sweep on buttons */
       @keyframes uc-border-sweep {
         0% { background-position: 0% 50%; }
@@ -118,7 +132,12 @@ function useCursorReveal() {
   return ref;
 }
 
-export default function LoginScreen({ navigation }: any) {
+export default function LoginScreen({ navigation, route, onPasswordRecoveryComplete }: any) {
+  const mode: AuthScreenMode = route?.name === 'PasswordRecovery'
+    ? 'request-reset'
+    : route?.name === 'ResetPassword'
+      ? 'update-password'
+      : 'login';
   const { width } = useWindowDimensions();
   const isDesktop = width >= 980;
   // Mobile hero font sizing — "UNDERGROUND" (11 chars at 900-weight bold)
@@ -131,15 +150,24 @@ export default function LoginScreen({ navigation }: any) {
   const heroTitleFontSize = isDesktop ? 44 : 28;
   const heroTitleLetterSpacing = isDesktop ? 1 : 0.4;
   // Inject CSS on mount
-  useEffect(() => { injectLoginCSS(); }, []);
+  useEffect(() => {
+    injectLoginCSS();
+    installAuthFocusStyles();
+  }, []);
   const heroRevealRef = useCursorReveal();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   // Separate flag so the Google button gets its own disabled / spinner
   // state without freezing the email/password form during the redirect.
   const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [recoveryState, setRecoveryState] = useState<'checking' | 'ready' | 'invalid'>(
+    mode === 'update-password' ? 'checking' : 'ready',
+  );
   const [showSSO, setShowSSO] = useState(false);
   const [ssoDomain, setSsoDomain] = useState('');
   const [focusedField, setFocusedField] = useState<FocusField>(null);
@@ -150,8 +178,30 @@ export default function LoginScreen({ navigation }: any) {
   // login form with no idea what went wrong.
   useEffect(() => {
     const oauthError = readOAuthErrorFromUrl();
-    if (oauthError) setError(oauthError);
-  }, []);
+    if (oauthError && mode === 'login') setError(getSafeAuthErrorMessage('oauth', oauthError));
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== 'update-password') return;
+    let active = true;
+
+    safeGetSession().then(({ value }) => {
+      if (active) setRecoveryState(value ? 'ready' : 'invalid');
+    }).catch(() => {
+      if (active) setRecoveryState('invalid');
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (!active) return;
+      if (event === 'PASSWORD_RECOVERY' && nextSession) setRecoveryState('ready');
+      if (event === 'SIGNED_OUT') setRecoveryState('invalid');
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, [mode]);
 
   // Portal suck-in transition — zooms INTO the portal like being pulled in
   const [portalTransition, setPortalTransition] = useState(false);
@@ -189,8 +239,15 @@ export default function LoginScreen({ navigation }: any) {
 
   const handleLogin = async () => {
     setError('');
-    if (!email || !password) {
+    setNotice('');
+    const normalizedEmail = normalizeAuthEmail(email).slice(0, LENGTH_LIMITS.email.max);
+    if (!normalizedEmail || !password) {
       setError('Fill in both fields.');
+      return;
+    }
+    const emailValidation = validateEmail(normalizedEmail);
+    if (!emailValidation.isValid) {
+      setError('Enter a valid email address.');
       return;
     }
 
@@ -219,19 +276,44 @@ export default function LoginScreen({ navigation }: any) {
       // (captive portal, DNS blackhole, paused Supabase project) leaves the
       // portal overlay holding a solid black screen forever with no error and
       // no control. Race a hard cap that resets the UI with a message.
+      const signInPromise = supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password: password.slice(0, LENGTH_LIMITS.password.max),
+      });
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const signInResult = await Promise.race([
-        supabase.auth.signInWithPassword({ email, password }),
-        new Promise<{ error: { message: string } }>((resolve) =>
-          setTimeout(() => resolve({ error: { message: 'Sign-in timed out. Check your connection and try again.' } }), 15_000)),
+        signInPromise.then((result) => ({ timedOut: false as const, result })),
+        new Promise<{ timedOut: true }>((resolve) => {
+          timeoutId = setTimeout(() => resolve({ timedOut: true }), 15_000);
+        }),
       ]);
-      const signInError = (signInResult as { error?: { message: string } | null }).error;
+      if (timeoutId) clearTimeout(timeoutId);
+
+      if (signInResult.timedOut) {
+        // The GoTrue method has no per-call abort signal. If it settles after
+        // the UI timeout, immediately remove any session it created so a
+        // user never sees a timeout and then becomes signed in unexpectedly.
+        void signInPromise.then(({ data }) => {
+          if (data.session) {
+            return secureSignOut({ scope: 'local', userId: data.user?.id }).then(() => undefined);
+          }
+          return undefined;
+        }).catch(() => {});
+        setPortalTransition(false);
+        portalAnim.setValue(0);
+        setLoading(false);
+        setError(getSafeAuthErrorMessage('login', { message: 'timed out' }));
+        return;
+      }
+
+      const signInError = signInResult.result.error;
 
       if (signInError) {
         // Auth failed — reverse the animation
         setPortalTransition(false);
         portalAnim.setValue(0);
         setLoading(false);
-        setError(signInError.message);
+        setError(getSafeAuthErrorMessage('login', signInError));
       }
       // If success, Supabase session triggers navigation — animation is already playing
     } catch (err) {
@@ -244,7 +326,9 @@ export default function LoginScreen({ navigation }: any) {
 
   const handleSSO = async () => {
     setError('');
-    if (!ssoDomain.trim()) {
+    setNotice('');
+    const normalizedDomain = ssoDomain.trim().toLowerCase().slice(0, 253);
+    if (!normalizedDomain) {
       setError('Enter your company domain.');
       return;
     }
@@ -254,12 +338,95 @@ export default function LoginScreen({ navigation }: any) {
       // signInWithSSO can THROW (network/AbortError), not just return an
       // error — without the finally, a throw left `loading` stuck true and
       // disabled both the SSO and email submit buttons until a page refresh.
-      const { error: ssoError } = await signInWithSSO(ssoDomain.trim());
+      const { error: ssoError } = await signInWithSSO(normalizedDomain);
       if (ssoError) {
-        setError(ssoError);
+        setError(getSafeAuthErrorMessage('sso', ssoError));
       }
     } catch {
       setError('SSO sign-in failed to start. Check the domain and try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetRequest = async () => {
+    setError('');
+    setNotice('');
+    const normalizedEmail = normalizeAuthEmail(email).slice(0, LENGTH_LIMITS.email.max);
+    const emailValidation = validateEmail(normalizedEmail);
+    if (!emailValidation.isValid) {
+      setError('Enter a valid email address.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const origin = Platform.OS === 'web' && typeof window !== 'undefined'
+        ? window.location.origin
+        : undefined;
+      const redirectTo = buildPasswordResetRedirect(origin);
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(
+        normalizedEmail,
+        redirectTo ? { redirectTo } : undefined,
+      );
+
+      if (resetError) {
+        const safeMessage = getSafeAuthErrorMessage('reset_request', resetError);
+        if (safeMessage.startsWith('Too many') || safeMessage.includes('could not reach')) {
+          setError(safeMessage);
+          return;
+        }
+      }
+
+      // The same response is shown whether or not the address exists.
+      setNotice('If an account exists for that email, a password-reset link is on its way.');
+    } catch (resetError) {
+      setError(getSafeAuthErrorMessage('reset_request', resetError as Error));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePasswordUpdate = async () => {
+    setError('');
+    setNotice('');
+    if (recoveryState !== 'ready') {
+      setError('This password-reset link is invalid or expired. Request a new one.');
+      return;
+    }
+
+    const passwordValidation = validatePassword(newPassword);
+    if (!passwordValidation.isValid) {
+      setError(passwordValidation.error || 'Choose a stronger password.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('The passwords do not match.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+      if (updateError) {
+        setError(getSafeAuthErrorMessage('password_update', updateError));
+        return;
+      }
+
+      // A recovery session should not silently become a normal long-lived
+      // application session. Revoke other sessions when possible, then make
+      // sure this browser is signed out before returning to login.
+      const { error: globalSignOutError } = await secureSignOut({ scope: 'global' });
+      if (globalSignOutError) {
+        await secureSignOut({ scope: 'local' }).catch(() => {});
+      }
+      showAlert('Password updated', 'Sign in with your new password.');
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        window.history.replaceState({}, '', '/login');
+      }
+      onPasswordRecoveryComplete?.();
+    } catch (updateError) {
+      setError(getSafeAuthErrorMessage('password_update', updateError as Error));
     } finally {
       setLoading(false);
     }
@@ -278,6 +445,9 @@ export default function LoginScreen({ navigation }: any) {
     onSubmitEditing,
     returnKeyType,
     inputRef,
+    autoComplete,
+    maxLength,
+    accessibilityHint,
   }: {
     label: string;
     value: string;
@@ -289,6 +459,9 @@ export default function LoginScreen({ navigation }: any) {
     onSubmitEditing?: () => void;
     returnKeyType?: 'next' | 'go' | 'done';
     inputRef?: React.RefObject<TextInput | null>;
+    autoComplete?: React.ComponentProps<typeof TextInput>['autoComplete'];
+    maxLength?: number;
+    accessibilityHint?: string;
   }) => (
     <View style={[styles.fieldShell, focusedField === focusKey && styles.fieldShellFocused]}>
       <Text style={styles.fieldLabel}>{label}</Text>
@@ -302,20 +475,46 @@ export default function LoginScreen({ navigation }: any) {
         onFocus={() => setFocusedField(focusKey)}
         onBlur={() => setFocusedField((current) => (current === focusKey ? null : current))}
         autoCapitalize="none"
+        autoCorrect={false}
+        autoComplete={autoComplete}
+        accessibilityLabel={label.toLowerCase().replace(/\s+/g, ' ')}
+        accessibilityHint={accessibilityHint}
         keyboardType={keyboardType}
         secureTextEntry={secureTextEntry}
         onSubmitEditing={onSubmitEditing}
         returnKeyType={returnKeyType}
+        maxLength={maxLength}
       />
     </View>
   );
+
+  const cardCopy = mode === 'request-reset'
+    ? {
+        eyebrow: 'PASSWORD RECOVERY',
+        title: 'Get back inside.',
+        subtitle: 'Enter your email and we will send a secure reset link.',
+      }
+    : mode === 'update-password'
+      ? {
+          eyebrow: 'SECURE YOUR ACCOUNT',
+          title: 'Choose a new password.',
+          subtitle: 'Use at least eight characters with upper and lowercase letters and a number.',
+        }
+      : {
+          eyebrow: 'MEMBER LOGIN',
+          title: 'Get back inside.',
+          subtitle: 'Your agents are waiting. Pick up where you left off.',
+        };
 
   return (
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <View style={styles.container}>
+      <View
+        style={styles.container}
+        {...(Platform.OS === 'web' ? { dataSet: { ucAuthSurface: 'true' } } as any : {})}
+      >
         {/* Three.js background — web only, renders behind everything.
             Suspense fallback is an empty View so the login form paints
             immediately while three/postprocessing stream in. The
@@ -407,29 +606,149 @@ export default function LoginScreen({ navigation }: any) {
 
             <View style={styles.formColumn}>
               <View style={styles.formCard}>
-                <Text style={styles.cardEyebrow}>MEMBER LOGIN</Text>
-                <Text style={styles.cardTitle}>Get back inside.</Text>
-                <Text style={styles.cardSubtitle}>
-                  Your agents are waiting. Pick up where you left off.
-                </Text>
+                <Text style={styles.cardEyebrow}>{cardCopy.eyebrow}</Text>
+                <Text style={styles.cardTitle}>{cardCopy.title}</Text>
+                <Text style={styles.cardSubtitle}>{cardCopy.subtitle}</Text>
 
                 {error ? (
-                  <View style={styles.errorBox}>
+                  <View style={styles.errorBox} accessibilityRole="alert" accessibilityLiveRegion="assertive">
                     <Text style={styles.errorText}>{error}</Text>
                   </View>
                 ) : null}
 
-                {showSSO ? (
+                {notice ? (
+                  <View style={styles.noticeBox} accessibilityRole="alert" accessibilityLiveRegion="polite">
+                    <Text style={styles.noticeText}>{notice}</Text>
+                  </View>
+                ) : null}
+
+                {mode === 'update-password' ? (
+                  <>
+                    {recoveryState === 'checking' ? (
+                      <View style={styles.noticeBox} accessibilityLiveRegion="polite">
+                        <Text style={styles.noticeText}>Checking your reset link…</Text>
+                      </View>
+                    ) : recoveryState === 'invalid' ? (
+                      <View style={styles.errorBox} accessibilityRole="alert">
+                        <Text style={styles.errorText}>
+                          This password-reset link is invalid or expired. Request a new one.
+                        </Text>
+                      </View>
+                    ) : (
+                      <>
+                        {renderInput({
+                          label: 'NEW PASSWORD',
+                          value: newPassword,
+                          onChangeText: (text) => setNewPassword(text.slice(0, LENGTH_LIMITS.password.max)),
+                          placeholder: 'Your new password',
+                          focusKey: 'newPassword',
+                          secureTextEntry: true,
+                          returnKeyType: 'next',
+                          autoComplete: 'new-password',
+                          maxLength: LENGTH_LIMITS.password.max,
+                          accessibilityHint: 'At least eight characters with upper and lowercase letters and a number',
+                        })}
+                        {renderInput({
+                          label: 'CONFIRM NEW PASSWORD',
+                          value: confirmPassword,
+                          onChangeText: (text) => setConfirmPassword(text.slice(0, LENGTH_LIMITS.password.max)),
+                          placeholder: 'Repeat your new password',
+                          focusKey: 'confirmPassword',
+                          secureTextEntry: true,
+                          returnKeyType: 'go',
+                          onSubmitEditing: handlePasswordUpdate,
+                          autoComplete: 'new-password',
+                          maxLength: LENGTH_LIMITS.password.max,
+                        })}
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel="Update password"
+                          accessibilityState={{ disabled: loading, busy: loading }}
+                          style={({ pressed }) => [
+                            styles.primaryButton,
+                            hoveredAction === 'updatePassword' && styles.primaryButtonHovered,
+                            pressed && styles.primaryButtonPressed,
+                            loading && styles.buttonDisabled,
+                          ]}
+                          onHoverIn={() => setHoveredAction('updatePassword')}
+                          onHoverOut={() => setHoveredAction((current) => (current === 'updatePassword' ? null : current))}
+                          onPress={handlePasswordUpdate}
+                          disabled={loading}
+                        >
+                          <Text style={styles.primaryButtonText}>
+                            {loading ? 'UPDATING...' : 'UPDATE PASSWORD'}
+                          </Text>
+                        </Pressable>
+                      </>
+                    )}
+
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Request a new password reset link"
+                      style={styles.secondaryButton}
+                      onPress={() => navigation.replace('PasswordRecovery')}
+                    >
+                      <Text style={styles.secondaryButtonText}>Request a new reset link</Text>
+                    </Pressable>
+                  </>
+                ) : mode === 'request-reset' ? (
+                  <>
+                    {renderInput({
+                      label: 'EMAIL',
+                      value: email,
+                      onChangeText: (text) => setEmail(text.slice(0, LENGTH_LIMITS.email.max)),
+                      placeholder: 'you@company.com',
+                      focusKey: 'email',
+                      keyboardType: 'email-address',
+                      returnKeyType: 'go',
+                      onSubmitEditing: handleResetRequest,
+                      autoComplete: 'email',
+                      maxLength: LENGTH_LIMITS.email.max,
+                    })}
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Send password reset link"
+                      accessibilityState={{ disabled: loading, busy: loading }}
+                      style={({ pressed }) => [
+                        styles.primaryButton,
+                        hoveredAction === 'resetRequest' && styles.primaryButtonHovered,
+                        pressed && styles.primaryButtonPressed,
+                        loading && styles.buttonDisabled,
+                      ]}
+                      onHoverIn={() => setHoveredAction('resetRequest')}
+                      onHoverOut={() => setHoveredAction((current) => (current === 'resetRequest' ? null : current))}
+                      onPress={handleResetRequest}
+                      disabled={loading}
+                    >
+                      <Text style={styles.primaryButtonText}>
+                        {loading ? 'SENDING...' : 'SEND RESET LINK'}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Back to login"
+                      style={styles.secondaryButton}
+                      onPress={() => navigation.replace('Login')}
+                    >
+                      <Text style={styles.secondaryButtonText}>Back to login</Text>
+                    </Pressable>
+                  </>
+                ) : showSSO ? (
                   <>
                     {renderInput({
                       label: 'WORKSPACE DOMAIN',
                       value: ssoDomain,
-                      onChangeText: setSsoDomain,
+                      onChangeText: (text) => setSsoDomain(text.slice(0, 253)),
                       placeholder: 'company.com',
                       focusKey: 'sso',
+                      autoComplete: 'organization',
+                      maxLength: 253,
                     })}
 
                     <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Continue with company single sign-on"
+                      accessibilityState={{ disabled: loading, busy: loading }}
                       style={({ pressed }) => [
                         styles.primaryButton,
                         hoveredAction === 'submitSso' && styles.primaryButtonHovered,
@@ -447,6 +766,8 @@ export default function LoginScreen({ navigation }: any) {
                     </Pressable>
 
                     <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Back to email login"
                       style={[styles.secondaryButton, hoveredAction === 'backToEmail' && styles.secondaryButtonHovered]}
                       onHoverIn={() => setHoveredAction('backToEmail')}
                       onHoverOut={() => setHoveredAction((current) => (current === 'backToEmail' ? null : current))}
@@ -466,6 +787,8 @@ export default function LoginScreen({ navigation }: any) {
                       keyboardType: 'email-address',
                       returnKeyType: 'next',
                       onSubmitEditing: () => passwordRef.current?.focus(),
+                      autoComplete: 'email',
+                      maxLength: LENGTH_LIMITS.email.max,
                     })}
 
                     {renderInput({
@@ -478,9 +801,27 @@ export default function LoginScreen({ navigation }: any) {
                       returnKeyType: 'go',
                       onSubmitEditing: handleLogin,
                       inputRef: passwordRef,
+                      autoComplete: 'current-password',
+                      maxLength: LENGTH_LIMITS.password.max,
                     })}
 
                     <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Forgot password"
+                      style={styles.forgotPasswordButton}
+                      onHoverIn={() => setHoveredAction('forgotPassword')}
+                      onHoverOut={() => setHoveredAction((current) => (current === 'forgotPassword' ? null : current))}
+                      onPress={() => navigation.navigate('PasswordRecovery')}
+                    >
+                      <Text style={[styles.forgotPasswordText, hoveredAction === 'forgotPassword' && styles.footerLinkHovered]}>
+                        Forgot password?
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Sign in"
+                      accessibilityState={{ disabled: loading, busy: loading }}
                       style={({ pressed }) => [
                         styles.primaryButton,
                         hoveredAction === 'login' && styles.primaryButtonHovered,
@@ -507,6 +848,8 @@ export default function LoginScreen({ navigation }: any) {
                     </Pressable>
 
                     <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Use company single sign-on"
                       style={[styles.secondaryButton, hoveredAction === 'showSso' && styles.secondaryButtonHovered]}
                       onHoverIn={() => setHoveredAction('showSso')}
                       onHoverOut={() => setHoveredAction((current) => (current === 'showSso' ? null : current))}
@@ -533,6 +876,9 @@ export default function LoginScreen({ navigation }: any) {
                         prompt in Settings, otherwise the giant scope
                         sheet on first click scares users off. */}
                     <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Continue with Google"
+                      accessibilityState={{ disabled: googleLoading, busy: googleLoading }}
                       style={[
                         styles.secondaryButton,
                         hoveredAction === 'googleSignin' && styles.secondaryButtonHovered,
@@ -549,7 +895,7 @@ export default function LoginScreen({ navigation }: any) {
                           const { ok, reason } = await signInWithGoogle();
                           if (!ok) {
                             setGoogleLoading(false);
-                            if (reason) setError(reason);
+                            if (reason) setError(getSafeAuthErrorMessage('oauth', reason));
                           }
                           // If ok, Supabase has already triggered the
                           // window-level redirect to Google. Leave
@@ -578,18 +924,22 @@ export default function LoginScreen({ navigation }: any) {
                   </>
                 )}
 
-                <View style={styles.footerRow}>
-                  <Text style={styles.footerText}>No account yet?</Text>
-                  <Pressable
-                    onHoverIn={() => setHoveredAction('signup')}
-                    onHoverOut={() => setHoveredAction((current) => (current === 'signup' ? null : current))}
-                    onPress={() => navigation.navigate('SignUp')}
-                  >
-                    <Text style={[styles.footerLink, hoveredAction === 'signup' && styles.footerLinkHovered]}>
-                      Join the circle
-                    </Text>
-                  </Pressable>
-                </View>
+                {mode === 'login' && (
+                  <View style={styles.footerRow}>
+                    <Text style={styles.footerText}>No account yet?</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Create an account"
+                      onHoverIn={() => setHoveredAction('signup')}
+                      onHoverOut={() => setHoveredAction((current) => (current === 'signup' ? null : current))}
+                      onPress={() => navigation.navigate('SignUp')}
+                    >
+                      <Text style={[styles.footerLink, hoveredAction === 'signup' && styles.footerLinkHovered]}>
+                        Join the circle
+                      </Text>
+                    </Pressable>
+                  </View>
+                )}
               </View>
             </View>
           </View>
@@ -755,6 +1105,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
+  noticeBox: {
+    backgroundColor: 'rgba(65, 108, 28, 0.28)',
+    borderWidth: 1,
+    borderColor: 'rgba(184, 255, 97, 0.28)',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  noticeText: {
+    color: '#d2ff9c',
+    fontSize: 13,
+    lineHeight: 18,
+  },
   fieldShell: {
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
@@ -783,7 +1147,18 @@ const styles = StyleSheet.create({
     color: '#f5f7f2',
     fontSize: 16,
     paddingVertical: 10,
-    outlineWidth: 0,
+  },
+  forgotPasswordButton: {
+    alignSelf: 'flex-end',
+    paddingVertical: 6,
+    paddingHorizontal: 2,
+    marginTop: -6,
+    marginBottom: 2,
+  },
+  forgotPasswordText: {
+    color: ACCENT,
+    fontSize: 13,
+    fontWeight: '700',
   },
   primaryButton: {
     minHeight: 58,

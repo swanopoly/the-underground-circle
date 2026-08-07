@@ -14,36 +14,102 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
+const MAX_GITHUB_WEBHOOK_BODY_BYTES = 2_000_000;
+const GITHUB_EVENT_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const GITHUB_DELIVERY_PATTERN = /^[A-Za-z0-9-]{1,100}$/;
+const GITHUB_OWNER_PATTERN = /^(?!-)[A-Za-z0-9-]{1,39}(?<!-)$/;
+const GITHUB_REPO_PATTERN = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
+
+function webhookResponse(body: string, status: number): Response {
+  return new Response(body, {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
+async function readBoundedGitHubBody(
+  req: Request,
+): Promise<{ bytes: Uint8Array; text: string } | { response: Response }> {
+  const contentLength = req.headers.get("content-length");
+  if (
+    contentLength
+    && /^[0-9]+$/.test(contentLength)
+    && Number(contentLength) > MAX_GITHUB_WEBHOOK_BODY_BYTES
+  ) {
+    return { response: webhookResponse("Payload too large", 413) };
+  }
+
+  const reader = req.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > MAX_GITHUB_WEBHOOK_BODY_BYTES) {
+        await reader.cancel("payload_too_large").catch(() => {});
+        return { response: webhookResponse("Payload too large", 413) };
+      }
+      chunks.push(value);
+    }
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return {
+      bytes,
+      text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    };
+  } catch {
+    return { response: webhookResponse("Invalid UTF-8", 400) };
+  }
+}
+
 // ─── HMAC-SHA256 Signature Verification ──────────────────────────────────────
 
 async function verifyGitHubSignature(
-  body: string,
+  body: Uint8Array | string,
   signature: string | null,
   secret: string
 ): Promise<boolean> {
-  if (!signature) return false;
+  if (
+    !signature
+    || !/^sha256=[0-9a-f]{64}$/.test(signature)
+    || typeof secret !== "string"
+    || secret.length < 16
+  ) return false;
 
-  // GitHub sends: sha256=<hex>
-  const expected = signature.replace("sha256=", "");
+  const expected = signature.slice("sha256=".length);
+  const expectedBytes = new Uint8Array(32);
+  for (let index = 0; index < expectedBytes.length; index += 1) {
+    expectedBytes[index] = Number.parseInt(expected.slice(index * 2, index * 2 + 2), 16);
+  }
 
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign"]
+    ["verify"]
   );
-  const sig = await crypto.subtle.sign(
+  const rawBody = typeof body === "string"
+    ? new TextEncoder().encode(body)
+    : body;
+  const bodyBuffer = new ArrayBuffer(rawBody.byteLength);
+  new Uint8Array(bodyBuffer).set(rawBody);
+  return crypto.subtle.verify(
     "HMAC",
     key,
-    new TextEncoder().encode(body)
+    expectedBytes,
+    bodyBuffer,
   );
-  const computed = Array.from(new Uint8Array(sig))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-  // Timing-safe comparison via string equality on hex
-  return computed.length === expected.length && computed === expected;
 }
 
 // ─── Event Parsers ───────────────────────────────────────────────────────────
@@ -60,17 +126,111 @@ interface ParsedEvent {
   deletions: number;
 }
 
+type WebhookPayloadBudget = { nodes: number; stringChars: number };
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedWebhookText(
+  value: unknown,
+  maxLength: number,
+  fallback = "",
+): string {
+  if (typeof value !== "string" && typeof value !== "number") return fallback;
+  const cleaned = String(value)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (cleaned || fallback).slice(0, maxLength);
+}
+
+function boundedWebhookUrl(value: unknown, maxLength = 600): string {
+  if (typeof value !== "string" || value.length > maxLength) return "";
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== "https:"
+      || (parsed.port && parsed.port !== "443")
+      || parsed.username
+      || parsed.password
+    ) return "";
+    return parsed.toString().slice(0, maxLength);
+  } catch {
+    return "";
+  }
+}
+
+function boundedWebhookCount(value: unknown): number {
+  const count = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  return Math.min(1_000_000_000, Math.floor(count));
+}
+
+function sanitizeParsedEvent(value: ParsedEvent): ParsedEvent {
+  const title = boundedWebhookText(value.title, 240, "GitHub event");
+  const body = boundedWebhookText(value.body, 2_000);
+  return {
+    title,
+    body: body || null,
+    author: boundedWebhookText(value.author, 100, "unknown"),
+    authorAvatar: boundedWebhookUrl(value.authorAvatar),
+    url: boundedWebhookUrl(value.url),
+    ref: boundedWebhookText(value.ref, 255) || null,
+    commitsCount: boundedWebhookCount(value.commitsCount),
+    additions: boundedWebhookCount(value.additions),
+    deletions: boundedWebhookCount(value.deletions),
+  };
+}
+
+/** Persist only a bounded JSON-compatible projection of the signed payload. */
+function sanitizeGitHubPayload(
+  value: unknown,
+  depth = 0,
+  budget: WebhookPayloadBudget = { nodes: 0, stringChars: 0 },
+): unknown {
+  if (budget.nodes >= 2_500 || depth > 8) return "[truncated]";
+  budget.nodes += 1;
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string") {
+    const remaining = Math.max(0, 120_000 - budget.stringChars);
+    const bounded = value.slice(0, Math.min(10_000, remaining));
+    budget.stringChars += bounded.length;
+    return bounded.length < value.length ? `${bounded}…` : bounded;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 200).map((item) =>
+      sanitizeGitHubPayload(item, depth + 1, budget)
+    );
+  }
+  if (!isPlainObject(value)) return null;
+  const sanitized: Record<string, unknown> = Object.create(null);
+  for (const key of Object.keys(value).slice(0, 80)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") continue;
+    const safeKey = boundedWebhookText(key, 120);
+    if (!safeKey) continue;
+    sanitized[safeKey] = sanitizeGitHubPayload(value[key], depth + 1, budget);
+  }
+  return sanitized;
+}
+
 function parsePushEvent(payload: any): ParsedEvent {
-  const commits = payload.commits || [];
-  const branch = (payload.ref || "").replace("refs/heads/", "");
-  const pusher = payload.pusher?.name || payload.sender?.login || "unknown";
-  const avatar = payload.sender?.avatar_url || "";
+  const commits = Array.isArray(payload.commits) ? payload.commits.slice(0, 200) : [];
+  const branch = boundedWebhookText(payload.ref, 300).replace("refs/heads/", "");
+  const pusher = boundedWebhookText(
+    payload.pusher?.name || payload.sender?.login,
+    100,
+    "unknown",
+  );
+  const avatar = boundedWebhookText(payload.sender?.avatar_url, 600);
 
   const commitSummaries = commits
     .slice(0, 5)
     .map((c: any) => {
-      const msg = (c.message || "").split("\n")[0].slice(0, 80);
-      return `  \`${c.id.slice(0, 7)}\` ${msg}`;
+      const msg = boundedWebhookText(c?.message, 500).split("\n")[0].slice(0, 80);
+      const commitId = boundedWebhookText(c?.id, 64, "unknown").slice(0, 7);
+      return `  \`${commitId}\` ${msg}`;
     })
     .join("\n");
 
@@ -78,11 +238,11 @@ function parsePushEvent(payload: any): ParsedEvent {
     commits.length > 5 ? `\n  ...and ${commits.length - 5} more` : "";
 
   const totalAdds = commits.reduce(
-    (s: number, c: any) => s + (c.added?.length || 0),
+    (s: number, c: any) => s + (Array.isArray(c?.added) ? c.added.length : 0),
     0
   );
   const totalDels = commits.reduce(
-    (s: number, c: any) => s + (c.removed?.length || 0),
+    (s: number, c: any) => s + (Array.isArray(c?.removed) ? c.removed.length : 0),
     0
   );
 
@@ -91,7 +251,7 @@ function parsePushEvent(payload: any): ParsedEvent {
     body: commitSummaries + extra || null,
     author: pusher,
     authorAvatar: avatar,
-    url: payload.compare || payload.repository?.html_url || "",
+    url: boundedWebhookText(payload.compare || payload.repository?.html_url, 600),
     ref: branch,
     commitsCount: commits.length,
     additions: totalAdds,
@@ -107,11 +267,11 @@ function parsePullRequestEvent(payload: any): ParsedEvent {
   const merged = action === "closed" && pr.merged;
 
   const verb = merged ? "merged" : action;
-  const title = `${actor} ${verb} PR #${pr.number}: ${(pr.title || "").slice(0, 80)}`;
+  const title = `${actor} ${verb} PR #${pr.number}: ${boundedWebhookText(pr.title, 80)}`;
 
   return {
     title,
-    body: pr.body?.slice(0, 500) || null,
+    body: boundedWebhookText(pr.body, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: pr.html_url || "",
@@ -129,8 +289,8 @@ function parseIssuesEvent(payload: any): ParsedEvent {
   const avatar = payload.sender?.avatar_url || "";
 
   return {
-    title: `${actor} ${action} issue #${issue.number}: ${(issue.title || "").slice(0, 80)}`,
-    body: issue.body?.slice(0, 500) || null,
+    title: `${actor} ${action} issue #${issue.number}: ${boundedWebhookText(issue.title, 80)}`,
+    body: boundedWebhookText(issue.body, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: issue.html_url || "",
@@ -149,7 +309,7 @@ function parseReleaseEvent(payload: any): ParsedEvent {
 
   return {
     title: `${actor} ${action} release ${release.tag_name || ""}`,
-    body: release.body?.slice(0, 500) || null,
+    body: boundedWebhookText(release.body, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: release.html_url || "",
@@ -203,8 +363,8 @@ function parsePullRequestReviewEvent(payload: any): ParsedEvent {
         : "reviewed";
 
   return {
-    title: `${actor} ${verb} PR #${pr.number}: ${(pr.title || "").slice(0, 80)}`,
-    body: review.body?.slice(0, 500) || null,
+    title: `${actor} ${verb} PR #${pr.number}: ${boundedWebhookText(pr.title, 80)}`,
+    body: boundedWebhookText(review.body, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: review.html_url || pr.html_url || "",
@@ -230,8 +390,8 @@ function parseCheckRunEvent(payload: any): ParsedEvent {
         : conclusion;
 
   return {
-    title: `Check "${checkRun.name || "check"}" ${status} on ${checkRun.head_sha?.slice(0, 7) || "unknown"}`,
-    body: checkRun.output?.summary?.slice(0, 500) || null,
+    title: `Check "${checkRun.name || "check"}" ${status} on ${boundedWebhookText(checkRun.head_sha, 7, "unknown")}`,
+    body: boundedWebhookText(checkRun.output?.summary, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: checkRun.html_url || "",
@@ -257,7 +417,7 @@ function parseCheckSuiteEvent(payload: any): ParsedEvent {
         : conclusion;
 
   return {
-    title: `Check suite ${status} on ${suite.head_branch || "unknown"} (${suite.head_sha?.slice(0, 7) || ""})`,
+    title: `Check suite ${status} on ${suite.head_branch || "unknown"} (${boundedWebhookText(suite.head_sha, 7)})`,
     body: `${suite.latest_check_runs_count || 0} check(s) — conclusion: ${conclusion}`,
     author: actor,
     authorAvatar: avatar,
@@ -277,7 +437,7 @@ function parseDeploymentEvent(payload: any): ParsedEvent {
 
   return {
     title: `${actor} ${action} deployment to ${deployment.environment || "unknown"}`,
-    body: deployment.description?.slice(0, 500) || null,
+    body: boundedWebhookText(deployment.description, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: deployment.url || "",
@@ -299,7 +459,7 @@ function parseDeploymentStatusEvent(payload: any): ParsedEvent {
 
   return {
     title: `Deployment to ${env} is ${state}`,
-    body: status.description?.slice(0, 500) || null,
+    body: boundedWebhookText(status.description, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: status.target_url || status.log_url || deployment.url || "",
@@ -363,7 +523,7 @@ function parseDependabotAlertEvent(payload: any): ParsedEvent {
 
   return {
     title: `[SECURITY] Dependabot alert ${action}: ${pkg} (${severity})`,
-    body: advisory ? advisory.slice(0, 500) : `Vulnerability in ${pkg} — severity: ${severity}`,
+    body: boundedWebhookText(advisory, 500) || `Vulnerability in ${pkg} — severity: ${severity}`,
     author: actor,
     authorAvatar: avatar,
     url: alert.html_url || "",
@@ -400,8 +560,8 @@ function parseDiscussionEvent(payload: any): ParsedEvent {
   const avatar = payload.sender?.avatar_url || "";
 
   return {
-    title: `${actor} ${action} discussion: ${(discussion.title || "").slice(0, 80)}`,
-    body: discussion.body?.slice(0, 500) || null,
+    title: `${actor} ${action} discussion: ${boundedWebhookText(discussion.title, 80)}`,
+    body: boundedWebhookText(discussion.body, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: discussion.html_url || "",
@@ -420,8 +580,8 @@ function parseDiscussionCommentEvent(payload: any): ParsedEvent {
   const avatar = payload.sender?.avatar_url || "";
 
   return {
-    title: `${actor} ${action} comment on discussion: ${(discussion.title || "").slice(0, 80)}`,
-    body: comment.body?.slice(0, 500) || null,
+    title: `${actor} ${action} comment on discussion: ${boundedWebhookText(discussion.title, 80)}`,
+    body: boundedWebhookText(comment.body, 500) || null,
     author: actor,
     authorAvatar: avatar,
     url: comment.html_url || discussion.html_url || "",
@@ -548,45 +708,47 @@ Deno.serve(async (req: Request) => {
   }
 
   if (req.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
+    return webhookResponse("Method not allowed", 405);
   }
 
   try {
-    // Read raw body for signature verification
-    const body = await req.text();
+    const boundedBody = await readBoundedGitHubBody(req);
+    if ("response" in boundedBody) return boundedBody.response;
+    const body = boundedBody.text;
 
     const eventType = req.headers.get("x-github-event") || "";
     const deliveryId = req.headers.get("x-github-delivery") || "";
     const signature = req.headers.get("x-hub-signature-256");
-
-    // Parse payload
-    let payload: any;
-    try {
-      payload = JSON.parse(body);
-    } catch {
-      return new Response("Invalid JSON", { status: 400 });
+    if (!GITHUB_EVENT_PATTERN.test(eventType) || !GITHUB_DELIVERY_PATTERN.test(deliveryId)) {
+      return webhookResponse("Invalid webhook headers", 400);
     }
 
-    // GitHub sends a "ping" event when a webhook is first created
-    if (eventType === "ping") {
-      console.log(`GitHub webhook ping: ${payload.zen}`);
-      return new Response(
-        JSON.stringify({ ok: true, event: "ping", zen: payload.zen }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    // Parse into a bounded, JSON-compatible projection. Signature verification
+    // still uses the exact raw bytes above; this copy is untrusted application
+    // data and is never treated as authority or instructions.
+    let rawPayload: unknown;
+    try {
+      rawPayload = JSON.parse(body);
+    } catch {
+      return webhookResponse("Invalid JSON", 400);
+    }
+    if (!isPlainObject(rawPayload)) {
+      return webhookResponse("Invalid webhook payload", 400);
     }
 
     // Extract repo info to find the connection
-    const repoOwner =
-      payload.repository?.owner?.login ||
-      payload.repository?.owner?.name ||
-      "";
-    const repoName = payload.repository?.name || "";
+    const repoOwner = boundedWebhookText(
+      (rawPayload as any).repository?.owner?.login ||
+      (rawPayload as any).repository?.owner?.name ||
+      "",
+      39,
+    );
+    const repoName = boundedWebhookText((rawPayload as any).repository?.name, 100);
 
-    if (!repoOwner || !repoName) {
-      console.error("No repository info in webhook payload");
-      return new Response("Missing repository info", { status: 400 });
+    if (!GITHUB_OWNER_PATTERN.test(repoOwner) || !GITHUB_REPO_PATTERN.test(repoName)) {
+      return webhookResponse("Invalid repository identity", 400);
     }
+    const payload = sanitizeGitHubPayload(rawPayload) as Record<string, any>;
 
     // Init Supabase service client
     const supabase = createClient(
@@ -601,22 +763,34 @@ Deno.serve(async (req: Request) => {
       .eq("owner", repoOwner)
       .eq("repo", repoName)
       .eq("is_active", true)
-      .single();
+      .maybeSingle();
 
-    if (connErr || !connection) {
-      console.warn(`No active connection for ${repoOwner}/${repoName}`);
-      return new Response("No connection found", { status: 404 });
+    // Perform HMAC work even when the lookup misses, then return one uniform
+    // failure. This avoids revealing whether a repository is connected.
+    const verificationSecret = typeof connection?.webhook_secret === "string"
+      ? connection.webhook_secret
+      : "unavailable-webhook-secret";
+    const valid = await verifyGitHubSignature(
+      boundedBody.bytes,
+      signature,
+      verificationSecret,
+    );
+    if (connErr || !connection || !valid) {
+      console.warn("GitHub webhook authentication failed");
+      return webhookResponse("Webhook authentication failed", 401);
     }
 
-    // Verify HMAC signature
-    const valid = await verifyGitHubSignature(
-      body,
-      signature,
-      connection.webhook_secret
-    );
-    if (!valid) {
-      console.error(`Invalid signature for ${repoOwner}/${repoName}`);
-      return new Response("Invalid signature", { status: 401 });
+    // GitHub sends a ping when a webhook is created. It is acknowledged only
+    // after repository lookup and signature verification.
+    if (eventType === "ping") {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          event: "ping",
+          zen: boundedWebhookText(payload.zen, 200),
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     }
 
     // Check if this event type is enabled
@@ -629,7 +803,7 @@ Deno.serve(async (req: Request) => {
     }
 
     // Parse the event
-    const action = payload.action || null;
+    const action = boundedWebhookText(payload.action, 80) || null;
     let parsed: ParsedEvent;
 
     switch (eventType) {
@@ -702,6 +876,8 @@ Deno.serve(async (req: Request) => {
         };
     }
 
+    parsed = sanitizeParsedEvent(parsed);
+
     // Flag security events as high priority in the stored record
     const priority = isSecurityEvent(eventType) ? "high" : "normal";
 
@@ -724,7 +900,7 @@ Deno.serve(async (req: Request) => {
         additions: parsed.additions,
         deletions: parsed.deletions,
         priority,
-        payload: payload,
+        payload,
       })
       .select("id")
       .single();
@@ -866,6 +1042,7 @@ Deno.serve(async (req: Request) => {
         try {
           await fetch(`${supabaseUrl}/functions/v1/automation-executor`, {
             method: "POST",
+            redirect: "manual",
             headers: {
               "Content-Type": "application/json",
               "Authorization": `Bearer ${serviceKey}`,
@@ -875,6 +1052,8 @@ Deno.serve(async (req: Request) => {
               circleId: connection.circle_id,
               triggerSource: "event",
               eventPayload: {
+                trust: "untrusted_external_event",
+                mutation_eligible: false,
                 source: "github",
                 event_type: eventType,
                 action,
@@ -922,9 +1101,9 @@ Deno.serve(async (req: Request) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err: any) {
-    console.error("github-webhook error:", err);
+    console.error("github-webhook error:", err instanceof Error ? err.name : "unknown_error");
     return new Response(
-      JSON.stringify({ error: err.message }),
+      JSON.stringify({ error: "github_webhook_failed" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

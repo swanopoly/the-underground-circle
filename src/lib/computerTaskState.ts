@@ -1,5 +1,6 @@
 import { storage } from './storage';
 import { normalizeComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import { compactExactPlanApprovalCorrelation } from './exactPlanApprovalContinuityCore';
 import {
   acknowledgeComputerTaskNotifications,
   appendComputerTaskNotification,
@@ -107,6 +108,13 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
       id: String(parsed.id || ''),
       circleId: String(parsed.circleId || ''),
       threadId: parsed.threadId ? String(parsed.threadId) : null,
+      requestIdentity: typeof parsed.requestIdentity === 'string'
+        && parsed.requestIdentity.trim().length > 0
+        && parsed.requestIdentity.trim().length <= 240
+        && !/[\u0000-\u001f\u007f]/.test(parsed.requestIdentity)
+        ? parsed.requestIdentity.trim()
+        : null,
+      exactPlanApproval: compactExactPlanApprovalCorrelation(parsed.exactPlanApproval),
       task: String(parsed.task || ''),
       taskKind: String(parsed.taskKind || 'unknown'),
       taskLabel: String(parsed.taskLabel || 'Computer task'),
@@ -246,7 +254,11 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
 }
 
 export async function loadComputerTaskState(circleId: string, threadId?: string | null): Promise<ComputerTaskStateRecord | null> {
-  return normalizeRecord(await storage.getItem(storageKey(circleId, threadId)));
+  const record = normalizeRecord(await storage.getItem(storageKey(circleId, threadId)));
+  if (!record) return null;
+  return record.circleId === circleId && record.threadId === (threadId || null)
+    ? record
+    : null;
 }
 
 export async function saveComputerTaskState(record: ComputerTaskStateRecord): Promise<void> {
@@ -263,7 +275,8 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
   // when the user reruns identical task text.
   let surfaceEscalations = record.surfaceEscalations;
   let actionTrace = record.actionTrace;
-  if (surfaceEscalations === undefined || actionTrace === undefined) {
+  let requestIdentity = record.requestIdentity;
+  if (surfaceEscalations === undefined || actionTrace === undefined || requestIdentity === undefined) {
     let previous: ComputerTaskStateRecord | null = null;
     try {
       previous = normalizeRecord(await storage.getItem(storageKey(record.circleId, record.threadId)));
@@ -275,9 +288,20 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
     if (actionTrace === undefined) {
       actionTrace = sameTask ? previous?.actionTrace || null : null;
     }
+    if (requestIdentity === undefined) {
+      requestIdentity = sameTask ? previous?.requestIdentity || null : null;
+    }
   }
+  const boundedRequestIdentity = typeof requestIdentity === 'string'
+    && requestIdentity.trim().length > 0
+    && requestIdentity.trim().length <= 240
+    && !/[\u0000-\u001f\u007f]/.test(requestIdentity)
+    ? requestIdentity.trim()
+    : null;
   await storage.setItem(storageKey(record.circleId, record.threadId), JSON.stringify({
     ...record,
+    requestIdentity: boundedRequestIdentity,
+    exactPlanApproval: compactExactPlanApprovalCorrelation(record.exactPlanApproval),
     surfaceEscalations,
     actionTrace,
     capabilityBuildout: compactComputerTaskCapabilityBuildout(record.capabilityBuildout),

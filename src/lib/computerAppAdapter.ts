@@ -137,7 +137,16 @@ function normalizeText(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase();
 }
 
-export type NativeAppActivationKind = 'launch_app' | 'focus_app';
+/**
+ * `open_app` is the user-facing lifecycle primitive: satisfy running AND
+ * frontmost with at most one OS activation. It launches when the app is not
+ * running, focuses when it is already running in the background, and is a
+ * verified no-op when it is already frontmost. Keeping this decision inside
+ * one observe-first adapter prevents an "open" request from becoming a
+ * launch-then-focus sequence that can steal focus back after the user moves
+ * to another app during startup.
+ */
+export type NativeAppActivationKind = 'open_app' | 'launch_app' | 'focus_app';
 
 export type NativeAppActivationObservation = {
   app: string;
@@ -761,12 +770,12 @@ function boundedNativeAppObservation(
 }
 
 function nativeAppPostconditionSatisfied(
-  kind: NativeAppActivationKind,
+  _kind: NativeAppActivationKind,
   observation: BoundedNativeAppObservation,
 ): boolean {
   return observation.targetMatched
     && observation.appRunning
-    && (kind === 'launch_app' || observation.frontmost);
+    && observation.frontmost;
 }
 
 function normalizeNativeOpenPathEvidence(value: unknown): string {
@@ -1251,10 +1260,20 @@ export async function executeObservedNativeAppActivation(
   deps: NativeAppActivationDeps,
 ): Promise<ComputerAppAdapterResult> {
   const requestedName = String(requestedNameInput || '').trim().slice(0, 120);
-  const resultKind = kind === 'focus_app' ? 'desktop_bridge_focus' : 'desktop_bridge_launch';
-  const actionVerb = kind === 'focus_app' ? 'focus' : 'launch';
-  const completedVerb = kind === 'focus_app' ? 'Focused' : 'Launched';
-  const requestedPostcondition = kind === 'focus_app' ? 'running_and_frontmost' : 'running';
+  const resultKind = kind === 'focus_app'
+    ? 'desktop_bridge_focus'
+    : kind === 'open_app'
+      ? 'desktop_bridge_open'
+      : 'desktop_bridge_launch';
+  const actionVerb = kind === 'focus_app' ? 'focus' : kind === 'open_app' ? 'open' : 'launch';
+  const completedVerb = kind === 'focus_app' ? 'Focused' : kind === 'open_app' ? 'Opened' : 'Launched';
+  // Every public lifecycle tool is also a focus-safety boundary for whatever
+  // semantic action follows it. Process-only success is unsafe: a model-guided
+  // sequence could otherwise continue typing/clicking while Chrome or another
+  // app remains frontmost. A launch still performs at most one OS activation;
+  // if that activation does not produce fresh exact foreground proof, the
+  // sequence fails closed without a compensating focus or automatic replay.
+  const requestedPostcondition = 'running_and_frontmost';
   const now = deps.now || (() => new Date().toISOString());
   if (
     !requestedName
@@ -1387,10 +1406,15 @@ export async function executeObservedNativeAppActivation(
   }
 
   const mutationNeeded = !nativeAppPostconditionSatisfied(kind, before);
+  const dispatchOperation: 'launch_app' | 'focus_app' | 'none' = !mutationNeeded
+    ? 'none'
+    : kind === 'open_app'
+      ? before.appRunning ? 'focus_app' : 'launch_app'
+      : kind;
   let dispatchResult: NativeAppActivationBridgeResult<NativeAppActivationDispatch> | null = null;
   if (mutationNeeded) {
     try {
-      dispatchResult = kind === 'focus_app'
+      dispatchResult = dispatchOperation === 'focus_app'
         ? await deps.focusApp(resolvedName)
         : await deps.launchApp(resolvedName);
     } catch {
@@ -1414,7 +1438,7 @@ export async function executeObservedNativeAppActivation(
   );
   const displayName = resolvedName;
   if (
-    kind === 'launch_app'
+    dispatchOperation === 'launch_app'
     && dispatchResult?.ok
     && dispatchTargetMatched
     && deps.waitForApp
@@ -1458,6 +1482,7 @@ export async function executeObservedNativeAppActivation(
     requestedName,
     resolvedAppName: resolvedName,
     requestedPostcondition,
+    dispatchOperation,
     mutationNeeded,
     mutationAttempted: mutationNeeded,
     mutationPerformed: mutationNeeded && dispatchAcknowledged && dispatchTargetMatched && completionVerified,
@@ -1513,9 +1538,7 @@ export async function executeObservedNativeAppActivation(
   }
 
   if (!completionVerified) {
-    const missingState = kind === 'focus_app'
-      ? 'the requested app running in the frontmost state'
-      : 'the requested app running';
+    const missingState = 'the requested app running in the frontmost state';
     return {
       ok: false,
       message: `${mutationNeeded ? `The bridge accepted the ${actionVerb} request` : `**${requestedName}** initially appeared to satisfy the request`}, but a fresh post-action observation did not confirm ${missingState}.`,
@@ -1538,9 +1561,7 @@ export async function executeObservedNativeAppActivation(
     };
   }
 
-  const noOpMessage = kind === 'focus_app'
-    ? `**${displayName}** was already frontmost; a fresh observation confirmed no focus action was needed.`
-    : `**${displayName}** was already running; a fresh observation confirmed no launch action was needed.`;
+  const noOpMessage = `**${displayName}** was already frontmost; a fresh observation confirmed no ${kind === 'launch_app' ? 'launch' : 'focus'} action was needed.`;
   return {
     ok: true,
     message: mutationNeeded

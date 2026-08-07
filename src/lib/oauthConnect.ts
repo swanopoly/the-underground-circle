@@ -18,6 +18,78 @@ export interface OAuthResult {
   error: string;
 }
 
+type OAuthCallbackMessage = {
+  type: 'oauth-callback';
+  success: boolean;
+  provider: OAuthProvider;
+  email: string;
+  error: string;
+  nonce: string;
+};
+
+const PROVIDER_AUTHORIZE_ORIGINS: Record<OAuthProvider, string> = {
+  google: 'https://accounts.google.com',
+  microsoft: 'https://login.microsoftonline.com',
+  yahoo: 'https://api.login.yahoo.com',
+};
+
+function createOAuthClientNonce(): string | null {
+  try {
+    const bytes = new Uint8Array(24);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return null;
+  }
+}
+
+function getOAuthCallbackOrigin(): string | null {
+  try {
+    const origin = window.location.origin;
+    const parsed = new URL(origin);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+      ? parsed.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedAuthorizeUrl(provider: OAuthProvider, candidate: unknown): candidate is string {
+  if (typeof candidate !== 'string') return false;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === 'https:' && url.origin === PROVIDER_AUTHORIZE_ORIGINS[provider];
+  } catch {
+    return false;
+  }
+}
+
+function readExpectedCallbackMessage(
+  event: MessageEvent,
+  popup: Window,
+  callbackOrigin: string,
+  provider: OAuthProvider,
+  clientNonce: string,
+): OAuthCallbackMessage | null {
+  if (event.origin !== callbackOrigin || event.source !== popup) return null;
+  const data = event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  if (
+    data.type !== 'oauth-callback'
+    || data.provider !== provider
+    || data.nonce !== clientNonce
+    || typeof data.success !== 'boolean'
+    || typeof data.email !== 'string'
+    || typeof data.error !== 'string'
+    || data.email.length > 320
+    || data.error.length > 500
+  ) {
+    return null;
+  }
+  return data as OAuthCallbackMessage;
+}
+
 /**
  * Opens a popup window that initiates the OAuth flow for the given provider.
  * Returns a promise that resolves when the popup sends back a postMessage.
@@ -28,6 +100,18 @@ export function openOAuthPopup(
   jwt: string
 ): Promise<OAuthResult> {
   return new Promise((resolve) => {
+    const clientNonce = createOAuthClientNonce();
+    const callbackOrigin = getOAuthCallbackOrigin();
+    if (!clientNonce || !callbackOrigin) {
+      resolve({
+        success: false,
+        provider,
+        email: '',
+        error: 'Secure OAuth initialization is unavailable.',
+      });
+      return;
+    }
+
     // Open the popup synchronously (about:blank) so the browser keeps the click
     // gesture and does not block it; we redirect it to the IdP once the
     // authenticated init returns a URL. The OAuth state is a server-minted nonce
@@ -39,33 +123,62 @@ export function openOAuthPopup(
 
     const popup = window.open(
       'about:blank',
-      `oauth-${provider}`,
+      `oauth-${provider}-${clientNonce.slice(0, 12)}`,
       `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,location=yes,status=no`
     );
 
-    // Listen for postMessage from popup
+    if (!popup) {
+      resolve({ success: false, provider, email: '', error: 'Popup blocked' });
+      return;
+    }
+
+    let settled = false;
+    let checkClosed: ReturnType<typeof setInterval> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let closeResolutionTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      window.removeEventListener('message', handleMessage);
+      if (checkClosed) clearInterval(checkClosed);
+      if (timeout) clearTimeout(timeout);
+      if (closeResolutionTimer) clearTimeout(closeResolutionTimer);
+    };
+
+    const finish = (result: OAuthResult, closePopup = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (closePopup && !popup.closed) popup.close();
+      resolve(result);
+    };
+
+    // Accept a callback only from this exact popup, the Supabase function
+    // origin, the expected provider, and this one browser attempt's nonce.
     const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'oauth-callback') {
-        window.removeEventListener('message', handleMessage);
-        clearInterval(checkClosed);
-        resolve({
-          success: event.data.success,
-          provider: event.data.provider || provider,
-          email: event.data.email || '',
-          error: event.data.error || '',
-        });
-      }
+      const message = readExpectedCallbackMessage(
+        event,
+        popup,
+        callbackOrigin,
+        provider,
+        clientNonce,
+      );
+      if (!message) return;
+      finish({
+        success: message.success,
+        provider: message.provider,
+        email: message.email,
+        error: message.error,
+      }, true);
     };
     window.addEventListener('message', handleMessage);
 
     // Also check if popup was closed without completing
-    const checkClosed = setInterval(() => {
-      if (popup?.closed) {
-        clearInterval(checkClosed);
-        window.removeEventListener('message', handleMessage);
+    checkClosed = setInterval(() => {
+      if (popup.closed) {
+        if (checkClosed) clearInterval(checkClosed);
         // Give a short delay in case the message was sent just before close
-        setTimeout(() => {
-          resolve({
+        closeResolutionTimer = setTimeout(() => {
+          finish({
             success: false,
             provider,
             email: '',
@@ -76,16 +189,13 @@ export function openOAuthPopup(
     }, 1000);
 
     // Timeout after 5 minutes
-    setTimeout(() => {
-      clearInterval(checkClosed);
-      window.removeEventListener('message', handleMessage);
-      if (popup && !popup.closed) popup.close();
-      resolve({
+    timeout = setTimeout(() => {
+      finish({
         success: false,
         provider,
         email: '',
         error: 'Timeout',
-      });
+      }, true);
     }, 5 * 60 * 1000);
 
     // Authenticated init: mint the IdP authorize URL (carrying a server-stored
@@ -96,24 +206,27 @@ export function openOAuthPopup(
           `${SUPABASE_URL}/functions/v1/email-calendar-oauth/authorize`,
           {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
-            body: JSON.stringify({ provider, scopes }),
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${jwt}`,
+              apikey: SUPABASE_ANON_KEY,
+            },
+            body: JSON.stringify({ provider, scopes, client_nonce: clientNonce }),
           }
         );
         const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.url) {
-          window.removeEventListener('message', handleMessage);
-          clearInterval(checkClosed);
-          if (popup && !popup.closed) popup.close();
-          resolve({ success: false, provider, email: '', error: data.error || `Failed to start OAuth (${res.status})` });
+        if (!res.ok || !isAllowedAuthorizeUrl(provider, data.url)) {
+          finish({
+            success: false,
+            provider,
+            email: '',
+            error: `Failed to start OAuth (${res.status})`,
+          }, true);
           return;
         }
-        if (popup) popup.location.href = data.url;
-      } catch (e: any) {
-        window.removeEventListener('message', handleMessage);
-        clearInterval(checkClosed);
-        if (popup && !popup.closed) popup.close();
-        resolve({ success: false, provider, email: '', error: e?.message || 'Failed to start OAuth' });
+        if (!settled) popup.location.href = data.url;
+      } catch {
+        finish({ success: false, provider, email: '', error: 'Failed to start OAuth' }, true);
       }
     })();
   });

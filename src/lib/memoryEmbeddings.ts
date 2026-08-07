@@ -49,8 +49,6 @@
 
 import { supabase } from './supabase';
 import { shouldBlockExternalAiProvider } from './privacyMode';
-import { readLLMProxyInvokeError } from './llmProxyErrorCore';
-import { safeGetSession } from './authSession';
 import {
   EMBEDDING_BATCH_MAX,
   EMBEDDING_COALESCE_MS,
@@ -89,7 +87,6 @@ import {
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
 export const EMBEDDING_DIMS = 1536;
 const BATCH_SIZE = EMBEDDING_BATCH_MAX;
-const EMBEDDING_PROXY_TIMEOUT_MS = 30_000;
 
 interface EmbedResponse {
   embeddings: number[][];
@@ -107,167 +104,52 @@ interface EmbedResponse {
 let breakerState: EmbeddingBreakerState = createEmbeddingBreakerState();
 let repairSchedule: EmbeddingRepairSchedule = createEmbeddingRepairSchedule();
 
-type EmbeddingCredentialBlockCode = 'key_missing' | 'credential_unreadable';
-type EmbeddingCredentialBlock = {
-  code: EmbeddingCredentialBlockCode;
-  provider: 'openai';
-  sinceMs: number;
-  generation: number;
-  userId: string | null;
-};
-
-// Missing/unreadable BYOK state is not a transient proxy outage. Keep one
-// session-local terminal pause so write and repair paths do not hammer the same
-// permanent 400/409. The durable orphan ledger remains armed and a successful
-// OpenAI Marketplace write explicitly clears this pause below.
-let embeddingCredentialBlock: EmbeddingCredentialBlock | null = null;
-let embeddingCredentialGeneration = 0;
-let embeddingProxyTurn: Promise<void> | null = null;
-
 /**
  * Record rows we could not embed. This is the ONLY thing standing between a
  * proxy outage and a permanently unsearchable memory: it arms the repair sweep,
  * which finds the rows again through `embedding IS NULL`.
  */
-function noteOrphans(count: number, why: string, log = true): void {
+function noteOrphans(count: number, why: string): void {
   if (!count || count <= 0) return;
   repairSchedule = markEmbeddingOrphans(repairSchedule, count, Date.now());
-  if (log) {
-    console.warn(`[memoryEmbeddings] ${count} memory row(s) left un-embedded (${why}) — queued for repair sweep`);
-  }
-}
-
-function isEmbeddingCredentialBlockCode(value: unknown): value is EmbeddingCredentialBlockCode {
-  return value === 'key_missing' || value === 'credential_unreadable';
-}
-
-async function readEmbeddingAuthUserId(): Promise<{ known: boolean; userId: string | null }> {
-  const { value, error } = await safeGetSession();
-  if (error) return { known: false, userId: null };
-  return { known: true, userId: value?.user?.id ?? null };
-}
-
-/**
- * Called only after an OpenAI Marketplace key write succeeds. The next repair
- * is forced in the background; a still-broken credential pauses again after
- * one bounded probe instead of entering a retry loop.
- */
-export function resetMemoryEmbeddingCredentialBlock(): void {
-  embeddingCredentialGeneration += 1;
-  embeddingCredentialBlock = null;
-  breakerState = recordEmbeddingSuccess(breakerState);
-  const activeRepair = repairInFlight;
-  void (activeRepair ? activeRepair.catch(() => undefined) : Promise.resolve())
-    .then(() => ensureMemoryEmbeddingCoverage({ force: true }))
-    .catch(() => {});
+  console.warn(`[memoryEmbeddings] ${count} memory row(s) left un-embedded (${why}) — queued for repair sweep`);
 }
 
 async function callEmbedProxy(inputs: string[]): Promise<EmbedResponse | null> {
   if (inputs.length === 0) return { embeddings: [], model: EMBEDDING_MODEL, dimensions: EMBEDDING_DIMS, input_tokens: 0 };
   if (shouldBlockExternalAiProvider('openai')) return null;
-  const initialAuth = await readEmbeddingAuthUserId();
-  if (
-    embeddingCredentialBlock
-    && initialAuth.known
-    && embeddingCredentialBlock.userId !== initialAuth.userId
-  ) {
-    // A terminal credential result belongs only to the signed-in user that
-    // produced it. An in-place account switch must not inherit that pause.
-    embeddingCredentialGeneration += 1;
-    embeddingCredentialBlock = null;
-    breakerState = recordEmbeddingSuccess(breakerState);
-  }
-  if (embeddingCredentialBlock) return null;
 
-  // Multiple memory writers can wake together during app startup. Serialize
-  // only the proxy turn (not vector writes) so one terminal credential result
-  // establishes the session pause before another request can leave. Successful
-  // turns still receive and return the vectors for their own exact input batch.
-  while (embeddingProxyTurn) {
-    await embeddingProxyTurn.catch(() => {});
-    if (embeddingCredentialBlock || shouldBlockExternalAiProvider('openai')) return null;
+  // Circuit breaker — if we've failed N times in a row, stop trying for 5 min
+  if (isEmbeddingBreakerOpen(breakerState, Date.now())) {
+    return null;
   }
-  let releaseProxyTurn!: () => void;
-  const proxyTurn = new Promise<void>((resolve) => { releaseProxyTurn = resolve; });
-  embeddingProxyTurn = proxyTurn;
-  const requestCredentialGeneration = embeddingCredentialGeneration;
-  const requestUserId = initialAuth.known ? initialAuth.userId : undefined;
 
   try {
-    // Re-check after acquiring the turn: a preceding request may have paused
-    // credentials or opened the breaker while this caller was waiting.
-    if (embeddingCredentialBlock || shouldBlockExternalAiProvider('openai')) return null;
-
-    // Circuit breaker — if we've failed N times in a row, stop trying for 5 min
-    if (isEmbeddingBreakerOpen(breakerState, Date.now())) {
-      return null;
-    }
-
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      if (controller) timeout = setTimeout(() => controller.abort(), EMBEDDING_PROXY_TIMEOUT_MS);
-      const { data, error } = await supabase.functions.invoke('llm-proxy', {
-        body: {
-          provider: 'openai-embed',
-          model: EMBEDDING_MODEL,
-          input: inputs,
-          messages: [],
-        },
-        ...(controller ? { signal: controller.signal } : {}),
-      });
-      if (error) {
-        const details = await readLLMProxyInvokeError(error, 'openai');
-        if (isEmbeddingCredentialBlockCode(details.code)) {
-          const completedAuth = await readEmbeddingAuthUserId();
-          // A key can be replaced while this request is in flight. Never let
-          // the response from old ciphertext or a prior signed-in account
-          // re-pause the current credential generation.
-          if (
-            requestCredentialGeneration !== embeddingCredentialGeneration
-            || requestUserId === undefined
-            || !completedAuth.known
-            || completedAuth.userId !== requestUserId
-          ) {
-            if (completedAuth.known && completedAuth.userId !== requestUserId) {
-              embeddingCredentialGeneration += 1;
-              embeddingCredentialBlock = null;
-              breakerState = recordEmbeddingSuccess(breakerState);
-            }
-            return null;
-          }
-          embeddingCredentialBlock = {
-            code: details.code,
-            provider: 'openai',
-            sinceMs: Date.now(),
-            generation: requestCredentialGeneration,
-            userId: requestUserId,
-          };
-          console.warn(`[memoryEmbeddings] paused until the OpenAI Marketplace key changes (${details.code}): ${details.message}`);
-          return null;
-        }
-        breakerState = recordEmbeddingFailure(breakerState, Date.now());
-        console.warn('[memoryEmbeddings] proxy error:', details.message, '| status:', details.status);
-        return null;
-      }
-      if (!data?.embeddings || !Array.isArray(data.embeddings) || data.embeddings.length === 0) {
-        breakerState = recordEmbeddingFailure(breakerState, Date.now());
-        console.warn('[memoryEmbeddings] proxy returned an unexpected response shape');
-        return null;
-      }
-      // Success — reset circuit breaker
-      breakerState = recordEmbeddingSuccess(breakerState);
-      return data as EmbedResponse;
-    } catch (err) {
+    const { data, error } = await supabase.functions.invoke('llm-proxy', {
+      body: {
+        provider: 'openai-embed',
+        model: EMBEDDING_MODEL,
+        input: inputs,
+        messages: [],
+      },
+    });
+    if (error) {
       breakerState = recordEmbeddingFailure(breakerState, Date.now());
-      console.warn('[memoryEmbeddings] proxy call failed:', err instanceof Error ? err.name : 'unknown_error');
+      console.warn('[memoryEmbeddings] proxy error:', error.message, '| status:', (error as any).status, '| context:', JSON.stringify(error).slice(0, 200));
       return null;
-    } finally {
-      if (timeout) clearTimeout(timeout);
     }
-  } finally {
-    if (embeddingProxyTurn === proxyTurn) embeddingProxyTurn = null;
-    releaseProxyTurn();
+    if (!data?.embeddings || !Array.isArray(data.embeddings) || data.embeddings.length === 0) {
+      breakerState = recordEmbeddingFailure(breakerState, Date.now());
+      console.warn('[memoryEmbeddings] proxy returned unexpected data:', JSON.stringify(data).slice(0, 300));
+      return null;
+    }
+    // Success — reset circuit breaker
+    breakerState = recordEmbeddingSuccess(breakerState);
+    return data as EmbedResponse;
+  } catch (err) {
+    breakerState = recordEmbeddingFailure(breakerState, Date.now());
+    console.warn('[memoryEmbeddings] proxy call failed:', err);
+    return null;
   }
 }
 
@@ -360,14 +242,8 @@ export async function embedAndStoreMemory(opts: {
   if (!memoryId || !combined) return false;
   const vector = await embedText(combined);
   if (!vector) {
-    if (!embeddingCredentialBlock) {
-      console.warn(`[memoryEmbeddings] embedText returned null for memory ${memoryId.slice(0, 8)} — embedding skipped`);
-    }
-    noteOrphans(
-      1,
-      embeddingCredentialBlock ? 'OpenAI Marketplace credential unavailable' : 'embed proxy returned nothing',
-      !embeddingCredentialBlock,
-    );
+    console.warn(`[memoryEmbeddings] embedText returned null for memory ${memoryId.slice(0, 8)} — embedding skipped`);
+    noteOrphans(1, 'embed proxy returned nothing');
     return false;
   }
   if (!Array.isArray(vector) || vector.length !== EMBEDDING_DIMS) {
@@ -456,11 +332,6 @@ async function drainEmbedQueue(): Promise<void> {
   // queue would never drain again.
   const run = (async () => {
     try {
-      if (embedQueue.length > 0 && embeddingCredentialBlock) {
-        noteOrphans(embedQueue.length, 'OpenAI Marketplace credential unavailable', false);
-        embedQueue = [];
-        return;
-      }
       if (embedQueue.length > 0 && shouldBlockExternalAiProvider('openai')) {
         // Strict local AI mode. Record the debt and let go of the rows — the
         // sweep re-finds them from the database once the mode is turned off.
@@ -488,17 +359,7 @@ async function drainEmbedQueue(): Promise<void> {
           // Failed batches are NOT requeued — that risks an infinite retry loop
           // against a broken proxy. They become orphans, and the sweep (which
           // reads `embedding IS NULL` from the database) is the retry.
-          const credentialBlocked = Boolean(embeddingCredentialBlock);
-          noteOrphans(
-            batch.length,
-            credentialBlocked ? 'OpenAI Marketplace credential unavailable' : 'embed proxy failure',
-            !credentialBlocked,
-          );
-          if (credentialBlocked) {
-            noteOrphans(embedQueue.length, 'OpenAI Marketplace credential unavailable', false);
-            embedQueue = [];
-            return;
-          }
+          noteOrphans(batch.length, 'embed proxy failure');
           continue;
         }
 
@@ -568,7 +429,7 @@ function persistCursor(cursor: MemoryEmbeddingRepairCursor): void {
 
 export interface MemoryEmbeddingRepairResult {
   ran: boolean;
-  /** Why the pass stopped, including credential_blocked for terminal BYOK setup state. */
+  /** Why the pass stopped: done | max_pages | max_rows | deadline | breaker_open | fetch_failed | privacy_blocked | cooling_down | idle */
   reason: string;
   cursor: MemoryEmbeddingRepairCursor;
   scanned: number;
@@ -683,9 +544,6 @@ export async function repairMemoryEmbeddings(opts?: {
     // strict local mode is turned off.
     return repairResult(createRepairCursor(Date.now()), 'privacy_blocked', false, 0, dryRun);
   }
-  if (embeddingCredentialBlock) {
-    return repairResult(createRepairCursor(Date.now()), 'credential_blocked', false, 0, dryRun);
-  }
 
   const persisted = opts?.resume === false ? null : readPersistedCursor();
   // A completed sweep starts over next time: new null rows can appear anywhere
@@ -727,31 +585,16 @@ export async function repairMemoryEmbeddings(opts?: {
 
     let pageEmbedded = 0;
     let pageFailed = 0;
-    let credentialBlocked = false;
     if (!dryRun) {
       for (const chunk of planEmbeddingBatches(jobs, EMBEDDING_BATCH_MAX)) {
         const res = await callEmbedProxy(chunk.map((job) => job.text));
-        if (!res) {
-          if (embeddingCredentialBlock) {
-            credentialBlocked = true;
-            break;
-          }
-          pageFailed += chunk.length;
-          continue;
-        }
+        if (!res) { pageFailed += chunk.length; continue; }
         await Promise.all(chunk.map(async (job, i) => {
           const vector = res.embeddings?.[i];
           const ok = Array.isArray(vector) ? await storeEmbedding(job.id, vector, res.model || EMBEDDING_MODEL) : false;
           if (ok) pageEmbedded += 1; else pageFailed += 1;
         }));
       }
-    }
-
-    // Do not advance the repair cursor past rows that were never attempted.
-    // A Marketplace key change clears the pause and retries this exact page.
-    if (credentialBlocked) {
-      stopReason = 'credential_blocked';
-      break;
     }
 
     cursor = advanceRepairCursor(
@@ -799,7 +642,6 @@ export async function ensureMemoryEmbeddingCoverage(opts?: {
   const idle = repairResult(readPersistedCursor() || createRepairCursor(now), 'idle', false, 0, false);
 
   if (shouldBlockExternalAiProvider('openai')) return { ...idle, reason: 'privacy_blocked' };
-  if (embeddingCredentialBlock) return { ...idle, reason: 'credential_blocked' };
   if (repairInFlight) return repairInFlight;
 
   const decision = shouldRunEmbeddingRepair({
@@ -883,7 +725,6 @@ export function getMemoryEmbeddingRuntimeStatus(): {
   lastRepairAtMs: number;
   queued: number;
   cursor: MemoryEmbeddingRepairCursor | null;
-  credentialBlock: Omit<EmbeddingCredentialBlock, 'userId'> | null;
 } {
   return {
     breaker: describeEmbeddingBreaker(breakerState, Date.now()),
@@ -892,12 +733,6 @@ export function getMemoryEmbeddingRuntimeStatus(): {
     lastRepairAtMs: repairSchedule.lastRepairAtMs,
     queued: embedQueue.length,
     cursor: readPersistedCursor(),
-    credentialBlock: embeddingCredentialBlock ? {
-      code: embeddingCredentialBlock.code,
-      provider: embeddingCredentialBlock.provider,
-      sinceMs: embeddingCredentialBlock.sinceMs,
-      generation: embeddingCredentialBlock.generation,
-    } : null,
   };
 }
 

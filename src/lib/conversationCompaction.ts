@@ -13,10 +13,6 @@
 
 import { supabase } from './supabase';
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-  : '';
-
 export interface CompactedContext {
   summary: string;
   messageCount: number;
@@ -36,7 +32,7 @@ export async function compactConversation(
   messages: Array<{ role: string; text: string; timestamp?: string }>,
   circleContext?: string,
 ): Promise<CompactedContext | null> {
-  if (!GEMINI_API_KEY || messages.length < 10) return null;
+  if (messages.length < 10) return null;
 
   const transcript = messages.map(m => {
     const time = m.timestamp ? ` [${m.timestamp}]` : '';
@@ -59,20 +55,20 @@ ${transcript.slice(0, 8000)}
 Summary:`;
 
   try {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 800, temperature: 0.1 },
-        }),
+    const { data, error } = await supabase.functions.invoke('llm-proxy', {
+      body: {
+        provider: 'google_ai',
+        model: 'gemini-2.5-flash',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 800,
+        temperature: 0.1,
       },
-    );
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const summary = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    });
+    if (error || data?.error) {
+      console.warn('[conversationCompaction] Server-side Google AI route unavailable. Connect or verify a Google AI key in Marketplace.');
+      return null;
+    }
+    const summary = typeof data?.response === 'string' ? data.response.trim() : '';
     if (!summary || summary.length < 30) return null;
 
     return {
@@ -82,6 +78,7 @@ Summary:`;
       tokenEstimate: Math.ceil(summary.length / 4),
     };
   } catch {
+    console.warn('[conversationCompaction] Server-side Google AI route unavailable. Connect or verify a Google AI key in Marketplace.');
     return null;
   }
 }

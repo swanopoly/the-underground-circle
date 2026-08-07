@@ -25,9 +25,19 @@ import { byokMissingMessage, getAuthenticatedUser, resolveUserModelApiKey } from
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Expose-Headers": "content-type",
 };
+
+const MAX_BRIEF_CHARS = 30_000;
+const MAX_SYSTEM_EXTRA_CHARS = 10_000;
+
+function jsonError(status: number, error: string, code: string): Response {
+  return new Response(JSON.stringify({ error, code }), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
 
 // Canonical short IDs (no date suffix). `claude-opus` points at 4.7 (the
 // latest), matching the rest of the app — build-stream had been left on
@@ -77,29 +87,48 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
+  if (req.method !== "POST") {
+    return jsonError(405, "Use POST.", "method_not_allowed");
+  }
+
+  // Authenticate before parsing attacker-controlled JSON or creating the
+  // service-role client. Router JWT verification is disabled for ES256
+  // compatibility, so this in-function check is the public boundary.
+  const user = await getAuthenticatedUser(req);
+  if (!user) {
+    return jsonError(401, "Valid JWT required.", "unauthenticated");
+  }
+
   let body: StreamRequest;
   try {
     body = await req.json();
   } catch {
-    return new Response(JSON.stringify({ error: "invalid JSON body" }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonError(400, "Invalid JSON body.", "validation");
   }
 
-  if (!body.brief || typeof body.brief !== "string") {
-    return new Response(JSON.stringify({ error: "brief required" }), {
-      status: 400,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  if (
+    !body.brief ||
+    typeof body.brief !== "string" ||
+    body.brief.length > MAX_BRIEF_CHARS
+  ) {
+    return jsonError(
+      400,
+      `Brief must be between 1 and ${MAX_BRIEF_CHARS} characters.`,
+      "validation",
+    );
   }
-
-  const user = await getAuthenticatedUser(req);
-  if (!user) {
-    return new Response(JSON.stringify({ error: "Valid JWT required", code: "unauthenticated" }), {
-      status: 401,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  if (
+    body.system_extra != null &&
+    (
+      typeof body.system_extra !== "string" ||
+      body.system_extra.length > MAX_SYSTEM_EXTRA_CHARS
+    )
+  ) {
+    return jsonError(
+      400,
+      `Additional constraints must be at most ${MAX_SYSTEM_EXTRA_CHARS} characters.`,
+      "validation",
+    );
   }
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -126,33 +155,48 @@ Deno.serve(async (req) => {
     : DEFAULT_SYSTEM;
 
   // Kick off the upstream streaming request
-  const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey.apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 4096,
-      // cache_control on the system prompt — DEFAULT_SYSTEM is stable across
-      // all /build-stream calls and system_extra is typically short or
-      // reused, so this yields ephemeral cache reads on repeat builds.
-      system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-      stream: true,
-      messages: [
-        { role: "user", content: `Build a landing page for: ${body.brief}` },
-      ],
-    }),
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        // cache_control on the system prompt — DEFAULT_SYSTEM is stable across
+        // all /build-stream calls and system_extra is typically short or
+        // reused, so this yields ephemeral cache reads on repeat builds.
+        system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+        stream: true,
+        messages: [
+          { role: "user", content: `Build a landing page for: ${body.brief}` },
+        ],
+      }),
+      redirect: "manual",
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (error) {
+    console.error("[build-stream] Anthropic request failed before response", {
+      name: error instanceof Error ? error.name : typeof error,
+    });
+    return jsonError(502, "The model provider could not be reached.", "upstream_error");
+  }
 
   if (!upstream.ok || !upstream.body) {
-    const errText = await upstream.text().catch(() => "");
-    return new Response(JSON.stringify({ error: `Anthropic ${upstream.status}: ${errText.slice(0, 500)}` }), {
-      status: 502,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    try { await upstream.body?.cancel(); } catch { /* best effort */ }
+    console.error("[build-stream] Anthropic request failed", {
+      status: upstream.status,
+      redirected: upstream.status >= 300 && upstream.status < 400,
     });
+    return jsonError(
+      502,
+      `The model provider could not complete the request (HTTP ${upstream.status}).`,
+      "upstream_error",
+    );
   }
 
   // Pipe Anthropic SSE → our SSE. We translate event names into our small
@@ -233,7 +277,7 @@ Deno.serve(async (req) => {
               tokensOut = data.usage.output_tokens;
               usage.output = data.usage.output_tokens;
             } else if (eventName === "error") {
-              emit("error", { error: data?.error?.message || "upstream stream error" });
+              emit("error", { error: "The model provider ended the stream unexpectedly." });
               controller.close();
               return;
             }
@@ -251,8 +295,10 @@ Deno.serve(async (req) => {
           metadata: { brief_length: body.brief.length },
         });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        emit("error", { error: msg });
+        console.error("[build-stream] stream failed", {
+          name: err instanceof Error ? err.name : typeof err,
+        });
+        emit("error", { error: "The page stream ended unexpectedly." });
         controller.close();
       }
     },

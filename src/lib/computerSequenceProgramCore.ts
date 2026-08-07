@@ -102,8 +102,7 @@ export type ComputerSequenceProjectedPredicate = Readonly<{
     | 'photoshop_launch_identity_verified'
     | 'photoshop_focus_identity_verified'
     | 'photoshop_create_foreground_precondition_verified'
-    | 'photoshop_created_document_receipt_verified'
-    | 'photoshop_created_document_foreground_verified';
+    | 'photoshop_created_document_receipt_verified';
   tool: 'desktop.observe_app' | 'desktop.photoshop_document_status';
   args: Readonly<Record<string, unknown>>;
   expected: Readonly<Record<string, boolean | number>>;
@@ -130,67 +129,78 @@ export type PhotoshopNewDocumentProjectionBranch =
   | 'app_background'
   | 'app_frontmost';
 
-export type ComputerSequencePredicateFingerprintDraft = Readonly<{
+export type ComputerSequencePredicateRequirement = Readonly<{
   index: number;
-  fingerprint: string;
-  contract: ComputerSequenceProjectedPredicate;
+  contractRequirementFingerprint: string;
+  stage: ComputerSequenceProjectedPredicate['stage'];
+  actionIndex: number | null;
+  role: ComputerSequenceProjectedPredicate['role'];
+  observerTool: ComputerSequenceProjectedPredicate['tool'];
+  requirements: ReadonlyArray<ComputerSequenceProjectedProofRequirement>;
 }>;
 
-export type ComputerSequenceRootAcceptanceActionDraft = Readonly<{
+export type ComputerSequenceActionRequirement = Readonly<{
+  actionIndex: number;
   tool: ComputerSequenceProjectedMutation['tool'];
   toolArgsFingerprint: string;
-  authorizationFingerprint: string;
+  authorizationRequirementFingerprint: string;
+  authorizationReceiptStatus: 'required';
+  proofReceiptStatus: 'required';
   mutatesState: true;
   requiresForegroundLease: true;
 }>;
 
 /**
- * A future gateway must turn this requirement into a real root dispatch
- * binding and a section-26 authorization receipt. This inert value does
- * neither: notably, it has `requiredMutationAuthority`, never the root's
- * authority-bearing `mutationAuthority` field.
+ * A future gateway must satisfy this requirement with a trusted authorization
+ * receipt, proof receipt, real root dispatch binding, and section-26 mutation
+ * authority. This inert value deliberately shares no authority-bearing
+ * fingerprint field names with a root dispatch binding.
  */
-export type ComputerSequenceRequiredDispatchBindingDraft = Readonly<{
+export type ComputerSequenceRequiredDispatchRequirement = Readonly<{
   projectionOnly: true;
+  readyForDispatchBinding: false;
   bindingStatus: 'required';
   actionIndex: number;
   tool: ComputerSequenceProjectedMutation['tool'];
   source: 'compiler';
-  callIdentityFingerprint: string;
+  callIdentityRequirementFingerprint: string;
   authorizationCategory: ComputerSequenceProjectedMutation['authorizationCategory'];
+  authorizationReceiptStatus: 'required';
+  proofReceiptStatus: 'required';
   requiredMutationAuthority: 'action_ledger';
-  policyBindingFingerprint: string;
-  verifierBindingFingerprint: string;
-  replayBindingFingerprint: string;
-  verifierPredicateFingerprints: ReadonlyArray<string>;
-  verifierRequirements: ReadonlyArray<ComputerSequenceProjectedProofRequirement>;
+  policyBindingRequirementFingerprint: string;
+  verifierBindingRequirementFingerprint: string;
+  replayBindingRequirementFingerprint: string;
+  verifierPredicateRequirementFingerprints: ReadonlyArray<string>;
+  proofReceiptRequirements: ReadonlyArray<ComputerSequenceProjectedProofRequirement>;
 }>;
 
 /**
- * Feature-off handoff shape for the universal root. `observedState` is only a
- * compiler branch hint. It is not proof that Photoshop is still in that
- * state; the fresh app/status receipt predicates below remain mandatory.
+ * Feature-off requirement shape for a future universal-root gateway.
+ * `observedState` is only a compiler branch hint. It is not proof that
+ * Photoshop is still in that state; fresh app/status receipts remain
+ * mandatory and no value-bearing observation is returned here.
  */
 export type PhotoshopNewDocumentRootProjectionDraft = Readonly<{
   schemaVersion: 1;
   projectionOnly: true;
+  readyForRootBinding: false;
   programId: 'photoshop_new_document';
   requestIdentityFingerprint: string;
   programFingerprint: string;
   projectionBranch: PhotoshopNewDocumentProjectionBranch;
-  requestedDimensions: Readonly<{ widthPx: number; heightPx: number }>;
-  authorization: Readonly<{
+  authorizationPolicyRequirement: Readonly<{
     mode: ComputerSequenceProgram['authorization']['mode'];
     category: ComputerSequenceProjectedMutation['authorizationCategory'];
-    directRequestAuthorizesDraft: boolean;
+    trustedAuthorizationReceiptRequired: true;
     chatPlanApprovalRequired: boolean;
   }>;
-  predicateBindings: ReadonlyArray<ComputerSequencePredicateFingerprintDraft>;
-  acceptanceDraft: Readonly<{
-    predicateFingerprints: ReadonlyArray<string>;
-    actions: ReadonlyArray<ComputerSequenceRootAcceptanceActionDraft>;
+  predicateRequirements: ReadonlyArray<ComputerSequencePredicateRequirement>;
+  acceptanceRequirements: Readonly<{
+    predicateRequirementFingerprints: ReadonlyArray<string>;
+    actionRequirements: ReadonlyArray<ComputerSequenceActionRequirement>;
   }>;
-  requiredDispatchBindingDrafts: ReadonlyArray<ComputerSequenceRequiredDispatchBindingDraft>;
+  requiredDispatchRequirements: ReadonlyArray<ComputerSequenceRequiredDispatchRequirement>;
 }>;
 
 export type ComputerSequenceFingerprintBuilder = (
@@ -747,22 +757,6 @@ export function projectPhotoshopNewDocumentMutations(
             'dimensions_match_request',
           ],
         },
-        {
-          stage: 'verify_after_action',
-          actionIndex: mutation.index,
-          role: 'photoshop_created_document_foreground_verified',
-          tool: 'desktop.observe_app',
-          args: { appName: 'Photoshop' },
-          expected: { appRunning: true, frontmost: true },
-          requirements: [
-            'fresh_receipt',
-            'requested_app_is_photoshop',
-            'resolved_photoshop_identity',
-            'same_pid_as_prior_app_receipt',
-            'app_running',
-            'frontmost',
-          ],
-        },
       );
     }
     const predicates = Object.freeze(predicateInputs.map(freezeProjectedPredicate));
@@ -808,6 +802,23 @@ function photoshopProjectionBranch(
   return observedState.appFrontmost ? 'app_frontmost' : 'app_background';
 }
 
+function canonicalPhotoshopHandlerArgs(
+  mutation: ComputerSequenceProjectedMutation,
+  dimensions: Readonly<{ widthPx: number; heightPx: number }>,
+): Readonly<Record<string, unknown>> | null {
+  if (mutation.tool === 'desktop.launch_app' || mutation.tool === 'desktop.focus_app') {
+    return Object.freeze({ appName: 'Photoshop' });
+  }
+  if (mutation.tool === 'desktop.photoshop_create_document') {
+    return Object.freeze({
+      appName: 'Photoshop',
+      widthPx: dimensions.widthPx,
+      heightPx: dimensions.heightPx,
+    });
+  }
+  return null;
+}
+
 async function buildUniqueSequenceFingerprint(input: {
   fingerprint: ComputerSequenceFingerprintBuilder;
   contract: unknown;
@@ -820,11 +831,12 @@ async function buildUniqueSequenceFingerprint(input: {
 }
 
 /**
- * Convert the exact observed-state mutation projection into an immutable
- * universal-root acceptance draft plus the dispatch bindings a future
- * section-26 gateway MUST obtain. This does not bind, claim, dispatch, or
- * authorize an action. All identity comes from the injected fingerprint
- * builder; no digest is synthesized locally.
+ * Convert the exact observed-state mutation projection into immutable,
+ * value-free requirements for a future universal-root/section-26 gateway.
+ * The returned shape is structurally unusable as either a root acceptance or
+ * a bound dispatch. It does not bind, claim, dispatch, authorize, or prove an
+ * action. All identity comes from the injected fingerprint builder; no digest
+ * is synthesized locally.
  *
  * The observed booleans select one canonical branch only. They are never
  * accepted as execution proof: every branch retains fresh observe_app and
@@ -905,7 +917,7 @@ export async function buildPhotoshopNewDocumentRootProjectionDraft(input: {
       requestedDimensions: Object.freeze({ ...dimensions }),
     });
 
-    const predicateBindings: ComputerSequencePredicateFingerprintDraft[] = [];
+    const predicateRequirements: ComputerSequencePredicateRequirement[] = [];
     for (let index = 0; index < canonicalProjection.predicates.length; index += 1) {
       const contract = canonicalProjection.predicates[index];
       const predicateFingerprint = await buildUniqueSequenceFingerprint({
@@ -921,10 +933,14 @@ export async function buildPhotoshopNewDocumentRootProjectionDraft(input: {
         },
       });
       if (!predicateFingerprint) return null;
-      predicateBindings.push(Object.freeze({
+      predicateRequirements.push(Object.freeze({
         index,
-        fingerprint: predicateFingerprint,
-        contract,
+        contractRequirementFingerprint: predicateFingerprint,
+        stage: contract.stage,
+        actionIndex: contract.actionIndex,
+        role: contract.role,
+        observerTool: contract.tool,
+        requirements: Object.freeze([...contract.requirements]),
       }));
     }
 
@@ -937,85 +953,80 @@ export async function buildPhotoshopNewDocumentRootProjectionDraft(input: {
         (mutation) => mutation.authorizationCategory !== authorizationCategory,
       )
     ) return null;
-    const approvalBinding = Object.freeze({
+    const authorizationPolicyRequirement = Object.freeze({
       mode: authorizationMode,
       category: authorizationCategory,
-      directRequestAuthorizesDraft: authorizationMode === 'direct_user_request',
+      trustedAuthorizationReceiptRequired: true as const,
       chatPlanApprovalRequired: authorizationMode === 'chat_plan_approval',
     });
 
-    const acceptanceActions: ComputerSequenceRootAcceptanceActionDraft[] = [];
-    const dispatchRequirements: ComputerSequenceRequiredDispatchBindingDraft[] = [];
+    const actionRequirements: ComputerSequenceActionRequirement[] = [];
+    const dispatchRequirements: ComputerSequenceRequiredDispatchRequirement[] = [];
     for (const mutation of canonicalProjection.mutations) {
-      const relevantPredicates = predicateBindings.filter((binding) => (
-        binding.contract.actionIndex === null
-        || binding.contract.actionIndex <= mutation.index
+      const relevantPredicates = predicateRequirements.filter((requirement) => (
+        requirement.actionIndex === null
+        || requirement.actionIndex <= mutation.index
       ));
-      const verifierPredicateFingerprints = Object.freeze(
-        relevantPredicates.map((binding) => binding.fingerprint),
+      const verifierPredicateRequirementFingerprints = Object.freeze(
+        relevantPredicates.map((requirement) => requirement.contractRequirementFingerprint),
       );
-      const verifierRequirements = Object.freeze(Array.from(new Set(
-        relevantPredicates.flatMap((binding) => binding.contract.requirements),
+      const proofReceiptRequirements = Object.freeze(Array.from(new Set(
+        relevantPredicates.flatMap((requirement) => requirement.requirements),
       )));
-      const exactToolArgs = Object.freeze({ ...mutation.args });
+      const normalizedHandlerArgs = canonicalPhotoshopHandlerArgs(mutation, dimensions);
+      if (!normalizedHandlerArgs) return null;
+      const toolArgsFingerprint = await fingerprint(normalizedHandlerArgs);
+      if (
+        !COMPUTER_SEQUENCE_SHA256_RE.test(toolArgsFingerprint)
+        || seen.has(toolArgsFingerprint)
+      ) return null;
+      seen.add(toolArgsFingerprint);
       const actionIdentity = Object.freeze({
         ...sharedIdentity,
         actionIndex: mutation.index,
         tool: mutation.tool,
-        exactToolArgs,
+        toolArgsFingerprint,
         mutatesState: mutation.mutatesState,
         requiresForegroundLease: mutation.requiresForegroundLease,
       });
-
-      const toolArgsFingerprint = await buildUniqueSequenceFingerprint({
-        fingerprint,
-        seen,
-        contract: {
-          schemaVersion: 1,
-          namespace: 'computer_sequence_projection_tool_args',
-          ...actionIdentity,
-        },
-      });
-      if (!toolArgsFingerprint) return null;
-      const authorizationFingerprint = await buildUniqueSequenceFingerprint({
+      const authorizationRequirementFingerprint = await buildUniqueSequenceFingerprint({
         fingerprint,
         seen,
         contract: {
           schemaVersion: 1,
           namespace: 'computer_sequence_projection_authorization',
           ...actionIdentity,
-          authorization: approvalBinding,
+          authorizationPolicyRequirement,
           requiredMutationAuthority: mutation.requiredMutationAuthority,
         },
       });
-      if (!authorizationFingerprint) return null;
-      const callIdentityFingerprint = await buildUniqueSequenceFingerprint({
+      if (!authorizationRequirementFingerprint) return null;
+      const callIdentityRequirementFingerprint = await buildUniqueSequenceFingerprint({
         fingerprint,
         seen,
         contract: {
           schemaVersion: 1,
           namespace: 'computer_sequence_projection_call_identity',
           ...actionIdentity,
-          toolArgsFingerprint,
-          authorizationFingerprint,
+          authorizationRequirementFingerprint,
         },
       });
-      if (!callIdentityFingerprint) return null;
-      const policyBindingFingerprint = await buildUniqueSequenceFingerprint({
+      if (!callIdentityRequirementFingerprint) return null;
+      const policyBindingRequirementFingerprint = await buildUniqueSequenceFingerprint({
         fingerprint,
         seen,
         contract: {
           schemaVersion: 1,
           namespace: 'computer_sequence_projection_policy_binding',
           ...actionIdentity,
-          authorization: approvalBinding,
-          authorizationFingerprint,
+          authorizationPolicyRequirement,
+          authorizationRequirementFingerprint,
           requiredMutationAuthority: mutation.requiredMutationAuthority,
           foregroundLeaseRequiredBeforeDispatch: true,
         },
       });
-      if (!policyBindingFingerprint) return null;
-      const verifierBindingFingerprint = await buildUniqueSequenceFingerprint({
+      if (!policyBindingRequirementFingerprint) return null;
+      const verifierBindingRequirementFingerprint = await buildUniqueSequenceFingerprint({
         fingerprint,
         seen,
         contract: {
@@ -1023,70 +1034,76 @@ export async function buildPhotoshopNewDocumentRootProjectionDraft(input: {
           namespace: 'computer_sequence_projection_verifier_binding',
           ...actionIdentity,
           verifierPredicateRole: mutation.verifierPredicateRole,
-          verifierPredicateFingerprints,
-          verifierRequirements,
+          verifierPredicateRequirementFingerprints,
+          proofReceiptRequirements,
         },
       });
-      if (!verifierBindingFingerprint) return null;
-      const replayBindingFingerprint = await buildUniqueSequenceFingerprint({
+      if (!verifierBindingRequirementFingerprint) return null;
+      const replayBindingRequirementFingerprint = await buildUniqueSequenceFingerprint({
         fingerprint,
         seen,
         contract: {
           schemaVersion: 1,
           namespace: 'computer_sequence_projection_replay_binding',
           ...actionIdentity,
-          callIdentityFingerprint,
+          callIdentityRequirementFingerprint,
           replayPolicy: 'never_redispatch_after_dispatched_or_outcome_unknown',
           outcomeUnknownRecovery: 'verification_only',
         },
       });
-      if (!replayBindingFingerprint) return null;
+      if (!replayBindingRequirementFingerprint) return null;
 
-      acceptanceActions.push(Object.freeze({
+      actionRequirements.push(Object.freeze({
+        actionIndex: mutation.index,
         tool: mutation.tool,
         toolArgsFingerprint,
-        authorizationFingerprint,
+        authorizationRequirementFingerprint,
+        authorizationReceiptStatus: 'required' as const,
+        proofReceiptStatus: 'required' as const,
         mutatesState: true as const,
         requiresForegroundLease: true as const,
       }));
       dispatchRequirements.push(Object.freeze({
         projectionOnly: true as const,
+        readyForDispatchBinding: false as const,
         bindingStatus: 'required' as const,
         actionIndex: mutation.index,
         tool: mutation.tool,
         source: 'compiler' as const,
-        callIdentityFingerprint,
+        callIdentityRequirementFingerprint,
         authorizationCategory,
+        authorizationReceiptStatus: 'required' as const,
+        proofReceiptStatus: 'required' as const,
         requiredMutationAuthority: 'action_ledger' as const,
-        policyBindingFingerprint,
-        verifierBindingFingerprint,
-        replayBindingFingerprint,
-        verifierPredicateFingerprints,
-        verifierRequirements,
+        policyBindingRequirementFingerprint,
+        verifierBindingRequirementFingerprint,
+        replayBindingRequirementFingerprint,
+        verifierPredicateRequirementFingerprints,
+        proofReceiptRequirements,
       }));
     }
 
-    const frozenPredicateBindings = Object.freeze([...predicateBindings]);
-    const frozenPredicateFingerprints = Object.freeze(
-      frozenPredicateBindings.map((binding) => binding.fingerprint),
+    const frozenPredicateRequirements = Object.freeze([...predicateRequirements]);
+    const frozenPredicateRequirementFingerprints = Object.freeze(
+      frozenPredicateRequirements.map((requirement) => requirement.contractRequirementFingerprint),
     );
-    const frozenAcceptanceActions = Object.freeze([...acceptanceActions]);
-    const acceptanceDraft = Object.freeze({
-      predicateFingerprints: frozenPredicateFingerprints,
-      actions: frozenAcceptanceActions,
+    const frozenActionRequirements = Object.freeze([...actionRequirements]);
+    const acceptanceRequirements = Object.freeze({
+      predicateRequirementFingerprints: frozenPredicateRequirementFingerprints,
+      actionRequirements: frozenActionRequirements,
     });
     return Object.freeze({
       schemaVersion: 1 as const,
       projectionOnly: true as const,
+      readyForRootBinding: false as const,
       programId: 'photoshop_new_document' as const,
       requestIdentityFingerprint,
       programFingerprint,
       projectionBranch,
-      requestedDimensions: Object.freeze({ ...dimensions }),
-      authorization: approvalBinding,
-      predicateBindings: frozenPredicateBindings,
-      acceptanceDraft,
-      requiredDispatchBindingDrafts: Object.freeze([...dispatchRequirements]),
+      authorizationPolicyRequirement,
+      predicateRequirements: frozenPredicateRequirements,
+      acceptanceRequirements,
+      requiredDispatchRequirements: Object.freeze([...dispatchRequirements]),
     });
   } catch {
     return null;

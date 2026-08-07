@@ -1179,7 +1179,7 @@ export default function FeedTab({
                 onCreateGoal={goalsHook.createGoal}
                 onUpdateGoal={goalsHook.updateGoal}
                 onDeleteGoal={goalsHook.deleteGoal}
-                onCreateTask={kanban.createTask}
+                onCreateTask={async (fields) => { await kanban.createTask(fields); }}
                 onEditGoal={setEditGoal}
                 plans={plansHook.plans}
                 onOpenMarketplace={handleOpenMarketplace}
@@ -1316,7 +1316,7 @@ export default function FeedTab({
             onClose={() => setEditGoal(null)}
             onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
             onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
-            onCreateTask={kanban.createTask}
+            onCreateTask={async (fields) => { await kanban.createTask(fields); }}
           />
         )}
 
@@ -1333,7 +1333,8 @@ export default function FeedTab({
             prefillTitle={createPrefillTitle}
             onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
             onCreate={async (fields) => {
-              await kanban.createTask(fields);
+              const created = await kanban.createTask(fields);
+              if (!created) return;
               setShowCreate(false);
               setCreatePrefillTitle('');
             }}
@@ -1393,7 +1394,7 @@ export default function FeedTab({
           onCreateGoal={goalsHook.createGoal}
           onUpdateGoal={goalsHook.updateGoal}
           onDeleteGoal={goalsHook.deleteGoal}
-          onCreateTask={kanban.createTask}
+          onCreateTask={async (fields) => { await kanban.createTask(fields); }}
           onEditGoal={setEditGoal}
           plans={plansHook.plans}
           circleId={circleId}
@@ -1565,7 +1566,7 @@ export default function FeedTab({
           onClose={() => setEditGoal(null)}
           onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
           onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
-          onCreateTask={kanban.createTask}
+          onCreateTask={async (fields) => { await kanban.createTask(fields); }}
         />
       )}
 
@@ -1588,7 +1589,8 @@ export default function FeedTab({
           prefillTitle={createPrefillTitle}
           onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
           onCreate={async (fields) => {
-            await kanban.createTask(fields);
+            const created = await kanban.createTask(fields);
+            if (!created) return;
             setShowCreate(false);
             setCreatePrefillTitle('');
           }}

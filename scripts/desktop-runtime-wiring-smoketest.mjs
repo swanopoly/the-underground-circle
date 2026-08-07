@@ -679,7 +679,8 @@ assert(
   && localAwarenessBlock.includes('desktop.list_running_apps')
   && localAwarenessBlock.includes('desktop.window_state')
   && localAwarenessBlock.includes('desktop.clipboard')
-  && computerTaskBranch.includes('executeSharedComputerTask(content)')
+  && computerTaskBranch.includes('executeSharedComputerTask(content, {')
+  && computerTaskBranch.includes('requestIdentity: userMessage.id')
   && !computerTaskBranch.includes('executeLocalComputerAwarenessRequest')
   && openSwanBranch.includes('executeLocalComputerAwarenessRequest(content)'),
   'ChatTab routes launch/focus through authenticated computer-task execution and keeps only read-only desktop awareness shortcuts',

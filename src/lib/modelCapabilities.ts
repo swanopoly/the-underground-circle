@@ -6,10 +6,6 @@
  * Returns structured results with rendered artifacts.
  */
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-  : '';
-
 // ── Model capability definitions ────────────────────────────────────────────
 
 export type ModelCapability = 'text' | 'code' | 'image_gen' | 'image_understand' | 'video_gen' | 'audio_gen' | 'webpage_gen' | 'reasoning';
@@ -482,71 +478,28 @@ async function generateImageHF(prompt: string, model: string): Promise<{ url: st
   }
 }
 
-// ── Image Generation via Gemini ─────────────────────────────────────────────
-
-async function generateImageGemini(prompt: string): Promise<{ url: string; text?: string } | null> {
-  if (!GEMINI_API_KEY) return null;
-
-  try {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
-          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-        }),
-      }
-    );
-
-    if (!resp.ok) return null;
-    const data = await resp.json();
-
-    const parts = data?.candidates?.[0]?.content?.parts || [];
-    let imageUrl = '';
-    let textResp = '';
-
-    for (const part of parts) {
-      if (part.inlineData?.mimeType?.startsWith('image/')) {
-        const b64 = part.inlineData.data;
-        imageUrl = `data:${part.inlineData.mimeType};base64,${b64}`;
-      }
-      if (part.text) textResp += part.text;
-    }
-
-    if (imageUrl) return { url: imageUrl, text: textResp };
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// ── Webpage Generation via Gemini ───────────────────────────────────────────
+// ── Webpage Generation via server-side Google AI BYOK ──────────────────────
 
 async function generateWebpage(prompt: string): Promise<string | null> {
-  if (!GEMINI_API_KEY) return null;
-
   try {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: `You are a web developer. Generate a complete, self-contained HTML page with inline CSS and JavaScript based on this request: "${prompt}"\n\nRequirements:\n- Single HTML file, all CSS/JS inline\n- Modern, dark theme design\n- Responsive layout\n- Use modern CSS (flexbox/grid)\n- Make it visually impressive\n- Return ONLY the HTML code, no markdown fences, no explanation before or after`,
-            }],
-          }],
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.7 },
-        }),
+    // Keep this module pure for intent/capability callers; load the authenticated
+    // edge client only if the dormant webpage lane is explicitly invoked.
+    const { supabase } = await import('./supabase');
+    const { data, error } = await supabase.functions.invoke('llm-proxy', {
+      body: {
+        provider: 'google_ai',
+        model: 'gemini-2.5-flash',
+        messages: [{
+          role: 'user',
+          content: `You are a web developer. Generate a complete, self-contained HTML page with inline CSS and JavaScript based on this request: "${prompt}"\n\nRequirements:\n- Single HTML file, all CSS/JS inline\n- Modern, dark theme design\n- Responsive layout\n- Use modern CSS (flexbox/grid)\n- Make it visually impressive\n- Return ONLY the HTML code, no markdown fences, no explanation before or after`,
+        }],
+        max_tokens: 8192,
+        temperature: 0.7,
       }
-    );
+    });
 
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    let html = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if (error || data?.error) return null;
+    let html = typeof data?.response === 'string' ? data.response : '';
     // Strip markdown fences if present
     html = html.replace(/^```html?\n?/i, '').replace(/\n?```$/i, '').trim();
     if (html.includes('<html') || html.includes('<!DOCTYPE') || html.includes('<body')) {
@@ -593,22 +546,6 @@ export async function routeByCapability(
       }
     }
 
-    // Fallback to Gemini image gen
-    if (GEMINI_API_KEY) attemptedImageBackends.push('Gemini image gen');
-    const geminiResult = await generateImageGemini(imagePrompt);
-    if (geminiResult) {
-      return {
-        handled: true,
-        response: geminiResult.text || `Generated image for: "${imagePrompt.slice(0, 80)}"`,
-        artifacts: [{
-          kind: 'image',
-          title: imagePrompt.slice(0, 60),
-          url: geminiResult.url,
-          metadata: { model: 'gemini-2.0-flash-exp', prompt: imagePrompt },
-        }],
-      };
-    }
-
     // All image gen APIs failed — return handled:false so the caller's
     // normal tiered path recovers with the user's selected model instead of
     // rendering a dead-end "temporarily unavailable" bubble. The notice tells
@@ -616,7 +553,7 @@ export async function routeByCapability(
     // plain next action.
     const fallbackNotice = attemptedImageBackends.length > 0
       ? `Image generation didn't work just now (${attemptedImageBackends.join(' and ')} failed), so I'll answer in text instead. Try again in a minute, or pick a different image model.`
-      : `Image generation isn't set up yet (no image backend is configured), so I'll answer in text instead. Add a Google AI key in Marketplace to enable it.`;
+      : `Image generation isn't set up for this model, so I'll answer in text instead. Pick a supported image model or use OpenSwan's image-generation tool.`;
     return { handled: false, response: '', fallbackNotice };
   }
 
@@ -635,7 +572,11 @@ export async function routeByCapability(
         }],
       };
     }
-    return { handled: false, response: '' };
+    return {
+      handled: false,
+      response: '',
+      fallbackNotice: `I couldn't build the page through the server-side model route. Connect or verify a Google AI key in Marketplace, then try again.`,
+    };
   }
 
   // ── Video Generation (placeholder — describe intent) ──────────────────────

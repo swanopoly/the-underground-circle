@@ -58,6 +58,21 @@ for (const request of [
   assert.equal(classifyGenericAppTaskFamily(request), 'launch_or_read', `${request} has preflight lifecycle parity`);
 }
 for (const request of [
+  'Focus Photoshop',
+  'Activate Slack',
+  'Switch to Slack',
+  'Switch over to Slack',
+  'Bring Slack to the front',
+  'Bring Slack forward',
+  'Bring forward Slack',
+]) {
+  assert.equal(
+    parseStrictNamedAppLifecycleIntent(request)?.operation,
+    'focus',
+    `${request} is an explicit focus-only request and cannot implicitly launch`,
+  );
+}
+for (const request of [
   'Should I open Photoshop?',
   'Can you open Photoshop and create a document?',
   'Could you launch Photoshop, then tell me which document is open?',
@@ -127,6 +142,14 @@ assert(abletonPlan.actionLadder.some((step) => step.includes('one reversible vis
 assert(abletonPlan.recommendedTools.includes('desktop.click_element'));
 assert(abletonPlan.recommendedTools.includes('desktop.set_element_value'));
 assert(abletonPlan.recommendedTools.includes('agent.build_app_capability'));
+assert(
+  abletonPlan.recoveryRules.some((rule) => rule.includes('verification-only mode') && rule.includes('instead of refocusing or relaunching automatically')),
+  'foreground recovery pauses after user/app ownership changes instead of reclaiming focus',
+);
+assert(
+  !abletonPlan.recoveryRules.some((rule) => /^if focus is wrong, refocus or relaunch/i.test(rule)),
+  'generic recovery no longer tells agents to refocus or relaunch automatically',
+);
 assert(abletonPlan.buildoutTriggers.some((trigger) => trigger.includes('app-specific save/export/render')));
 assert(abletonPlan.sourceRefs.some((ref) => ref.url.includes('developer.apple.com')));
 assert(abletonPlan.sourceRefs.some((ref) => ref.url.includes('learn.microsoft.com')));

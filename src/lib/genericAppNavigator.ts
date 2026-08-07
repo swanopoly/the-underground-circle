@@ -413,8 +413,11 @@ function extractNamedAppLifecycleCommand(task: string): {
     /^(open(?:\s+up)?|launch|start|focus|activate|switch(?:\s+over)?\s+to)\s+(.+)$/i,
   );
   if (direct) {
+    const verb = String(direct[1] || '');
     return {
-      operation: /^focus$/i.test(direct[1]) ? 'focus' : 'open_or_launch',
+      operation: /^(?:focus|activate|switch(?:\s+over)?\s+to)$/i.test(verb)
+        ? 'focus'
+        : 'open_or_launch',
       rawCandidate: direct[2] || '',
     };
   }
@@ -423,7 +426,7 @@ function extractNamedAppLifecycleCommand(task: string): {
   );
   const bringBefore = command.match(/^bring\s+forward\s+(.+)$/i);
   const rawCandidate = bringAfter?.[1] || bringBefore?.[1] || '';
-  return rawCandidate ? { operation: 'open_or_launch', rawCandidate } : null;
+  return rawCandidate ? { operation: 'focus', rawCandidate } : null;
 }
 
 function hasLifecycleFollowUpSyntax(candidate: string): boolean {
@@ -987,7 +990,7 @@ export function buildGenericAppNavigatorPlan(
       'approval is required before a side effect and has not been granted',
     ],
     recoveryRules: [
-      'if focus is wrong, refocus or relaunch the target app before typing or pressing shortcuts',
+      'before mutation, use at most one request-authorized launch or focus dispatch and verify the exact target; if foreground ownership changes afterward, pause in verification-only mode and require an explicit resume with fresh evidence instead of refocusing or relaunching automatically',
       'if a dialog appears, read it with accessibility state, classify the safe/default action, and stop for user choice on destructive or ambiguous prompts',
       'if a semantic click/type fails once, refresh window state and a11y tree before retrying; after a second failure, delegate buildout or ask for the smallest user choice',
       'never escalate from missing semantic state directly into repeated coordinates; one bounded visual step is the maximum without new evidence',

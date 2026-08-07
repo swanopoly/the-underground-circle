@@ -169,6 +169,8 @@ const SECONDARY_DB_STORE = 'kv';
 const SECONDARY_TOKEN_KEY = 'pair_token_v1';
 const SECONDARY_SECRET_NAMESPACE = 'desktop_bridge';
 const SECONDARY_SECRET_ID = 'pair_token';
+let desktopBridgeTokenGeneration = 0;
+const pendingSecondaryTokenWrites = new Set<Promise<void>>();
 
 function openSecondaryDb(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
@@ -254,11 +256,42 @@ async function readSecondaryToken(): Promise<string | null> {
   }
 }
 
-export function clearDesktopBridgeToken(): void {
+function trackSecondaryTokenWrite(value: string, generation: number): void {
+  const pending = (async () => {
+    await writeSecondaryToken(value);
+    if (generation !== desktopBridgeTokenGeneration) {
+      await writeSecondaryToken(null);
+    }
+  })();
+  pendingSecondaryTokenWrites.add(pending);
+  void pending.then(
+    () => pendingSecondaryTokenWrites.delete(pending),
+    () => pendingSecondaryTokenWrites.delete(pending),
+  );
+}
+
+async function invalidateDesktopBridgeTokenStorage(): Promise<void> {
+  desktopBridgeTokenGeneration += 1;
   try {
     if (typeof localStorage !== 'undefined') localStorage.removeItem(TOKEN_KEY);
   } catch {}
-  void writeSecondaryToken(null);
+  if (pendingSecondaryTokenWrites.size > 0) {
+    await Promise.allSettled(Array.from(pendingSecondaryTokenWrites));
+  }
+  await writeSecondaryToken(null);
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
+export function clearDesktopBridgeToken(): void {
+  void invalidateDesktopBridgeTokenStorage();
+}
+
+/** Awaitable logout variant so a secondary IndexedDB/keychain copy cannot
+ * survive after the signed-out UI is handed to another account. */
+export async function clearDesktopBridgeTokenForLogout(): Promise<void> {
+  await invalidateDesktopBridgeTokenStorage();
 }
 
 /**
@@ -288,6 +321,7 @@ export function getDesktopBridgeToken(): string | null {
  * failure the caller surfaces the original error to the user.
  */
 export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token: string; autoPaired: boolean }>> {
+  const tokenGeneration = desktopBridgeTokenGeneration;
   const cached = readToken();
   if (cached && cached.length >= 32) {
     return { ok: true, data: { token: cached, autoPaired: false } };
@@ -295,18 +329,24 @@ export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token
   // Read-through fallback (gap #9): localStorage was cleared but the
   // secondary copy survived — repopulate the primary and skip re-pairing.
   const recovered = await readSecondaryToken();
+  if (tokenGeneration !== desktopBridgeTokenGeneration) {
+    return { ok: false, error: 'bridge pairing was cleared during account exit', errorCode: 'not_paired' };
+  }
   if (recovered && recovered.length >= 32) {
     writeToken(recovered);
     return { ok: true, data: { token: recovered, autoPaired: false } };
   }
   const health = await getDesktopBridgeHealth();
+  if (tokenGeneration !== desktopBridgeTokenGeneration) {
+    return { ok: false, error: 'bridge pairing was cleared during account exit', errorCode: 'not_paired' };
+  }
   if (!health) {
     return { ok: false, error: 'bridge_offline', errorCode: 'bridge_offline' };
   }
   if (!health.supported) {
     return { ok: false, error: 'platform_unsupported', errorCode: 'platform_unsupported' };
   }
-  const paired = await pairDesktopBridge();
+  const paired = await pairDesktopBridgeAtGeneration(tokenGeneration);
   if (!paired.ok) return paired as DesktopResult<{ token: string; autoPaired: boolean }>;
   return { ok: true, data: { token: paired.data!.token, autoPaired: true } };
 }
@@ -318,7 +358,9 @@ export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token
  * before the bridge returns the shared token, then caches it locally. Call once
  * per device.
  */
-export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string }>> {
+async function pairDesktopBridgeAtGeneration(
+  tokenGeneration: number,
+): Promise<DesktopResult<{ token: string }>> {
   const base = getDesktopBridgeBaseUrl();
   if (!base) {
     return { ok: false, error: 'bridge unavailable in this environment', errorCode: 'bridge_offline' };
@@ -332,13 +374,20 @@ export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string
         errorCode: paired.status === 401 || paired.status === 403 ? 'not_paired' : 'unknown',
       };
     }
+    if (tokenGeneration !== desktopBridgeTokenGeneration) {
+      return { ok: false, error: 'bridge pairing was cleared during account exit', errorCode: 'not_paired' };
+    }
     writeToken(paired.token);
     // Dual-write: secondary copy survives a localStorage clear (gap #9).
-    void writeSecondaryToken(paired.token);
+    trackSecondaryTokenWrite(paired.token, tokenGeneration);
     return { ok: true, data: { token: paired.token } };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'bridge unreachable', errorCode: 'bridge_offline' };
   }
+}
+
+export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string }>> {
+  return pairDesktopBridgeAtGeneration(desktopBridgeTokenGeneration);
 }
 
 // ─── Desktop actions ───────────────────────────────────────────────────────
@@ -4499,6 +4548,8 @@ export type PhotoshopDocumentStatus = {
   status: string;
   documentCount: number;
   activeDocumentName: string | null;
+  /** Positive Photoshop session document id when available. */
+  activeDocumentId: number | null;
   activeDocumentPath: string | null;
   activeDocumentModified: boolean;
   activeDocumentSaved: boolean;
@@ -4666,6 +4717,16 @@ export interface PhotoshopCreateDocumentResult {
   appName: string;
   appRunning: boolean;
   created: boolean;
+  /** Bridge-local correlation evidence only; not authorization or a signature. */
+  operationId: string;
+  observedAt: string;
+  startedAt: string;
+  completedAt: string;
+  documentCountBefore: number;
+  documentCountAfter: number;
+  activeDocumentNameBefore: string | null;
+  /** Photoshop session document id when exposed by the host DOM. */
+  createdDocumentId: number | null;
   documentName: string | null;
   widthPx: number;
   heightPx: number;
@@ -4673,6 +4734,148 @@ export interface PhotoshopCreateDocumentResult {
   mode: string | null;
   documentCount: number;
   error: string | null;
+}
+
+export interface PhotoshopCreateDocumentReceiptExpectation {
+  widthPx: number;
+  heightPx: number;
+  /** Exact only when sealed by a fresh native target guard. */
+  appName?: string;
+  /** Exact only when the caller requested an explicit document name. */
+  documentName?: string;
+}
+
+const PHOTOSHOP_CREATE_OPERATION_ID_RE = /^photoshop-create-[a-f0-9]{32}$/;
+const PHOTOSHOP_CREATE_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function parsePhotoshopCreateReceiptIso(value: unknown): { value: string; ms: number } | null {
+  if (typeof value !== 'string' || !PHOTOSHOP_CREATE_ISO_RE.test(value)) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString() !== value) return null;
+  return { value, ms };
+}
+
+function isBoundedPhotoshopDocumentName(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 260
+    && !/[\x00-\x1f\x7f]/.test(value);
+}
+
+/**
+ * Strictly parse bridge-generated correlation evidence for one create call.
+ * The receipt is intentionally unsigned and does not confer mutation authority.
+ */
+export function parsePhotoshopCreateDocumentBridgeResponse(
+  value: unknown,
+  expected: PhotoshopCreateDocumentReceiptExpectation,
+): DesktopResult<PhotoshopCreateDocumentResult> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      ok: false,
+      error: 'Photoshop returned malformed create-document correlation evidence.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  const d = value as Record<string, unknown>;
+  const operationId = typeof d.operationId === 'string' ? d.operationId : '';
+  const observedAt = parsePhotoshopCreateReceiptIso(d.observedAt);
+  const startedAt = parsePhotoshopCreateReceiptIso(d.startedAt);
+  const completedAt = parsePhotoshopCreateReceiptIso(d.completedAt);
+  const documentCountBefore = d.documentCountBefore;
+  const documentCountAfter = d.documentCountAfter;
+  const documentCount = d.documentCount;
+  const widthPx = d.widthPx;
+  const heightPx = d.heightPx;
+  const resolution = d.resolution;
+  const appName = typeof d.appName === 'string' ? d.appName : '';
+  const mode = typeof d.mode === 'string' ? d.mode : '';
+  const activeDocumentNameBefore = d.activeDocumentNameBefore;
+  const createdDocumentId = d.createdDocumentId;
+  const validBeforeName = activeDocumentNameBefore === null
+    || isBoundedPhotoshopDocumentName(activeDocumentNameBefore);
+  const validCreatedDocumentId = createdDocumentId === null
+    || (
+      typeof createdDocumentId === 'number'
+      && Number.isSafeInteger(createdDocumentId)
+      && createdDocumentId > 0
+    );
+  const malformed = d.ok !== true
+    || d.appRunning !== true
+    || d.created !== true
+    || d.error !== null
+    || !PHOTOSHOP_CREATE_OPERATION_ID_RE.test(operationId)
+    || !observedAt
+    || !startedAt
+    || !completedAt
+    || observedAt.ms > startedAt.ms
+    || startedAt.ms > completedAt.ms
+    || completedAt.ms - observedAt.ms > 120_000
+    || !appName
+    || appName.length > 160
+    || !/photoshop/i.test(appName)
+    || /[\x00-\x1f\x7f]/.test(appName)
+    || (expected.appName !== undefined && appName !== expected.appName)
+    || typeof documentCountBefore !== 'number'
+    || !Number.isSafeInteger(documentCountBefore)
+    || documentCountBefore < 0
+    || typeof documentCountAfter !== 'number'
+    || !Number.isSafeInteger(documentCountAfter)
+    || documentCountAfter !== documentCountBefore + 1
+    || typeof documentCount !== 'number'
+    || !Number.isSafeInteger(documentCount)
+    || documentCount !== documentCountAfter
+    || !Object.prototype.hasOwnProperty.call(d, 'activeDocumentNameBefore')
+    || !validBeforeName
+    || (documentCountBefore === 0 && activeDocumentNameBefore !== null)
+    || (documentCountBefore > 0 && !isBoundedPhotoshopDocumentName(activeDocumentNameBefore))
+    || !Object.prototype.hasOwnProperty.call(d, 'createdDocumentId')
+    || !validCreatedDocumentId
+    || !isBoundedPhotoshopDocumentName(d.documentName)
+    || (expected.documentName !== undefined && d.documentName !== expected.documentName)
+    || typeof widthPx !== 'number'
+    || !Number.isSafeInteger(widthPx)
+    || widthPx !== expected.widthPx
+    || typeof heightPx !== 'number'
+    || !Number.isSafeInteger(heightPx)
+    || heightPx !== expected.heightPx
+    || typeof resolution !== 'number'
+    || !Number.isFinite(resolution)
+    || resolution < 36
+    || resolution > 1200
+    || !mode
+    || mode.length > 40
+    || /[\x00-\x1f\x7f]/.test(mode);
+  if (malformed) {
+    return {
+      ok: false,
+      error: 'Photoshop returned malformed create-document correlation evidence.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  return {
+    ok: true,
+    data: {
+      appName,
+      appRunning: true,
+      created: true,
+      operationId,
+      observedAt: observedAt.value,
+      startedAt: startedAt.value,
+      completedAt: completedAt.value,
+      documentCountBefore,
+      documentCountAfter,
+      activeDocumentNameBefore: activeDocumentNameBefore as string | null,
+      createdDocumentId: createdDocumentId as number | null,
+      documentName: d.documentName as string,
+      widthPx,
+      heightPx,
+      resolution,
+      mode,
+      documentCount,
+      error: null,
+    },
+  };
 }
 
 /** Create a new blank Photoshop document — the one Photoshop mutation with no
@@ -4686,7 +4889,19 @@ export async function photoshopCreateDocument(args: {
   name?: string;
   mode?: 'rgb' | 'grayscale' | 'cmyk';
   background?: 'white' | 'transparent' | 'background';
+  /** Optional for legacy callers; durable canaries require this exact guard. */
+  targetGuard?: DesktopNativeUiTargetGuard;
 }): Promise<DesktopResult<PhotoshopCreateDocumentResult>> {
+  const targetGuard = args.targetGuard === undefined
+    ? undefined
+    : normalizeDesktopNativeUiTargetGuard(args.targetGuard);
+  if (args.targetGuard !== undefined && !targetGuard) {
+    return {
+      ok: false,
+      error: 'Exact frontmost app/PID/CGWindow/bounds target guard is required.',
+      errorCode: 'uncertain_ui_target',
+    };
+  }
   const r = await callBridge('POST', '/desktop/photoshop_create_document', {
     appName: args.appName || 'Photoshop',
     widthPx: args.widthPx,
@@ -4695,26 +4910,368 @@ export async function photoshopCreateDocument(args: {
     name: args.name || undefined,
     mode: args.mode || undefined,
     background: args.background || undefined,
+    targetGuard,
   });
   if (!r.ok) return r as DesktopResult<PhotoshopCreateDocumentResult>;
-  const d = r.data as any;
-  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return parsePhotoshopCreateDocumentBridgeResponse(r.data, {
+    widthPx: args.widthPx,
+    heightPx: args.heightPx,
+    ...(targetGuard ? { appName: targetGuard.appName } : {}),
+    ...(typeof args.name === 'string' && args.name.trim()
+      ? { documentName: args.name.trim() }
+      : {}),
+  });
+}
+
+export interface PhotoshopDocumentStatusReceiptExpectation {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}
+
+const PHOTOSHOP_STATUS_ALLOWED_KEYS = new Set([
+  'ok',
+  'appName',
+  'appRunning',
+  'status',
+  'documentCount',
+  'activeDocumentName',
+  'activeDocumentId',
+  'activeDocumentPath',
+  'activeDocumentModified',
+  'activeDocumentSaved',
+  'widthPx',
+  'heightPx',
+  'resolution',
+  'mode',
+  'bitsPerChannel',
+  'layerCount',
+  'groupCount',
+  'textLayerCount',
+  'smartObjectCount',
+  'adjustmentLayerCount',
+  'lockedLayers',
+  'hiddenLayers',
+  'selectionActive',
+  'expectedDocumentName',
+  'sourceDocumentPath',
+  'documents',
+  'error',
+]);
+const PHOTOSHOP_STATUS_DOCUMENT_KEYS = new Set([
+  'name',
+  'path',
+  'modified',
+  'saved',
+  'widthPx',
+  'heightPx',
+]);
+const PHOTOSHOP_STATUS_VALUES = new Set([
+  'not_running',
+  'no_document',
+  'document_mismatch',
+  'ready',
+]);
+const PHOTOSHOP_STATUS_APP_IDENTITY_RE = /^(?:adobe )?photoshop(?: (?:cc(?: \d{4})?|\d{4}(?:\.\d+)?|beta|\(beta\)))?(?:\.app)?$/i;
+const PHOTOSHOP_STATUS_MAX_DOCUMENTS = 12;
+const PHOTOSHOP_STATUS_MAX_DOCUMENT_COUNT = 1_000_000;
+const PHOTOSHOP_STATUS_MAX_LAYER_COUNT = 1_000_000;
+const PHOTOSHOP_STATUS_MAX_DIMENSION_PX = 300_000;
+const PHOTOSHOP_STATUS_MAX_RESOLUTION = 1_000_000;
+
+function malformedPhotoshopDocumentStatus(): DesktopResult<PhotoshopDocumentStatus> {
   return {
-    ok: d?.ok === true && d?.created === true,
+    ok: false,
+    error: 'Photoshop returned malformed document-status evidence.',
+    errorCode: 'stale_bridge',
+  };
+}
+
+function readExactPhotoshopStatusRecord(
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const ownKeys = Reflect.ownKeys(descriptors);
+  if (
+    ownKeys.length !== allowedKeys.size
+    || ownKeys.some((key) => typeof key !== 'string' || !allowedKeys.has(key))
+  ) return null;
+  const result: Record<string, unknown> = Object.create(null);
+  for (const key of allowedKeys) {
+    const descriptor = descriptors[key];
+    if (
+      !descriptor
+      || !descriptor.enumerable
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      || descriptor.get
+      || descriptor.set
+    ) return null;
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function boundedPhotoshopStatusString(
+  value: unknown,
+  maxChars: number,
+): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && Array.from(value).length <= maxChars
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function nullableBoundedPhotoshopStatusString(
+  value: unknown,
+  maxChars: number,
+): value is string | null {
+  return value === null || boundedPhotoshopStatusString(value, maxChars);
+}
+
+function boundedPhotoshopStatusInteger(
+  value: unknown,
+  min: number,
+  max: number,
+): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= min
+    && value <= max;
+}
+
+function boundedPhotoshopStatusNumber(
+  value: unknown,
+  minExclusive: number,
+  max: number,
+): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value > minExclusive
+    && value <= max;
+}
+
+function canonicalPhotoshopStatusAppIdentity(value: unknown): string | null {
+  if (!boundedPhotoshopStatusString(value, 160)) return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (normalized !== value || !PHOTOSHOP_STATUS_APP_IDENTITY_RE.test(normalized)) return null;
+  return normalized
+    .replace(/\.app$/i, '')
+    .replace(/^adobe /i, '')
+    .toLowerCase();
+}
+
+function photoshopStatusAppIdentityMatches(
+  actual: unknown,
+  expected: unknown,
+): actual is string {
+  const actualIdentity = canonicalPhotoshopStatusAppIdentity(actual);
+  const expectedIdentity = canonicalPhotoshopStatusAppIdentity(expected);
+  if (!actualIdentity || !expectedIdentity) return false;
+  // Generic "Photoshop" requests are resolved by the bridge to an exact
+  // installed/versioned process name. Versioned or beta requests remain exact.
+  return expectedIdentity === 'photoshop' || actualIdentity === expectedIdentity;
+}
+
+function parsePhotoshopStatusDocuments(
+  value: unknown,
+  documentCount: number,
+): PhotoshopDocumentSummary[] | null {
+  if (
+    !Array.isArray(value)
+    || value.length !== Math.min(documentCount, PHOTOSHOP_STATUS_MAX_DOCUMENTS)
+  ) return null;
+  const documents: PhotoshopDocumentSummary[] = [];
+  for (const candidate of value) {
+    const document = readExactPhotoshopStatusRecord(candidate, PHOTOSHOP_STATUS_DOCUMENT_KEYS);
+    if (
+      !document
+      || !boundedPhotoshopStatusString(document.name, 260)
+      || !nullableBoundedPhotoshopStatusString(document.path, 1024)
+      || typeof document.modified !== 'boolean'
+      || typeof document.saved !== 'boolean'
+      || document.modified && document.saved
+      || !boundedPhotoshopStatusNumber(document.widthPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+      || !boundedPhotoshopStatusNumber(document.heightPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+    ) return null;
+    documents.push({
+      name: document.name,
+      path: document.path,
+      modified: document.modified,
+      saved: document.saved,
+      widthPx: document.widthPx,
+      heightPx: document.heightPx,
+    });
+  }
+  return documents;
+}
+
+/**
+ * Parse one HTTP-success Photoshop document-status body as untrusted transport
+ * data. Valid absence and guarded mismatch observations remain successful, but
+ * missing, coerced, extra, or internally contradictory fields fail closed.
+ */
+export function parsePhotoshopDocumentStatusBridgeResponse(
+  value: unknown,
+  expected: PhotoshopDocumentStatusReceiptExpectation = {},
+): DesktopResult<PhotoshopDocumentStatus> {
+  const status = readExactPhotoshopStatusRecord(value, PHOTOSHOP_STATUS_ALLOWED_KEYS);
+  const expectedAppName = typeof expected.appName === 'string' && expected.appName.trim()
+    ? expected.appName.trim()
+    : 'Photoshop';
+  const expectedDocumentName = typeof expected.expectedDocumentName === 'string'
+    && expected.expectedDocumentName.length > 0
+    ? expected.expectedDocumentName
+    : null;
+  const expectedSourceDocumentPath = typeof expected.sourceDocumentPath === 'string'
+    && expected.sourceDocumentPath.length > 0
+    ? expected.sourceDocumentPath
+    : null;
+  if (
+    !status
+    || status.ok !== true
+    || !photoshopStatusAppIdentityMatches(status.appName, expectedAppName)
+    || typeof status.appRunning !== 'boolean'
+    || typeof status.status !== 'string'
+    || !PHOTOSHOP_STATUS_VALUES.has(status.status)
+    || !boundedPhotoshopStatusInteger(status.documentCount, 0, PHOTOSHOP_STATUS_MAX_DOCUMENT_COUNT)
+    || !nullableBoundedPhotoshopStatusString(status.activeDocumentName, 260)
+    || !(status.activeDocumentId === null
+      || boundedPhotoshopStatusInteger(status.activeDocumentId, 1, Number.MAX_SAFE_INTEGER))
+    || !nullableBoundedPhotoshopStatusString(status.activeDocumentPath, 1024)
+    || typeof status.activeDocumentModified !== 'boolean'
+    || typeof status.activeDocumentSaved !== 'boolean'
+    || status.activeDocumentModified && status.activeDocumentSaved
+    || typeof status.widthPx !== 'number'
+    || !Number.isFinite(status.widthPx)
+    || typeof status.heightPx !== 'number'
+    || !Number.isFinite(status.heightPx)
+    || typeof status.resolution !== 'number'
+    || !Number.isFinite(status.resolution)
+    || !nullableBoundedPhotoshopStatusString(status.mode, 80)
+    || !nullableBoundedPhotoshopStatusString(status.bitsPerChannel, 80)
+    || !boundedPhotoshopStatusInteger(status.layerCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.groupCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.textLayerCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.smartObjectCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.adjustmentLayerCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.lockedLayers, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.hiddenLayers, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || typeof status.selectionActive !== 'boolean'
+    || !nullableBoundedPhotoshopStatusString(status.expectedDocumentName, 260)
+    || !nullableBoundedPhotoshopStatusString(status.sourceDocumentPath, 1024)
+    || status.expectedDocumentName !== expectedDocumentName
+    || (expectedSourceDocumentPath === null
+      ? status.sourceDocumentPath !== null
+      : status.sourceDocumentPath === null)
+    || !(status.error === null || boundedPhotoshopStatusString(status.error, 500))
+  ) return malformedPhotoshopDocumentStatus();
+
+  const documentCount = status.documentCount;
+  const documents = parsePhotoshopStatusDocuments(status.documents, documentCount);
+  const zeroDocumentProof = documentCount === 0
+    && status.activeDocumentName === null
+    && status.activeDocumentId === null
+    && status.activeDocumentPath === null
+    && status.activeDocumentModified === false
+    && status.activeDocumentSaved === false
+    && status.widthPx === 0
+    && status.heightPx === 0
+    && status.resolution === 0
+    && status.mode === null
+    && status.bitsPerChannel === null
+    && status.layerCount === 0
+    && status.groupCount === 0
+    && status.textLayerCount === 0
+    && status.smartObjectCount === 0
+    && status.adjustmentLayerCount === 0
+    && status.lockedLayers === 0
+    && status.hiddenLayers === 0
+    && status.selectionActive === false
+    && status.error === null;
+  const activeIdentityProof = documentCount > 0
+    && boundedPhotoshopStatusString(status.activeDocumentName, 260)
+    && boundedPhotoshopStatusInteger(status.activeDocumentId, 1, Number.MAX_SAFE_INTEGER);
+  const zeroActiveDocumentDetails = status.activeDocumentPath === null
+    && status.activeDocumentModified === false
+    && status.activeDocumentSaved === false
+    && status.widthPx === 0
+    && status.heightPx === 0
+    && status.resolution === 0
+    && status.mode === null
+    && status.bitsPerChannel === null
+    && status.layerCount === 0
+    && status.groupCount === 0
+    && status.textLayerCount === 0
+    && status.smartObjectCount === 0
+    && status.adjustmentLayerCount === 0
+    && status.lockedLayers === 0
+    && status.hiddenLayers === 0
+    && status.selectionActive === false;
+  const totalLayerCount = typeof status.layerCount === 'number' ? status.layerCount : -1;
+  const layerCountsCoherent = [
+    status.groupCount,
+    status.textLayerCount,
+    status.smartObjectCount,
+    status.adjustmentLayerCount,
+    status.lockedLayers,
+    status.hiddenLayers,
+  ].every((count) => typeof count === 'number' && count <= totalLayerCount);
+  const readyProof = activeIdentityProof
+    && boundedPhotoshopStatusNumber(status.widthPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+    && boundedPhotoshopStatusNumber(status.heightPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+    && boundedPhotoshopStatusNumber(status.resolution, 0, PHOTOSHOP_STATUS_MAX_RESOLUTION)
+    && boundedPhotoshopStatusString(status.mode, 80)
+    && boundedPhotoshopStatusString(status.bitsPerChannel, 80)
+    && layerCountsCoherent
+    && status.error === null;
+  const mismatchProof = activeIdentityProof
+    && zeroActiveDocumentDetails
+    && (status.expectedDocumentName !== null || status.sourceDocumentPath !== null)
+    && status.error === 'Expected Photoshop document is not active.';
+  const stateCoherent = status.status === 'not_running'
+    ? status.appRunning === false && zeroDocumentProof
+    : status.status === 'no_document'
+      ? status.appRunning === true && zeroDocumentProof
+      : status.status === 'document_mismatch'
+        ? status.appRunning === true && mismatchProof
+        : status.appRunning === true && readyProof;
+  if (!documents || !stateCoherent) return malformedPhotoshopDocumentStatus();
+
+  return {
+    ok: true,
     data: {
-      appName: d?.appName ? String(d.appName) : (args.appName || 'Photoshop'),
-      appRunning: d?.appRunning !== false,
-      created: d?.created === true,
-      documentName: d?.documentName ? String(d.documentName) : null,
-      widthPx: toNumber(d?.widthPx),
-      heightPx: toNumber(d?.heightPx),
-      resolution: toNumber(d?.resolution),
-      mode: d?.mode ? String(d.mode) : null,
-      documentCount: toNumber(d?.documentCount),
-      error: d?.error ? String(d.error) : null,
+      appName: status.appName,
+      appRunning: status.appRunning,
+      status: status.status,
+      documentCount,
+      activeDocumentName: status.activeDocumentName,
+      activeDocumentId: status.activeDocumentId,
+      activeDocumentPath: status.activeDocumentPath,
+      activeDocumentModified: status.activeDocumentModified,
+      activeDocumentSaved: status.activeDocumentSaved,
+      widthPx: status.widthPx,
+      heightPx: status.heightPx,
+      resolution: status.resolution,
+      mode: status.mode,
+      bitsPerChannel: status.bitsPerChannel,
+      layerCount: status.layerCount,
+      groupCount: status.groupCount,
+      textLayerCount: status.textLayerCount,
+      smartObjectCount: status.smartObjectCount,
+      adjustmentLayerCount: status.adjustmentLayerCount,
+      lockedLayers: status.lockedLayers,
+      hiddenLayers: status.hiddenLayers,
+      selectionActive: status.selectionActive,
+      expectedDocumentName: status.expectedDocumentName,
+      sourceDocumentPath: status.sourceDocumentPath,
+      documents,
+      error: status.error,
     },
-    ...(d?.ok === true && d?.created === true ? {} : { error: d?.error ? String(d.error) : 'Photoshop did not confirm document creation.' }),
-  } as DesktopResult<PhotoshopCreateDocumentResult>;
+  };
 }
 
 export async function photoshopDocumentStatus(args: {
@@ -4731,48 +5288,11 @@ export async function photoshopDocumentStatus(args: {
     sourceDocumentPath: sourceDocumentPath || undefined,
   });
   if (!r.ok) return r as DesktopResult<PhotoshopDocumentStatus>;
-  const d = r.data as any;
-  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
-  const documents = Array.isArray(d?.documents)
-    ? d.documents.slice(0, 12).map((doc: any) => ({
-        name: doc?.name ? String(doc.name) : '',
-        path: doc?.path ? String(doc.path) : null,
-        modified: doc?.modified === true,
-        saved: doc?.saved === true,
-        widthPx: toNumber(doc?.widthPx),
-        heightPx: toNumber(doc?.heightPx),
-      })).filter((doc: PhotoshopDocumentSummary) => !!doc.name)
-    : [];
-  return {
-    ok: true,
-    data: {
-      appName: d?.appName ? String(d.appName) : appName,
-      appRunning: d?.appRunning === true,
-      status: d?.status ? String(d.status) : 'unknown',
-      documentCount: toNumber(d?.documentCount),
-      activeDocumentName: d?.activeDocumentName ? String(d.activeDocumentName) : null,
-      activeDocumentPath: d?.activeDocumentPath ? String(d.activeDocumentPath) : null,
-      activeDocumentModified: d?.activeDocumentModified === true,
-      activeDocumentSaved: d?.activeDocumentSaved === true,
-      widthPx: toNumber(d?.widthPx),
-      heightPx: toNumber(d?.heightPx),
-      resolution: toNumber(d?.resolution),
-      mode: d?.mode ? String(d.mode) : null,
-      bitsPerChannel: d?.bitsPerChannel ? String(d.bitsPerChannel) : null,
-      layerCount: toNumber(d?.layerCount),
-      groupCount: toNumber(d?.groupCount),
-      textLayerCount: toNumber(d?.textLayerCount),
-      smartObjectCount: toNumber(d?.smartObjectCount),
-      adjustmentLayerCount: toNumber(d?.adjustmentLayerCount),
-      lockedLayers: toNumber(d?.lockedLayers),
-      hiddenLayers: toNumber(d?.hiddenLayers),
-      selectionActive: d?.selectionActive === true,
-      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
-      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
-      documents,
-      error: d?.error ? String(d.error) : null,
-    },
-  };
+  return parsePhotoshopDocumentStatusBridgeResponse(r.data, {
+    appName,
+    expectedDocumentName: expectedDocumentName || null,
+    sourceDocumentPath: sourceDocumentPath || null,
+  });
 }
 
 export async function photoshopLayerInventory(args: {

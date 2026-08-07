@@ -193,6 +193,9 @@ type ToolContext = {
   supabase: SupabaseEdgeClient;
   circleId: string;
   userId: string;
+  /** Exact Chat thread selected when this turn started. Server-side message
+   *  writes may target only this pre-authorized thread. */
+  threadId?: string | null;
   /** The current agent_runs.id — set whenever runLoop is running under a
    *  persisted run (every non-throwaway call has one). M3d approvals
    *  attach to this when the model omits runId. */
@@ -205,6 +208,100 @@ type ToolContext = {
   agentDbId?: string | null;
   agentLegacyIds?: string[];
 };
+
+// THREAD_AUTHORIZATION_CORE_START
+type SwanBotChatThreadAuthorizationDecision =
+  | { ok: true; threadId: string | null }
+  | {
+      ok: false;
+      status: 403 | 503;
+      code: "thread_forbidden" | "thread_authorization_unavailable";
+      message: string;
+    };
+
+/**
+ * Authorize the exact Chat thread immediately before it becomes service-role
+ * tool authority. Continuations call this again after opening their sealed
+ * snapshot: a membership that was valid when the run paused may have been
+ * revoked before a dispatch claim or result submission arrives.
+ */
+async function authorizeSwanBotChatThread(input: {
+  supabase: SupabaseEdgeClient;
+  circleId: string;
+  userId: string;
+  threadId?: unknown;
+}): Promise<SwanBotChatThreadAuthorizationDecision> {
+  if (input.threadId === null || input.threadId === undefined) {
+    return { ok: true, threadId: null };
+  }
+
+  const threadId = typeof input.threadId === "string"
+    ? input.threadId.trim().toLowerCase()
+    : "";
+  const validThreadId =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId);
+  if (!validThreadId) {
+    return {
+      ok: false,
+      status: 403,
+      code: "thread_forbidden",
+      message: "The active Chat thread identity is invalid. No new tool work was authorized.",
+    };
+  }
+
+  const { data: thread, error: threadError } = await input.supabase
+    .from("circle_chat_threads")
+    .select("id, circle_id, created_by, visibility")
+    .eq("id", threadId)
+    .eq("circle_id", input.circleId)
+    .maybeSingle();
+  if (threadError) {
+    return {
+      ok: false,
+      status: 503,
+      code: "thread_authorization_unavailable",
+      message: "Could not verify the active Chat thread. No new tool work was authorized.",
+    };
+  }
+  if (!thread) {
+    return {
+      ok: false,
+      status: 403,
+      code: "thread_forbidden",
+      message: "The active Chat thread does not belong to this circle. No new tool work was authorized.",
+    };
+  }
+
+  if (thread.visibility === "circle" || thread.created_by === input.userId) {
+    return { ok: true, threadId };
+  }
+
+  const { data: threadMembership, error: threadMembershipError } = await input.supabase
+    .from("circle_chat_thread_members")
+    .select("user_id")
+    .eq("thread_id", threadId)
+    .eq("user_id", input.userId)
+    .maybeSingle();
+  if (threadMembershipError) {
+    return {
+      ok: false,
+      status: 503,
+      code: "thread_authorization_unavailable",
+      message: "Could not verify the active Chat thread. No new tool work was authorized.",
+    };
+  }
+  if (!threadMembership) {
+    return {
+      ok: false,
+      status: 403,
+      code: "thread_forbidden",
+      message: "Not authorized for this Chat thread. No new tool work was authorized.",
+    };
+  }
+
+  return { ok: true, threadId };
+}
+// THREAD_AUTHORIZATION_CORE_END
 
 type Mode =
   | "talk" | "build" | "plan" | "execute"
@@ -1396,18 +1493,24 @@ const TOOLS: ToolDef[] = [
       required: ["content"],
       additionalProperties: false,
     },
-    handler: async (input, { supabase, circleId, userId }) => {
+    handler: async (input, { supabase, circleId, userId, threadId }) => {
       const args = (input || {}) as { content?: string; threadId?: string; replyToId?: string };
       const content = String(args.content || "").trim().slice(0, 4000);
       if (!content) return { ok: false, error: "content required" };
+      if (!threadId) {
+        return { ok: false, error: "active Chat thread identity required" };
+      }
+      if (args.threadId && args.threadId !== threadId) {
+        return { ok: false, error: "messages.create cannot write outside the active Chat thread" };
+      }
       const payload: Record<string, unknown> = {
         circle_id: circleId,
         user_id: userId,
         content,
         reactions: {},
         is_bot: false,
+        thread_id: threadId,
       };
-      if (args.threadId) payload.thread_id = args.threadId;
       if (args.replyToId) payload.reply_to = args.replyToId;
       const { data, error } = await supabase
         .from("messages")
@@ -1707,7 +1810,7 @@ const TOOLS: ToolDef[] = [
     {
       name: "credentials.get",
       description:
-        "Fetches credentials from 1Password via the user's local bridge (`/secrets` → `op item get`). Returns requested fields as a key→value map. Treat as highly sensitive — NEVER echo to chat or include in a tool_use payload for another tool without narrowing to the specific field. Requires `op` CLI + OP_SERVICE_ACCOUNT_TOKEN set on the bridge host.",
+        "Unavailable to model-side tools: raw credential values are never returned to the model. Use browser.fill_credential_field only through its target-bound guarded runtime, or ask the user to enter the credential manually.",
       input_schema: {
         type: "object" as const,
         properties: {
@@ -2345,7 +2448,7 @@ const TOOLS: ToolDef[] = [
     {
       name: "browser.fill_field",
       description:
-        "Drafts non-secret text into one exact textbox or searchbox selected by accessible name OR an exact CSS selector, then verifies it through the sealed client runtime. This action never submits. Use browser.select_option for dropdowns and browser.fill_credential_field for saved credentials. Login, OTP, MFA, CAPTCHA, bot-check, payment, recovery, and secret-like fields fail closed.",
+        "Drafts non-secret text into one exact textbox or searchbox selected by accessible name OR an exact CSS selector, then verifies it through the sealed client runtime. This action never submits. Use browser.select_option for dropdowns. Saved credential injection is currently withheld, so ask the user to enter login secrets manually. Login, OTP, MFA, CAPTCHA, bot-check, payment, recovery, and secret-like fields fail closed.",
       input_schema: {
         type: "object" as const,
         properties: {
@@ -2400,11 +2503,12 @@ const TOOLS: ToolDef[] = [
     {
       name: "browser.fill_credential_field",
       description:
-        "Safely fills a browser field with a login credential from 1Password without returning the raw secret to the model. Use for username/email/password fields during user-approved login flows, and pass siteUrl or expectedOrigin whenever known so the local browser can verify it is on the approved origin before fetching the secret. Never use for OTP, MFA, CAPTCHA, bot checks, or 'not a robot' controls — pause for the human instead.",
+        "Safely fills a browser field from exactly one saved-login source — credentialId for a granted circle-vault entry or item for 1Password — without returning the raw secret to the model. Use for username/email/password fields during user-approved login flows, and pass siteUrl or expectedOrigin whenever known so the local browser can verify it is on the approved origin before fetching the secret. Never use for OTP, MFA, CAPTCHA, bot checks, or 'not a robot' controls — pause for the human instead.",
       input_schema: {
         type: "object" as const,
         properties: {
-          item: { type: "string", description: "1Password item name (for example, 'WordPress Admin')." },
+          credentialId: { type: "string", minLength: 1, description: "Circle vault credential id from vault.resolve_for_task or vault.find." },
+          item: { type: "string", minLength: 1, description: "1Password item name (for example, 'WordPress Admin')." },
           vault: { type: "string", description: "Optional 1Password vault name." },
           siteUrl: { type: "string", description: "Expected site URL for origin binding before the saved credential is fetched and filled." },
           expectedOrigin: { type: "string", description: "Expected browser origin or hostname, e.g. https://example.com or example.com. Overrides siteUrl when provided." },
@@ -2414,9 +2518,16 @@ const TOOLS: ToolDef[] = [
           selector: { type: "string", description: "Optional CSS selector when ARIA label is unavailable." },
           submit: { type: "boolean", description: "Press Enter after filling." },
           exact: { type: "boolean" },
-          timeoutMs: { type: "integer" },
+          nth: { type: "integer", minimum: 0, description: "Zero-based disambiguator when multiple fields match." },
+          timeoutMs: { type: "integer", minimum: 500, maximum: 30000 },
+          taskContext: { type: "string", description: "Original user task or login context for guarded browser popup decisions." },
         },
-        required: ["item", "credentialField"],
+        required: ["credentialField"],
+        oneOf: [
+          { required: ["credentialId"], not: { required: ["item"] } },
+          { required: ["item"], not: { required: ["credentialId"] } },
+        ],
+        additionalProperties: false,
       },
     },
     {
@@ -2748,10 +2859,10 @@ const TOOL_GROUPS: Record<string, string[]> = {
   rooms: ["rooms.list", "rooms.create", "rooms.send_message", "workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "approvals.request"],
   workspace: ["workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "verification.typecheck", "verification.tests", "verification.lint", "approvals.request"],
   approvals: ["approvals.list", "approvals.request"],
-  browser: ["browser.open_url", "browser.dom_snapshot", "browser.wp_admin_source_intelligence", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.press_key", "browser.wait_for", "browser.scroll", "browser.screenshot", "approvals.request"],
+  browser: ["browser.open_url", "browser.dom_snapshot", "browser.wp_admin_source_intelligence", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.press_key", "browser.wait_for", "browser.scroll", "browser.screenshot", "approvals.request"],
   desktop: ["fetch_url", "desktop.launch_app", "desktop.focus_app", "desktop.type_text", "desktop.paste_text", "desktop.run_applescript", "desktop.press_keys", "desktop.menu_click", "desktop.list_running_apps", "desktop.wait_for_app", "desktop.screenshot", "desktop.open_url", "desktop.open_path", "desktop.file_search", "desktop.file_stat", "desktop.convert_image", "desktop.click_at", "desktop.mouse_move", "desktop.mouse_click", "desktop.mouse_down", "desktop.mouse_up", "desktop.mouse_drag", "desktop.mouse_scroll", "desktop.screen_size", "desktop.read_a11y_tree", "desktop.click_element", "desktop.set_element_value", "approvals.request"],
-  wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence", "wp.upload_media", "wp.create_slide", "wp.update_post", "wp.trash_post", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.wait_for", "browser.scroll", "approvals.request"],
-  credentials: ["credentials.get", "browser.fill_credential_field", "browser.verification_state", "approvals.request"],
+  wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence", "wp.upload_media", "wp.create_slide", "wp.update_post", "wp.trash_post", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.wait_for", "browser.scroll", "approvals.request"],
+  credentials: ["browser.verification_state", "approvals.request"],
   rewards: ["rewards.summary", "rewards.leaderboard", "getMemberStatus", "check_ins.list", "tasks.list"],
   verification: ["verification.typecheck", "verification.tests", "verification.lint"],
   coding: ["codebase.search", "desktop.edit_file", "local.run_shell", "git.run", "todo.write", "coordination.file_status", "desktop.file_read", "desktop.file_search", "verification.typecheck", "verification.tests", "verification.lint", "approvals.request"],
@@ -2760,6 +2871,12 @@ const TOOL_GROUPS: Record<string, string[]> = {
 function addToolNames(target: Set<string>, names: readonly string[]) {
   for (const name of names) if (TOOL_BY_NAME.has(name)) target.add(name);
 }
+
+const MODEL_DISABLED_TOOL_NAMES = new Set([
+  "approvals.resolve",
+  "credentials.get",
+  "browser.fill_credential_field",
+]);
 
 function selectToolsForTurn(userMessage: string, mode: Mode): ToolDef[] {
   const text = String(userMessage || "").toLowerCase();
@@ -2785,16 +2902,20 @@ function selectToolsForTurn(userMessage: string, mode: Mode): ToolDef[] {
 
   const tools = [...selected]
     .map((name) => TOOL_BY_NAME.get(name))
-    .filter((tool): tool is ToolDef => !!tool);
-  return tools.length > 0 ? tools : TOOLS;
+    .filter((tool): tool is ToolDef => !!tool && !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
+  return tools.length > 0
+    ? tools
+    : TOOLS.filter((tool) => !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
 }
 
 function resolveToolsByName(names?: string[]): ToolDef[] {
   if (!names || names.length === 0) return TOOLS;
   const out = names
     .map((name) => TOOL_BY_NAME.get(name))
-    .filter((tool): tool is ToolDef => !!tool);
-  return out.length > 0 ? out : TOOLS;
+    .filter((tool): tool is ToolDef => !!tool && !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
+  return out.length > 0
+    ? out
+    : TOOLS.filter((tool) => !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
 }
 
 // ─── Connectivity gate (client-supplied snapshot) ───────────────────────────
@@ -2806,13 +2927,11 @@ function resolveToolsByName(names?: string[]): ToolDef[] {
 // round on a doomed call. No snapshot → gate nothing (old clients identical).
 //
 // extraRules re-key v2's local-bridge-backed families to their TRUE
-// prerequisites (they are clientOnly here — wp.* and credentials.get execute
-// over the local desktop bridge, browser.fill_credential_field over the
-// browser bridge). extraRules win specificity ties over the core's defaults.
+// prerequisites (wp.* executes over the local desktop bridge). Disabled
+// credential tools are withheld from model selection above and therefore do
+// not get reachability hints that could encourage a doomed retry loop.
 const V2_CONNECTIVITY_EXTRA_RULES: ToolPrereqRule[] = [
   { match: "wp.", capability: "desktopBridge", hint: "Start the local desktop bridge to use wp.* tools." },
-  { match: "credentials.get", capability: "desktopBridge", hint: "Start the local desktop bridge before fetching a credential." },
-  { match: "browser.fill_credential_field", capability: "browser", hint: "Start the local browser bridge before filling saved credentials." },
 ];
 
 /** Keep LITERAL booleans only from the caller-supplied snapshot (plus bounded
@@ -2876,7 +2995,7 @@ async function buildFrozenBlock(
     "4. Before any click_at/mouse_move/mouse_click/mouse_down/mouse_up/mouse_drag/mouse_scroll call, always obtain a fresh exact app observation and call desktop.screenshot or desktop.screen_size first. Pass that exact `appName` with the bounded coordinates; never guess either the app or coordinates.",
     "5. Before browser clicks/fills on login, signup, checkout, admin, or suspicious pages, call browser.verification_state. If CAPTCHA, bot verification, MFA, or 'not a robot' is detected, DO NOT click or solve it; tell the user to complete it manually and wait for confirmation.",
     "6. For risky writes (publish, external_send, file_write, browser_action), call approvals.request FIRST with a `payload` containing `{ tool, app, label, url }` so the HITL banner renders a human-readable action line instead of raw args.",
-    "7. For login forms, prefer browser.fill_credential_field over credentials.get so raw passwords are never returned to the model. Pass siteUrl or expectedOrigin whenever known so the browser can verify the approved origin before filling. Never print secrets.",
+    "7. Saved credential tools are currently withheld from model use. For login forms, never request or print a secret; ask the user to enter credentials manually, and always hand OTP, MFA, CAPTCHA, and bot checks to the human.",
     "8. Use only the tools listed below. If a capability is missing from this turn's focused tool list, explain the needed capability rather than inventing a tool call.",
     "9. Deterministic-first orchestration: when the user gives explicit desktop/browser steps, execute the concrete tool sequence instead of replacing it with free-form model advice. Use model reasoning only at decision points: ambiguous visual target, selector missing after observation, creative artifact generation, summarization of observed state, or recovery after two failed deterministic attempts.",
     "10. Creative/model handoff: if the task needs a generated image, design asset, prompt rewrite, or visual concept, produce a concrete artifact or route to the available image/model tool when present. If this turn's focused tools do not include image generation, say what tool/key is needed and provide a ready-to-run prompt rather than claiming the runtime cannot help.",
@@ -3058,6 +3177,8 @@ type RunContinuation = {
   targetAgentDbId?: string | null;
   targetAgentLegacyIds?: string[];
   agentSubject?: Record<string, unknown>;
+  /** Exact visible Chat thread inherited by every resumed server tool call. */
+  threadId?: string;
   systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }>;
   toolNames?: string[];
   pendingToolUseIds: string[];
@@ -4727,6 +4848,9 @@ async function runLoop(args: {
   supabase: SupabaseEdgeClient;
   circleId: string;
   userId: string;
+  /** Validated visible Chat thread for this fresh turn. Resumes restore the
+   *  value from the authenticated continuation snapshot. */
+  threadId?: string | null;
   runId: string | null;
   /** Optional resume — when present, skips user-message setup and
    *  picks up from the persisted `messages` / `iter`. */
@@ -4766,6 +4890,7 @@ async function runLoop(args: {
     supabase,
     circleId,
     userId,
+    threadId,
     runId,
     resumeFrom,
     resumeToolResults,
@@ -4889,6 +5014,7 @@ async function runLoop(args: {
     supabase,
     circleId,
     userId,
+    threadId: resumeFrom?.threadId ?? threadId ?? null,
     runId,
     // Agent identity travels with the run (fresh turns and resumes both carry
     // it — see the `continuation` restore) so `save_memory` can write the
@@ -5121,6 +5247,7 @@ async function runLoop(args: {
         targetAgentDbId,
         targetAgentLegacyIds,
         agentSubject,
+        ...(ctx.threadId ? { threadId: ctx.threadId } : {}),
         systemBlocks,
         toolNames: activeTools.map((tool) => tool.name),
         pendingToolUseIds: clientUses.map((u) => u.id),
@@ -5217,6 +5344,12 @@ Deno.serve(async (req: Request) => {
   if (!circleId || !userId) {
     return errResponse(400, "missing_fields", "circleId, userId required");
   }
+  const requestedThreadId = !isContinuation && typeof body.threadId === "string"
+    ? body.threadId.trim().toLowerCase()
+    : null;
+  if (!isContinuation && body.threadId !== undefined && !isUuidLike(requestedThreadId)) {
+    return errResponse(400, "invalid_thread_identity", "threadId must be a valid Chat thread id");
+  }
   if (isContinuation && !isDispatchClaim && !isResultSubmission) {
     return errResponse(
       409,
@@ -5274,6 +5407,23 @@ Deno.serve(async (req: Request) => {
     .maybeSingle();
   if (!membership) {
     return errResponse(403, "forbidden", "Not authorized for this circle.");
+  }
+
+  // Bind service-role server tools to the exact visible Chat thread supplied
+  // by the authenticated client. The same authorization is repeated against
+  // a continuation's sealed thread after the snapshot is opened below.
+  const freshThreadAuthorization = await authorizeSwanBotChatThread({
+    supabase,
+    circleId,
+    userId,
+    threadId: requestedThreadId,
+  });
+  if (!freshThreadAuthorization.ok) {
+    return errResponse(
+      freshThreadAuthorization.status,
+      freshThreadAuthorization.code,
+      freshThreadAuthorization.message,
+    );
   }
 
   // A pre-dispatch claim is an authenticated safety operation, not a model
@@ -5360,6 +5510,24 @@ Deno.serve(async (req: Request) => {
           : "The paused checkpoint changed while it was being authenticated. No local action was authorized or replayed.",
       );
     }
+    // A sealed thread id is identity, not evergreen authorization. Membership
+    // may be revoked while local work is paused, so re-check it before parsing
+    // or honoring a dispatch claim, consuming submitted results, or resuming
+    // any model/tool work under the service role.
+    const continuationThreadAuthorization = await authorizeSwanBotChatThread({
+      supabase,
+      circleId,
+      userId,
+      threadId: cont.threadId,
+    });
+    if (!continuationThreadAuthorization.ok) {
+      return errResponse(
+        continuationThreadAuthorization.status,
+        continuationThreadAuthorization.code,
+        continuationThreadAuthorization.message,
+      );
+    }
+    cont.threadId = continuationThreadAuthorization.threadId ?? undefined;
     const parsedDispatchClaim = parseSwanBotContinuationDispatchClaim(body);
     if (!parsedDispatchClaim.ok) {
       return errResponse(
@@ -5839,7 +6007,7 @@ Deno.serve(async (req: Request) => {
       targetAgentLegacyIds: targetAgentMetadata.targetAgentLegacyIds as string[] | undefined,
       agentSubject: targetAgentMetadata.agentSubject as Record<string, unknown> | undefined,
       memoryPayload,
-      supabase, circleId, userId, runId,
+      supabase, circleId, userId, threadId: requestedThreadId, runId,
       resumeFrom,
       resumeToolResults,
       clientContinuationProtocolVersion,

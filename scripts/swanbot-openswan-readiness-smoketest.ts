@@ -46,6 +46,7 @@ for (const requiredRuntimeSmoke of [
   'direct-image-conversion-runtime',
   'computer-app-action-contract',
   'browser-locator-actionability',
+  'browser-wait-scroll-reachability',
   'browser-fill-mutation-gateway',
   'browser-toggle-mutation-gateway',
   'browser-toggle-runtime-gateway',
@@ -78,6 +79,57 @@ const packageJson = JSON.parse(
   readFileSync(join(process.cwd(), 'package.json'), 'utf8'),
 ) as { scripts?: PackageScripts };
 const packageScripts = packageJson.scripts ?? {};
+const releaseWorkflowSource = readFileSync(
+  join(process.cwd(), '.github/workflows/openswan-release.yml'),
+  'utf8',
+);
+
+for (const currentPinnedAction of [
+  'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+  'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
+  'denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5',
+]) {
+  assert(
+    releaseWorkflowSource.includes(currentPinnedAction),
+    `OpenSwan release workflow should pin current official action ${currentPinnedAction}`,
+  );
+}
+assert(
+  releaseWorkflowSource.includes('ref: ${{ github.event.pull_request.head.sha || github.sha }}')
+    && releaseWorkflowSource.includes('persist-credentials: false'),
+  'OpenSwan release workflow should inspect the exact event commit without persisting GitHub credentials',
+);
+assert(
+  releaseWorkflowSource.includes('pull_request)')
+    && releaseWorkflowSource.includes('workflow_dispatch)')
+    && releaseWorkflowSource.includes('git check-ref-format "$base_candidate"')
+    && releaseWorkflowSource.includes('git rev-parse --verify --end-of-options')
+    && releaseWorkflowSource.includes('git merge-base "$resolved_base" "$head_commit"'),
+  'OpenSwan release workflow should fail closed while resolving PR and manual-dispatch merge bases',
+);
+assert(
+  releaseWorkflowSource.includes('--base-ref "$OPENSWAN_MERGE_BASE"')
+    && releaseWorkflowSource.includes('git diff --check "$OPENSWAN_MERGE_BASE" "$OPENSWAN_HEAD_COMMIT" --'),
+  'OpenSwan release workflow should scope review and whitespace checks to merge-base..committed HEAD',
+);
+assert(
+  !releaseWorkflowSource.includes('pull_request_target:')
+    && !releaseWorkflowSource.includes('${{ secrets.'),
+  'OpenSwan release workflow should not run privileged PR code or interpolate repository secrets',
+);
+for (const releaseBoundaryPath of [
+  "'supabase/migrations/**'",
+  "'netlify.toml'",
+  "'AGENTS.md'",
+  "'AGENT.md'",
+  "'CLAUDE.md'",
+  "'Gemini.md'",
+]) {
+  assert(
+    releaseWorkflowSource.includes(releaseBoundaryPath),
+    `OpenSwan release workflow should run when ${releaseBoundaryPath} changes`,
+  );
+}
 
 function commandSegments(scriptName: string): string[] {
   const command = packageScripts[scriptName];
@@ -117,6 +169,11 @@ for (const smoke of SWANBOT_OPENSWAN_REQUIRED_SMOKES) {
   );
 }
 
+assertExecutesOnce('smoke:swanbot-openswan-readiness', 'smoke:chat-file-permission-demand');
+assertExecutesOnce('smoke:swanbot-v2-edge-fill-schema', 'smoke:browser-credential-schema-parity');
+assertExecutesOnce('smoke:computer-app-launch-focus-proof', 'smoke:computer-foreground-ownership');
+assertExecutesOnce('smoke:openswan-runtime-approval', 'smoke:chat-plan-tool-manifest');
+
 const dailyGuardSmokes = [
   'smoke:swanbot-v2-batch-policy',
   'smoke:swanbot-v2-client-result-persistence',
@@ -136,7 +193,9 @@ const releaseGuardSmokes = [
   'smoke:swanbot-v2-batch-policy',
   'smoke:swanbot-v2-client-result-persistence',
   'smoke:swanbot-v2-edge-fill-schema',
+  'smoke:swanbot-v2-thread-identity',
   'smoke:browser-locator-actionability',
+  'smoke:browser-wait-scroll-reachability',
   'smoke:browser-fill-mutation-gateway',
   'smoke:browser-toggle-mutation-gateway',
   'smoke:browser-toggle-runtime-gateway',
@@ -148,6 +207,7 @@ const releaseGuardSmokes = [
   'smoke:agent-action-runtime-wiring',
   'smoke:computer-app-semantic-action-proof',
   'smoke:computer-app-semantic-action-runtime',
+  'smoke:computer-task-truthful-outcome',
 ];
 
 for (const chainName of ['check:swanbot-v2:daily', 'check:swanbot-chat:daily']) {
@@ -156,6 +216,9 @@ for (const chainName of ['check:swanbot-v2:daily', 'check:swanbot-chat:daily']) 
 for (const chainName of ['check:swanbot-v2:release', 'check:swanbot-chat:release']) {
   for (const smokeName of releaseGuardSmokes) assertExecutesOnce(chainName, smokeName);
 }
+assertExecutesOnce('check:swanbot-chat:release', 'smoke:chat-failure-recovery');
+assertExecutesOnce('check:swanbot-chat:release', 'smoke:thinking-label-hook-order');
+assertExecutesOnce('check:swanbot-chat:release', 'smoke:exact-program-authority');
 const authoritySafetySmokes = [
   'smoke:chat-approval-single-use',
   'smoke:openswan-runtime-approval',
@@ -189,6 +252,7 @@ for (const smokeName of new Set([
   ...releaseGuardSmokes,
   ...chatComputerPolicySmokes,
   ...authoritySafetySmokes,
+  'smoke:chat-failure-recovery',
 ])) {
   assertExecutesOnce('smoke:all', smokeName);
 }

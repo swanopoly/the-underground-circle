@@ -20,6 +20,12 @@
 
 import { getFreshAccessToken } from './authSession';
 import { shouldBlockExternalAiProvider, getStrictLocalAiModeMessage } from './privacyMode';
+import {
+  sanitizeComputerTaskRootPointer,
+  type ComputerTaskRootPointerV1,
+} from './computerTaskRootStore';
+export { sanitizeComputerTaskRootPointer };
+export type { ComputerTaskRootPointerV1 } from './computerTaskRootStore';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 
@@ -148,6 +154,11 @@ export interface ComputerUseAgentOpts {
   booking?: boolean;
   /** Required fail-closed execution context for the cloud action gateway. */
   policy: ComputerUsePolicyEnvelope;
+  /**
+   * Inert correlation pointer only. It cannot authorize an action. The edge
+   * must re-read and CAS the authenticated root before any mutation.
+   */
+  computerTaskRootPointer?: ComputerTaskRootPointerV1 | null;
   onRunStarted?: (info: { runId: string }) => void;
   onSessionStarted?: (info: { sessionId: string; liveUrl: string }) => void;
   /** Fired when the agent pauses for user approval via the `ask_user`
@@ -235,15 +246,59 @@ export interface AgentHandle {
   cancel: () => void;
 }
 
+export interface ComputerUseAgentRequestPayload {
+  task: string;
+  circleId: string;
+  userId?: string;
+  model?: string | null;
+  sessionId?: string;
+  browserbase: { apiKey: string; projectId: string; region?: string };
+  maxIterations?: number;
+  maxTokensBudget?: number;
+  maxCostUsd?: number;
+  booking?: boolean;
+  policy: ComputerUsePolicyEnvelope;
+  computerTaskRootPointer?: ComputerTaskRootPointerV1;
+}
+
+/** Pure, allowlist-only POST projection used by the live client and smoke. */
+export function buildComputerUseAgentRequestPayload(
+  opts: ComputerUseAgentOpts,
+): ComputerUseAgentRequestPayload | null {
+  const pointerWasSupplied = opts.computerTaskRootPointer !== undefined
+    && opts.computerTaskRootPointer !== null;
+  const computerTaskRootPointer = sanitizeComputerTaskRootPointer(opts.computerTaskRootPointer);
+  if (pointerWasSupplied && !computerTaskRootPointer) return null;
+  return {
+    task: opts.task,
+    circleId: opts.circleId,
+    userId: opts.userId,
+    model: opts.model,
+    sessionId: opts.sessionId,
+    browserbase: { ...opts.browserbase },
+    maxIterations: opts.maxIterations,
+    maxTokensBudget: opts.maxTokensBudget,
+    maxCostUsd: opts.maxCostUsd,
+    booking: opts.booking,
+    policy: opts.policy,
+    ...(computerTaskRootPointer ? { computerTaskRootPointer } : {}),
+  };
+}
+
 export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
   const controller = new AbortController();
   let cancelled = false;
+  const requestPayload = buildComputerUseAgentRequestPayload(opts);
 
   (async () => {
     // Let the caller store the returned handle before any terminal callback
     // can fire (strict-local mode can reject synchronously otherwise).
     await Promise.resolve();
     if (cancelled) return;
+    if (!requestPayload) {
+      opts.onError('The computer task root pointer is invalid. Nothing was started.');
+      return;
+    }
     if (shouldBlockExternalAiProvider('anthropic')) {
       opts.onError(getStrictLocalAiModeMessage('anthropic'));
       return;
@@ -260,19 +315,9 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          task: opts.task,
-          circleId: opts.circleId,
-          userId: opts.userId,
-          model: opts.model,
-          sessionId: opts.sessionId,
-          browserbase: opts.browserbase,
-          maxIterations: opts.maxIterations,
-          maxTokensBudget: opts.maxTokensBudget,
-          maxCostUsd: opts.maxCostUsd,
-          booking: opts.booking,
-          policy: opts.policy,
-        }),
+        // Root correlation remains inert here. The edge is responsible for an
+        // authenticated re-read and CAS transition before any mutation.
+        body: JSON.stringify(requestPayload),
         signal: controller.signal,
       });
 

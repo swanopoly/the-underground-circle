@@ -31,6 +31,7 @@ import { getUserAgents } from '../../lib/agents';
 import { useUserApiKeys, type LLMProvider } from '../../lib/llmProviders';
 import MentionsInbox from '../../components/MentionsInbox';
 import { getLastProfileCircle, navigateToUnifiedProfile } from '../../lib/profileNavigation';
+import { secureSignOut } from '../../lib/authLogout';
 
 const fmt = (n: number) => n.toLocaleString();
 
@@ -324,7 +325,7 @@ export default function ProfileScreen({ navigation, route }: any) {
     // Matches EditProfileScreen/useAuth. Errors are swallowed on purpose: a
     // failed revoke should not strand the UI in a half-logged-in state.
     const signOutLocal = async () => {
-      try { await supabase.auth.signOut({ scope: 'local' }); } catch {}
+      try { await secureSignOut({ scope: 'local', userId: profile?.id }); } catch {}
     };
     if (Platform.OS === 'web') {
       if (window.confirm('You sure you want to sign out?')) {

@@ -1,6 +1,7 @@
 import type { ComputerTaskCheckpointSurface, ComputerTaskComplexityPlan } from './computerTaskComplexityPlan';
 import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
 import type { ConnectedAgentProvider } from './connectedAgentDispatch';
+import type { ExactPlanApprovalCorrelation } from './exactPlanApprovalContinuityCore';
 
 export type ComputerTaskPhase =
   | 'planning'
@@ -309,6 +310,13 @@ export interface ComputerTaskStateRecord {
   id: string;
   circleId: string;
   threadId: string | null;
+  /** Stable originating user-message/submission identity. Exact mutation
+   * retries preserve it; legacy records without it fail closed. */
+  requestIdentity?: string | null;
+  /** Credential-free pointer used to reconcile one exact Chat plan approval
+   * after a full refresh. It is not execution authority; the approval gate
+   * re-fingerprints and atomically consumes the matching row before dispatch. */
+  exactPlanApproval?: ExactPlanApprovalCorrelation | null;
   task: string;
   taskKind: string;
   taskLabel: string;

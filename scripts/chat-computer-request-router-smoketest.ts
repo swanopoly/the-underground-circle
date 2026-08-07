@@ -932,18 +932,18 @@ for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
   ['Focus Photoshop', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Focus Visual Studio Code', 'Visual Studio Code', 'Visual Studio Code', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Start TextEdit', 'TextEdit', 'TextEdit', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Switch to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Bring Slack to the front', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Activate Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Switch to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring Slack to the front', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Activate Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Can you open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Could you launch Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Would you open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Can you please open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open Photoshop please', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open up Photoshop', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Switch over to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Bring Slack forward', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Bring forward Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Switch over to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring Slack forward', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring forward Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open settings', 'settings', 'System Settings', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open Chrome', 'Chrome', 'Google Chrome', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Launch Firefox', 'Firefox', 'Firefox', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
@@ -951,6 +951,9 @@ for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
   const route = buildChatComputerRequestRoute(task);
   const program = route?.deterministicLifecycleReadProgram;
   const actionTools = route?.actionItems.map((item) => item.tool) || [];
+  const expectedConditions = program?.operation === 'focus'
+    ? ['always', 'if_not_frontmost', 'always']
+    : ['always', 'if_not_running', 'if_launched', 'if_initially_running_not_frontmost', 'always'];
   const prompt = buildChatComputerRequestRoutePromptBlock(task) || '';
   if (
     route?.aiNeed?.level !== 'none'
@@ -962,6 +965,7 @@ for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
     || program.targetAppName !== expectedTarget
     || program.dispatchAppName !== expectedDispatch
     || JSON.stringify(actionTools) !== JSON.stringify(expectedTools)
+    || JSON.stringify(program.steps.map((step) => step.when)) !== JSON.stringify(expectedConditions)
     || route.recommendedTools.some((tool) => !expectedTools.includes(tool as any))
     || /selected_chat_model_then_openswan|model_guided_tools/.test(prompt)
   ) {

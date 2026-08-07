@@ -2,7 +2,7 @@ import './src/lib/animationPatch'; // Must be first — patches Animated.loop fo
 import './src/lib/pixelDesign'; // Side effect: injects the global system font stack + :root CSS vars on web
 import { installErrorReporter } from './src/lib/errorReporter';
 installErrorReporter(); // Register global unhandled-rejection / error handlers
-import React, { Suspense, useState, useEffect, useRef, useMemo } from 'react';
+import React, { Suspense, useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { StatusBar, View, Text, StyleSheet, Animated, Platform } from 'react-native';
 import { NavigationContainer, useNavigation, LinkingOptions } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -10,9 +10,18 @@ import { Session } from '@supabase/supabase-js';
 import { supabase } from './src/lib/supabase';
 import ErrorBoundary from './src/components/ErrorBoundary';
 import AppHeader from './src/components/AppHeader';
-import { acceptInvite, lookupInvite } from './src/lib/invites';
+import { acceptInvite } from './src/lib/invites';
 import { buildAppActions } from './src/components/command/commandActions';
 import { ToastProvider } from './src/components/Toast';
+import {
+  bootstrapValidatedAuthSession,
+  clearInvalidLocalAuthSession,
+  validateAuthSessionCandidate,
+} from './src/lib/authBootstrap';
+import { isPasswordRecoveryLocation } from './src/lib/authUiPolicy';
+import { safeGetUser } from './src/lib/authSession';
+import { OWNER_EMAIL } from './src/lib/officeConfig';
+import { clearLocalAuthResidualAuthority } from './src/lib/authLogout';
 
 const AuthNavigator = React.lazy(() => import('./src/navigation/AuthNavigator'));
 const MainNavigator = React.lazy(() => import('./src/navigation/MainNavigator'));
@@ -152,8 +161,32 @@ function getInviteFromPath(): string | undefined {
   return undefined;
 }
 
+function isPasswordRecoveryUrl(): boolean {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return false;
+  try {
+    return isPasswordRecoveryLocation(
+      window.location.pathname,
+      window.location.search,
+      window.location.hash,
+    );
+  } catch {
+    return false;
+  }
+}
+
 function MainWithHeader() {
   const navigation = useNavigation();
+
+  // Owner-only command palette entries (Backpack) — hidden until the auth
+  // read proves the session belongs to OWNER_EMAIL. Fail closed.
+  const [isOwnerAccount, setIsOwnerAccount] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    safeGetUser().then(({ value }) => {
+      if (!cancelled) setIsOwnerAccount(value?.email === OWNER_EMAIL);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   // Build command palette actions with current navigation context
   const actions = useMemo(() => {
@@ -171,8 +204,8 @@ function MainWithHeader() {
         }
       }
     } catch {}
-    return buildAppActions(nav, circleId);
-  }, [navigation]);
+    return buildAppActions(nav, circleId, { showOwnerTabs: isOwnerAccount });
+  }, [navigation, isOwnerAccount]);
 
   const content = (
     <View style={{ flex: 1 }}>
@@ -196,6 +229,19 @@ function MainWithHeader() {
 }
 
 const NAV_STATE_KEY = 'uc_nav_state_v1';
+
+/**
+ * Web URLs are shareable navigation authority. A persisted stack is only a
+ * convenience when the user opens the bare app root; otherwise it can carry a
+ * prior account or circle over an explicit deep link. Native has no browser
+ * URL to honor, so its saved stack remains authoritative on startup.
+ */
+export function shouldRestorePersistedNavigationState(
+  platform: string,
+  webLocation: string | null | undefined,
+): boolean {
+  return platform !== 'web' || webLocation === '/';
+}
 
 async function loadNavState() {
   try {
@@ -234,6 +280,8 @@ const linking: LinkingOptions<any> = {
       // Auth
       Login: 'login',
       SignUp: 'signup',
+      PasswordRecovery: 'forgot-password',
+      ResetPassword: 'reset-password',
       // Main
       CirclesList: 'circles',
       CreateCircle: 'circles/create',
@@ -282,7 +330,16 @@ export default function App() {
   const [initialNavState, setInitialNavState] = useState<object | undefined>(undefined);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [hasCircles, setHasCircles] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(isPasswordRecoveryUrl);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  const completePasswordRecovery = useCallback(() => {
+    setSession(null);
+    setPasswordRecovery(false);
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.history.replaceState({}, '', '/login');
+    }
+  }, []);
 
   const refreshHasCircles = async (userId: string): Promise<boolean> => {
     try {
@@ -305,6 +362,10 @@ export default function App() {
   };
 
   useEffect(() => {
+    let disposed = false;
+    let authRevision = 0;
+    let activeUserId: string | null = null;
+
     // Setup notifications
     import('./src/lib/notifications').then(n => {
       n.setupNotifications();
@@ -350,48 +411,77 @@ export default function App() {
       try { localStorage.setItem(PENDING_INVITE_KEY, inviteToken); } catch {}
     }
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setLoading(false);
-      // Start agent auto-connect immediately if already logged in
-      if (session) {
-        startAgentAutoConnectDeferred();
-        // Redeem pending invite if user just logged in with one
-        handlePendingInvite(session.user.id).finally(() => {
-          refreshHasCircles(session.user.id).then((userHasCircles) => {
-            if (!userHasCircles && !isOnboardingComplete()) {
-              setShowOnboarding(true);
-            }
-          }).catch(() => {});
-        });
-      } else {
-        setHasCircles(false);
-      }
-    }).catch(() => {
-      setLoading(false);
-    });
+    const finishUserSetup = (validatedSession: Session) => {
+      handlePendingInvite(validatedSession.user.id).finally(() => {
+        refreshHasCircles(validatedSession.user.id).then((userHasCircles) => {
+          if (!userHasCircles && !isOnboardingComplete()) {
+            setShowOnboarding(true);
+          } else {
+            setShowOnboarding(false);
+          }
+        }).catch(() => {});
+      });
+    };
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      setSession(session);
-      // Start agent auto-connect when user logs in
-      // Only stop on explicit SIGNED_OUT — token refresh events can briefly have null session
-      // which was killing all agent connections
-      if (session) {
-        startAgentAutoConnectDeferred();
-        // Redeem pending invite after auth
-        if (event === 'SIGNED_IN') {
-          handlePendingInvite(session.user.id).finally(() => {
-            refreshHasCircles(session.user.id).then((userHasCircles) => {
-              if (!userHasCircles && !isOnboardingComplete()) {
-                setShowOnboarding(true);
-              } else {
-                setShowOnboarding(false);
-              }
-            }).catch(() => {});
-          });
-        }
-      } else if (event === 'SIGNED_OUT') {
+    const applyValidatedSession = async (
+      candidate: Session,
+      event: string,
+      validate: (session: Session) => Promise<Session | null> = validateAuthSessionCandidate,
+    ) => {
+      const revision = ++authRevision;
+      const validatedSession = await validate(candidate);
+      if (disposed || revision !== authRevision) return;
+
+      if (!validatedSession) {
+        setSession(null);
+        setLoading(false);
+        setHasCircles(false);
         stopAgentAutoConnectDeferred();
+        void clearInvalidLocalAuthSession();
+        return;
+      }
+
+      const isRecovery = event === 'PASSWORD_RECOVERY' || isPasswordRecoveryUrl();
+      activeUserId = validatedSession.user.id;
+      setSession(validatedSession);
+      setLoading(false);
+      setPasswordRecovery(isRecovery);
+
+      // A password-recovery session is only for choosing a new password. Do
+      // not mount the main application or start local agents with it.
+      if (isRecovery) {
+        stopAgentAutoConnectDeferred();
+        return;
+      }
+
+      startAgentAutoConnectDeferred();
+      if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+        finishUserSetup(validatedSession);
+      }
+    };
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (disposed) return;
+
+      if (event === 'PASSWORD_RECOVERY') {
+        setPasswordRecovery(true);
+      }
+
+      if (nextSession) {
+        // Supabase recommends keeping auth callbacks synchronous. Defer any
+        // getUser call until its internal auth lock has been released.
+        setTimeout(() => {
+          if (!disposed) void applyValidatedSession(nextSession, event);
+        }, 0);
+      } else if (event === 'SIGNED_OUT') {
+        const signedOutUserId = activeUserId;
+        activeUserId = null;
+        authRevision += 1;
+        setSession(null);
+        setLoading(false);
+        setPasswordRecovery(false);
+        stopAgentAutoConnectDeferred();
+        void clearLocalAuthResidualAuthority(signedOutUserId);
         setShowOnboarding(false);
         setHasCircles(false);
         // Clear per-user persisted UI state so the NEXT account on this
@@ -401,10 +491,45 @@ export default function App() {
           localStorage.removeItem(NAV_STATE_KEY);
           localStorage.removeItem(ONBOARDING_KEY);
         } catch {}
+      } else if (event === 'INITIAL_SESSION') {
+        // A missing initial session is a valid signed-out state. Other auth
+        // events can transiently carry null while refresh is in flight, so
+        // those do not evict an already verified session. Leave the bounded
+        // bootstrap authoritative in case storage hydration finishes just
+        // after this initial notification.
+        setSession(null);
+        setLoading(false);
+        setHasCircles(false);
       }
     });
 
+    // A persisted session is only a candidate. Verify it against Supabase
+    // before it can select MainNavigator or start the desktop agent bridge.
+    const bootstrapRevision = ++authRevision;
+    bootstrapValidatedAuthSession().then((validatedSession) => {
+      if (disposed || bootstrapRevision !== authRevision) return;
+      if (!validatedSession) {
+        setSession(null);
+        setHasCircles(false);
+        setLoading(false);
+        void clearInvalidLocalAuthSession();
+        return;
+      }
+      void applyValidatedSession(
+        validatedSession,
+        'INITIAL_SESSION',
+        async (sessionCandidate) => sessionCandidate,
+      );
+    }).catch(() => {
+      if (disposed || bootstrapRevision !== authRevision) return;
+      setSession(null);
+      setHasCircles(false);
+      setLoading(false);
+    });
+
     return () => {
+      disposed = true;
+      authRevision += 1;
       subscription.unsubscribe();
       clearTimeout(timeout);
     };
@@ -424,27 +549,40 @@ export default function App() {
   // Only use saved nav state if it looks valid (has routes array)
   const validNavState = initialNavState && typeof initialNavState === 'object' && 'routes' in initialNavState
     ? initialNavState as any : undefined;
+  const webNavigationLocation = Platform.OS === 'web' && typeof window !== 'undefined'
+    ? `${window.location.pathname}${window.location.search}${window.location.hash}`
+    : null;
+  const restorePersistedNavigation = shouldRestorePersistedNavigationState(
+    Platform.OS,
+    webNavigationLocation,
+  );
 
   return (
     <ErrorBoundary scope="app">
       <ToastProvider>
         <NavigationContainer
           linking={linking}
-          initialState={session ? validNavState : undefined}
+          initialState={session && !passwordRecovery && restorePersistedNavigation
+            ? validNavState
+            : undefined}
           onStateChange={(state) => {
-            if (state && session) saveNavState(state);
+            if (state && session && !passwordRecovery) saveNavState(state);
           }}
         >
           <StatusBar barStyle="light-content" />
-          {session ? (
+          {session && !passwordRecovery ? (
             <MainWithHeader />
           ) : (
             <Suspense fallback={<AppRouteFallback />}>
-              <AuthNavigator />
+              <AuthNavigator
+                key={passwordRecovery ? 'password-recovery' : 'auth'}
+                passwordRecovery={passwordRecovery}
+                onPasswordRecoveryComplete={completePasswordRecovery}
+              />
             </Suspense>
           )}
         </NavigationContainer>
-        {showOnboarding && session && !hasCircles && (
+        {showOnboarding && session && !passwordRecovery && !hasCircles && (
           <Suspense fallback={null}>
             <OnboardingFlow
               userId={session.user.id}
@@ -452,7 +590,7 @@ export default function App() {
             />
           </Suspense>
         )}
-        {session && (
+        {session && !passwordRecovery && (
           <Suspense fallback={null}>
             <XPOverlay />
           </Suspense>

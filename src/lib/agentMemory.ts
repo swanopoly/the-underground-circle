@@ -130,21 +130,10 @@ async function persistSoulRouting(
 
 // ── Memory Extraction ───────────────────────────────────────────────────────
 
-// Extraction used to be hard-wired to a PLATFORM Gemini key that is only
-// non-empty when EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'. That flag
-// ships `false`, so the key was `''`, extraction short-circuited before it
-// ever called a model, and every caller got a clean-looking
-// {saved:0,updated:0,rejected:0}. The whole "the agent remembers our
-// conversations" loop captured nothing, silently.
-//
-// The transport now mirrors memoryEmbeddings: server-side `llm-proxy` via
-// supabase.functions.invoke, keyed by the user's own marketplace providers
-// (or an llm-proxy env key), with the same circuit-breaker conventions. The
-// platform key survives ONLY as an optional fast path for dev builds that
-// explicitly opt in.
-const PLATFORM_GEMINI_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-  : '';
+// Extraction mirrors memoryEmbeddings: it always crosses the authenticated
+// server-side `llm-proxy` boundary and uses a provider connected in
+// Marketplace. A provider key must never be compiled into, read by, or sent
+// directly from the browser bundle.
 
 type ExtractedMemory = ExtractedMemoryCandidate;
 
@@ -177,8 +166,7 @@ async function loadAvailableProviders(): Promise<string[]> {
     return providers;
   } catch (err) {
     console.warn('[AgentMemory] provider discovery failed:', err);
-    // Cache the empty answer briefly so a broken RPC doesn't get hammered;
-    // platform-env routes are still attempted below.
+    // Cache the empty answer briefly so a broken RPC doesn't get hammered.
     providerCache = { at: now, providers: [] };
     return [];
   }
@@ -212,31 +200,6 @@ interface ExtractionCallResult {
   detail: string;
 }
 
-/** Optional dev fast path: direct Gemini, only when the platform-key flag is on. */
-async function callPlatformGemini(prompt: { system: string; user: string }): Promise<string | null> {
-  if (!PLATFORM_GEMINI_KEY) return null;
-  if (shouldBlockExternalAiProvider('google_ai')) return null;
-  try {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${PLATFORM_GEMINI_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `${prompt.system}\n\n${prompt.user}` }] }],
-          generationConfig: { maxOutputTokens: EXTRACTION_MAX_TOKENS, temperature: 0.1 },
-        }),
-      },
-    );
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-  } catch (e) {
-    console.warn('[AgentMemory] platform Gemini fast path failed:', e);
-    return null;
-  }
-}
-
 /**
  * Run the extraction prompt through `llm-proxy`, walking the candidate routes
  * until one answers. Returns which route answered so callers can report it.
@@ -245,12 +208,6 @@ async function callExtractionModel(prompt: { system: string; user: string }): Pr
   // Circuit breaker first — a dead proxy must not cost a round trip per turn.
   if (extractionFailures >= MAX_EXTRACTION_FAILURES && Date.now() - lastExtractionFailureAt < EXTRACTION_BACKOFF_MS) {
     return { text: null, route: null, failure: 'provider_error', detail: 'Extraction circuit breaker open after repeated failures.' };
-  }
-
-  const fastPath = await callPlatformGemini(prompt);
-  if (fastPath) {
-    extractionFailures = 0;
-    return { text: fastPath, route: { provider: 'google_ai', model: 'gemini-2.5-flash', source: 'override' }, failure: null, detail: 'platform key fast path' };
   }
 
   const availableProviders = await loadAvailableProviders();

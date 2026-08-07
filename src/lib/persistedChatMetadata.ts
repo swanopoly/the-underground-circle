@@ -21,6 +21,7 @@ import {
   normalizeComputerTaskOutcomeStatus,
   type ComputerTaskOutcomeStatus,
 } from './computerTaskOutcome';
+import { sanitizeComputerTaskRootPointer } from './computerTaskRootStore';
 
 const LEGACY_CROWN_PREFIX = /^👑 \*\*OpenSwan:\*\* /u;
 const BOT_PREFIX = /^(🦢|🤖) \*\*[^*]{1,80}:\*\* /u;
@@ -32,6 +33,31 @@ const AGENT_SUBJECT_NAME_MAX = 120;
 const AGENT_SUBJECT_PROVIDER_MAX = 80;
 const AGENT_SUBJECT_ALIAS_MAX = 160;
 const AGENT_SUBJECT_ALIAS_LIMIT = 8;
+
+function preserveInertComputerTaskRootPointer<T extends Record<string, unknown>>(value: T): T {
+  const pointer = sanitizeComputerTaskRootPointer(value.computerTaskRootPointer);
+  const { computerTaskRootPointer: _discarded, ...rest } = value;
+  return (pointer
+    ? { ...rest, computerTaskRootPointer: pointer }
+    : rest) as T;
+}
+
+function preserveInertBrowserRootPointers(
+  metadata: PersistedChatBotMetadata,
+): Pick<PersistedChatBotMetadata, 'browserPlans' | 'browserSessions'> {
+  return {
+    browserPlans: Array.isArray(metadata.browserPlans)
+      ? metadata.browserPlans.map((plan) => preserveInertComputerTaskRootPointer(
+          plan as unknown as Record<string, unknown>,
+        )) as unknown as BrowserPlanCardData[]
+      : undefined,
+    browserSessions: Array.isArray(metadata.browserSessions)
+      ? metadata.browserSessions.map((session) => preserveInertComputerTaskRootPointer(
+          session as unknown as Record<string, unknown>,
+        )) as unknown as BrowserSessionRecord[]
+      : undefined,
+  };
+}
 
 export type PersistedChatRecoveryOption = {
   id: string;
@@ -851,6 +877,43 @@ function sortDesignRunbooksByRisk<T extends { risk?: unknown; operation?: unknow
   });
 }
 
+function compactComputerVerificationTarget(
+  target?: ChatComputerHandoffMetadata['verificationTarget'] | null,
+): ChatComputerHandoffMetadata['verificationTarget'] | null {
+  if (!target) return null;
+  const exact = (value: unknown, max: number): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed && trimmed.length <= max && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : null;
+  };
+  const dimension = (value: unknown): number | null => {
+    const number = Number(value);
+    return Number.isInteger(number) && number > 0 && number <= 100_000 ? number : null;
+  };
+  const expectedWidthPx = dimension(target.expectedWidthPx);
+  const expectedHeightPx = dimension(target.expectedHeightPx);
+  const dimensionsArePaired = expectedWidthPx != null && expectedHeightPx != null;
+  const browserProcessId = exact(target.browserIdentity?.browserProcessId, 160);
+  const browserContextId = exact(target.browserIdentity?.browserContextId, 160);
+  const pageId = exact(target.browserIdentity?.pageId, 160);
+  const opaqueUrl = typeof target.browserIdentity?.url === 'string'
+    && /^uc_browser_url_[a-f0-9]{64}$/.test(target.browserIdentity.url)
+    ? target.browserIdentity.url
+    : null;
+  const browserIdentity = browserProcessId && browserContextId && pageId && opaqueUrl
+    ? { browserProcessId, browserContextId, pageId, url: opaqueUrl }
+    : null;
+  const compacted = {
+    appName: exact(target.appName, 160),
+    browserIdentity,
+    expectedDocumentName: exact(target.expectedDocumentName, 240),
+    expectedWidthPx: dimensionsArePaired ? expectedWidthPx : null,
+    expectedHeightPx: dimensionsArePaired ? expectedHeightPx : null,
+    filePath: exact(target.filePath, 4_096),
+  };
+  return Object.values(compacted).some((value) => value != null) ? compacted : null;
+}
+
 function compactComputerHandoff(
   handoff?: ChatComputerHandoffMetadata | null,
   mode: 'full' | 'minimal' | 'tiny' = 'full',
@@ -872,6 +935,10 @@ function compactComputerHandoff(
       replayPolicy: handoff.replayPolicy === 'manual_verify_only' ? 'manual_verify_only' : 'normal',
       mutationDispatched: handoff.mutationDispatched === true,
       verificationOnlyTools: (handoff.verificationOnlyTools || []).slice(0, 4).map((value) => truncateText(String(value), 120)),
+      verificationBridgeInstanceId: handoff.verificationBridgeInstanceId
+        ? truncateText(String(handoff.verificationBridgeInstanceId), 128)
+        : null,
+      verificationTarget: compactComputerVerificationTarget(handoff.verificationTarget),
       preflightStatus: handoff.preflightStatus || null,
       preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), 120) : null,
       groundingStatus: handoff.groundingStatus || null,
@@ -1048,6 +1115,10 @@ function compactComputerHandoff(
     replayPolicy: handoff.replayPolicy === 'manual_verify_only' ? 'manual_verify_only' : 'normal',
     mutationDispatched: handoff.mutationDispatched === true,
     verificationOnlyTools: (handoff.verificationOnlyTools || []).slice(0, 4).map((value) => truncateText(String(value), 120)),
+    verificationBridgeInstanceId: handoff.verificationBridgeInstanceId
+      ? truncateText(String(handoff.verificationBridgeInstanceId), 128)
+      : null,
+    verificationTarget: compactComputerVerificationTarget(handoff.verificationTarget),
     preflightStatus: handoff.preflightStatus || null,
     preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), mode === 'minimal' ? 160 : 360) : null,
     groundingStatus: handoff.groundingStatus || null,
@@ -1349,6 +1420,8 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       completedAt: plan.completedAt,
       backendSessionId: plan.backendSessionId,
       backendLiveUrl: plan.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(plan.computerTaskRootPointer) || undefined,
       actions: Array.isArray(plan.actions)
         ? plan.actions.slice(0, 10).map((action: any) => ({
             id: action.id,
@@ -1375,6 +1448,8 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       currentUrl: session.currentUrl,
       backendSessionId: session.backendSessionId,
       backendLiveUrl: session.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(session.computerTaskRootPointer) || undefined,
       recommendedPermission: session.recommendedPermission,
       actions: Array.isArray(session.actions) ? session.actions.slice(0, 10) : [],
     })) as any,
@@ -1462,6 +1537,8 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       status: plan.status,
       backendSessionId: plan.backendSessionId,
       backendLiveUrl: plan.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(plan.computerTaskRootPointer) || undefined,
       actions: Array.isArray(plan.actions)
         ? plan.actions.slice(0, 5).map((action: any) => ({
             id: action.id,
@@ -1482,6 +1559,8 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       status: session.status,
       backendSessionId: session.backendSessionId,
       backendLiveUrl: session.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(session.computerTaskRootPointer) || undefined,
     })) as any,
     recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 3),
     recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability, 'minimal'),
@@ -1535,8 +1614,10 @@ export function readPersistedChatBotMetadata(content: string | null | undefined)
     const parsed = JSON.parse(raw) as PersistedChatBotMetadata;
     if (!parsed || typeof parsed !== 'object') return null;
     const agentSubjectMetadata = compactAgentSubjectMetadata(parsed.agentSubjectMetadata);
+    const browserRootPointers = preserveInertBrowserRootPointers(parsed);
     return {
       ...parsed,
+      ...browserRootPointers,
       requestAuthorId: boundedLegacyValue(parsed.requestAuthorId, 160) || undefined,
       agentSubjectMetadata: agentSubjectMetadata || undefined,
       computerTaskStatus: normalizeComputerTaskOutcomeStatus(parsed.computerTaskStatus),
@@ -1819,6 +1900,7 @@ export function formatPersistedChatBotMessage(
   const normalizedMetadata = metadata
     ? {
         ...metadata,
+        ...preserveInertBrowserRootPointers(metadata),
         requestAuthorId: boundedLegacyValue(metadata.requestAuthorId, 160) || undefined,
         agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
         recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),

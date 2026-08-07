@@ -169,7 +169,7 @@ export interface SwanBotOpenSwanReadinessSnapshot {
 // Expected counts are pinned against the live `swanbot-v2-ai` TOOLS array by
 // the readiness smoke via deriveSwanbotV2ToolParityFromSource — if the edge
 // catalog grows or shrinks, the smoke fails until these are re-pinned here.
-// (Re-pinned 2026-08-06: +2 bounded semantic browser primitives —
+// (Re-pinned 2026-08-05: +2 bounded semantic browser primitives —
 // browser.wait_for and browser.scroll — so v2 now exposes 84 tools, 59 of
 // them client-delegated. Locator-actionability evidence still never
 // authorizes or binds a later mutation.)
@@ -178,6 +178,7 @@ export const SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS = 59;
 export const SWANBOT_OPENSWAN_DEFAULT_MIN_TELEMETRY_RUNS = 50;
 
 export const SWANBOT_OPENSWAN_REQUIRED_SMOKES: SwanBotOpenSwanSmokeCheck[] = [
+  { id: 'chat-file-permission-demand', command: 'npm run smoke:chat-file-permission-demand', status: 'unknown' },
   { id: 'swanbot-routing', command: 'npm run smoke:swanbot-routing', status: 'unknown' },
   { id: 'swanbot-v2-delegation', command: 'npm run smoke:swanbot-v2-delegation', status: 'unknown' },
   { id: 'swanbot-v2-continuation', command: 'npm run smoke:swanbot-v2-continuation', status: 'unknown' },
@@ -193,6 +194,7 @@ export const SWANBOT_OPENSWAN_REQUIRED_SMOKES: SwanBotOpenSwanSmokeCheck[] = [
   { id: 'wordpress-admin-source-intelligence', command: 'npm run smoke:wordpress-admin-source-intelligence', status: 'unknown' },
   { id: 'browser-locator-actionability', command: 'npm run smoke:browser-locator-actionability', status: 'unknown' },
   { id: 'browser-dom-snapshot-privacy', command: 'npm run smoke:browser-dom-snapshot-privacy', status: 'unknown' },
+  { id: 'browser-wait-scroll-reachability', command: 'npm run smoke:browser-wait-scroll-reachability', status: 'unknown' },
   { id: 'openswan-runtime-approval', command: 'npm run smoke:openswan-runtime-approval', status: 'unknown' },
   { id: 'openswan-generic-native-ui-runtime', command: 'npm run smoke:openswan-generic-native-ui-runtime', status: 'unknown' },
   { id: 'chat-approval-single-use', command: 'npm run smoke:chat-approval-single-use', status: 'unknown' },

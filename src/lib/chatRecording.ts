@@ -198,6 +198,35 @@ export function abortRecording(): { ok: true; discardedSteps: number } {
   return { ok: true, discardedSteps: active?.steps.length ?? 0 };
 }
 
+/**
+ * Remove recording data owned by the account leaving this device while
+ * preserving recordings explicitly owned by other local accounts. Legacy
+ * rows without an owner are removed because they cannot be isolated safely.
+ */
+export function clearRecordingStateForLogout(userId?: string | null): {
+  activeCleared: boolean;
+  savedCleared: number;
+} {
+  const active = readActive();
+  // There can be only one active recorder on the device. It is executable
+  // session state, so any account exit aborts it regardless of a corrupt or
+  // stale owner field.
+  const shouldClearActive = !!active;
+  if (shouldClearActive) writeActive(null);
+
+  if (!userId) return { activeCleared: shouldClearActive, savedCleared: 0 };
+  const store = readStore();
+  let savedCleared = 0;
+  for (const [name, recording] of Object.entries(store)) {
+    if (!recording?.userId || recording.userId === userId) {
+      delete store[name];
+      savedCleared += 1;
+    }
+  }
+  if (savedCleared > 0) writeStore(store);
+  return { activeCleared: shouldClearActive, savedCleared };
+}
+
 // ─── Library reads ──────────────────────────────────────────────────
 
 export function listRecordings(filter?: { circleId?: string }): Recording[] {

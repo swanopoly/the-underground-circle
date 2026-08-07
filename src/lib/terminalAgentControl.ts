@@ -1,7 +1,11 @@
 import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
-import { sendTerminalAgentSessionMessage } from './bridgeTaskDispatcher';
+import { sendTerminalAgentSessionMessage, wakeAndAssignTask } from './bridgeTaskDispatcher';
 import { loadAgentIdentities, type TerminalAgentOfficeConfig } from './agentIdentity';
+import {
+  formatVisualBriefsForConnectedAgent,
+  type ChatVisualBriefArtifact,
+} from './chatVisualBriefCore';
 
 export type TerminalAgentControlProvider = 'claude-code' | 'codex' | 'gemini' | 'cursor';
 
@@ -179,6 +183,26 @@ function parseSendIntent(message: string): { target: string; body: string } | nu
   return null;
 }
 
+/** True only for a message that will send instructions to an existing managed
+ * terminal agent. Status/list requests intentionally do not trigger image
+ * analysis. */
+export function isTerminalAgentSendRequest(message: string): boolean {
+  return Boolean(parseSendIntent(message));
+}
+
+function providerFromExplicitTarget(target: string): TerminalAgentControlProvider | null {
+  const key = normalize(target);
+  if (/\bclaude(?: code)?\b/.test(key)) return 'claude-code';
+  if (/\bcodex\b/.test(key)) return 'codex';
+  if (/\bgemini(?: cli)?\b/.test(key)) return 'gemini';
+  if (/\bcursor(?: composer)?\b|\bcomposer\b/.test(key)) return 'cursor';
+  return null;
+}
+
+function providerLabel(provider: TerminalAgentControlProvider): string {
+  return PROVIDERS.find((candidate) => candidate.provider === provider)?.label || provider;
+}
+
 function isStatusIntent(message: string): boolean {
   const raw = String(message || '').trim();
   if (/^\/(?:agents|terminals|terminal-agents)$/i.test(raw)) return true;
@@ -200,6 +224,11 @@ function applyTerminalProfile(message: string, config?: TerminalAgentOfficeConfi
 
 export async function executeTerminalAgentControlFromChat(
   message: string,
+  options: {
+    visionArtifacts?: readonly ChatVisualBriefArtifact[];
+    circleId?: string;
+    launchIfMissing?: boolean;
+  } = {},
 ): Promise<{ message: string } | null> {
   if (isStatusIntent(message)) {
     const sessions = await listTerminalAgentControlSessions();
@@ -209,9 +238,37 @@ export async function executeTerminalAgentControlFromChat(
   const sendIntent = parseSendIntent(message);
   if (!sendIntent) return null;
 
+  const visualContext = formatVisualBriefsForConnectedAgent(options.visionArtifacts);
+  const bodyWithVisualContext = visualContext
+    ? `${sendIntent.body}\n\n${visualContext}`
+    : sendIntent.body;
+  const launchExplicitProvider = async (): Promise<{ message: string } | null> => {
+    const explicitProvider = providerFromExplicitTarget(sendIntent.target);
+    if (!explicitProvider || !options.launchIfMissing || !options.circleId) return null;
+    const label = providerLabel(explicitProvider);
+    const launched = await wakeAndAssignTask(
+      explicitProvider,
+      label,
+      bodyWithVisualContext,
+      options.circleId,
+      undefined,
+      { sessionName: label },
+    );
+    if (launched.ok) {
+      return {
+        message: `Started a managed **${label}** session and sent the task.\n\n${sendIntent.body}`,
+      };
+    }
+    return {
+      message: `I found the **${label}** target, but its local bridge could not start a managed session: ${launched.error || 'unknown bridge error'}`,
+    };
+  };
+
   const sessions = await listTerminalAgentControlSessions();
   const target = findTerminalAgentSessionTarget(sessions, sendIntent.target);
   if (!target) {
+    const launchResult = await launchExplicitProvider();
+    if (launchResult) return launchResult;
     return {
       message: [
         `I could not find a terminal agent matching "${sendIntent.target}".`,
@@ -222,12 +279,14 @@ export async function executeTerminalAgentControlFromChat(
   }
 
   if (!target.manageable) {
+    const launchResult = await launchExplicitProvider();
+    if (launchResult) return launchResult;
     return {
       message: `I can see **${target.displayName}**, but it was not launched as a managed terminal session, so I cannot safely send input to it. Start a new managed session from chat, then use \`/agent ${target.displayName} <message>\`.`,
     };
   }
 
-  const body = applyTerminalProfile(sendIntent.body, target.terminalConfig);
+  const body = applyTerminalProfile(bodyWithVisualContext, target.terminalConfig);
   const result = await sendTerminalAgentSessionMessage(target.provider, target.sessionId, body);
   if (!result.ok) {
     return { message: `Could not send to **${target.displayName}**: ${result.error || 'unknown error'}` };

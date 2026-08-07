@@ -32,9 +32,9 @@ import type {
   ApprovalGate,
   ChatTransportContext,
 } from './runChatAutomationPlan';
+import { buildChatPlanApprovalIntentFingerprint } from './runChatAutomationPlan';
 import { resolveAutoApproveDecision, type AutoApproveDecision } from './chatAutoApproveSettings';
 import { detectAlwaysConfirmFloorCategories, type ChatComputerConstraintCategory } from './chatComputerRequestRouter';
-import { buildComputerAppToolArgsFingerprintAsync } from './computerAppGrounding';
 
 export type CreateApprovalGateOptions = {
   /** Session key stored on the approval row. Defaults to default::blackswan. */
@@ -163,7 +163,28 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
     // the planner marked approval not required.
     const waiver = category ? resolveAutoApproveWaiver(decision, plan) : 'default';
     if (waiver === 'pass') {
-      return { pass: true };
+      const approvalIntentFingerprint = await buildApprovalIntentFingerprint(plan, ctx);
+      if (!approvalIntentFingerprint) {
+        return {
+          pass: false,
+          deferred: {
+            approvalId: '',
+            message: 'Could not bind this policy waiver to an exact approval intent. Nothing was executed.',
+            category: 'error',
+            retryable: false,
+          },
+        };
+      }
+      return {
+        pass: true,
+        notice: `Auto-approved by the circle's ${category} policy for this exact action.`,
+        authority: {
+          schemaVersion: 1,
+          kind: 'policy_auto_waiver',
+          approvalIntentFingerprint,
+          policyCategory: category,
+        },
+      };
     }
 
     if (!plan.approval.required && waiver !== 'confirm_required') {
@@ -360,6 +381,12 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
           return {
             pass: true,
             approvalId: top.id,
+            authority: {
+              schemaVersion: 1,
+              kind: 'claimed_approval_row',
+              approvalId: top.id,
+              approvalIntentFingerprint,
+            },
             notice: status === 'auto_approved'
               ? `Claimed one-time auto-approval \`${shortId}\` for this exact action.`
               : `Claimed one-time approval \`${shortId}\` for this exact action.`,
@@ -517,20 +544,7 @@ export async function buildApprovalIntentFingerprint(
   plan: ChatAutomationPlan,
   ctx: ChatTransportContext,
 ): Promise<string> {
-  return buildComputerAppToolArgsFingerprintAsync({
-    schemaVersion: 2,
-    circleId: ctx.circleId,
-    userId: ctx.userId,
-    threadId: ctx.threadId ?? null,
-    roomId: ctx.roomId ?? null,
-    source: plan.source,
-    intent: plan.intent,
-    execution: plan.execution,
-    approval: plan.approval,
-    risk: plan.risk,
-    confidence: plan.confidence,
-    notes: plan.notes,
-  });
+  return buildChatPlanApprovalIntentFingerprint(plan, ctx);
 }
 
 function describeDefault(plan: ChatAutomationPlan): string {

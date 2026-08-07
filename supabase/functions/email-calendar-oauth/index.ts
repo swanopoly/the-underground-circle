@@ -4,7 +4,7 @@
 // Supports Calendar + Email integration for Office furniture items.
 //
 // Routes:
-//   GET  /authorize?provider=google|microsoft|yahoo&scopes=calendar,email&state=JWT
+//   POST /authorize  { provider, scopes, client_nonce } (authenticated)
 //   GET  /callback?code=...&state=...
 //   POST /fetch-calendar  { provider }   → returns real calendar events
 //   POST /fetch-emails    { provider }   → returns real emails
@@ -31,6 +31,25 @@ const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const SITE_URL =
   Deno.env.get("SITE_URL") || "https://app.chrisswanson.xyz";
+const APP_ORIGIN = (() => {
+  try {
+    const parsed = new URL(SITE_URL);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("invalid protocol");
+    return parsed.origin;
+  } catch {
+    return "https://app.chrisswanson.xyz";
+  }
+})();
+
+const OAUTH_NONCE_PATTERN = /^[a-f0-9]{48}$/;
+
+function parseCombinedOAuthState(raw: string): { serverNonce: string; clientNonce: string } | null {
+  const [serverNonce, clientNonce, extra] = raw.split(".");
+  if (extra !== undefined || !OAUTH_NONCE_PATTERN.test(serverNonce) || !OAUTH_NONCE_PATTERN.test(clientNonce)) {
+    return null;
+  }
+  return { serverNonce, clientNonce };
+}
 
 function getCallbackUrl(): string {
   return `${SUPABASE_URL}/functions/v1/email-calendar-oauth/callback`;
@@ -109,7 +128,7 @@ async function storeTokens(
   email?: string,
   scopesGranted?: string
 ): Promise<void> {
-  await supabase.rpc("store_user_api_key", {
+  const { error } = await supabase.rpc("store_user_api_key", {
     p_provider: provider,
     p_api_key: accessToken,
     p_label: "oauth",
@@ -120,6 +139,7 @@ async function storeTokens(
       scopes: scopesGranted || "",
     }),
   });
+  if (error) throw new Error("Token persistence failed");
 }
 
 async function getStoredTokens(
@@ -191,17 +211,9 @@ async function refreshTokenIfNeeded(
 
   // Update stored tokens using service role
   const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-  // Delete old and re-store — use service role to update directly
-  await serviceClient
-    .from("user_api_keys")
-    .delete()
-    .eq("user_id", userId)
-    .eq("provider", provider)
-    .eq("label", "oauth");
-
-  // Re-store with new tokens — we need to call the RPC as the user
-  // Since we can't impersonate, store directly using service role
-  const passphrase = "tuc-default-enc-key-change-me"; // fallback
+  // Store the replacement atomically through the service RPC. Deleting the
+  // old row first could strand the user without a credential if persistence
+  // failed after a successful provider refresh.
   const { error: storeError } = await serviceClient.rpc("store_user_api_key_service", {
     p_user_id: userId,
     p_provider: provider,
@@ -214,7 +226,8 @@ async function refreshTokenIfNeeded(
     }),
   });
   if (storeError) {
-    console.warn("[email-calendar-oauth] token refresh store failed:", storeError.message);
+    console.error("[email-calendar-oauth] token refresh store failed:", storeError.message);
+    throw new Error("Token refresh persistence failed");
   }
 
   return newAccessToken;
@@ -437,7 +450,7 @@ Deno.serve(async (req: Request) => {
   const pathParts = url.pathname.split("/");
   const action = pathParts[pathParts.length - 1];
 
-  // ── GET /authorize — Start OAuth flow ────────────────────────────────────
+  // ── POST /authorize — Start OAuth flow ───────────────────────────────────
   // Authenticated init: verify the caller, mint a server-stored nonce, and
   // return the IdP authorize URL carrying only that nonce as state. The user's
   // JWT never travels through the IdP anymore (advisory #6). POST (not GET) so
@@ -454,13 +467,20 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    let body: { provider?: unknown; scopes?: unknown } = {};
+    let body: { provider?: unknown; scopes?: unknown; client_nonce?: unknown } = {};
     try { body = await req.json(); } catch { /* empty body */ }
     const provider = typeof body.provider === "string" && body.provider ? body.provider : "google";
     const scopes = typeof body.scopes === "string" && body.scopes ? body.scopes : "calendar,email";
+    const clientNonce = typeof body.client_nonce === "string" ? body.client_nonce : "";
+    if (!OAUTH_NONCE_PATTERN.test(clientNonce)) {
+      return new Response(
+        JSON.stringify({ error: "Invalid OAuth attempt nonce" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     const config = getProviderConfig(provider);
-    if (!config || !config.clientId) {
+    if (!config || !config.clientId || !config.clientSecret) {
       return new Response(
         JSON.stringify({ error: `${provider} OAuth not configured. Set ${provider.toUpperCase()}_CLIENT_ID and ${provider.toUpperCase()}_CLIENT_SECRET in Supabase secrets.` }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -501,7 +521,10 @@ Deno.serve(async (req: Request) => {
     authUrl.searchParams.set("redirect_uri", getCallbackUrl());
     authUrl.searchParams.set("scope", scopeParts.join(" "));
     authUrl.searchParams.set("response_type", "code");
-    authUrl.searchParams.set("state", nonce);
+    // The browser nonce is random, short-lived, and contains no credential.
+    // Combining it with the server-stored nonce lets the callback authenticate
+    // its postMessage to the exact browser attempt without a new DB column.
+    authUrl.searchParams.set("state", `${nonce}.${clientNonce}`);
 
     // Provider-specific params
     if (config.extraAuthParams) {
@@ -520,48 +543,72 @@ Deno.serve(async (req: Request) => {
   if (action === "callback" && req.method === "GET") {
     const code = url.searchParams.get("code");
     const stateRaw = url.searchParams.get("state") || "";
-    const error = url.searchParams.get("error");
-
-    if (error) {
-      return new Response(oauthResultHTML(false, error), {
-        headers: { ...corsHeaders, "Content-Type": "text/html" },
-      });
-    }
-
-    if (!code) {
-      return new Response(oauthResultHTML(false, "Missing authorization code"), {
-        headers: { ...corsHeaders, "Content-Type": "text/html" },
-      });
+    const providerError = url.searchParams.get("error");
+    const parsedState = parseCombinedOAuthState(stateRaw);
+    if (!parsedState) {
+      return oauthResultResponse({ success: false, error: "Invalid or expired state" });
     }
 
     // Resolve the flow from the server-stored nonce — never trust a decoded
     // client-supplied state (that carried the JWT; advisory #6).
     const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const { data: stateRow } = await serviceClient
+    const { data: stateRow, error: stateLookupError } = await serviceClient
       .from("email_calendar_oauth_states")
       .select("id, user_id, provider, scopes, expires_at")
-      .eq("state", stateRaw)
+      .eq("state", parsedState.serverNonce)
       .maybeSingle();
-    if (!stateRow) {
-      return new Response(oauthResultHTML(false, "Invalid or expired state"), {
-        headers: { ...corsHeaders, "Content-Type": "text/html" },
-      });
+    if (stateLookupError || !stateRow) {
+      if (stateLookupError) console.error("OAuth state lookup failed:", stateLookupError.message);
+      return oauthResultResponse({ success: false, error: "Invalid or expired state" });
     }
+
+    // Atomically claim the state before exchanging or storing credentials.
+    // Concurrent/replayed callbacks can read the row, but only one can delete
+    // and return it; every other callback fails closed.
+    const { data: claimedState, error: claimError } = await serviceClient
+      .from("email_calendar_oauth_states")
+      .delete()
+      .eq("id", stateRow.id)
+      .eq("state", parsedState.serverNonce)
+      .select("id")
+      .maybeSingle();
+    if (claimError || !claimedState) {
+      if (claimError) console.error("OAuth state claim failed:", claimError.message);
+      return oauthResultResponse({ success: false, error: "Invalid or expired state" });
+    }
+
+    const resultContext = {
+      provider: (stateRow.provider as string) || "google",
+      clientNonce: parsedState.clientNonce,
+    };
+
     if (new Date(stateRow.expires_at) < new Date()) {
-      await serviceClient.from("email_calendar_oauth_states").delete().eq("id", stateRow.id);
-      return new Response(oauthResultHTML(false, "State expired"), {
-        headers: { ...corsHeaders, "Content-Type": "text/html" },
+      return oauthResultResponse({ ...resultContext, success: false, error: "State expired" });
+    }
+
+    if (providerError) {
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: providerError.slice(0, 200),
       });
     }
-    const provider = (stateRow.provider as string) || "google";
+
+    if (!code) {
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: "Missing authorization code",
+      });
+    }
+
+    const provider = resultContext.provider;
     const scopes = (stateRow.scopes as string) || "calendar,email";
     const userId = stateRow.user_id as string;
 
     const config = getProviderConfig(provider);
     if (!config) {
-      return new Response(oauthResultHTML(false, "Unknown provider"), {
-        headers: { ...corsHeaders, "Content-Type": "text/html" },
-      });
+      return oauthResultResponse({ ...resultContext, success: false, error: "Unknown provider" });
     }
 
     // Exchange code for tokens
@@ -573,21 +620,39 @@ Deno.serve(async (req: Request) => {
       grant_type: "authorization_code",
     };
 
-    const tokenResp = await fetch(config.tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(tokenBody),
-    });
-
-    if (!tokenResp.ok) {
-      const err = await tokenResp.text();
-      console.error(`Token exchange failed for ${provider}:`, err);
-      return new Response(oauthResultHTML(false, `Token exchange failed`), {
-        headers: { ...corsHeaders, "Content-Type": "text/html" },
+    let tokenResp: Response;
+    try {
+      tokenResp = await fetch(config.tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(tokenBody),
+      });
+    } catch {
+      console.error(`Token exchange transport failed for ${provider}`);
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: "Token exchange failed",
       });
     }
 
-    const tokens = await tokenResp.json();
+    if (!tokenResp.ok) {
+      console.error(`Token exchange failed for ${provider} (${tokenResp.status})`);
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: "Token exchange failed",
+      });
+    }
+
+    const tokens = await tokenResp.json().catch(() => null);
+    if (!tokens || typeof tokens.access_token !== "string" || !tokens.access_token) {
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: "Provider returned an invalid token response",
+      });
+    }
 
     // Get user email for display
     let userEmail = "";
@@ -599,7 +664,7 @@ Deno.serve(async (req: Request) => {
         );
         if (infoResp.ok) {
           const info = await infoResp.json();
-          userEmail = info.email || "";
+          userEmail = typeof info.email === "string" ? info.email : "";
         }
       } else if (provider === "microsoft") {
         const infoResp = await fetch(
@@ -608,7 +673,11 @@ Deno.serve(async (req: Request) => {
         );
         if (infoResp.ok) {
           const info = await infoResp.json();
-          userEmail = info.mail || info.userPrincipalName || "";
+          userEmail = typeof info.mail === "string"
+            ? info.mail
+            : typeof info.userPrincipalName === "string"
+              ? info.userPrincipalName
+              : "";
         }
       } else if (provider === "yahoo") {
         const infoResp = await fetch(
@@ -617,7 +686,7 @@ Deno.serve(async (req: Request) => {
         );
         if (infoResp.ok) {
           const info = await infoResp.json();
-          userEmail = info.email || "";
+          userEmail = typeof info.email === "string" ? info.email : "";
         }
       }
     } catch {
@@ -626,24 +695,41 @@ Deno.serve(async (req: Request) => {
 
     // Store tokens for the verified user via the service role — no JWT needed
     // now that the flow is bound to a server-stored nonce (advisory #6).
-    await serviceClient.rpc("store_user_api_key_service", {
-      p_user_id: userId,
-      p_provider: provider,
-      p_api_key: tokens.access_token,
-      p_label: "oauth",
-      p_endpoint: JSON.stringify({
-        refresh_token: tokens.refresh_token || "",
-        expires_at: new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString(),
-        email: userEmail,
-        scopes,
-      }),
-    });
-    // Single-use: delete the consumed nonce.
-    await serviceClient.from("email_calendar_oauth_states").delete().eq("id", stateRow.id);
+    const expiresIn = Number.isFinite(Number(tokens.expires_in))
+      ? Math.max(60, Math.min(Number(tokens.expires_in), 604_800))
+      : 3600;
+    let storeError: unknown = null;
+    try {
+      const storeResult = await serviceClient.rpc("store_user_api_key_service", {
+        p_user_id: userId,
+        p_provider: provider,
+        p_api_key: tokens.access_token,
+        p_label: "oauth",
+        p_endpoint: JSON.stringify({
+          refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : "",
+          expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
+          email: userEmail.slice(0, 320),
+          scopes,
+        }),
+      });
+      storeError = storeResult.error;
+    } catch {
+      storeError = true;
+    }
+    if (storeError) {
+      console.error("OAuth token persistence failed");
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: "Could not save the connection",
+      });
+    }
 
     // Send success HTML that posts message to opener window
-    return new Response(oauthResultHTML(true, "", provider, userEmail), {
-      headers: { ...corsHeaders, "Content-Type": "text/html" },
+    return oauthResultResponse({
+      ...resultContext,
+      success: true,
+      email: userEmail.slice(0, 320),
     });
   }
 
@@ -688,12 +774,26 @@ Deno.serve(async (req: Request) => {
   // ── POST /disconnect — Remove tokens ─────────────────────────────────────
   if (action === "disconnect") {
     const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    await serviceClient
-      .from("user_api_keys")
-      .delete()
-      .eq("user_id", user.id)
-      .eq("provider", provider)
-      .eq("label", "oauth");
+    let disconnectError: unknown = null;
+    try {
+      const disconnectResult = await serviceClient
+        .from("user_api_keys")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("provider", provider)
+        .eq("label", "oauth");
+      disconnectError = disconnectResult.error;
+    } catch {
+      disconnectError = true;
+    }
+
+    if (disconnectError) {
+      console.error("OAuth disconnect persistence failed");
+      return new Response(
+        JSON.stringify({ error: "Could not disconnect provider", disconnected: false }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     return new Response(
       JSON.stringify({ disconnected: true, provider }),
@@ -799,65 +899,44 @@ Deno.serve(async (req: Request) => {
   );
 });
 
-// ─── OAuth result HTML — sends postMessage to opener ──────────────────────────
+// ─── OAuth callback relay ────────────────────────────────────────────────────
 
-function oauthResultHTML(
-  success: boolean,
-  error: string = "",
-  provider: string = "",
-  email: string = ""
-): string {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${success ? "Connected!" : "Connection Failed"}</title>
-  <style>
-    body {
-      margin: 0; padding: 40px 20px;
-      background: #0a0a0a; color: #fff;
-      font-family: 'SF Mono', 'Fira Code', monospace;
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; box-sizing: border-box;
-    }
-    .card {
-      background: #111; border: 1px solid #2a2a2a; border-radius: 16px;
-      padding: 40px; text-align: center; max-width: 360px; width: 100%;
-    }
-    .icon { font-size: 48px; margin-bottom: 16px; }
-    h2 { margin: 0 0 8px; font-size: 18px; font-weight: 900; letter-spacing: 1px; }
-    p { color: #888; font-size: 12px; margin: 0; line-height: 1.6; }
-    .email { color: #22c55e; font-weight: 700; }
-    .error { color: #ef4444; }
-    .close-hint { color: #555; font-size: 10px; margin-top: 20px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">${success ? "✅" : "❌"}</div>
-    <h2>${success ? "CONNECTED" : "CONNECTION FAILED"}</h2>
-    ${
-      success
-        ? `<p>${provider === "google" ? "Google" : provider === "microsoft" ? "Microsoft" : "Yahoo"} account connected</p>
-           ${email ? `<p class="email">${email}</p>` : ""}
-           <p class="close-hint">This window will close automatically...</p>`
-        : `<p class="error">${error}</p>
-           <p class="close-hint">Close this window and try again</p>`
-    }
-  </div>
-  <script>
-    if (window.opener) {
-      window.opener.postMessage({
-        type: 'oauth-callback',
-        success: ${success},
-        provider: '${provider}',
-        email: '${email}',
-        error: '${error}'
-      }, '*');
-      ${success ? "setTimeout(() => window.close(), 1500);" : ""}
-    }
-  </script>
-</body>
-</html>`;
+type OAuthResultPage = {
+  success: boolean;
+  error?: string;
+  provider?: string;
+  email?: string;
+  clientNonce?: string;
+};
+
+function oauthResultResponse(result: OAuthResultPage): Response {
+  const provider = typeof result.provider === "string" && getProviderConfig(result.provider)
+    ? result.provider
+    : "";
+  const email = typeof result.email === "string" ? result.email.slice(0, 320) : "";
+  const error = typeof result.error === "string" ? result.error.slice(0, 500) : "";
+  const clientNonce = typeof result.clientNonce === "string" && OAUTH_NONCE_PATTERN.test(result.clientNonce)
+    ? result.clientNonce
+    : "";
+  const relayUrl = new URL("/oauth/email-calendar/callback", APP_ORIGIN);
+  relayUrl.hash = new URLSearchParams({
+    success: result.success ? "1" : "0",
+    provider,
+    email,
+    error,
+    nonce: clientNonce,
+  }).toString();
+
+  // Supabase deliberately serves function-generated HTML as sandboxed text,
+  // which blocks postMessage scripts. Redirect to the trusted app origin and
+  // let the early app bootstrap relay this non-secret, nonce-bound outcome.
+  return new Response(null, {
+    status: 303,
+    headers: {
+      "Location": relayUrl.toString(),
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
 }

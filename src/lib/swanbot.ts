@@ -18,6 +18,12 @@ import { buildResearchKnowledgeBundle, buildResearchSearchResponse, buildSpiritR
 import { getAgentIdentityKey, loadAgentIdentities } from './agentIdentity';
 import type { OpenSwanExecutionStatus } from './openswanExecution';
 import type { ComputerTaskEvidenceRecoveryObservation } from './computerTaskEvidenceRecovery';
+import {
+  summarizeComputerTaskTurnEvidence,
+  type AgentTaskCompletionExpectation,
+  type ComputerTaskToolEvidenceInput,
+  type ComputerTaskTurnEvidenceSummary,
+} from './computerTaskOutcome';
 import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExternalAiProvider } from './privacyMode';
 import type { OpenSwanMemoryStores } from './openswanMemoryStores';
 import type { OpenSwanChatMode } from './openswanModePolicy';
@@ -278,8 +284,23 @@ export type SwanBotContext = {
    * local desktop catalog and must never become a post-failure fallback.
    */
   forceClientToolLoop?: boolean;
+  /** Outer caller's task-proof expectation; also isolates receipt caching. */
+  completionExpectation?: AgentTaskCompletionExpectation;
+  /**
+   * Immutable outer run/request identity used only by the duplicate guard.
+   * Required for receipt-bearing computer turns so one run can never consume
+   * another run's cached terminal proof.
+   */
+  turnDedupeScope?: string;
   /** Hard catalog/dispatch ceiling derived from the task capability profile. */
   executionSurfaceGuard?: TaskExecutionSurfaceGuard;
+  /**
+   * Runtime-only proof channel for parent task orchestration. Ordinary chat
+   * callers omit it and retain the string response API. Computer-task callers
+   * use it to receive bounded receipt counts/status without exposing hidden
+   * receipt metadata to the model or UI transcript.
+   */
+  onTaskExecutionSummary?: (summary: ComputerTaskTurnEvidenceSummary) => void;
 };
 
 function getContextAgentSubjectKey(context: SwanBotContext): string | undefined {
@@ -719,6 +740,32 @@ function addToHistory(circleId: string, role: 'user' | 'model', text: string): b
   return true;
 }
 
+/**
+ * Clear device-local session context on account exit without touching durable
+ * Supabase memories. These caches are not user-keyed, so retaining them would
+ * expose one account's prompt context to the next account using the browser.
+ */
+export function clearLocalSwanBotSessionState(): void {
+  conversationHistory.clear();
+  _activeBondId = null;
+  _activeBondCircleId = null;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const keys: string[] = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith(HISTORY_STORAGE_PREFIX) || key?.startsWith('uc_mem_extract_')) {
+          keys.push(key);
+        }
+      }
+      keys.forEach((key) => localStorage.removeItem(key));
+    }
+  } catch {}
+  try {
+    delete (globalThis as any).__uc_last_a11y_tree;
+  } catch {}
+}
+
 // ─── Session Persistence ────────────────────────────────────────────────────
 
 /**
@@ -1135,10 +1182,13 @@ async function callLlmProxy(
  * confirmed. Results then atomically consume the same claim before model
  * resume. Loop until terminal or the shared continuation cap.
  *
- * Returns `null` on failure before local client tools run so the caller can
- * fall back to v1. After a client-side tool is attempted, failures return a
- * stop message instead of falling back, avoiding repeated desktop/browser
- * side effects through the legacy path.
+ * Returns a v1-fallback-safe marker only when no mutation-capable v2 request
+ * crossed a dispatch boundary. Once the initial edge POST is attempted, total
+ * response loss is outcome-unknown: the edge may have committed a server-side
+ * write, and v1 does not share v2's turnRequestId dedupe namespace. After a
+ * client-side tool is attempted, failures likewise return a stop message
+ * instead of falling back, avoiding repeated desktop/browser side effects
+ * through the legacy path.
  * See `docs/SWANBOT_V2_MIGRATION_PLAN.md` for rollout boundaries.
  */
 /** Outcome of a v2 attempt, carrying enough for the orchestrator to make the
@@ -1147,10 +1197,22 @@ async function callLlmProxy(
  *  structured terminal body, including deliberate fail-closed 4xx outcomes —
  *  the orchestrator surfaces it but must NOT count it toward the transient
  *  transport breaker or fall through to v1. A transport failure leaves
- *  `bodyError` undefined with `text` null (the value the breaker DOES count). */
+ *  `bodyError` undefined with `text` null (the value the breaker DOES count),
+ *  but v1 fallback additionally requires explicit pre-dispatch-safe proof. */
 type V2CallResult = {
   text: string | null;
   bodyError?: V2BodyError;
+  executionSummary?: ComputerTaskTurnEvidenceSummary;
+  /**
+   * The v2 attempt provably stopped before any mutation-capable edge POST or
+   * local handler entry. Only this explicit authority permits a v1 fallback.
+   */
+  v1FallbackSafeBeforeDispatch?: true;
+  /**
+   * A mutation-capable v2 POST was attempted but no authenticated response was
+   * recovered. The edge may have committed a write; never replay in v1.
+   */
+  mutationCapablePostOutcomeUnknown?: true;
   /**
    * A non-null authenticated v2 response reached the client and represented a
    * terminal edge decision. This stays true even when its display text is
@@ -1304,7 +1366,9 @@ async function callSwanBotV2(
   agentSubject?: AgentRuntimeSubjectMetadata | null,
   clientLoopContext?: SwanbotV2ClientLoopContext,
 ): Promise<V2CallResult> {
-  if (shouldBlockExternalAiProvider('anthropic')) return { text: null };
+  if (shouldBlockExternalAiProvider('anthropic')) {
+    return projectSwanBotV2TransportFailure({ mutationCapablePostAttempted: false });
+  }
   // Resolve the user's hard constraints for BOTH v2 implementations. The
   // device-local typed loop also re-parses internally, but the default edge
   // continuation loop must not lose the exact-call approval callback or let a
@@ -1368,7 +1432,7 @@ async function callSwanBotV2(
       // agentSubject rides in the extra bag — NEVER as an 11th positional
       // (that slot IS the extra bag). SwanbotV2BatchResult is structurally
       // identical to V2CallResult, so no cast.
-      return runSwanbotV2Batch(
+      const batchResult = await runSwanbotV2Batch(
         message, circleId, userId, _discordContext, model, _wikiContext,
         conversationMessages, thinkingLevel, _maxTokens, systemDirective,
         {
@@ -1387,6 +1451,12 @@ async function callSwanBotV2(
           onActivity: (row) => emitSwanBotActivity(row.label),
         },
       );
+      // The batch runtime returns null text only while its runtime-owned
+      // `anyToolExecuted` latch is still false. Preserve that proven
+      // pre-dispatch fallback without widening the edge transport path.
+      return batchResult.text === null
+        ? { ...batchResult, v1FallbackSafeBeforeDispatch: true }
+        : batchResult;
     } catch (err) {
       if (forceClientToolLoop) {
         console.warn('[SwanBot/v2] required client-loop startup failed — refusing text-only fallback:', err);
@@ -1406,6 +1476,8 @@ async function callSwanBotV2(
   const MAX_CONTINUATIONS = SWANBOT_CONTINUATION_BASE_MAX;
   let attemptedClientTools = false;
   let attemptedDispatchClaim = false;
+  let mutationCapableV2PostAttempted = false;
+  const clientToolEvidence: ComputerTaskToolEvidenceInput[] = [];
   // #12: capture a structured edge error body from ANY leg (initial or
   // continuation), whether supabase-js returned it as data or wrapped the
   // non-2xx Response in FunctionsHttpError. This lets the orchestrator
@@ -1415,7 +1487,9 @@ async function callSwanBotV2(
   const captureBodyError = (err: V2BodyError) => { bodyError = err; };
   try {
     const accessToken = await getFreshAccessToken();
-    if (!accessToken) return { text: null };
+    if (!accessToken) {
+      return projectSwanBotV2TransportFailure({ mutationCapablePostAttempted: false });
+    }
 
     // ── P2 (docs/MEMORY_V2_INTEGRATION_PLAN.md) — the memory bundle. ────────
     // P1 taught the edge to accept `body.memory`, fence it and append it to
@@ -1487,11 +1561,17 @@ async function callSwanBotV2(
     }
 
     // ── First call — initial message. ─────────────────────────────────
+    // From this point onward, an absent response is NOT evidence that nothing
+    // ran. The selected edge catalog contains server-side writers, and the
+    // request can commit one before the HTTP response is lost. Set the latch
+    // immediately before dispatch so catch/null paths cannot replay through v1.
+    mutationCapableV2PostAttempted = true;
     let response = await invokeSwanbotV2(accessToken, {
       message,
       circleId,
       userId,
       turnRequestId,
+      ...(clientLoopContext?.threadId ? { threadId: clientLoopContext.threadId } : {}),
       ...(connectivity ? { connectivity } : {}),
       // P2: OMIT the field entirely when there is nothing to send. An empty
       // `{sections: []}` is NOT falsy on the edge — its `hasPayload` test is
@@ -1511,7 +1591,12 @@ async function callSwanBotV2(
       agentSubject: agentSubject || undefined,
       legacy: { conversationMessages },
     }, captureBodyError);
-    if (!response) return { text: null, bodyError };
+    if (!response) {
+      return projectSwanBotV2TransportFailure({
+        mutationCapablePostAttempted: mutationCapableV2PostAttempted,
+        bodyError,
+      });
+    }
 
     // ── Continuation loop for clientOnly tool calls. ──────────────────
     for (let i = 0; i < MAX_CONTINUATIONS; i++) {
@@ -1565,9 +1650,35 @@ async function callSwanBotV2(
         userId,
         runId: response.continuationRunId,
         iteration: i + 1,
+        activePluginIds: clientLoopContext?.activePluginIds?.slice(0, 32),
         toolApprovalGate: clientLoopContext?.toolApprovalGate,
         userConstraints: mergedUserConstraints,
         alwaysConfirmFloor: mergedAlwaysConfirmFloor,
+      });
+      for (const toolResult of toolResults) {
+        if (clientToolEvidence.length >= 2_000) break;
+        clientToolEvidence.push({
+          toolName: pendingCalls.find((call) => call.id === toolResult.tool_use_id)?.name,
+          toolUseId: toolResult.tool_use_id,
+          mutatesState: toolResult.runtime_mutates_state,
+          dispatched: toolResult.runtime_dispatched,
+          result: {
+            ok: toolResult.is_error !== true,
+            data: {},
+            ...(toolResult.is_error === true ? { error: 'client tool failed' } : {}),
+            ...(toolResult.receipt_metadata
+              ? { metadata: toolResult.receipt_metadata }
+              : {}),
+          },
+        });
+      }
+      const wireToolResults: SwanBotV2ClientToolWireResult[] = toolResults.map((toolResult) => {
+        const {
+          runtime_dispatched: _runtimeDispatched,
+          runtime_mutates_state: _runtimeMutatesState,
+          ...wireResult
+        } = toolResult;
+        return wireResult;
       });
       response = await invokeSwanbotV2(accessToken, {
         circleId,
@@ -1576,12 +1687,20 @@ async function callSwanBotV2(
         continuationAction: 'submit_results',
         ...pendingIdentity,
         dispatchClaimId,
-        toolResults,
+        toolResults: wireToolResults,
       }, captureBodyError);
       if (!response) {
         if (attemptedClientTools) {
           console.warn('[SwanBot/v2] continuation failed after client tools; not falling back to v1.');
-          return { text: swanBotV2ClientToolStopMessage('continuation_failed'), bodyError };
+          return {
+            text: swanBotV2ClientToolStopMessage('continuation_failed'),
+            bodyError,
+            executionSummary: summarizeComputerTaskTurnEvidence({
+              toolEvidence: clientToolEvidence,
+              cleanTerminal: false,
+              runtimeFailed: true,
+            }),
+          };
         }
         return { text: null, bodyError };
       }
@@ -1589,14 +1708,46 @@ async function callSwanBotV2(
 
     if (response.pending) {
       console.warn('[SwanBot/v2] hit continuation cap; not falling back to v1.');
-      return { text: swanBotV2ClientToolStopMessage('continuation_cap'), bodyError };
+      return {
+        text: swanBotV2ClientToolStopMessage('continuation_cap'),
+        bodyError,
+        executionSummary: summarizeComputerTaskTurnEvidence({
+          toolEvidence: clientToolEvidence,
+          cleanTerminal: false,
+        }),
+      };
     }
-    return projectSwanBotV2TerminalResponse(response, bodyError);
+    const terminalCancelled = 'cancelled' in response && response.cancelled === true;
+    return {
+      ...projectSwanBotV2TerminalResponse(response, bodyError),
+      executionSummary: summarizeComputerTaskTurnEvidence({
+        toolEvidence: clientToolEvidence,
+        // The edge terminal projection does not yet return the complete
+        // server-side tool receipt ledger or authoritative loop stop reason.
+        // Client-only receipts can prove their own mutation integrity, but the
+        // aggregate coverage boundary is incomplete and must not look clean.
+        cleanTerminal: false,
+        cancelled: terminalCancelled,
+      }),
+    };
   } catch (err: any) {
     console.warn('[SwanBot/v2] call failed:', err?.message || err);
-    if (attemptedClientTools) return { text: swanBotV2ClientToolStopMessage('continuation_failed'), bodyError };
+    if (attemptedClientTools) {
+      return {
+        text: swanBotV2ClientToolStopMessage('continuation_failed'),
+        bodyError,
+        executionSummary: summarizeComputerTaskTurnEvidence({
+          toolEvidence: clientToolEvidence,
+          cleanTerminal: false,
+          runtimeFailed: true,
+        }),
+      };
+    }
     if (attemptedDispatchClaim) return { text: swanBotV2DispatchClaimStopMessage(), bodyError };
-    return { text: null, bodyError };
+    return projectSwanBotV2TransportFailure({
+      mutationCapablePostAttempted: mutationCapableV2PostAttempted,
+      bodyError,
+    });
   }
 }
 
@@ -1708,6 +1859,16 @@ type V2Response =
 const SWANBOT_V2_CANCELLED_MESSAGE =
   'Run cancelled by the user. No further actions were started. Any already-dispatched local action remains recorded and will not be replayed automatically.';
 
+function projectSwanBotV2TransportFailure(input: {
+  mutationCapablePostAttempted: boolean;
+  bodyError?: V2BodyError;
+}): V2CallResult {
+  if (input.bodyError) return { text: null, bodyError: input.bodyError };
+  return input.mutationCapablePostAttempted
+    ? { text: null, mutationCapablePostOutcomeUnknown: true }
+    : { text: null, v1FallbackSafeBeforeDispatch: true };
+}
+
 function projectSwanBotV2TerminalResponse(
   response: { cancelled?: unknown; text?: unknown; response?: unknown },
   bodyError?: V2BodyError,
@@ -1746,7 +1907,9 @@ function classifySwanBotV2CallDisposition(
 }
 
 function shouldFallbackSwanBotV2ToV1(result: V2CallResult): boolean {
-  return classifySwanBotV2CallDisposition(result) === 'transport_failure';
+  return classifySwanBotV2CallDisposition(result) === 'transport_failure'
+    && result.v1FallbackSafeBeforeDispatch === true
+    && result.mutationCapablePostOutcomeUnknown !== true;
 }
 // SWANBOT_V2_CLIENT_TERMINAL_CORE_END
 
@@ -1832,20 +1995,83 @@ type SwanBotV2EdgeClientToolContext = {
   userId: string;
   runId: string;
   iteration?: number;
+  activePluginIds?: SwanbotV2ClientLoopContext['activePluginIds'];
   toolApprovalGate?: SwanbotV2ClientLoopContext['toolApprovalGate'];
   userConstraints?: SwanbotV2ClientLoopContext['userConstraints'];
   alwaysConfirmFloor?: SwanbotV2ClientLoopContext['alwaysConfirmFloor'];
 };
 
-async function executeClientToolCalls(
-  calls: Array<{ id: string; name: string; input: unknown }>,
-  context?: SwanBotV2EdgeClientToolContext,
-): Promise<Array<{
+/**
+ * Client-delegated tools whose final dispatcher owns the canonical exact-call
+ * policy/approval boundary. The default edge continuation must not put a
+ * second generic review prompt in front of these calls. Keep this set in
+ * lockstep with dispatchOneClientTool's runtime-gateway switch and the
+ * WordPress helpers that consume their own bound approvals.
+ */
+const SWANBOT_V2_EDGE_CANONICAL_APPROVAL_TOOL_NAMES = new Set([
+  'desktop.edit_file',
+  'local.run_shell',
+  'git.run',
+  'codebase.search',
+  'todo.write',
+  'coordination.file_status',
+  'browser.open_url',
+  'browser.fill_field',
+  'browser.fill_credential_field',
+  'browser.set_toggle',
+  'browser.select_option',
+  'browser.click_role',
+  'browser.press_key',
+  'browser.wait_for',
+  'browser.scroll',
+  'desktop.launch_app',
+  'desktop.focus_app',
+  'desktop.type_text',
+  'desktop.paste_text',
+  'desktop.press_keys',
+  'desktop.menu_click',
+  'desktop.run_applescript',
+  'desktop.convert_image',
+  'desktop.open_url',
+  'desktop.open_path',
+  'desktop.click_at',
+  'desktop.mouse_move',
+  'desktop.mouse_click',
+  'desktop.mouse_down',
+  'desktop.mouse_up',
+  'desktop.mouse_drag',
+  'desktop.mouse_scroll',
+  'desktop.click_element',
+  'desktop.set_element_value',
+  'wp.upload_media',
+  'wp.create_slide',
+  'wp.update_post',
+  'wp.trash_post',
+]);
+
+const SWANBOT_V2_EDGE_DISABLED_MODEL_TOOL_NAMES = new Set([
+  'credentials.get',
+  'browser.fill_credential_field',
+  'approvals.resolve',
+]);
+
+type SwanBotV2ClientToolWireResult = {
   tool_use_id: string;
   content: string;
   is_error?: boolean;
   receipt_metadata?: SwanBotClientToolReceiptMetadata;
-}>> {
+};
+
+type SwanBotV2ClientToolExecutionResult = SwanBotV2ClientToolWireResult & {
+  /** Client-only terminal-evidence fields; stripped before edge submission. */
+  runtime_dispatched: boolean;
+  runtime_mutates_state: boolean;
+};
+
+async function executeClientToolCalls(
+  calls: Array<{ id: string; name: string; input: unknown }>,
+  context?: SwanBotV2EdgeClientToolContext,
+): Promise<SwanBotV2ClientToolExecutionResult[]> {
   if (calls.length === 0) return [];
   const bridge = await import('./desktopBridge');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
@@ -1855,8 +2081,16 @@ async function executeClientToolCalls(
   // 'unknown' class (never widens what replays without a verdict).
   let toolPolicyLookup: ((toolName: string) => unknown) | null = null;
   try {
-    const { createOpenSwanToolParallelPolicyProvider } = await import('./openswanBridge');
-    toolPolicyLookup = createOpenSwanToolParallelPolicyProvider();
+    const { getOpenSwanToolPolicy } = await import('./openswanToolRuntime');
+    // Completion/replay classification uses the current catalog policy,
+    // including plugin tightening, not the parallel scheduler's synthetic
+    // `mutatesState: true` barrier bit.
+    // Semantic waits and viewport scrolls are serial ordering primitives but
+    // remain non-mutating task evidence.
+    toolPolicyLookup = (toolName) => getOpenSwanToolPolicy(
+      toolName as never,
+      context?.activePluginIds,
+    );
   } catch { toolPolicyLookup = null; }
 
   // Failed client tools get a classified recovery hint (bridge offline /
@@ -1895,11 +2129,7 @@ async function executeClientToolCalls(
   const buildPreDispatchBlockResult = (
     call: { id: string; name: string },
     reason: string,
-  ): {
-    tool_use_id: string;
-    content: string;
-    is_error: true;
-  } => ({
+  ): SwanBotV2ClientToolExecutionResult => ({
     tool_use_id: call.id,
     content: appendAppActionVerificationGate(
       serializeSwanBotClientToolResult({ ok: false, error: reason }),
@@ -1907,24 +2137,37 @@ async function executeClientToolCalls(
       'error',
     ),
     is_error: true,
+    runtime_dispatched: false,
+    runtime_mutates_state: true,
   });
 
   // One call's full dispatch (bridge call + a11y cache + recording observer +
   // verification-gate framing), unchanged from the legacy loop body.
   const runOne = async (
     call: { id: string; name: string; input: unknown },
-  ): Promise<{
-    tool_use_id: string;
-    content: string;
-    is_error?: boolean;
-    receipt_metadata?: SwanBotClientToolReceiptMetadata;
-  }> => {
+  ): Promise<SwanBotV2ClientToolExecutionResult> => {
+    let handlerEntered = false;
     try {
+      let toolApprovalMode: 'auto' | 'ask' | 'blocked' | 'unknown' = 'unknown';
+      if (SWANBOT_V2_EDGE_DISABLED_MODEL_TOOL_NAMES.has(call.name)) {
+        toolApprovalMode = 'blocked';
+      } else if (toolPolicyLookup) {
+        try {
+          const policy = toolPolicyLookup(call.name) as { approvalMode?: unknown } | null;
+          if (policy?.approvalMode === 'auto' || policy?.approvalMode === 'ask') {
+            toolApprovalMode = policy.approvalMode;
+          }
+        } catch {
+          toolApprovalMode = 'unknown';
+        }
+      }
       const authorization = await authorizeSwanbotV2EdgeClientToolCall(
         {
           userConstraints: context?.userConstraints || null,
           alwaysConfirmFloor: context?.alwaysConfirmFloor || [],
           toolApprovalGate: context?.toolApprovalGate,
+          toolApprovalMode,
+          runtimeApprovalToolNames: SWANBOT_V2_EDGE_CANONICAL_APPROVAL_TOOL_NAMES,
         },
         {
           toolName: call.name,
@@ -1951,6 +2194,7 @@ async function executeClientToolCalls(
           'A cryptographically strong mutation receipt was unavailable, so the client mutation was not dispatched.',
         );
       }
+      handlerEntered = true;
       const result = await dispatchOneClientTool(
         bridge,
         call,
@@ -2022,6 +2266,9 @@ async function executeClientToolCalls(
         // to the exact pending tool call; it is deliberately never serialized
         // into model-visible `content`.
         ...durableReceiptProjection,
+        runtime_dispatched: true,
+        // Filled from the canonical catalog after ordering is restored.
+        runtime_mutates_state: true,
       };
     } catch (err: any) {
       return {
@@ -2032,6 +2279,8 @@ async function executeClientToolCalls(
           'error',
         ),
         is_error: true,
+        runtime_dispatched: handlerEntered,
+        runtime_mutates_state: true,
       };
     }
   };
@@ -2042,17 +2291,27 @@ async function executeClientToolCalls(
   // original call order — so write ordering is byte-for-byte preserved.
   // The partitioner is pure + smoke-pinned (clientToolBatchCore).
   const partition = partitionClientToolBatch(calls);
-  // A live approval surface is inherently sequential: concurrent prompts can
-  // reorder decisions and make it unclear which exact call the user reviewed.
-  const groups = context?.toolApprovalGate
+  // Only calls that can actually reach the surface review callback force the
+  // batch sequential. Merely having a callback must not serialize or prompt
+  // canonical auto/read tools, nor duplicate a runtime-owned approval.
+  const hasSurfaceReviewedCall = Boolean(context?.toolApprovalGate) && (
+    Boolean(context?.userConstraints?.approvalBefore.length)
+    || Boolean(context?.alwaysConfirmFloor?.length)
+    || calls.some((call) => {
+      if (SWANBOT_V2_EDGE_CANONICAL_APPROVAL_TOOL_NAMES.has(call.name)) return false;
+      if (SWANBOT_V2_EDGE_DISABLED_MODEL_TOOL_NAMES.has(call.name)) return false;
+      try {
+        const policy = toolPolicyLookup?.(call.name) as { approvalMode?: unknown } | null;
+        return policy?.approvalMode === 'ask';
+      } catch {
+        return true;
+      }
+    })
+  );
+  const groups = hasSurfaceReviewedCall
     ? partition.groups.flat().map((call) => [call])
     : partition.groups;
-  const byId = new Map<string, {
-    tool_use_id: string;
-    content: string;
-    is_error?: boolean;
-    receipt_metadata?: SwanBotClientToolReceiptMetadata;
-  }>();
+  const byId = new Map<string, SwanBotV2ClientToolExecutionResult>();
   for (const group of groups) {
     // Live progress label so the user sees "Reading the screen…" / "Running
     // tests…" instead of a static spinner during a multi-tool loop.
@@ -2070,12 +2329,25 @@ async function executeClientToolCalls(
   }
   // Return in the ORIGINAL call order (edge fn matches tool_result by id, but
   // stable order keeps transcripts/telemetry faithful).
-  return calls.map((c) => byId.get(c.id)).filter(Boolean) as Array<{
-    tool_use_id: string;
-    content: string;
-    is_error?: boolean;
-    receipt_metadata?: SwanBotClientToolReceiptMetadata;
-  }>;
+  return calls.map((call) => {
+    const result = byId.get(call.id);
+    if (!result) return null;
+    let policy: { mutatesState?: boolean; externalSideEffect?: boolean } | null = null;
+    try {
+      policy = toolPolicyLookup
+        ? toolPolicyLookup(call.name) as { mutatesState?: boolean; externalSideEffect?: boolean } | null
+        : null;
+    } catch {
+      policy = null;
+    }
+    return {
+      ...result,
+      // Unknown policy fails closed as mutation-capable for task completion.
+      runtime_mutates_state: !policy
+        || policy.mutatesState === true
+        || policy.externalSideEffect === true,
+    };
+  }).filter(Boolean) as SwanBotV2ClientToolExecutionResult[];
 }
 
 // SWANBOT_DIRECT_CLIENT_MUTATION_RECEIPT_CORE_START
@@ -2388,6 +2660,7 @@ async function dispatchCodingClientTool(
         toolName: call.name,
         toolUseId: call.id,
         iteration: context?.iteration,
+        activePluginIds: context?.activePluginIds,
         // Keep both non-erasable turn policy inputs attached at the final
         // runtime chokepoint. `userConstraints` is enforced there today;
         // `alwaysConfirmFloor` also remains available to the runtime context
@@ -3822,24 +4095,11 @@ async function dispatchBrowserScreenshot(input: Record<string, any>): Promise<{ 
 }
 
 async function dispatchCredentialsGet(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
-  const item = String(input?.item || '').trim();
-  if (!item) return { ok: false, error: 'item required' };
-  const vault = typeof input?.vault === 'string' ? input.vault.trim() : undefined;
-  const fields = Array.isArray(input?.fields)
-    ? (input.fields as unknown[]).map((f) => String(f)).filter(Boolean)
-    : undefined;
-  try {
-    const { getCredentials } = await import('./credentialService');
-    const r = await getCredentials({ item, vault, fields });
-    if (!r.ok) return { ok: false, error: r.error || 'credential fetch failed' };
-    // Return the fields map verbatim. The caller is responsible for not
-    // echoing these to chat / other tools. The tool description warns
-    // the model; we don't strip or mask here because callers like
-    // `wp.create_slide` legitimately need the raw values.
-    return { ok: true, data: { item, vault: vault || null, fields: r.fields } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
-  }
+  void input;
+  return {
+    ok: false,
+    error: 'credentials.get is disabled for model-side tools because raw secret values must never enter model-visible tool results. Use a target-bound saved-credential fill after fresh browser verification, or ask the user to enter the credential manually.',
+  };
 }
 
 async function dispatchVerification(
@@ -3877,6 +4137,7 @@ async function dispatchVerification(
 
 interface SwanBotEdgeCallResult {
   response: string | null;
+  executionSummary?: ComputerTaskTurnEvidenceSummary;
   error?: {
     code?: string;
     message: string;
@@ -3983,25 +4244,45 @@ async function callSwanBotAI(
           recordSwanbotV2Outcome(outcome.kind === 'success');
         }
         if (disposition === 'cancelled') {
-          return { response: v2.text || SWANBOT_V2_CANCELLED_MESSAGE };
+          return {
+            response: v2.text || SWANBOT_V2_CANCELLED_MESSAGE,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
+          };
         }
         if (v2.bodyError) {
           console.warn('[SwanBot] v2 returned a terminal edge body (not counted toward the breaker or v1 fallback):', v2.bodyError.code || v2.bodyError.message);
-          return { response: null, error: v2.bodyError };
-        }
-        if (v2.text) return { response: v2.text };
-        if (!mayFallbackToV1) {
           return {
             response: null,
+            error: v2.bodyError,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
+          };
+        }
+        if (v2.text) {
+          return {
+            response: v2.text,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
+          };
+        }
+        if (!mayFallbackToV1) {
+          const mutationCapablePostOutcomeUnknown =
+            v2.mutationCapablePostOutcomeUnknown === true;
+          return {
+            response: null,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
             error: {
-              code: 'v2_terminal_without_payload',
-              message: 'The v2 run reached a terminal state without a displayable result. It was not replayed through v1.',
+              code: mutationCapablePostOutcomeUnknown
+                ? 'v2_transport_outcome_unknown'
+                : 'v2_terminal_without_payload',
+              message: mutationCapablePostOutcomeUnknown
+                ? 'The mutation-capable v2 request returned no authenticated response, so its outcome is unknown. It was not replayed through v1; inspect the existing run and current app/data state before starting fresh.'
+                : 'The v2 run reached a terminal state without a displayable result. It was not replayed through v1.',
             },
           };
         }
         if (forceClientToolLoop) {
           return {
             response: null,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
             error: {
               code: 'client_tool_loop_unavailable',
               message: 'The required local typed tool loop returned no result. It was not replayed through the text-only fallback.',
@@ -5193,19 +5474,50 @@ async function resolveBudgetDownshift(
   }
 }
 
-export async function getSwanBotResponse(
+export type SwanBotTurnResult = {
+  text: string;
+  executionSummary?: ComputerTaskTurnEvidenceSummary;
+};
+
+/**
+ * Detailed turn result for orchestration callers. The duplicate guard owns the
+ * complete object, so concurrent callers receive the same proof summary rather
+ * than one caller winning a callback race. Ordinary chat keeps using the
+ * string compatibility wrapper below.
+ */
+export async function getSwanBotTurnResult(
   message: string,
-  context: SwanBotContext
-): Promise<string> {
+  context: SwanBotContext,
+): Promise<SwanBotTurnResult> {
   const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
 
   if (!cleaned) {
-    return "What's good? 🦢";
+    return { text: "What's good? 🦢" };
   }
 
   return runSwanBotTurnWithDuplicateGuard('text', cleaned, context, () =>
-    getSwanBotResponseImpl(cleaned, context),
+    (async () => {
+      let executionSummary: ComputerTaskTurnEvidenceSummary | undefined;
+      const text = await getSwanBotResponseImpl(cleaned, {
+        ...context,
+        onTaskExecutionSummary: (summary) => {
+          executionSummary = summary;
+          try { context.onTaskExecutionSummary?.(summary); } catch {}
+        },
+      });
+      return {
+        text,
+        ...(executionSummary ? { executionSummary } : {}),
+      };
+    })(),
   );
+}
+
+export async function getSwanBotResponse(
+  message: string,
+  context: SwanBotContext,
+): Promise<string> {
+  return (await getSwanBotTurnResult(message, context)).text;
 }
 
 async function getSwanBotResponseImpl(
@@ -5577,6 +5889,9 @@ async function getSwanBotResponseImpl(
         executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
       },
     );
+    if (aiResult?.executionSummary) {
+      try { enrichedContext.onTaskExecutionSummary?.(aiResult.executionSummary); } catch {}
+    }
     const aiResponse = aiResult?.response || null;
     if (aiResponse) {
       console.log('[SwanBot] Tier 2: Got response from edge function');
@@ -5639,6 +5954,9 @@ async function getSwanBotResponseImpl(
               executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
             },
           );
+          if (failoverResult?.executionSummary) {
+            try { enrichedContext.onTaskExecutionSummary?.(failoverResult.executionSummary); } catch {}
+          }
           const failoverText = failoverResult?.response || null;
           if (failoverText) {
             const noticedResponse = `${failoverPlan.userNotice}\n\n${failoverText}`;

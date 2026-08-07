@@ -5,8 +5,9 @@
 > Synthesized 2026-07-13 from a read-only sweep of the codebase (571 `src/lib`
 > modules, 47 edge functions, ~30 planning docs) plus a frontier scan of the
 > mid-2026 agent field.
-> Runtime reconciliation updated 2026-07-27 for guarded browser fill/toggle/
-> native-select, read-only locator-actionability evidence, native activation and narrow semantic-press proof, SwanBot
+> Runtime reconciliation updated 2026-08-06 for guarded browser fill/toggle/
+> native-select, bounded browser wait/scroll, read-only locator-actionability
+> evidence, native activation and narrow semantic-press proof, SwanBot
 > continuation receipts, the durable action-call ledger, Chat computer context
 > packs, provider-aware app-capability recovery, and bounded dispatch/proof
 > persistence.
@@ -182,13 +183,16 @@ governance (scope × rate × require-review).
   exact-call approval callback when supplied. Policy exceptions and approval
   rejection fail closed; an active approval surface forces sequential
   per-call dispatch so prompts cannot race or be reviewed out of order.
-- **82-tool executable subset** — 25 server-side (memory/tasks/missions/rooms/
-  messages/approvals/rewards/github/fetch) + 57 client-delegated across desktop,
+- **84-tool source-executable subset** — 25 server-side (memory/tasks/missions/rooms/
+  messages/approvals/rewards/github/fetch) + 59 client-delegated across desktop,
   browser, workspace, WordPress, credentials, and coding-agent families.
+  bounded semantic `browser.wait_for` / `browser.scroll`,
   `browser.select_option`, read-only `browser.locator_actionability`, and the
   exact `desktop.click_element` semantic-press schema are included in that same
-  82/57 catalog, with edge/OpenSwan schema and dispatcher parity guarded by
-  focused smokes. Locator actionability is bounded advisory evidence for one
+  84/59 catalog, with edge/OpenSwan schema and dispatcher parity guarded by
+  focused smokes. The 84/59 count is derived from current source; it does not
+  prove that the deployed edge contains the same bytes. Locator actionability
+  is bounded advisory evidence for one
   fresh exact target; it does not authorize or bind a later mutation. The edge-facing
   `browser.fill_field` schema is narrowed to the sealed draft contract:
   textbox/searchbox only, bounded text/context/locator fields, name XOR
@@ -379,10 +383,29 @@ Plans: `docs/AGENT_APP_AUTOMATION_IMPLEMENTATION_PLAN.md`,
   bounded, CAS-protected, and require multi-target coverage. Section 28 also
   validates and freezes protected schema-v2 Chat/OpenSwan approval payloads,
   server-stamps pending resolution, and restricts expiry/one-use consume to the
-  requester without touching unrelated legacy/scheduled rows. These contracts and their
-  ten focused guards are source/focused-smoke evidence only: §26/§27/§28,
-  updated edges, live DB/cron/Realtime races, external provider execution, and
-  GUI behavior remain unverified.
+  requester without touching unrelated legacy/scheduled rows. These contracts
+  and their ten focused guards are source/focused-smoke evidence only. §26 is
+  applied and catalog-verified, but live contention/crash behavior remains
+  unverified; §27/§28 are unapplied. Updated edges, live DB/cron/Realtime races,
+  external provider execution, and GUI behavior also remain unverified.
+- **Exact Photoshop and manual verification hardening (source-verified
+  2026-08-06)** — each exact Photoshop request binds the originating Chat
+  message/submission fingerprint and executable program into one authenticated
+  root plus compiler-scoped §26 claim/start/finish lifecycle. Approval and
+  capability re-entry preserve that identity; missing, legacy, or mismatched
+  identity fails before root creation and desktop access. Same-request duplicate
+  dispatch is blocked, while a new explicit submission intentionally gets a new
+  request/root; live contention proof remains pending. Manual verification is
+  requester-, task-, bridge-instance-, and target-bound, allowlisted and
+  observation-only, rechecks scope after every
+  await and before persistence, and never marks the task complete. Photoshop
+  status inspects the active document without activating another document.
+  These are source/focused-smoke claims, not live recovery or cross-device proof.
+- **Human foreground ownership (planned kernel invariant)** — an explicitly
+  requested lifecycle action may foreground its exact target once. A later user
+  switch to Terminal, another app, or another browser tab interrupts the task;
+  observation, approval, progress, and retry loops must pause/fail closed rather
+  than repeatedly raising the target or Chat browser.
 - **Sealed browser/native mutation canaries (source-verified)** — typed
   OpenSwan `browser.fill_field` normalizes one exact non-secret draft, observes
   opaque bridge-process/context/live-document/URL identity, and asks read-only
@@ -742,18 +765,18 @@ with our sticky floor as the enforcement point.
   outcome-unknown and require a fresh observation; they are not auto-replayed.
   Current proof is focused source/unit/typecheck verification, not live browser
   or native GUI execution.
-- **Durable action ledger is not production-proven yet** — the
-  `agent_action_calls` source, SQL migration/RPCs, runtime wrapper, and focused
-  smokes are built. Applying and exercising that migration against the live
-  database, verifying authenticated run ownership/RLS and claim/start/finish
-  RPCs, and racing two workers against one idempotency identity remain release
-  checks.
+- **Durable action ledger contention is not production-proven yet** — the
+  `agent_action_calls` source, SQL migration/RPCs, runtime wrapper, focused
+  smokes, and live catalog presence are verified. Exercising authenticated run
+  ownership/RLS and claim/start/finish under faults, then racing two workers
+  against one idempotency identity, remain release checks.
 - **Authority consolidation is source-proven, not deployment-proven** — the
   exact Chat/OpenSwan/SwanBot approval claims, value-free direct handoffs,
   `desktop.open_path` ledger, automation/scheduled no-replay guards,
   `outcome_unknown` UI, Office durable-row wakeup, and external edge ledger
-  bindings are pinned by focused smokes and readiness. Sections 26, 27, and 28 are
-  not applied; changed edges are not deployed/re-verified; and live RLS,
+  bindings are pinned by focused smokes and readiness. Section 26 is applied and
+  catalog-verified but not contention-proven; sections 27 and 28 are not
+  applied. Changed edges are not deployed/re-verified; and live RLS,
   Realtime, cron, provider, concurrent-worker, and GUI behavior was not tested.
   Local Docker/Supabase was unavailable for §28 execution.
 - **Continuation protocol/privacy is source-proven, not
@@ -814,7 +837,7 @@ scrubbing/sweeping, live GUI execution, live Realtime/RLS/cron behavior, live da
 concurrency/failure-injection behavior, or production telemetry. Tool-catalog
 size is stated as "180+"
 because the `OpenSwanRuntimeToolName` union is a composed multi-type union
-  (counting method yields 170–191); **82 total = 25 server-side + 57
+  (counting method yields 170–191); **84 total = 25 server-side + 59
 client-delegated** is the concrete source-derived `swanbot-v2-ai` executable
 subset. §9 frontier claims are primary-sourced for the pre-cutoff backbone
 (launch dates, benchmark methodology, protocol history, RLVR science, the

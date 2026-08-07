@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import {
   canConsumeSwanBotContinuationDispatchClaim,
   decideSwanBotContinuationDispatchClaim,
@@ -22,6 +23,28 @@ function fail(
 ): void {
   assert.equal(value.ok, false, `${label}: expected validation failure`);
   assert.match((value as { ok: false; error: string }).error, pattern, label);
+}
+
+function loadMarkedCore(
+  source: string,
+  startMarker: string,
+  endMarker: string,
+  exportNames: string[],
+): Record<string, (...args: any[]) => any> {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert(start >= 0 && end > start, `found executable core ${startMarker}`);
+  const block = source.slice(start + startMarker.length, end);
+  const assignment = `\n(globalThis as any).__ucExports = { ${exportNames.join(', ')} };\n`;
+  const transpiled = ts.transpileModule(block + assignment, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.None,
+    },
+  });
+  const realm: Record<string, unknown> = {};
+  Function('globalThis', transpiled.outputText)(realm);
+  return realm.__ucExports as Record<string, (...args: any[]) => any>;
 }
 
 const valid = ok(validateSwanBotResumeToolResults([
@@ -426,4 +449,119 @@ assert(
   'server writers are withheld without a valid durable retry identity',
 );
 
-console.log('swanbot-v2-continuation smoke passed');
+const continuationOpenIndex = edgeSource.indexOf(
+  'const cont = await openStoredContinuationEnvelope(',
+);
+const continuationThreadAuthorizationIndex = edgeSource.indexOf(
+  'const continuationThreadAuthorization = await authorizeSwanBotChatThread({',
+  continuationOpenIndex,
+);
+const continuationClaimParseIndex = edgeSource.indexOf(
+  'const parsedDispatchClaim = parseSwanBotContinuationDispatchClaim(body);',
+  continuationOpenIndex,
+);
+const continuationResultPersistenceIndex = edgeSource.indexOf(
+  'const persisted = await persistClientContinuationToolResults({',
+  continuationOpenIndex,
+);
+const continuationRunLoopIndex = edgeSource.indexOf(
+  'const result = await runLoop({',
+  continuationOpenIndex,
+);
+assert(
+  continuationOpenIndex >= 0
+    && continuationThreadAuthorizationIndex > continuationOpenIndex
+    && continuationClaimParseIndex > continuationThreadAuthorizationIndex
+    && continuationResultPersistenceIndex > continuationThreadAuthorizationIndex
+    && continuationRunLoopIndex > continuationThreadAuthorizationIndex,
+  'authenticated continuation thread is reauthorized before claim, result persistence, and resumed model/tool work',
+);
+
+async function runContinuationThreadAuthorizationRegression(): Promise<void> {
+  const edgeAuthorizationCore = loadMarkedCore(
+    edgeSource,
+    '// THREAD_AUTHORIZATION_CORE_START',
+    '// THREAD_AUTHORIZATION_CORE_END',
+    ['authorizeSwanBotChatThread'],
+  );
+  const authorizeThread = edgeAuthorizationCore.authorizeSwanBotChatThread;
+  assert.equal(typeof authorizeThread, 'function', 'loaded current edge thread authorization core');
+
+  const circleId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const userId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const threadId = '11111111-1111-4111-8111-111111111111';
+  const threadCreatorId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const makeThreadAuthDb = (
+    membership: Record<string, unknown> | null,
+    membershipError: unknown = null,
+  ) => ({
+    from(table: string) {
+      const query = {
+        select() { return query; },
+        eq() { return query; },
+        async maybeSingle() {
+          return table === 'circle_chat_threads'
+            ? {
+                data: {
+                  id: threadId,
+                  circle_id: circleId,
+                  created_by: threadCreatorId,
+                  visibility: 'private',
+                },
+                error: null,
+              }
+            : { data: membership, error: membershipError };
+        },
+      };
+      return query;
+    },
+  });
+
+  const currentMember = await authorizeThread({
+    supabase: makeThreadAuthDb({ user_id: userId }),
+    circleId,
+    userId,
+    threadId,
+  });
+  assert.deepEqual(
+    currentMember,
+    { ok: true, threadId },
+    'current private-thread membership authorizes continuation work',
+  );
+
+  // Adversarial case: the user was authorized when the encrypted checkpoint
+  // was sealed, then removed before claim_dispatch or submit_results. A valid
+  // sealed snapshot must not confer stale thread authority.
+  const revokedMember = await authorizeThread({
+    supabase: makeThreadAuthDb(null),
+    circleId,
+    userId,
+    threadId,
+  });
+  assert.deepEqual(revokedMember, {
+    ok: false,
+    status: 403,
+    code: 'thread_forbidden',
+    message: 'Not authorized for this Chat thread. No new tool work was authorized.',
+  }, 'revoked private-thread membership blocks continuation authority');
+
+  const lookupFailure = await authorizeThread({
+    supabase: makeThreadAuthDb(null, new Error('database unavailable')),
+    circleId,
+    userId,
+    threadId,
+  });
+  assert.deepEqual(lookupFailure, {
+    ok: false,
+    status: 503,
+    code: 'thread_authorization_unavailable',
+    message: 'Could not verify the active Chat thread. No new tool work was authorized.',
+  }, 'thread membership lookup failure fails closed');
+}
+
+runContinuationThreadAuthorizationRegression()
+  .then(() => console.log('swanbot-v2-continuation smoke passed'))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

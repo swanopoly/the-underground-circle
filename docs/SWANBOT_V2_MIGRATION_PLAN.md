@@ -14,7 +14,7 @@
 |---|---|---|
 | **M1** Flag + client router + plan doc | `uc_swanbot_v2_enabled` localStorage flag, `/v2 on|off` slash command, `callSwanBotV2`, tier-2 route switcher in `swanbot.ts` | Shipped 2026-04-23 |
 | **M2** Client-delegated tool protocol | v2 returns pending `clientToolCalls`; the client first claims exact dispatch ownership, executes locally only after the echoed claim is confirmed, then posts the exact results under that same claim so the edge can claim model-resume ownership | Shipped 2026-04-23; source-hardened through 2026-07-26 with pre-handler constraint/approval enforcement, hidden proof receipts, gateway-first mutations, AES-256-GCM-sealed continuation checkpoints, value-free public events, and the two-phase `client_pending → client_dispatching → client_resuming` protocol; env/deploy/§29/live race proof remains pending |
-| **M3** Full OpenSwan tool parity | Port the OpenSwan runtime-facing tool families into v2's `TOOLS: ToolDef[]` (Supabase-backed tools direct; client-delegated via M2 protocol) | Source-shipped at **82 total = 25 server-side + 57 client-delegated**, including sealed browser fill/native-select, read-only advisory locator-actionability evidence, value-stripped typed handoffs for all six legacy Computer Use mutation kinds, and the exact native semantic-press schema; focused parity smokes guard drift |
+| **M3** Full OpenSwan tool parity | Port the OpenSwan runtime-facing tool families into v2's `TOOLS: ToolDef[]` (Supabase-backed tools direct; client-delegated via M2 protocol) | Source-shipped at **84 total = 25 server-side + 59 client-delegated**, including bounded semantic browser wait/scroll, sealed browser fill/native-select, read-only advisory locator-actionability evidence, value-stripped typed handoffs for all six legacy Computer Use mutation kinds, and the exact native semantic-press schema; focused parity smokes guard drift, while deployed 84-tool parity remains unverified |
 | **M4** Flip the default | Default `uc_swanbot_v2_enabled = true`; v1 becomes opt-out for regression escapes | Client default flipped 2026-07-07 with a session circuit breaker (see status log); telemetry sign-off still gates calling M4 done |
 | **M5** Retire v1 tool loop | Retire the v1 **tool loop** (`BLACKSWAN_TOOLS` + `executeToolUseLoop`). **Do NOT delete the edge function** — its provider **relay** leg is still load-bearing (see M5). | After 30 days of M4 with no rollbacks |
 
@@ -367,14 +367,15 @@ compatibility boundary.
 ## M3 — Full OpenSwan tool parity
 
 M3 is source-complete. The v2 edge catalog is derived from
-`supabase/functions/swanbot-v2-ai/index.ts` and currently pins **82 tools:
-25 server-side + 57 client-delegated** (coding-agent client tools — edit_file,
+`supabase/functions/swanbot-v2-ai/index.ts` and currently pins **84 tools:
+25 server-side + 59 client-delegated** (coding-agent client tools — edit_file,
 run_shell, git.run, codebase.search, todo.write, coordination.file_status —
   added 2026-07-14; guarded `browser.set_toggle` added 2026-07-25; sealed native
   HTML-select `browser.select_option` added 2026-07-26; read-only advisory
-  `browser.locator_actionability` added 2026-07-27). The narrowed
+  `browser.locator_actionability` added 2026-07-27; bounded semantic
+  `browser.wait_for` and `browser.scroll` added 2026-08-05). The narrowed
 `desktop.click_element` semantic-press contract was hardened in place and is
-  included within the same 82/57 catalog; its hardening did not change counts. The
+  included within the same 84/59 catalog; its hardening did not change counts. The
 historical sub-phases below record how parity was reached. New catalog or schema
 growth must be re-pinned by `smoke:swanbot-openswan-readiness`, dispatcher
 parity, and the focused semantic-action runtime smoke before it is treated as
@@ -382,14 +383,15 @@ ready.
 
 - **M3a — read-only Supabase tools (SHIPPED 2026-04-23).** 7 new tools added to `swanbot-v2-ai/index.ts` TOOLS: `fetch_url`, `tasks.list`, `missions.list` (with mission_tasks roll-up for progress %), `check_ins.list`, `integrations.list`, `rooms.list`, `office.list_agents`. Handlers reimplemented inline against the edge-side Supabase client — can't import from `src/` (RN-flavoured). Includes v1's `getMemberStatus`, `searchCircleMemory`, `getGithubActivity`, `listLibrarySkills`, `viewLibrarySkill` — v2 total: **12 server-side + 11 client-delegated desktop = 23 tools**.
 - **M3b — writers (server-side mutations, SHIPPED 2026-04-23).** 8 new writer tools added: `save_memory`, `tasks.create`, `tasks.update_status`, `tasks.assign`, `missions.create_task`, `messages.create`, `rooms.create`, `rooms.send_message`. Handlers reimplemented inline against the edge Supabase service-role client. Because service-role bypasses RLS, every writer explicitly scopes by `circle_id = circleId` on `insert` and re-verifies parent rows (task / mission / room) belong to the caller's circle before mutation. Cross-circle attempts return `"X not found in this circle"`. Status aliases ("in progress", "open") normalised via `normalizeTaskStatus()` helper. 52 smoke assertions in `scripts/swanbot-v2-writers-smoketest.ts` cover scope guards + validation + shape. Approval gating stays on the client side via `chatApprovalGate` — server is scope-enforcement only.
+  Fresh and resumed v2 Chat turns now bind `messages.create` to the authenticated active thread: the edge verifies the exact user/circle/thread, persists that identity inside the encrypted continuation, rejects a missing or model-mismatched thread, and writes only the pre-authorized `thread_id`. This source fix closes the observed `messages?select=id` 400/default-thread misrouting seam; current-edge deployment and live §31 behavior remain unverified.
 - **M3c — workspace / verification via client-delegation (SHIPPED 2026-04-23).** 6 new `clientOnly` tools: `workspace.create_room`, `workspace.apply_artifacts`, `workspace.open_preview`, `verification.typecheck`, `verification.tests`, `verification.lint`. Edge fn declares them with defensive-throw handlers; client dispatcher in `src/lib/swanbot.ts` routes the tool names to `createWorkspaceFromArtifact` / `createFilesInRoomFromArtifact` (chatWorkspace.ts), `primeRoomWorkspaceLaunch` / `focusRoomWorkspaceFile` (roomWorkspaceLauncher.ts), and `detectClaudeCodeBridge` + `execBridgeCommand` (claudeCodeDetector.ts). Verification output stdout/stderr clipped at 8KB to cap context cost. `normalizeArtifact` helper enforces artifact `{ kind, title }` shape before any write. 47 smoke assertions in `scripts/swanbot-v2-workspace-smoketest.ts`.
 - **M3d — approvals + credentials (SHIPPED 2026-04-23; self-approval blocked 2026-06-29).** Server-side model tools: `approvals.list` (scoped to circle, filter by status, default `pending`) and `approvals.request` (auto-attaches to ctx.runId when caller omits runId; scope-guards against cross-circle run ids; clamps timeoutSeconds to [30, 86400]). `approvals.resolve` is deliberately not selected for model-facing tools and its edge handler fails closed; approval resolution must come from the signed UI or another out-of-band operator flow. ToolContext gained `runId?: string | null` so request handlers can attach to the current run without duplicating state. Client-only: `credentials.get` proxies to the bridge `/secrets` endpoint (1Password CLI via OP_SERVICE_ACCOUNT_TOKEN) via `dispatchCredentialsGet` in `src/lib/swanbot.ts` — returns the raw `{ field: value }` map, since callers like `wp.create_slide` need plaintext. Tool description explicitly warns the model not to echo. `scripts/swanbot-v2-approvals-smoketest.ts` now guards the fail-closed resolve path.
-- **Production deploy (SHIPPED 2026-04-23; re-verify before S1).** `supabase functions deploy swanbot-v2-ai` pushed the then-current `index.ts` + `_claude/anthropic.ts` + `_shared/edge.ts` to project `rjkniqiqdtroeholxacg`. The worktree has since expanded the catalog, so S1 must verify the deployed function matches the source-derived readiness snapshot before flipping defaults.
-- **M3e — WordPress + publishing (SHIPPED 2026-04-23).** Client-only WordPress tools: `wp.discover_types`, `wp.list_posts`, `wp.upload_media`, `wp.create_slide`, `wp.update_post`, and `wp.trash_post`, plus the companion browser tool `browser.wp_admin_source_intelligence` for bounded/redacted wp-admin and Dealer Inspire page understanding. Must be client-delegated because they need 1P credentials resolved via the local bridge, local browser state, and/or writes to the user's WordPress install. Client dispatchers in `src/lib/swanbot.ts` validate `siteUrl` must start with `http(s)://` (rejects `javascript:`, `ftp:`, etc.), require `onePasswordItem`, default sane mimeTypes, clamp `perPage` to [1, 50], and narrow WP API responses to `{ id, title, status, link }` tuples (title.rendered flattened from object-or-string) so the model sees small payloads. Tool descriptions tell the model to pair with `approvals.request` first. **v2 tool migration complete for this phase; current readiness parity is source-derived and pinned by `smoke:swanbot-openswan-readiness` at 25 server-side + 57 client-delegated = 82 tools.** Next: M4 (flip default after telemetry).
+- **Production deploy (SHIPPED 2026-04-23; re-verify before S1).** `supabase functions deploy swanbot-v2-ai` pushed the then-current `index.ts` + `_claude/anthropic.ts` + `_shared/edge.ts` to project `rjkniqiqdtroeholxacg`. The worktree has since expanded the catalog, so S1 must verify the deployed function matches the source-derived readiness snapshot before operational sign-off.
+- **M3e — WordPress + publishing (SHIPPED 2026-04-23).** Client-only WordPress tools: `wp.discover_types`, `wp.list_posts`, `wp.upload_media`, `wp.create_slide`, `wp.update_post`, and `wp.trash_post`, plus the companion browser tool `browser.wp_admin_source_intelligence` for bounded/redacted wp-admin and Dealer Inspire page understanding. Must be client-delegated because they need 1P credentials resolved via the local bridge, local browser state, and/or writes to the user's WordPress install. Client dispatchers in `src/lib/swanbot.ts` validate `siteUrl` must start with `http(s)://` (rejects `javascript:`, `ftp:`, etc.), require `onePasswordItem`, default sane mimeTypes, clamp `perPage` to [1, 50], and narrow WP API responses to `{ id, title, status, link }` tuples (title.rendered flattened from object-or-string) so the model sees small payloads. Tool descriptions tell the model to pair with `approvals.request` first. **v2 tool migration complete for this phase; current readiness parity is source-derived and pinned by `smoke:swanbot-openswan-readiness` at 25 server-side + 59 client-delegated = 84 tools.** Next: complete M4 production telemetry and deployment sign-off; client default routing is already source-shipped.
 - **M3e hardening (2026-06-23).** OpenSwan runtime policy now has an explicit `wp.*` branch: `wp.discover_types` and `wp.list_posts` are read-only/auto, while `wp.upload_media` and `wp.create_slide` are publish-class writes requiring approval. Chat-side WordPress schedule now posts `status: future` plus the requested ISO date through `wordpressRestPayload`, so scheduled posts no longer degrade to draft-only behavior.
 - **M3e Dealer Inspire hardening (2026-06-23; expanded 2026-06-26).** `wp.discover_types`, `wp.list_posts`, `wp.upload_media`, `wp.create_slide`, `wp.update_post`, `wp.trash_post`, and `browser.wp_admin_source_intelligence` are in the OpenSwan/SwanBot model-facing safe-name catalog so typed tool disclosure can actually expose them when WordPress/DI tasks need them. `wp.create_slide` now accepts `slideType` for Dealer Inspire/DI Slides flows, and its schema/description tells the model to discover `di_slide` / `flavor_di_slides`, create drafts first, and request approval before media, slider, expiration, order, cache, or public-status changes. Chat routes and OpenSwan planner ordering now inspect bounded WordPress admin source facts before using dashboard-only DI fields.
 - **M3e update hardening (2026-06-24).** Added `wp.update_post` as a client-delegated WordPress write for known post/page/custom-post-type IDs. It supports bounded fields only (`title`, `content`, `status`, `slug`, `excerpt`, `date`, `featuredMedia`, `menuOrder`, `meta`), validates `siteUrl`/`onePasswordItem`/`postId`, returns a slim post receipt, and is publish-class approval-gated like media upload and slide creation. Chat/strategy/planner routes now recommend it for existing WordPress/Dealer Inspire updates before falling back to wp-admin browser control.
-- **M3 browser/native mutation hardening (SOURCE-VERIFIED 2026-07-27; live proof pending).** `browser.locator_actionability` now supplies bounded read-only advisory evidence for one fresh exact browser target; it never authorizes or binds a later mutation, which must use its own approval/proof gate. `browser.select_option` seals one exact option on one native single-value HTML `<select>`, restricts it to low-consequence local presentation/accessibility preferences, and verifies the same control without submit/navigation; custom ARIA comboboxes, multi-selects, consequential settings, and unknown state fail closed. The existing `desktop.click_element` catalog entry is narrowed to a press-only semantic contract. Its adapter re-observes the exact frontmost app/PID/path/role/label/accessibility generation, seals a one-shot target, emits only privacy-safe bounded approval metadata, and accepts completion only when that exact target disappears or changes fingerprint. Text/state/value controls, modals, unknown semantics, destructive/payment/auth/permission/send/publish targets, and automatic replay are rejected. OpenSwan builds a `computerAppGrounding` observation epoch, hashes transient arguments, authorizes the exact contract, then calls `dispatchDurableComputerAppMutation`; the `agent_action_calls` claim/start/finish wrapper marks dispatch before one bridge perform and prevents duplicate execution. Ambiguous handler or after-state results end as outcome-unknown rather than replay. SwanBot intercepts the tool into this same runtime, while both raw dispatchers fail closed. Focused smokes pin the public and edge schemas, interception order, raw-bypass closure, grounding/ledger order, exact-target proof, and no-replay behavior. This is source/test evidence only: latest edge deployment, live database migration/RPC execution, production telemetry, and a real native GUI run remain unverified.
+- **M3 browser/native mutation hardening (SOURCE-VERIFIED 2026-07-27; live proof pending).** `browser.locator_actionability` now supplies bounded read-only advisory evidence for one fresh exact browser target; it never authorizes or binds a later mutation, which must use its own approval/proof gate. `browser.select_option` seals one exact option on one native single-value HTML `<select>`, restricts it to low-consequence local presentation/accessibility preferences, and verifies the same control without submit/navigation; custom ARIA comboboxes, multi-selects, consequential settings, and unknown state fail closed. The existing `desktop.click_element` catalog entry is narrowed to a press-only semantic contract. Its adapter re-observes the exact frontmost app/PID/path/role/label/accessibility generation, seals a one-shot target, emits only privacy-safe bounded approval metadata, and accepts completion only when that exact target disappears or changes fingerprint. Text/state/value controls, modals, unknown semantics, destructive/payment/auth/permission/send/publish targets, and automatic replay are rejected. OpenSwan builds a `computerAppGrounding` observation epoch, hashes transient arguments, authorizes the exact contract, then calls `dispatchDurableComputerAppMutation`; the `agent_action_calls` claim/start/finish wrapper marks dispatch before one bridge perform and prevents duplicate execution. Ambiguous handler or after-state results end as outcome-unknown rather than replay. SwanBot intercepts the tool into this same runtime, while both raw dispatchers fail closed. Focused smokes pin the public and edge schemas, interception order, raw-bypass closure, grounding/ledger order, exact-target proof, and no-replay behavior. This is source/test evidence only: latest edge deployment, live §26 contention/crash-boundary behavior, production telemetry, and a real native GUI run remain unverified.
 - **M3 authority and unattended-dispatch consolidation (SOURCE-VERIFIED
   2026-07-26; deployment/live DB proof pending).** Chat approval is SHA-256
   authority over the complete normalized plan plus user/circle/thread/room and
@@ -424,9 +426,11 @@ ready.
   allowlisted immutable schema-v2 payloads for protected Chat/OpenSwan
   approvals, server-stamps pending resolution, and restricts expiry/one-use
   consumption to the requester without changing unrelated legacy/scheduled
-  rows. Sections 26, 27, and 28, current edges, live scheduler/Realtime
-  contention, external providers, and native GUI behavior remain unverified.
-  Local Docker/Supabase was unavailable for §28 execution.
+  rows. Section 26 is applied and catalog-verified, but its live contention and
+  crash behavior remain unverified. Sections 27 and 28 remain unapplied; current
+  edges, live scheduler/Realtime contention, external providers, and native GUI
+  behavior also remain unverified. Local Docker/Supabase was unavailable for
+  §28 execution.
 - **M3 adversarial closure (SOURCE-VERIFIED 2026-07-26; live races pending).**
   The v2 `browser.fill_field` model schema exposes only the sealed
   textbox/searchbox, bounded, no-submit, no-extra-properties contract, with
@@ -459,12 +463,12 @@ ready.
 ### Smoke-test strategy
 
 Pre-M4 readiness:
-1. Deploy/re-verify `swanbot-v2-ai` against the source-derived 82-tool snapshot
+1. Deploy/re-verify `swanbot-v2-ai` against the source-derived 84-tool snapshot
    with a dedicated `SWANBOT_CONTINUATION_ENCRYPTION_SECRET` and explicit
    `SWANBOT_CONTINUATION_ENCRYPTION_KEY_VERSION`. Also verify that a deployment
    with no valid key withholds all `clientOnly` tools and creates no pending
    local-action checkpoint.
-2. For focused Lane 1 work, run `npm run check:swanbot-v2:daily`; before default flips or customer release handoff, run `npm run check:swanbot-v2:release`. Cross-lane chat/computer work uses the matching `check:swanbot-chat:daily` or `check:swanbot-chat:release` gate. All four daily/release gates include `smoke:swanbot-v2-client-result-persistence` and the read-only `smoke:browser-locator-actionability`; `smoke:all` includes the latter too. These checks lock exact pending-call correlation, receipt redaction/model separation, idempotent event persistence, the bounded run aggregate, and advisory locator evidence that cannot authorize or bind a later mutation.
+2. For focused Lane 1 work, run `npm run check:swanbot-v2:daily`; before customer release or production-default sign-off, run `npm run check:swanbot-v2:release`. Cross-lane chat/computer work uses the matching `check:swanbot-chat:daily` or `check:swanbot-chat:release` gate. All four daily/release gates include `smoke:swanbot-v2-client-result-persistence` and the read-only `smoke:browser-locator-actionability`; both release gates and canonical readiness include `smoke:browser-wait-scroll-reachability`. Both releases also run `smoke:computer-task-truthful-outcome` and `smoke:swanbot-v2-thread-identity`, while Chat release runs `smoke:chat-failure-recovery` and `smoke:exact-program-authority`. `smoke:all` includes the established focused suite plus the v2 thread-identity guard; exact-program authority remains intentionally Chat-release scoped. These checks lock exact pending-call correlation, receipt redaction/model separation, idempotent event persistence, the bounded run aggregate, bounded semantic wait/scroll reachability, advisory locator evidence that cannot authorize or bind a later mutation, authenticated fresh/resumed Chat-thread binding for service-role message writes, origin-message/program-bound exact root plus §26 dispatch authority, truthful outcome projection, and recovery boundaries.
 3. Explicitly run or confirm release-gate coverage for
    `smoke:browser-select-mutation-gateway`,
    `smoke:browser-select-runtime-gateway`, the 103-assertion
@@ -511,7 +515,7 @@ Pre-M4 readiness:
 6. Verify real `agent_runs` telemetry, not synthetic readiness input: v1 `swanbot-ai` rows must write `metadata.version='swanbot-ai'`, v2 rows must write `metadata.version='swanbot-v2-ai'`, and `src/lib/swanbotOpenSwanReadiness.ts` must load both cohorts by `metadata->>version` and `surface='main_chat'`.
 7. Verify `agent_runs.final_stop_reason` telemetry is normalized to `end_turn`,
    `max_tokens`, `client_pending`, `client_dispatching`, `client_resuming`, and
-   `error` before default-flip decisions. The first three client reasons are
+   `error` before M4 production-sign-off decisions. The first three client reasons are
    active/non-terminal and readiness must ignore them. The v2 edge preserves
    the raw Anthropic stop reason only in metadata as `rawStopReason`; the v1
    baseline normalizes terminal legacy turns to `end_turn`, `max_tokens`, or
@@ -534,13 +538,14 @@ Pre-M4 readiness:
 ## M4 — Flip the default
 
 - After M3e, watch a week of mixed v1/v2 telemetry from the opt-in cohort.
-- Build the decision from `src/lib/swanbotOpenSwanReadiness.ts`, not a manual checklist. It derives the current v2 catalog from `supabase/functions/swanbot-v2-ai/index.ts` and currently requires 82 tools total, 57 client-delegated tools, the SwanBot v2 routing/delegation/continuation/writer/workspace/approval/WordPress/dispatcher-parity smokes, browser locator-actionability smoke, WordPress admin source-intelligence smoke, OpenSwan approval/planner smokes, failure-recovery smoke, and enough real `agent_runs.final_stop_reason` telemetry from both the v1 baseline and v2 candidate cohorts. `scripts/swanbot-openswan-readiness-report.ts` is the operator-facing production report for that same logic; it first probes `agent_runs` for the late telemetry columns (`tool_calls`, `iteration_count`, `final_stop_reason`, `input_tokens`, `output_tokens`, `cached_tokens`) and reports cohort completeness before printing the readiness snapshot.
-- The 82/57 readiness count proves catalog shape, not the newest guarded
+- Build the decision from `src/lib/swanbotOpenSwanReadiness.ts`, not a manual checklist. It derives the current v2 catalog from `supabase/functions/swanbot-v2-ai/index.ts` and currently requires 84 tools total, 59 client-delegated tools, the SwanBot v2 routing/delegation/continuation/writer/workspace/approval/WordPress/dispatcher-parity smokes, bounded semantic browser wait/scroll coverage, browser locator-actionability smoke, WordPress admin source-intelligence smoke, OpenSwan approval/planner smokes, failure-recovery smoke, and enough real `agent_runs.final_stop_reason` telemetry from both the v1 baseline and v2 candidate cohorts. `scripts/swanbot-openswan-readiness-report.ts` is the operator-facing production report for that same logic; it first probes `agent_runs` for the late telemetry columns (`tool_calls`, `iteration_count`, `final_stop_reason`, `input_tokens`, `output_tokens`, `cached_tokens`) and reports cohort completeness before printing the readiness snapshot.
+- The 84/59 readiness count proves catalog shape, not the newest guarded
   runtime. Before operational sign-off, separately confirm the deployed edge
   has the exact fill/select/semantic schemas, default-edge policy enforcement,
   gateway-first mutation routing, and both continuation CAS phases before
   local dispatch and before model resume.
-  Apply and exercise `agent_action_calls` in the live database, race both the
+  Exercise the applied/catalog-verified `agent_action_calls` contract in the
+  live database and race both the
   action and continuation CAS paths, configure the dedicated continuation key,
   apply §29 and verify its scrub/cron behavior, inject ambiguous outcomes, and
   collect real browser/native GUI proof. Until then these guarded routes and
@@ -603,7 +608,7 @@ If v2 goes sideways at any phase:
 |---|---|
 | M1 | Flag toggle works · `/v2` command lands · v2 invocation succeeds end-to-end when enabled · v1 unchanged · typecheck + all smoke suites green |
 | M2 | Client-only desktop/tool calls succeed under v2 with flag on · pending `clientToolCalls` + same-edge continuation round-trip works · exact resumable state is AES-256-GCM sealed under the dedicated versioned key while the public envelope/events remain value-free · missing-key starts withhold all `clientOnly` tools · exact `client_pending → client_dispatching` ownership is confirmed before any local execution · exact results transition `client_dispatching → client_resuming` before model resume · only same-claim dispatch retry is idempotent · invalid/duplicate/missing results and competing/mixed/ambiguous/expired claim paths fail closed outcome-unknown with no replay · raw-turn/upstream constraints plus the all-non-read always-confirm floor and exact-call approval run before handlers · trusted receipt metadata is re-sanitized, durably correlated, and absent from model content · guarded mutations enter their canonical runtime before generic dispatch and raw bypasses fail closed · rollback flag works |
-| M3 | Source-derived **82 = 25 + 57** catalog and edge/OpenSwan schema parity pass · smoke tests cover representative read/write/client-delegated families plus exact Chat/OpenSwan/SwanBot approval, direct-handoff/open-path, automation/schedule/Office/database-authority, continuation privacy, read-only locator-actionability, fill/select/semantic/ledger, and all-mutation legacy-handoff invariants · deployed edge snapshot, live §26/§27/§28/§29 migration/RPC/cleanup ownership, approval/action/schedule/continuation races, cron, and GUI proofs are verified · `agent_runs.metadata` captures only the bounded public trace/envelope |
+| M3 | Source-derived **84 = 25 + 59** catalog and edge/OpenSwan schema parity pass · smoke tests cover representative read/write/client-delegated families plus exact Chat/OpenSwan/SwanBot approval, direct-handoff/open-path, automation/schedule/Office/database-authority, continuation privacy, bounded semantic browser wait/scroll, read-only locator-actionability, fill/select/semantic/ledger, and all-mutation legacy-handoff invariants · deployed edge snapshot, live §26/§27/§28/§29 migration/RPC/cleanup ownership, approval/action/schedule/continuation races, cron, and GUI proofs are verified · `agent_runs.metadata` captures only the bounded public trace/envelope |
 | M4 | `swanbotOpenSwanReadiness` returns ready · default flipped · v1/v2 telemetry shows v2 ≥ v1 on completion rate · no regressions reported |
 | M5 | v1 **tool-loop** path removed (`BLACKSWAN_TOOLS` / `executeToolUseLoop`) · **provider relay leg kept + all invoke callers green** · roadmap doc updated. (Edge-function deletion is explicitly OUT of M5 — it needs the relay re-homed first.) |
 
@@ -611,6 +616,14 @@ If v2 goes sideways at any phase:
 
 ## Status log
 
+- **2026-08-06 — browser synchronization and truthful release gates
+  (source-verified).** The source catalog is 84/59/25 after bounded semantic
+  `browser.wait_for` and `browser.scroll`; canonical readiness now requires
+  their reachability smoke. Both release gates include the task-outcome truth
+  smoke, and Chat release includes failure recovery. The 2026-08-05 production
+  report proved function/JWT/secret-name/CORS availability, not that deployed
+  v2 bytes contain this 84-tool source snapshot. Deploy/re-verification remains
+  required.
 - **2026-07-26 — encrypted continuation checkpoint privacy
   (source-verified).** SwanBot v2 now seals the exact resumable
   transcript/system/tool snapshot with AES-256-GCM under the dedicated
@@ -638,7 +651,8 @@ If v2 goes sideways at any phase:
   as verify-first `outcome_unknown` without retry. Office broadcast payloads
   are wakeups whose exact RLS row is the only command source. The ten focused
   authority guards run exactly once in every Chat/SwanBot daily/release gate,
-  `smoke:all`, and readiness. **Still pending:** apply §26/§27/§28, deploy all
+  `smoke:all`, and readiness. §26 is now applied and catalog-verified. **Still
+  pending:** exercise §26 contention/crash behavior, apply §27/§28, deploy all
   changed edges, and prove live DB/cron/Realtime contention, external provider
   execution, and GUI behavior.
 - **2026-07-26 — cloud Computer Use policy + root Chat bypass closure
@@ -682,9 +696,9 @@ If v2 goes sideways at any phase:
   competing/mixed/ambiguous/expired paths close outcome-unknown without replay,
   and readiness ignores all three active states. Edge/OpenSwan
   schemas and focused runtime smokes pin the contract, while the catalog
-  remains **82 total / 57 client-delegated / 25 server-side**. **Still
-  pending:** deploy/re-verify the latest `swanbot-v2-ai` source, apply and
-  exercise the ledger migration/RPCs in the live database, race continuation
+  remains **84 total / 59 client-delegated / 25 server-side**. **Still
+  pending:** deploy/re-verify the latest `swanbot-v2-ai` source, exercise the
+  applied/catalog-verified ledger RPCs in the live database, race continuation
   and action claims plus inject ambiguous/expired outcomes, collect live
   browser/native GUI proof, generalize beyond the narrow low-consequence
   canaries, and complete M4 production telemetry sign-off.

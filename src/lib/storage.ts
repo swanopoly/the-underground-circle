@@ -37,3 +37,41 @@ class WebStorage implements Storage {
 
 // Export the appropriate storage for the platform
 export const storage: Storage = Platform.OS === 'web' ? new WebStorage() : AsyncStorage;
+
+/**
+ * Remove only keys owned by an authenticated session/capability namespace.
+ * This deliberately requires explicit prefixes so logout cleanup cannot turn
+ * into a broad "clear all device data" operation.
+ */
+export async function removeStorageKeysByPrefix(prefixes: readonly string[]): Promise<number> {
+  const allowedPrefixes = Array.from(new Set(
+    prefixes.map((prefix) => String(prefix || '')).filter(Boolean),
+  ));
+  if (allowedPrefixes.length === 0) return 0;
+
+  if (Platform.OS === 'web') {
+    if (typeof localStorage === 'undefined') return 0;
+    const matches: string[] = [];
+    try {
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key && allowedPrefixes.some((prefix) => key.startsWith(prefix))) {
+          matches.push(key);
+        }
+      }
+      matches.forEach((key) => localStorage.removeItem(key));
+      return matches.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    const matches = keys.filter((key) => allowedPrefixes.some((prefix) => key.startsWith(prefix)));
+    if (matches.length > 0) await AsyncStorage.multiRemove(matches);
+    return matches.length;
+  } catch {
+    return 0;
+  }
+}

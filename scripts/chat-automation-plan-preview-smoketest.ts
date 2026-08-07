@@ -34,9 +34,22 @@ function main() {
   {
     const preview = previewFor('hello there');
     assertEqual(preview.title, 'Model chat', 'plain chat: title');
+    assertEqual(preview.routeLabel, 'Chat', 'plain chat: route label');
     assertEqual(preview.mode, 'agentic', 'plain chat: mode');
     assertEqual(preview.approvalRequired, false, 'plain chat: no approval');
     assert(preview.evidence.includes('final answer'), 'plain chat: final answer evidence');
+  }
+
+  {
+    const preview = previewFor('Open Photoshop and create a new 600 by 600 document');
+    assertEqual(preview.title, 'Computer task', 'photoshop: title');
+    assertEqual(preview.routeLabel, 'Desktop app', 'photoshop: native route is not mislabeled as browser/direct');
+  }
+
+  {
+    const preview = previewFor('Search files in my Downloads folder for invoice');
+    assertEqual(preview.title, 'Computer task', 'local file: title');
+    assertEqual(preview.routeLabel, 'Local files', 'local file: route label');
   }
 
   {
@@ -100,6 +113,7 @@ function main() {
   {
     const preview = previewFor('review the latest office run', 'review');
     assertEqual(preview.title, 'OpenSwan agent', 'openswan: title');
+    assertEqual(preview.routeLabel, 'OpenSwan', 'openswan: route label');
     assertEqual(preview.mode, 'agentic', 'openswan: mode');
     assert(preview.evidence.includes('agent run summary'), 'openswan: evidence');
   }

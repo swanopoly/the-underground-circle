@@ -1,16 +1,15 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import type { ChatAutomationPlanPreview, ChatAutomationPreviewTone } from '../../../../lib/chatAutomationPlanPreview';
+import { resolveChatAutomationPlanDisplayRouteLabel } from '../../../../lib/chatRecoveryDisplayCore';
 
 type Props = {
   preview: ChatAutomationPlanPreview;
   accentColor: string;
   /**
-   * P22: display-only Route label. `preview.routeLabel` is the forced
-   * computer-task path's hardcoded 'browser' for desktop/app tasks (and the
-   * preview smoke locks that value), so callers pass a surface-accurate label
-   * derived from the handoff metadata for DISPLAY only — executor selection
-   * still keys off the unchanged routeId.
+   * Compatibility fallback for historical previews that persisted the old
+   * lowercase `browser`/`direct` placeholder. Current previews already carry
+   * the canonical computer surface and always win over this coarser value.
    */
   routeLabelOverride?: string | null;
 };
@@ -34,7 +33,7 @@ function compactList(values: string[], limit: number): string[] {
 
 export default function ChatAutomationPlanCard({ preview, accentColor, routeLabelOverride }: Props) {
   const riskColor = toneColor(preview.riskTone, accentColor);
-  const routeLabel = String(routeLabelOverride || '').trim() || preview.routeLabel;
+  const routeLabel = resolveChatAutomationPlanDisplayRouteLabel(preview.routeLabel, routeLabelOverride);
   const evidence = compactList(preview.evidence, 3);
   const recovery = compactList(preview.recovery, 2);
   const tools = compactList(preview.tools, 4);

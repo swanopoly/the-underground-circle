@@ -12,10 +12,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   buildComputerUsePolicyEnvelope,
+  sanitizeComputerTaskRootPointer,
   startComputerUseAgent,
   type AgentHandle,
   type ComputerUseAlwaysConfirmCategory,
   type ComputerUsePreRunBrowserPermission,
+  type ComputerTaskRootPointerV1,
 } from './computerUseAgent';
 import { resolveComputerUseCreds } from './computerUseCreds';
 import {
@@ -247,9 +249,30 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       alwaysConfirmCategories?: ComputerUseAlwaysConfirmCategory[];
       /** Optional short-lived signal from an explicit browser permission UI. */
       preRunBrowserPermission?: ComputerUsePreRunBrowserPermission;
+      /**
+       * Inert root correlation only. The cloud edge must authenticate, re-read,
+       * and CAS the durable root before it may mutate anything.
+       */
+      computerTaskRootPointer?: ComputerTaskRootPointerV1 | null;
     },
   ): Promise<ComputerUseTaskStartResult> => {
     if (!task.trim()) return { started: false, reason: 'Empty task.' };
+    const rootPointerWasSupplied = options?.computerTaskRootPointer !== undefined
+      && options?.computerTaskRootPointer !== null;
+    const computerTaskRootPointer = sanitizeComputerTaskRootPointer(
+      options?.computerTaskRootPointer,
+    );
+    if (rootPointerWasSupplied && !computerTaskRootPointer) {
+      const reason = 'The computer task root pointer is invalid. Nothing was started.';
+      setState({
+        ...EMPTY_STATE,
+        status: 'error',
+        outcomeStatus: 'failed',
+        task,
+        errorMessage: reason,
+      });
+      return { started: false, reason, outcomeStatus: 'failed' };
+    }
     if (handleRef.current || startReservationRef.current) {
       return { started: false, reason: 'Another task is already running.' };
     }
@@ -335,6 +358,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
             options?.alwaysConfirmCategories ?? derivedPolicy.alwaysConfirmCategories,
           preRunBrowserPermission: options?.preRunBrowserPermission,
         }),
+        computerTaskRootPointer,
         browserbase: credsResult.creds.browserbase,
         onRunStarted: ({ runId }) => {
           if (!isCurrentAttempt()) return;

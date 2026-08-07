@@ -98,11 +98,11 @@ export function formatRecoveryEvidenceLabel(value: string): string {
     .trim();
 }
 
-// P22: display-only route/surface label for computer/desktop/app-task
-// messages. The plan preview's `routeLabel` is hardcoded 'browser' for the
-// forced computer-task path (and the preview smoke locks that value), so we
-// derive a surface-accurate label from the handoff metadata for DISPLAY only —
-// executor selection still keys off the unchanged routeId.
+// Historical computer-task messages may still carry the former lowercase
+// `browser` route label. The handoff surface remains a useful display fallback
+// for those rows and for route chips that do not have a persisted plan preview.
+// New plan cards use the canonical `computerRequestRoute.kind` label from the
+// preview instead (see `resolveChatAutomationPlanDisplayRouteLabel`).
 export function formatHandoffSurfaceRouteLabel(
   handoff?: ChatComputerHandoffMetadata | null,
 ): string | null {
@@ -118,6 +118,29 @@ export function formatHandoffSurfaceRouteLabel(
     default:
       return null;
   }
+}
+
+/**
+ * Select the plan card's display-only route label without letting the coarser
+ * legacy handoff surface erase a canonical planner label. In particular, a
+ * `computer` handoff cannot distinguish a true hybrid task from capability
+ * buildout, while the persisted plan preview can.
+ *
+ * The override is retained only to repair historical previews whose route was
+ * persisted as the old lowercase `browser`/`direct` placeholder. Execution
+ * continues to use the typed plan and never reads this display value.
+ */
+export function resolveChatAutomationPlanDisplayRouteLabel(
+  previewRouteLabel: string | null | undefined,
+  legacyHandoffOverride?: string | null,
+): string {
+  const previewLabel = String(previewRouteLabel || '').trim();
+  const fallbackLabel = String(legacyHandoffOverride || '').trim();
+
+  if (previewLabel && previewLabel !== 'browser' && previewLabel !== 'direct') {
+    return previewLabel;
+  }
+  return fallbackLabel || previewLabel || 'Direct';
 }
 
 // P22: the one always-visible compact summary line for a computer/desktop/

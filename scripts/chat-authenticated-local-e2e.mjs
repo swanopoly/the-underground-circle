@@ -61,6 +61,7 @@ const password = `Aa9!${crypto.randomBytes(18).toString('base64url')}`;
 
 let userId = null;
 let circleId = null;
+let bootstrapProbe = null;
 let socket = null;
 let sequence = 0;
 const pending = new Map();
@@ -263,8 +264,16 @@ async function connectChrome() {
 
 async function runChatCanary(session) {
   await connectChrome();
+  await cdpCall('Storage.clearDataForOrigin', {
+    origin: parsedAppUrl.origin,
+    storageTypes: 'all',
+  });
   await cdpCall('Page.navigate', { url: `${appBaseUrl}/login` });
   await delay(4_000);
+  // This Chrome profile is dedicated to the canary but reused across runs.
+  // Clear Expo/React Navigation persistence as well as the prior auth row so
+  // a stale circle route cannot override the exact temporary circle below.
+  await evaluate(`localStorage.clear(); sessionStorage.clear(); true`);
   const projectRef = new URL(supabaseUrl).hostname.split('.')[0];
   const storageKey = `sb-${projectRef}-auth-token`;
   const storedSession = {
@@ -278,6 +287,27 @@ async function runChatCanary(session) {
     url: `${appBaseUrl}/circle/${circleId}/chat`,
   });
   await delay(12_000);
+
+  // A brand-new canary user sees onboarding. Dismiss it inside the isolated
+  // profile so it cannot cover the composer or consume the first key event.
+  const tutorialSkipTarget = await evaluate(`(() => {
+    const exactText = [...document.querySelectorAll('*')]
+      .find((candidate) => /^skip tutorial$/i.test(String(candidate.textContent || '').trim()));
+    if (!exactText) return null;
+    const pressable = exactText.closest('button,[role=button],[tabindex="0"]') || exactText;
+    const rect = pressable.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`);
+  if (tutorialSkipTarget) {
+    await cdpCall('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: tutorialSkipTarget.x, y: tutorialSkipTarget.y, button: 'left', clickCount: 1,
+    });
+    await cdpCall('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: tutorialSkipTarget.x, y: tutorialSkipTarget.y, button: 'left', clickCount: 1,
+    });
+    await delay(1_000);
+  }
 
   const composer = await evaluate(`(() => {
     const candidates = [...document.querySelectorAll('textarea,input,[contenteditable=true]')];
@@ -337,14 +367,90 @@ async function runChatCanary(session) {
 
   const sentAt = new Date(Date.now() - 1_000).toISOString();
   await delay(400);
+  if (chatMessage.startsWith('/')) {
+    const slashSuggestionTarget = await evaluate(`(() => {
+      const exactText = [...document.querySelectorAll('*')]
+        .filter((candidate) => String(candidate.textContent || '').trim() === ${JSON.stringify(chatMessage)})
+        .find((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+      if (!exactText) return null;
+      const pressable = exactText.closest('button,[role=button],[tabindex="0"]') || exactText.parentElement || exactText;
+      const rect = pressable.getBoundingClientRect();
+      return rect.width && rect.height
+        ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        : null;
+    })()`);
+    if (slashSuggestionTarget) {
+      await cdpCall('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: slashSuggestionTarget.x, y: slashSuggestionTarget.y,
+        button: 'left', clickCount: 1,
+      });
+      await cdpCall('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: slashSuggestionTarget.x, y: slashSuggestionTarget.y,
+        button: 'left', clickCount: 1,
+      });
+      await delay(400);
+    }
+  }
+  // `/help` opens autocomplete. Escape closes only that suggestion surface so
+  // the following Enter submits the exact command rather than selecting it.
+  await cdpCall('Input.dispatchKeyEvent', {
+    type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27,
+  });
+  await cdpCall('Input.dispatchKeyEvent', {
+    type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27,
+  });
   greetingSubmitted = expectedOutcome === 'greeting-routing';
-  let sendControl = await evaluate(`(() => {
+  let sendControl = null;
+  const visualSendTarget = await evaluate(`(() => {
+    const composer = document.querySelector('textarea');
+    if (!composer) return null;
+    const composerRect = composer.getBoundingClientRect();
+    const exactArrows = [...document.querySelectorAll('*')]
+      .filter((candidate) => String(candidate.textContent || '').trim() === '↑')
+      .map((candidate) => {
+        const pressable = candidate.closest('button,[role=button],[tabindex="0"]') || candidate;
+        const rect = pressable.getBoundingClientRect();
+        const dx = (rect.left + rect.width / 2) - composerRect.right;
+        const dy = (rect.top + rect.height / 2) - (composerRect.top + composerRect.height / 2);
+        return { rect, distance: Math.hypot(dx, dy) };
+      })
+      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
+      .sort((a, b) => a.distance - b.distance);
+    const rect = exactArrows[0]?.rect;
+    return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+  })()`);
+  if (visualSendTarget) {
+    await cdpCall('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: visualSendTarget.x, y: visualSendTarget.y, button: 'left', clickCount: 1,
+    });
+    await cdpCall('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: visualSendTarget.x, y: visualSendTarget.y, button: 'left', clickCount: 1,
+    });
+    sendControl = { ok: true, via: 'visual-send-control' };
+  }
+  if (!sendControl) sendControl = await evaluate(`(() => {
     const candidates = [...document.querySelectorAll('button,[role=button]')];
     const button = candidates.find((candidate) => /send/i.test([
       candidate.innerText,
       candidate.getAttribute('aria-label'),
       candidate.getAttribute('title'),
-    ].filter(Boolean).join(' ')));
+    ].filter(Boolean).join(' '))) || (() => {
+      const composer = document.querySelector('textarea');
+      if (!composer) return null;
+      const composerRect = composer.getBoundingClientRect();
+      return candidates
+        .filter((candidate) => String(candidate.innerText || '').trim() === '↑')
+        .map((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          const dx = (rect.left + rect.width / 2) - (composerRect.right + 20);
+          const dy = (rect.top + rect.height / 2) - (composerRect.top + composerRect.height / 2);
+          return { candidate, distance: Math.hypot(dx, dy) };
+        })
+        .sort((a, b) => a.distance - b.distance)[0]?.candidate || null;
+    })();
     if (!button) return { ok: false, via: null };
     button.click();
     return {
@@ -370,6 +476,23 @@ async function runChatCanary(session) {
       nativeVirtualKeyCode: 13,
     });
     sendControl = { ok: true, via: 'keyboard-enter' };
+    await delay(500);
+    const composerStillContainsMessage = await evaluate(`(() => {
+      const element = [...document.querySelectorAll('textarea,input,[contenteditable=true]')]
+        .find((candidate) => candidate.tagName === 'TEXTAREA');
+      if (!element) return false;
+      const value = element.isContentEditable ? element.textContent : element.value;
+      return String(value || '').trim() === ${JSON.stringify(chatMessage)};
+    })()`);
+    if (composerStillContainsMessage) {
+      await cdpCall('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      });
+      await cdpCall('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      });
+      sendControl = { ok: true, via: 'keyboard-enter-twice-after-autocomplete' };
+    }
   }
 
   await delay(8_000);
@@ -379,6 +502,13 @@ async function runChatCanary(session) {
   const browserState = JSON.parse(await evaluate(`JSON.stringify({
     href: location.href,
     body: (document.body?.innerText || '').slice(-7000),
+    sessionUserId: (() => {
+      try {
+        const key = Object.keys(localStorage)
+          .find((candidate) => candidate.startsWith('sb-') && candidate.endsWith('-auth-token'));
+        return key ? JSON.parse(localStorage.getItem(key) || 'null')?.user?.id || null : null;
+      } catch { return null; }
+    })(),
   })`));
   const lazyModuleFailures = [...exceptions, ...consoleErrors].filter((message) =>
     /metro-require|ENOENT|authSession\.bundle|memoryIntentCore\.bundle|crossSurfaceReferenceResolverCore\.bundle|circleContextSnapshot\.bundle/i.test(message)
@@ -386,6 +516,8 @@ async function runChatCanary(session) {
 
   return {
     route: browserState.href,
+    routeMatchesRequestedCircle: browserState.href.includes(`/circle/${circleId}/chat`),
+    sessionMatchesTemporaryUser: browserState.sessionUserId === userId,
     chatMessage,
     expectedOutcome,
     webSearchEnabled: enableWebSearch,
@@ -404,6 +536,7 @@ async function runChatCanary(session) {
     assistantReplyPersisted: Boolean(persistedAssistantReply),
     assistantReplySurface: persistedAssistantReply?.surface || null,
     assistantReplyCharacters: persistedAssistantReply?.visibleCharacters || 0,
+    bootstrapProbe,
     bodyTail: browserState.body.slice(-700),
   };
 }
@@ -411,9 +544,10 @@ async function runChatCanary(session) {
 async function cleanup() {
   if (socket?.readyState === WebSocket.OPEN) {
     try {
-      await evaluate(`Object.keys(localStorage)
-        .filter((key) => key.startsWith('sb-') && key.endsWith('-auth-token'))
-        .forEach((key) => localStorage.removeItem(key)); true`);
+      await cdpCall('Storage.clearDataForOrigin', {
+        origin: parsedAppUrl.origin,
+        storageTypes: 'all',
+      });
       await cdpCall('Page.navigate', { url: `${appBaseUrl}/login` });
     } catch { /* cleanup continues through SQL */ }
     try { socket.close(); } catch { /* noop */ }
@@ -474,6 +608,35 @@ try {
     throw new Error('Circle creation returned no identifier.');
   }
   circleId = circles[0].id;
+
+  // Distinguish a database bootstrap/RLS failure from a browser hydration
+  // failure before navigating the UI. Keep the evidence value-free: counts
+  // and the selected default model are enough to locate the broken boundary.
+  const membershipQuery = new URLSearchParams({
+    select: 'role',
+    circle_id: `eq.${circleId}`,
+    user_id: `eq.${userId}`,
+  });
+  const threadQuery = new URLSearchParams({
+    select: 'visibility,default_model',
+    circle_id: `eq.${circleId}`,
+    visibility: 'eq.circle',
+  });
+  const [visibleMemberships, visibleThreads] = await Promise.all([
+    supabaseRequest(`/rest/v1/circle_members?${membershipQuery.toString()}`, {
+      headers: { Authorization: `Bearer ${signup.access_token}` },
+    }),
+    supabaseRequest(`/rest/v1/circle_chat_threads?${threadQuery.toString()}`, {
+      headers: { Authorization: `Bearer ${signup.access_token}` },
+    }),
+  ]);
+  bootstrapProbe = {
+    visibleMembershipCount: Array.isArray(visibleMemberships) ? visibleMemberships.length : 0,
+    visibleThreadCount: Array.isArray(visibleThreads) ? visibleThreads.length : 0,
+    defaultModel: Array.isArray(visibleThreads) && typeof visibleThreads[0]?.default_model === 'string'
+      ? visibleThreads[0].default_model
+      : null,
+  };
 
   result = await runChatCanary(signup);
   if (expectedOutcome === 'help' && !result.helpVisible) {

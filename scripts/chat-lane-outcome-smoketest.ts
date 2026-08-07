@@ -562,9 +562,9 @@ function main() {
       'case4c exact plan approval resolution',
     );
     assert(exactApprovalSection.includes('canResumeApprovalInMountedChat(approval)')
-      && exactApprovalSection.includes('const canUseReloadFallback = !pending')
-      && exactApprovalSection.includes('scopedExactApprovalCount === 1'),
-      'case4c: live owned approval resolves inline while reload fallback remains fail-closed');
+      && exactApprovalSection.includes('compactExactPlanApprovalCorrelation(computerTaskState?.exactPlanApproval)')
+      && exactApprovalSection.includes('reconcileExactPlanApprovalRef.current(approval.id)'),
+      'case4c: a refresh-hydrated exact correlation resolves through the exact-row reconciler');
     const exactTerminalSection = sourceSection(
       chatTabSource,
       'const terminalizeExactPlanApproval = async',
@@ -575,14 +575,16 @@ function main() {
       && exactTerminalSection.includes("? 'cancelled'")
       && exactTerminalSection.includes(": 'blocked'")
       && exactTerminalSection.includes('clearComputerTaskState(circleId, activeThreadId)')
+      && exactTerminalSection.includes('exactPlanApproval: null')
       && exactTerminalSection.includes("executionKind: 'exact_plan_approval'")
       && exactTerminalSection.includes('recordSessionArchiveEvent({')
       && !exactTerminalSection.includes('startMainChatFailureRecoveryPayload'),
-      'case4c: reject is cancelled and expiry/reload is blocked, with no failure recovery');
+      'case4c: reject is cancelled and expiry/invalid state is blocked, with no failure recovery');
     assert(exactApprovalSection.includes('exactPlanApprovalContinuityGateRef.current.resolve')
       && exactApprovalSection.includes("resolution.kind === 'queued_before_registration'")
-      && /await pending\.originSettled;[\s\S]{0,900}status === 'rejected'/.test(exactApprovalSection),
-      'case4c: approve and reject share one-shot registration and wait for origin writes');
+      && exactApprovalSection.includes('payload.userId !== currentUserId')
+      && exactApprovalSection.includes('payload.threadId !== (activeThreadId || null)'),
+      'case4c: only the authenticated requester/thread row may queue an early resolution');
     const filingSection = sourceSection(
       chatTabSource,
       'let exactApprovalResolutionDuringFiling:',
@@ -591,11 +593,40 @@ function main() {
     );
     assert(filingSection.includes('registerExactApprovalOwner(')
       && filingSection.includes('exactPlanApprovalContinuityGateRef.current.register')
-      && filingSection.includes(".select('id, circle_id, session_key, action_type, status, requested_at, timeout_seconds')")
+      && filingSection.includes(".select('id, circle_id, session_key, action_type, status, requested_at, timeout_seconds, resolved_at, resolved_by, applied_at, payload')")
+      && filingSection.includes('reconcileExactPlanApprovalRow({')
       && filingSection.includes('if (exactApprovalResolutionDuringFiling)')
       && filingSection.includes('owner.originSettled.then(async () =>')
       && filingSection.includes('return { handled: true as const, browser: false as const };'),
       'case4c: resolution-before-registration reconciles once and skips stale awaiting persistence');
+    const durableReconcileSection = sourceSection(
+      chatTabSource,
+      'const reconcileExactPlanApproval = useCallback',
+      'reconcileExactPlanApprovalRef.current = reconcileExactPlanApproval;',
+      'case4c durable exact approval reconciliation',
+    );
+    assert(durableReconcileSection.includes(".eq('id', correlation.approvalId)")
+      && durableReconcileSection.includes(".eq('circle_id', circleId)")
+      && durableReconcileSection.includes(".eq('session_key', chatAutomationApprovalSessionKey)")
+      && durableReconcileSection.includes(".eq('action_type', correlation.actionType)")
+      && durableReconcileSection.includes(".contains('payload', payloadScope)")
+      && durableReconcileSection.includes('reconcileExactPlanApprovalRow({ correlation, expected, row })'),
+      'case4c: refresh reconciliation requeries one exact authenticated circle/thread/user row');
+    const durableApprovedStart = durableReconcileSection.indexOf("const resolution = exactPlanApprovalContinuityGateRef.current.resolve(boundedApprovalId, 'approved')");
+    const durableApprovedEnd = durableReconcileSection.indexOf('await executeSharedComputerTask(owner.task', durableApprovedStart);
+    const durableApprovedBlock = durableReconcileSection.slice(durableApprovedStart, durableApprovedEnd + 200);
+    assert(durableApprovedStart >= 0
+      && durableApprovedEnd > durableApprovedStart
+      && !durableApprovedBlock.includes('exactPlanApproval: null')
+      && durableApprovedBlock.includes('exactApprovalResume: owner.correlation'),
+      'case4c: crash-before-CAS keeps the durable resume pointer through gate re-entry');
+    const exactHandlerStart = filingSection.indexOf('run_computer_task: async (_dispatchedPlan, transportCtx) => {');
+    const exactHandlerDispatch = filingSection.indexOf("if (execution.entrypoint === 'browser_runtime')", exactHandlerStart);
+    const exactHandlerBlock = filingSection.slice(exactHandlerStart, exactHandlerDispatch);
+    assert(exactHandlerBlock.includes("authority.authorizationSource !== 'claimed_approval_row'")
+      && exactHandlerBlock.includes('exactPlanApproval: null')
+      && exactHandlerBlock.indexOf('exactPlanApproval: null') < exactHandlerDispatch,
+      'case4c: the durable pointer retires only after exact gate authority, before app/browser dispatch');
     const attentionActionSection = sourceSection(
       chatTabSource,
       'const handleChatAttentionAction =',

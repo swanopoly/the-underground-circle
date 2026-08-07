@@ -67,6 +67,18 @@ export function clearCachedBridgeToken(expected?: string | null) {
 }
 
 /**
+ * Logout boundary for bridgeAuth's own pairing cache. Waiting for the current
+ * pair attempt and clearing a second time closes the race where a late bridge
+ * response could otherwise repopulate the token after account exit.
+ */
+export async function clearBridgeAuthStateForLogout(): Promise<void> {
+  clearCachedBridgeToken();
+  const activePair = inflightPair;
+  if (activePair) await activePair.catch(() => null);
+  clearCachedBridgeToken();
+}
+
+/**
  * Complete the shared challenge-v1 pairing exchange used by the Claude,
  * Codex, Gemini, and Cursor bridges. Current Claude returns its expected first
  * challenge as HTTP 200 so browsers do not log the handshake as a failed

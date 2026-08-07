@@ -1196,26 +1196,6 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
   },
 };
 
-function encodeSecret(value: string): string {
-  try {
-    return btoa(unescape(encodeURIComponent(value)));
-  } catch {
-    return btoa(value);
-  }
-}
-
-function decodeSecret(value: string): string {
-  try {
-    return decodeURIComponent(escape(atob(value)));
-  } catch {
-    try {
-      return atob(value);
-    } catch {
-      return value;
-    }
-  }
-}
-
 export async function listCircleIntegrations(circleId: string): Promise<CircleIntegrationRecord[]> {
   const { data, error } = await supabase
     .from('circle_integrations')
@@ -1308,30 +1288,27 @@ export async function saveCircleIntegrationSecrets(opts: {
   secrets: Record<string, string>;
 }): Promise<boolean> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    const userId = auth.user?.id;
-    if (!userId) return false;
+    const secrets = Object.fromEntries(
+      Object.entries(opts.secrets)
+        .filter(([, value]) => typeof value === 'string' && value.trim().length > 0),
+    );
 
-    const rows = Object.entries(opts.secrets)
-      .filter(([, value]) => value.trim().length > 0)
-      .map(([key, value]) => ({
-        integration_id: opts.integrationId,
-        key,
-        value_encrypted: encodeSecret(value),
-        created_by: userId,
-      }));
+    if (Object.keys(secrets).length === 0) return true;
 
-    if (rows.length === 0) return true;
-
-    const { error } = await supabase
-      .from('circle_integration_secrets')
-      .upsert(rows, { onConflict: 'integration_id,key' });
+    // The database derives the caller from auth.uid(), verifies current
+    // manager membership, and encrypts every value before storage. Never add
+    // a browser-side encoding or direct-table fallback here: that would turn
+    // the ciphertext boundary back into an exposed client implementation.
+    const { data, error } = await supabase.rpc('save_circle_integration_secrets', {
+      p_integration_id: opts.integrationId,
+      p_secrets: secrets,
+    });
 
     if (error) {
       console.error('[circleIntegrations] save secrets error:', error);
       return false;
     }
-    return true;
+    return data === true;
   } catch (err) {
     console.error('[circleIntegrations] save secrets exception:', err);
     return false;
@@ -1339,34 +1316,51 @@ export async function saveCircleIntegrationSecrets(opts: {
 }
 
 export async function listCircleIntegrationSecretKeys(integrationId: string): Promise<string[]> {
-  const { data, error } = await supabase
-    .from('circle_integration_secrets')
-    .select('key')
-    .eq('integration_id', integrationId)
-    .order('key');
+  const { data, error } = await supabase.rpc('list_circle_integration_secret_keys', {
+    p_integration_id: integrationId,
+  });
 
   if (error) {
     console.error('[circleIntegrations] secret key list error:', error);
     return [];
   }
 
-  return (data || []).map((row: { key: string }) => row.key);
+  return (Array.isArray(data) ? data : [])
+    .map((row: unknown) => (
+      row && typeof row === 'object' && typeof (row as { key?: unknown }).key === 'string'
+        ? (row as { key: string }).key
+        : ''
+    ))
+    .filter(Boolean);
 }
 
 export async function getCircleIntegrationSecretValues(integrationId: string): Promise<Record<string, string>> {
-  const { data, error } = await supabase
-    .from('circle_integration_secrets')
-    .select('key, value_encrypted')
-    .eq('integration_id', integrationId);
+  const { data, error } = await supabase.rpc('get_circle_integration_secret_values', {
+    p_integration_id: integrationId,
+  });
 
   if (error) {
     console.error('[circleIntegrations] secret value load error:', error);
     return {};
   }
 
-  const out: Record<string, string> = {};
-  for (const row of (data || []) as Array<{ key: string; value_encrypted: string }>) {
-    out[row.key] = decodeSecret(row.value_encrypted);
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+
+  // Build a null-prototype map so a malicious/corrupt key cannot mutate an
+  // object's prototype. The RPC already validates names and returns plaintext
+  // only after current manager authorization; ciphertext and encryption keys
+  // never reach this module.
+  const out = Object.create(null) as Record<string, string>;
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    if (
+      /^[A-Za-z0-9_.-]{1,128}$/.test(key)
+      && key !== '__proto__'
+      && key !== 'prototype'
+      && key !== 'constructor'
+      && typeof value === 'string'
+    ) {
+      out[key] = value;
+    }
   }
   return out;
 }

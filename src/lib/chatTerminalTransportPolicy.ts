@@ -158,7 +158,11 @@ export function chooseChatTerminalTransport(
   }
 
   if (!input.canStreamAnthropic) {
-    return { path: 'batch_openswan', reason: 'stream_unavailable', canStream: false };
+    // Transport capability must never expand execution authority. A turn the
+    // canonical planner classified as plain Chat stays plain Chat when SSE is
+    // unavailable; it simply uses the selected provider's batch endpoint.
+    // Only the earlier explicit `run_openswan` branch may enter OpenSwan.
+    return { path: 'batch_plain_chat', reason: 'stream_unavailable', canStream: false };
   }
 
   // Simple, streamable, non-action chat. With the Phase 2 seam ON (the default

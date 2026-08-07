@@ -18,6 +18,34 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// Shared builds are untrusted, user-authored HTML. Keep them on an opaque
+// sandboxed origin even though this public renderer must permit inline assets
+// and scripts used by generated previews. In particular, do not grant
+// allow-same-origin or top-navigation: a published page must never inherit the
+// Supabase function origin or navigate its viewer without an explicit click.
+const publishedPageCsp = [
+  "sandbox allow-scripts allow-forms allow-modals allow-popups",
+  "default-src 'none'",
+  "script-src 'unsafe-inline' 'unsafe-eval' https:",
+  "style-src 'unsafe-inline' https:",
+  "img-src https: data: blob:",
+  "font-src https: data:",
+  "media-src https: blob:",
+  "connect-src https:",
+  "frame-src https:",
+  "worker-src blob:",
+  "form-action https:",
+  "base-uri 'none'",
+].join("; ");
+
+const errorPageCsp = [
+  "default-src 'none'",
+  "style-src 'unsafe-inline'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -69,6 +97,8 @@ function errorPage(title: string, message: string, status: number): Response {
       "Content-Type": "text/html; charset=utf-8",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": errorPageCsp,
+      "X-Frame-Options": "DENY",
     },
   });
 }
@@ -119,8 +149,8 @@ Deno.serve(async (req) => {
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
-      // Content Security Policy — the iframe runs the shared author's code,
-      // so we keep it permissive but isolate cookies
+      "Content-Security-Policy": publishedPageCsp,
+      "Cross-Origin-Resource-Policy": "cross-origin",
       "X-Frame-Options": "SAMEORIGIN",
     },
   });

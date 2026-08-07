@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import FlatIcon from '../../components/FlatIcon';
 import {
   View,
@@ -12,7 +12,6 @@ import {
   NativeSyntheticEvent,
   NativeScrollEvent,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../../lib/supabase';
 import type { CircleIntegrationGroupKey } from '../../lib/circleIntegrationCatalog';
 import TutorialController from '../../components/onboarding/TutorialController';
@@ -23,6 +22,8 @@ import { LoadingScreen } from '../../components/LoadingWave';
 import { recordWorkspaceTabVisit } from '../../lib/workspaceAdaptation';
 import { ROOM_WORKSPACE_OPEN_EVENT } from '../../lib/roomWorkspaceLauncher';
 import { rememberLastProfileCircle } from '../../lib/profileNavigation';
+import { safeGetUser } from '../../lib/authSession';
+import { OWNER_EMAIL } from '../../lib/officeConfig';
 
 // ─── Inject CSS animation for tab dot pulse (web only) ───────────────────
 if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('uc-tab-dot-css')) {
@@ -57,6 +58,10 @@ const SearchModal = React.lazy(() => import('../../components/SearchModal'));
 // Gated tabs — hidden from nav until the feature is complete (see docs/NEXT_LEVEL_PLAN.md Phase 0.3)
 const GATED_TABS = new Set(['WALLET']);
 
+// Owner-only tabs — hidden (nav + content + deep links) for everyone except
+// OWNER_EMAIL. Fail closed: treated as hidden until the auth read resolves.
+const OWNER_ONLY_TABS = new Set(['BACKPACK']);
+
 const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: string; color: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat', color: '#22c55e' },
   { key: 'ROOMS', label: 'Rooms', icon: '🏠', flatIcon: 'rooms', color: '#a855f7' },
@@ -75,6 +80,8 @@ const TAB_META = TAB_META_ALL.filter(t => !GATED_TABS.has(t.key));
 
 const TABS = TAB_META.map(t => t.key) as readonly string[];
 type Tab = string;
+const DEFAULT_CIRCLE_TAB: Tab = 'OFFICE';
+
 function normalizeTabKey(value?: string | null): Tab | null {
   const upper = value?.toUpperCase();
   if (!upper) return null;
@@ -88,19 +95,10 @@ type MarketplaceFocus = {
   ts: number;
 } | null;
 
-// Persist active tab per circle across refreshes.
-//
-// The URL path is the single source of truth. `setActiveTab` rewrites it
-// on every tab change so a refresh always restores exactly where the user
-// was. We intentionally DO NOT fall back to localStorage when the URL has
-// no tab slug — that used to trap users on Profile indefinitely when a
-// stale localStorage entry outlived its session. A bare URL signals "just
-// entered this circle" and should land on CHAT.
-//
-// Native (no URL semantics) still uses AsyncStorage as the persistence
-// layer because there's no web URL to read from.
-const TAB_STORAGE_KEY = 'uc_active_tab';
-function loadSavedTab(circleId: string): Tab {
+// Explicit URL tabs are navigation authority. A bare circle route means the
+// user just entered the workspace, so it always starts in Office instead of
+// restoring stale per-circle state from an earlier visit.
+function loadInitialTab(): Tab {
   try {
     if (Platform.OS === 'web') {
       // 1. Clean URL path /circle/:id/:tab — the sole source of truth.
@@ -116,25 +114,11 @@ function loadSavedTab(circleId: string): Tab {
         const urlTab = normalizeTabKey(new URLSearchParams(window.location.search).get('tab'));
         if (urlTab) return urlTab;
       } catch {}
-      // Bare URL → fresh entry. Default to CHAT. Ignore localStorage here
-      // so a stale previous-session tab can't override the "just entered"
-      // signal the URL is giving us.
-      return 'CHAT';
-    }
-    // Native fallback.
-    // Web never reaches this branch.
-  } catch {}
-  return 'CHAT';
-}
-function saveTab(circleId: string, tab: Tab) {
-  try {
-    const key = `${TAB_STORAGE_KEY}_${circleId}`;
-    if (Platform.OS === 'web') {
-      localStorage.setItem(key, tab);
-    } else {
-      AsyncStorage.setItem(key, tab).catch(() => {});
+      // Bare URL → fresh entry. Office is the workspace landing surface.
+      return DEFAULT_CIRCLE_TAB;
     }
   } catch {}
+  return DEFAULT_CIRCLE_TAB;
 }
 
 // Cache circle data so the screen renders instantly on refresh
@@ -172,15 +156,28 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     // Route param takes priority (from CMD+K, deep links, programmatic navigation)
     const normalizedRouteTab = normalizeTabKey(routeTab);
     if (normalizedRouteTab) return normalizedRouteTab;
-    return loadSavedTab(circleId);
+    return loadInitialTab();
   });
   // Circle-scoped global search modal state. Effect hooks that depend on
   // setActiveTab are declared below, after setActiveTab itself.
   const [searchOpen, setSearchOpen] = useState(false);
   const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
+  // Owner-only tab gate. null = auth read pending (tabs stay hidden), so a
+  // non-owner never sees a Backpack flash while the session resolves.
+  const [isOwnerAccount, setIsOwnerAccount] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    safeGetUser().then(({ value }) => {
+      if (!cancelled) setIsOwnerAccount(value?.email === OWNER_EMAIL);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const visibleTabs = useMemo(
+    () => (isOwnerAccount === true ? TAB_META : TAB_META.filter(t => !OWNER_ONLY_TABS.has(t.key))),
+    [isOwnerAccount],
+  );
   const setActiveTab = useCallback((tab: Tab) => {
     setActiveTabRaw(tab);
-    saveTab(circleId, tab);
     // Sync tab to URL — clean path: /circle/:id/:tab
     if (Platform.OS === 'web') {
       try {
@@ -192,11 +189,19 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     }
   }, [circleId, circleName]);
 
+  // If a non-owner lands on an owner-only tab, return them to the normal
+  // circle landing surface once the auth read resolves.
+  useEffect(() => {
+    if (isOwnerAccount === false && OWNER_ONLY_TABS.has(activeTab)) {
+      setActiveTab(DEFAULT_CIRCLE_TAB);
+    }
+  }, [isOwnerAccount, activeTab, setActiveTab]);
+
   // On mount, immediately sync the URL to the resolved active tab. Without
   // this, entering a circle via a bare URL (like `/circle/:id/?circleName=…`)
   // would leave the URL bare even though the screen is showing a specific
   // tab. On the next refresh the URL would still be bare, fall through to
-  // CHAT, and the user's session-state would be lost. Rewriting the URL at
+  // Office, and lose the explicit current-tab state. Rewriting the URL at
   // mount time makes the URL always reflect the current tab.
   useEffect(() => {
     if (Platform.OS !== 'web') return;
@@ -266,23 +271,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const [chatPopout, setChatPopout] = useState(false);
   const [chatMountKey, setChatMountKey] = useState(0);
 
-  // Loading gate: show the screen as soon as circle data is ready. Do NOT
-  // block on OfficeTab — it runs ~18 queries + realtime subscriptions and
-  // was gating every circle load behind 2-5s of agent/presence setup even
-  // when the user was going to Chat, not Office. Office now mounts lazily
-  // like every other secondary tab and loads in the background on first
-  // visit.
+  // Loading gate: show the Circle shell as soon as its data is ready. Office
+  // is the default tab and handles its own queries, subscriptions, and loading
+  // state without blocking the shell; an explicit link to another tab does not
+  // mount Office until the user visits it.
   const [circleLoaded, setCircleLoaded] = useState(!!cached.circle);
   const loading = !circleLoaded;
-
-  // Native: load saved tab asynchronously on mount
-  useEffect(() => {
-    if (Platform.OS !== 'web') {
-      AsyncStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`).then(raw => {
-        if (raw && TABS.includes(raw)) setActiveTabRaw(raw);
-      }).catch(() => {});
-    }
-  }, [circleId]);
 
   useEffect(() => {
     if (!activeTab || !TABS.includes(activeTab)) return;
@@ -339,21 +333,6 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         setActiveStreakCount(Math.max(1, Math.floor(mc * 0.7)));
         cacheCircle(circleId, circleData, mc);
       }
-      // Smart default: if user has no saved tab and circle has missions, show FEED (missions live in Feed now)
-      try {
-        const hasSavedTab = Platform.OS === 'web' && localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`);
-        if (!hasSavedTab && !routeTab) {
-          const { data: missions } = await supabase
-            .from('circle_missions')
-            .select('id', { count: 'exact' })
-            .eq('circle_id', circleId)
-            .eq('status', 'active')
-            .limit(1);
-          if (missions && missions.length > 0) {
-            setActiveTab('FEED');
-          }
-        }
-      } catch {}
     } catch (error) {
       console.error('Error loading circle data:', error);
     } finally {
@@ -372,8 +351,9 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     gaming: 'GAMING', creative: 'CREATIVE', custom: 'CUSTOM',
   };
 
-  // Office used to eagerly mount; now lazy like every other tab so the
-  // circle screen paints in ~200ms instead of 2-5s. `handleOfficeReady` is
+  // Office uses the shared lazy-tab wrapper so explicit links to another tab
+  // do not pay its setup cost. On a bare circle entry it is the active/default
+  // tab and mounts immediately. `handleOfficeReady` is
   // kept as a no-op in case OfficeTab still passes it; the loading gate
   // doesn't depend on it anymore.
   const handleOfficeReady = useCallback(() => { /* no-op — loading gate no longer blocks on Office */ }, []);
@@ -405,7 +385,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       <View style={styles.header}>
         <View style={styles.headerInner}>
           <TabBarScroller
-            tabs={TAB_META}
+            tabs={visibleTabs}
             activeTab={activeTab}
             accentColor={accentColor}
             isMobile={isMobile}
@@ -444,9 +424,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       <LazyTab tabKey="ROOMS" activeTab={activeTab}>
         <RoomsTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
-      <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
-        <BackpackTab circleId={circleId} accentColor={accentColor} />
-      </LazyTab>
+      {/* BACKPACK — owner-only (OWNER_EMAIL); content never mounts for others */}
+      {isOwnerAccount === true && (
+        <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
+          <BackpackTab circleId={circleId} accentColor={accentColor} />
+        </LazyTab>
+      )}
       <LazyTab tabKey="FEED" activeTab={activeTab}>
         <FeedTab circleId={circleId} accentColor={accentColor} onOpenMarketplace={openMarketplace} />
       </LazyTab>

@@ -271,12 +271,18 @@ export async function uploadToStorage(
       return null;
     }
 
-    // Get public URL
-    const { data: urlData } = supabase.storage
+    // Never turn a chat upload into a durable bearer-by-URL asset. This legacy
+    // helper currently has no callers, but keeping its contract private avoids
+    // reintroducing public image URLs if it is reused later.
+    const { data: urlData, error: signedUrlError } = await supabase.storage
       .from('chat-media')
-      .getPublicUrl(data.path);
+      .createSignedUrl(data.path, 3600);
 
-    return urlData?.publicUrl || null;
+    if (signedUrlError) {
+      console.error('[chatMedia] Signed URL error:', signedUrlError.message);
+      return null;
+    }
+    return urlData?.signedUrl || null;
   } catch (err) {
     console.error('[chatMedia] uploadToStorage error:', err);
     return null;
@@ -298,13 +304,12 @@ export function prepareImageForAI(attachment: ChatAttachment): string {
     return `The user has attached a ${attachment.type} file: "${attachment.name}" (${formatFileSize(attachment.size)}, ${attachment.mimeType}). Use it as supporting context and acknowledge any limitations if the file is binary.`;
   }
 
-  if (attachment.base64) {
-    // Truncate base64 for context window — provide enough for description
-    const preview = attachment.base64.slice(0, 200);
-    return `[User attached an image: "${attachment.name}" (${formatFileSize(attachment.size)}, ${attachment.mimeType}). Base64 preview: ${preview}... Describe what context this image might provide and respond helpfully to their message.]`;
-  }
-
-  return `[User attached an image: "${attachment.name}" (${formatFileSize(attachment.size)}). Acknowledge the image and respond to their message.]`;
+  // Image bytes are never meaningful as text. The old path copied the first
+  // 200 base64 characters into the prompt and invited the model to guess what
+  // they represented; that was neither vision nor a safe description. Actual
+  // pixels now travel only through the typed multimodal vision boundary. This
+  // helper remains metadata-only for callers that have not migrated yet.
+  return `[User attached an image: "${attachment.name}" (${formatFileSize(attachment.size)}, ${attachment.mimeType}). No visual description has been generated in this text-only context. Do not infer image contents from the filename or encoded bytes.]`;
 }
 
 export function buildAttachmentPromptContext(attachments: ChatAttachment[]): string {

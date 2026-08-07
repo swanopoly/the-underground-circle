@@ -83,8 +83,38 @@ export interface StreamChatResult {
   interruptReason?: StreamInterruptReason;
 }
 
+/** Image formats accepted by Anthropic's Messages vision input. The edge
+ * function re-validates both this media type and the decoded file signature;
+ * this client type is convenience, not a security boundary. */
+export type StreamChatImageMediaType =
+  | 'image/jpeg'
+  | 'image/png'
+  | 'image/gif'
+  | 'image/webp';
+
+export type StreamChatMessageContentBlock =
+  | { type: 'text'; text: string }
+  | {
+      type: 'image';
+      source: {
+        type: 'base64';
+        media_type: StreamChatImageMediaType;
+        data: string;
+      };
+    };
+
+/**
+ * A chat-stream message. Existing callers keep sending a string. Vision-aware
+ * callers may send Anthropic-compatible text/image blocks on USER messages;
+ * the authenticated edge rejects images on assistant/system messages.
+ */
+export interface StreamChatMessage {
+  role: string;
+  content: string | StreamChatMessageContentBlock[];
+}
+
 export interface StreamChatOpts {
-  messages: Array<{ role: string; content: string }>;
+  messages: StreamChatMessage[];
   system?: string;
   model?: string;
   circleId?: string;

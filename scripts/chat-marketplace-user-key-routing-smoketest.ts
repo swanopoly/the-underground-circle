@@ -45,8 +45,8 @@ check(
   'Marketplace probes the stored credential through the authenticated Chat boundary',
 );
 check(
-  anthropicBranch.indexOf("notifyUserApiKeyChanges('anthropic')") > anthropicBranch.indexOf('testStoredApiKey('),
-  'Chat provider readiness refreshes with the exact Anthropic identity only after the stored-key probe succeeds',
+  anthropicBranch.indexOf('notifyUserApiKeyChanges()') > anthropicBranch.indexOf('testStoredApiKey('),
+  'Chat provider readiness refreshes only after the stored-key probe succeeds',
 );
 check(
   !anthropicBranch.includes('connectGenericCircleIntegration'),
@@ -62,14 +62,5 @@ const storedProbe = providers.slice(
   providers.indexOf('function getDefaultModel'),
 );
 check(!storedProbe.includes('api_key'), 'stored-key validation never resends a raw credential');
-
-const genericVaultSyncStart = marketplace.indexOf("supabase.rpc('store_user_api_key'", genericConnectStart);
-const genericVaultSyncEnd = marketplace.indexOf("if (integration.status === 'degraded')", genericVaultSyncStart);
-check(genericVaultSyncStart >= 0 && genericVaultSyncEnd > genericVaultSyncStart, 'generic Marketplace key-vault sync is present');
-const genericVaultSync = marketplace.slice(genericVaultSyncStart, genericVaultSyncEnd);
-check(
-  genericVaultSync.includes('if (!error) notifyUserApiKeyChanges(userApiProvider);'),
-  'a successful generic key-vault write refreshes only its exact provider (including OpenAI embedding resume)',
-);
 
 console.log(`chat-marketplace-user-key-routing smoke: ${passed} passed`);

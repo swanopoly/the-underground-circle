@@ -11,6 +11,21 @@ import path from 'node:path';
 const root = path.resolve(__dirname, '..');
 const migrationName = '20260726_database_authority_guards.sql';
 const migrationPath = path.join(root, 'supabase', 'migrations', migrationName);
+const chatApprovalRepairMigrationName =
+  '20260806_chat_v2_approval_auto_approve_category.sql';
+const chatApprovalRepairMigrationPath = path.join(
+  root,
+  'supabase',
+  'migrations',
+  chatApprovalRepairMigrationName,
+);
+const computerTaskRootMigrationName = '20260806_universal_computer_task_roots.sql';
+const computerTaskRootMigrationPath = path.join(
+  root,
+  'supabase',
+  'migrations',
+  computerTaskRootMigrationName,
+);
 const continuationPrivacyMigrationName = '20260726_swanbot_continuation_privacy.sql';
 const continuationPrivacyMigrationPath = path.join(
   root,
@@ -20,6 +35,13 @@ const continuationPrivacyMigrationPath = path.join(
 );
 const consolidatedPath = path.join(root, 'docs', 'RUN_THIS_SQL.sql');
 const invocationPath = path.join(root, 'src', 'lib', 'agentInvocation.ts');
+const chatApprovalGatePath = path.join(root, 'src', 'lib', 'chatApprovalGate.ts');
+const chatAutoApproveSettingsPath = path.join(
+  root,
+  'src',
+  'lib',
+  'chatAutoApproveSettings.ts',
+);
 const actionCallsMigrationPath = path.join(
   root,
   'supabase',
@@ -28,13 +50,35 @@ const actionCallsMigrationPath = path.join(
 );
 
 const migration = fs.readFileSync(migrationPath, 'utf8');
+const chatApprovalRepairMigration = fs.readFileSync(
+  chatApprovalRepairMigrationPath,
+  'utf8',
+);
+const computerTaskRootMigration = fs.readFileSync(
+  computerTaskRootMigrationPath,
+  'utf8',
+);
 const continuationPrivacyMigration = fs.readFileSync(
   continuationPrivacyMigrationPath,
   'utf8',
 );
 const consolidated = fs.readFileSync(consolidatedPath, 'utf8');
 const invocation = fs.readFileSync(invocationPath, 'utf8');
+const chatApprovalGate = fs.readFileSync(chatApprovalGatePath, 'utf8');
+const chatAutoApproveSettings = fs.readFileSync(chatAutoApproveSettingsPath, 'utf8');
 const actionCallsMigration = fs.readFileSync(actionCallsMigrationPath, 'utf8');
+
+const expectedChatAutoApproveCategories = [
+  'memory_read',
+  'memory_write',
+  'skill_run',
+  'skill_write',
+  'automation_create',
+  'automation_run',
+  'browser_click',
+  'external_publish',
+  'desktop_action',
+] as const;
 
 let assertions = 0;
 
@@ -112,6 +156,16 @@ const completionSql = section(
   'CREATE OR REPLACE FUNCTION public.mark_message_done(',
   '-- ─── Schema-v2 payload validators',
 );
+const chatValidatorSql = section(
+  migration,
+  'CREATE OR REPLACE FUNCTION public.is_valid_chat_v2_approval_payload(',
+  'CREATE OR REPLACE FUNCTION public.is_valid_tool_v2_approval_payload(',
+);
+const repairedChatValidatorSql = section(
+  chatApprovalRepairMigration,
+  'CREATE OR REPLACE FUNCTION public.is_valid_chat_v2_approval_payload(',
+  'REVOKE ALL ON FUNCTION public.is_valid_chat_v2_approval_payload(jsonb)',
+);
 const chatGuardSql = section(
   migration,
   'CREATE OR REPLACE FUNCTION public.guard_chat_v2_approval()',
@@ -182,9 +236,53 @@ const continuationCronSql = section(
   'DO $cron$',
   'COMMENT ON FUNCTION public.sweep_unsafe_swanbot_continuations()',
 );
+const computerTaskRootValidatorSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.is_valid_computer_task_root_snapshot_v1(',
+  'REVOKE ALL ON FUNCTION public.is_valid_computer_task_root_snapshot_v1(jsonb)',
+);
+const computerTaskRootNestedValidatorSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.is_valid_computer_task_root_nested_v1(',
+  'REVOKE ALL ON FUNCTION public.is_valid_computer_task_root_nested_v1(jsonb)',
+);
+const computerTaskRootAdmissionSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.admit_computer_task_root_v1(',
+  'CREATE OR REPLACE FUNCTION public.read_computer_task_root_v1(',
+);
+const computerTaskRootReadSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.read_computer_task_root_v1(',
+  'DROP FUNCTION IF EXISTS public.transition_computer_task_root_v1(',
+);
+const computerTaskRootTransitionSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.transition_computer_task_root_v1(',
+  'REVOKE ALL ON FUNCTION public.admit_computer_task_root_v1(',
+);
+const computerTaskRootActionClaimSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.claim_computer_task_root_action_v1(',
+  'CREATE OR REPLACE FUNCTION public.start_computer_task_root_action_v1(',
+);
+const computerTaskRootActionStartSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.start_computer_task_root_action_v1(',
+  'CREATE OR REPLACE FUNCTION public.settle_computer_task_root_action_v1(',
+);
+const computerTaskRootActionSettleSql = section(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.settle_computer_task_root_action_v1(',
+  'REVOKE ALL ON FUNCTION public.admit_computer_task_root_v1(',
+);
 assertBalancedSqlDelimiters(
   continuationRunGuardFunctionSql,
   'continuation trigger SQL delimiters are balanced',
+);
+assertBalancedSqlDelimiters(
+  computerTaskRootMigration,
+  'computer task root migration SQL delimiters are balanced',
 );
 
 // Consolidated SQL is an executable copy, not a hand-maintained approximation.
@@ -197,6 +295,8 @@ has(consolidated, '--   §26 Durable agent action calls', 'contents restores sec
 has(consolidated, '--   §27 Scheduled-action mutation guard', 'contents keeps section 27');
 has(consolidated, '--   §28 Database authority guards', 'contents adds section 28');
 has(consolidated, '--   §29 SwanBot continuation privacy sweeper', 'contents adds section 29');
+has(consolidated, '--   §33 Chat v2 approval auto-approve category repair', 'contents adds section 33');
+has(consolidated, '--   §34 Universal computer-task roots', 'contents adds section 34');
 const consolidatedMarker = `-- Source: ${migrationName}\n\n`;
 const consolidatedMarkerIndex = consolidated.indexOf(consolidatedMarker);
 check(consolidatedMarkerIndex >= 0, 'consolidated SQL has the authority migration source marker');
@@ -248,6 +348,23 @@ check(
 check(
   consolidated.split(actionCallsMigration).length === 2,
   'section 26 remains one byte-identical copy of its source migration',
+);
+check(
+  consolidated.split(chatApprovalRepairMigration).length === 2,
+  'section 33 is one byte-identical copy of the Chat approval repair migration',
+);
+has(
+  consolidated,
+  `-- Source: ${computerTaskRootMigrationName}`,
+  'consolidated SQL has the universal computer-task root migration source marker',
+);
+check(
+  consolidated.split(computerTaskRootMigration).length === 2,
+  'section 34 is one byte-identical copy of the universal computer-task root migration',
+);
+check(
+  repairedChatValidatorSql === chatValidatorSql,
+  'fresh-install and forward-repair Chat validators are byte-identical',
 );
 
 // Office claims bind a durable message, circle, command, target, and claimant.
@@ -351,6 +468,81 @@ has(migration, 'is_valid_chat_v2_approval_payload', 'chat payload has a database
 has(migration, "SELECT COALESCE((", 'validators reject SQL NULL as invalid');
 has(migration, "'approvalIntentFingerprint'", 'chat intent fingerprint is required');
 has(migration, "'redacted'", 'chat payload carries bounded redaction metadata');
+has(
+  chatApprovalGate,
+  'autoApproveCategory: category ?? null',
+  'the app always includes a bounded category or JSON null in Chat v2 approval payloads',
+);
+const chatAutoApproveType = section(
+  chatAutoApproveSettings,
+  'export type AutoApproveCategory =',
+  'export type AutoApproveSettings',
+);
+const appAutoApproveCategories = Array.from(
+  chatAutoApproveType.matchAll(/\|\s*'([a-z_]+)'/g),
+  (match) => match[1],
+);
+check(
+  JSON.stringify(appAutoApproveCategories) === JSON.stringify(expectedChatAutoApproveCategories),
+  'the pinned nine-category smoke taxonomy matches the app AutoApproveCategory union',
+);
+const chatAutoApproveCategoryClause = section(
+  chatValidatorSql,
+  "AND (\n      NOT (p_payload ? 'autoApproveCategory')",
+  '\n    AND NOT EXISTS',
+);
+has(
+  chatAutoApproveCategoryClause,
+  "NOT (p_payload ? 'autoApproveCategory')",
+  'legacy Chat v2 payloads may omit the additive category key',
+);
+has(
+  chatAutoApproveCategoryClause,
+  "p_payload->'autoApproveCategory' = 'null'::jsonb",
+  'the validator accepts the app JSON-null category shape',
+);
+has(
+  chatAutoApproveCategoryClause,
+  "jsonb_typeof(p_payload->'autoApproveCategory') = 'string'",
+  'non-null categories must be JSON strings',
+);
+const sqlCategoryMatch = chatAutoApproveCategoryClause.match(
+  /p_payload->>'autoApproveCategory' IN \(([\s\S]*?)\n        \)/,
+);
+check(sqlCategoryMatch !== null, 'the category validator uses an exact SQL IN allowlist');
+const sqlAutoApproveCategories = Array.from(
+  sqlCategoryMatch[1].matchAll(/'([a-z_]+)'/g),
+  (match) => match[1],
+);
+check(
+  JSON.stringify(sqlAutoApproveCategories) === JSON.stringify(expectedChatAutoApproveCategories),
+  'the SQL validator accepts exactly the nine app categories and rejects unknown strings',
+);
+lacks(
+  chatAutoApproveCategoryClause,
+  '~',
+  'the Chat category branch has no permissive string-pattern fallback',
+);
+has(
+  chatValidatorSql,
+  "'threadId',\n        'autoApproveCategory',\n        'redacted'",
+  'the strict Chat payload-key allowlist includes only the additive category key',
+);
+has(
+  chatValidatorSql,
+  'WHERE payload_key <> ALL (ARRAY[',
+  'unknown Chat payload keys remain rejected',
+);
+has(
+  chatApprovalRepairMigration,
+  'FROM PUBLIC, anon, authenticated;',
+  'the forward repair does not expose the validator to app roles',
+);
+has(
+  chatApprovalRepairMigration,
+  "NOTIFY pgrst, 'reload schema';",
+  'the forward repair refreshes the PostgREST schema cache',
+);
 has(chatGuardSql, "OLD.action_type LIKE 'chat.%'", 'chat guard scopes existing protected rows');
 has(chatGuardSql, "NEW.action_type LIKE 'chat.%'", 'chat guard scopes new protected rows');
 has(chatGuardSql, 'chat_v2_approval_schema_conversion_forbidden', 'chat guard denies legacy conversion');
@@ -892,6 +1084,598 @@ has(
   continuationPrivacyMigration,
   "NOTIFY pgrst, 'reload schema';",
   'continuation privacy functions refresh the PostgREST schema',
+);
+
+// Universal computer-task roots are request-bound coordination records, not
+// executable authority. Database admission/read/transition must preserve that
+// distinction even when the client refreshes, races, or sends hostile JSON.
+has(
+  computerTaskRootMigration,
+  'CREATE TABLE IF NOT EXISTS public.computer_task_roots',
+  'universal computer tasks have one durable root table',
+);
+has(
+  computerTaskRootMigration,
+  'UNIQUE (user_id, circle_id, request_identity_fingerprint)',
+  'one authenticated Chat request has one root identity',
+);
+has(
+  computerTaskRootMigration,
+  'ALTER TABLE public.computer_task_roots ENABLE ROW LEVEL SECURITY',
+  'root rows enable RLS',
+);
+has(
+  computerTaskRootMigration,
+  'CREATE POLICY computer_task_roots_select_exact_actor',
+  'root reads use an exact-actor policy',
+);
+has(
+  computerTaskRootMigration,
+  'REVOKE ALL ON TABLE public.computer_task_roots FROM PUBLIC, anon, authenticated;',
+  'clients cannot write root rows directly',
+);
+has(
+  computerTaskRootMigration,
+  'GRANT SELECT ON TABLE public.computer_task_roots TO authenticated;',
+  'authenticated actors retain only RLS-filtered table reads',
+);
+has(
+  computerTaskRootValidatorSql,
+  'octet_length(p_snapshot::text) BETWEEN 64 AND 256000',
+  'root snapshots have an exact database size ceiling',
+);
+has(
+  computerTaskRootMigration,
+  "to_regprocedure('extensions.digest(bytea,text)') IS NULL",
+  'the root migration fails explicitly when schema-qualified pgcrypto is unavailable',
+);
+has(
+  computerTaskRootValidatorSql,
+  "jsonb_array_length(p_snapshot->'attempts') <= 64",
+  'root attempts are bounded',
+);
+has(
+  computerTaskRootValidatorSql,
+  "jsonb_array_length(p_snapshot->'checkpoints') <= 256",
+  'root checkpoints are bounded',
+);
+has(
+  computerTaskRootValidatorSql,
+  "jsonb_array_length(p_snapshot#>'{acceptance,actions}') BETWEEN 1 AND 128",
+  'request acceptance actions are bounded',
+);
+has(
+  computerTaskRootValidatorSql,
+  "WHERE snapshot_key <> ALL (ARRAY[",
+  'unknown root snapshot keys are rejected',
+);
+has(
+  computerTaskRootValidatorSql,
+  "WHERE request_key <> ALL (ARRAY[",
+  'unknown authenticated-request keys are rejected',
+);
+has(
+  computerTaskRootValidatorSql,
+  "WHERE action.value->>'state' <> 'verified'",
+  'completed roots require every acceptance action to be verified',
+);
+has(
+  computerTaskRootValidatorSql,
+  "action.value->>'state' IN ('dispatched', 'outcome_unknown')",
+  'ambiguous dispatched actions force verification-only state',
+);
+has(
+  computerTaskRootValidatorSql,
+  "p_snapshot->>'state' = 'verification_only'\n        AND p_snapshot->>'replayPolicy' = 'verification_only'",
+  'nonterminal dispatched work requires both verification-only state and replay policy',
+);
+lacks(
+  computerTaskRootMigration,
+  'normalizedTask',
+  'database roots never persist raw normalized task text',
+);
+const computerTaskRootFunctionDefinitions = Array.from(
+  computerTaskRootMigration.matchAll(
+    /CREATE OR REPLACE FUNCTION public\.([a-z0-9_]+)\([\s\S]*?\n\$function\$;/g,
+  ),
+  (match) => ({ name: match[1], sql: match[0] }),
+);
+const computerTaskRootSecurityDefinerNames = computerTaskRootFunctionDefinitions
+  .filter((definition) => definition.sql.includes('\nSECURITY DEFINER\n'))
+  .map((definition) => definition.name);
+const expectedComputerTaskRootSecurityDefinerNames = [
+  'is_computer_task_root_run_v1',
+  'admit_computer_task_root_v1',
+  'read_computer_task_root_v1',
+  'transition_computer_task_root_v1',
+  'claim_computer_task_root_action_v1',
+  'start_computer_task_root_action_v1',
+  'settle_computer_task_root_action_v1',
+];
+check(
+  JSON.stringify(computerTaskRootSecurityDefinerNames)
+    === JSON.stringify(expectedComputerTaskRootSecurityDefinerNames),
+  'only the seven named root ownership, lifecycle, and action gateway functions run as security definers',
+);
+const computerTaskRootFixedSearchPathNames = computerTaskRootFunctionDefinitions
+  .filter((definition) => definition.sql.includes('\nSET search_path = pg_catalog, public\n'))
+  .map((definition) => definition.name);
+const expectedComputerTaskRootFixedSearchPathNames = [
+  'is_computer_task_root_run_v1',
+  'is_valid_computer_task_root_timestamp_v1',
+  'computer_task_root_canonical_json_v1',
+  'computer_task_root_fingerprint_v1',
+  'is_valid_computer_task_root_nested_v1',
+  'is_valid_computer_task_root_snapshot_v1',
+  'admit_computer_task_root_v1',
+  'read_computer_task_root_v1',
+  'transition_computer_task_root_v1',
+  '_computer_task_root_action_error_v1',
+  '_computer_task_root_action_identity_matches_v1',
+  '_computer_task_root_action_payload_v1',
+  'claim_computer_task_root_action_v1',
+  'start_computer_task_root_action_v1',
+  'settle_computer_task_root_action_v1',
+];
+check(
+  JSON.stringify(computerTaskRootFixedSearchPathNames)
+    === JSON.stringify(expectedComputerTaskRootFixedSearchPathNames),
+  'every named root identity helper, validator, lifecycle RPC, and action gateway has a fixed search path',
+);
+for (const functionName of expectedComputerTaskRootSecurityDefinerNames) {
+  const definition = computerTaskRootFunctionDefinitions.find(
+    (candidate) => candidate.name === functionName,
+  );
+  check(definition !== undefined, `${functionName} has a parsed SQL definition`);
+  has(definition.sql, 'SECURITY DEFINER', `${functionName} owns its privileged database transition`);
+  has(
+    definition.sql,
+    'SET search_path = pg_catalog, public',
+    `${functionName} pins its privileged search path`,
+  );
+}
+has(
+  computerTaskRootMigration,
+  'CREATE OR REPLACE FUNCTION public.computer_task_root_canonical_json_v1(',
+  'database root identity uses a dedicated canonical JSON serializer',
+);
+has(
+  computerTaskRootMigration,
+  'extensions.digest(',
+  'database root identity uses schema-qualified SHA-256',
+);
+has(
+  computerTaskRootValidatorSql,
+  "'namespace', 'computer_task_request_identity'",
+  'request identity fingerprints are recomputed from the bounded request',
+);
+has(
+  computerTaskRootValidatorSql,
+  "'namespace', 'computer_task_root'",
+  'root fingerprints are recomputed from request and task digests',
+);
+has(
+  computerTaskRootMigration,
+  'REFERENCES public.circle_chat_threads(id)\n  ON DELETE RESTRICT;',
+  'immutable thread scope cannot be nulled underneath a root',
+);
+has(
+  computerTaskRootMigration,
+  'CREATE POLICY agent_runs_computer_task_root_update_guard',
+  'root-owned wrapper runs reject direct authenticated updates',
+);
+has(
+  computerTaskRootMigration,
+  'CREATE POLICY agent_runs_computer_task_root_delete_guard',
+  'root-owned wrapper runs reject direct authenticated deletes',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "(SELECT count(*) FROM jsonb_object_keys(v_entry)) <> 14",
+  'acceptance actions require their exact V1 key set',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'proofFingerprint', 'dispatchBinding', 'updatedAt'",
+  'every acceptance action carries the required dispatch-binding slot',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "FROM jsonb_object_keys(v_dispatch_binding)\n          ) <> 9",
+  'bound dispatch authority requires the exact V1 object shape',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'compiler', 'provider', 'deterministic', 'connected_agent',",
+  'dispatch binding sources are closed-world',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "owner.value->>'kind' = v_dispatch_binding->>'source'",
+  'dispatch binding source must match its acceptance-owning attempt kind',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'read_only', 'direct_request', 'plan_approval',",
+  'dispatch authorization categories are closed-world',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'read_only', 'action_ledger', 'provider_idempotency',",
+  'dispatch mutation authorities are closed-world',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'callIdentityFingerprint'",
+  'dispatch call identity is digest-bound',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'policyBindingFingerprint'",
+  'dispatch policy is digest-bound',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'verifierBindingFingerprint'",
+  'dispatch verifier is digest-bound',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'replayBindingFingerprint'",
+  'dispatch replay policy is digest-bound',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'boundAt' > v_entry->>'updatedAt'",
+  'dispatch bindings cannot postdate their owning action revision',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'authorizationCategory' = 'read_only'",
+  'mutating actions reject read-only authorization bindings',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'mutationAuthority' <> 'read_only'",
+  'nonmutating actions require read-only mutation authority',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_action_state <> 'planned'\n        AND (\n          v_dispatch_binding = 'null'::jsonb",
+  'every claimed-or-later action requires its immutable dispatch binding',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_dispatch_binding->>'authorizationCategory' IN (\n            'proposal_only', 'unsupported'",
+  'audit-only authorization bindings cannot appear on claimed-or-later actions',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_action_frontier_seen := true",
+  'strict hydration enforces one ordered action frontier after a verified prefix',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "owner.value->>'attemptId' = v_acceptance_attempt_id\n        AND owner.value->>'state' = 'active'",
+  'nonterminal acceptance requires its owning attempt to remain active',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "(action.value->>'requiresForegroundLease')::boolean",
+  'active lease hydration requires an action that declares foreground ownership',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "action.value->>'state' = 'dispatched'\n              AND p_snapshot->>'state' = 'verification_only'",
+  'active dispatched leases can exist only in verification-only state',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_entry->>'actionId' = ANY(v_action_ids)",
+  'acceptance action identities are unique',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'namespace', 'computer_task_attempt'",
+  'attempt IDs are recomputed from the exact root, index, kind, and parent',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'namespace', 'computer_task_child_action'",
+  'action IDs are recomputed from their exact manifest identity',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'namespace', 'computer_task_action_idempotency'",
+  'action idempotency keys are recomputed by PostgreSQL',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'namespace', 'computer_task_acceptance'",
+  'acceptance fingerprints are recomputed from predicates and ordered manifests',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "'namespace', 'computer_task_action_acceptance_binding'",
+  'per-action acceptance bindings are recomputed by PostgreSQL',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "v_action_state = 'verified'",
+  'verified actions require a structured proof fingerprint',
+);
+has(
+  computerTaskRootNestedValidatorSql,
+  "(v_latch - ARRAY['kind', 'latchedAt', 'revision']) <> '{}'::jsonb",
+  'interrupt latches require the exact V1 shape',
+);
+
+has(computerTaskRootAdmissionSql, 'v_actor uuid := auth.uid()', 'root admission binds the current actor');
+has(computerTaskRootAdmissionSql, 'member.user_id = v_actor', 'root admission rechecks circle membership');
+has(computerTaskRootAdmissionSql, 'thread.created_by = v_actor', 'root admission validates private thread ownership');
+has(computerTaskRootAdmissionSql, 'thread_member.user_id = v_actor', 'root admission validates explicit thread membership');
+has(computerTaskRootAdmissionSql, 'pg_advisory_xact_lock(hashtextextended(', 'competing admissions serialize before wrapper creation');
+has(computerTaskRootAdmissionSql, 'FOR UPDATE', 'duplicate admission locks the canonical root');
+has(computerTaskRootAdmissionSql, "'disposition', 'duplicate'", 'exact duplicate admission is explicit');
+check(
+  computerTaskRootAdmissionSql.indexOf('IF FOUND THEN')
+    < computerTaskRootAdmissionSql.indexOf('Only a genuinely new admission pays'),
+  'exact duplicate admission returns before snapshot derivation and client clock freshness checks',
+);
+has(computerTaskRootAdmissionSql, "'code', 'identity_conflict'", 'request drift fails with stable identity conflict');
+has(computerTaskRootAdmissionSql, "'taskCompletionVerified', false", 'wrapper runs never self-certify task completion');
+has(computerTaskRootAdmissionSql, "'rootCoordinationOnly', true", 'wrapper runs are marked coordination-only');
+
+has(computerTaskRootReadSql, 'v_actor uuid := auth.uid()', 'root refresh reauthenticates the actor');
+has(computerTaskRootReadSql, 'member.user_id = v_actor', 'root refresh rechecks circle membership');
+has(computerTaskRootReadSql, 'thread_member.user_id = v_actor', 'root refresh rechecks private-thread access');
+has(computerTaskRootReadSql, "'disposition', 'read'", 'root refresh returns an explicit inert read projection');
+
+has(computerTaskRootTransitionSql, 'p_transition_type text', 'transition RPC receives an explicit transition kind');
+has(computerTaskRootTransitionSql, "p_transition_type NOT IN (", 'transition kinds are closed-world');
+has(computerTaskRootTransitionSql, 'FOR UPDATE', 'root transitions lock the canonical row');
+has(computerTaskRootTransitionSql, 'v_root.revision <> p_expected_revision', 'root transition enforces revision CAS');
+check(
+  computerTaskRootTransitionSql.indexOf('FOR UPDATE')
+    < computerTaskRootTransitionSql.indexOf('IF NOT public.is_valid_computer_task_root_snapshot_v1'),
+  'transition snapshot hashing occurs only after exact actor/root lookup and revision CAS',
+);
+has(computerTaskRootTransitionSql, 'v_next_revision <> v_root.revision + 1', 'root revision advances exactly once');
+has(computerTaskRootTransitionSql, "p_root_snapshot->'request' IS DISTINCT FROM v_root.root_snapshot->'request'", 'authenticated request scope is immutable');
+has(computerTaskRootTransitionSql, 'OR CASE p_transition_type', 'every transition has an exact top-level delta mask');
+has(
+  computerTaskRootTransitionSql,
+  "'bind_action_dispatch',",
+  'action dispatch binding has an explicit transition kind',
+);
+has(
+  computerTaskRootTransitionSql,
+  "WHEN 'bind_action_dispatch' THEN",
+  'action dispatch binding owns an exact top-level delta mask',
+);
+has(
+  computerTaskRootTransitionSql,
+  "'revision', 'state', 'updatedAt', 'acceptance'",
+  'dispatch binding atomically resumes a waiting root into running state',
+);
+has(computerTaskRootTransitionSql, "OR ((p_root_snapshot->'checkpoints')", 'checkpoint prefix comparison parenthesizes the JSONB operand');
+has(computerTaskRootTransitionSql, "OR ((p_root_snapshot->'attempts')", 'attempt prefix comparison parenthesizes the JSONB operand');
+has(computerTaskRootTransitionSql, "OR ((p_root_snapshot->'acceptance') -", 'acceptance delta comparison parenthesizes the JSONB operand');
+has(computerTaskRootTransitionSql, "OR ((p_root_snapshot->'foregroundLease') -", 'lease delta comparison parenthesizes the JSONB operand');
+check(
+  (
+    computerTaskRootTransitionSql.match(
+      /NULLIF\(\s*v_root\.root_snapshot->'foregroundLease',\s*'null'::jsonb\s*\)/g,
+    ) || []
+  ).length === 3,
+  'every foreground-lease jsonb_set base is safe when the lease is JSON null',
+);
+has(
+  computerTaskRootTransitionSql,
+  "p_root_snapshot#>>'{foregroundLease,status}'\n                IS DISTINCT FROM 'active'",
+  'foreground-required dispatch rejects a missing lease status instead of accepting SQL NULL',
+);
+has(
+  computerTaskRootTransitionSql,
+  "p_root_snapshot#>>'{foregroundLease,actionId}'\n                IS DISTINCT FROM",
+  'foreground-required dispatch rejects a missing or mismatched lease action',
+);
+has(
+  computerTaskRootTransitionSql,
+  "p_root_snapshot#>>'{foregroundLease,expiresAt}' IS NULL",
+  'foreground-required dispatch rejects a missing lease expiry before timestamp comparison',
+);
+has(computerTaskRootTransitionSql, "WHEN 'completed' THEN 'paused'", 'root completion cannot promote the wrapper run to completed');
+has(computerTaskRootTransitionSql, "'taskCompletionVerified', false", 'every root transition preserves unverified wrapper status');
+has(computerTaskRootTransitionSql, "p_transition_type = 'record_action_state'", 'typed action-state updates own ambiguity recovery');
+has(
+  computerTaskRootTransitionSql,
+  "p_transition_type = 'bind_action_dispatch'",
+  'typed dispatch binding owns its one-time action update',
+);
+has(
+  computerTaskRootTransitionSql,
+  "OR action.value->'dispatchBinding' <> 'null'::jsonb",
+  'acceptance starts every action with an unbound dispatch slot',
+);
+has(
+  computerTaskRootTransitionSql,
+  "prior.value->'dispatchBinding' <> 'null'::jsonb",
+  'dispatch bindings cannot be rebound',
+);
+has(
+  computerTaskRootTransitionSql,
+  "next.value - ARRAY['dispatchBinding', 'updatedAt']",
+  'dispatch binding changes only its binding and timestamp',
+);
+has(
+  computerTaskRootTransitionSql,
+  "next.value#>>'{dispatchBinding,boundAt}' <>\n                p_root_snapshot->>'updatedAt'",
+  'dispatch binding timestamp equals the root transition timestamp',
+);
+has(
+  computerTaskRootTransitionSql,
+  "prior.value->>'attemptId' =\n                v_root.root_snapshot#>>'{acceptance,attemptId}'",
+  'an acceptance-owning attempt cannot finish through the generic attempt transition',
+);
+has(
+  computerTaskRootTransitionSql,
+  "next.value#>>'{dispatchBinding,authorizationCategory}'\n                    IN ('proposal_only', 'unsupported')",
+  'proposal-only and unsupported dispatch categories never claim',
+);
+has(
+  computerTaskRootTransitionSql,
+  "NOT IN ('action_ledger', 'provider_idempotency')",
+  'mutating claims require a durable mutation authority',
+);
+has(
+  computerTaskRootTransitionSql,
+  "next.value#>>'{dispatchBinding,mutationAuthority}'\n                      <> 'read_only'",
+  'nonmutating claims require read-only authority',
+);
+check(
+  (
+    computerTaskRootTransitionSql.match(
+      /owner\.value->>'attemptId' = (?:next|action)\.value->>'attemptId'[\s\S]{0,120}owner\.value->>'state' = 'active'/g,
+    ) || []
+  ).length === 2,
+  'claim or dispatch and foreground lease acquisition both require the action-owning attempt to remain active',
+);
+has(
+  computerTaskRootTransitionSql,
+  "(other.value->>'index')::integer <\n                  (action.value->>'index')::integer",
+  'foreground lease acquisition cannot skip an earlier unverified action',
+);
+has(
+  computerTaskRootTransitionSql,
+  "other.value->>'actionId' <> action.value->>'actionId'\n                AND other.value->>'state' IN ('claimed', 'dispatched')",
+  'foreground lease acquisition cannot overlap another claimed or dispatched action',
+);
+has(computerTaskRootTransitionSql, "v_next_state NOT IN ('running', 'verification_only')", 'action transitions cannot skip into terminal completion');
+has(computerTaskRootTransitionSql, "next.value->>'state' = 'claimed'", 'action claiming enforces manifest order');
+has(
+  computerTaskRootTransitionSql,
+  "prior.value->>'state' = 'outcome_unknown'\n                  AND next.value->>'state' = 'verified'",
+  'outcome-unknown work may reconcile only to proof-bearing verified state',
+);
+has(computerTaskRootTransitionSql, "next.value->>'updatedAt' <> p_root_snapshot->>'updatedAt'", 'the changed action owns the transition timestamp');
+has(computerTaskRootTransitionSql, "p_root_snapshot#>>'{interruptLatch,revision}'", 'STOP and foreground override bind the next revision');
+has(
+  computerTaskRootTransitionSql,
+  "'append_checkpoint', 'record_action_state',\n        'release_foreground_lease', 'stop_requested',\n        'human_foreground_override'",
+  'verification-only work may release focus, accept proof, or latch an interrupt without replay',
+);
+has(computerTaskRootTransitionSql, "v_root.state IN ('completed', 'failed', 'cancelled')", 'terminal roots cannot reactivate');
+
+const computerTaskRootActionGatewayDefinitions = [
+  ['claim_computer_task_root_action_v1', computerTaskRootActionClaimSql],
+  ['start_computer_task_root_action_v1', computerTaskRootActionStartSql],
+  ['settle_computer_task_root_action_v1', computerTaskRootActionSettleSql],
+] as const;
+for (const [functionName, definition] of computerTaskRootActionGatewayDefinitions) {
+  has(definition, 'v_actor uuid := auth.uid()', `${functionName} binds the current actor`);
+  has(definition, 'root.user_id = v_actor', `${functionName} binds the exact root owner`);
+  has(definition, 'member.user_id = v_actor', `${functionName} rechecks circle membership`);
+  has(definition, 'thread.created_by = v_actor', `${functionName} rechecks private-thread ownership`);
+  has(definition, 'thread_member.user_id = v_actor', `${functionName} rechecks private-thread membership`);
+  has(
+    definition,
+    'public._computer_task_root_action_identity_matches_v1(',
+    `${functionName} revalidates the ledger identity derived from the locked root`,
+  );
+  lacks(definition, "auth.role() = 'service_role'", `${functionName} has no service-role bypass`);
+
+  const rootLookupIndex = definition.indexOf('FROM public.computer_task_roots AS root');
+  const rootLockIndex = definition.indexOf('\n  FOR UPDATE;', rootLookupIndex);
+  const actionLedgerLookupIndex = definition.indexOf(
+    'FROM public.agent_action_calls AS action_call',
+    rootLockIndex,
+  );
+  const actionLedgerLockIndex = definition.indexOf('\n  FOR UPDATE;', actionLedgerLookupIndex);
+  check(rootLookupIndex >= 0, `${functionName} looks up the exact root row`);
+  check(rootLockIndex > rootLookupIndex, `${functionName} locks the root row`);
+  check(
+    actionLedgerLookupIndex > rootLockIndex,
+    `${functionName} reaches the action ledger only after locking the root`,
+  );
+  check(
+    actionLedgerLockIndex > actionLedgerLookupIndex,
+    `${functionName} locks the exact action ledger row under the root lock`,
+  );
+}
+
+const computerTaskRootActionGatewaySignatures = [
+  'public.claim_computer_task_root_action_v1(\n  uuid, integer, text, jsonb, jsonb, integer\n)',
+  'public.start_computer_task_root_action_v1(\n  uuid, integer, text, uuid, jsonb\n)',
+  'public.settle_computer_task_root_action_v1(\n  uuid, integer, text, uuid, text, text, jsonb, text, jsonb, jsonb\n)',
+] as const;
+for (const signature of computerTaskRootActionGatewaySignatures) {
+  has(
+    computerTaskRootMigration,
+    `REVOKE ALL ON FUNCTION ${signature} FROM PUBLIC, anon;`,
+    `${signature} removes public and anonymous execution`,
+  );
+  has(
+    computerTaskRootMigration,
+    `GRANT EXECUTE ON FUNCTION ${signature} TO authenticated;`,
+    `${signature} grants only the authenticated app boundary`,
+  );
+}
+
+const privateComputerTaskRootActionHelpers = [
+  {
+    name: 'public._computer_task_root_action_error_v1',
+    revoke:
+      'REVOKE ALL ON FUNCTION public._computer_task_root_action_error_v1(text, text)\n'
+      + '  FROM PUBLIC, anon, authenticated;',
+  },
+  {
+    name: 'public._computer_task_root_action_identity_matches_v1',
+    revoke:
+      'REVOKE ALL ON FUNCTION public._computer_task_root_action_identity_matches_v1(\n'
+      + '  public.computer_task_roots, jsonb, public.agent_action_calls\n'
+      + ') FROM PUBLIC, anon, authenticated;',
+  },
+  {
+    name: 'public._computer_task_root_action_payload_v1',
+    revoke:
+      'REVOKE ALL ON FUNCTION public._computer_task_root_action_payload_v1(\n'
+      + '  jsonb, public.agent_action_calls, text, boolean\n'
+      + ') FROM PUBLIC, anon, authenticated;',
+  },
+] as const;
+for (const helper of privateComputerTaskRootActionHelpers) {
+  has(
+    computerTaskRootMigration,
+    helper.revoke,
+    `${helper.name} remains private to the privileged gateway`,
+  );
+  lacks(
+    computerTaskRootMigration,
+    `GRANT EXECUTE ON FUNCTION ${helper.name}`,
+    `${helper.name} is never granted directly`,
+  );
+}
+
+has(
+  computerTaskRootMigration,
+  'DROP FUNCTION IF EXISTS public.transition_computer_task_root_v1(\n  uuid, integer, jsonb\n);',
+  'the obsolete transition signature is removed',
+);
+has(
+  computerTaskRootMigration,
+  'GRANT EXECUTE ON FUNCTION public.transition_computer_task_root_v1(\n  uuid, integer, text, jsonb\n) TO authenticated;',
+  'only the exact four-argument transition RPC is granted',
+);
+has(
+  computerTaskRootMigration,
+  'REVOKE ALL ON FUNCTION public.is_valid_computer_task_root_snapshot_v1(jsonb)\n  FROM PUBLIC, anon, authenticated;',
+  'snapshot validation remains a private helper',
+);
+has(
+  computerTaskRootMigration,
+  "NOTIFY pgrst, 'reload schema';",
+  'root RPCs refresh the PostgREST schema',
 );
 
 console.log(`database-authority-guards smoke: ${assertions} assertions passed`);

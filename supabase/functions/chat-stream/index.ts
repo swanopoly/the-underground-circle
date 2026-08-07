@@ -30,10 +30,31 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
+type SupportedImageMediaType =
+  | "image/jpeg"
+  | "image/png"
+  | "image/gif"
+  | "image/webp";
+
+type ChatStreamTextBlock = { type: "text"; text: string };
+type ChatStreamImageBlock = {
+  type: "image";
+  source: {
+    type: "base64";
+    media_type: SupportedImageMediaType;
+    data: string;
+  };
+};
+type ChatStreamContent = string | Array<ChatStreamTextBlock | ChatStreamImageBlock>;
+type NormalizedChatStreamMessage = {
+  role: "user" | "assistant" | "system";
+  content: ChatStreamContent;
+};
+
 interface ChatStreamRequest {
   model?: string;
-  messages: Array<{ role: string; content: string }>;
-  system?: string;
+  messages: unknown;
+  system?: unknown;
   max_tokens?: number;
   temperature?: number;
   circleId?: string;
@@ -42,6 +63,213 @@ interface ChatStreamRequest {
   // tools, so this is the safety boundary for the stream->tool seam.
   tools?: unknown[];
   tool_choice?: unknown;
+}
+
+const MAX_STREAM_MESSAGES = 64;
+const MAX_BLOCKS_PER_MESSAGE = 16;
+const MAX_TOTAL_CONTENT_BLOCKS = 256;
+const MAX_TEXT_CHARS_PER_BLOCK = 120_000;
+const MAX_SYSTEM_TEXT_CHARS = 200_000;
+const MAX_TOTAL_TEXT_CHARS = 400_000;
+const MAX_IMAGE_COUNT = 3;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_BASE64_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
+// 10 MiB decoded images expand to ~13.34 MiB in base64. Leave bounded room
+// for text + JSON framing, while rejecting obvious oversized bodies before
+// `req.json()` allocates them. Chunked bodies still face the per-field guards.
+const MAX_REQUEST_CONTENT_LENGTH = 16 * 1024 * 1024;
+const SUPPORTED_IMAGE_MEDIA_TYPES = new Set<SupportedImageMediaType>([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
+type ValidationState = {
+  textChars: number;
+  contentBlocks: number;
+  imageCount: number;
+  imageBytes: number;
+};
+
+type NormalizedChatInput = {
+  messages: NormalizedChatStreamMessage[];
+  systemPrompt: string | undefined;
+};
+
+type ChatInputValidation =
+  | { ok: true; value: NormalizedChatInput }
+  | { ok: false; error: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isBase64AlphabetCode(code: number): boolean {
+  return (
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    (code >= 48 && code <= 57) ||
+    code === 43 ||
+    code === 47
+  );
+}
+
+/** Return decoded byte length for strict, unwrapped base64; null when malformed. */
+function decodedBase64Length(value: string): number | null {
+  if (!value || value.length > MAX_BASE64_CHARS || value.length % 4 !== 0) return null;
+  let padding = 0;
+  if (value.endsWith("==")) padding = 2;
+  else if (value.endsWith("=")) padding = 1;
+  const dataEnd = value.length - padding;
+  for (let i = 0; i < dataEnd; i += 1) {
+    if (!isBase64AlphabetCode(value.charCodeAt(i))) return null;
+  }
+  for (let i = dataEnd; i < value.length; i += 1) {
+    if (value.charCodeAt(i) !== 61) return null;
+  }
+  // A single leftover base64 symbol cannot encode a byte. Canonical padded
+  // input therefore has 2 data chars before `==` or 3 before `=`.
+  const quartetDataChars = dataEnd % 4;
+  if ((padding === 2 && quartetDataChars !== 2) || (padding === 1 && quartetDataChars !== 3)) return null;
+  if (padding === 0 && quartetDataChars !== 0) return null;
+  const bytes = (value.length / 4) * 3 - padding;
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null;
+}
+
+function imageSignatureMatches(data: string, mediaType: SupportedImageMediaType): boolean {
+  try {
+    // Decode only the small prefix needed for magic-byte validation. Full
+    // length/alphabet/padding validation happened above, so image bytes never
+    // need to be materialized a second time inside the edge function.
+    const prefixChars = Math.min(data.length, 24);
+    const alignedChars = prefixChars - (prefixChars % 4);
+    const binary = atob(data.slice(0, alignedChars));
+    const bytes = Array.from(binary, (char) => char.charCodeAt(0));
+    if (mediaType === "image/jpeg") {
+      return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    }
+    if (mediaType === "image/png") {
+      return bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+        bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+    }
+    if (mediaType === "image/gif") {
+      const signature = binary.slice(0, 6);
+      return signature === "GIF87a" || signature === "GIF89a";
+    }
+    return binary.slice(0, 4) === "RIFF" && binary.slice(8, 12) === "WEBP";
+  } catch {
+    return false;
+  }
+}
+
+function addTextToBudget(text: unknown, state: ValidationState, maxChars = MAX_TEXT_CHARS_PER_BLOCK): string | null {
+  if (typeof text !== "string" || text.length > maxChars) return null;
+  state.textChars += text.length;
+  if (state.textChars > MAX_TOTAL_TEXT_CHARS) return null;
+  return text;
+}
+
+function normalizeImageBlock(
+  block: Record<string, unknown>,
+  role: "user" | "assistant" | "system",
+  state: ValidationState,
+): ChatStreamImageBlock | null {
+  if (role !== "user" || !isRecord(block.source)) return null;
+  const source = block.source;
+  if (source.type !== "base64" || typeof source.media_type !== "string" || typeof source.data !== "string") return null;
+  if (!SUPPORTED_IMAGE_MEDIA_TYPES.has(source.media_type as SupportedImageMediaType)) return null;
+  const mediaType = source.media_type as SupportedImageMediaType;
+  const decodedBytes = decodedBase64Length(source.data);
+  if (decodedBytes === null || decodedBytes > MAX_IMAGE_BYTES || !imageSignatureMatches(source.data, mediaType)) return null;
+  if (state.imageCount >= MAX_IMAGE_COUNT || state.imageBytes + decodedBytes > MAX_TOTAL_IMAGE_BYTES) return null;
+  state.imageCount += 1;
+  state.imageBytes += decodedBytes;
+  return {
+    type: "image",
+    source: { type: "base64", media_type: mediaType, data: source.data },
+  };
+}
+
+function normalizeMessageContent(
+  raw: unknown,
+  role: "user" | "assistant" | "system",
+  state: ValidationState,
+): ChatStreamContent | null {
+  if (typeof raw === "string") return addTextToBudget(raw, state);
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_BLOCKS_PER_MESSAGE) return null;
+  const normalized: Array<ChatStreamTextBlock | ChatStreamImageBlock> = [];
+  for (const rawBlock of raw) {
+    state.contentBlocks += 1;
+    if (state.contentBlocks > MAX_TOTAL_CONTENT_BLOCKS || !isRecord(rawBlock)) return null;
+    if (rawBlock.type === "text") {
+      const text = addTextToBudget(rawBlock.text, state);
+      if (text === null) return null;
+      normalized.push({ type: "text", text });
+      continue;
+    }
+    if (rawBlock.type === "image") {
+      const image = normalizeImageBlock(rawBlock, role, state);
+      if (!image) return null;
+      normalized.push(image);
+      continue;
+    }
+    return null;
+  }
+  return normalized;
+}
+
+function textOnlyContent(content: ChatStreamContent): string | null {
+  if (typeof content === "string") return content;
+  if (content.some((block) => block.type !== "text")) return null;
+  return content.map((block) => (block as ChatStreamTextBlock).text).join("\n");
+}
+
+/**
+ * Validate and normalize all model-visible input before credentials are used.
+ * Errors are intentionally generic: no text, bytes, file metadata, or URLs
+ * from the request are copied into responses or logs.
+ */
+function validateChatInput(rawMessages: unknown, rawSystem: unknown): ChatInputValidation {
+  if (!Array.isArray(rawMessages) || rawMessages.length === 0 || rawMessages.length > MAX_STREAM_MESSAGES) {
+    return { ok: false, error: `messages must contain 1-${MAX_STREAM_MESSAGES} items` };
+  }
+  const state: ValidationState = { textChars: 0, contentBlocks: 0, imageCount: 0, imageBytes: 0 };
+  let directSystem = "";
+  if (rawSystem !== undefined && rawSystem !== null) {
+    const normalized = addTextToBudget(rawSystem, state, MAX_SYSTEM_TEXT_CHARS);
+    if (normalized === null) return { ok: false, error: "system prompt is invalid or too large" };
+    directSystem = normalized;
+  }
+
+  const messages: NormalizedChatStreamMessage[] = [];
+  const systemParts: string[] = directSystem ? [directSystem] : [];
+  for (const rawMessage of rawMessages) {
+    if (!isRecord(rawMessage)) return { ok: false, error: "message is invalid" };
+    const role = rawMessage.role;
+    if (role !== "user" && role !== "assistant" && role !== "system") {
+      return { ok: false, error: "message role is invalid" };
+    }
+    const content = normalizeMessageContent(rawMessage.content, role, state);
+    if (content === null) {
+      return { ok: false, error: "message content or image input is invalid, unsupported, or over the size limit" };
+    }
+    if (role === "system") {
+      const text = textOnlyContent(content);
+      if (text === null) return { ok: false, error: "system messages must be text-only" };
+      systemParts.push(text);
+    } else {
+      // normalizeMessageContent already rejects image blocks for assistant.
+      messages.push({ role, content });
+    }
+  }
+  if (messages.length === 0) return { ok: false, error: "at least one user or assistant message is required" };
+  const systemPrompt = systemParts.filter(Boolean).join("\n\n") || undefined;
+  if (systemPrompt && systemPrompt.length > MAX_SYSTEM_TEXT_CHARS) {
+    return { ok: false, error: "combined system prompt is too large" };
+  }
+  return { ok: true, value: { messages, systemPrompt } };
 }
 
 function credentialErrorResponse(
@@ -81,6 +309,14 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  const declaredContentLength = Number(req.headers.get("content-length") || 0);
+  if (Number.isFinite(declaredContentLength) && declaredContentLength > MAX_REQUEST_CONTENT_LENGTH) {
+    return new Response(JSON.stringify({ error: "Request body is too large", code: "validation" }), {
+      status: 413,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
   let body: ChatStreamRequest;
   try {
     body = await req.json();
@@ -90,17 +326,19 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const { messages, system, max_tokens, temperature, circleId, tools, tool_choice } = body;
+  const { max_tokens, temperature, circleId, tools, tool_choice } = body;
+  const validatedInput = validateChatInput(body.messages, body.system);
+  if (!validatedInput.ok) {
+    return new Response(JSON.stringify({ error: validatedInput.error, code: "validation" }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  const { messages, systemPrompt } = validatedInput.value;
   // Single source of truth for "are we in tool mode": only true when the
   // caller actually supplied tool definitions. Everything tool-related below
   // is gated on this so the no-tools path stays byte-for-byte unchanged.
   const hasTools = Array.isArray(tools) && tools.length > 0;
-  if (!messages?.length) {
-    return new Response(JSON.stringify({ error: "messages required" }), {
-      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
-
   let anthropicKey: ResolvedApiKey | null;
   try {
     anthropicKey = await resolveUserModelApiKey({
@@ -179,10 +417,10 @@ Deno.serve(async (req: Request) => {
   const model = MODEL_MAP[rawModel] || rawModel;
 
   // Build Anthropic request with streaming enabled
-  const chatMessages = messages
-    .filter(m => m.role !== "system")
-    .map(m => ({ role: m.role === "user" ? "user" : "assistant", content: m.content }));
-  const systemPrompt = system || messages.filter(m => m.role === "system").map(m => m.content).join("\n\n") || undefined;
+  const chatMessages = messages.map((m) => ({
+    role: m.role === "user" ? "user" : "assistant",
+    content: m.content,
+  }));
 
   const anthropicBody: Record<string, unknown> = {
     model,

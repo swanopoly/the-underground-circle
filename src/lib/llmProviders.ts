@@ -37,9 +37,6 @@ export type LLMProvider =
   | 'fireworks_ai'
   | 'deepseek';
 
-/** Providers stored in the personal key vault, including non-model tool keys. */
-export type UserApiKeyProvider = LLMProvider | 'brave';
-
 export interface ProviderKey {
   id: string;
   provider: LLMProvider;
@@ -78,24 +75,17 @@ export interface LLMProxyResponse {
 
 export type ThinkingLevel = 'fast' | 'balanced' | 'deep';
 
-const userApiKeyChangeListeners = new Set<(provider?: UserApiKeyProvider) => void>();
+const userApiKeyChangeListeners = new Set<() => void>();
 
 /** Subscribe to same-runtime Marketplace key changes (web and native). */
-export function subscribeUserApiKeyChanges(listener: (provider?: UserApiKeyProvider) => void): () => void {
+export function subscribeUserApiKeyChanges(listener: () => void): () => void {
   userApiKeyChangeListeners.add(listener);
   return () => { userApiKeyChangeListeners.delete(listener); };
 }
 
-export function notifyUserApiKeyChanges(provider?: UserApiKeyProvider): void {
+export function notifyUserApiKeyChanges(): void {
   for (const listener of userApiKeyChangeListeners) {
-    try { listener(provider); } catch { /* observers must not break credential writes */ }
-  }
-  if (provider === 'openai') {
-    // Dynamic to keep memoryEmbeddings off ordinary model-picker startup and
-    // avoid turning optional repair work into part of a credential write.
-    void import('./memoryEmbeddings')
-      .then(({ resetMemoryEmbeddingCredentialBlock }) => resetMemoryEmbeddingCredentialBlock())
-      .catch(() => {});
+    try { listener(); } catch { /* observers must not break credential writes */ }
   }
 }
 
@@ -289,7 +279,7 @@ export async function storeApiKey(
   });
 
   if (error) return { error: error.message };
-  if (options.notify !== false) notifyUserApiKeyChanges(provider);
+  if (options.notify !== false) notifyUserApiKeyChanges();
   return { id: data };
 }
 

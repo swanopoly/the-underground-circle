@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  buildChatManualVerificationRecoveryAction,
   buildChatComputerOutcomePresentation,
+  isChatManualVerificationCurrentTask,
   isCompactDirectImageConversionBridgeFailure,
   isCompactPhotoshopSaveForWebBridgeFailure,
   isQuietSuccessfulComputerTaskWarning,
@@ -116,6 +118,85 @@ assert.deepEqual(
   exactPostDispatchUnknown.nextSteps,
   ['Check the active document with Photoshop document status; do not run Create again.'],
   'manual verification permits only read-only Photoshop status',
+);
+
+const exactPostDispatchVerifyAction = buildChatManualVerificationRecoveryAction({
+  replayPolicy: 'manual_verify_only',
+  mutationDispatched: true,
+  verificationOnlyTools: ['desktop.photoshop_document_status'],
+});
+assert.deepEqual(exactPostDispatchVerifyAction, {
+  id: 'verify_current_state',
+  label: 'Verify current state',
+  tools: ['desktop.photoshop_document_status'],
+  mutationAllowed: false,
+  promptReplayAllowed: false,
+}, 'manual-verification-only outcome exposes one explicit read-only current-state action');
+const currentManualVerificationIdentity = {
+  replayPolicy: 'manual_verify_only' as const,
+  mutationDispatched: true,
+  verificationOnlyTools: ['desktop.photoshop_document_status'],
+  requestAuthorId: 'member-a',
+  currentRequestAuthorId: 'member-a',
+  currentUserId: 'member-a',
+  expectedTaskStateId: 'run-a',
+  currentTaskStateId: 'run-a',
+  expectedSourceMessageId: 'message-a',
+  currentSourceMessageId: 'message-a',
+  hasNewerUserMessage: false,
+  verificationBridgeInstanceId: 'bridge-instance-aaaaaaaa',
+  currentVerificationBridgeInstanceId: 'bridge-instance-aaaaaaaa',
+  targetBound: true,
+};
+assert.equal(
+  isChatManualVerificationCurrentTask(currentManualVerificationIdentity),
+  true,
+  'manual verify is actionable only for the current requester/task/bridge/target tuple',
+);
+assert.equal(
+  isChatManualVerificationCurrentTask({ ...currentManualVerificationIdentity, hasNewerUserMessage: true }),
+  false,
+  'a newer human turn removes the stale Verify current state affordance',
+);
+assert.equal(
+  isChatManualVerificationCurrentTask({ ...currentManualVerificationIdentity, currentUserId: 'member-b' }),
+  false,
+  'another circle member never sees an actionable manual-verification capability',
+);
+assert.equal(
+  isChatManualVerificationCurrentTask({ ...currentManualVerificationIdentity, currentVerificationBridgeInstanceId: 'bridge-instance-bbbbbbbb' }),
+  false,
+  'a changed local bridge identity invalidates the current-task predicate',
+);
+assert.equal(buildChatManualVerificationRecoveryAction({
+  replayPolicy: 'manual_verify_only',
+  mutationDispatched: true,
+  verificationOnlyTools: ['desktop.photoshop_document_status', 'desktop.photoshop_create_document'],
+}), null, 'one injected mutation tool invalidates the whole manual-verification action');
+assert.equal(buildChatManualVerificationRecoveryAction({
+  replayPolicy: 'normal',
+  mutationDispatched: true,
+  verificationOnlyTools: ['desktop.photoshop_document_status'],
+}), null, 'ordinary recovery cannot mint the post-dispatch verification affordance');
+assert.equal(buildChatManualVerificationRecoveryAction({
+  replayPolicy: 'manual_verify_only',
+  mutationDispatched: false,
+  verificationOnlyTools: ['desktop.photoshop_document_status'],
+}), null, 'manual verification requires authoritative mutation-dispatch state');
+assert.match(
+  chatTabSource,
+  /isChatManualVerificationCurrentTask\([\s\S]*?issueChatManualVerificationAuthority\([\s\S]*?executeChatManualVerification\(\{/,
+  'Chat mints the current-task verification authority at click time and executes only that sealed program',
+);
+assert.match(
+  chatTabSource,
+  /Safe recovery[\s\S]*?Verify current state[\s\S]*?cannot rerun the original prompt or dispatch a mutation/,
+  'Chat renders one explicit read-only verification action for an uncertain dispatched mutation',
+);
+assert.match(
+  chatTabSource,
+  /const scopedThreadId = activeThreadId \|\| 'main'[\s\S]*?const mountedThreadId = activeThreadScopeRef\.current\.threadId \|\| 'main'/,
+  'manual verification binds the main-thread null case to the same canonical sentinel at issue and dispatch time',
 );
 
 const textOnlyNoReplayWarning = buildChatComputerOutcomePresentation({

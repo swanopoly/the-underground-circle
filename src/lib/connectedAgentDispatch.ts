@@ -15,6 +15,10 @@ import { launchClaudeCodeSessions } from './claudeCodeDetector';
 import { launchCodexSessions } from './codexDetector';
 import { launchGeminiCliSessions } from './geminiCliDetector';
 import { launchCursorComposerSessions } from './cursorDetector';
+import {
+  formatVisualBriefsForConnectedAgent,
+  type ChatVisualBriefArtifact,
+} from './chatVisualBriefCore';
 
 export type ConnectedAgentProvider = 'codex' | 'claude-code' | 'gemini' | 'cursor';
 
@@ -56,6 +60,7 @@ async function launchForProvider(provider: ConnectedAgentProvider, input: Common
 
 export async function dispatchConnectedAgentTask(opts: {
   prompt: string;
+  visionArtifacts?: readonly ChatVisualBriefArtifact[];
   sessionName: string;
   sessionId?: string | null;
   preferredProvider?: ConnectedAgentProvider | null;
@@ -70,6 +75,8 @@ export async function dispatchConnectedAgentTask(opts: {
   circleId?: string;
   userId?: string;
 }): Promise<ConnectedAgentDispatchResult> {
+  const visualBlock = formatVisualBriefsForConnectedAgent(opts.visionArtifacts);
+  const dispatchPrompt = visualBlock ? `${opts.prompt}\n\n${visualBlock}` : opts.prompt;
   const allowed = new Set<ConnectedAgentProvider>(
     opts.allowedProviders?.length ? opts.allowedProviders : DEFAULT_PROVIDER_ORDER,
   );
@@ -97,7 +104,7 @@ export async function dispatchConnectedAgentTask(opts: {
     }
   }
   if (target && isConnectedAgentProvider(target.provider)) {
-    const sent = await sendTerminalAgentSessionMessage(target.provider, target.sessionId, opts.prompt);
+    const sent = await sendTerminalAgentSessionMessage(target.provider, target.sessionId, dispatchPrompt);
     if (sent.ok) {
       return {
         ok: true,
@@ -125,8 +132,8 @@ export async function dispatchConnectedAgentTask(opts: {
   for (const provider of launchable) {
     const launched = await launchForProvider(provider, {
       count: 1,
-      prompt: opts.prompt,
-      prompts: [opts.prompt],
+      prompt: dispatchPrompt,
+      prompts: [dispatchPrompt],
       names: [opts.sessionName],
       circleId: opts.circleId,
       userId: opts.userId,

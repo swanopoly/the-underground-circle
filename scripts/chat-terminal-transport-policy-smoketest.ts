@@ -224,8 +224,8 @@ assert(looksLikeTerminalActionRequest(localAppMessage), 'detector: local app tas
 
 assertEqual(
   decide({ executionKind: 'run_plain_chat', chatMode: 'none', canStreamAnthropic: false }),
-  { path: 'batch_openswan', reason: 'stream_unavailable', canStream: false },
-  'policy: non-streamable models fall back to batch OpenSwan',
+  { path: 'batch_plain_chat', reason: 'stream_unavailable', canStream: false },
+  'policy: non-streamable plain chat stays on the selected model batch lane',
 );
 
 // ─── Phase 2 seam: stream-by-default → escalate-on-tool-use (DEFAULT ON 2026-07-01) ────
@@ -288,8 +288,8 @@ assertEqual(
 );
 assertEqual(
   decide({ executionKind: 'run_plain_chat', chatMode: 'none', canStreamAnthropic: false, streamEscalateOnToolUse: true }),
-  { path: 'batch_openswan', reason: 'stream_unavailable', canStream: false },
-  'policy(flag ON): non-streamable models still fall back to batch OpenSwan',
+  { path: 'batch_plain_chat', reason: 'stream_unavailable', canStream: false },
+  'policy(flag ON): transport failure still cannot promote plain chat into OpenSwan',
 );
 
 const chatTabSource = readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8');

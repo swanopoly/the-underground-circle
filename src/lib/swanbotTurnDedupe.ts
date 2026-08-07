@@ -12,6 +12,12 @@ export type SwanBotTurnDedupeContext = {
   modeKey?: string | null;
   taskKind?: string | null;
   sessionProfile?: string | null;
+  threadId?: string | null;
+  /** Immutable identity of the outer run/request that owns side effects. */
+  turnDedupeScope?: string | null;
+  forceClientToolLoop?: boolean;
+  completionExpectation?: string | null;
+  executionSurfaceGuard?: string | null;
   thinkingLevel?: string;
   conversationMessages?: Array<{ role: string; content: string }>;
   buildState?: string;
@@ -20,7 +26,11 @@ export type SwanBotTurnDedupeContext = {
 
 export const SWANBOT_TURN_DEDUPE_TTL_MS = 15_000;
 
-const inFlightSwanBotTurns: Map<string, { startedAt: number; promise: Promise<unknown> }> = new Map();
+const inFlightSwanBotTurns: Map<string, {
+  startedAt: number;
+  protectedTurn: boolean;
+  promise: Promise<unknown>;
+}> = new Map();
 const completedSwanBotTurns: Map<string, { settledAt: number; value: unknown }> = new Map();
 
 export function normalizeSwanBotTurnText(text: string): string {
@@ -51,6 +61,11 @@ export function buildSwanBotTurnDedupeKey(
     modeKey: context.modeKey || '',
     taskKind: context.taskKind || '',
     sessionProfile: context.sessionProfile || '',
+    threadId: context.threadId || '',
+    turnDedupeScope: context.turnDedupeScope || '',
+    forceClientToolLoop: context.forceClientToolLoop === true,
+    completionExpectation: context.completionExpectation || '',
+    executionSurfaceGuard: context.executionSurfaceGuard || '',
     thinkingLevel: context.thinkingLevel || '',
     buildState: context.buildState || '',
     buildConverging: context.buildConverging === true,
@@ -59,9 +74,19 @@ export function buildSwanBotTurnDedupeKey(
   });
 }
 
+function requiresIsolatedExecutionScope(context: SwanBotTurnDedupeContext): boolean {
+  return context.forceClientToolLoop === true
+    || context.completionExpectation === 'verified_task'
+    || Boolean(context.executionSurfaceGuard);
+}
+
 function pruneExpiredSwanBotTurns(now = Date.now()) {
   for (const [key, entry] of inFlightSwanBotTurns.entries()) {
-    if (now - entry.startedAt > SWANBOT_TURN_DEDUPE_TTL_MS) {
+    // Receipt-bearing computer runs may legitimately stay in Photoshop or
+    // another native app longer than the short UI double-submit window. Their
+    // in-flight claim must live until the owning promise settles; expiring it
+    // would allow the same run to dispatch a second mutation after 15s.
+    if (!entry.protectedTurn && now - entry.startedAt > SWANBOT_TURN_DEDUPE_TTL_MS) {
       inFlightSwanBotTurns.delete(key);
     }
   }
@@ -78,11 +103,28 @@ export function runSwanBotTurnWithDuplicateGuard<T>(
   context: SwanBotTurnDedupeContext,
   runner: () => Promise<T>,
 ): Promise<T> {
+  const protectedTurn = requiresIsolatedExecutionScope(context);
+  // A completed computer turn may carry mutation receipts. Never share that
+  // proof across outer executions. Callers in these lanes must supply an
+  // immutable run/request scope; older callers fail safe by bypassing both the
+  // in-flight and settled caches instead of replaying another run's result.
+  if (
+    protectedTurn
+    && !String(context.turnDedupeScope || '').trim()
+  ) {
+    return Promise.resolve().then(runner);
+  }
   const now = Date.now();
   pruneExpiredSwanBotTurns(now);
   const key = buildSwanBotTurnDedupeKey(kind, cleanedMessage, context);
   const existing = inFlightSwanBotTurns.get(key);
-  if (existing && now - existing.startedAt <= SWANBOT_TURN_DEDUPE_TTL_MS) {
+  if (
+    existing
+    && (
+      existing.protectedTurn
+      || now - existing.startedAt <= SWANBOT_TURN_DEDUPE_TTL_MS
+    )
+  ) {
     return existing.promise as Promise<T>;
   }
   const completed = completedSwanBotTurns.get(key);
@@ -91,7 +133,7 @@ export function runSwanBotTurnWithDuplicateGuard<T>(
   }
 
   const promise = Promise.resolve().then(runner);
-  inFlightSwanBotTurns.set(key, { startedAt: now, promise });
+  inFlightSwanBotTurns.set(key, { startedAt: now, protectedTurn, promise });
   void promise.then(
     (value) => {
       if (inFlightSwanBotTurns.get(key)?.promise === promise) {

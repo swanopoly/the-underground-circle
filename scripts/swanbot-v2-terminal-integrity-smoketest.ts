@@ -255,11 +255,13 @@ const clientCore = loadMarkedCore(
   '// SWANBOT_V2_CLIENT_TERMINAL_CORE_START',
   '// SWANBOT_V2_CLIENT_TERMINAL_CORE_END',
   [
+    'projectSwanBotV2TransportFailure',
     'projectSwanBotV2TerminalResponse',
     'classifySwanBotV2CallDisposition',
     'shouldFallbackSwanBotV2ToV1',
   ],
 );
+const projectTransportFailure = clientCore.projectSwanBotV2TransportFailure;
 const projectTerminal = clientCore.projectSwanBotV2TerminalResponse;
 const classifyDisposition = clientCore.classifySwanBotV2CallDisposition;
 const shouldFallback = clientCore.shouldFallbackSwanBotV2ToV1;
@@ -287,7 +289,46 @@ equal(nonemptyCancellation.cancelled, true, 'nonempty cancellation propagates ca
 equal(nonemptyCancellation.text, emptyCancellation.text, 'partial model tail is replaced by neutral cancellation copy');
 equal(shouldFallback(nonemptyCancellation), false, 'nonempty cancellation never falls back to v1');
 
-equal(shouldFallback({ text: null }), true, 'genuine empty transport failure may still use v1 fallback');
+const preDispatchTransportFailure = projectTransportFailure({
+  mutationCapablePostAttempted: false,
+});
+equal(preDispatchTransportFailure, {
+  text: null,
+  v1FallbackSafeBeforeDispatch: true,
+}, 'pre-dispatch transport failure carries explicit safe fallback authority');
+equal(
+  classifyDisposition(preDispatchTransportFailure),
+  'transport_failure',
+  'pre-dispatch transport failure still contributes to breaker health',
+);
+equal(shouldFallback(preDispatchTransportFailure), true, 'proved pre-dispatch failure may use v1 fallback');
+
+// Adversarial case: the edge committed a server-side mutation and every HTTP
+// response (including transport retries) was lost. The client can observe only
+// a null response, so the attempted mutation-capable POST must be treated as
+// outcome-unknown and must never replay the turn through v1.
+const lostAllResponsesAfterServerWrite = projectTransportFailure({
+  mutationCapablePostAttempted: true,
+});
+equal(lostAllResponsesAfterServerWrite, {
+  text: null,
+  mutationCapablePostOutcomeUnknown: true,
+}, 'lost response after a mutation-capable edge POST is outcome-unknown');
+equal(
+  classifyDisposition(lostAllResponsesAfterServerWrite),
+  'transport_failure',
+  'ambiguous post-response loss still contributes to breaker health',
+);
+equal(
+  shouldFallback(lostAllResponsesAfterServerWrite),
+  false,
+  'lost all responses after a possible server write cannot replay through v1',
+);
+equal(
+  shouldFallback({ text: null }),
+  false,
+  'unmarked null transport results cannot implicitly authorize v1 replay',
+);
 equal(shouldFallback({
   text: 'generic continuation stop copy',
   bodyError: { code: 'client_mutation_outcome_unknown', message: 'blocked' },
@@ -338,11 +379,25 @@ check(
 const cancelledBranch = clientSource.indexOf("if (disposition === 'cancelled')");
 const fallbackLog = clientSource.indexOf("falling back to v1.", cancelledBranch);
 check(
-  clientSource.includes('return projectSwanBotV2TerminalResponse(response, bodyError)')
+  clientSource.includes('...projectSwanBotV2TerminalResponse(response, bodyError)')
     && clientSource.includes('const mayFallbackToV1 = shouldFallbackSwanBotV2ToV1(v2)')
     && cancelledBranch >= 0
     && fallbackLog > cancelledBranch,
   'client propagates cancellation and returns before the only v1 fallback branch',
+);
+const initialV2PostLatch = clientSource.indexOf('mutationCapableV2PostAttempted = true;');
+const initialV2Invoke = clientSource.indexOf('let response = await invokeSwanbotV2(', initialV2PostLatch);
+const initialLostResponseProjection = clientSource.indexOf(
+  'return projectSwanBotV2TransportFailure({',
+  initialV2Invoke,
+);
+check(
+  initialV2PostLatch >= 0
+    && initialV2Invoke > initialV2PostLatch
+    && initialLostResponseProjection > initialV2Invoke
+    && clientSource.includes("'v2_transport_outcome_unknown'")
+    && clientSource.includes('v1FallbackSafeBeforeDispatch === true'),
+  'initial mutation-capable POST is latched before dispatch and total response loss is surfaced without v1 replay',
 );
 
 console.log(`swanbot-v2-terminal-integrity smoke passed (${assertions} assertions)`);

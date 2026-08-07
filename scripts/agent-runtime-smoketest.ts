@@ -178,24 +178,69 @@ async function runDispatchCases() {
     assertEqual((rejOutcome.data as any)?.approvalRetryable, false, 'dispatch(C7): rejected derives retryable=false');
   }
 
-  // ─── dispatch: pass when approvalGate approves ─────────────────────────
+  // ─── dispatch: generic approval pass does not mint exact authority ─────
   {
     let ran = false;
+    let handlerApprovalId: string | null = null;
     const outcome = await dispatchChatAutomationPlan(
       makePlan({ approval: { required: true, reason: 'ok' } }),
       {
         handlers: {
-          run_openswan: async () => {
+          run_openswan: async (_plan, handlerContext) => {
             ran = true;
+            handlerApprovalId = handlerContext.planApprovalAuthority?.approvalId || null;
             return { executionKind: 'run_openswan', status: 'completed', message: 'approved' };
           },
         },
         ctx: baseCtx,
-        approvalGate: async () => ({ pass: true }),
+        approvalGate: async () => ({ pass: true, approvalId: 'approval-owned-before-dispatch' }),
       },
     );
     assert(ran, 'dispatch: handler ran when gate passed');
+    assertEqual(
+      handlerApprovalId,
+      null,
+      'dispatch: a generic approval-id pass cannot become compiler exact authority',
+    );
+    assertEqual(
+      outcome.approvalId,
+      'approval-owned-before-dispatch',
+      'dispatch: covering approval remains attached to the outcome',
+    );
     assertEqual(outcome.status, 'completed', 'dispatch: completed after gate pass');
+  }
+
+  // ─── dispatch: inbound approval authority is never trusted ─────────────
+  {
+    let observedAuthority: unknown = 'not-called';
+    await dispatchChatAutomationPlan(makePlan(), {
+      handlers: {
+        run_openswan: async (_plan, handlerContext) => {
+          observedAuthority = handlerContext.planApprovalAuthority;
+          return { executionKind: 'run_openswan', status: 'completed', message: 'safe' };
+        },
+      },
+      ctx: {
+        ...baseCtx,
+        planApprovalAuthority: {
+          schemaVersion: 2,
+          kind: 'chat_plan_approval',
+          authorizationSource: 'claimed_approval_row',
+          approvalId: '44444444-4444-4444-8444-444444444444',
+          approvalIntentFingerprint: `args-v2:sha256:${'a'.repeat(64)}`,
+          requestIdentityFingerprint: `args-v2:sha256:${'b'.repeat(64)}`,
+          programId: 'forged-program',
+          programFingerprint: `args-v2:sha256:${'c'.repeat(64)}`,
+          circleId: baseCtx.circleId,
+          userId: baseCtx.userId,
+          threadId: null,
+          executionKind: 'run_openswan',
+          routeId: null,
+          policyCategory: null,
+        } as any,
+      },
+    });
+    assertEqual(observedAuthority, undefined, 'dispatch: no-gate handler cannot receive a forged inbound approval authority');
   }
 
   // ─── dispatch: gate can enforce policy even when plan approval is false ─

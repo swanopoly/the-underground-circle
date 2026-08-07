@@ -15,6 +15,12 @@ import { showAlert } from '../../lib/alert';
 import { validateUsername, validateEmail, validatePassword, sanitizeString, LENGTH_LIMITS } from '../../lib/validation';
 import { signInWithGoogle, readOAuthErrorFromUrl } from '../../lib/googleCreds';
 import ErrorBoundary from '../../components/ErrorBoundary';
+import {
+  getSafeAuthErrorMessage,
+  installAuthFocusStyles,
+  isExistingAccountError,
+  normalizeAuthEmail,
+} from '../../lib/authUiPolicy';
 
 // Same 3D backdrop as the login screen — keeps the auth flow visually
 // continuous instead of bouncing between three different surfaces.
@@ -34,14 +40,15 @@ export default function SignUpScreen({ navigation }: any) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    installAuthFocusStyles();
     const oauthError = readOAuthErrorFromUrl();
-    if (oauthError) setError(oauthError);
+    if (oauthError) setError(getSafeAuthErrorMessage('oauth', oauthError));
   }, []);
 
   const handleSignUp = async () => {
     setError('');
     const sanitizedUsername = sanitizeString(username, LENGTH_LIMITS.username.max);
-    const sanitizedEmail = sanitizeString(email, LENGTH_LIMITS.email.max).toLowerCase();
+    const sanitizedEmail = normalizeAuthEmail(email).slice(0, LENGTH_LIMITS.email.max);
     if (!sanitizedUsername || !sanitizedEmail || !password) {
       setError('Fill in everything');
       return;
@@ -57,17 +64,30 @@ export default function SignUpScreen({ navigation }: any) {
     try {
       // signUp can THROW (network/AbortError) — without the finally, a throw
       // left `loading` stuck true and the CTA permanently disabled.
-      const { error: signUpError } = await supabase.auth.signUp({
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email: sanitizedEmail,
         password,
         options: { data: { username: sanitizedUsername, display_name: sanitizedUsername } },
       });
       if (signUpError) {
-        setError(signUpError.message);
+        if (isExistingAccountError(signUpError)) {
+          showAlert(
+            'Check your inbox',
+            'If this email can be registered, a verification link is on its way. Otherwise, sign in or reset your password.',
+          );
+          navigation.navigate('Login');
+          return;
+        }
+        setError(getSafeAuthErrorMessage('signup', signUpError));
         return;
       }
-      showAlert('Welcome to the Circle', 'Check your email to verify, then log in.');
-      navigation.navigate('Login');
+      if (!signUpData.session) {
+        showAlert(
+          'Check your inbox',
+          'If this email can be registered, a verification link is on its way. Otherwise, sign in or reset your password.',
+        );
+        navigation.navigate('Login');
+      }
     } catch {
       setError('Sign-up failed to reach the server. Check your connection and try again.');
     } finally {
@@ -77,7 +97,10 @@ export default function SignUpScreen({ navigation }: any) {
 
   return (
     <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <View style={styles.root}>
+      <View
+        style={styles.root}
+        {...(Platform.OS === 'web' ? { dataSet: { ucAuthSurface: 'true' } } as any : {})}
+      >
         {Platform.OS === 'web' && (
           <ErrorBoundary scope="signup-background" fallback={null}>
             <Suspense fallback={null}>
@@ -97,7 +120,7 @@ export default function SignUpScreen({ navigation }: any) {
             </View>
 
             {error ? (
-              <View style={styles.errorBox}>
+              <View style={styles.errorBox} accessibilityRole="alert" accessibilityLiveRegion="assertive">
                 <Text style={styles.errorText}>{error}</Text>
               </View>
             ) : null}
@@ -112,6 +135,10 @@ export default function SignUpScreen({ navigation }: any) {
                   value={username}
                   onChangeText={(text) => setUsername(text.slice(0, LENGTH_LIMITS.username.max))}
                   autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete={Platform.OS === 'web' ? 'username' : 'username-new'}
+                  accessibilityLabel="username"
+                  accessibilityHint="Three to twenty letters, numbers, or underscores"
                   maxLength={LENGTH_LIMITS.username.max}
                 />
               </View>
@@ -127,6 +154,9 @@ export default function SignUpScreen({ navigation }: any) {
                   value={email}
                   onChangeText={(text) => setEmail(text.slice(0, LENGTH_LIMITS.email.max))}
                   autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="email"
+                  accessibilityLabel="email"
                   keyboardType="email-address"
                   maxLength={LENGTH_LIMITS.email.max}
                 />
@@ -143,12 +173,18 @@ export default function SignUpScreen({ navigation }: any) {
                   value={password}
                   onChangeText={(text) => setPassword(text.slice(0, LENGTH_LIMITS.password.max))}
                   secureTextEntry
+                  autoComplete="new-password"
+                  accessibilityLabel="password"
+                  accessibilityHint="At least eight characters with upper and lowercase letters and a number"
                   maxLength={LENGTH_LIMITS.password.max}
                 />
               </View>
             </View>
 
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Create account"
+              accessibilityState={{ disabled: loading, busy: loading }}
               onPress={handleSignUp}
               disabled={loading}
               style={({ hovered, pressed }: any) => [
@@ -172,6 +208,9 @@ export default function SignUpScreen({ navigation }: any) {
             </View>
 
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Continue with Google"
+              accessibilityState={{ disabled: loading || googleLoading, busy: googleLoading }}
               onPress={async () => {
                 if (googleLoading) return;
                 setError('');
@@ -180,7 +219,7 @@ export default function SignUpScreen({ navigation }: any) {
                   const { ok, reason } = await signInWithGoogle();
                   if (!ok) {
                     setGoogleLoading(false);
-                    if (reason) setError(reason);
+                    if (reason) setError(getSafeAuthErrorMessage('oauth', reason));
                   }
                 } catch {
                   setGoogleLoading(false);
@@ -199,7 +238,12 @@ export default function SignUpScreen({ navigation }: any) {
               </Text>
             </Pressable>
 
-            <Pressable onPress={() => navigation.navigate('Login')} style={styles.linkBtn}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Back to login"
+              onPress={() => navigation.navigate('Login')}
+              style={styles.linkBtn}
+            >
               <Text style={styles.linkText}>
                 Already in? <Text style={styles.linkBold}>Log in.</Text>
               </Text>

@@ -1,7 +1,7 @@
 import { storage } from './storage';
 import { supabase } from './supabase';
 import { Platform } from 'react-native';
-import { readLocalSecret, writeLocalSecret } from './localSecrets';
+import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
 
 export type ProviderType =
   | 'openswan' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'opencode'
@@ -287,6 +287,20 @@ export async function loadConnections(): Promise<AgentConnection[]> {
   }
 
   return finalConnections;
+}
+
+/**
+ * Connected-agent bearer tokens are device-local and the legacy storage keys
+ * are not user-scoped. Remove them on logout so another account using the same
+ * browser/device cannot inherit a prior account's execution bridge.
+ */
+export async function clearLocalAgentConnectionsForLogout(): Promise<number> {
+  const local = await loadLocal();
+  await Promise.allSettled(local.map((connection) => (
+    deleteLocalSecret('office_connection', connection.id)
+  )));
+  await storage.removeItem(STORAGE_KEY);
+  return local.length;
 }
 
 export async function saveConnections(connections: AgentConnection[]): Promise<void> {

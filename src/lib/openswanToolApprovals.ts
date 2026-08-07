@@ -505,3 +505,443 @@ export function resolveOpenSwanRuntimeApprovalDecision(input: {
 
   return { kind: 'new' };
 }
+
+/**
+ * Persisted-safe description of how one action relates to a Chat plan
+ * approval. This is metadata only: neither a built nor a validated manifest
+ * is dispatch authority. The eventual runtime gateway must still compare the
+ * current catalog policy and atomically consume independently issued
+ * authority immediately before a mutating handler.
+ */
+export type OpenSwanPlanManifestCoverage = 'plan_covered' | 'final_confirmation';
+
+export type OpenSwanPlanManifestHardFloor =
+  | 'credential'
+  | 'login'
+  | 'payment'
+  | 'purchase'
+  | 'checkout'
+  | 'publish'
+  | 'send'
+  | 'post'
+  | 'external_communication'
+  | 'delete'
+  | 'trash'
+  | 'overwrite'
+  | 'destructive'
+  | 'permission'
+  | 'security'
+  | 'unknown';
+
+export type ChatPlanToolPolicySensitivityInputV1 = {
+  policyFamily: string;
+  approvalMode: 'auto' | 'ask';
+  mutatesState: boolean;
+  externalSideEffect: boolean;
+  /**
+   * Must be explicit. A mutation is plan-coverable only when the current
+   * catalog classifies it as a non-floor mutation.
+   */
+  mutationClassification: 'read_only' | 'classified_mutation' | 'unknown';
+  floorCategory: OpenSwanPlanManifestHardFloor | null;
+  /** Additional JSON policy fields are included in the exact digest. */
+  [key: string]: unknown;
+};
+
+export type ChatPlanToolActionManifestInputV1 = {
+  actionIndex: number;
+  actionId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  policySensitivity: ChatPlanToolPolicySensitivityInputV1;
+};
+
+export type ChatPlanToolActionManifestEntryV1 = Readonly<{
+  actionIndex: number;
+  actionId: string;
+  toolName: string;
+  /** Exact tool+args binding. Raw arguments are deliberately not persisted. */
+  toolApprovalDigest: string;
+  /** Exact catalog-policy binding. Raw policy values are not persisted. */
+  policyBindingDigest: string;
+  coverage: OpenSwanPlanManifestCoverage;
+}>;
+
+export type ChatPlanToolActionManifestV1 = Readonly<{
+  schemaVersion: 1;
+  rootRunId: string;
+  requestIdentityFingerprint: string;
+  orderedActions: readonly ChatPlanToolActionManifestEntryV1[];
+  manifestFingerprint: string;
+}>;
+
+export type ChatPlanToolActionManifestBuildInputV1 = {
+  rootRunId: string;
+  requestIdentityFingerprint: string;
+  orderedActions: readonly ChatPlanToolActionManifestInputV1[];
+};
+
+export const CHAT_PLAN_TOOL_ACTION_MANIFEST_MAX_ACTIONS = 32;
+
+const CHAT_PLAN_REQUEST_FINGERPRINT_RE = /^args-v2:sha256:[0-9a-f]{64}$/;
+const CHAT_PLAN_POLICY_BINDING_RE = /^policy-v1:sha256:[0-9a-f]{64}$/;
+const CHAT_PLAN_MANIFEST_FINGERPRINT_RE = /^chat-plan-tools-v1:sha256:[0-9a-f]{64}$/;
+const CHAT_PLAN_HARD_FLOORS = new Set<OpenSwanPlanManifestHardFloor>([
+  'credential',
+  'login',
+  'payment',
+  'purchase',
+  'checkout',
+  'publish',
+  'send',
+  'post',
+  'external_communication',
+  'delete',
+  'trash',
+  'overwrite',
+  'destructive',
+  'permission',
+  'security',
+  'unknown',
+]);
+const CHAT_PLAN_ENTRY_KEYS = new Set([
+  'actionIndex',
+  'actionId',
+  'toolName',
+  'toolApprovalDigest',
+  'policyBindingDigest',
+  'coverage',
+]);
+const CHAT_PLAN_MANIFEST_KEYS = new Set([
+  'schemaVersion',
+  'rootRunId',
+  'requestIdentityFingerprint',
+  'orderedActions',
+  'manifestFingerprint',
+]);
+
+/**
+ * Strict JSON canonicalization for fingerprint inputs. It deliberately
+ * rejects cycles, accessors, sparse arrays, non-finite numbers, custom
+ * prototypes, symbols, undefined, functions, and other values whose runtime
+ * identity cannot survive an exact JSON round trip.
+ */
+function strictCanonicalJson(value: unknown, seen = new WeakSet<object>(), depth = 0): string {
+  if (depth > 64) throw new Error('Manifest fingerprint input is too deeply nested.');
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('Manifest fingerprint numbers must be finite.');
+    return JSON.stringify(Object.is(value, -0) ? 0 : value);
+  }
+  if (typeof value !== 'object') {
+    throw new Error('Manifest fingerprint input must contain JSON values only.');
+  }
+
+  const objectValue = value as object;
+  if (seen.has(objectValue)) throw new Error('Manifest fingerprint input must not be cyclic.');
+  seen.add(objectValue);
+  try {
+    if (Array.isArray(value)) {
+      const ownKeys = Reflect.ownKeys(value);
+      const expectedKeys = new Set(['length', ...value.map((_entry, index) => String(index))]);
+      if (
+        ownKeys.length !== expectedKeys.size
+        || ownKeys.some((key) => typeof key !== 'string' || !expectedKeys.has(key))
+      ) {
+        throw new Error('Manifest fingerprint arrays must be dense JSON arrays.');
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !('value' in descriptor) || descriptor.enumerable !== true) {
+          throw new Error('Manifest fingerprint arrays must contain plain data entries.');
+        }
+      }
+      return `[${value.map((entry) => strictCanonicalJson(entry, seen, depth + 1)).join(',')}]`;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error('Manifest fingerprint objects must be plain JSON objects.');
+    }
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.some((key) => typeof key !== 'string')) {
+      throw new Error('Manifest fingerprint objects must not contain symbol keys.');
+    }
+    const keys = (ownKeys as string[]).sort();
+    const entries = keys.map((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !('value' in descriptor) || descriptor.enumerable !== true) {
+        throw new Error('Manifest fingerprint objects must contain enumerable data properties only.');
+      }
+      return `${JSON.stringify(key)}:${strictCanonicalJson(descriptor.value, seen, depth + 1)}`;
+    });
+    return `{${entries.join(',')}}`;
+  } finally {
+    seen.delete(objectValue);
+  }
+}
+
+async function digestStrictCanonicalJson(
+  prefix: 'policy-v1:sha256:' | 'chat-plan-tools-v1:sha256:',
+  value: unknown,
+): Promise<string> {
+  let canonical = '';
+  try {
+    canonical = strictCanonicalJson(value);
+  } catch {
+    return '';
+  }
+  const hex = await sha256Hex(canonical);
+  return hex ? `${prefix}${hex}` : '';
+}
+
+/**
+ * Resolve coverage conservatively from the current catalog policy. Any
+ * malformed, unknown, mismatched, hard-floor, or externally effectful policy
+ * requires a final confirmation. External side effects intentionally start
+ * on the hard side of this boundary.
+ */
+export function resolveOpenSwanPlanManifestCoverage(
+  value: unknown,
+): OpenSwanPlanManifestCoverage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'final_confirmation';
+  const policy = value as Record<string, unknown>;
+  if (
+    !CALL_ID_RE.test(typeof policy.policyFamily === 'string' ? policy.policyFamily : '')
+    || (policy.approvalMode !== 'auto' && policy.approvalMode !== 'ask')
+    || typeof policy.mutatesState !== 'boolean'
+    || typeof policy.externalSideEffect !== 'boolean'
+  ) {
+    return 'final_confirmation';
+  }
+  if (policy.externalSideEffect !== false) return 'final_confirmation';
+
+  const floorCategory = policy.floorCategory;
+  if (floorCategory !== null) {
+    if (
+      typeof floorCategory !== 'string'
+      || !CHAT_PLAN_HARD_FLOORS.has(floorCategory as OpenSwanPlanManifestHardFloor)
+    ) {
+      // An unrecognized sensitivity label is itself unknown.
+      return 'final_confirmation';
+    }
+    return 'final_confirmation';
+  }
+
+  if (policy.mutatesState === false) {
+    return policy.mutationClassification === 'read_only'
+      ? 'plan_covered'
+      : 'final_confirmation';
+  }
+  return policy.mutationClassification === 'classified_mutation'
+    ? 'plan_covered'
+    : 'final_confirmation';
+}
+
+async function buildChatPlanPolicyBindingDigestV1(
+  toolName: string,
+  policySensitivity: unknown,
+): Promise<string> {
+  return digestStrictCanonicalJson('policy-v1:sha256:', {
+    schemaVersion: 1,
+    toolName,
+    policySensitivity,
+  });
+}
+
+type ChatPlanToolActionManifestFingerprintInputV1 = Omit<
+  ChatPlanToolActionManifestV1,
+  'manifestFingerprint'
+>;
+
+/**
+ * Fingerprint the complete ordered persisted envelope. This digest is an
+ * integrity/equality binding, not a signature or runtime authority.
+ */
+export async function fingerprintChatPlanToolActionManifestV1(
+  input: ChatPlanToolActionManifestFingerprintInputV1,
+): Promise<string> {
+  return digestStrictCanonicalJson('chat-plan-tools-v1:sha256:', input);
+}
+
+function freezeChatPlanToolActionManifestV1(
+  input: ChatPlanToolActionManifestV1,
+): ChatPlanToolActionManifestV1 {
+  const orderedActions = input.orderedActions.map((entry) => Object.freeze({ ...entry }));
+  return Object.freeze({ ...input, orderedActions: Object.freeze(orderedActions) });
+}
+
+/**
+ * Build a credential-free, immutable, ordered manifest for at most 32 exact
+ * tool calls. Raw root request text, tool args, and policy values are used
+ * only to derive digests and are absent from the returned value.
+ */
+export async function buildChatPlanToolActionManifestV1(
+  input: ChatPlanToolActionManifestBuildInputV1,
+): Promise<ChatPlanToolActionManifestV1 | null> {
+  if (
+    !UUID_RE.test(input.rootRunId)
+    || !CHAT_PLAN_REQUEST_FINGERPRINT_RE.test(input.requestIdentityFingerprint)
+    || !Array.isArray(input.orderedActions)
+    || input.orderedActions.length < 1
+    || input.orderedActions.length > CHAT_PLAN_TOOL_ACTION_MANIFEST_MAX_ACTIONS
+  ) {
+    return null;
+  }
+
+  const actionIds = new Set<string>();
+  const orderedActions: ChatPlanToolActionManifestEntryV1[] = [];
+  let finalConfirmationReached = false;
+  for (let position = 0; position < input.orderedActions.length; position += 1) {
+    const action = input.orderedActions[position];
+    if (
+      !action
+      || action.actionIndex !== position
+      || !Number.isInteger(action.actionIndex)
+      || !CALL_ID_RE.test(action.actionId)
+      || actionIds.has(action.actionId)
+      || !CALL_ID_RE.test(action.toolName)
+      || !action.args
+      || typeof action.args !== 'object'
+      || Array.isArray(action.args)
+    ) {
+      return null;
+    }
+
+    // Preflight exact JSON compatibility before using the existing canonical
+    // tool approval digest. This rejects values that stable string coercion
+    // would otherwise make ambiguous across a serialization boundary.
+    try {
+      const strictArgs = strictCanonicalJson(action.args);
+      const strictPolicy = strictCanonicalJson(action.policySensitivity);
+      if (strictArgs.length > 1_000_000 || strictPolicy.length > 1_000_000) return null;
+    } catch {
+      return null;
+    }
+
+    const toolApprovalDigest = await buildOpenSwanToolApprovalDigest(
+      action.toolName,
+      action.args,
+    );
+    const policyBindingDigest = await buildChatPlanPolicyBindingDigestV1(
+      action.toolName,
+      action.policySensitivity,
+    );
+    if (
+      !APPROVAL_DIGEST_RE.test(toolApprovalDigest)
+      || !CHAT_PLAN_POLICY_BINDING_RE.test(policyBindingDigest)
+    ) {
+      return null;
+    }
+
+    const resolvedCoverage = resolveOpenSwanPlanManifestCoverage(action.policySensitivity);
+    if (resolvedCoverage === 'final_confirmation') finalConfirmationReached = true;
+    const coverage: OpenSwanPlanManifestCoverage = finalConfirmationReached
+      ? 'final_confirmation'
+      : 'plan_covered';
+    actionIds.add(action.actionId);
+    orderedActions.push({
+      actionIndex: action.actionIndex,
+      actionId: action.actionId,
+      toolName: action.toolName,
+      toolApprovalDigest,
+      policyBindingDigest,
+      coverage,
+    });
+  }
+
+  const envelope: ChatPlanToolActionManifestFingerprintInputV1 = {
+    schemaVersion: 1,
+    rootRunId: input.rootRunId,
+    requestIdentityFingerprint: input.requestIdentityFingerprint,
+    orderedActions,
+  };
+  const manifestFingerprint = await fingerprintChatPlanToolActionManifestV1(envelope);
+  if (!CHAT_PLAN_MANIFEST_FINGERPRINT_RE.test(manifestFingerprint)) return null;
+  return freezeChatPlanToolActionManifestV1({ ...envelope, manifestFingerprint });
+}
+
+/**
+ * Strict persisted-shape and digest validator. Successful validation means
+ * only that the data is canonical and self-consistent; because the digest is
+ * unkeyed and serialization strips runtime provenance, the result MUST NOT be
+ * treated as approval or dispatch authority.
+ */
+export async function validateChatPlanToolActionManifestV1(
+  value: unknown,
+): Promise<ChatPlanToolActionManifestV1 | null> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const manifest = value as Record<string, unknown>;
+  if (
+    Object.keys(manifest).length !== CHAT_PLAN_MANIFEST_KEYS.size
+    || Object.keys(manifest).some((key) => !CHAT_PLAN_MANIFEST_KEYS.has(key))
+    || manifest.schemaVersion !== 1
+    || !UUID_RE.test(typeof manifest.rootRunId === 'string' ? manifest.rootRunId : '')
+    || !CHAT_PLAN_REQUEST_FINGERPRINT_RE.test(
+      typeof manifest.requestIdentityFingerprint === 'string'
+        ? manifest.requestIdentityFingerprint
+        : '',
+    )
+    || !Array.isArray(manifest.orderedActions)
+    || manifest.orderedActions.length < 1
+    || manifest.orderedActions.length > CHAT_PLAN_TOOL_ACTION_MANIFEST_MAX_ACTIONS
+    || !CHAT_PLAN_MANIFEST_FINGERPRINT_RE.test(
+      typeof manifest.manifestFingerprint === 'string' ? manifest.manifestFingerprint : '',
+    )
+  ) {
+    return null;
+  }
+
+  const actionIds = new Set<string>();
+  const orderedActions: ChatPlanToolActionManifestEntryV1[] = [];
+  let finalConfirmationReached = false;
+  for (let position = 0; position < manifest.orderedActions.length; position += 1) {
+    const rawEntry = manifest.orderedActions[position];
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) return null;
+    const entry = rawEntry as Record<string, unknown>;
+    const coverage = entry.coverage;
+    if (
+      Object.keys(entry).length !== CHAT_PLAN_ENTRY_KEYS.size
+      || Object.keys(entry).some((key) => !CHAT_PLAN_ENTRY_KEYS.has(key))
+      || entry.actionIndex !== position
+      || !Number.isInteger(entry.actionIndex)
+      || !CALL_ID_RE.test(typeof entry.actionId === 'string' ? entry.actionId : '')
+      || actionIds.has(String(entry.actionId))
+      || !CALL_ID_RE.test(typeof entry.toolName === 'string' ? entry.toolName : '')
+      || !APPROVAL_DIGEST_RE.test(
+        typeof entry.toolApprovalDigest === 'string' ? entry.toolApprovalDigest : '',
+      )
+      || !CHAT_PLAN_POLICY_BINDING_RE.test(
+        typeof entry.policyBindingDigest === 'string' ? entry.policyBindingDigest : '',
+      )
+      || (coverage !== 'plan_covered' && coverage !== 'final_confirmation')
+      || (finalConfirmationReached && coverage === 'plan_covered')
+    ) {
+      return null;
+    }
+    if (coverage === 'final_confirmation') finalConfirmationReached = true;
+    actionIds.add(String(entry.actionId));
+    orderedActions.push({
+      actionIndex: position,
+      actionId: String(entry.actionId),
+      toolName: String(entry.toolName),
+      toolApprovalDigest: String(entry.toolApprovalDigest),
+      policyBindingDigest: String(entry.policyBindingDigest),
+      coverage,
+    });
+  }
+
+  const envelope: ChatPlanToolActionManifestFingerprintInputV1 = {
+    schemaVersion: 1,
+    rootRunId: String(manifest.rootRunId),
+    requestIdentityFingerprint: String(manifest.requestIdentityFingerprint),
+    orderedActions,
+  };
+  const expectedFingerprint = await fingerprintChatPlanToolActionManifestV1(envelope);
+  if (expectedFingerprint !== manifest.manifestFingerprint) return null;
+  return freezeChatPlanToolActionManifestV1({
+    ...envelope,
+    manifestFingerprint: expectedFingerprint,
+  });
+}

@@ -78,96 +78,99 @@ function ensureVerbRainbowStyles() {
 
 const CROSSFADE_MS = 480;
 
-export default function ThinkingLabel({
+function WebThinkingLabel({
   text,
-  color = AMBER_BASE,
   fontSize = 13,
-  style,
 }: ThinkingLabelProps) {
   useEffect(() => {
-    if (Platform.OS === 'web') ensureVerbRainbowStyles();
+    ensureVerbRainbowStyles();
   }, []);
 
-  // ── Web path: cross-fade two verb layers, both gradient-painted.
+  // Cross-fade two verb layers, both gradient-painted.
   // We drop into raw DOM (`createElement('span')`) so RN Web's Text
   // style synthesis can't override `color: transparent` with its own
   // default text color — which was silently turning the whole thing
   // black. The span inherits font from the document body (system
   // stack via pixelDesign.ts).
-  if (Platform.OS === 'web') {
-    const [displayText, setDisplayText] = useState(text);
-    const [prevText, setPrevText] = useState<string | null>(null);
+  const [displayText, setDisplayText] = useState(text);
+  const [prevText, setPrevText] = useState<string | null>(null);
 
-    useEffect(() => {
-      if (text === displayText) return;
-      setPrevText(displayText);
-      setDisplayText(text);
-      const timer = setTimeout(() => setPrevText(null), CROSSFADE_MS);
-      return () => clearTimeout(timer);
-    }, [text, displayText]);
+  useEffect(() => {
+    if (text === displayText) return;
+    setPrevText(displayText);
+    setDisplayText(text);
+    const timer = setTimeout(() => setPrevText(null), CROSSFADE_MS);
+    return () => clearTimeout(timer);
+  }, [text, displayText]);
 
-    // Shimmer gradient: mostly amber with a narrow brighter slice
-    // around 50%. background-size 300% means the slice has off-screen
-    // room to glide from right to left.
-    const shimmer = `linear-gradient(100deg, ${AMBER_BASE} 0%, ${AMBER_BASE} 40%, ${AMBER_HIGHLIGHT} 50%, ${AMBER_BASE} 60%, ${AMBER_BASE} 100%)`;
+  // Shimmer gradient: mostly amber with a narrow brighter slice
+  // around 50%. background-size 300% means the slice has off-screen
+  // room to glide from right to left.
+  const shimmer = `linear-gradient(100deg, ${AMBER_BASE} 0%, ${AMBER_BASE} 40%, ${AMBER_HIGHLIGHT} 50%, ${AMBER_BASE} 60%, ${AMBER_BASE} 100%)`;
 
-    const baseSpanStyle: React.CSSProperties = {
-      fontSize,
-      fontWeight: 700,
-      letterSpacing: 0.3,
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-      display: 'inline-block',
-      backgroundImage: shimmer,
-      backgroundSize: '300% 100%',
-      backgroundClip: 'text',
-      WebkitBackgroundClip: 'text',
-      WebkitTextFillColor: 'transparent',
-      color: 'transparent',
-      willChange: 'background-position',
-    };
+  const baseSpanStyle: React.CSSProperties = {
+    fontSize,
+    fontWeight: 700,
+    letterSpacing: 0.3,
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    display: 'inline-block',
+    backgroundImage: shimmer,
+    backgroundSize: '300% 100%',
+    backgroundClip: 'text',
+    WebkitBackgroundClip: 'text',
+    WebkitTextFillColor: 'transparent',
+    color: 'transparent',
+    willChange: 'background-position',
+  };
 
-    return React.createElement(
-      'div',
-      {
-        style: {
-          position: 'relative',
-          minHeight: fontSize * 1.4,
-          display: 'flex',
-          alignItems: 'center',
-        },
+  return React.createElement(
+    'div',
+    {
+      style: {
+        position: 'relative',
+        minHeight: fontSize * 1.4,
+        display: 'flex',
+        alignItems: 'center',
       },
-      prevText
-        ? React.createElement(
-            'span',
-            {
-              key: `prev-${prevText}`,
-              style: {
-                ...baseSpanStyle,
-                position: 'absolute',
-                left: 0,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                animation: `uc-verb-out ${CROSSFADE_MS}ms ease-in-out forwards, uc-verb-shimmer 2.4s ease-in-out infinite`,
-              } as any,
-            },
-            prevText,
-          )
-        : null,
-      React.createElement(
-        'span',
-        {
-          key: `cur-${displayText}`,
-          style: {
-            ...baseSpanStyle,
-            animation: `uc-verb-in ${CROSSFADE_MS}ms ease-in-out forwards, uc-verb-shimmer 2.4s ease-in-out infinite`,
-          } as any,
-        },
-        displayText,
-      ),
-    );
-  }
+    },
+    prevText
+      ? React.createElement(
+          'span',
+          {
+            key: `prev-${prevText}`,
+            style: {
+              ...baseSpanStyle,
+              position: 'absolute',
+              left: 0,
+              top: '50%',
+              transform: 'translateY(-50%)',
+              animation: `uc-verb-out ${CROSSFADE_MS}ms ease-in-out forwards, uc-verb-shimmer 2.4s ease-in-out infinite`,
+            } as any,
+          },
+          prevText,
+        )
+      : null,
+    React.createElement(
+      'span',
+      {
+        key: `cur-${displayText}`,
+        style: {
+          ...baseSpanStyle,
+          animation: `uc-verb-in ${CROSSFADE_MS}ms ease-in-out forwards, uc-verb-shimmer 2.4s ease-in-out infinite`,
+        } as any,
+      },
+      displayText,
+    ),
+  );
+}
 
-  // ── Native fallback: solid amber + opacity cross-fade on swap.
+function NativeThinkingLabel({
+  text,
+  color = AMBER_BASE,
+  fontSize = 13,
+  style,
+}: ThinkingLabelProps) {
+  // Solid amber + opacity cross-fade on swap.
   // Shimmer via background-clip:text isn't portable to native, so we
   // just hold the solid color and rely on the cross-fade for motion.
   const opacity = useRef(new Animated.Value(1)).current;
@@ -196,4 +199,16 @@ export default function ThinkingLabel({
       {text}
     </Animated.Text>
   );
+}
+
+/**
+ * Keep platform implementations in separate components so every mounted
+ * component has one unconditional hook order. The former in-component web
+ * return caused React's `Expected static flag was missing` development error
+ * during Chat's animated task label lifecycle.
+ */
+export default function ThinkingLabel(props: ThinkingLabelProps) {
+  return Platform.OS === 'web'
+    ? <WebThinkingLabel {...props} />
+    : <NativeThinkingLabel {...props} />;
 }

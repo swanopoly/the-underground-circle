@@ -13,6 +13,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 import {
   PHOTOSHOP_ADJUSTMENT_LAYER_KINDS,
   PHOTOSHOP_ADJUSTMENT_KIND_EVENT_IDS,
@@ -686,6 +687,58 @@ assert.ok(
 // from the bridge source and assert they compose byte-identical jsx.
 
 const bridgeSource = readFileSync(path.resolve(process.cwd(), 'scripts/claude-bridge.js'), 'utf8');
+const desktopBridgeSource = readFileSync(path.resolve(process.cwd(), 'src/lib/desktopBridge.ts'), 'utf8');
+
+function loadTypeScriptExports(source: string): Record<string, unknown> {
+  const compiled = transpileModule(source, {
+    compilerOptions: {
+      module: ModuleKind.CommonJS,
+      target: ScriptTarget.ES2022,
+    },
+  }).outputText;
+  const moduleExports: Record<string, unknown> = {};
+  new Function('exports', compiled)(moduleExports);
+  return moduleExports;
+}
+
+const nativeGuardCoreStart = desktopBridgeSource.indexOf('const DESKTOP_NATIVE_PID_MAX');
+const nativeGuardCoreEnd = desktopBridgeSource.indexOf('function guardedDesktopMutationBody', nativeGuardCoreStart);
+assert.ok(nativeGuardCoreStart >= 0 && nativeGuardCoreEnd > nativeGuardCoreStart, 'client native-target guard core is extractable');
+const nativeGuardExports = loadTypeScriptExports(
+  desktopBridgeSource.slice(nativeGuardCoreStart, nativeGuardCoreEnd),
+);
+const normalizeDesktopNativeUiTargetGuard = nativeGuardExports.normalizeDesktopNativeUiTargetGuard as (
+  value: unknown,
+) => {
+  appName: string;
+  pid: number;
+  window: { id: number; x: number; y: number; width: number; height: number };
+} | null;
+
+const createParserStart = desktopBridgeSource.indexOf('const PHOTOSHOP_CREATE_OPERATION_ID_RE');
+const createParserEnd = desktopBridgeSource.indexOf('/** Create a new blank Photoshop document', createParserStart);
+assert.ok(createParserStart >= 0 && createParserEnd > createParserStart, 'Photoshop create receipt parser is extractable');
+const createParserExports = loadTypeScriptExports(
+  desktopBridgeSource.slice(createParserStart, createParserEnd),
+);
+const parsePhotoshopCreateDocumentBridgeResponse = createParserExports.parsePhotoshopCreateDocumentBridgeResponse as (
+  value: unknown,
+  expected: { widthPx: number; heightPx: number; appName?: string; documentName?: string },
+) => { ok: boolean; data?: { createdDocumentId: number | null } };
+
+const statusParserStart = desktopBridgeSource.indexOf('const PHOTOSHOP_STATUS_ALLOWED_KEYS');
+const statusParserEnd = desktopBridgeSource.indexOf(
+  'export async function photoshopDocumentStatus',
+  statusParserStart,
+);
+assert.ok(statusParserStart >= 0 && statusParserEnd > statusParserStart, 'Photoshop status receipt parser is extractable');
+const statusParserExports = loadTypeScriptExports(
+  desktopBridgeSource.slice(statusParserStart, statusParserEnd),
+);
+const parsePhotoshopDocumentStatusBridgeResponse = statusParserExports.parsePhotoshopDocumentStatusBridgeResponse as (
+  value: unknown,
+  expected?: { appName?: string; expectedDocumentName?: string | null; sourceDocumentPath?: string | null },
+) => { ok: boolean; data?: { status: string; activeDocumentId: number | null; documentCount: number } };
 
 function extractBridgeTopLevel(name: string, opener: 'function' | 'const'): string {
   const startToken = opener === 'function' ? `\nfunction ${name}(` : `\nconst ${name} = {`;
@@ -705,6 +758,388 @@ function extractBridgeTopLevel(name: string, opener: 'function' | 'const'): stri
   assert.ok(terminated, `bridge ${name} terminates`);
   return out.join('\n');
 }
+
+const photoshopStatusBuilderSource = extractBridgeTopLevel('buildPhotoshopDocumentStatusScript', 'function');
+assert.ok(
+  photoshopStatusBuilderSource.includes('doc = app.activeDocument'),
+  'Photoshop document status inspects only the already-active document',
+);
+assert.equal(
+  photoshopStatusBuilderSource.includes('app.activeDocument = doc'),
+  false,
+  'Photoshop document status never activates another open document',
+);
+assert.ok(
+  photoshopStatusBuilderSource.includes('activeDocumentId'),
+  'Photoshop document status returns the active Photoshop session document id',
+);
+assert.ok(
+  photoshopStatusBuilderSource.includes('Number(doc.id)')
+    && photoshopStatusBuilderSource.includes('value > 0')
+    && photoshopStatusBuilderSource.includes('Math.floor(value) === value'),
+  'Photoshop document status exposes only a positive integer session document id',
+);
+
+const photoshopCreateBuilderSource = extractBridgeTopLevel('buildPhotoshopCreateDocumentScript', 'function');
+assert.equal(
+  (photoshopCreateBuilderSource.match(/app\.documents\.add\s*\(/g) || []).length,
+  1,
+  'Photoshop create builder performs exactly one document-add mutation',
+);
+for (const field of [
+  'appRunning',
+  'documentCountBefore',
+  'documentCountAfter',
+  'activeDocumentNameBefore',
+  'createdDocumentId',
+  'documentName',
+  'widthPx',
+  'heightPx',
+]) {
+  assert.ok(photoshopCreateBuilderSource.includes(field), 'Photoshop create JSX returns ' + field);
+}
+assert.ok(
+  photoshopCreateBuilderSource.includes('Number(doc.id)')
+    && photoshopCreateBuilderSource.includes('value > 0'),
+  'Photoshop create JSX returns a positive session document id when available',
+);
+
+const createRouteStart = bridgeSource.indexOf("if (url === '/desktop/photoshop_create_document'");
+const createRouteEnd = bridgeSource.indexOf("if (url === '/desktop/photoshop_document_status'", createRouteStart);
+assert.ok(createRouteStart >= 0 && createRouteEnd > createRouteStart, 'Photoshop create route is extractable');
+const photoshopCreateRouteSource = bridgeSource.slice(createRouteStart, createRouteEnd);
+assert.ok(
+  photoshopCreateRouteSource.includes('parseDesktopNativeTargetGuardServer(parsed.targetGuard)'),
+  'Photoshop create route independently validates an optional exact native target guard',
+);
+assert.ok(
+  /verifyDesktopNativeTargetGuardServer\(guarded\.guard,[\s\S]*?invokeCreateDocument\(\);/.test(photoshopCreateRouteSource),
+  'guarded Photoshop create re-verifies exact foreground ownership immediately before invoking JSX',
+);
+assert.equal(
+  /focusTarget|window_manage|tell application [^\n]+ to activate/.test(photoshopCreateRouteSource),
+  false,
+  'Photoshop create route never focuses or raises the app',
+);
+for (const field of [
+  'operationId',
+  'observedAt',
+  'startedAt',
+  'completedAt',
+  'documentCountBefore',
+  'documentCountAfter',
+  'activeDocumentNameBefore',
+  'createdDocumentId',
+]) {
+  assert.ok(photoshopCreateRouteSource.includes(field), 'Photoshop create bridge response includes ' + field);
+}
+
+type NativeTargetGuard = NonNullable<ReturnType<typeof normalizeDesktopNativeUiTargetGuard>>;
+const exactGuard: NativeTargetGuard = {
+  appName: 'Adobe Photoshop 2025',
+  pid: 4242,
+  window: { id: 99, x: 10, y: 20, width: 1200, height: 900 },
+};
+assert.deepEqual(
+  normalizeDesktopNativeUiTargetGuard(exactGuard),
+  exactGuard,
+  'client accepts an exact Photoshop app/PID/CGWindow/bounds guard',
+);
+assert.equal(
+  normalizeDesktopNativeUiTargetGuard({ ...exactGuard, pid: '4242' }),
+  null,
+  'client rejects a stringified/wrong PID guard',
+);
+assert.equal(
+  normalizeDesktopNativeUiTargetGuard({ ...exactGuard, window: { ...exactGuard.window, id: 0 } }),
+  null,
+  'client rejects a missing/wrong CGWindow identity',
+);
+
+const proofMatchesGuard = new Function(
+  extractBridgeTopLevel('desktopNativeTargetProofMatchesGuard', 'function')
+    + '\nreturn desktopNativeTargetProofMatchesGuard;',
+)() as (guard: NativeTargetGuard, proof: Record<string, unknown>) => boolean;
+const exactProof = {
+  appName: exactGuard.appName,
+  pid: exactGuard.pid,
+  windowId: exactGuard.window.id,
+  x: exactGuard.window.x,
+  y: exactGuard.window.y,
+  width: exactGuard.window.width,
+  height: exactGuard.window.height,
+};
+assert.equal(proofMatchesGuard(exactGuard, exactProof), true, 'bridge accepts exact current foreground proof');
+assert.equal(proofMatchesGuard(exactGuard, { ...exactProof, pid: 4243 }), false, 'bridge rejects PID drift');
+assert.equal(proofMatchesGuard(exactGuard, { ...exactProof, windowId: 100 }), false, 'bridge rejects window substitution');
+assert.equal(proofMatchesGuard(exactGuard, { ...exactProof, width: 1199 }), false, 'bridge rejects window-bounds drift');
+assert.equal(proofMatchesGuard(exactGuard, {}), false, 'bridge rejects missing/frontmost proof');
+const verifyGuardSource = extractBridgeTopLevel('verifyDesktopNativeTargetGuardServer', 'function');
+assert.ok(
+  verifyGuardSource.includes("['window-proof', '--pid', String(guard.pid)]"),
+  'guard verification asks the native helper for the exact frontmost window of the sealed PID',
+);
+
+const validCreateReceipt = {
+  ok: true,
+  appName: 'Adobe Photoshop 2025',
+  appRunning: true,
+  created: true,
+  operationId: 'photoshop-create-' + 'a'.repeat(32),
+  observedAt: '2026-08-06T12:00:00.000Z',
+  startedAt: '2026-08-06T12:00:00.010Z',
+  completedAt: '2026-08-06T12:00:00.050Z',
+  documentCountBefore: 0,
+  documentCountAfter: 1,
+  activeDocumentNameBefore: null,
+  createdDocumentId: 812,
+  documentName: 'Untitled-1',
+  widthPx: 600,
+  heightPx: 600,
+  resolution: 72,
+  mode: 'DocumentMode.RGB',
+  documentCount: 1,
+  error: null,
+};
+const parsedCreateReceipt = parsePhotoshopCreateDocumentBridgeResponse(
+  validCreateReceipt,
+  { widthPx: 600, heightPx: 600 },
+);
+assert.equal(parsedCreateReceipt.ok, true, 'client accepts a complete exact Photoshop create receipt');
+assert.equal(parsedCreateReceipt.data?.createdDocumentId, 812, 'client preserves the created session document id');
+
+function assertMalformedCreateReceipt(
+  receiptPatch: Record<string, unknown>,
+  label: string,
+  remove?: keyof typeof validCreateReceipt,
+) {
+  const candidate: Record<string, unknown> = { ...validCreateReceipt, ...receiptPatch };
+  if (remove) delete candidate[remove];
+  const parsed = parsePhotoshopCreateDocumentBridgeResponse(candidate, { widthPx: 600, heightPx: 600 });
+  assert.equal(parsed.ok, false, label);
+}
+
+assertMalformedCreateReceipt({}, 'missing explicit appRunning never defaults to true', 'appRunning');
+assertMalformedCreateReceipt({ operationId: 'caller-controlled' }, 'malformed operation id is rejected');
+assertMalformedCreateReceipt(
+  { startedAt: '2026-08-06T12:00:00.060Z', completedAt: '2026-08-06T12:00:00.050Z' },
+  'reversed receipt timeline is rejected',
+);
+assertMalformedCreateReceipt({ documentCountAfter: 2, documentCount: 2 }, 'non-unit document-count delta is rejected');
+assertMalformedCreateReceipt({ documentCount: 2 }, 'documentCount must equal documentCountAfter');
+assertMalformedCreateReceipt({ widthPx: 601 }, 'wrong returned width is rejected');
+assertMalformedCreateReceipt({ heightPx: 599 }, 'wrong returned height is rejected');
+assertMalformedCreateReceipt({ createdDocumentId: 0 }, 'non-positive created document id is rejected');
+assertMalformedCreateReceipt({ createdDocumentId: '812' }, 'stringified created document id is rejected');
+assertMalformedCreateReceipt({ activeDocumentNameBefore: 'Other.psd' }, 'zero-document baseline cannot name an active document');
+assertMalformedCreateReceipt({}, 'missing created document id field is rejected', 'createdDocumentId');
+assert.equal(
+  parsePhotoshopCreateDocumentBridgeResponse(
+    { ...validCreateReceipt, appName: 'Adobe Photoshop 2024' },
+    { widthPx: 600, heightPx: 600, appName: 'Adobe Photoshop 2025' },
+  ).ok,
+  false,
+  'sealed app identity drift is rejected',
+);
+assert.equal(
+  parsePhotoshopCreateDocumentBridgeResponse(
+    { ...validCreateReceipt, documentName: 'Different.psd' },
+    { widthPx: 600, heightPx: 600, documentName: 'Requested.psd' },
+  ).ok,
+  false,
+  'explicit requested document-name drift is rejected',
+);
+assert.equal(
+  parsePhotoshopCreateDocumentBridgeResponse(
+    {
+      ...validCreateReceipt,
+      documentCountBefore: 2,
+      documentCountAfter: 3,
+      documentCount: 3,
+      activeDocumentNameBefore: 'Existing.psd',
+      createdDocumentId: null,
+    },
+    { widthPx: 600, heightPx: 600 },
+  ).ok,
+  true,
+  'created document id may be null only when Photoshop does not expose it',
+);
+
+const validReadyStatus = {
+  ok: true,
+  appName: 'Adobe Photoshop 2025',
+  appRunning: true,
+  status: 'ready',
+  documentCount: 2,
+  activeDocumentName: 'Untitled-2',
+  activeDocumentId: 913,
+  activeDocumentPath: null,
+  activeDocumentModified: true,
+  activeDocumentSaved: false,
+  widthPx: 600,
+  heightPx: 600,
+  resolution: 72,
+  mode: 'DocumentMode.RGB',
+  bitsPerChannel: 'BitsPerChannelType.EIGHT',
+  layerCount: 3,
+  groupCount: 1,
+  textLayerCount: 1,
+  smartObjectCount: 0,
+  adjustmentLayerCount: 0,
+  lockedLayers: 1,
+  hiddenLayers: 0,
+  selectionActive: false,
+  expectedDocumentName: null,
+  sourceDocumentPath: null,
+  documents: [
+    {
+      name: 'Existing.psd',
+      path: '/tmp/Existing.psd',
+      modified: false,
+      saved: true,
+      widthPx: 1200,
+      heightPx: 800,
+    },
+    {
+      name: 'Untitled-2',
+      path: null,
+      modified: true,
+      saved: false,
+      widthPx: 600,
+      heightPx: 600,
+    },
+  ],
+  error: null,
+};
+const parsedReadyStatus = parsePhotoshopDocumentStatusBridgeResponse(
+  validReadyStatus,
+  { appName: 'Photoshop' },
+);
+assert.equal(parsedReadyStatus.ok, true, 'strict status parser accepts a coherent ready proof');
+assert.equal(parsedReadyStatus.data?.activeDocumentId, 913, 'strict status parser preserves positive active document identity');
+
+const zeroDocumentStatus = {
+  ...validReadyStatus,
+  appRunning: true,
+  status: 'no_document',
+  documentCount: 0,
+  activeDocumentName: null,
+  activeDocumentId: null,
+  activeDocumentPath: null,
+  activeDocumentModified: false,
+  activeDocumentSaved: false,
+  widthPx: 0,
+  heightPx: 0,
+  resolution: 0,
+  mode: null,
+  bitsPerChannel: null,
+  layerCount: 0,
+  groupCount: 0,
+  textLayerCount: 0,
+  smartObjectCount: 0,
+  adjustmentLayerCount: 0,
+  lockedLayers: 0,
+  hiddenLayers: 0,
+  selectionActive: false,
+  documents: [],
+};
+assert.equal(
+  parsePhotoshopDocumentStatusBridgeResponse(zeroDocumentStatus, { appName: 'Photoshop' }).ok,
+  true,
+  'strict status parser preserves a coherent running/no-document observation',
+);
+assert.equal(
+  parsePhotoshopDocumentStatusBridgeResponse(
+    { ...zeroDocumentStatus, appRunning: false, status: 'not_running' },
+    { appName: 'Photoshop' },
+  ).ok,
+  true,
+  'strict status parser preserves a coherent not-running observation',
+);
+
+const guardedMismatchStatus = {
+  ...validReadyStatus,
+  status: 'document_mismatch',
+  activeDocumentPath: null,
+  activeDocumentModified: false,
+  activeDocumentSaved: false,
+  widthPx: 0,
+  heightPx: 0,
+  resolution: 0,
+  mode: null,
+  bitsPerChannel: null,
+  layerCount: 0,
+  groupCount: 0,
+  textLayerCount: 0,
+  smartObjectCount: 0,
+  adjustmentLayerCount: 0,
+  lockedLayers: 0,
+  hiddenLayers: 0,
+  selectionActive: false,
+  expectedDocumentName: 'Requested.psd',
+  error: 'Expected Photoshop document is not active.',
+};
+assert.equal(
+  parsePhotoshopDocumentStatusBridgeResponse(
+    guardedMismatchStatus,
+    { appName: 'Photoshop', expectedDocumentName: 'Requested.psd' },
+  ).ok,
+  true,
+  'strict status parser preserves a coherent guarded document mismatch',
+);
+
+function assertMalformedStatus(
+  patch: Record<string, unknown>,
+  label: string,
+  remove?: keyof typeof validReadyStatus,
+) {
+  const candidate: Record<string, unknown> = { ...validReadyStatus, ...patch };
+  if (remove) delete candidate[remove];
+  assert.equal(
+    parsePhotoshopDocumentStatusBridgeResponse(candidate, { appName: 'Photoshop' }).ok,
+    false,
+    label,
+  );
+}
+
+assertMalformedStatus({}, 'missing status fields never receive synthesized defaults', 'activeDocumentId');
+assertMalformedStatus({ unexpected: true }, 'extra uncontracted status fields are rejected');
+assertMalformedStatus({ documentCount: '2' }, 'stringified document counts are rejected');
+assertMalformedStatus({ activeDocumentId: null }, 'ready status requires a positive active document id');
+assertMalformedStatus({ activeDocumentId: 0 }, 'zero active document id is rejected');
+assertMalformedStatus({ error: 'warning' }, 'ready proof requires error:null');
+assertMalformedStatus({ status: 'unknown' }, 'unknown/coerced status is rejected');
+assertMalformedStatus({ appName: 'Photoshop Helper' }, 'non-Photoshop process identity is rejected');
+assertMalformedStatus({ groupCount: 4 }, 'layer subtype counts cannot exceed total layer count');
+assertMalformedStatus({ documents: validReadyStatus.documents.slice(0, 1) }, 'document summaries must match the bounded document count');
+assertMalformedStatus(
+  { documents: [{ ...validReadyStatus.documents[0], extra: true }, validReadyStatus.documents[1]] },
+  'document summaries reject extra fields',
+);
+assert.equal(
+  parsePhotoshopDocumentStatusBridgeResponse(
+    { ...validReadyStatus, appName: 'Adobe Photoshop 2024' },
+    { appName: 'Adobe Photoshop 2025' },
+  ).ok,
+  false,
+  'version-specific requested Photoshop identity rejects process drift',
+);
+assert.equal(
+  parsePhotoshopDocumentStatusBridgeResponse(
+    { ...zeroDocumentStatus, activeDocumentName: 'Ghost.psd' },
+    { appName: 'Photoshop' },
+  ).ok,
+  false,
+  'no-document status rejects contradictory active-document identity',
+);
+assert.equal(
+  parsePhotoshopDocumentStatusBridgeResponse(
+    { ...guardedMismatchStatus, expectedDocumentName: null },
+    { appName: 'Photoshop' },
+  ).ok,
+  false,
+  'document mismatch requires an exact requested document guard',
+);
 
 type BridgeJsxFns = {
   photoshopJsxPrelude: (args: { expectedDocumentName: string; sourceDocumentPath: string }) => string;
