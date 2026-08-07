@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const config = fs.readFileSync(path.resolve('netlify.toml'), 'utf8');
+const packageJson = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf8')) as {
+  scripts?: Record<string, string>;
+};
 const rootEntry = fs.readFileSync(path.resolve('index.ts'), 'utf8');
 const mainNavigator = fs.readFileSync(path.resolve('src/navigation/MainNavigator.tsx'), 'utf8');
 const authNavigator = fs.readFileSync(path.resolve('src/navigation/AuthNavigator.tsx'), 'utf8');
@@ -44,6 +47,10 @@ assert(jsCacheHeader?.[1].includes('max-age=0') === true, 'JavaScript is revalid
 assert(jsCacheHeader?.[1].includes('must-revalidate') === true, 'stale JavaScript cannot be reused without validation');
 assert(jsCacheHeader?.[1].includes('immutable') === false, 'JavaScript is not marked immutable across Metro module-graph changes');
 assert(config.includes('for = "/assets/*"') && config.includes('max-age=31536000, immutable'), 'content-addressed assets retain long-lived caching');
+assert(
+  packageJson.scripts?.build?.includes('--clear') === true,
+  'production exports clear Metro transforms so public environment changes cannot reuse a stale bundle',
+);
 
 const revisionPattern = /WEB_MODULE_GRAPH_REVISION\s*=\s*'([^']+)'/;
 const graphRevisions = [rootEntry, mainNavigator, authNavigator]
