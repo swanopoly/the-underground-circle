@@ -169,11 +169,12 @@ export interface SwanBotOpenSwanReadinessSnapshot {
 // Expected counts are pinned against the live `swanbot-v2-ai` TOOLS array by
 // the readiness smoke via deriveSwanbotV2ToolParityFromSource — if the edge
 // catalog grows or shrinks, the smoke fails until these are re-pinned here.
-// (Re-pinned 2026-07-27: +1 read-only advisory locator-actionability tool —
-// browser.locator_actionability — v2 now exposes 82 tools, 57 of them
-// client-delegated. Its evidence never authorizes or binds a later mutation.)
-export const SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL = 82;
-export const SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS = 57;
+// (Re-pinned 2026-08-06: +2 bounded semantic browser primitives —
+// browser.wait_for and browser.scroll — so v2 now exposes 84 tools, 59 of
+// them client-delegated. Locator-actionability evidence still never
+// authorizes or binds a later mutation.)
+export const SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL = 84;
+export const SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS = 59;
 export const SWANBOT_OPENSWAN_DEFAULT_MIN_TELEMETRY_RUNS = 50;
 
 export const SWANBOT_OPENSWAN_REQUIRED_SMOKES: SwanBotOpenSwanSmokeCheck[] = [
