@@ -863,7 +863,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_token'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'black-forest-labs/flux-schnell' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'black-forest-labs/flux-schnell', required: false },
     ],
     validationHints: ['API tokens scope per-account. Pin a default model so agents converge fast.'],
   },
@@ -887,7 +887,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'anthropic/claude-sonnet-4' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'anthropic/claude-sonnet-4', required: false },
     ],
     validationHints: ['Set a default_model so the agent has a safe fallback when route resolution is ambiguous.'],
   },
@@ -1009,7 +1009,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'claude-sonnet-4-6' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'claude-sonnet-4-6', required: false },
     ],
     validationHints: ['Get the key from https://console.anthropic.com/settings/keys. Scope: full account.'],
   },
@@ -1021,7 +1021,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: ['organization_id'],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5', required: false },
     ],
     validationHints: ['Get the key from https://platform.openai.com/api-keys. Set organization_id if you belong to multiple orgs.'],
   },
@@ -1034,7 +1034,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     optionalSecretKeys: ['endpoint_url'],
     metadataFields: [
       { key: 'endpoint_url', label: 'Endpoint URL', placeholder: 'https://models.company.com/v1 or /v1/chat/completions' },
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'company-agent' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'company-agent', required: false },
     ],
     validationHints: ['Use any endpoint that accepts OpenAI Chat Completions request/response shape. Store this per user so usage bills to the business account.'],
   },
@@ -1046,7 +1046,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'gemini-2.5-pro' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gemini-2.5-pro', required: false },
     ],
     validationHints: ['Generate an API key at https://aistudio.google.com/apikey. No project setup needed.'],
   },
@@ -1058,7 +1058,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama-3.3-70b-versatile' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama-3.3-70b-versatile', required: false },
     ],
     validationHints: ['Create a key at https://console.groq.com/keys. Free tier covers light usage.'],
   },
@@ -1070,7 +1070,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'mistral-large-latest' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'mistral-large-latest', required: false },
     ],
     validationHints: ['Get a key at https://console.mistral.ai/api-keys. Pay-as-you-go billing.'],
   },
@@ -1082,7 +1082,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'command-r-plus' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'command-r-plus', required: false },
     ],
     validationHints: ['Generate a key at https://dashboard.cohere.com/api-keys. Production keys are separate from trial keys.'],
   },
@@ -1094,7 +1094,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'sonar-pro' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'sonar-pro', required: false },
     ],
     validationHints: ['Get a key at https://www.perplexity.ai/settings/api. $5 free credit on signup.'],
   },
@@ -1106,7 +1106,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', required: false },
     ],
     validationHints: ['Generate a key at https://api.together.xyz/settings/api-keys.'],
   },
@@ -1118,7 +1118,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'accounts/fireworks/models/firefunction-v2' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'accounts/fireworks/models/firefunction-v2', required: false },
     ],
     validationHints: ['Create a key at https://fireworks.ai/account/api-keys.'],
   },
@@ -1130,7 +1130,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'deepseek-chat' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'deepseek-chat', required: false },
     ],
     validationHints: ['Get a key at https://platform.deepseek.com/api_keys.'],
   },
@@ -1142,7 +1142,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'glm-4-plus' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'glm-4-plus', required: false },
     ],
     validationHints: ['Generate a key at https://open.bigmodel.cn/usercenter/apikeys.'],
   },
@@ -1154,7 +1154,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'MiniMax-Text-01' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'MiniMax-Text-01', required: false },
     ],
     validationHints: ['Get a key at https://www.minimaxi.com/platform/account/keys.'],
   },
@@ -1167,7 +1167,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     optionalSecretKeys: ['api_key'],
     metadataFields: [
       { key: 'baseUrl', label: 'Base URL', placeholder: 'http://localhost:11434' },
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama3.3' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama3.3', required: false },
     ],
     validationHints: ['Run `ollama serve` on the same network. The chat will hit baseUrl + /v1/chat/completions (Ollama exposes an OpenAI-compatible endpoint).'],
   },
@@ -1580,6 +1580,13 @@ export async function validateCircleIntegrationSetup(
   const secretSet = new Set(secretKeys);
   const metadata = integration.metadata || {};
   const missingSecretKeys = definition.requiredSecretKeys.filter(key => !secretSet.has(key));
+  // NOTE the default: `required !== false` means a field that OMITS `required`
+  // is treated as REQUIRED. That is easy to miss when adding a definition, and
+  // the failure is invisible at the point of the mistake — the integration
+  // saves fine, then its Marketplace card reads "Degraded" forever, because
+  // IntegrationsTab maps `!validation.ok` to `validationOk: false`. Re-entering
+  // the API key cannot clear it, since the key was never the problem.
+  // All 16 provider `defaultModel` fields hit exactly that (fixed 2026-08-07).
   const missingMetadataFields = (definition.metadataFields || [])
     .filter(field => field.required !== false)
     .map(field => field.key)

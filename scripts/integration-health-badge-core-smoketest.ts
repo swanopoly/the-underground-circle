@@ -269,6 +269,43 @@ function main() {
     assert(badgeGood.tone === 'ok' && badgeGood.label === 'Connected', 'round trip: successful re-save → green badge');
   }
 
+  // ── Regression: an OPTIONAL metadata field must not brand a working
+  //    integration "Degraded" forever ─────────────────────────────────────
+  //
+  // Live symptom (2026-08-07): new Anthropic AND OpenRouter tokens were saved,
+  // both rows were status='connected' with last_validation_error=null and the
+  // api_key secret present — and both cards still read Degraded. Cause was not
+  // the key at all: validateCircleIntegrationSetup treats a metadata field that
+  // OMITS `required` as required (`field.required !== false`), and all 16
+  // provider definitions declared `defaultModel` without it. IntegrationsTab
+  // maps !validation.ok → validationOk:false → the badge core reports degraded.
+  // So re-entering the key could never clear it.
+  //
+  // Source-level because circleIntegrations.ts imports supabase and cannot be
+  // loaded by tsx. Asserts the DEFINITIONS, which is where the bug lived.
+  {
+    const fs = require('fs') as typeof import('fs');
+    const src = fs.readFileSync('src/lib/circleIntegrations.ts', 'utf8');
+    const defaultModelLines = src.split('\n').filter(l => l.includes("key: 'defaultModel'"));
+    assert(defaultModelLines.length > 0, 'definitions still declare defaultModel fields');
+    const stillRequired = defaultModelLines.filter(l => !l.includes('required: false'));
+    assert(
+      stillRequired.length === 0,
+      `every defaultModel field is optional (${stillRequired.length} still implicitly required)`,
+    );
+    // The badge core half of the same loop: setup-incomplete alone is enough to
+    // read degraded even when the stored row is perfectly healthy.
+    const badge = buildIntegrationHealthBadge({
+      status: 'connected',
+      lastValidationError: null,
+      validationOk: false,
+    });
+    assert(
+      badge.tone !== 'ok',
+      'a connected row with failing setup validation still reports degraded (why the definitions must be right)',
+    );
+  }
+
   console.log(`\nintegration-health-badge-core: ${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) {
     console.error('FAILURES:\n' + failures.map(f => `  - ${f}`).join('\n'));
