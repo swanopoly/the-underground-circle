@@ -1760,7 +1760,7 @@ function CreateTaskModal({
               <Text style={m.contextLabel}>Starting from current board context</Text>
               <View style={m.contextChipRow}>
                 {initialRoom && (
-                  <View style={[m.contextChip, { borderColor: (initialRoom.color || '#22d3ee') + '35' }]}>
+                  <View style={[m.contextChip, { borderColor: (initialRoom.color || '#6366f1') + '35' }]}>
                     <View style={[m.contextChipDot, { backgroundColor: initialRoom.color || '#22d3ee' }]} />
                     <Text style={m.contextChipText}>Room: {initialRoom.name}</Text>
                   </View>

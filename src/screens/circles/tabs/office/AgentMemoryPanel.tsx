@@ -462,7 +462,7 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
                   else await pinMemory(mem.id);
                   void load();
                 }}
-                style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: mem.pinned ? '#22d3ee40' : '#2a2a3e', backgroundColor: mem.pinned ? '#22d3ee10' : undefined }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: mem.pinned ? '#6366f140' : '#2a2a3e', backgroundColor: mem.pinned ? '#22d3ee10' : undefined }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
                 <Text style={{ color: mem.pinned ? '#22d3ee' : '#a0a0b0', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{mem.pinned ? 'Unpin' : 'Pin'}</Text>
               </Pressable>

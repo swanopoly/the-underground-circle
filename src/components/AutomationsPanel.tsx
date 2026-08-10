@@ -3078,7 +3078,7 @@ const s = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: '#22d3ee14',
     borderWidth: 1,
-    borderColor: '#22d3ee30',
+    borderColor: '#6366f130',
     paddingHorizontal: 5,
     paddingVertical: 1,
     gap: 4,

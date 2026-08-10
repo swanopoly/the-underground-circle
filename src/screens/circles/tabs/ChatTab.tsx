@@ -23274,7 +23274,7 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
     borderRadius: 18,
     borderWidth: 2,
-    borderColor: '#22d3ee',
+    borderColor: 'rgba(99, 102, 241, 0.67)',
     backgroundColor: 'rgba(8, 15, 28, 0.92)',
     alignItems: 'center',
     ...(Platform.OS === 'web' ? { boxShadow: '0 16px 60px rgba(34, 211, 238, 0.18)', backdropFilter: 'blur(10px)' } as any : {}),

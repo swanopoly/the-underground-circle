@@ -261,7 +261,7 @@ export default function SearchModal({ circleId, visible, onClose, onSelect, onAc
                         onHoverIn={Platform.OS === "web" ? () => setHighlight(idx) : undefined}
                         style={[s.row, active && s.rowActive]}
                       >
-                        <View style={[s.kindChip, { borderColor: "#22d3ee60" }]}>
+                        <View style={[s.kindChip, { borderColor: "#6366f160" }]}>
                           <Text style={[s.kindChipText, { color: "#22d3ee" }]}>↺</Text>
                         </View>
                         <View style={{ flex: 1, minWidth: 0 }}>

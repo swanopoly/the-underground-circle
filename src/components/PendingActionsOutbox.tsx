@@ -239,7 +239,7 @@ const styles = StyleSheet.create({
     borderColor: '#262626',
     backgroundColor: '#0a0a10',
   },
-  rowBtnPrimary: { borderColor: '#22d3ee', backgroundColor: '#22d3ee18' },
+  rowBtnPrimary: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee18' },
   rowBtnText: {
     color: '#a3a3a3',
     fontSize: 10,

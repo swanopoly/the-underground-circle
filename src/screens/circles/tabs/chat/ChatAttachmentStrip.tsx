@@ -172,7 +172,7 @@ export default function ChatAttachmentStrip({
 
 const styles = StyleSheet.create({
   container: { gap: 6 },
-  dragOverContainer: { borderWidth: 2, borderColor: '#22d3ee', borderStyle: 'dashed', borderRadius: 8, padding: 4 },
+  dragOverContainer: { borderWidth: 2, borderColor: 'rgba(99, 102, 241, 0.67)', borderStyle: 'dashed', borderRadius: 8, padding: 4 },
   attachBtn: {
     alignSelf: 'flex-start',
     paddingHorizontal: 10, paddingVertical: 5,

@@ -846,7 +846,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
             <Text style={s.metaBadgeText}>{String(mem.scope).toUpperCase()}</Text>
           </View>
           {providerLabel(mem) ? (
-            <View style={[s.metaBadge, { borderColor: '#22d3ee', backgroundColor: '#22d3ee10' }]}>
+            <View style={[s.metaBadge, { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee10' }]}>
               <Text style={[s.metaBadgeText, { color: '#22d3ee' }]}>{providerLabel(mem)!.toUpperCase()}</Text>
             </View>
           ) : null}
@@ -902,7 +902,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
     return (
       <View key={mem.id} style={s.inboxCard}>
         <View style={s.cardTopRow}>
-          <View style={[s.metaBadge, { borderColor: '#22d3ee', backgroundColor: '#22d3ee12' }]}>
+          <View style={[s.metaBadge, { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee12' }]}>
             <Text style={[s.metaBadgeText, { color: '#22d3ee' }]}>{provider.toUpperCase()}</Text>
           </View>
           <View style={[s.metaBadge, { borderColor: '#ffffff', backgroundColor: '#ffffff' }]}>

@@ -146,7 +146,7 @@ function injectStudioRuntime(html: string): string {
     if (styleEl) return;
     styleEl = document.createElement('style');
     styleEl.setAttribute('data-uc-point-style','1');
-    styleEl.textContent = '[data-uc-point-outline]{outline:2px dashed #22d3ee !important;outline-offset:2px;cursor:crosshair !important;}';
+    styleEl.textContent = '[data-uc-point-outline]{outline:2px dashed rgba(99, 102, 241, 0.67) !important;outline-offset:2px;cursor:crosshair !important;}';
     document.documentElement.appendChild(styleEl);
   }
   function cssPath(el){
@@ -211,7 +211,7 @@ function consoleLevelStyle(level: string) {
   const l = level.toLowerCase();
   if (l === 'error') return { color: '#ef4444', borderColor: '#ef4444' };
   if (l === 'warn')  return { color: '#f59e0b', borderColor: '#f59e0b' };
-  if (l === 'info')  return { color: '#22d3ee', borderColor: '#22d3ee' };
+  if (l === 'info')  return { color: '#22d3ee', borderColor: 'rgba(99, 102, 241, 0.67)' };
   return { color: '#94a3b8', borderColor: '#334155' };
 }
 
@@ -1455,7 +1455,7 @@ const styles = StyleSheet.create({
   },
 
   pointDrawer: {
-    backgroundColor: '#05070b', borderWidth: 1, borderColor: '#22d3ee',
+    backgroundColor: '#05070b', borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)',
     borderRadius: 8, padding: 12, gap: 8, marginTop: 8,
   },
   pointDrawerHeader: {

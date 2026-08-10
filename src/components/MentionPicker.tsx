@@ -179,7 +179,7 @@ function kindGlyph(kind: MentionKind): string {
 
 function kindBadgeColor(kind: MentionKind) {
   switch (kind) {
-    case "user":         return { borderColor: "#22d3ee" };
+    case "user":         return { borderColor: "rgba(99, 102, 241, 0.67)" };
     case "mission":      return { borderColor: "#f59e0b" };
     case "mission_task": return { borderColor: "#a855f7" };
     case "agent":        return { borderColor: "#22c55e" };

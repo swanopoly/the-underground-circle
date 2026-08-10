@@ -387,7 +387,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#22d3ee40',
+    borderColor: '#6366f140',
     backgroundColor: '#0ea5e915',
   },
   subagentChipText: {

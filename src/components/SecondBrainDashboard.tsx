@@ -2115,7 +2115,7 @@ export default function SecondBrainDashboard({
               disabled={mapping}
               style={({ hovered, pressed }: any) => [
                 styles.ghostBtn,
-                { borderColor: '#22d3ee55', backgroundColor: mapping ? '#22d3ee08' : undefined },
+                { borderColor: '#6366f155', backgroundColor: mapping ? '#22d3ee08' : undefined },
                 hovered && !mapping && webLift,
                 pressed && webPressed,
               ]}
@@ -2189,7 +2189,7 @@ export default function SecondBrainDashboard({
 
       {/* ── Status ─────────────────────────────────────────────────────── */}
       {(mapStatus || status || uploadStatus) ? (
-        <View style={[styles.statusBar, mapStatus ? { borderColor: '#22d3ee33', backgroundColor: '#22d3ee0a' } : null]}>
+        <View style={[styles.statusBar, mapStatus ? { borderColor: '#6366f133', backgroundColor: '#22d3ee0a' } : null]}>
           <Text style={[styles.statusText, mapStatus ? { color: '#22d3ee' } : null]}>
             {mapStatus || uploadStatus || status}
           </Text>
@@ -3142,7 +3142,7 @@ const styles = StyleSheet.create({
   // Graph stage
   graphStage: {
     borderWidth: 1,
-    borderColor: '#22d3ee28',
+    borderColor: '#6366f128',
     borderRadius: 4,
     backgroundColor: '#040b14',
     overflow: 'hidden',
@@ -3274,7 +3274,7 @@ const styles = StyleSheet.create({
   // System flow
   systemFlowPanel: {
     borderWidth: 1,
-    borderColor: '#22d3ee28',
+    borderColor: '#6366f128',
     borderRadius: 4,
     backgroundColor: '#030711',
     padding: GRID.md,
@@ -3634,7 +3634,7 @@ const styles = StyleSheet.create({
   },
   agentBriefPanel: {
     borderWidth: 1,
-    borderColor: '#22d3ee30',
+    borderColor: '#6366f130',
     borderRadius: 3,
     backgroundColor: '#06101b',
     padding: GRID.md,

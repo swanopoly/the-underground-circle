@@ -192,7 +192,7 @@ const styles = StyleSheet.create({
     borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6,
     minWidth: 96,
   },
-  voiceChipActive: { borderColor: '#22d3ee', backgroundColor: '#22d3ee1a' },
+  voiceChipActive: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee1a' },
   voiceChipText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
   voiceChipTextActive: { color: '#22d3ee' },
   voiceChipSub: { color: '#7f8ea3', fontSize: 9, marginTop: 2, fontFamily: 'monospace' },
@@ -207,7 +207,7 @@ const styles = StyleSheet.create({
   footerBtnGhostText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
   footerBtnPrimary: {
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6,
-    borderWidth: 1, borderColor: '#22d3ee', backgroundColor: '#22d3ee18',
+    borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee18',
   },
   footerBtnPrimaryText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
 });

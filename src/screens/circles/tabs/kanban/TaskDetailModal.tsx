@@ -274,7 +274,7 @@ const rs = StyleSheet.create({
   aiOutputBox: {
     backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#22d3ee20',
+    borderColor: '#6366f120',
     borderRadius: 8,
     padding: 12,
   },
@@ -1273,7 +1273,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 </Pressable>
                 <Pressable
                   onPress={() => selectedRoomId && setAssignmentMode('room_team')}
-                  style={[s.chip, assignmentMode === 'room_team' && { backgroundColor: '#22d3ee15', borderColor: '#22d3ee30' }, !selectedRoomId && { opacity: 0.4 }]}
+                  style={[s.chip, assignmentMode === 'room_team' && { backgroundColor: '#22d3ee15', borderColor: '#6366f130' }, !selectedRoomId && { opacity: 0.4 }]}
                   disabled={!selectedRoomId}
                 >
                   <Text style={[s.chipText, assignmentMode === 'room_team' && { color: '#22d3ee' }]}>Use room team</Text>
@@ -2440,7 +2440,7 @@ const s = StyleSheet.create({
   agentResultBox: {
     backgroundColor: '#0a0a0a',
     borderWidth: 1,
-    borderColor: '#22d3ee20',
+    borderColor: '#6366f120',
     borderRadius: 10,
     padding: 14,
     gap: 6,

@@ -10,7 +10,7 @@ import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, StyleSheet, 
 const hoverGhost = Platform.OS === 'web'
   ? { transition: 'all 0.15s ease' } as any : {};
 const hoverGhostIn = { borderColor: '#94a3b8', backgroundColor: '#152032', transform: [{ translateY: -1 }] };
-const hoverPrimaryIn = { borderColor: '#22d3ee', backgroundColor: '#22d3ee30', transform: [{ translateY: -1 }] };
+const hoverPrimaryIn = { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee30', transform: [{ translateY: -1 }] };
 const pressScale = { transform: [{ scale: 0.96 }] };
 import { type GitHubRepoLite, listReposForSave, saveArtifactToGitHub, type SaveToGitHubResult } from '../../../../lib/builderGithubSave';
 
@@ -224,7 +224,7 @@ const styles = StyleSheet.create({
   list: { gap: 4, paddingVertical: 4 },
   empty: { color: '#475569', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', paddingVertical: 24 },
   repoRow: { padding: 10, borderRadius: 6, borderWidth: 1, borderColor: '#152032', backgroundColor: '#0a0f17' },
-  repoRowActive: { borderColor: '#22d3ee', backgroundColor: '#22d3ee14' },
+  repoRowActive: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee14' },
   repoName: { color: '#d8e1ef', fontSize: 12, fontWeight: '800', fontFamily: 'monospace' },
   repoMeta: { color: '#7f8ea3', fontSize: 10, fontFamily: 'monospace', marginTop: 2 },
   errorBox: { padding: 10, borderRadius: 6, borderWidth: 1, borderColor: '#ef4444', backgroundColor: '#2a0a0a' },
@@ -235,6 +235,6 @@ const styles = StyleSheet.create({
   footer: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   ghostBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: '#243246', backgroundColor: '#0a0f17' },
   ghostBtnText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
-  primaryBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: '#22d3ee', backgroundColor: '#22d3ee18', alignItems: 'center' },
+  primaryBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee18', alignItems: 'center' },
   primaryBtnText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
 });

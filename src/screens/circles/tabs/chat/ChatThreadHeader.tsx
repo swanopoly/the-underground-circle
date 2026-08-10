@@ -691,7 +691,7 @@ const styles = StyleSheet.create({
   serviceActionText: { color: '#f59e0b', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   actionBtn: {
     paddingHorizontal: 10, paddingVertical: 6,
-    borderRadius: 6, borderWidth: 1, borderColor: '#22d3ee',
+    borderRadius: 6, borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)',
     backgroundColor: '#0e2030',
   },
   actionBtnText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },

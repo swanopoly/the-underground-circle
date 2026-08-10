@@ -739,7 +739,7 @@ export default function Whiteboard({
             </View>
 
             {/* Connections cell */}
-            <View style={[s.statCell, { backgroundColor: '#22d3ee10', borderColor: '#22d3ee20' }]}>
+            <View style={[s.statCell, { backgroundColor: '#22d3ee10', borderColor: '#6366f120' }]}>
               <Text style={[s.statValue, { color: connectedCount > 0 ? '#22d3ee' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
               <Text style={s.statLabel}>LINKS</Text>
             </View>

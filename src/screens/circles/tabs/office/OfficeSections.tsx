@@ -63,7 +63,7 @@ export function OfficeWorkspaceSection({
       hovered && Platform.OS === 'web' && ({
         backgroundColor: 'rgba(34, 211, 238, 0.12)',
         borderColor: 'rgba(168, 85, 247, 0.65)',
-        boxShadow: '0 0 0 1px rgba(34, 211, 238, 0.18), 0 0 18px rgba(168, 85, 247, 0.20), inset 0 0 12px rgba(59, 130, 246, 0.08)',
+        boxShadow: '0 0 0 1px rgba(99, 102, 241, 0.18), 0 0 18px rgba(168, 85, 247, 0.20), inset 0 0 12px rgba(59, 130, 246, 0.08)',
         transform: 'translateY(-1px)',
       } as any),
       pressed && Platform.OS === 'web' && ({ transform: 'translateY(0px) scale(0.99)' } as any),

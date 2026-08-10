@@ -107,7 +107,7 @@ export default function SkillAdminPanel({ visible, circleId, soulKey, userId, on
                         enabled && styles.skillRowEnabled,
                         Platform.OS === 'web' && { transition: 'all 0.15s ease' },
                         hovered && !enabled && { borderColor: '#334155', backgroundColor: '#0f1520', transform: [{ translateY: -1 }] },
-                        hovered && enabled && { borderColor: '#22d3ee66', backgroundColor: '#22d3ee14', transform: [{ translateY: -1 }] },
+                        hovered && enabled && { borderColor: '#6366f166', backgroundColor: '#22d3ee14', transform: [{ translateY: -1 }] },
                         pressed && { transform: [{ scale: 0.98 }] },
                       ]}
                     >
@@ -141,7 +141,7 @@ export default function SkillAdminPanel({ visible, circleId, soulKey, userId, on
               style={({ hovered, pressed }: any) => [
                 styles.doneBtn,
                 Platform.OS === 'web' && { transition: 'all 0.15s ease' },
-                hovered && { borderColor: '#22d3ee', backgroundColor: '#22d3ee28', transform: [{ translateY: -1 }] },
+                hovered && { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee28', transform: [{ translateY: -1 }] },
                 pressed && { transform: [{ scale: 0.95 }] },
               ]}
             >
@@ -178,7 +178,7 @@ const styles = StyleSheet.create({
     padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#1e293b',
     backgroundColor: '#0b1220', gap: 4,
   },
-  skillRowEnabled: { borderColor: '#22d3ee44', backgroundColor: '#22d3ee08' },
+  skillRowEnabled: { borderColor: '#6366f144', backgroundColor: '#22d3ee08' },
   skillHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   skillName: { fontSize: 12, fontWeight: '800', color: '#d8e1ef', fontFamily: 'monospace' },
   skillBadges: { flexDirection: 'row', gap: 6, alignItems: 'center' },
@@ -192,7 +192,7 @@ const styles = StyleSheet.create({
     fontSize: 9, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace',
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, borderWidth: 1,
   },
-  toggleOn: { color: '#22d3ee', borderColor: '#22d3ee', backgroundColor: '#22d3ee18' },
+  toggleOn: { color: '#22d3ee', borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee18' },
   toggleOff: { color: '#64748b', borderColor: '#334155', backgroundColor: '#0f172a' },
   skillDesc: { fontSize: 10, color: '#94a3b8', lineHeight: 14 },
   toolsList: { fontSize: 9, color: '#475569', fontFamily: 'monospace' },
@@ -200,7 +200,7 @@ const styles = StyleSheet.create({
   footerCount: { fontSize: 10, color: '#64748b', fontFamily: 'monospace' },
   doneBtn: {
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6,
-    borderWidth: 1, borderColor: '#22d3ee', backgroundColor: '#22d3ee18',
+    borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee18',
   },
   doneBtnText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
 });
