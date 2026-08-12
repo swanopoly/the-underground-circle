@@ -96,3 +96,41 @@ export function formatCost(n: number): string {
   if (n < 1) return `$${n.toFixed(3)}`;
   return `$${n.toFixed(2)}`;
 }
+
+// ─── Running-cost counter (Office trip meter) ────────────────────────────────
+
+/**
+ * Sum of `claude_api_usage.estimated_cost` for a circle since an exact
+ * timestamp (or all-time when `sinceIso` is null). The Office running-cost
+ * counter needs an exact bound because its reset is user-initiated mid-day,
+ * while `get_claude_usage_summary` only takes whole days. Reads the table
+ * directly under the existing `usage_read_circle_members` RLS policy and sums
+ * client-side in pages — PostgREST aggregates are disabled on this project,
+ * and the table is small (hundreds of rows; the 50-page ceiling is years of
+ * headroom at current volume).
+ *
+ * Strict like `getClaudeUsageSummaryStrict`: transport failures throw so the
+ * dashboard retains its last snapshot instead of showing a convincing $0.
+ */
+export async function getClaudeUsageCostSinceStrict(
+  circleId: string,
+  sinceIso: string | null,
+): Promise<number> {
+  const PAGE = 1000;
+  let total = 0;
+  for (let page = 0; page < 50; page += 1) {
+    let query = supabase
+      .from('claude_api_usage')
+      .select('estimated_cost')
+      .eq('circle_id', circleId)
+      .order('created_at', { ascending: true })
+      .range(page * PAGE, page * PAGE + PAGE - 1);
+    if (sinceIso) query = query.gte('created_at', sinceIso);
+    const { data, error } = await query;
+    if (error) throw error;
+    const rows = (data || []) as Array<{ estimated_cost: unknown }>;
+    for (const row of rows) total += Math.max(0, toNum(row.estimated_cost));
+    if (rows.length < PAGE) break;
+  }
+  return total;
+}

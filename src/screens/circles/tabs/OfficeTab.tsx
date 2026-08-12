@@ -209,6 +209,69 @@ function setAutoConnectCircleId(circleId: string) {
     .catch(() => {});
 }
 
+// ─── Running-cost trip meter (top-of-dashboard strip) ───────────────────────
+// The tracker cards below show ROLLING windows (today/week), which read as
+// "the cost keeps resetting". This strip is the opposite contract: it sums the
+// durable ledger from the user's last explicit reset (all-time when never
+// reset) and only ever moves backward when the user two-tap resets it — the
+// outgoing figure is logged to office_preferences first, like a trip log.
+function OfficeRunningCostStrip({ running, lastReset, armed, onReset, accentColor }: {
+  running: { total: number; sinceIso: string | null } | null;
+  lastReset: { atIso: string; amount: number } | null;
+  armed: boolean;
+  onReset: () => void;
+  accentColor: string;
+}) {
+  if (!running) return null;
+  const fmt = (n: number): string => {
+    if (!Number.isFinite(n) || n === 0) return '$0.00';
+    if (n < 0.01) return `$${n.toFixed(4)}`;
+    if (n < 1) return `$${n.toFixed(3)}`;
+    return `$${n.toFixed(2)}`;
+  };
+  const day = (iso: string): string => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
+  return (
+    <View style={runningCostStyles.wrap}>
+      <Text style={runningCostStyles.label}>RUNNING COST</Text>
+      <Text style={[runningCostStyles.value, { color: accentColor }]}>{fmt(running.total)}</Text>
+      <Text style={runningCostStyles.meta}>
+        {running.sinceIso ? `since ${day(running.sinceIso)}` : 'all time'}
+      </Text>
+      {lastReset ? (
+        <Text style={runningCostStyles.meta}>prev {fmt(lastReset.amount)} · {day(lastReset.atIso)}</Text>
+      ) : null}
+      <Pressable
+        onPress={onReset}
+        accessibilityRole="button"
+        accessibilityLabel={armed ? 'Tap again to confirm cost counter reset' : 'Reset cost counter'}
+        style={[runningCostStyles.resetBtn, armed && runningCostStyles.resetBtnArmed]}
+      >
+        <Text style={[runningCostStyles.resetText, armed && runningCostStyles.resetTextArmed]}>
+          {armed ? 'TAP AGAIN TO RESET' : 'RESET'}
+        </Text>
+      </Pressable>
+    </View>
+  );
+}
+
+const runningCostStyles = StyleSheet.create({
+  wrap: {
+    flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8,
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderBottomWidth: 1, borderBottomColor: '#141b2b', backgroundColor: '#0a0f1a',
+  },
+  label: { color: '#64748b', fontSize: 9, fontWeight: '800', letterSpacing: 1, fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+  value: { fontSize: 13, fontWeight: '800', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+  meta: { color: '#475569', fontSize: 9 },
+  resetBtn: { marginLeft: 'auto', borderWidth: 1, borderColor: '#334155', borderRadius: 4, paddingHorizontal: 8, paddingVertical: 3 },
+  resetBtnArmed: { borderColor: '#f59e0b', backgroundColor: '#f59e0b14' },
+  resetText: { color: '#94a3b8', fontSize: 9, fontWeight: '700', letterSpacing: 0.5 },
+  resetTextArmed: { color: '#f59e0b' },
+});
+
 function updateAutoConnectConnections(connections: AgentConnection[]) {
   import('../../../lib/agentAutoConnect')
     .then((mod) => mod.updateAutoConnectConnections(connections))
@@ -507,6 +570,30 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const timer = setInterval(() => { void refresh(); }, 60_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, []);
+  // Running-cost trip meter (user-resettable; never resets on its own).
+  // Baselines/history are stored per circle in office_preferences; the flat
+  // refs mirror the CURRENT circle so fetch/reset stay simple.
+  const [runningCost, setRunningCost] = useState<{ total: number; sinceIso: string | null } | null>(null);
+  const [runningCostArmed, setRunningCostArmed] = useState(false);
+  const runningCostBaselineRef = useRef<string | null>(null);
+  const runningCostHistoryRef = useRef<Array<{ atIso: string; amount: number }>>([]);
+  const runningCostLastResetRef = useRef<{ atIso: string; amount: number } | null>(null);
+  const runningCostBaselineMapRef = useRef<Record<string, string>>({});
+  const runningCostHistoryMapRef = useRef<Record<string, Array<{ atIso: string; amount: number }>>>({});
+  const runningCostSeqRef = useRef(0);
+  const runningCostArmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Seq-guarded so a slow response can never land on a newer circle/baseline.
+  // Strict read: on failure keep the last known value; the 60s usage tick
+  // retries, so a transient error never paints a convincing $0.
+  const refreshRunningCost = useCallback(async () => {
+    const seq = runningCostSeqRef.current;
+    try {
+      const { getClaudeUsageCostSinceStrict } = await import('../../../lib/claudeUsage');
+      const total = await getClaudeUsageCostSinceStrict(circleId, runningCostBaselineRef.current);
+      if (seq !== runningCostSeqRef.current) return;
+      setRunningCost({ total, sinceIso: runningCostBaselineRef.current });
+    } catch { /* dashboard extra — never break Office */ }
+  }, [circleId]);
   const opsLiveRunsRef = useRef<AgentRun[]>([]);
   const opsUsageCacheRef = useRef<{
     summary?: ClaudeUsageSummary;
@@ -523,6 +610,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     // Reset per-circle so a circle switch can't show stale spend/runs.
     opsLiveRunsRef.current = [];
     opsUsageCacheRef.current = { fetchedAtMs: 0 };
+    runningCostSeqRef.current += 1;
+    setRunningCost(null);
+    runningCostBaselineRef.current = runningCostBaselineMapRef.current[circleId] || null;
+    runningCostHistoryRef.current = runningCostHistoryMapRef.current[circleId] || [];
+    runningCostLastResetRef.current = runningCostHistoryRef.current.length
+      ? runningCostHistoryRef.current[runningCostHistoryRef.current.length - 1]
+      : null;
     setOpsRunFreshness(new Map());
 
     const rebuildTracker = async () => {
@@ -584,6 +678,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         ]);
         if (cancelled) return;
         opsUsageCacheRef.current = { summary, byModel, fetchedAtMs: Date.now() };
+        void refreshRunningCost();
         void rebuildTracker();
       } catch { /* dashboard extra — never break Office */ }
     };
@@ -1599,6 +1694,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     });
   }, []);
 
+  // Two-tap reset for the running-cost trip meter (no dialog dependency; the
+  // armed state disarms itself). Note-then-reset: the outgoing figure is
+  // appended to a bounded per-circle history in office_preferences BEFORE the
+  // baseline moves, so the number is durably noted, not just flashed away.
+  const handleRunningCostReset = useCallback(() => {
+    if (!runningCostArmed) {
+      setRunningCostArmed(true);
+      if (runningCostArmTimerRef.current) clearTimeout(runningCostArmTimerRef.current);
+      runningCostArmTimerRef.current = setTimeout(() => setRunningCostArmed(false), 4000);
+      return;
+    }
+    if (runningCostArmTimerRef.current) clearTimeout(runningCostArmTimerRef.current);
+    setRunningCostArmed(false);
+    const nowIso = new Date().toISOString();
+    const amount = Math.round((runningCost?.total ?? 0) * 100) / 100;
+    const entry = { atIso: nowIso, amount };
+    const history = [...runningCostHistoryRef.current, entry].slice(-24);
+    runningCostHistoryRef.current = history;
+    runningCostLastResetRef.current = entry;
+    runningCostBaselineRef.current = nowIso;
+    runningCostBaselineMapRef.current = { ...runningCostBaselineMapRef.current, [circleId]: nowIso };
+    runningCostHistoryMapRef.current = { ...runningCostHistoryMapRef.current, [circleId]: history };
+    setRunningCost({ total: 0, sinceIso: nowIso });
+    pushOfficePreferences({
+      costCounterSinceIsoByCircle: runningCostBaselineMapRef.current,
+      costCounterHistoryByCircle: runningCostHistoryMapRef.current,
+    });
+  }, [circleId, pushOfficePreferences, runningCost, runningCostArmed]);
+
   // ─── Telegram handlers ──────────────────────────────
 
   const handleTelegramConnect = useCallback(async () => {
@@ -1849,6 +1973,24 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             if (isMissingProfileColumnError(prefsRes.error)) _profileHasOfficePreferences = false;
           } else if (prefsRes.data?.office_preferences) {
             remotePrefsRecord = prefsRes.data.office_preferences as Record<string, unknown>;
+            const ccBaselines = (remotePrefsRecord as Record<string, unknown>).costCounterSinceIsoByCircle;
+            if (ccBaselines && typeof ccBaselines === 'object' && !Array.isArray(ccBaselines)) {
+              runningCostBaselineMapRef.current = ccBaselines as Record<string, string>;
+            }
+            const ccHistories = (remotePrefsRecord as Record<string, unknown>).costCounterHistoryByCircle;
+            if (ccHistories && typeof ccHistories === 'object' && !Array.isArray(ccHistories)) {
+              runningCostHistoryMapRef.current = ccHistories as Record<string, Array<{ atIso: string; amount: number }>>;
+            }
+            const ccBaseline = runningCostBaselineMapRef.current[circleId];
+            runningCostBaselineRef.current = typeof ccBaseline === 'string' && ccBaseline ? ccBaseline : null;
+            const ccHistory = runningCostHistoryMapRef.current[circleId];
+            runningCostHistoryRef.current = Array.isArray(ccHistory) ? ccHistory : [];
+            runningCostLastResetRef.current = runningCostHistoryRef.current.length
+              ? runningCostHistoryRef.current[runningCostHistoryRef.current.length - 1]
+              : null;
+            // Stored baseline may arrive after the first all-time fetch — this
+            // corrective refresh narrows the counter to the saved reset point.
+            void refreshRunningCost();
             const remote = prefsRes.data.office_preferences as {
               agentNames?: Record<string, string>;
               telegramConfig?: { botToken?: string; chatId?: string };
@@ -4150,6 +4292,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           to per-bridge rows; self-polls, no OfficeTab state. */}
       <OfficeBridgeDiagPanel />
       <OfficeConnectBridgesSection circleId={circleId} />
+
+      {/* Running cost — a trip meter, not a window: sums durable ledger spend
+          since the user's last explicit reset (all-time when never reset).
+          The tracker cards keep their rolling today/week windows; this number
+          only moves backward when the user resets it. */}
+      <OfficeRunningCostStrip
+        running={runningCost}
+        lastReset={runningCostLastResetRef.current}
+        armed={runningCostArmed}
+        onReset={handleRunningCostReset}
+        accentColor={accentColor}
+      />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
 
