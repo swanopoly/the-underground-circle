@@ -311,67 +311,36 @@ function PlatformCard({
       style={[
         styles.platformCard,
         isWide && styles.platformCardWide,
-        {
-          borderColor: connected ? item.color + '40' : '#2a2a2a',
-          opacity: 1,
-        },
+        connected && { borderColor: item.color + '33' },
         hovered && clickable && styles.platformCardHovered,
-        hovered && clickable && { borderColor: item.color + '60' },
+        hovered && clickable && { borderColor: item.color + '55' },
       ]}
     >
+      {/* Minimal card (2026-08-12): identity + one-line capability + state.
+          The description, scope/New badges, relationship chips, hint prose,
+          and action pill moved out — the detail page owns the long form.
+          State is a dot (green = connected) unless health is degraded, which
+          keeps the actionable IntegrationHealthChip. */}
       <View style={styles.cardTop}>
-        <View style={[styles.iconCircle, { backgroundColor: item.color + '18' }]}>
+        <View style={[styles.iconCircle, { backgroundColor: item.color + '14' }]}>
           <Text style={[styles.platformIconText, item.icon.length > 2 && styles.platformIconTextSmall]}>{item.icon}</Text>
         </View>
-        <View style={styles.cardTopRight}>
-          {item.recentlyAdded ? (
-            <View style={styles.newBadge}>
-              <Text style={styles.newBadgeText}>New</Text>
-            </View>
-          ) : null}
-          {status?.health && status.health.tone !== 'ok' ? (
-            <IntegrationHealthChip badge={status.health} />
-          ) : connected ? (
-            <View style={[
-              styles.statusBadge,
-              { backgroundColor: '#22c55e15', borderColor: '#22c55e30' },
-            ]}>
-              <View style={[styles.statusDot, { backgroundColor: '#22c55e' }]} />
-              <Text style={[styles.statusLabel, { color: '#22c55e' }]}>
-                Connected
-              </Text>
-            </View>
-          ) : null}
-          <View style={styles.scopeBadge}>
-            <Text style={styles.scopeBadgeText}>{item.scopeLabel}</Text>
-          </View>
+        <View style={styles.cardTitleCol}>
+          <Text style={styles.platformName} numberOfLines={1}>{item.label}</Text>
+          <Text style={styles.capabilityLabel} numberOfLines={1}>{item.capabilityLabel}</Text>
         </View>
+        {status?.health && status.health.tone !== 'ok' ? (
+          <IntegrationHealthChip badge={status.health} />
+        ) : (
+          <View style={[styles.cardStateDot, { backgroundColor: connected ? '#22c55e' : '#252b3a' }]} />
+        )}
       </View>
-
-      <Text style={[styles.platformName, { color: item.color }]}>{item.label}</Text>
-      <Text style={styles.capabilityLabel}>{item.capabilityLabel}</Text>
-
-      {status?.name ? <Text style={styles.connectedTo}>{status.name}</Text> : null}
-      {status?.hint ? <Text style={styles.connectedHint}>{status.hint}</Text> : null}
-
-      <Text style={styles.platformDesc}>{item.description}</Text>
-
-      <View style={styles.relationshipRow}>
-        {item.relationships.slice(0, 3).map(rel => (
-          <View key={rel} style={styles.relationshipChip}>
-            <Text style={styles.relationshipChipText}>{rel}</Text>
-          </View>
-        ))}
-      </View>
-
-      <View style={[
-        styles.cardAction,
-        { backgroundColor: item.color + '12', borderColor: item.color + '25' },
-      ]}>
-        <Text style={[styles.cardActionText, { color: item.color }]}>
-          {connected ? 'Manage →' : clickable ? 'Connect →' : 'Built in'}
-        </Text>
-      </View>
+      {connected && status?.name ? (
+        <Text style={styles.connectedTo} numberOfLines={1}>{status.name}</Text>
+      ) : null}
+      <Text style={[styles.cardActionText, { color: clickable ? item.color : '#475569' }]}>
+        {connected ? 'Manage →' : clickable ? 'Connect →' : 'Built in'}
+      </Text>
     </Pressable>
   );
 }
@@ -431,9 +400,6 @@ function MarketplaceAppOverview({
   return (
     <View style={styles.mpAccordionGroup}>
       <MarketplaceAccordion title="What this unlocks" accentColor={accentColor} defaultOpen>
-        <Text style={styles.marketplaceOverviewText}>
-          This app expands what the circle can own end-to-end across Souls, tasks, and operational workflows.
-        </Text>
         {detail.unlocks.map(value => (
           <Text key={value} style={styles.marketplaceOverviewBullet}>- {value}</Text>
         ))}
@@ -1328,10 +1294,6 @@ export default function MarketplaceTab({
   const visibleItemsCount = useMemo(() => {
     return filteredCatalogItems.length;
   }, [filteredCatalogItems]);
-  const agentAppCount = useMemo(
-    () => CIRCLE_INTEGRATION_CATALOG.filter(item => item.group === 'ai_agents_services').length,
-    [],
-  );
 
   const handleBack = () => {
     setActivePlatform('none');
@@ -1352,7 +1314,6 @@ export default function MarketplaceTab({
           {activeItem ? (
             <View style={[styles.mpHeroCard, { borderColor: heroAccent + '44' }]}>
               <View style={styles.mpHeroTop}>
-                <View style={[styles.mpHeroIcon, { backgroundColor: heroAccent + '22', borderColor: heroAccent + '55' }]} />
                 <View style={{ flex: 1, gap: 2 }}>
                   <Text style={[styles.mpHeroLabel, { color: heroAccent }]}>{activeItem.label}</Text>
                   <Text style={styles.mpHeroDesc} numberOfLines={3}>{activeItem.description}</Text>
@@ -1421,9 +1382,7 @@ export default function MarketplaceTab({
           <View style={styles.headerTop}>
             <View style={styles.headerLeft}>
               <Text style={styles.headerTitle}>Marketplace</Text>
-              <Text style={styles.headerDesc}>
-                Circle-wide apps and native capabilities. Connect once, then use them across Office, tasks, rooms, chat, publishing, automations, and agent execution.
-              </Text>
+              <Text style={styles.headerDesc}>Connect once — used across chat, rooms, tasks, and automations.</Text>
             </View>
             <View style={styles.headerBadge}>
               <Text style={styles.headerBadgeNum}>{connectedCount}</Text>
@@ -1434,37 +1393,11 @@ export default function MarketplaceTab({
             <TextInput
               value={searchQuery}
               onChangeText={setSearchQuery}
-              placeholder="Search marketplace apps, capabilities, workflows, or systems..."
+              placeholder="Search apps..."
               placeholderTextColor="#667085"
               style={styles.searchInput}
             />
-            <Text style={styles.searchMeta}>
-              {visibleItemsCount} marketplace item{visibleItemsCount === 1 ? '' : 's'} visible across the circle catalog.
-            </Text>
           </View>
-          <View style={styles.summaryGrid}>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Installed</Text>
-              <Text style={styles.summaryCardValue}>{connectedCount}</Text>
-              <Text style={styles.summaryCardHint}>Live circle apps</Text>
-            </View>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Native</Text>
-              <Text style={styles.summaryCardValue}>{nativeCount}</Text>
-              <Text style={styles.summaryCardHint}>Built into the app</Text>
-            </View>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Agent Systems</Text>
-              <Text style={styles.summaryCardValue}>{agentAppCount}</Text>
-              <Text style={styles.summaryCardHint}>Runtime, evals, browser ops</Text>
-            </View>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Connectable</Text>
-              <Text style={styles.summaryCardValue}>{externalCount}</Text>
-              <Text style={styles.summaryCardHint}>Managed provider apps</Text>
-            </View>
-          </View>
-
           {/* What's connected — the user-facing mirror of the agent's
               connected-resources prompt block (names only, secret-safe). */}
           <View style={{ marginBottom: 12 }}>
@@ -1533,12 +1466,9 @@ export default function MarketplaceTab({
             })}
           </ScrollView>
           {activeGroupFilter === 'models' ? (
-            <View style={styles.modelsKeyHint}>
-              <Text style={styles.modelsKeyHintTitle}>Model API keys save to the database</Text>
-              <Text style={styles.modelsKeyHintText}>
-                Select a provider card, open Setup & connect, and paste its API key. Personal Chat keys are validated and stored in your encrypted user model-key vault; circle-wide workflow credentials stay in their separate integration scope.
-              </Text>
-            </View>
+            <Text style={styles.modelsKeyHint}>
+              Pick a provider card and paste its API key under Setup & connect — keys are validated and stored in your encrypted vault.
+            </Text>
           ) : null}
           {/* Sort row — applies to whatever the filters above produced.
               Default is `popular` (curated rank) so anthropic / openai
@@ -1590,7 +1520,7 @@ export default function MarketplaceTab({
               ))}
             </View>
             <Text style={styles.statusText}>
-              {connectedCount} installed now. {nativeCount} native app capabilities. {externalCount} managed provider apps are ready for circle-wide connection.
+              {connectedCount} installed · {nativeCount} native · {externalCount} connectable
             </Text>
           </View>
         )}
@@ -1614,18 +1544,15 @@ export default function MarketplaceTab({
                 if (items.length === 0) return null;
                 const connectedInGroup = items.filter(item => item.platformKey && statuses[item.platformKey]?.connected).length;
                 const availableInGroup = items.filter(item => item.availability === 'available').length;
-                const nativeInGroup = items.filter(item => item.availability === 'available' && !item.platformKey).length;
 
                 return (
                   <View key={group.key} style={styles.groupCard}>
                     <View style={styles.groupHeader}>
                       <View style={styles.groupHeaderLeft}>
                         <Text style={styles.groupTitle}>{group.label}</Text>
-                        <Text style={styles.groupDesc}>{group.description}</Text>
                       </View>
                       <View style={styles.groupHeaderRight}>
                         <Text style={styles.groupMeta}>{connectedInGroup}/{availableInGroup || 0}</Text>
-                        {nativeInGroup > 0 ? <Text style={styles.groupMetaSub}>{nativeInGroup} native</Text> : null}
                       </View>
                     </View>
 
@@ -1724,46 +1651,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     ...(RNPlatform.OS === 'web' ? { outlineWidth: 0 } as any : {}),
   },
-  searchMeta: {
-    color: '#7d8798',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '600',
-  },
-  summaryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  summaryCard: {
-    minWidth: 170,
-    flexGrow: 1,
-    backgroundColor: '#0d1018',
-    borderWidth: 1,
-    borderColor: '#1b2433',
-    borderRadius: 14,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    gap: 4,
-  },
-  summaryCardLabel: {
-    color: '#7d8798',
-    fontSize: 11,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    textTransform: 'uppercase',
-  },
-  summaryCardValue: {
-    color: '#f8fafc',
-    fontSize: 22,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  summaryCardHint: {
-    color: '#94a3b8',
-    fontSize: 11,
-    fontFamily: 'monospace',
-  },
   filterRow: {
     gap: 8,
     paddingBottom: 2,
@@ -1790,22 +1677,7 @@ const styles = StyleSheet.create({
     color: '#dbeafe',
   },
   modelsKeyHint: {
-    backgroundColor: '#07110d',
-    borderWidth: 1,
-    borderColor: '#14532d',
-    borderRadius: 12,
-    padding: 12,
-    gap: 6,
-  },
-  modelsKeyHintTitle: {
-    color: '#86efac',
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 0.6,
-  },
-  modelsKeyHintText: {
-    color: '#bbf7d0',
+    color: '#7d8798',
     fontSize: 11,
     lineHeight: 17,
     fontFamily: 'monospace',
@@ -1813,13 +1685,13 @@ const styles = StyleSheet.create({
   statusBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0d0d0d',
+    backgroundColor: '#0b0d13',
     borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    marginBottom: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: '#000000',
+    borderColor: '#161821',
     gap: 10,
   },
   statusPips: {
@@ -1862,14 +1734,14 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     fontFamily: 'monospace',
   },
-  groupStack: { gap: 14 },
+  groupStack: { gap: 12 },
   groupCard: {
     backgroundColor: '#0a0a0e',
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#161821',
-    padding: 14,
-    gap: 12,
+    padding: 12,
+    gap: 10,
   },
   groupHeader: {
     flexDirection: 'row',
@@ -1887,12 +1759,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontFamily: 'monospace',
   },
-  groupDesc: {
-    color: '#7d8798',
-    fontSize: 12,
-    lineHeight: 18,
-    fontFamily: 'monospace',
-  },
   groupHeaderRight: {
     alignItems: 'flex-end',
     gap: 3,
@@ -1903,27 +1769,22 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontWeight: '700',
   },
-  groupMetaSub: {
-    color: '#64748b',
-    fontSize: 10,
-    fontFamily: 'monospace',
-    fontWeight: '700',
-  },
   platformGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    gap: 10,
   },
   platformCell: {
     minWidth: 240,
     maxWidth: '100%',
   },
   platformCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#0c0e14',
     borderWidth: 1,
-    borderRadius: 14,
-    padding: 18,
-    gap: 10,
+    borderColor: '#1c2130',
+    borderRadius: 10,
+    padding: 12,
+    gap: 8,
     ...(RNPlatform.OS === 'web' ? { transition: 'all 0.2s ease' } as any : {}),
   },
   platformCardWide: {
@@ -1936,139 +1797,55 @@ const styles = StyleSheet.create({
   },
   cardTop: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 10,
   },
-  cardTopRight: {
-    alignItems: 'flex-end',
-    gap: 6,
+  cardTitleCol: {
+    flex: 1,
+    minWidth: 0,
+    gap: 1,
+  },
+  cardStateDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
   },
   iconCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
+    width: 30,
+    height: 30,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
   },
   platformIconText: {
-    fontSize: 20,
+    fontSize: 14,
     fontWeight: '800',
     fontFamily: 'monospace',
   },
   platformIconTextSmall: {
-    fontSize: 14,
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 20,
-    backgroundColor: '#000000',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: '#555',
-  },
-  statusLabel: {
-    color: '#cbd5e1',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '600',
-  },
-  scopeBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: '#0b1020',
-    borderWidth: 1,
-    borderColor: '#1d2948',
-  },
-  scopeBadgeText: {
-    color: '#93c5fd',
     fontSize: 10,
-    fontFamily: 'monospace',
-    fontWeight: '700',
-  },
-  newBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: '#132112',
-    borderWidth: 1,
-    borderColor: '#1f4b1c',
-  },
-  newBadgeText: {
-    color: '#86efac',
-    fontSize: 10,
-    fontFamily: 'monospace',
-    fontWeight: '800',
-    textTransform: 'uppercase',
   },
   platformName: {
-    fontSize: 16,
+    color: '#f8fafc',
+    fontSize: 13,
     fontWeight: '700',
     fontFamily: 'monospace',
   },
   capabilityLabel: {
-    color: '#dbe4f0',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '700',
-  },
-  connectedTo: {
-    color: '#d1d5db',
-    fontSize: 12,
-    fontFamily: 'monospace',
-  },
-  connectedHint: {
-    color: '#7d8798',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    lineHeight: 16,
-  },
-  platformDesc: {
-    color: '#8792a4',
-    fontSize: 12,
-    fontFamily: 'monospace',
-    lineHeight: 18,
-  },
-  relationshipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  relationshipChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: '#17181d',
-    borderWidth: 1,
-    borderColor: '#242630',
-  },
-  relationshipChipText: {
-    color: '#94a3b8',
+    color: '#64748b',
     fontSize: 10,
     fontFamily: 'monospace',
-    fontWeight: '700',
+    fontWeight: '600',
   },
-  cardAction: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    borderWidth: 1,
-    alignItems: 'center',
-    marginTop: 2,
+  connectedTo: {
+    color: '#8b95a7',
+    fontSize: 11,
+    fontFamily: 'monospace',
   },
   cardActionText: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.4,
     fontFamily: 'monospace',
   },
   backRow: {
@@ -2098,12 +1875,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-  },
-  mpHeroIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    borderWidth: 1,
   },
   mpHeroLabel: {
     fontSize: 16,
@@ -2169,37 +1940,6 @@ const styles = StyleSheet.create({
     gap: 8,
     borderTopWidth: 1,
     borderTopColor: '#ffffff10',
-  },
-  marketplaceOverviewCard: {
-    backgroundColor: '#0b1018',
-    borderWidth: 1,
-    borderColor: '#1b2433',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-    gap: 10,
-  },
-  marketplaceOverviewTitle: {
-    color: '#f8fafc',
-    fontSize: 15,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-  },
-  marketplaceOverviewText: {
-    color: '#93a0b4',
-    fontSize: 12,
-    lineHeight: 18,
-    fontFamily: 'monospace',
-  },
-  marketplaceOverviewSection: {
-    gap: 6,
-  },
-  marketplaceOverviewLabel: {
-    color: '#cbd5e1',
-    fontSize: 11,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    textTransform: 'uppercase',
   },
   marketplaceOverviewBullet: {
     color: '#9fb0c7',
@@ -2319,12 +2059,6 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontSize: 12,
     ...(RNPlatform.OS === 'web' ? { outlineWidth: 0 } as any : {}),
-  },
-  genericHint: {
-    color: '#7d8798',
-    fontSize: 11,
-    lineHeight: 16,
-    fontFamily: 'monospace',
   },
   genericSaveBtn: {
     paddingVertical: 12,
