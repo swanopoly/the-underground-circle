@@ -94,20 +94,6 @@ export default function RunMetadataSummary({
             </Text>
           </View>
         ) : null}
-        {observedEval?.responseQuality ? (
-          <View style={styles.responseQualityCompactChip}>
-            <Text style={styles.responseQualityCompactChipText}>
-              RESPONSE {observedEval.responseQuality.score}
-            </Text>
-          </View>
-        ) : null}
-        {observedEval?.modeSignals?.slice(0, 1).map((signal) => (
-          <View key={signal.key} style={styles.responseQualityCompactChip}>
-            <Text style={styles.responseQualityCompactChipText}>
-              {signal.label.toUpperCase()} {signal.score}
-            </Text>
-          </View>
-        ))}
         {commandDecisions.length > 0 ? (
           <RunRoutingSummary decisions={commandDecisions} variant="compact" accentColor={accentColor} />
         ) : null}
@@ -173,67 +159,39 @@ export default function RunMetadataSummary({
                 SCORE {observedEval.score}
               </Text>
             </View>
-            <View style={styles.qualityStatRow}>
-              <View style={styles.qualityStatChip}>
-                <Text style={styles.qualityStatValue}>
-                  {observedEval.verification.passed}/{Math.max(observedEval.verification.planned, observedEval.verification.executed)}
-                </Text>
-                <Text style={styles.qualityStatLabel}>VERIFY</Text>
-              </View>
-              <View style={styles.qualityStatChip}>
-                <Text style={styles.qualityStatValue}>
-                  {observedEval.artifacts.durable}/{observedEval.artifacts.total}
-                </Text>
-                <Text style={styles.qualityStatLabel}>ARTIFACTS</Text>
-              </View>
-              <View style={styles.qualityStatChip}>
-                <Text style={styles.qualityStatValue}>{observedEval.blockers.length}</Text>
-                <Text style={styles.qualityStatLabel}>BLOCKERS</Text>
-              </View>
-              <View style={styles.qualityStatChip}>
-                <Text style={styles.qualityStatValue}>{observedEval.responseQuality.score}</Text>
-                <Text style={styles.qualityStatLabel}>RESPONSE</Text>
-              </View>
-            </View>
-            {observedEval.modeSignals.length > 0 ? (
-              <View style={styles.modeSignalRow}>
-                {observedEval.modeSignals.slice(0, 3).map((signal) => (
-                  <View key={signal.key} style={styles.modeSignalChip}>
-                    <Text style={styles.modeSignalValue}>{signal.score}</Text>
-                    <Text style={styles.modeSignalLabel}>{signal.label.toUpperCase()}</Text>
+            {/* A failed run gets a terse card — outcome, score, and what
+                blocked it. Grading the SHAPE of an error notice produced
+                absurd output ("Strength: appropriately concise answer" on a
+                crash), and the signal/met/missed chip rows were dashboard
+                internals, not message-level information (they still feed
+                OpenSwanQualityDashboard). */}
+            {observedEval.outcome !== 'failed' ? (
+              <>
+                <View style={styles.qualityStatRow}>
+                  <View style={styles.qualityStatChip}>
+                    <Text style={styles.qualityStatValue}>
+                      {observedEval.verification.passed}/{Math.max(observedEval.verification.planned, observedEval.verification.executed)}
+                    </Text>
+                    <Text style={styles.qualityStatLabel}>VERIFY</Text>
                   </View>
+                  <View style={styles.qualityStatChip}>
+                    <Text style={styles.qualityStatValue}>
+                      {observedEval.artifacts.durable}/{observedEval.artifacts.total}
+                    </Text>
+                    <Text style={styles.qualityStatLabel}>ARTIFACTS</Text>
+                  </View>
+                  <View style={styles.qualityStatChip}>
+                    <Text style={styles.qualityStatValue}>{observedEval.blockers.length}</Text>
+                    <Text style={styles.qualityStatLabel}>BLOCKERS</Text>
+                  </View>
+                </View>
+                {observedEval.strengths.slice(0, 2).map((item, index) => (
+                  <Text key={`${item}-${index}`} style={styles.qualityDetailText}>
+                    Strength {index + 1}: {item}
+                  </Text>
                 ))}
-              </View>
+              </>
             ) : null}
-            {observedEval.skillSignals?.length > 0 ? (
-              <View style={styles.modeSignalRow}>
-                {observedEval.skillSignals
-                  .slice()
-                  .sort((left, right) => left.score - right.score)
-                  .slice(0, 3)
-                  .map((signal) => (
-                    <View key={signal.key} style={styles.skillSignalChip}>
-                      <Text style={styles.modeSignalValue}>{signal.score}</Text>
-                      <Text style={styles.modeSignalLabel}>{signal.label.toUpperCase()}</Text>
-                    </View>
-                  ))}
-              </View>
-            ) : null}
-            {observedEval.strengths.slice(0, 2).map((item, index) => (
-              <Text key={`${item}-${index}`} style={styles.qualityDetailText}>
-                Strength {index + 1}: {item}
-              </Text>
-            ))}
-            {observedEval.responseQuality.met.slice(0, 2).map((item, index) => (
-              <Text key={`${item}-${index}`} style={styles.qualityDetailText}>
-                Response met {index + 1}: {item}
-              </Text>
-            ))}
-            {observedEval.responseQuality.missed.slice(0, 2).map((item, index) => (
-              <Text key={`${item}-${index}`} style={[styles.qualityDetailText, styles.qualityBlockerText]}>
-                Response missed {index + 1}: {item}
-              </Text>
-            ))}
             {observedEval.blockers.slice(0, 2).map((item, index) => (
               <Text key={`${item}-${index}`} style={[styles.qualityDetailText, styles.qualityBlockerText]}>
                 Blocker {index + 1}: {item}
@@ -335,21 +293,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   qualityCompactChipText: {
-    fontSize: 9,
-    fontWeight: '900',
-    letterSpacing: 0.6,
-    fontFamily: 'monospace',
-  },
-  responseQualityCompactChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#6366f140',
-    backgroundColor: '#1e1b4b',
-  },
-  responseQualityCompactChipText: {
-    color: '#a5b4fc',
     fontSize: 9,
     fontWeight: '900',
     letterSpacing: 0.6,
@@ -517,44 +460,6 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   qualityStatLabel: {
-    color: '#94a3b8',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-    fontFamily: 'monospace',
-  },
-  modeSignalRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  modeSignalChip: {
-    minWidth: 84,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#ffffff12',
-    backgroundColor: '#ffffff08',
-    gap: 2,
-  },
-  skillSignalChip: {
-    minWidth: 84,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#22c55e30',
-    backgroundColor: '#052e16',
-    gap: 2,
-  },
-  modeSignalValue: {
-    color: '#f8fafc',
-    fontSize: 12,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-  },
-  modeSignalLabel: {
     color: '#94a3b8',
     fontSize: 9,
     fontWeight: '800',
