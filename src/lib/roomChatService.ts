@@ -2,6 +2,7 @@ import { type SwanBotStructuredArtifact } from './swanbot';
 import { runOpenSwanSessionTurn, type OpenSwanRunCallbacks } from './openswanSessionRuntime';
 import { loadFiles, sendAgentMessage, sendMessage } from '../screens/circles/tabs/rooms/roomRepository';
 import { type AgenticCodingProfile } from './agenticCodingProfile';
+import { isConversationOnlyTurn } from './webSearchAutoDetect';
 import { resolveSessionCodingProfile, type SessionCodingProfile } from './chatSessionProfile';
 import { buildRoomAgentMessageMetadata } from './roomMessageMetadata';
 
@@ -156,6 +157,34 @@ export async function sendRoomStructuredChatMessage({
   } catch {}
 
   const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
+
+  // Main-chat parity: a pure social turn ("hey", "thanks") answers through
+  // the plain SwanBot lane and never enters the task runtime — no task plan,
+  // no tools, no verification checks, no quality grade, no run card. Tool
+  // runs and their accountability cards stay for actual room work.
+  //
+  // The guard is isConversationOnlyTurn — the same deliberately narrow
+  // whole-message greeting list main Chat trusts to skip web search — NOT
+  // the smart-route intent classifier: probing showed detectSmartRoute
+  // labels "hey, can you fix auth.ts" casual/trivial (the greeting prefix
+  // dominates), which would swallow real work into a toolless reply. The
+  // pattern list requires the greeting to BE the message, so any trailing
+  // request routes through the full runtime.
+  if (isConversationOnlyTurn(cleanContent)) {
+    const { getSwanBotResponse } = await import('./swanbot');
+    const casualHistory = recentMessages
+      .slice(-6)
+      .map(message => `${message.metadata?.bot ? 'Agent' : 'User'}: ${(message.content || '').slice(0, 200)}`)
+      .join('\n');
+    const casualReply = await getSwanBotResponse(cleanContent, {
+      userId,
+      circleId,
+      chatHistory: casualHistory,
+      ...(modelOverride && modelOverride !== 'auto' ? { model: modelOverride } : {}),
+    });
+    await sendAgentMessage(roomId, 'Agent', casualReply, { bot: true, bot_name: 'Agent', generating: false });
+    return { response: casualReply, artifacts: [] };
+  }
   const callerPrefix = promptPrefix ? `${promptPrefix.trim()}\n\n` : '';
   const recentContext = recentMessages
     .slice(-8)

@@ -75,8 +75,13 @@ function scoreProfile(message: string, signals: Signal[]): number {
 }
 
 export function detectAgenticCodingProfile(message: string, surface: AgenticCodingSurface): AgenticCodingProfile {
-  if (surface === 'room_chat') return 'review';
-
+  // Rooms score signals exactly like main chat. The old hard
+  // `room_chat → 'review'` short-circuit made EVERY auto-profile room
+  // message a review task before any content check ran — a bare "hey"
+  // got a REVIEW tool plan (code.inspect/code.review, 2 required checks),
+  // whose failed run rendered a full task-telemetry card in the room.
+  // Rooms are a file-editing surface: the scoring below lands on 'senior'
+  // (build/edit) unless the message actually asks for review/debug/etc.
   const scores: Record<AgenticCodingProfile, number> = {
     debug: scoreProfile(message, DEBUG_SIGNALS),
     review: scoreProfile(message, REVIEW_SIGNALS),

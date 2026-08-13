@@ -175,7 +175,11 @@ async function main() {
       'search degradation stays backend-only and is never rendered as a Chat notice',
     );
     assert(
-      chatSource.includes('webSearchDegradationContext,\n        cleanContent,'),
+      // In-order presence, not adjacency: other prompt parts may be inserted
+      // between them (boundedMultiActionPromptBlock was, 2026-08-13) without
+      // breaking the guarantee this pins — the degradation context rides the
+      // same prompt-parts array as the user's message.
+      /webSearchDegradationContext,[\s\S]{0,400}?cleanContent,\s*\][\s\S]{0,80}?\.filter\(Boolean\)/.test(chatSource),
       'canonical Chat receives the not-web-verified degradation context',
     );
   }
