@@ -881,8 +881,12 @@ export default function OfficeChat({
         const message = rest.slice(spaceIdx + 1).trim();
         setProcessing(true);
         try {
-          const result = await withTimeout(sendSessionMessage(defaultConn.config, sessionKey, message), 15000, 'Message');
-          addMsg(result.ok ? `✅ ${result.reply}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
+          // sendSessionMessage already keeps OpenSwan's 25s provider wait
+          // inside its 30s client boundary. A shorter UI timeout would report
+          // failure while the session may still be working and invite a
+          // duplicate manual replay.
+          const result = await sendSessionMessage(defaultConn.config, sessionKey, message);
+          addMsg(result.ok ? `↗ ${result.reply}` : `❌ ${result.error || 'Failed'}`, false, defaultConn.conn.name);
         } catch (e: any) {
           addMsg(`❌ ${e.message || 'Failed'}`, false, 'System');
         } finally { setProcessing(false); }

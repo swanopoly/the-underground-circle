@@ -76,26 +76,30 @@ function main(): void {
   assert(MODEL_PRICES.default.inPer1M >= MODEL_PRICES['claude-sonnet'].inPer1M, '(1) default is conservative (>= sonnet input rate)');
 
   // ── Group 2: estimateRunCostUsd — known models, exact formula ───────────────
-  // opus: 1M in @15 + 1M out @75 = 90
-  assertEq(estimateRunCostUsd({ model: 'claude-opus', inputTokens: 1_000_000, outputTokens: 1_000_000 }), 90, '(2) opus 1M in + 1M out = 90');
+  // floating opus alias: current Opus 5 at 1M in @5 + 1M out @25 = 30
+  assertEq(estimateRunCostUsd({ model: 'claude-opus', inputTokens: 1_000_000, outputTokens: 1_000_000 }), 30, '(2) current opus 1M in + 1M out = 30');
   // sonnet: 1M in @3
   assertEq(estimateRunCostUsd({ model: 'claude-sonnet', inputTokens: 1_000_000 }), 3, '(2) sonnet 1M in = 3');
-  // haiku: 1M out @4
-  assertEq(estimateRunCostUsd({ model: 'claude-haiku', outputTokens: 1_000_000 }), 4, '(2) haiku 1M out = 4');
+  // haiku: 1M out @5
+  assertEq(estimateRunCostUsd({ model: 'claude-haiku', outputTokens: 1_000_000 }), 5, '(2) haiku 1M out = 5');
   // gpt-4o: 2M in @2.5 + 0.5M out @10 = 5 + 5 = 10
   assertEq(estimateRunCostUsd({ model: 'gpt-4o', inputTokens: 2_000_000, outputTokens: 500_000 }), 10, '(2) gpt-4o mixed = 10');
   // gemini-flash: 1M in @0.1 + 1M out @0.4 = 0.5
   assertEq(estimateRunCostUsd({ model: 'gemini-flash', inputTokens: 1_000_000, outputTokens: 1_000_000 }), 0.5, '(2) gemini-flash = 0.5');
-  // cached billed at cheaper rate: opus 1M cached @1.5
-  assertEq(estimateRunCostUsd({ model: 'claude-opus', cachedTokens: 1_000_000 }), 1.5, '(2) opus 1M cached = 1.5');
+  // cached billed at cheaper rate: opus 1M cached @0.5
+  assertEq(estimateRunCostUsd({ model: 'claude-opus', cachedTokens: 1_000_000 }), 0.5, '(2) opus 1M cached = 0.5');
+  assertEq(estimateRunCostUsd({ model: 'gpt-5.6-sol', inputTokens: 1_000_000 }), 5, '(2) GPT-5.6 Sol exact input rate');
+  assertEq(estimateRunCostUsd({ model: 'gpt-5.6-terra', inputTokens: 1_000_000 }), 2.5, '(2) GPT-5.6 Terra exact input rate');
+  assertEq(estimateRunCostUsd({ model: 'gpt-5.6-luna', outputTokens: 1_000_000 }), 6, '(2) GPT-5.6 Luna exact output rate');
+  assertEq(estimateRunCostUsd({ model: 'google_ai/gemini-3.6-flash', inputTokens: 1_000_000 }), 1.5, '(2) Gemini 3.6 exact input rate');
 
   // ── Group 3: model resolution (prefix / dotted / case / longest-match) ──────
-  assertEq(estimateRunCostUsd({ model: 'anthropic/claude-opus-4-8', inputTokens: 1_000_000 }), 15, '(3) provider-prefixed opus id → opus');
+  assertEq(estimateRunCostUsd({ model: 'anthropic/claude-opus-4-8', inputTokens: 1_000_000 }), 5, '(3) provider-prefixed current-price opus id → opus');
   assertEq(estimateRunCostUsd({ model: 'google_ai/gemini-2.5-pro', inputTokens: 1_000_000 }), 1.25, '(3) dotted gemini id → gemini base');
-  assertEq(estimateRunCostUsd({ model: 'CLAUDE-OPUS', inputTokens: 1_000_000 }), 15, '(3) uppercase resolves');
-  assertEq(estimateRunCostUsd({ model: 'claude.opus', inputTokens: 1_000_000 }), 15, '(3) dotted claude.opus resolves');
-  // longest-match: claude-opus (15) beats bare claude (3)
-  assertEq(estimateRunCostUsd({ model: 'claude-opus', inputTokens: 1_000_000 }), 15, '(3) longest-match opus not bare claude');
+  assertEq(estimateRunCostUsd({ model: 'CLAUDE-OPUS', inputTokens: 1_000_000 }), 5, '(3) uppercase resolves');
+  assertEq(estimateRunCostUsd({ model: 'claude.opus', inputTokens: 1_000_000 }), 5, '(3) dotted claude.opus resolves');
+  // longest-match: claude-opus (5) beats bare claude (3)
+  assertEq(estimateRunCostUsd({ model: 'claude-opus', inputTokens: 1_000_000 }), 5, '(3) longest-match opus not bare claude');
   // gpt-4o-mini (0.15) beats gpt-4o (2.5) beats gpt-4 (3)
   assertEq(estimateRunCostUsd({ model: 'gpt-4o-mini', inputTokens: 1_000_000 }), 0.15, '(3) gpt-4o-mini specific');
   assertEq(estimateRunCostUsd({ model: 'gpt-4-1', inputTokens: 1_000_000 }), 3, '(3) gpt-4-1 → gpt-4');

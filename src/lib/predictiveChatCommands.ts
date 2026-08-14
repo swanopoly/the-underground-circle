@@ -990,7 +990,7 @@ const GENERAL_COMMANDS: PredictiveCommandSeed[] = [
     text: 'Tell me all the tabs I have open in Chrome right now',
     hint: 'Use the local desktop bridge, not Browserbase',
     app: 'General',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['tabs', 'chrome', 'browser', 'local', 'computer'],
     priority: 66,
   },

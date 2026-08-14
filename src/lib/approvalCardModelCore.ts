@@ -41,6 +41,7 @@ import { classifyApprovalAge } from './approvalPreviewCore';
 import { matchesAlwaysAskFloor } from './unifiedApprovalPolicyCore';
 import { resolveApprovalExpiresAt } from './chatAttentionQueue';
 import { planApprovalBatch } from './openswanApprovalBatchCore';
+import { readOpenSwanApprovalAuditToolName } from './openswanToolApprovals';
 import type { ApprovalRiskTier, ApprovalRiskChipTone } from './approvalIntentPreview';
 
 /**
@@ -119,7 +120,7 @@ export type RunApprovalCardPlanEntry =
   | {
       kind: 'batch';
       indices: number[];
-      /** Normalized (lowercased) payload.tool shared by every covered row. */
+      /** Normalized (lowercased) payload tool shared by one run/requester origin. */
       tool: string;
       /** Shared `openswanApprovalBatchCore` risk bucket: 'low' | 'medium'. */
       combinedRisk: string;
@@ -142,6 +143,10 @@ const BATCHABLE_APPROVAL_KINDS: ReadonlySet<string> = new Set([
 
 /** Mirrors openswanApprovalBatchCore.MAX_ITEMS so coverage stays bounded. */
 const MAX_PLAN_ROWS = 500;
+
+/** Exact durable identity required before two approval rows may share one tap. */
+const APPROVAL_ROW_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Minimum original index an entry covers (its display position). */
 function planEntryFirstIndex(entry: RunApprovalCardPlanEntry): number {
@@ -180,7 +185,8 @@ function planEntryFirstIndex(entry: RunApprovalCardPlanEntry): number {
  *
  * Surviving rows group through `planApprovalBatch` (low and medium never
  * co-mingle), then each shared-risk group is subdivided by normalized
- * `payload.tool` — a batch card never merges different tools under one yes.
+ * payload tool + exact run + requester — a batch card never merges different
+ * tools or durable origins under one yes.
  * Partitions of ≥2 become batch entries; everything else is single. Entries
  * are ordered by first covered index (deterministic; same input → same plan).
  * Total: hostile rows (throwing getters, wrong shapes) become solo entries,
@@ -205,7 +211,7 @@ export function planRunApprovalBatchCards(rows: unknown): RunApprovalCardPlanEnt
     // Per-row facts for the batcher, plus the tool partition key. Any parse
     // failure marks the row solo (risk 'unknown' + floor) — fail-closed.
     const items: Array<{ risk: string; tool: string; category: string; floor: boolean }> = [];
-    const toolKeys: string[] = [];
+    const batchAuthorityKeys: string[] = [];
     for (let i = 0; i < n; i++) {
       let item = { risk: 'unknown', tool: '', category: '', floor: true };
       let toolKey = '';
@@ -218,18 +224,27 @@ export function planRunApprovalBatchCards(rows: unknown): RunApprovalCardPlanEnt
         const payload = row.payload && typeof row.payload === 'object'
           ? (row.payload as Record<string, unknown>)
           : null;
-        const tool = payload && typeof payload.tool === 'string'
-          ? payload.tool.trim().toLowerCase().slice(0, 200)
+        const tool = (readOpenSwanApprovalAuditToolName(payload) || '')
+          .toLowerCase()
+          .slice(0, 200);
+        const runId = typeof row.run_id === 'string' ? row.run_id.trim().toLowerCase() : '';
+        const requestedBy = typeof row.requested_by === 'string'
+          ? row.requested_by.trim().toLowerCase()
           : '';
+        const hasExactOrigin =
+          APPROVAL_ROW_UUID_RE.test(runId) && APPROVAL_ROW_UUID_RE.test(requestedBy);
         const approvalKey = payload ? payload.toolApprovalKey : null;
         const hasTrustedKey = typeof approvalKey === 'string' && approvalKey.length > 0;
         const externalSideEffect = payload ? payload.externalSideEffect === true : false;
 
-        // (e) floor: always-ask markers or credential/password on tool OR kind.
+        const genericEffectContainer = kind === 'tool_use' || kind === 'browser_action';
+        const kindEffectSignal = genericEffectContainer ? '' : kind;
+        // (e) floor: always-ask markers or credential/password on the exact
+        // tool or a semantic kind. Generic transport kinds carry no effect.
         const floor =
           kind === 'cost_threshold' ||
           matchesAlwaysAskFloor(tool) ||
-          matchesAlwaysAskFloor(kind) ||
+          (kindEffectSignal ? matchesAlwaysAskFloor(kindEffectSignal) : false) ||
           tool.includes('credential') ||
           tool.includes('password') ||
           kind.includes('credential') ||
@@ -250,19 +265,33 @@ export function planRunApprovalBatchCards(rows: unknown): RunApprovalCardPlanEnt
           risk = 'unknown';
         } else if (!BATCHABLE_APPROVAL_KINDS.has(kind)) {
           risk = 'unknown'; // includes cost_threshold (also floored above)
-        } else if (!hasTrustedKey || externalSideEffect || !tool || tier === null) {
+        } else if (!hasTrustedKey || externalSideEffect || !tool || tier === null || !hasExactOrigin) {
           risk = 'unknown'; // rules (a)/(c), toolless rows, previewless rows
         } else {
           risk = tier; // 'read' → low, 'reversible' → medium, 'irreversible' → critical (solo)
         }
-        item = { risk, tool, category: kind, floor };
-        toolKey = tool;
+        // `tool_use` / `browser_action` are transport containers, not effect
+        // classifications. Feeding either generic label into the canonical
+        // effect fold would make even an exact `browser.fill_field` or
+        // `browser.set_toggle` look ambiguous and disable the deliberately
+        // narrow reversible batch path. The exact tool remains authoritative;
+        // file, privileged, external, unknown, and review kinds keep their
+        // semantic category and therefore stay separate.
+        const effectCategory = genericEffectContainer
+          ? ''
+          : kind;
+        item = { risk, tool, category: effectCategory, floor };
+        // One approval card is one immutable runtime origin. Matching tool and
+        // risk are not enough: circle-wide approval reads can contain rows
+        // from different runs/requesters, which must never become one click or
+        // one synthetic continuation turn.
+        toolKey = hasExactOrigin ? `${tool}\u0000${runId}\u0000${requestedBy}` : '';
       } catch {
         item = { risk: 'unknown', tool: '', category: '', floor: true };
         toolKey = '';
       }
       items.push(item);
-      toolKeys.push(toolKey);
+      batchAuthorityKeys.push(toolKey);
     }
 
     const plan = planApprovalBatch(items);
@@ -277,12 +306,12 @@ export function planRunApprovalBatchCards(rows: unknown): RunApprovalCardPlanEnt
         }
         continue;
       }
-      // Subdivide the shared-risk group by normalized payload.tool — a batch
-      // card never merges different tools under one yes. Map preserves the
-      // ascending insertion order, so partition minima stay deterministic.
+      // Subdivide the shared-risk group by normalized approval tool plus exact
+      // source run/requester. One tap never spans durable origins. Map
+      // preserves ascending insertion order, so minima stay deterministic.
       const partitions = new Map<string, number[]>();
       for (const idx of group.indices) {
-        const key = toolKeys[idx] || '';
+        const key = batchAuthorityKeys[idx] || '';
         if (!key) {
           // Defensive: toolless rows were already marked unknown above.
           entries.push({ kind: 'single', index: idx });
@@ -293,7 +322,8 @@ export function planRunApprovalBatchCards(rows: unknown): RunApprovalCardPlanEnt
         if (bucket) bucket.push(idx);
         else partitions.set(key, [idx]);
       }
-      for (const [tool, indices] of partitions) {
+      for (const [authorityKey, indices] of partitions) {
+        const tool = authorityKey.split('\u0000', 1)[0] || '';
         if (indices.length >= 2) {
           entries.push({
             kind: 'batch',

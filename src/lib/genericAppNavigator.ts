@@ -323,6 +323,31 @@ export interface StrictNamedAppLifecycleParseOptions {
   observedAppNames?: readonly string[] | null;
 }
 
+export type DirectDesktopCommandModifier =
+  | 'greeting'
+  | 'discourse_marker'
+  | 'request_courtesy'
+  | 'scope_limiter'
+  | 'recipient_courtesy'
+  | 'soft_urgency'
+  | 'soft_timing'
+  | 'desktop_scope';
+
+/**
+ * Bounded, non-operational language around a direct desktop command.
+ *
+ * `commandCandidates` is ordered from least to most normalized. Lifecycle
+ * parsing uses that order to preserve an exact installed app whose real name
+ * ends in a modifier-looking word (for example, `Acme Now`) before considering
+ * the fully normalized command. Nothing in this envelope may add, remove, or
+ * weaken an operation, condition, approval, credential, or schedule.
+ */
+export interface DirectDesktopCommandEnvelope {
+  command: string;
+  commandCandidates: readonly string[];
+  modifiers: readonly DirectDesktopCommandModifier[];
+}
+
 let refreshedLifecycleAppNames: readonly string[] = [];
 
 /**
@@ -364,25 +389,209 @@ function exactObservedAppName(
   return null;
 }
 
+const DIRECT_DESKTOP_COMMAND_MAX_LENGTH = 4_000;
+const DIRECT_DESKTOP_MODIFIER_LIMIT = 12;
+
+const DIRECT_DESKTOP_SUFFIX_MODIFIERS: ReadonlyArray<{
+  kind: DirectDesktopCommandModifier;
+  pattern: RegExp;
+}> = [
+  {
+    kind: 'request_courtesy',
+    pattern: /\s*,?\s*(?:please|thanks(?:\s+in\s+advance)?|thank\s+you(?:\s+very\s+much)?|ok(?:ay)?|if\s+that(?:'|’)s\s+ok(?:ay)?)$/i,
+  },
+  {
+    kind: 'recipient_courtesy',
+    pattern: /\s+for\s+(?:me|us)$/i,
+  },
+  {
+    kind: 'soft_urgency',
+    pattern: /\s*,?\s*(?:now|already|right\s+now|right\s+away|straight\s+away|at\s+once|asap|quick|real(?:ly)?\s+(?:quick|fast)|quickly)$/i,
+  },
+  {
+    kind: 'soft_timing',
+    pattern: /\s*,?\s*(?:as\s+soon\s+as\s+you\s+can|when(?:ever)?\s+you\s+can|when(?:ever)?\s+you\s+(?:get|have)\s+(?:a\s+)?(?:chance|moment|second|time)|when(?:ever)?\s+possible|if\s+possible|at\s+your\s+(?:earliest\s+)?convenience|if\s+you\s+(?:do\s+not|don't)\s+mind|no\s+rush)$/i,
+  },
+  {
+    kind: 'desktop_scope',
+    pattern: /\s+on\s+(?:(?:my|this|the)\s+)?(?:mac|computer|desktop|machine)$/i,
+  },
+];
+
+function addDirectDesktopModifier(
+  modifiers: DirectDesktopCommandModifier[],
+  modifier: DirectDesktopCommandModifier,
+): void {
+  if (!modifiers.includes(modifier) && modifiers.length < DIRECT_DESKTOP_MODIFIER_LIMIT) {
+    modifiers.push(modifier);
+  }
+}
+
+function stripDirectDesktopTerminalPunctuation(value: string): string {
+  return value.replace(/\s*[.!?]+\s*$/g, '').trim();
+}
+
+function normalizeWouldYouMindCommand(value: string): string {
+  const replacements: Array<[RegExp, string]> = [
+    [/^opening\s+up\b/i, 'open up'],
+    [/^opening\b/i, 'open'],
+    [/^launching\b/i, 'launch'],
+    [/^starting\b/i, 'start'],
+    [/^focusing\b/i, 'focus'],
+    [/^activating\b/i, 'activate'],
+    [/^switching\s+over\s+to\b/i, 'switch over to'],
+    [/^switching\s+to\b/i, 'switch to'],
+    [/^bringing\b/i, 'bring'],
+    [/^creating\b/i, 'create'],
+    [/^making\b/i, 'make'],
+  ];
+  let normalized = value;
+  for (const [pattern, replacement] of replacements) {
+    if (pattern.test(normalized)) {
+      normalized = normalized.replace(pattern, replacement);
+      break;
+    }
+  }
+  return normalized
+    .replace(/\b(and|then)\s+opening\b/gi, '$1 open')
+    .replace(/\b(and|then)\s+launching\b/gi, '$1 launch')
+    .replace(/\b(and|then)\s+starting\b/gi, '$1 start')
+    .replace(/\b(and|then)\s+creating\b/gi, '$1 create')
+    .replace(/\b(and|then)\s+making\b/gi, '$1 make');
+}
+
 /**
- * Remove only the bounded courtesy envelope accepted for direct desktop
- * commands. This is shared by strict app lifecycle routing and compiler-owned
- * exact programs so common phrasing cannot drift between preflight and
- * dispatch. Questions asking what the user should do are deliberately not
- * commands.
+ * Separate the semantic command from harmless conversational wrapping.
+ *
+ * This intentionally is not a general natural-language parser. It accepts a
+ * closed set of greetings, request courtesies, scope limiters, soft urgency,
+ * and desktop-scope phrases. Material words remain in `command`, where the
+ * exact lifecycle/program grammar rejects them or routes them to the normal
+ * model-guided workflow.
+ */
+export function parseDirectDesktopCommandEnvelope(task: string): DirectDesktopCommandEnvelope | null {
+  let text = compactWhitespace(task);
+  if (!text || text.length > DIRECT_DESKTOP_COMMAND_MAX_LENGTH) return null;
+
+  const modifiers: DirectDesktopCommandModifier[] = [];
+  const greeting = text.match(/^(?:hey|hi|hello)(?:\s+there)?\s*[,!]\s*([\s\S]+)$/i);
+  if (greeting?.[1]) {
+    text = greeting[1].trim();
+    addDirectDesktopModifier(modifiers, 'greeting');
+  }
+
+  const discourseMarker = text.match(/^(?:ok(?:ay)?|alright|actually)\s*,\s*([\s\S]+)$/i);
+  if (discourseMarker?.[1]) {
+    text = discourseMarker[1].trim();
+    addDirectDesktopModifier(modifiers, 'discourse_marker');
+  }
+
+  // Questions asking what the user should do are guidance, not execution
+  // authority, even when wrapped in a greeting or politeness.
+  if (/^(?:should|would|could|can|may|might|will|do)\s+i\b/i.test(text)) return null;
+
+  let leadingCourtesy = text.match(/^(?:please|kindly)\s*,?\s*([\s\S]+)$/i);
+  while (leadingCourtesy?.[1]) {
+    text = leadingCourtesy[1].trim();
+    addDirectDesktopModifier(modifiers, 'request_courtesy');
+    leadingCourtesy = text.match(/^(?:please|kindly)\s*,?\s*([\s\S]+)$/i);
+  }
+
+  let normalizeMindGerund = false;
+  const mindRequest = text.match(/^(?:would|do)\s+you\s+mind\b\s*([\s\S]+)$/i);
+  const abilityRequest = text.match(/^(?:could|would)\s+you\s+be\s+able\s+to\s+([\s\S]+)$/i);
+  const modalRequest = text.match(/^(?:can|could|would|will)\s+you\b\s*([\s\S]+)$/i);
+  const personalRequest = text.match(
+    /^(?:i\s+(?:want|need|would\s+like)\s+you\s+to|i(?:'|’)d\s+like\s+you\s+to)\s+([\s\S]+)$/i,
+  );
+  if (mindRequest?.[1]) {
+    text = mindRequest[1].trim();
+    normalizeMindGerund = true;
+    addDirectDesktopModifier(modifiers, 'request_courtesy');
+  } else if (abilityRequest?.[1]) {
+    text = abilityRequest[1].trim();
+    addDirectDesktopModifier(modifiers, 'request_courtesy');
+  } else if (modalRequest?.[1]) {
+    text = modalRequest[1].trim();
+    addDirectDesktopModifier(modifiers, 'request_courtesy');
+  } else if (personalRequest?.[1]) {
+    text = personalRequest[1].trim();
+    addDirectDesktopModifier(modifiers, 'request_courtesy');
+  }
+
+  for (let index = 0; index < DIRECT_DESKTOP_MODIFIER_LIMIT; index += 1) {
+    const goAhead = text.match(/^go\s+ahead\s+and\s+([\s\S]+)$/i);
+    if (goAhead?.[1]) {
+      text = goAhead[1].trim();
+      addDirectDesktopModifier(modifiers, 'scope_limiter');
+      continue;
+    }
+    const favor = text.match(/^do\s+me\s+a\s+favou?r\s+and\s+([\s\S]+)$/i);
+    if (favor?.[1]) {
+      text = favor[1].trim();
+      addDirectDesktopModifier(modifiers, 'request_courtesy');
+      continue;
+    }
+    const scoped = text.match(/^(?:please|kindly|just|only|simply|quickly|now)\s*,?\s+([\s\S]+)$/i);
+    if (scoped?.[1]) {
+      text = scoped[1].trim();
+      addDirectDesktopModifier(
+        modifiers,
+        /^(?:please|kindly)\b/i.test(scoped[0]) ? 'request_courtesy' : 'scope_limiter',
+      );
+      continue;
+    }
+    // Tentative adverbs are harmless only inside an explicit request frame
+    // ("could you maybe open..."). A bare "maybe open..." stays conversational.
+    if (mindRequest || abilityRequest || modalRequest || personalRequest) {
+      const tentative = text.match(/^(?:maybe|possibly)\s+([\s\S]+)$/i);
+      if (tentative?.[1]) {
+        text = tentative[1].trim();
+        addDirectDesktopModifier(modifiers, 'request_courtesy');
+        continue;
+      }
+    }
+    break;
+  }
+
+  if (normalizeMindGerund) text = normalizeWouldYouMindCommand(text);
+  text = stripDirectDesktopTerminalPunctuation(text);
+  if (!text) return null;
+
+  const commandCandidates: string[] = [text];
+  let command = text;
+  for (let index = 0; index < DIRECT_DESKTOP_MODIFIER_LIMIT; index += 1) {
+    let stripped = false;
+    for (const suffix of DIRECT_DESKTOP_SUFFIX_MODIFIERS) {
+      const match = command.match(suffix.pattern);
+      if (!match || match.index === undefined) continue;
+      const next = command.slice(0, match.index).replace(/[\s,]+$/g, '').trim();
+      // Never consume the entire target (for example, an app genuinely named
+      // `Now`). At least an action token and target token must remain.
+      if (next.split(/\s+/).filter(Boolean).length < 2) continue;
+      command = stripDirectDesktopTerminalPunctuation(next);
+      addDirectDesktopModifier(modifiers, suffix.kind);
+      if (!commandCandidates.includes(command)) commandCandidates.push(command);
+      stripped = true;
+      break;
+    }
+    if (!stripped) break;
+  }
+
+  return Object.freeze({
+    command,
+    commandCandidates: Object.freeze(commandCandidates),
+    modifiers: Object.freeze([...modifiers]),
+  });
+}
+
+/**
+ * Return the normalized command shared by strict app lifecycle routing and
+ * compiler-owned exact programs. See `parseDirectDesktopCommandEnvelope` for
+ * the deliberately narrow language that may be ignored.
  */
 export function unwrapDirectDesktopCommand(task: string): string | null {
-  const text = compactWhitespace(task);
-  if (!text || /^(?:should|would|could|can|may|might|will|do)\s+i\b/i.test(text)) return null;
-  const match = text.match(
-    /^(?:please\s+)?(?:(?:(?:can|could|would|will)\s+you(?:\s+please)?(?:\s+to)?|i\s+(?:want|need|would\s+like)\s+you\s+to)\s+)?([\s\S]+)$/i,
-  );
-  if (!match?.[1]) return null;
-  const command = match[1]
-    .replace(/\s*,?\s*please\s*[.!?]*$/i, '')
-    .replace(/[.!?]+$/g, '')
-    .trim();
-  return command || null;
+  return parseDirectDesktopCommandEnvelope(task)?.command || null;
 }
 
 function exactlyNamedKnownApp(candidate: string) {
@@ -403,22 +612,28 @@ function exactlyNamedKnownApp(candidate: string) {
     : null;
 }
 
-function extractNamedAppLifecycleCommand(task: string): {
+function extractNamedAppLifecycleCommandText(
+  command: string,
+  normalizeTrailingOpenParticle = false,
+): {
   operation: StrictNamedAppLifecycleIntent['operation'];
   rawCandidate: string;
 } | null {
-  const command = unwrapDirectDesktopCommand(task);
   if (!command) return null;
   const direct = command.match(
     /^(open(?:\s+up)?|launch|start|focus|activate|switch(?:\s+over)?\s+to)\s+(.+)$/i,
   );
   if (direct) {
     const verb = String(direct[1] || '');
+    const rawCandidate = String(direct[2] || '');
+    const normalizedCandidate = normalizeTrailingOpenParticle && /^open$/i.test(verb)
+      ? rawCandidate.replace(/\s+up$/i, '').trim() || rawCandidate
+      : rawCandidate;
     return {
       operation: /^(?:focus|activate|switch(?:\s+over)?\s+to)$/i.test(verb)
         ? 'focus'
         : 'open_or_launch',
-      rawCandidate: direct[2] || '',
+      rawCandidate: normalizedCandidate,
     };
   }
   const bringAfter = command.match(
@@ -429,9 +644,48 @@ function extractNamedAppLifecycleCommand(task: string): {
   return rawCandidate ? { operation: 'focus', rawCandidate } : null;
 }
 
+function normalizeLifecycleAppCandidate(rawCandidate: string): string {
+  return compactWhitespace(rawCandidate)
+    .replace(/^[\s"'`]+|[\s"'`]+$/g, '')
+    .replace(/^(?:the|a|an)\s+/i, '')
+    .replace(/\s+(?:app|application|program)$/i, '')
+    .trim();
+}
+
+function isExactLifecycleAppIdentity(
+  rawCandidate: string,
+  options: StrictNamedAppLifecycleParseOptions,
+): boolean {
+  const candidate = normalizeLifecycleAppCandidate(rawCandidate);
+  if (!candidate || /^(?:task manager)$/i.test(candidate)) return false;
+  return Boolean(exactlyNamedKnownApp(candidate) || exactObservedAppName(candidate, options));
+}
+
+function extractNamedAppLifecycleCommand(
+  task: string,
+  options: StrictNamedAppLifecycleParseOptions = {},
+): {
+  operation: StrictNamedAppLifecycleIntent['operation'];
+  rawCandidate: string;
+} | null {
+  const envelope = parseDirectDesktopCommandEnvelope(task);
+  if (!envelope) return null;
+
+  // Prefer the longest exact catalog/observed identity before removing a
+  // modifier-looking suffix. This keeps a real installed `Acme Now` target
+  // intact while still normalizing `Open Photoshop right now`.
+  for (const command of envelope.commandCandidates) {
+    const extracted = extractNamedAppLifecycleCommandText(command);
+    if (extracted && isExactLifecycleAppIdentity(extracted.rawCandidate, options)) return extracted;
+  }
+  return extractNamedAppLifecycleCommandText(envelope.command, true);
+}
+
 function hasLifecycleFollowUpSyntax(candidate: string): boolean {
   return /[,;:]/.test(candidate)
-    || /\b(?:and|or|then|also|but|because|while|after|before|once|to)\b/i.test(candidate);
+    || /\b(?:and|or|then|also|but|because|while|after|before|once|to|for|if|unless|until|without|using|with|via|in|on|at)\b/i.test(candidate)
+    || /\b(?:again|today|later|tomorrow|tonight|next\s+(?:hour|day|week|month)|this\s+(?:morning|afternoon|evening|weekend))\b/i.test(candidate)
+    || /\bat\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\b/i.test(candidate);
 }
 
 export function hasStrictNamedAppLifecycleCommandShape(task: string): boolean {
@@ -449,15 +703,11 @@ export function parseStrictNamedAppLifecycleIntent(
   task: string,
   options: StrictNamedAppLifecycleParseOptions = {},
 ): StrictNamedAppLifecycleIntent | null {
-  const extracted = extractNamedAppLifecycleCommand(task);
+  const extracted = extractNamedAppLifecycleCommand(task, options);
   if (!extracted?.rawCandidate) return null;
   const { operation, rawCandidate } = extracted;
 
-  const appName = compactWhitespace(rawCandidate)
-    .replace(/^[\s"'`]+|[\s"'`]+$/g, '')
-    .replace(/^(?:the|a|an)\s+/i, '')
-    .replace(/\s+(?:app|application|program)$/i, '')
-    .trim();
+  const appName = normalizeLifecycleAppCandidate(rawCandidate);
   if (!appName) return null;
   const hasExplicitAppSuffix = /\s+(?:app|application|program)\s*$/i.test(compactWhitespace(rawCandidate));
 
@@ -465,8 +715,10 @@ export function parseStrictNamedAppLifecycleIntent(
   // containing clause syntax are follow-up instructions, never part of this
   // no-model lifecycle lane.
   const exactKnownApp = exactlyNamedKnownApp(appName);
+  const observedAppName = exactKnownApp ? null : exactObservedAppName(appName, options);
   if (
     !exactKnownApp
+    && !observedAppName
     && (
       hasLifecycleFollowUpSyntax(appName)
     )
@@ -475,7 +727,6 @@ export function parseStrictNamedAppLifecycleIntent(
   // Keep the existing ambiguous OS noun suppression even if a noisy process
   // inventory happens to contain a matching label.
   if (!exactKnownApp && /^(?:task manager)$/i.test(appName)) return null;
-  const observedAppName = exactKnownApp ? null : exactObservedAppName(appName, options);
   const looksProductNamed = appName
     .split(/\s+/)
     .every((word) => /^[A-Z0-9]/.test(word))

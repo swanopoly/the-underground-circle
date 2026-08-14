@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, Pressable, ScrollView, TextInput, Platform, Modal, Linking,
   useWindowDimensions,
@@ -19,16 +19,21 @@ import {
 } from '../../../../lib/connectionManager';
 import {
   ProviderKey, LLMProvider, PROVIDER_MODELS, PROVIDER_HELP,
-  storeApiKey, deleteApiKey, testApiKey, listApiKeys,
+  storeApiKeyExact, deleteApiKeyExact, testApiKeyExact,
 } from '../../../../lib/llmProviders';
 import { isStrictLocalAiModeEnabled, setStrictLocalAiModeEnabled, subscribeStrictLocalAiMode } from '../../../../lib/privacyMode';
 import { BudgetConfig } from '../../../../lib/budgetAlerts';
 import { IDLE_BEHAVIORS, IdleBehaviorConfig, IdleBehaviorDef } from '../../../../lib/idleBehaviors';
 import { supabase } from '../../../../lib/supabase';
-import { safeGetUser } from '../../../../lib/authSession';
+import {
+  checkFigmaOAuthStatus,
+  disconnectFigmaOAuth,
+  openOAuthPopup,
+  type FigmaOAuthConnectionStatus,
+} from '../../../../lib/oauthConnect';
 import { showConfirm } from '../../../../lib/alert';
 import {
-  CustomThemeRecord, saveCustomTheme, deleteCustomTheme,
+  CustomThemeRecord, saveCustomThemeExact, deleteCustomThemeExact,
   CUSTOM_THEME_PREFIX, customThemeToOfficeTheme,
 } from '../../../../services/customThemes';
 import {
@@ -139,6 +144,13 @@ export interface TelegramConfig {
   chatId: string;
 }
 
+export interface CustomizeExactAuthority {
+  readonly userId: string;
+  readonly circleId: string;
+  readonly accessToken: string;
+  readonly generation: number;
+}
+
 interface Props {
   visible: boolean;
   onClose: () => void;
@@ -178,6 +190,8 @@ interface Props {
   circleId?: string;
   // Owner gating
   userEmail?: string;
+  exactAuthority?: CustomizeExactAuthority | null;
+  isExactAuthorityCurrent?: (authority: CustomizeExactAuthority) => boolean;
 }
 
 type AddStep = 'list' | 'pick-provider' | 'form';
@@ -192,13 +206,15 @@ export default function CustomizePanel({
   budgetConfig, onBudgetConfigChange,
   idleConfig, onIdleConfigChange,
   customThemes = [], onCustomThemesRefresh, circleId,
-  userEmail,
+  userEmail, exactAuthority, isExactAuthorityCurrent,
 }: Props) {
   const { width: screenWidth } = useWindowDimensions();
   const isWide = screenWidth > 768;
   const isOwner = userEmail === OWNER_EMAIL;
   const [tab, setTab] = useState<Tab>('theme');
   const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.id || '');
+  const selectedAgentIdRef = useRef(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
 
   // Custom souls state
   const [customSouls, setCustomSouls] = useState<CustomSoul[]>([]);
@@ -224,6 +240,218 @@ export default function CustomizePanel({
   const [apiKeySaving, setApiKeySaving] = useState<Record<string, boolean>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [strictLocalAiMode, setStrictLocalAiMode] = useState<boolean>(isStrictLocalAiModeEnabled());
+  const [figmaStatus, setFigmaStatus] = useState<FigmaOAuthConnectionStatus>({
+    state: 'unavailable',
+    connected: false,
+    accountId: '',
+  });
+  const [figmaBusy, setFigmaBusy] = useState(false);
+  const [figmaStatusBusy, setFigmaStatusBusy] = useState(false);
+  const [figmaError, setFigmaError] = useState('');
+  const figmaStatusGeneration = useRef(0);
+  const figmaStatusInFlight = useRef<{
+    generation: number;
+    promise: Promise<FigmaOAuthConnectionStatus>;
+  } | null>(null);
+  const figmaOperationEpoch = useRef(0);
+  const figmaActiveOperation = useRef<number | null>(null);
+  const figmaOperationController = useRef<AbortController | null>(null);
+  const apiOperationControllers = useRef<Map<LLMProvider, AbortController>>(new Map());
+  const themeOperationController = useRef<AbortController | null>(null);
+
+  const captureCustomizeAuthority = useCallback((): CustomizeExactAuthority | null => {
+    if (!exactAuthority || !isExactAuthorityCurrent?.(exactAuthority)) return null;
+    return { ...exactAuthority };
+  }, [exactAuthority, isExactAuthorityCurrent]);
+
+  const customizeAuthorityIsCurrent = useCallback((authority: CustomizeExactAuthority): boolean => (
+    isExactAuthorityCurrent?.(authority) === true
+  ), [isExactAuthorityCurrent]);
+  const captureFigmaAuthority = captureCustomizeAuthority;
+  const figmaAuthorityIsCurrent = customizeAuthorityIsCurrent;
+
+  const refreshFigmaStatus = useCallback((): Promise<FigmaOAuthConnectionStatus> => {
+    const authority = captureFigmaAuthority();
+    if (!authority) {
+      const unavailable: FigmaOAuthConnectionStatus = {
+        state: 'unavailable', connected: false, accountId: '',
+      };
+      setFigmaStatus(unavailable);
+      setFigmaError('Your signed-in account changed. Reopen Customize and retry.');
+      return Promise.resolve(unavailable);
+    }
+    const generation = figmaStatusGeneration.current;
+    const existing = figmaStatusInFlight.current;
+    if (existing?.generation === generation) return existing.promise;
+
+    setFigmaStatusBusy(true);
+    let request!: Promise<FigmaOAuthConnectionStatus>;
+    request = checkFigmaOAuthStatus(authority.accessToken)
+      .then((status) => {
+        const current = figmaAuthorityIsCurrent(authority)
+          && generation === figmaStatusGeneration.current;
+        if (current) {
+          setFigmaStatus(status);
+          setFigmaError(status.state === 'unavailable'
+            ? 'Figma connection status is unavailable. Refresh status before connecting or disconnecting.'
+            : '');
+        }
+        if (current) return status;
+        const unavailable: FigmaOAuthConnectionStatus = {
+          state: 'unavailable', connected: false, accountId: '',
+        };
+        return unavailable;
+      })
+      .finally(() => {
+        if (figmaStatusInFlight.current?.promise === request) {
+          figmaStatusInFlight.current = null;
+        }
+        if (figmaAuthorityIsCurrent(authority) && generation === figmaStatusGeneration.current) {
+          setFigmaStatusBusy(false);
+        }
+      });
+    figmaStatusInFlight.current = { generation, promise: request };
+    return request;
+  }, [captureFigmaAuthority, figmaAuthorityIsCurrent]);
+
+  useEffect(() => {
+    if (!visible || tab !== 'connections') return undefined;
+    refreshFigmaStatus().catch(() => {});
+    return () => {
+      figmaStatusGeneration.current += 1;
+      figmaStatusInFlight.current = null;
+      figmaOperationEpoch.current += 1;
+      figmaActiveOperation.current = null;
+      figmaOperationController.current?.abort();
+      figmaOperationController.current = null;
+      setFigmaStatusBusy(false);
+      setFigmaBusy(false);
+    };
+  }, [refreshFigmaStatus, tab, visible]);
+
+  const handleFigmaConnect = async () => {
+    if (
+      figmaActiveOperation.current !== null
+      || figmaStatusInFlight.current
+      || figmaBusy
+      || figmaStatusBusy
+      || figmaStatus.state === 'unavailable'
+    ) return;
+    const authority = captureFigmaAuthority();
+    if (!authority) return;
+    const operation = ++figmaOperationEpoch.current;
+    figmaActiveOperation.current = operation;
+    const generation = ++figmaStatusGeneration.current;
+    figmaStatusInFlight.current = null;
+    setFigmaStatusBusy(false);
+    setFigmaBusy(true);
+    setFigmaError('');
+    try {
+      // Open synchronously on the user gesture; the helper refreshes auth
+      // inside the already-open blank window so popup blocking stays unlikely.
+      const result = await openOAuthPopup(
+        'figma',
+        'file_content:read',
+        authority.accessToken,
+        () => figmaAuthorityIsCurrent(authority),
+      );
+      if (
+        !figmaAuthorityIsCurrent(authority)
+        || operation !== figmaActiveOperation.current
+        || generation !== figmaStatusGeneration.current
+      ) return;
+      if (!result.success) {
+        setFigmaError(result.error || 'Figma did not complete the connection.');
+        return;
+      }
+      const status = await refreshFigmaStatus();
+      if (generation === figmaStatusGeneration.current && status.state === 'unavailable') {
+        setFigmaError('Figma finished OAuth, but its connection status could not be confirmed. Refresh status before continuing.');
+      }
+    } finally {
+      if (operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+        setFigmaBusy(false);
+      }
+    }
+  };
+
+  const handleFigmaDisconnect = async () => {
+    if (
+      figmaActiveOperation.current !== null
+      || figmaStatusInFlight.current
+      || figmaBusy
+      || figmaStatusBusy
+      || !figmaStatus.connected
+    ) return;
+    const authority = captureFigmaAuthority();
+    if (!authority) return;
+    const operation = ++figmaOperationEpoch.current;
+    figmaActiveOperation.current = operation;
+    const confirmed = await showConfirm({
+      title: 'Disconnect your Figma account?',
+      message: 'Chat will stop reading bounded private Figma file structure and layer content. Saved Office Figma links are not deleted.',
+      confirmLabel: 'Disconnect',
+      cancelLabel: 'Keep connected',
+      destructive: true,
+    });
+    if (!confirmed) {
+      if (operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+      }
+      return;
+    }
+    if (
+      !figmaAuthorityIsCurrent(authority)
+      || operation !== figmaActiveOperation.current
+      || figmaStatusInFlight.current
+      || figmaBusy
+      || figmaStatusBusy
+      || !figmaStatus.connected
+    ) {
+      if (operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+      }
+      return;
+    }
+    const generation = ++figmaStatusGeneration.current;
+    figmaStatusInFlight.current = null;
+    setFigmaStatusBusy(false);
+    setFigmaBusy(true);
+    setFigmaError('');
+    figmaOperationController.current?.abort();
+    const controller = new AbortController();
+    figmaOperationController.current = controller;
+    try {
+      const result = await disconnectFigmaOAuth(
+        authority.accessToken,
+        () => figmaAuthorityIsCurrent(authority)
+          && operation === figmaActiveOperation.current
+          && generation === figmaStatusGeneration.current,
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted
+        || !figmaAuthorityIsCurrent(authority)
+        || operation !== figmaActiveOperation.current
+        || generation !== figmaStatusGeneration.current
+      ) return;
+      if (result.outcome !== 'disconnected') {
+        setFigmaStatus({ state: 'unavailable', connected: false, accountId: '' });
+        setFigmaError('The disconnect result is unknown. Refresh Figma status before trying another action.');
+        return;
+      }
+      setFigmaStatus({ state: 'disconnected', connected: false, accountId: '' });
+    } finally {
+      if (figmaOperationController.current === controller) {
+        figmaOperationController.current = null;
+      }
+      if (figmaAuthorityIsCurrent(authority) && operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+        setFigmaBusy(false);
+      }
+    }
+  };
 
   useEffect(() => {
     setStrictLocalAiMode(isStrictLocalAiModeEnabled());
@@ -245,22 +473,72 @@ export default function CustomizePanel({
   const [agentDbId, setAgentDbId] = useState<string | null>(null);
   const [spiritLoaded, setSpiritLoaded] = useState<string | null>(null);
 
+  // Plaintext keys/tokens and private account state must not survive a modal
+  // close, unmount, bearer refresh, account switch, or circle switch.
+  useEffect(() => {
+    figmaOperationController.current?.abort();
+    figmaOperationController.current = null;
+    for (const controller of apiOperationControllers.current.values()) controller.abort();
+    apiOperationControllers.current.clear();
+    themeOperationController.current?.abort();
+    themeOperationController.current = null;
+    setApiKeyInputs({});
+    setApiKeyEndpoints({});
+    setApiKeyTesting({});
+    setApiKeySaving({});
+    setApiKeyStatus({});
+    setNewToken('');
+    setShowToken(false);
+    setVisibleTokenIds(new Set());
+    setCustomSouls([]);
+    setCustomSoulsLoaded(false);
+    setEditingSoul(null);
+    setSoulEditorMode('browse');
+    setPersonalityText('');
+    setPersonalitySaving(false);
+    setPersonalityLoaded(false);
+    setPersonalityStatus('');
+    setAgentDbId(null);
+    setAgentSpirit(null);
+    setSpiritLoaded(null);
+    return () => {
+      figmaOperationController.current?.abort();
+      figmaOperationController.current = null;
+      for (const controller of apiOperationControllers.current.values()) controller.abort();
+      apiOperationControllers.current.clear();
+      themeOperationController.current?.abort();
+      themeOperationController.current = null;
+      setApiKeyInputs({});
+      setApiKeyEndpoints({});
+      setNewToken('');
+    };
+  }, [
+    visible,
+    exactAuthority?.accessToken,
+    exactAuthority?.circleId,
+    exactAuthority?.generation,
+    exactAuthority?.userId,
+  ]);
+
   // Load spirit from DB when selected agent changes
   useEffect(() => {
     if (tab !== 'agents' || !circleId || !selectedAgentId) return;
     if (spiritLoaded === selectedAgentId) return;
-    const agentName = selectedAgent?.name;
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
+    const capturedAgentId = selectedAgentId;
+    const agentName = agents.find((agent) => agent.id === capturedAgentId)?.name;
     if (!agentName) return;
     (async () => {
-      const { value: user } = await safeGetUser();
-      if (!user) return;
       const { data } = await supabase
         .from('circle_office_agents')
         .select('id, spirit, spirit_emoji')
-        .eq('circle_id', circleId)
-        .eq('owner_id', user.id)
+        .eq('circle_id', authority.circleId)
+        .eq('owner_id', authority.userId)
         .ilike('name', agentName)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .maybeSingle();
+      if (!customizeAuthorityIsCurrent(authority) || selectedAgentIdRef.current !== capturedAgentId) return;
       if (data) {
         setAgentDbId(data.id);
         setAgentSpirit(data.spirit || null);
@@ -268,56 +546,78 @@ export default function CustomizePanel({
         setAgentDbId(null);
         setAgentSpirit(null);
       }
-      setSpiritLoaded(selectedAgentId);
+      setSpiritLoaded(capturedAgentId);
     })();
-  }, [tab, circleId, selectedAgentId, spiritLoaded]);
+  }, [
+    agents,
+    captureCustomizeAuthority,
+    circleId,
+    customizeAuthorityIsCurrent,
+    selectedAgentId,
+    spiritLoaded,
+    tab,
+  ]);
 
   // Load personality when agents tab is selected
   useEffect(() => {
     if (tab !== 'agents' || personalityLoaded || !circleId) return;
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
     (async () => {
-      const { value: user } = await safeGetUser();
-      if (!user) return;
       const { data } = await supabase
         .from('agent_personalities')
         .select('personality')
-        .eq('user_id', user.id)
-        .eq('circle_id', circleId)
+        .eq('user_id', authority.userId)
+        .eq('circle_id', authority.circleId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .maybeSingle();
+      if (!customizeAuthorityIsCurrent(authority)) return;
       if (data?.personality) setPersonalityText(data.personality);
       setPersonalityLoaded(true);
     })();
-  }, [tab, personalityLoaded, circleId]);
+  }, [
+    captureCustomizeAuthority,
+    circleId,
+    customizeAuthorityIsCurrent,
+    personalityLoaded,
+    tab,
+  ]);
 
   const handleSavePersonality = async () => {
-    if (!circleId) return;
+    const authority = captureCustomizeAuthority();
+    if (!authority || !circleId || authority.circleId !== circleId) return;
     setPersonalitySaving(true);
-    const { value: user } = await safeGetUser();
-    if (!user) { setPersonalitySaving(false); return; }
     const { error } = await supabase
       .from('agent_personalities')
       .upsert({
-        user_id: user.id,
-        circle_id: circleId,
+        user_id: authority.userId,
+        circle_id: authority.circleId,
         agent_name: 'default',
         personality: personalityText.trim(),
-      }, { onConflict: 'user_id,circle_id,agent_name' });
+      }, { onConflict: 'user_id,circle_id,agent_name' })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (!customizeAuthorityIsCurrent(authority)) return;
     setPersonalityStatus(error ? `Error: ${error.message}` : 'Personality saved!');
     setPersonalitySaving(false);
-    setTimeout(() => setPersonalityStatus(''), 3000);
+    setTimeout(() => {
+      if (customizeAuthorityIsCurrent(authority)) setPersonalityStatus('');
+    }, 3000);
   };
 
   // Load custom souls
   useEffect(() => {
     if (tab !== 'souls' || customSoulsLoaded || !circleId) return;
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
     (async () => {
-      const { value: user } = await safeGetUser();
-      if (!user) return;
       const { data } = await supabase
         .from('custom_souls')
         .select('*')
-        .eq('user_id', user.id)
+        .eq('user_id', authority.userId)
+        .eq('circle_id', authority.circleId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .order('created_at', { ascending: false });
+      if (!customizeAuthorityIsCurrent(authority)) return;
       if (data) {
         setCustomSouls(data.map((d: any) => ({
           id: d.id,
@@ -332,7 +632,13 @@ export default function CustomizePanel({
       }
       setCustomSoulsLoaded(true);
     })();
-  }, [tab, customSoulsLoaded, circleId]);
+  }, [
+    captureCustomizeAuthority,
+    circleId,
+    customSoulsLoaded,
+    customizeAuthorityIsCurrent,
+    tab,
+  ]);
 
   const handleDuplicateSoul = (tmpl: SoulTemplate) => {
     const newSoul: CustomSoul = {
@@ -364,13 +670,12 @@ export default function CustomizePanel({
   };
 
   const handleSaveCustomSoul = async () => {
-    if (!editingSoul || !circleId) return;
-    const { value: user } = await safeGetUser();
-    if (!user) return;
+    const authority = captureCustomizeAuthority();
+    if (!editingSoul || !circleId || !authority || authority.circleId !== circleId) return;
 
     const payload = {
-      user_id: user.id,
-      circle_id: circleId,
+      user_id: authority.userId,
+      circle_id: authority.circleId,
       name: editingSoul.name,
       emoji: editingSoul.emoji,
       category: editingSoul.category,
@@ -382,20 +687,43 @@ export default function CustomizePanel({
 
     const isNew = editingSoul.id.startsWith('custom-') && !customSouls.find(s => s.id === editingSoul.id);
     if (isNew) {
-      const { data, error } = await supabase.from('custom_souls').insert(payload).select().single();
+      const { data, error } = await supabase
+        .from('custom_souls')
+        .insert(payload)
+        .select()
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+        .single();
+      if (!customizeAuthorityIsCurrent(authority)) return;
       if (!error && data) {
         setCustomSouls(prev => [{ ...editingSoul, id: data.id }, ...prev]);
       }
     } else {
-      await supabase.from('custom_souls').update(payload).eq('id', editingSoul.id);
+      const { error } = await supabase
+        .from('custom_souls')
+        .update(payload)
+        .eq('id', editingSoul.id)
+        .eq('user_id', authority.userId)
+        .eq('circle_id', authority.circleId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      if (error || !customizeAuthorityIsCurrent(authority)) return;
       setCustomSouls(prev => prev.map(s => s.id === editingSoul.id ? editingSoul : s));
     }
+    if (!customizeAuthorityIsCurrent(authority)) return;
     setSoulEditorMode('browse');
     setEditingSoul(null);
   };
 
   const handleDeleteCustomSoul = async (id: string) => {
-    await supabase.from('custom_souls').delete().eq('id', id);
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
+    const { error } = await supabase
+      .from('custom_souls')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', authority.userId)
+      .eq('circle_id', authority.circleId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error || !customizeAuthorityIsCurrent(authority)) return;
     setCustomSouls(prev => prev.filter(s => s.id !== id));
   };
 
@@ -412,29 +740,67 @@ export default function CustomizePanel({
   const getKeyForProvider = (p: LLMProvider) => providerKeys.find(k => k.provider === p && k.isActive);
 
   const handleSaveApiKey = async (provider: LLMProvider) => {
+    const authority = captureCustomizeAuthority();
     const key = apiKeyInputs[provider]?.trim();
-    if (!key) return;
+    if (!authority || !key) return;
+    apiOperationControllers.current.get(provider)?.abort();
+    const controller = new AbortController();
+    apiOperationControllers.current.set(provider, controller);
     setApiKeySaving(prev => ({ ...prev, [provider]: true }));
     setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: '' } }));
     const endpoint = apiKeyEndpoints[provider]?.trim() || undefined;
-    const result = await storeApiKey(provider, key, 'default', endpoint);
-    if (result.error) {
+    // The request owns the local copy now; keep plaintext out of component
+    // state while the network operation is in flight.
+    setApiKeyInputs(prev => ({ ...prev, [provider]: '' }));
+    const result = await storeApiKeyExact(
+      provider,
+      key,
+      'default',
+      endpoint,
+      authority,
+      customizeAuthorityIsCurrent,
+      { signal: controller.signal },
+    );
+    if (
+      controller.signal.aborted
+      || apiOperationControllers.current.get(provider) !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    apiOperationControllers.current.delete(provider);
+    if (!result.ok) {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: result.error! } }));
     } else {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: true, msg: 'Key saved!' } }));
-      setApiKeyInputs(prev => ({ ...prev, [provider]: '' }));
       onProviderKeysRefresh?.();
     }
     setApiKeySaving(prev => ({ ...prev, [provider]: false }));
   };
 
   const handleTestApiKey = async (provider: LLMProvider) => {
+    const authority = captureCustomizeAuthority();
     const key = apiKeyInputs[provider]?.trim();
-    if (!key) return;
+    if (!authority || !key) return;
+    apiOperationControllers.current.get(provider)?.abort();
+    const controller = new AbortController();
+    apiOperationControllers.current.set(provider, controller);
     setApiKeyTesting(prev => ({ ...prev, [provider]: true }));
     setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: '' } }));
     const endpoint = apiKeyEndpoints[provider]?.trim() || undefined;
-    const result = await testApiKey(provider, key, endpoint);
+    const result = await testApiKeyExact(
+      provider,
+      key,
+      endpoint,
+      undefined,
+      authority,
+      customizeAuthorityIsCurrent,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted
+      || apiOperationControllers.current.get(provider) !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    apiOperationControllers.current.delete(provider);
     setApiKeyStatus(prev => ({
       ...prev,
       [provider]: result.success ? { ok: true, msg: 'Key works!' } : { ok: false, msg: result.error || 'Test failed' },
@@ -443,10 +809,25 @@ export default function CustomizePanel({
   };
 
   const handleDeleteApiKey = async (provider: LLMProvider) => {
+    const authority = captureCustomizeAuthority();
     const existing = getKeyForProvider(provider);
-    if (!existing) return;
-    const result = await deleteApiKey(existing.id);
-    if (result.error) {
+    if (!authority || !existing) return;
+    apiOperationControllers.current.get(provider)?.abort();
+    const controller = new AbortController();
+    apiOperationControllers.current.set(provider, controller);
+    const result = await deleteApiKeyExact(
+      existing.id,
+      authority,
+      customizeAuthorityIsCurrent,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted
+      || apiOperationControllers.current.get(provider) !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    apiOperationControllers.current.delete(provider);
+    if (!result.ok) {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: result.error! } }));
     } else {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: true, msg: 'Key deleted' } }));
@@ -462,6 +843,17 @@ export default function CustomizePanel({
   const [editorColors, setEditorColors] = useState<Record<string, string>>({});
   const [editorShared, setEditorShared] = useState(false);
   const [editorSaving, setEditorSaving] = useState(false);
+
+  useEffect(() => {
+    setEditorSaving(false);
+    setShowThemeEditor(false);
+  }, [
+    visible,
+    exactAuthority?.accessToken,
+    exactAuthority?.circleId,
+    exactAuthority?.generation,
+    exactAuthority?.userId,
+  ]);
 
   const openNewThemeEditor = () => {
     setEditingThemeId(null);
@@ -482,24 +874,37 @@ export default function CustomizePanel({
   };
 
   const handleSaveCustomTheme = async () => {
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
+    themeOperationController.current?.abort();
+    const controller = new AbortController();
+    themeOperationController.current = controller;
     setEditorSaving(true);
-    const result = await saveCustomTheme({
+    const result = await saveCustomThemeExact({
       id: editingThemeId || undefined,
       name: editorName,
       environment_type: editorEnv,
       colors: editorColors,
-      circle_id: circleId || null,
+      circle_id: authority.circleId,
       is_shared: editorShared,
-    });
+    }, authority, customizeAuthorityIsCurrent, controller.signal);
+    if (
+      controller.signal.aborted
+      || themeOperationController.current !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    themeOperationController.current = null;
     setEditorSaving(false);
-    if (result) {
+    if (result.ok && result.theme) {
       setShowThemeEditor(false);
       onCustomThemesRefresh?.();
-      onThemeChange(CUSTOM_THEME_PREFIX + result.id);
+      onThemeChange(CUSTOM_THEME_PREFIX + result.theme.id);
     }
   };
 
   const handleDeleteCustomTheme = async (id: string) => {
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
     const confirmed = await showConfirm({
       title: 'Delete this theme?',
       message: 'Anyone in your circle who was using this theme will fall back to the Underground default on their next reload.',
@@ -507,9 +912,23 @@ export default function CustomizePanel({
       cancelLabel: 'Keep it',
       destructive: true,
     });
-    if (!confirmed) return;
-    const ok = await deleteCustomTheme(id);
-    if (ok) {
+    if (!confirmed || !customizeAuthorityIsCurrent(authority)) return;
+    themeOperationController.current?.abort();
+    const controller = new AbortController();
+    themeOperationController.current = controller;
+    const result = await deleteCustomThemeExact(
+      id,
+      authority,
+      customizeAuthorityIsCurrent,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted
+      || themeOperationController.current !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    themeOperationController.current = null;
+    if (result.ok) {
       onCustomThemesRefresh?.();
       if (currentTheme === CUSTOM_THEME_PREFIX + id) {
         onThemeChange('underground');
@@ -1122,10 +1541,10 @@ export default function CustomizePanel({
                     </View>
                     <Pressable
                       onPress={async () => {
-                        if (agentDbId) {
-                          await updateAgentSpirit(agentDbId, null, null);
-                          setAgentSpirit(null);
-                        }
+                        const authority = captureCustomizeAuthority();
+                        if (!agentDbId || !authority || authority.circleId !== circleId) return;
+                        const result = await updateAgentSpirit(agentDbId, null, null, authority);
+                        if (!result.error && customizeAuthorityIsCurrent(authority)) setAgentSpirit(null);
                       }}
                       style={[{ backgroundColor: '#1a1a1a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, borderWidth: 1, borderColor: '#333' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     >
@@ -1150,10 +1569,10 @@ export default function CustomizePanel({
                           <Pressable
                             key={spirit.id}
                             onPress={async () => {
-                              if (agentDbId) {
-                                await updateAgentSpirit(agentDbId, spirit.id, spirit.emoji);
-                                setAgentSpirit(spirit.id);
-                              }
+                              const authority = captureCustomizeAuthority();
+                              if (!agentDbId || !authority || authority.circleId !== circleId) return;
+                              const result = await updateAgentSpirit(agentDbId, spirit.id, spirit.emoji, authority);
+                              if (!result.error && customizeAuthorityIsCurrent(authority)) setAgentSpirit(spirit.id);
                             }}
                             style={[
                               styles.itemCard,
@@ -1860,44 +2279,75 @@ export default function CustomizePanel({
                 </>
               )}
 
-              {/* Figma Integration */}
-              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>FIGMA</Text>
+              {/* Personal Figma OAuth; separate from circle-scoped integration credentials. */}
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>MY FIGMA ACCOUNT</Text>
               <View style={styles.connCard}>
                 <View style={styles.connCardHeader}>
                   <Text style={styles.connProviderIcon}>🎨</Text>
                   <View style={styles.connCardInfo}>
-                    <Text style={styles.connCardName}>Figma</Text>
-                    <Text style={styles.connCardEndpoint}>Connect your Figma account via OAuth</Text>
+                    <Text style={styles.connCardName}>Figma OAuth</Text>
+                    <Text style={styles.connCardEndpoint}>
+                      {figmaStatus.state === 'connected'
+                        ? `Connected${figmaStatus.accountId ? ` · account ${figmaStatus.accountId}` : ''}`
+                        : figmaStatus.state === 'reconnect_required'
+                          ? 'Reconnect required'
+                          : figmaStatus.state === 'disconnected'
+                            ? 'Not connected'
+                            : 'Connection status unavailable'}
+                    </Text>
                   </View>
                 </View>
+                {figmaError ? (
+                  <View style={styles.connCardErrorBox}>
+                    <Text style={styles.connCardErrorIcon}>!</Text>
+                    <Text style={styles.connCardError}>{figmaError}</Text>
+                  </View>
+                ) : null}
                 <Pressable
-                  onPress={() => {
-                    // Start Figma OAuth flow. Mint the authorize URL server-side
-                    // (nonce state) so the JWT never lands in the URL/history (advisory #7).
-                    (async () => {
-                      const { data: auth } = await supabase.auth.getSession();
-                      const token = auth.session?.access_token || '';
-                      if (!token) return;
-                      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-                      try {
-                        const res = await fetch(`${supabaseUrl}/functions/v1/figma-oauth/authorize`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                        });
-                        const data = await res.json().catch(() => ({}));
-                        if (data?.url) Linking.openURL(data.url);
-                      } catch {}
-                    })();
-                  }}
-                  style={[styles.quickConnectBtn, { alignSelf: 'flex-start' }]}
+                  onPress={figmaStatus.connected ? handleFigmaDisconnect : handleFigmaConnect}
+                  disabled={figmaBusy || figmaStatusBusy || figmaStatus.state === 'unavailable'}
+                  accessibilityRole="button"
+                  accessibilityLabel={figmaStatus.state === 'unavailable'
+                    ? 'Refresh Figma connection status before continuing'
+                    : figmaStatus.connected
+                      ? 'Disconnect personal Figma account'
+                      : 'Connect personal Figma account'}
+                  style={[styles.quickConnectBtn, {
+                    alignSelf: 'flex-start',
+                    opacity: figmaBusy || figmaStatusBusy || figmaStatus.state === 'unavailable' ? 0.5 : 1,
+                  }]}
                 >
-                  <Text style={styles.quickConnectText}>CONNECT FIGMA</Text>
+                  <Text style={styles.quickConnectText}>
+                    {figmaStatusBusy
+                      ? 'CHECKING STATUS...'
+                      : figmaBusy
+                        ? 'WORKING...'
+                        : figmaStatus.state === 'unavailable'
+                          ? 'REFRESH STATUS TO CONTINUE'
+                          : figmaStatus.connected
+                            ? 'DISCONNECT FIGMA'
+                            : figmaStatus.state === 'reconnect_required'
+                              ? 'RECONNECT FIGMA'
+                              : 'CONNECT FIGMA'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => refreshFigmaStatus().catch(() => {})}
+                  disabled={figmaBusy || figmaStatusBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel="Refresh Figma connection status"
+                  style={[styles.quickConnectBtn, {
+                    alignSelf: 'flex-start',
+                    opacity: figmaBusy || figmaStatusBusy ? 0.5 : 1,
+                  }]}
+                >
+                  <Text style={styles.quickConnectText}>{figmaStatusBusy ? 'CHECKING...' : 'REFRESH STATUS'}</Text>
                 </Pressable>
                 <View style={styles.connectInfo}>
                   <Text style={styles.connectInfoTitle}>What you get</Text>
-                  <Text style={styles.connectInfoText}>🎨 Link Figma files to circle tasks</Text>
-                  <Text style={styles.connectInfoText}>🖼️ Auto-render design thumbnails</Text>
-                  <Text style={styles.connectInfoText}>🔗 OAuth — no manual API keys needed</Text>
+                  <Text style={styles.connectInfoText}>🎨 Read bounded file structure and layer content when you paste a Figma link in Chat</Text>
+                  <Text style={styles.connectInfoText}>🔒 OAuth tokens stay on the server and are never returned to the browser</Text>
+                  <Text style={styles.connectInfoText}>🏢 Circle-wide Figma credentials and Figma Board furniture links remain separate</Text>
                 </View>
               </View>
             </View>

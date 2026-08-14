@@ -7,8 +7,38 @@ import {
 } from './circleIntegrations';
 import { getBridgeUrl } from './bridgeEnvironment';
 import { isAgentBridgeCapabilityReady } from './computerCapabilityReadiness';
+import {
+  classifyDesktopBridgeHealth,
+  type DesktopBridgeHealthClassification,
+} from './desktopBridgeProtocol';
+import {
+  normalizeComputerCapabilityPreparedSnapshot,
+  resolveComputerBrowserCapabilityStatuses,
+  shouldProbeDesktopBridgeForCapabilityAudit,
+  type AuditComputerCapabilitiesOptions,
+  type ComputerCapabilityPreparedSnapshotSummary,
+} from './computerTaskCapabilitySnapshot';
 
 export { isAgentBridgeCapabilityReady } from './computerCapabilityReadiness';
+export {
+  COMPUTER_CAPABILITY_PREPARED_SNAPSHOT_MAX_AGE_MS,
+  buildComputerCapabilityPreparedSnapshot,
+  normalizeComputerCapabilityPreparedSnapshot,
+  resolveComputerBrowserCapabilityStatuses,
+  shouldProbeDesktopBridgeForCapabilityAudit,
+} from './computerTaskCapabilitySnapshot';
+export type {
+  AcceptedComputerCapabilityPreparedSnapshot,
+  AuditComputerCapabilitiesOptions,
+  BuildComputerCapabilityPreparedSnapshotInput,
+  ComputerBrowserCapabilityStatus,
+  ComputerBrowserCapabilityStatuses,
+  ComputerCapabilityPreparedSnapshot,
+  ComputerCapabilityPreparedSnapshotRejectionCode,
+  ComputerCapabilityPreparedSnapshotSummary,
+  NormalizeComputerCapabilityPreparedSnapshotOptions,
+  RejectedComputerCapabilityPreparedSnapshot,
+} from './computerTaskCapabilitySnapshot';
 
 export type ComputerCapabilityId =
   | 'browser_automation'
@@ -38,12 +68,21 @@ export interface ComputerCapabilityAudit {
   activeBridgeProviders: string[];
   activeMcpServerCount: number;
   activeMcpToolCount: number;
+  /** Additive exact-feature/source readiness. Broad capability findings keep
+   * ordinary advertised desktop tools compatible in non-current states. */
+  desktopBridgeReadiness?: DesktopBridgeHealthClassification;
+  /** Whether task-start capability evidence was accepted. This is deliberately
+   * value-free: it carries process/freshness identity, never browser content. */
+  preparedSnapshot: ComputerCapabilityPreparedSnapshotSummary;
 }
 
 type DesktopBridgeProbe = {
-  supported: boolean;
-  tools: string[];
+  readiness: DesktopBridgeHealthClassification;
 };
+
+function unavailableDesktopReadiness(): DesktopBridgeHealthClassification {
+  return classifyDesktopBridgeHealth(null);
+}
 
 function normalizeText(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase();
@@ -99,22 +138,24 @@ async function probeDesktopBridge(): Promise<DesktopBridgeProbe | null> {
   if (typeof fetch === 'undefined') return null;
   const base = getBridgeUrl(7778);
   if (!base) return null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   try {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), 500) : null;
+    timer = controller ? setTimeout(() => controller.abort(), 500) : null;
     const res = await fetch(`${base}/desktop/health`, {
       cache: 'no-store',
       signal: controller?.signal,
     });
-    if (timer) clearTimeout(timer);
     if (!res.ok) return null;
-    const json = (await res.json()) as { ok?: boolean; supported?: boolean; tools?: unknown };
-    if (!json?.supported) return null;
+    const json = await res.json() as unknown;
+    const readiness = classifyDesktopBridgeHealth(json);
     return {
-      supported: true,
-      tools: Array.isArray(json.tools) ? json.tools.map(String) : [],
+      readiness,
     };
   } catch { return null; }
+  finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function summarizeSources(parts: Array<string | null | undefined>): string[] {
@@ -126,19 +167,37 @@ function summarizeSources(parts: Array<string | null | undefined>): string[] {
   return Array.from(unique);
 }
 
-export async function auditComputerCapabilities(circleId: string): Promise<ComputerCapabilityAudit> {
+export async function auditComputerCapabilities(
+  circleId: string,
+  options: AuditComputerCapabilitiesOptions = {},
+): Promise<ComputerCapabilityAudit> {
   // UC-5 follow-up: the local desktop bridge IS an app-control
   // capability — the original audit only counted MCP tools +
   // integrations, so the agent got told "missing: app_tools" even when
   // /desktop/health was reporting launch/focus/type/keys/a11y_tree.
-  // Probing here (unauthenticated health endpoint) stays cheap and
-  // never blocks — a 500ms timeout falls through to "no bridge".
+  // Legacy callers still receive the bounded live probe. A caller that already
+  // prepared the bridge passes one immutable snapshot instead: its presence is
+  // authoritative, so rejected/stale evidence fails closed without a second
+  // probe racing the task-start observation.
+  const shouldProbeDesktopBridge = shouldProbeDesktopBridgeForCapabilityAudit(options);
+  const preparedSnapshotWasProvided = !shouldProbeDesktopBridge;
+  const preparedSnapshot = preparedSnapshotWasProvided
+    ? normalizeComputerCapabilityPreparedSnapshot(options.preparedSnapshot, {
+        expectedBridgeInstanceId: options.expectedBridgeInstanceId,
+        nowMs: options.nowMs,
+      })
+    : null;
+  const acceptedPreparedSnapshot = preparedSnapshot?.status === 'accepted'
+    ? preparedSnapshot
+    : null;
   const [connections, integrationProviders, integrationCapabilities, mcpServers, bridgeProbe] = await Promise.all([
     loadConnections().catch(() => [] as AgentConnection[]),
     getInstalledIntegrationProviders(circleId).catch(() => [] as CircleIntegrationProvider[]),
     getCircleIntegrationCapabilities(circleId).catch(() => [] as string[]),
     listMcpServers(circleId).catch(() => []),
-    probeDesktopBridge().catch(() => null),
+    shouldProbeDesktopBridge
+      ? probeDesktopBridge().catch(() => null)
+      : Promise.resolve(null),
   ]);
 
   const mcpTools = mcpServers.length > 0
@@ -148,8 +207,14 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
   const enabledConnections = connections.filter((conn) => conn.enabled);
   const filesystemTools = mcpTools.filter(isFilesystemTool);
   const appTools = mcpTools.filter(isDesktopOrAppTool);
-  const bridgeAlive = !!bridgeProbe?.supported;
-  const bridgeTools = new Set((bridgeProbe?.tools || []).map((tool) => tool.toLowerCase()));
+  const desktopBridgeReadiness = acceptedPreparedSnapshot?.desktopBridgeReadiness
+    || bridgeProbe?.readiness
+    || unavailableDesktopReadiness();
+  // A stale or capability-limited bridge can still serve every exact ordinary
+  // tool it advertises. Attachment-specific callers inspect the additive
+  // readiness object instead of downgrading all desktop work.
+  const bridgeAlive = desktopBridgeReadiness.genericToolsReady;
+  const bridgeTools = new Set(desktopBridgeReadiness.advertisedTools);
   const bridgeHasFileSearch = bridgeAlive && (bridgeTools.has('file_search') || bridgeTools.has('file_list'));
   const bridgeHasFileRead = bridgeAlive && (bridgeTools.has('file_read') || bridgeTools.has('file_stat'));
   const bridgeHasFileWrite = bridgeAlive && (
@@ -161,12 +226,26 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     || bridgeTools.has('file_mkdir')
   );
 
-  const browserAvailable =
-    hasCapability(integrationCapabilities, 'web_automation') ||
-    hasCapability(integrationCapabilities, 'remote_browser_sessions');
+  const remoteBrowserAutomationReady = hasCapability(integrationCapabilities, 'web_automation');
+  const remoteBrowserSessionsReady = hasCapability(integrationCapabilities, 'remote_browser_sessions');
+  const localBrowserReady = acceptedPreparedSnapshot?.localBrowser.ready === true;
+  const localBrowserContextOpen = localBrowserReady
+    && acceptedPreparedSnapshot?.localBrowser.contextOpen === true;
+  const browserStatuses = resolveComputerBrowserCapabilityStatuses({
+    remoteAutomationReady: remoteBrowserAutomationReady,
+    remoteSessionsReady: remoteBrowserSessionsReady,
+    localBrowserReady,
+    localBrowserContextOpen,
+  });
   const browserSources = summarizeSources([
-    browserAvailable ? 'circle integration: browser automation' : null,
+    remoteBrowserAutomationReady ? 'circle integration: browser automation' : null,
+    remoteBrowserSessionsReady ? 'circle integration: remote browser sessions' : null,
     integrationProviders.includes('browserbase') ? 'integration: Browserbase' : null,
+    localBrowserReady
+      ? localBrowserContextOpen
+        ? 'local browser bridge: Playwright ready with an active context'
+        : 'local browser bridge: Playwright ready'
+      : null,
   ]);
 
   // The live local bridge (claude-bridge.js on :7778) IS an agent bridge —
@@ -182,7 +261,11 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
   });
   const bridgeSources = summarizeSources([
     ...enabledConnections.map((conn) => `bridge: ${conn.provider}`),
-    bridgeAlive && enabledConnections.length === 0 ? 'desktop bridge: localhost:7778 (live health probe)' : null,
+    bridgeAlive && enabledConnections.length === 0
+      ? acceptedPreparedSnapshot
+        ? `desktop bridge: localhost:7778 (prepared snapshot ${acceptedPreparedSnapshot.bridgeInstanceId})`
+        : 'desktop bridge: localhost:7778 (live health probe)'
+      : null,
   ]);
   const fileSources = summarizeSources([
     bridgeHasFileSearch || bridgeHasFileRead || bridgeHasFileWrite
@@ -200,28 +283,43 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     appTools.length > 0 ? `mcp tools: ${appTools.length} app/desktop tool${appTools.length === 1 ? '' : 's'}` : null,
     integrationProviders.length > 0 ? `integrations: ${integrationProviders.length}` : null,
     enabledConnections.length > 0 ? `bridges: ${enabledConnections.length}` : null,
-    bridgeAlive ? 'desktop bridge: launch/focus/type/paste/keys/menu/mouse/a11y_tree' : null,
+    bridgeAlive ? `desktop bridge: ${desktopBridgeReadiness.advertisedTools.length} advertised tools` : null,
+    bridgeProbe || acceptedPreparedSnapshot ? `desktop bridge readiness: ${desktopBridgeReadiness.state}` : null,
   ]);
+
+  const bridgeReadinessNote = desktopBridgeReadiness.state === 'current'
+    ? ' Uploaded-file opening is current.'
+    : desktopBridgeReadiness.state === 'capability_missing'
+      ? ' Ordinary advertised tools remain available, but uploaded-file opening needs a supervisor restart and health recheck.'
+      : desktopBridgeReadiness.state === 'source_changed'
+        ? ' Ordinary advertised tools remain available; newer local source is ready for a user-owned supervisor restart.'
+        : desktopBridgeReadiness.state === 'restart_blocked'
+          ? ' Ordinary advertised tools remain available; restart is currently blocked or its safety evidence is incomplete.'
+          : '';
 
   const findings: ComputerCapabilityFinding[] = [
     {
       id: 'browser_automation',
       label: 'Browser automation',
-      status: browserAvailable ? 'ready' : 'missing',
-      detail: browserAvailable
-        ? 'The circle can launch browser/computer tasks through the existing computer-use flow.'
-        : 'No active browser automation integration is visible for this circle yet.',
+      status: browserStatuses.browserAutomation,
+      detail: localBrowserReady && !remoteBrowserAutomationReady && !remoteBrowserSessionsReady
+        ? 'The verified local Playwright bridge can launch browser tasks on this computer.'
+        : browserStatuses.browserAutomation === 'ready'
+          ? 'The circle can launch browser/computer tasks through the existing computer-use flow.'
+          : 'No active browser automation integration is visible for this circle yet.',
       sources: browserSources,
     },
     {
       id: 'browser_sessions',
-      label: 'Remote browser sessions',
-      status: hasCapability(integrationCapabilities, 'remote_browser_sessions') ? 'ready' : browserAvailable ? 'partial' : 'missing',
-      detail: hasCapability(integrationCapabilities, 'remote_browser_sessions')
+      label: 'Browser sessions',
+      status: browserStatuses.browserSessions,
+      detail: remoteBrowserSessionsReady
         ? 'Remote browser session infrastructure is installed.'
-        : browserAvailable
-          ? 'Browser automation exists, but durable session capability is not clearly exposed in the capability map.'
-          : 'No remote browser session provider is configured.',
+        : localBrowserContextOpen
+          ? 'The verified local Playwright bridge has an active browser context.'
+          : browserStatuses.browserSessions === 'partial'
+            ? 'Browser automation is ready, but no active or durable session context is currently verified.'
+            : 'No remote browser session provider is configured.',
       sources: browserSources,
     },
     {
@@ -273,7 +371,7 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
             ? 'partial'
             : 'missing',
       detail: bridgeAlive
-        ? 'Desktop bridge is live on localhost:7778 — launch/focus/type/paste/keys/menu/mouse/a11y_tree/click_element/set_element_value are all available.'
+        ? `Desktop bridge is live on localhost:7778 with ${desktopBridgeReadiness.advertisedTools.length} exact advertised tool${desktopBridgeReadiness.advertisedTools.length === 1 ? '' : 's'}.${bridgeReadinessNote}`
         : appTools.length > 0 || integrationProviders.length > 0
           ? 'The circle has app-level capability sources through MCP tools and/or installed integrations.'
           : enabledConnections.length > 0
@@ -301,7 +399,7 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
           ? 'partial'
           : 'missing',
       detail: bridgeAlive
-        ? 'The local desktop bridge exposes native launch/focus/type/paste/keys/menu actions, mouse movement/click/hold/release/drag/scroll, AX tree reads, semantic clicks, and direct AX field value setting — first-class native control on this machine.'
+        ? `The local desktop bridge exposes a supported native-control tool surface on this machine.${bridgeReadinessNote}`
         : appTools.length > 0 && appTools.some((tool) => toolMatches(tool, ['desktop', 'window', 'computer']))
           ? 'There are early signals of desktop-oriented tools, but native app control is not yet a mature first-class runtime.'
           : 'Native desktop control is not yet a real canonical capability in the app.',
@@ -317,6 +415,33 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     activeBridgeProviders: enabledConnections.map((conn) => conn.provider),
     activeMcpServerCount: mcpServers.length,
     activeMcpToolCount: mcpTools.length,
+    desktopBridgeReadiness,
+    preparedSnapshot: preparedSnapshotWasProvided
+      ? preparedSnapshot?.status === 'accepted'
+        ? {
+            status: 'accepted',
+            rejectionCode: null,
+            observedAt: preparedSnapshot.observedAt,
+            bridgeInstanceId: preparedSnapshot.bridgeInstanceId,
+            localBrowserReady: preparedSnapshot.localBrowser.ready,
+            localBrowserContextOpen: preparedSnapshot.localBrowser.contextOpen,
+          }
+        : {
+            status: 'rejected',
+            rejectionCode: preparedSnapshot?.rejectionCode || 'invalid_snapshot',
+            observedAt: preparedSnapshot?.observedAt || null,
+            bridgeInstanceId: preparedSnapshot?.bridgeInstanceId || null,
+            localBrowserReady: false,
+            localBrowserContextOpen: false,
+          }
+      : {
+          status: 'not_provided',
+          rejectionCode: null,
+          observedAt: null,
+          bridgeInstanceId: null,
+          localBrowserReady: false,
+          localBrowserContextOpen: false,
+        },
   };
 }
 

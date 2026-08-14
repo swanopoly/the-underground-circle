@@ -71,16 +71,25 @@ import { buildRepeatedFlowAutomationProposals } from '../../../lib/chatAutomatio
 import {
   buildMultiAgentDispatchPrompt,
   formatMultiAgentHelp,
-  formatMultiAgentRunSummary,
   formatMultiAgentStrategyLabel,
   parseMultiAgentOrchestrationRequest,
 } from '../../../lib/multiAgentDispatch';
 import {
+  buildConnectedAgentHandoffReceipt,
+  projectConnectedAgentHandoffSnapshot,
+  resolveExactOpenSwanConnection,
+  type ConnectedAgentExternalDispatchKind,
+  type ConnectedAgentHandoffReceipt,
+} from '../../../lib/connectedAgentDispatch';
+import {
   DEFAULT_CHAT_AGENT_TARGET_ID,
+  buildChatAgentAssignmentCommand,
   buildChatAgentSetupMessage,
   buildChatAgentTargets,
   formatChatAgentProviderLabel,
   isOpenSwanChatAgentTarget,
+  parseChatAgentAssignmentCommand,
+  resolveChatAgentAssignmentTarget,
   resolveChatAgentTarget,
   type ChatAgentTarget,
 } from '../../../lib/chatAgentTargets';
@@ -104,7 +113,14 @@ import RunTraceCard from './chat/RunTraceCard';
 import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
-import { createStagedFile, getSignedUrl, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
+import {
+  createStagedFile,
+  getSignedUrl,
+  linkAttachmentsToMessage,
+  revokeStagedPreviews,
+  uploadAttachment,
+  type StagedFile,
+} from '../../../lib/chatAttachments';
 import { soulKeyForProfile, resolveModelForProfile, explainAutoModelChoice, spiritIdForProfile, suggestAutoModelAlternative, suggestModelForManualPick } from '../../../lib/serviceProfileSouls';
 import BestOfNResultCard from '../../../components/BestOfNResultCard';
 import type { PersistedBestOfNRace } from '../../../lib/persistedChatMetadata';
@@ -121,11 +137,21 @@ import HandoffCard from '../../../components/agent/HandoffCard';
 import AgentModeSelector from '../../../components/agent/AgentModeSelector';
 import AddModelPanel from '../../../components/models/AddModelPanel';
 import type { ModelGroup } from '../../../lib/integrations/modelProviderRegistry';
+import { resolvePlainChatModelRoute } from '../../../lib/crossProviderRouter';
+import { resolveModelSelectionReadiness } from '../../../lib/modelCatalogReadinessCore';
 import { pickAttachments, ChatAttachment, getMediaTypeIcon, buildAttachmentPromptContext } from '../../../lib/chatMedia';
 import {
   formatVisualBriefsForConnectedAgent,
   type ChatVisualBriefArtifact,
 } from '../../../lib/chatVisualBriefCore';
+import {
+  assembleOpenSwanAttachmentTurnSources,
+  type OpenSwanAttachmentTurnSources,
+} from '../../../lib/openSwanAttachmentTurnSources';
+import {
+  claimOpenSwanDesktopAttachmentApprovalResumeLease,
+  issueOpenSwanDesktopAttachmentAuthority,
+} from '../../../lib/openSwanDesktopAttachmentAuthority';
 import { buildFigmaPromptFromReferences, resolveFigmaReferences, type FigmaReference } from '../../../lib/figmaBuilder';
 import {
   loadUserProfile, updateProfileFromMessage, updateProfileFromDeletion,
@@ -164,6 +190,19 @@ import ChatCostFooter from '../../../components/ChatCostFooter';
 import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
 import WebSearchStatusChip from '../../../components/WebSearchStatusChip';
 import RunApprovalBanner from '../../../components/RunApprovalBanner';
+import type { AgentRunApproval } from '../../../services/runApprovalsService';
+import {
+  buildOpenSwanApprovalResumeBindingV1,
+  OPEN_SWAN_APPROVAL_RESUME_MAX_ITEMS,
+  projectOpenSwanApprovalResumeItemV1,
+  readOpenSwanApprovalAuditToolName,
+  type OpenSwanApprovalResumeBindingV1,
+  type OpenSwanApprovalResumeItemV1,
+} from '../../../lib/openswanToolApprovals';
+import {
+  deleteOpenSwanApprovalResumeOutboxCalls,
+  restoreOpenSwanApprovalResumeOutboxIntoProcessAuthority,
+} from '../../../lib/openSwanApprovalResumeOutbox';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
 import ChatAttentionStrip from '../../../components/ChatAttentionStrip';
 import ToolCallCheckpointStrip from '../../../components/ToolCallCheckpointStrip';
@@ -246,16 +285,28 @@ import {
   loadChatAgentName,
   loadLastThreadBuildArtifact,
   MAIN_CHAT_AGENT_NAME,
+  projectPersistedOpenSwanTerminal,
+  projectPersistedOpenSwanResumeLocator,
+  projectPersistedOpenSwanMultiActionCompletion,
   readPersistedChatBotMetadata,
   saveChatAgentAvatar,
   saveChatAgentName,
   saveLastThreadBuildArtifact,
   type PersistedChatBotMetadata,
   type PersistedChatRecoveryReliabilitySummary,
+  type PersistedOpenSwanMultiActionCompletion,
 } from '../../../lib/chatAgentIdentity';
+import {
+  OpenSwanResumeUnavailableError,
+  createOpenSwanResumeClaimGate,
+  resolveOpenSwanResumeLocator,
+  type OpenSwanResumeLocator,
+} from '../../../lib/toolLoopResume';
+import { buildOpenSwanTranscriptKey, loadOpenSwanTranscript } from '../../../lib/openswanTranscripts';
 import {
   deriveBrowserPlanChatOutcomeSignal,
   deriveComputerTaskChatOutcomeSignal,
+  deriveOpenSwanTerminalChatOutcomeSignal,
   deriveOutcomeVerdict,
   deriveStopMessageChatOutcomeSignal,
   mapReactionToSignal,
@@ -266,6 +317,7 @@ import {
   deriveCrossSurfaceFollowups,
   type CrossSurfaceFollowup,
 } from '../../../lib/crossSurfaceFollowupCore';
+import { encodeEntityHandle, type EntityHandle } from '../../../lib/entityHandleCore';
 // reference-nav-chips: type-only — the resolver itself is dynamic-imported in
 // addUserMessage so the send path stays lean.
 import type { SurfaceReferenceMatch } from '../../../lib/crossSurfaceReferenceResolverCore';
@@ -273,7 +325,14 @@ import { extractGitReferences } from '../../../lib/taskPRLinkageCore';
 import {
   buildChatInfluenceReferences,
 } from '../../../lib/chatAgentService';
-import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
+import {
+  bindChatAttachmentActionContract,
+  bindChatApprovalResumeActionContract,
+  buildChatAutomationPlan,
+  formatChatBoundedMultiActionPromptBlock,
+  type ChatAutomationPlan,
+  type ChatBoundedMultiActionLedger,
+} from '../../../lib/chatAutomationPlanner';
 import { compileComputerSequenceProgram } from '../../../lib/computerSequenceProgramCore';
 import { UNIFIED_CONVERSATIONAL_INTENT_TYPES } from '../../../lib/chatConversationalCutoverParity';
 import { buildChatAutomationPlanPreview, type ChatAutomationPlanPreview } from '../../../lib/chatAutomationPlanPreview';
@@ -302,6 +361,7 @@ import {
 } from '../../../lib/chatComputerOutcomeUx';
 import { buildChatComputerRequestUserNotice } from '../../../lib/chatComputerRequestUx';
 import {
+  buildChatComputerRequestedActionExecutionGate,
   buildChatComputerUsePolicyInputs,
   isCredentialedWebsiteAdminRoute,
 } from '../../../lib/chatComputerRequestRouter';
@@ -419,6 +479,16 @@ import { getSpiritById } from '../../../lib/agentSpirits';
 import { getAgentIdentityKey, loadAgentIdentities, type TerminalAgentOfficeConfig } from '../../../lib/agentIdentity';
 import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
 import { loadConnections } from '../../../lib/connectionManager';
+import {
+  getAutoConnectConnections,
+  getAutoConnectSessionFingerprints,
+  getAutoConnectSessions,
+} from '../../../lib/agentAutoConnectState';
+import {
+  buildOfficeSessionSnapshot,
+  readOfficeAgentSessionBinding,
+  resolveOfficeAgentSessionBinding,
+} from '../../../lib/officeAgentSessionBinding';
 import { DEFAULT_AGENT, sessionsToAgents, type OfficeAgent } from '../../../lib/officeAgents';
 import { loadCircleOfficeAgents, type CircleOfficeAgent } from '../../../lib/circleOffice';
 import { listSessions, sendSessionMessage, spawnSubAgent, type OpenSwanConfig } from '../../../lib/openswanService';
@@ -434,7 +504,11 @@ import {
 } from '../../../lib/chatSessionProfile';
 import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
 
-import { runOpenSwanSessionTurn, type OpenSwanDelegatedAgentDescriptor } from '../../../lib/openswanSessionRuntime';
+import {
+  runOpenSwanSessionTurn,
+  type OpenSwanDelegatedAgentDescriptor,
+  type OpenSwanTerminalReceipt,
+} from '../../../lib/openswanSessionRuntime';
 import type { OpenSwanTaskPlan } from '../../../lib/openswanTaskPlanner';
 import type { OpenSwanToolEvent } from '../../../lib/openswanToolRuntime';
 import { getSelectableChatModes } from '../../../lib/openswanModePolicy';
@@ -448,12 +522,29 @@ import {
   getDesktopBridgeHealth,
   inferLocalFileGrantRootsForTask,
   requestLocalFileSessionGrant,
+  isDesktopAttachmentOpenCapability,
+  revokeDesktopAttachmentOpenCapability,
   stageAttachmentForDesktop,
   stageAttachmentManifestForDesktop,
+  stageDesktopAttachmentOpenCapability,
+  type DesktopAttachmentOpenCapability,
+  type DesktopAttachmentOpenScope,
 } from '../../../lib/desktopBridge';
-import { addArtifact, appendRunBrowserPlanEvent, appendRunToolEvent, mergeRunMetadata } from '../../../lib/agentRunSystem';
+import {
+  addArtifact,
+  appendRunBrowserPlanEvent,
+  appendRunToolEvent,
+  getRun,
+  getRunArtifactsByIds,
+  mergeRunMetadata,
+  recordConnectedAgentAcceptedRun,
+  verifyAgentRunArtifactContentDigest,
+} from '../../../lib/agentRunSystem';
 import { getMainChatSessionActions } from '../../../lib/sessionPromptCatalog';
-import { auditComputerCapabilities } from '../../../lib/computerCapabilityRegistry';
+import {
+  auditComputerCapabilities,
+  buildComputerCapabilityPreparedSnapshot,
+} from '../../../lib/computerCapabilityRegistry';
 import {
   buildComputerTaskLocalFileAccessBlockedPresentation,
   buildComputerTaskSurfacePreparationBlockedPresentation,
@@ -481,18 +572,17 @@ import {
   appendCustomerSafeRecoveryMessage,
   isSupportOnlyComputerTaskWarning,
   sanitizeVisibleComputerTaskMessage,
-  getRecoveryOptionActorLabel,
   getRecoveryOptionAccent,
   formatRecoverySurfaceKind,
   formatRecoveryFailureArea,
   formatRecoveryEvidenceLabel,
   formatHandoffSurfaceRouteLabel,
   buildComputerTaskSummaryLine,
+  buildChatMinimalRecoveryPresentation,
   getRecoveryReliabilityStatus,
   buildRecoveryReliabilityCard,
   buildChatAppChoiceCard,
   stripChatAppChoiceLine,
-  getRecoveryOptionPolicyBadges,
   getRecoveryReliabilityFromArchive,
 } from '../../../lib/chatRecoveryDisplayCore';
 import {
@@ -501,8 +591,11 @@ import {
 } from '../../../lib/chatRecoveryActionIntent';
 import {
   autoConnectDesktopBridge,
+  buildDesktopBridgeReadinessRecoveryPayload,
   isDesktopBridgeRecoverySelection,
 } from '../../../lib/desktopBridgeAutoConnect';
+import type { DesktopBridgeRecoveryPayload } from '../../../lib/desktopBridgeRecovery';
+import { classifyDesktopBridgeHealth } from '../../../lib/desktopBridgeProtocol';
 import type { ComputerTaskComplexityPlan } from '../../../lib/computerTaskComplexityPlan';
 import { prepareComputerTaskExecution, type ComputerTaskExecutionEnvelope } from '../../../lib/computerTaskExecution';
 import type { ComputerTaskGrantId } from '../../../lib/computerTaskGrants';
@@ -535,9 +628,12 @@ import {
   buildDesktopAttachmentComputerTask,
   buildDesktopAttachmentPackageManifest,
   buildDesktopAttachmentStageGroupName,
+  classifyDesktopAttachmentRequest,
   inferDesktopAppForAttachment,
+  resolveExplicitDesktopAttachmentApp,
   shouldRouteAttachedFilesToDesktop,
   type ChatDesktopAttachmentCandidate,
+  type DesktopAttachmentRequestClassification,
   type StagedDesktopAttachment,
 } from '../../../lib/chatDesktopAttachmentRouting';
 import {
@@ -665,6 +761,8 @@ type AssignableAgent = {
   name: string;
   status: string;
   provider: string;
+  ownerId?: string | null;
+  isOwn?: boolean;
   color?: string | null;
   owner_display_name?: string | null;
   current_task?: string | null;
@@ -672,6 +770,7 @@ type AssignableAgent = {
   spirit?: string | null;
   model?: string | null;
   sessionKey?: string | null;
+  connectionId?: string | null;
   gatewayUrl?: string | null;
   source?: 'db' | 'openswan-session' | 'bridge-session' | 'default';
   terminalConfig?: TerminalAgentOfficeConfig | null;
@@ -705,13 +804,18 @@ function toAssignableDbAgent(agent: CircleOfficeAgent): AssignableAgent {
     name: agent.name,
     status: agent.status || 'idle',
     provider: agent.provider,
+    ownerId: agent.ownerId,
+    isOwn: agent.isOwn === true,
     color: agent.color,
     owner_display_name: agent.ownerDisplayName,
     current_task: agent.currentTask || null,
     circle_id: agent.circleId,
     spirit: agent.spirit || null,
     model: agent.model_name || extended?.modelPreference || null,
-    sessionKey: agent.provider === 'openswan' ? agent.id : null,
+    // A public Office UUID is not an OpenSwan provider session identity. Own
+    // OpenSwan rows resolve through their owner-private binding at dispatch.
+    sessionKey: null,
+    connectionId: null,
     gatewayUrl: agent.gatewayUrl || null,
     source: 'db',
   };
@@ -730,8 +834,21 @@ function toAssignableSessionAgent(agent: OfficeAgent, circleId: string): Assigna
     spirit: agent.spirit || null,
     model: agent.model || null,
     sessionKey: agent.sessionKey || null,
+    connectionId: agent.connectionId || null,
     source: 'openswan-session',
   };
+}
+
+function buildAssignableAgentSubjectMetadata(agent: AssignableAgent): AgentRuntimeSubjectMetadata {
+  return buildAgentRuntimeSubject({
+    id: agent.id,
+    name: agent.name,
+    sessionKey: agent.sessionKey || undefined,
+    providerType: agent.provider as any,
+    spirit: agent.spirit || undefined,
+  }, {
+    dbAgentId: isUuidLike(agent.id) ? agent.id : null,
+  }).metadata;
 }
 // Session-title derivation (TITLE_STOP_WORDS, formatSessionTitleWord,
 // deriveSessionTitleFromMessage) extracted verbatim to the pure, smoke-tested
@@ -869,6 +986,21 @@ function hydratePersistedChatBotMetadata(
   metadata?: PersistedChatBotMetadata | null,
 ): Partial<ChatMessage> {
   if (!metadata) return {};
+  const runId = metadata.runId
+    || metadata.connectedAgentHandoff?.runId
+    || metadata.computerHandoff?.runId
+    || undefined;
+  // Follow-up chips are intentionally not persisted, but an exact validated
+  // run link is durable. Re-derive only from the saved structural verdict and
+  // run id so reload cannot turn “Open the run” into a dead end.
+  const crossSurfaceFollowups = runId
+    ? deriveCrossSurfaceFollowups({
+        verdict: metadata.outcomeSignal?.verdict || 'unknown',
+        contextRun: { kind: 'run', id: runId },
+        hasRecoveryOptions: (metadata.recoveryOptions?.length || 0) > 0,
+        canRetry: metadata.outcomeSignal?.verdict === 'failed',
+      }).followups
+    : [];
   return {
     persistedMetadataSnapshot: metadata,
     artifacts: metadata.artifacts,
@@ -879,6 +1011,11 @@ function hydratePersistedChatBotMetadata(
     memoryRecommendations: metadata.memoryRecommendations,
     source: metadata.source,
     agentSubjectMetadata: metadata.agentSubjectMetadata || undefined,
+    connectedAgentHandoff: metadata.connectedAgentHandoff || undefined,
+    openSwanTerminal: metadata.openSwanTerminal || undefined,
+    openSwanResumeLocator: metadata.openSwanResumeLocator || undefined,
+    openSwanMultiActionCompletion: metadata.openSwanMultiActionCompletion || undefined,
+    delegatedTo: metadata.connectedAgentHandoff?.actor || undefined,
     usage: metadata.usage || undefined,
     executionStream: metadata.executionStream,
     agentPlan: metadata.agentPlan,
@@ -888,9 +1025,13 @@ function hydratePersistedChatBotMetadata(
     browserPlans: metadata.browserPlans,
     browserPlanEvents: metadata.browserPlanEvents,
     browserSessions: metadata.browserSessions,
-    runId: metadata.runId || metadata.computerHandoff?.runId || undefined,
+    runId,
+    showRunTrace: metadata.connectedAgentHandoff?.runId
+      ? true
+      : undefined,
     requestId: metadata.requestId || undefined,
     requestAuthorId: metadata.requestAuthorId || undefined,
+    requestSourceMessageId: metadata.requestSourceMessageId || undefined,
     recoveryOptions: metadata.recoveryOptions,
     recoveryReliability: metadata.recoveryReliability || undefined,
     computerTaskStatus: normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus)
@@ -901,6 +1042,12 @@ function hydratePersistedChatBotMetadata(
     computerFindings: metadata.computerFindings || undefined,
     bestOfN: metadata.bestOfN || undefined,
     outcomeSignal: metadata.outcomeSignal || undefined,
+    crossSurfaceFollowups: crossSurfaceFollowups.length > 0
+      ? crossSurfaceFollowups
+      : undefined,
+    // A persisted locator is correlation, not proof that its device-local
+    // checkpoint still exists. The post-hydration resolver enables the chip
+    // only after the exact local event matches this message scope.
     quickReplies: metadata.computerFindings?.items?.length
       ? metadata.computerFindings.items.map((_, i) => `Book option ${i + 1}`)
       : undefined,
@@ -928,8 +1075,13 @@ function projectPersistedChatBotMetadata(
   assign('runId', message.runId);
   assign('requestId', message.requestId);
   assign('requestAuthorId', message.requestAuthorId);
+  assign('requestSourceMessageId', message.requestSourceMessageId);
   assign('source', message.source);
   assign('agentSubjectMetadata', message.agentSubjectMetadata);
+  assign('connectedAgentHandoff', message.connectedAgentHandoff);
+  assign('openSwanTerminal', message.openSwanTerminal);
+  assign('openSwanResumeLocator', message.openSwanResumeLocator);
+  assign('openSwanMultiActionCompletion', message.openSwanMultiActionCompletion);
   assign('usage', message.usage);
   assign('artifacts', message.artifacts);
   assign('wikiRefs', message.wikiRefs);
@@ -1001,6 +1153,17 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
     const pendingRecord = record as PendingBotMessageRecordWithAgentSubject;
     const timestampMs = Date.parse(record.createdAt);
     const isBot = record.isBot !== false;
+    const connectedAgentHandoff = projectConnectedAgentHandoffSnapshot(record.connectedAgentHandoff);
+    const recoveredRunId = record.runId || connectedAgentHandoff?.runId || undefined;
+    const recoveredOutcomeSignal = record.outcomeSignal as ChatMessage['outcomeSignal'];
+    const recoveredRunFollowups = recoveredRunId
+      ? deriveCrossSurfaceFollowups({
+          verdict: recoveredOutcomeSignal?.verdict || 'unknown',
+          contextRun: { kind: 'run', id: recoveredRunId },
+          hasRecoveryOptions: Array.isArray(record.recoveryOptions) && record.recoveryOptions.length > 0,
+          canRetry: recoveredOutcomeSignal?.verdict === 'failed',
+        }).followups
+      : [];
     return {
       id: record.localMessageId,
       content: record.content || '',
@@ -1016,6 +1179,16 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       researchRefs: record.researchRefs as ResearchDocumentReference[] | undefined,
       source: record.source as ChatMessageSource | undefined,
       agentSubjectMetadata: pendingRecord.agentSubjectMetadata || undefined,
+      connectedAgentHandoff: connectedAgentHandoff || undefined,
+      openSwanTerminal: projectPersistedOpenSwanTerminal(
+        (record.persistedMetadataSnapshot as PersistedChatBotMetadata | undefined)?.openSwanTerminal,
+      ),
+      openSwanResumeLocator: projectPersistedOpenSwanResumeLocator(
+        (record.persistedMetadataSnapshot as PersistedChatBotMetadata | undefined)?.openSwanResumeLocator,
+      ),
+      openSwanMultiActionCompletion: projectPersistedOpenSwanMultiActionCompletion(
+        (record.persistedMetadataSnapshot as PersistedChatBotMetadata | undefined)?.openSwanMultiActionCompletion,
+      ),
       usage: record.usage as SwanBotStructuredResponse['usage'] | undefined,
       memoriesUsed: record.memoriesUsed,
       memoryRefs: record.memoryRefs as PromptMemoryReference[] | undefined,
@@ -1031,11 +1204,16 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
         || undefined,
       computerHandoff: record.computerHandoff as ChatComputerHandoffMetadata | undefined,
       chatAutomationPlanPreview: record.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
-      delegatedTo: record.delegatedTo,
+      delegatedTo: record.delegatedTo || connectedAgentHandoff?.actor,
       delegatedSubagents: record.delegatedSubagents,
-      runId: record.runId,
+      runId: recoveredRunId,
+      showRunTrace: !!recoveredRunId,
+      crossSurfaceFollowups: recoveredRunFollowups.length > 0
+        ? recoveredRunFollowups
+        : undefined,
       requestId: record.requestId,
       requestAuthorId: record.requestAuthorId,
+      requestSourceMessageId: record.requestSourceMessageId,
       persistedMetadataSnapshot: record.persistedMetadataSnapshot as PersistedChatBotMetadata | undefined,
       agentPlan: record.agentPlan as AgentPlanDraft | Record<string, unknown> | undefined,
       taskPlan: record.taskPlan as OpenSwanTaskPlan | undefined,
@@ -1043,7 +1221,7 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       verificationResults: record.verificationResults as OpenSwanVerificationResult[] | undefined,
       computerFindings: record.computerFindings as PersistedComputerFindings | undefined,
       bestOfN: record.bestOfN as PersistedBestOfNRace | undefined,
-      outcomeSignal: record.outcomeSignal as ChatMessage['outcomeSignal'],
+      outcomeSignal: recoveredOutcomeSignal,
       routing: record.routing as SwanBotStructuredResponse['routing'] | undefined,
       isPending: false,
       ...deriveChatActivityFlags(record.content),
@@ -1063,8 +1241,85 @@ function mergeRecoveredChatMessages(persisted: ChatMessage[], pending: ChatMessa
     .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 }
 
+async function hydrateCanonicalActionArtifacts(
+  messages: ChatMessage[],
+  circleId: string,
+): Promise<ChatMessage[]> {
+  const artifactIds = messages.flatMap((message) => (message.artifacts || []).flatMap((artifact) => {
+    const metadata = artifact.metadata;
+    const artifactId = metadata?.source === 'openswan_action_artifact'
+      && metadata?.contentTruncated === true
+      && typeof metadata?.canonicalArtifactId === 'string'
+      ? metadata.canonicalArtifactId
+      : null;
+    return artifactId ? [artifactId] : [];
+  }));
+  if (artifactIds.length === 0) return messages;
+  const rows = await getRunArtifactsByIds(circleId, artifactIds);
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  return messages.map((message) => {
+    if (!message.runId || !message.artifacts?.length) return message;
+    let changed = false;
+    const artifacts = message.artifacts.map((artifact) => {
+      const metadata = artifact.metadata;
+      const artifactId = metadata?.source === 'openswan_action_artifact'
+        && metadata?.contentTruncated === true
+        && typeof metadata?.canonicalArtifactId === 'string'
+        ? metadata.canonicalArtifactId
+        : null;
+      if (!artifactId) return artifact;
+      const row = rowById.get(artifactId);
+      const publishedArtifactKind = typeof metadata?.artifactKind === 'string'
+        ? metadata.artifactKind
+        : '';
+      const expectedCanonicalArtifactKind = publishedArtifactKind === 'translation'
+        ? 'translation'
+        : publishedArtifactKind === 'classification'
+          ? 'classification'
+          : publishedArtifactKind === 'draft'
+            ? 'text'
+            : [
+                'analysis',
+                'calculation',
+                'comparison',
+                'explanation',
+                'outline',
+                'ranking',
+                'recommendation',
+                'report',
+                'summary',
+                'synthesis',
+              ].includes(publishedArtifactKind)
+              ? 'report'
+              : null;
+      if (
+        !row
+        || expectedCanonicalArtifactKind == null
+        || row.run_id !== message.runId
+        || row.circle_id !== circleId
+        || row.artifact_kind !== expectedCanonicalArtifactKind
+        || row.title !== artifact.title
+        || row.metadata?.source !== 'openswan_action_artifact'
+        || row.metadata?.actionId !== metadata?.actionId
+        || row.metadata?.artifactKind !== metadata?.artifactKind
+        || typeof row.content !== 'string'
+        || row.content.length === 0
+        || !verifyAgentRunArtifactContentDigest(row.content, row.metadata, metadata)
+      ) return artifact;
+      changed = true;
+      return {
+        ...artifact,
+        content: row.content,
+        metadata: { ...metadata, contentTruncated: false },
+      };
+    });
+    return changed ? { ...message, artifacts } : message;
+  });
+}
+
 async function mapLoadedThreadMessages(
   rows: any[],
+  circleId: string,
   threadId: string | null | undefined,
   currentUserId: string | undefined,
   agentName: string,
@@ -1074,13 +1329,13 @@ async function mapLoadedThreadMessages(
   try {
     await reconcilePendingBotMessages(threadId, rows);
     const pendingRecords = await loadPendingBotMessages(threadId);
-    return mergeRecoveredChatMessages(
+    return hydrateCanonicalActionArtifacts(mergeRecoveredChatMessages(
       persistedMessages,
       mapPendingBotRecordsToChatMessages(pendingRecords, agentName),
-    );
+    ), circleId);
   } catch (error) {
     console.warn('[ChatTab] Pending OpenSwan message recovery failed:', error);
-    return persistedMessages;
+    return hydrateCanonicalActionArtifacts(persistedMessages, circleId);
   }
 }
 
@@ -1157,6 +1412,122 @@ type ChatMessageRouteChip = {
   value: string;
   tone: 'route' | 'model' | 'local' | 'provider';
 };
+
+type UserMessagePersistenceOutcome =
+  | Readonly<{ ok: true; persistedMessageId: string }>
+  | Readonly<{ ok: false; reason: string }>;
+
+type UserMessagePersistenceObserver = Readonly<{
+  settle: (outcome: UserMessagePersistenceOutcome) => void;
+}>;
+
+type DesktopAttachmentApprovalResume = Readonly<{
+  sources: OpenSwanAttachmentTurnSources;
+  messageId: string;
+  attachmentId: string;
+  sourceRunId: string;
+  originalUserTaskText: string;
+  ledger: ChatBoundedMultiActionLedger;
+}>;
+
+type DesktopAttachmentResumeCustodyObserver = Readonly<{
+  /** Fired at the last Chat boundary immediately before OpenSwan accepts the
+   * exact process-private sources. Earlier returns must leave this untouched. */
+  accepted: () => void;
+}>;
+
+type ChatOpenSwanRunOwner = Readonly<{
+  userId: string;
+  circleId: string;
+  threadId: string;
+  pendingMessageId: string;
+  sourceUserMessageId: string;
+  originalUserTaskText: string;
+  multiActionLedger: ChatBoundedMultiActionLedger | null;
+}>;
+
+type OpenSwanApprovalResumeTurn = Readonly<{
+  binding: OpenSwanApprovalResumeBindingV1;
+  sourceRunId: string;
+  sourceUserMessageId: string;
+  originalUserTaskText: string;
+  multiActionLedger: ChatBoundedMultiActionLedger | null;
+}>;
+
+type OpenSwanApprovalResumeCustodyObserver = Readonly<{
+  /** Last Chat boundary immediately before runtime receives the exact binding. */
+  accepted: () => void;
+  /** Runtime settled without accepting custody; this queued attempt is final. */
+  terminalWithoutCustody: () => void;
+}>;
+
+type QueuedOpenSwanApprovalResume = Readonly<{
+  item: OpenSwanApprovalResumeItemV1;
+  sourceRunId: string;
+  userId: string;
+  circleId: string;
+  threadId: string;
+  sourceUserMessageId: string;
+  originalUserTaskText: string;
+  multiActionLedger: ChatBoundedMultiActionLedger | null;
+}>;
+
+type QueuedDesktopAttachmentApprovalResume = Readonly<{
+  approval: AgentRunApproval;
+  status: 'approved' | 'rejected';
+  resumeDisposition: 'continue' | 'stale_batch_revoke';
+  userId: string;
+  circleId: string;
+  threadId: string;
+}>;
+
+type ChatSendOptions = Readonly<{
+  displayText?: string;
+  modeOverride?: string | null;
+  modelOverride?: string | null;
+  openSwanResume?: {
+    locator: OpenSwanResumeLocator;
+    sourceMessageId: string;
+    sourceRunId: string | null;
+  };
+  /** Exact, value-free approval authority for one OpenSwan continuation. */
+  openSwanApprovalResume?: OpenSwanApprovalResumeTurn;
+  openSwanApprovalResumeCustody?: OpenSwanApprovalResumeCustodyObserver;
+  /** Exact process-private source retained across one approved local-open gate. */
+  desktopAttachmentResume?: DesktopAttachmentApprovalResume;
+  desktopAttachmentResumeCustody?: DesktopAttachmentResumeCustodyObserver;
+}>;
+
+function isChatBoundedMultiActionLedger(value: unknown): value is ChatBoundedMultiActionLedger {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const ledger = value as Partial<ChatBoundedMultiActionLedger>;
+  if (
+    ledger.schemaVersion !== 1
+    || ledger.dispatchMode !== 'single_openswan_turn'
+    || !Number.isInteger(ledger.actionCount)
+    || !Array.isArray(ledger.actions)
+    || ledger.actions.length !== ledger.actionCount
+    || ledger.actions.length < 1
+    || ledger.actions.length > 3
+    || typeof ledger.completionRule !== 'string'
+    || !ledger.completionRule.trim()
+  ) return false;
+  const seen = new Set<string>();
+  return ledger.actions.every((action, index) => {
+    if (!action || typeof action !== 'object' || Array.isArray(action)) return false;
+    const expectedId = `A${index + 1}`;
+    if (
+      action.id !== expectedId
+      || action.ordinal !== index + 1
+      || typeof action.text !== 'string'
+      || !action.text.trim()
+      || !Array.isArray(action.dependsOnActionIds)
+      || action.dependsOnActionIds.some((id) => !seen.has(id))
+    ) return false;
+    seen.add(action.id);
+    return true;
+  });
+}
 
 function formatRouteSurfaceLabel(surface: string | null | undefined): string {
   const raw = String(surface || '').trim();
@@ -1355,9 +1726,11 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     runId: message.runId,
     requestId: message.requestId,
     requestAuthorId: message.requestAuthorId,
+    requestSourceMessageId: message.requestSourceMessageId,
     persistedMetadataSnapshot: message.persistedMetadataSnapshot,
     delegatedTo: message.delegatedTo,
     delegatedSubagents: message.delegatedSubagents,
+    connectedAgentHandoff: message.connectedAgentHandoff,
     artifacts: message.artifacts,
     wikiRefs: message.wikiRefs,
     researchRefs: message.researchRefs,
@@ -1592,6 +1965,22 @@ async function base64FromChatMediaAttachment(attachment: ChatAttachment): Promis
   }
 }
 
+async function base64FromExactFile(file: File): Promise<string | null> {
+  if (typeof FileReader === 'undefined') return null;
+  return new Promise<string | null>((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 && result.slice(0, comma).includes(';base64')
+        ? result.slice(comma + 1)
+        : null);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function describeChatAutomationApproval(agentName: string, plan: ChatAutomationPlan): string {
   const route = plan.execution.routeId ? ` (${plan.execution.routeId})` : '';
   const command = String(plan.execution.commandText || '').replace(/\s+/g, ' ').trim();
@@ -1643,6 +2032,80 @@ async function recordComputerTaskLaneTerminal(details: {
   } catch {
     return [];
   }
+}
+
+/** Short, deterministic status copy for non-success OpenSwan terminals. */
+function describeOpenSwanTerminalForChat(terminal: OpenSwanTerminalReceipt): string {
+  switch (terminal.state) {
+    case 'succeeded':
+      return terminal.completionVerified
+        ? ''
+        : 'OpenSwan ended this turn, but completion could not be verified.';
+    case 'partial':
+      if (terminal.reason === 'verification_blocked') {
+        return 'OpenSwan finished the work, but required verification was blocked or still needs manual review. Completion is not verified.';
+      }
+      if (terminal.reason === 'verification_unverified') {
+        return 'OpenSwan produced work, but the required checks did not provide enough proof to verify completion.';
+      }
+      if (terminal.reason === 'delegation_incomplete') {
+        return 'OpenSwan received incomplete work from one or more delegated agents, so this task is not complete yet.';
+      }
+      if (terminal.reason === 'action_coverage_incomplete') {
+        return 'OpenSwan did not verify every requested action. Completed steps were kept, but this multi-action task is not complete yet.';
+      }
+      return terminal.reason === 'step_cap'
+        ? terminal.resumable
+          ? 'OpenSwan reached this turn’s step limit before finishing. Partial work was kept; choose Continue to resume from the saved checkpoint.'
+          : 'OpenSwan reached this turn’s step limit before finishing. The result above is partial.'
+        : 'OpenSwan stopped before verified completion. The result above is partial.';
+    case 'failed':
+      if (terminal.reason === 'verification_failed') {
+        return 'OpenSwan finished executing, but a required verification check failed. Completion is not verified.';
+      }
+      if (terminal.reason === 'persistence_unverified') {
+        return 'OpenSwan could not confirm that the run’s final state was saved. The result is not being reported as complete.';
+      }
+      if (terminal.reason === 'action_coverage_failed') {
+        return 'OpenSwan attempted the requested actions, but one or more failed. Completion is not verified.';
+      }
+      return terminal.reason === 'runtime_guard'
+        ? 'OpenSwan stopped on a runtime safety or progress guard before verified completion.'
+        : 'OpenSwan could not finish this turn. Partial work and technical details were kept for recovery.';
+    case 'cancelled':
+      return terminal.resumable
+        ? 'Stopped at your request. Partial work was kept; choose Continue if you want to resume from the saved checkpoint.'
+        : 'Stopped at your request. Any partial work completed before the stop was kept.';
+    default: {
+      const unreachable: never = terminal.state;
+      return unreachable;
+    }
+  }
+}
+
+function describeOpenSwanMultiActionCompletionForChat(
+  ledger: ChatBoundedMultiActionLedger | null | undefined,
+  completion: PersistedOpenSwanMultiActionCompletion | null | undefined,
+): string {
+  if (!ledger) return '';
+  const statusLabels: Record<string, string> = {
+    completed: 'Verified',
+    pending: 'Pending',
+    missing: 'Not reported',
+    blocked: 'Blocked',
+    failed: 'Failed',
+    invalid: 'Unverified',
+  };
+  const lines = ledger.actions.map((action) => {
+    const status = completion?.actions.find((candidate) => candidate.actionId === action.id)?.status;
+    const label = statusLabels[status || 'invalid'] || 'Unverified';
+    const text = action.text.trim().replace(/\s+/g, ' ').slice(0, 160);
+    return `- ${action.id} · ${label} — ${text}`;
+  });
+  const headline = completion?.completionVerified
+    ? '**Requested actions · all verified**'
+    : '**Requested actions · completion not verified**';
+  return [headline, ...lines].join('\n');
 }
 
 interface LocalComputerUseAttempt {
@@ -1716,6 +2179,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     threadId: null,
   });
   activeThreadScopeRef.current = { circleId, threadId: activeThreadId };
+  const openSwanResumeClaimGateRef = useRef(createOpenSwanResumeClaimGate());
+  const [openSwanResumeAvailability, setOpenSwanResumeAvailability] = useState<Record<string, boolean>>({});
 
   // Fast Refresh preserves mounted React state. Remove legacy durable copies of
   // what are now ephemeral routing/progress surfaces without requiring the user
@@ -1740,6 +2205,52 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [input, setInput] = useState('');
   const [botTyping, setBotTyping] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  useEffect(() => {
+    openSwanResumeClaimGateRef.current.clear();
+    setOpenSwanResumeAvailability({});
+  }, [activeThreadId, circleId, currentUserId]);
+  useEffect(() => {
+    let disposed = false;
+    const threadId = activeThreadId;
+    const userId = currentUserId;
+    if (!threadId || !userId || threadLoadState.status !== 'ready') return () => { disposed = true; };
+    const candidates = messagesRef.current.filter((message) => (
+      message.isBot
+      && !!projectPersistedOpenSwanResumeLocator(message.openSwanResumeLocator)
+      && message.openSwanTerminal?.resumable === true
+    ));
+    if (candidates.length === 0) return () => { disposed = true; };
+    void (async () => {
+      const transcript = await loadOpenSwanTranscript(buildOpenSwanTranscriptKey({
+        chatSessionId: threadId,
+        circleId,
+        userId,
+        surface: 'main_chat',
+      }));
+      if (disposed || activeThreadScopeRef.current.circleId !== circleId || activeThreadScopeRef.current.threadId !== threadId) return;
+      const next: Record<string, boolean> = {};
+      for (const message of candidates) {
+        const locator = projectPersistedOpenSwanResumeLocator(message.openSwanResumeLocator);
+        if (!locator) continue;
+        const sourceMessageId = message.persistedMetadataSnapshot?.localMessageId || message.id;
+        const resolution = resolveOpenSwanResumeLocator({
+          locator,
+          scope: {
+            circleId,
+            userId,
+            threadId,
+            runId: message.runId || null,
+            messageId: sourceMessageId,
+          },
+          transcript,
+        });
+        next[message.id] = resolution.status === 'matched'
+          && !openSwanResumeClaimGateRef.current.isClaimed(locator);
+      }
+      setOpenSwanResumeAvailability(next);
+    })();
+    return () => { disposed = true; };
+  }, [activeThreadId, circleId, currentUserId, messages, threadLoadState.status]);
   const computerTaskAuthScopeRef = useRef({
     userId: currentUserId,
     circleId,
@@ -1802,7 +2313,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
     return new Set(
       marketplaceModelGroups
-        .filter((g) => g.connected)
+        .filter((g) => g.connected && g.models.some((model) => model.ready))
         .map((g) => normalizeConnectedProviderKey(g.provider as string)),
     );
   }, [marketplaceModelGroups]);
@@ -2469,7 +2980,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // installed/running apps from the desktop bridge plus the circle's
   // preferred-app-per-category store. Silent failures leave the fail-honest
   // empty context (bridge treated as offline; known-good web apps win).
-  const hydrateAppResolutionContext = useCallback(async () => {
+  const hydrateAppResolutionContext = useCallback(async (
+    expectedBridgeInstanceId?: string | null,
+  ): Promise<boolean> => {
     try {
       const [{ setAppResolutionContext }, bridge, shortcuts] = await Promise.all([
         import('../../../lib/chatComputerRequestRouter'),
@@ -2484,6 +2997,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           : Promise.resolve(undefined),
         shortcuts.loadPreferredAppsByCategory(circleId).catch(() => ({})),
       ]);
+      if (expectedBridgeInstanceId) {
+        const postObservationHealth = await bridge.getDesktopBridgeHealth().catch(() => null);
+        const observedBridgeInstanceId = typeof postObservationHealth?.instanceId === 'string'
+          ? postObservationHealth.instanceId
+          : null;
+        if (observedBridgeInstanceId !== expectedBridgeInstanceId) {
+          // Never retain installed/running-app evidence across a bridge
+          // restart. The task snapshot will independently fail closed; this
+          // clears the synchronous router's older process-local context too.
+          setAppResolutionContext({ bridgeOnline: false, preferredAppByCategory });
+          return false;
+        }
+      }
       setAppResolutionContext({
         bridgeOnline,
         // An empty probe result is ambiguous (it also means "probe failed")
@@ -2493,7 +3019,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         ...(runningApps && runningApps.length > 0 ? { runningApps } : {}),
         preferredAppByCategory,
       });
-    } catch { /* fail-honest: unhydrated registry keeps bridgeOnline=false */ }
+      return true;
+    } catch {
+      // Fail honest: an unhydrated registry keeps bridgeOnline=false.
+      return false;
+    }
   }, [circleId]);
 
   useEffect(() => {
@@ -2868,10 +3398,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     await import('../../../lib/computerGrantGateStore')
       .then(({ loadStickyAllowScopes }) => loadStickyAllowScopes())
       .catch(() => {});
-    // Wave-2: refresh the app-resolution registry fire-and-forget (bridge
-    // probes are cached). The awaits below give it time to land before the
-    // route build; a stale registry only degrades the app pick, never blocks.
-    void hydrateAppResolutionContext();
+    // App resolution is refreshed after the task-scoped bridge preparation
+    // below. This keeps the route on the same observed bridge state instead of
+    // racing a fire-and-forget installed/running-app probe.
     const initialExecution = prepareComputerTaskExecution({ task: trimmed, audit: null, grantedIds: [] });
     const surfacePreparationPlan = buildComputerTaskSurfacePreparationPlan(initialExecution);
     const surfacePreparationResult = surfacePreparationPlan.shouldPrepareDesktopBridge && Platform.OS === 'web'
@@ -2897,6 +3426,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       && /^[A-Za-z0-9._:-]{8,128}$/.test(taskDesktopHealth.instanceId)
       ? taskDesktopHealth.instanceId
       : null;
+    // Installed/running-app evidence is accepted only if a post-observation
+    // health check still names this exact prepared bridge process. A restart
+    // clears the router context before route construction.
+    await hydrateAppResolutionContext(taskBridgeInstanceId);
+    const preparedLocalBrowserReadiness = surfacePreparationResult
+      && 'readiness' in surfacePreparationResult
+      ? surfacePreparationResult.readiness?.browser ?? null
+      : null;
+    // One immutable task-start observation feeds routing and preflight. The
+    // capability audit must not throw away the successful auto-connect result
+    // and race a second short health probe; a stale or different bridge
+    // instance is rejected by the snapshot normalizer before any mutation.
+    const preparedCapabilitySnapshot = buildComputerCapabilityPreparedSnapshot({
+      desktopHealth: taskDesktopHealth,
+      localBrowserReadiness: preparedLocalBrowserReadiness,
+      expectedBridgeInstanceId: taskBridgeInstanceId,
+    });
     const surfacePreparationReceipt = buildComputerTaskSurfacePreparationReceipt(
       surfacePreparationPlan,
       surfacePreparationResult,
@@ -2912,7 +3458,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         },
       });
     }
-    const audit = await auditComputerCapabilities(circleId).catch(() => null);
+    const audit = await auditComputerCapabilities(circleId, {
+      preparedSnapshot: preparedCapabilitySnapshot,
+      expectedBridgeInstanceId: taskBridgeInstanceId,
+    }).catch(() => null);
     let grantedIds = await loadComputerTaskGrantIds(circleId).catch(() => []);
     const previewExecution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds });
     const [businessProfiles, providerKeys] = await Promise.all([
@@ -3087,9 +3636,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const surfacePreparationBlockers = surfacePreparationReceipt.ok
       ? []
       : surfacePreparationReceipt.warnings;
+    const requestedActionExecutionGate = buildChatComputerRequestedActionExecutionGate(trimmed);
     const preflightBlockers = [
+      ...(requestedActionExecutionGate.blocker ? [requestedActionExecutionGate.blocker] : []),
       ...surfacePreparationBlockers,
       ...execution.preflight.blockers.map((item) => `${item.label}: ${item.fix}`),
+    ];
+    const preflightFixActions = [
+      ...(requestedActionExecutionGate.fixAction ? [requestedActionExecutionGate.fixAction] : []),
+      ...execution.preflight.fixActions,
     ];
     const preflightWarnings = execution.preflight.warnings.map((item) => `${item.label}: ${item.fix}`);
     const defaultNextSteps = execution.entrypoint === 'browser_runtime'
@@ -3101,6 +3656,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const surfacePreparationBlockedPresentation = buildComputerTaskSurfacePreparationBlockedPresentation(surfacePreparationReceipt);
     if (surfacePreparationBlockedPresentation.shouldBlock) {
       const blocker = surfacePreparationBlockedPresentation.blockers[0] || surfacePreparationReceipt.summary;
+      const surfacePreparationHandoffContext = buildChatComputerHandoffContext({
+        task: trimmed,
+        entrypoint: execution.entrypoint,
+        adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+        taskKind: execution.preview.kind,
+        taskLabel: execution.preview.label,
+        outcomeStatus: 'blocked',
+        mutationDispatched: false,
+        requestedActionContract: requestedActionExecutionGate.contract,
+        blockers: surfacePreparationBlockedPresentation.blockers,
+      });
       await markEarlyReadyCapabilityAutoRetryFailed(blocker, surfacePreparationBlockedPresentation.nextSteps);
       await persistComputerTaskState({
         task: trimmed,
@@ -3140,20 +3706,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           ...surfacePreparationReceipt.touched,
         ])),
         metadata: {
+          handoff: surfacePreparationHandoffContext.metadata,
           entrypoint: execution.entrypoint,
           surfacePreparation: surfacePreparationReceipt,
           grounding: groundingState,
           complexityPlan: execution.complexityPlan,
         },
       });
-      addBotMessage(surfacePreparationBlockedPresentation.message, undefined, {
-        source: {
-          actor: 'OpenSwan',
-          surface: 'main_chat_desktop_bridge',
-          selectedModel,
-          effectiveModel: 'local-desktop-bridge',
+      addBotMessage(
+        `${surfacePreparationBlockedPresentation.message}${formatChatComputerHandoffForMessage(surfacePreparationHandoffContext)}`,
+        undefined,
+        {
+          computerTaskStatus: 'blocked',
+          computerHandoff: surfacePreparationHandoffContext.metadata,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_desktop_bridge',
+            selectedModel,
+            effectiveModel: 'local-desktop-bridge',
+          },
         },
-      });
+      );
       setBotTyping(false);
       return { handled: true as const, browser: false as const };
     }
@@ -3178,8 +3751,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           ...preflightBlockers,
           ...groundingBlockers,
         ].slice(0, 6),
-        nextSteps: execution.preflight.fixActions.length > 0
-          ? execution.preflight.fixActions.slice(0, 4)
+        nextSteps: preflightFixActions.length > 0
+          ? preflightFixActions.slice(0, 4)
           : [...groundingNextSteps, ...complexityNextSteps, ...defaultNextSteps].slice(0, 5),
         grounding: groundingState,
         capabilityBuildout: options?.readyCapabilityBuildout || null,
@@ -3209,7 +3782,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             : null,
           blockers: preflightBlockers,
           warnings: preflightWarnings,
-          fixActions: execution.preflight.fixActions,
+          fixActions: preflightFixActions,
         },
         grounding: groundingState,
         complexityPlan: execution.complexityPlan,
@@ -3261,6 +3834,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       persistLastAppResolution();
     }
     const computerEvidenceContract = computerPlan.computerRequestRoute?.evidenceContract || null;
+    const computerRequestedActionContract = computerPlan.computerRequestRoute?.requestedActionContract || null;
     const computerAppRouteDecision = computerPlan.computerRequestRoute?.appAutomationRouteDecision || execution.preflight.routeDecision || null;
     const computerStickyScopeApplied = computerPlan.computerRequestRoute?.stickyScopeApplied || null;
 
@@ -3368,7 +3942,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     try {
       if (preflightBlockers.length > 0) {
         const blockerLines = preflightBlockers.map((blocker) => `- ${blocker}`).join('\n');
-        const fixLines = execution.preflight.fixActions.map((fix) => `- ${fix}`).join('\n');
+        const fixLines = preflightFixActions.map((fix) => `- ${fix}`).join('\n');
         const preflightHandoffContext = buildChatComputerHandoffContext({
           task: trimmed,
           entrypoint: execution.entrypoint,
@@ -3384,6 +3958,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           groundingStatus: groundingState?.status || null,
           groundingSummary: groundingState?.summary || null,
           requestNotice: computerRequestNotice,
+          requestedActionContract: computerRequestedActionContract,
+          outcomeStatus: 'blocked',
+          mutationDispatched: false,
           evidenceContract: computerEvidenceContract,
           appAutomationRouteDecision: computerAppRouteDecision,
           stickyScopeApplied: computerStickyScopeApplied,
@@ -3417,8 +3994,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           grantedAccess: execution.grants.granted,
           accessPlan: execution.grants.summary,
           blockers: [...preflightBlockers, ...groundingBlockers].slice(0, 6),
-          nextSteps: execution.preflight.fixActions.length > 0
-            ? execution.preflight.fixActions.slice(0, 4)
+          nextSteps: preflightFixActions.length > 0
+            ? preflightFixActions.slice(0, 4)
             : [...groundingNextSteps, ...complexityNextSteps].slice(0, 5),
           grounding: groundingState,
           capabilityBuildout: options?.readyCapabilityBuildout
@@ -3452,7 +4029,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 : null,
               blockers: preflightBlockers,
               warnings: preflightWarnings,
-              fixActions: execution.preflight.fixActions,
+              fixActions: preflightFixActions,
             },
             grounding: groundingState,
             complexityPlan: execution.complexityPlan,
@@ -3548,6 +4125,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         || !exactPlanApprovalCorrelationMatchesScope(exactApprovalResume, exactApprovalExpectedScope)
       )) {
         const mismatchMessage = 'The saved desktop approval no longer matches the exact plan or request. Nothing was executed; resend the task to create a fresh approval.';
+        const mismatchHandoffContext = buildChatComputerHandoffContext({
+          task: trimmed,
+          entrypoint: execution.entrypoint,
+          adapterId: execution.entrypoint === 'browser_runtime' ? 'browser_adapter' : null,
+          taskKind: execution.preview.kind,
+          taskLabel: execution.preview.label,
+          outcomeStatus: 'blocked',
+          mutationDispatched: false,
+          requestedActionContract: computerRequestedActionContract,
+          evidenceContract: computerEvidenceContract,
+          appAutomationRouteDecision: computerAppRouteDecision,
+          blockers: [mismatchMessage],
+        });
         await persistComputerTaskState({
           task: trimmed,
           requestIdentity,
@@ -3564,9 +4154,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           grounding: groundingState,
           complexity: compactComputerTaskComplexityPlan(execution.complexityPlan),
         });
-        addBotMessage(mismatchMessage, undefined, {
+        addBotMessage(`${mismatchMessage}${formatChatComputerHandoffForMessage(mismatchHandoffContext)}`, undefined, {
           localOnly: true,
           computerTaskStatus: 'blocked',
+          computerHandoff: mismatchHandoffContext.metadata,
         });
         return { handled: true as const, browser: false as const };
       }
@@ -3790,7 +4381,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               const planCard = toBrowserPlanCardData(plan, universalTaskRootPointer);
               return {
                 executionKind: 'run_computer_task',
-                status: 'completed',
+                // Planning produced an approval-ready card, not the requested
+                // browser outcome. Keep the automation lane non-terminal so
+                // the approval/runtime result remains the completion owner.
+                status: 'deferred',
                 message: 'Browser-backed computer task planned and ready for approval.',
                 data: {
                   adapterId: 'browser_adapter',
@@ -3809,7 +4403,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     : null,
                   preflightBlockers,
                   preflightWarnings,
-                  preflightFixActions: execution.preflight.fixActions,
+                  preflightFixActions,
                   appAutomationRouteDecision: computerAppRouteDecision,
                   groundingStatus: execution.computerAppGroundingTrace?.status || null,
                   groundingSummary: execution.computerAppGroundingTrace?.display.summary || null,
@@ -3948,7 +4542,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               runId: result.runId || null,
               data: {
                 adapterId: result.adapterId,
-                computerTaskStatus: result.status,
+                  computerTaskStatus: result.status,
+                  taskCompletionVerified: result.taskCompletionVerified === true,
+                  requestedActionProgress: result.requestedActionProgress || null,
                 taskKind: result.execution.preview.kind,
                 taskLabel: result.execution.preview.label,
                 readinessSummary: result.execution.readiness.summary,
@@ -4228,6 +4824,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         ? (outcome.data as { clarification?: { questions?: unknown[]; assumptions?: unknown[] } }).clarification
         : null;
       if (outcomeClarification && typeof outcome.message === 'string' && outcome.message.trim()) {
+        const clarificationHandoffContext = buildChatComputerHandoffContext({
+          task: trimmed,
+          entrypoint: execution.entrypoint,
+          adapterId,
+          taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+          taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+          runId: outcome.runId || null,
+          outcomeStatus: 'needs_input',
+          replayPolicy,
+          mutationDispatched,
+          verificationOnlyTools,
+          groundingStatus: groundingState?.status || null,
+          groundingSummary: groundingState?.summary || null,
+          requestedActionContract: computerRequestedActionContract,
+          evidenceContract: computerEvidenceContract,
+          appAutomationRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
+        });
         const clarifyKey = activeThreadId || 'main';
         pendingClarificationRef.current.set(clarifyKey, {
           originalMessage: trimmed,
@@ -4244,6 +4857,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addBotMessage(outcome.message, undefined, {
           source: computerTaskSource,
           computerTaskStatus: computerTaskStatus || 'needs_input',
+          computerHandoff: clarificationHandoffContext.metadata,
           quickReplies: ['Proceed'],
         });
         await recordComputerTaskLaneTerminal({
@@ -4251,6 +4865,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           message: outcome.message,
           executionKind: outcome.executionKind,
           runId: outcome.runId || null,
+          replayPolicy,
+          mutationDispatched,
         });
         return { handled: true as const, browser: false };
       }
@@ -4309,6 +4925,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         groundingStatus: outcomeGroundingState?.status || null,
         groundingSummary: outcomeGroundingState?.summary || null,
         requestNotice: computerRequestNotice,
+        requestedActionContract: computerRequestedActionContract,
+        taskCompletionVerified: outcome.data?.taskCompletionVerified === true,
+        requestedActionProgress: (outcome.data?.requestedActionProgress as any) || null,
         evidenceContract: computerEvidenceContract,
         appAutomationRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
         replayPolicy,
@@ -5219,15 +5838,220 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // only at actual dispatch. Approvals granted while a turn is running are
   // drained when that turn ends (runStatus idle + typing done), which keeps
   // them inside the runtime's 15-minute cross-run approval honor window.
-  const queuedApprovalResumesRef = useRef<Array<{ id: string; tool: string }>>([]);
+  const queuedApprovalResumesRef = useRef<QueuedOpenSwanApprovalResume[]>([]);
   const approvalResumeInFlightRef = useRef(false);
+  const approvalResumeComposerNoticeRef = useRef(false);
+  const approvalResumeRecoveryInFlightRef = useRef(new Set<string>());
+  const approvalResumeRecoveryNoticeKeysRef = useRef(new Set<string>());
+  const approvedUnconsumedApprovalIdsRef = useRef(new Set<string>());
+  const enqueueApprovedOpenSwanApprovalsRef = useRef<(
+    approvals: readonly AgentRunApproval[],
+  ) => Promise<void>>(async () => {});
   const flushQueuedApprovalResumesRef = useRef<() => void>(() => {});
+  const queuedDesktopAttachmentApprovalResumesRef = useRef<QueuedDesktopAttachmentApprovalResume[]>([]);
+  // One approved process-private open can produce at most one durable recovery
+  // receipt in this mounted app process. The approval id remains only in this
+  // in-memory dedupe set; visible copy and persisted metadata stay value-free.
+  const desktopAttachmentResumeUnavailableNoticeKeysRef = useRef(new Set<string>());
+  // Runtime run ownership is published synchronously after createRun and
+  // before any approval-capable tool dispatch. React message state may lag
+  // that callback, so approval custody checks this exact bounded ref first.
+  const chatOpenSwanRunOwnersRef = useRef(new Map<string, ChatOpenSwanRunOwner>());
+  const resolveChatOpenSwanRunOwnerRef = useRef<(
+    runId: string,
+    requestedBy: string | null,
+  ) => ChatOpenSwanRunOwner | null>(() => null);
+  const desktopAttachmentApprovalResumeInFlightRef = useRef(false);
+  const handleDesktopAttachmentApprovalResumeRef = useRef<(
+    queued: QueuedDesktopAttachmentApprovalResume,
+  ) => Promise<void>>(async () => {});
+  const flushDesktopAttachmentApprovalResumesRef = useRef<() => void>(() => {});
+  resolveChatOpenSwanRunOwnerRef.current = (runId, requestedBy) => {
+    if (!currentUserId || !activeThreadId || requestedBy !== currentUserId) return null;
+    const live = chatOpenSwanRunOwnersRef.current.get(runId);
+    if (
+      live?.userId === currentUserId
+      && live.circleId === circleId
+      && live.threadId === activeThreadId
+    ) return live;
+
+    // Reload fallback: reconstruct only from the exact persisted source-user
+    // row carried by the bot envelope. Transcript adjacency is never identity:
+    // a collaborator or second device can interleave messages at any point.
+    const botIndex = messages.findIndex((message) => (
+      message.isBot
+      && message.runId === runId
+      && message.requestAuthorId === currentUserId
+      && message.authorId === currentUserId
+      && !!message.requestSourceMessageId
+    ));
+    if (botIndex < 0) return null;
+    const sourceUserMessageId = messages[botIndex].requestSourceMessageId;
+    if (!sourceUserMessageId) return null;
+    const candidate = messages.find((message) => (
+      message.isUser
+      && message.dbId === sourceUserMessageId
+      && message.authorId === currentUserId
+    ));
+    if (candidate?.isUser && candidate.authorId === currentUserId) {
+      const originalUserTaskText = candidate.content.trim();
+      if (!originalUserTaskText) return null;
+      const rebuilt = buildChatAutomationPlan({
+        message: originalUserTaskText,
+        selectedMode: 'execute',
+      });
+      const reconstructed = Object.freeze({
+        userId: currentUserId,
+        circleId,
+        threadId: activeThreadId,
+        pendingMessageId: messages[botIndex].id,
+        sourceUserMessageId,
+        originalUserTaskText,
+        multiActionLedger: rebuilt.multiActionLedger || null,
+      });
+      chatOpenSwanRunOwnersRef.current.set(runId, reconstructed);
+      while (chatOpenSwanRunOwnersRef.current.size > 32) {
+        const oldest = chatOpenSwanRunOwnersRef.current.keys().next().value;
+        if (typeof oldest !== 'string') break;
+        chatOpenSwanRunOwnersRef.current.delete(oldest);
+      }
+      return reconstructed;
+    }
+    return null;
+  };
+  enqueueApprovedOpenSwanApprovalsRef.current = async (approvals) => {
+    if (!currentUserId || !activeThreadId || approvals.length < 1) return;
+    const genericCandidates = approvals.filter((approval) => (
+      readOpenSwanApprovalAuditToolName(approval.payload) !== 'desktop.open_attachment'
+    ));
+    if (genericCandidates.length < 1) return;
+    const sourceRunIds = new Set(genericCandidates.map((approval) => approval.run_id));
+    if (sourceRunIds.size !== 1) return;
+    // One sealed binding is deliberately capped at eight calls. A larger
+    // recovered set is drained oldest-first in bounded chunks; dispatch CAS
+    // updates wake the approved-unconsumed selector for the next chunk.
+    // Never reject the whole set merely because more than eight approvals
+    // accumulated while this device was offline.
+    const genericApprovals = [...genericCandidates]
+      .sort((a, b) => (
+        Date.parse(a.requested_at) - Date.parse(b.requested_at)
+        || a.id.localeCompare(b.id)
+      ))
+      .slice(0, OPEN_SWAN_APPROVAL_RESUME_MAX_ITEMS);
+    const sourceRunId = genericApprovals[0]?.run_id;
+    if (!sourceRunId || approvalResumeRecoveryInFlightRef.current.has(sourceRunId)) return;
+    approvalResumeRecoveryInFlightRef.current.add(sourceRunId);
+    try {
+      const owner = resolveChatOpenSwanRunOwnerRef.current(
+        sourceRunId,
+        genericApprovals[0]?.requested_by || null,
+      );
+      if (!owner || genericApprovals.some((approval) => (
+        approval.run_id !== sourceRunId
+        || approval.requested_by !== currentUserId
+        || approval.circle_id !== circleId
+        || approval.resolved_by !== currentUserId
+      ))) return;
+
+      // A still-active source run owns its own approval transition. Cross-run
+      // recovery is admitted only after the exact persisted OpenSwan Chat run
+      // terminalized at the approval/action-coverage boundary. This prevents a
+      // realtime wake-up from racing Cancel, completion, or another surface.
+      const sourceRun = await getRun(sourceRunId);
+      const terminal = sourceRun?.metadata?.terminal;
+      const terminalRecord = terminal && typeof terminal === 'object' && !Array.isArray(terminal)
+        ? terminal as Record<string, unknown>
+        : null;
+      const sourceRunCanResume = !!sourceRun
+        && sourceRun.user_id === currentUserId
+        && sourceRun.circle_id === circleId
+        && sourceRun.surface === 'main_chat'
+        && sourceRun.provider === 'openswan'
+        && sourceRun.status === 'failed'
+        && terminalRecord?.state === 'partial'
+        && terminalRecord?.reason === 'action_coverage_incomplete'
+        && terminalRecord?.completionVerified === false;
+      if (!sourceRunCanResume) {
+        if (sourceRun && ['queued', 'planning', 'running', 'waiting_approval', 'paused'].includes(sourceRun.status)) {
+          return;
+        }
+        const noticeKey = `run:${sourceRunId}`;
+        if (!approvalResumeRecoveryNoticeKeysRef.current.has(noticeKey)) {
+          approvalResumeRecoveryNoticeKeysRef.current.add(noticeKey);
+          addBotMessage(
+            'Approval was recorded, but its source run is no longer at a verified OpenSwan approval stop. This tab will not replay or reconstruct the action.',
+            undefined,
+            { localOnly: true, durability: 'ephemeral' },
+          );
+        }
+        return;
+      }
+
+      const projected = genericApprovals.map((approval) => projectOpenSwanApprovalResumeItemV1(approval, {
+        approvalId: approval.id,
+        sourceRunId,
+        userId: currentUserId,
+        circleId,
+      }));
+      if (projected.some((item) => !item)) return;
+      const items = projected as OpenSwanApprovalResumeItemV1[];
+      const restored = await restoreOpenSwanApprovalResumeOutboxIntoProcessAuthority({
+        userId: currentUserId,
+        circleId,
+        threadId: activeThreadId,
+        approvalIds: items.map((item) => item.approvalId),
+      });
+      if (
+        activeThreadScopeRef.current.circleId !== circleId
+        || activeThreadScopeRef.current.threadId !== activeThreadId
+      ) return;
+      if (restored.status !== 'ready') {
+        const noticeKey = `custody:${sourceRunId}`;
+        if (!approvalResumeRecoveryNoticeKeysRef.current.has(noticeKey)) {
+          approvalResumeRecoveryNoticeKeysRef.current.add(noticeKey);
+          addBotMessage(
+            'Approval is recorded. This tab does not hold the encrypted exact call yet, so it will not recreate arguments from chat text. If another open tab owns the call, that tab can continue it; otherwise the approval will expire safely.',
+            undefined,
+            { localOnly: true, durability: 'ephemeral' },
+          );
+        }
+        return;
+      }
+
+      for (const item of items) {
+        if (queuedApprovalResumesRef.current.some((entry) => entry.item.approvalId === item.approvalId)) continue;
+        queuedApprovalResumesRef.current.push(Object.freeze({
+          item,
+          sourceRunId,
+          userId: currentUserId,
+          circleId,
+          threadId: activeThreadId,
+          sourceUserMessageId: owner.sourceUserMessageId,
+          originalUserTaskText: owner.originalUserTaskText,
+          multiActionLedger: owner.multiActionLedger,
+        }));
+      }
+      flushQueuedApprovalResumesRef.current();
+    } finally {
+      approvalResumeRecoveryInFlightRef.current.delete(sourceRunId);
+    }
+  };
   useEffect(() => {
     if (runStatus === 'idle' && !botTyping) {
       approvalResumeInFlightRef.current = false;
+      desktopAttachmentApprovalResumeInFlightRef.current = false;
+      flushDesktopAttachmentApprovalResumesRef.current();
       flushQueuedApprovalResumesRef.current();
     }
-  }, [runStatus, botTyping]);
+  }, [
+    runStatus,
+    botTyping,
+    attachments.length,
+    stagedFiles.length,
+    activeThreadId,
+    threadLoadState.status,
+    threadLoadState.threadId,
+  ]);
   // Re-assigned every render so the drain effect and the banner's onResolved
   // always invoke the freshest closure (addBotMessage/sendMessage are declared
   // later in this component; they are only dereferenced at call time, after
@@ -5238,25 +6062,160 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // second Approve tapped inside the stale-idle window (before
     // setRunStatus('running') commits) still queues instead of double-sending.
     if (approvalResumeInFlightRef.current) return;
+    if (
+      desktopAttachmentApprovalResumeInFlightRef.current
+      || queuedDesktopAttachmentApprovalResumesRef.current.length > 0
+    ) return;
     // A live loop picks run-scoped approvals up on its next round by itself;
     // the turn-end drain effect above flushes anything still queued.
     if (runStatus === 'running' || runStatus === 'delegated' || botTyping) return;
     // A send is mid-dispatch (350ms lock window): don't collide into
     // sendMessage's silent return — the turn-end drain will retry.
     if (sendLockRef.current) return;
-    const queued = queuedApprovalResumesRef.current.splice(0, queuedApprovalResumesRef.current.length);
-    approvalResumeInFlightRef.current = true;
-    const toolLabels = Array.from(new Set(queued.map((q) => q.tool)));
-    // The "resuming" notice prints ONLY at actual dispatch — never before a
-    // guard that could silently drop the continuation.
-    addBotMessage(`✅ Approval${queued.length > 1 ? 's' : ''} granted — resuming ${toolLabels.join(', ')} now.`, undefined, {
-      localOnly: true,
-      durability: 'ephemeral',
+    // Navigation/hydration owns retry timing. Calling sendMessage while the
+    // thread is not ready returns before custody; synchronously recursing from
+    // finally would otherwise spin the microtask queue indefinitely.
+    if (
+      !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+      || activeThreadScopeRef.current.circleId !== circleId
+      || activeThreadScopeRef.current.threadId !== activeThreadId
+    ) return;
+    if (attachments.length > 0 || stagedFiles.length > 0) {
+      if (!approvalResumeComposerNoticeRef.current) {
+        approvalResumeComposerNoticeRef.current = true;
+        addBotMessage(
+          'Approval saved. Your current file draft is untouched. Send or remove those attachments, then I’ll continue the approved action automatically.',
+          undefined,
+          { localOnly: true, durability: 'ephemeral' },
+        );
+      }
+      return;
+    }
+    approvalResumeComposerNoticeRef.current = false;
+    if (!currentUserId || !activeThreadId) return;
+    const eligibleIndex = queuedApprovalResumesRef.current.findIndex((queued) => (
+      queued.userId === currentUserId
+      && queued.circleId === circleId
+      && queued.threadId === activeThreadId
+    ));
+    if (eligibleIndex < 0) return;
+    const origin = queuedApprovalResumesRef.current[eligibleIndex];
+    const queued = queuedApprovalResumesRef.current.filter((entry) => (
+      entry.sourceRunId === origin.sourceRunId
+      && entry.userId === origin.userId
+      && entry.circleId === origin.circleId
+      && entry.threadId === origin.threadId
+      && entry.sourceUserMessageId === origin.sourceUserMessageId
+      && entry.originalUserTaskText === origin.originalUserTaskText
+      && entry.multiActionLedger === origin.multiActionLedger
+    )).slice(0, OPEN_SWAN_APPROVAL_RESUME_MAX_ITEMS);
+    const binding = buildOpenSwanApprovalResumeBindingV1({
+      sourceRunId: origin.sourceRunId,
+      userId: origin.userId,
+      circleId: origin.circleId,
+      threadId: origin.threadId,
+      approvals: queued.map((entry) => entry.item),
     });
-    const lines = queued.map((q) => `Approval ${q.id.slice(0, 8)} for ${q.tool} was granted.`);
-    void sendMessage(
-      `${lines.join(' ')} For each approved tool call that has not already executed since its approval, retry that exact call with the same arguments now — skip any that already completed. Then continue the task.`,
-    );
+    if (!binding) {
+      // A malformed or over-broad group cannot become a continuation. Remove
+      // only that group; durable approval remains resolved and no tool runs.
+      const ids = new Set(queued.map((entry) => entry.item.approvalId));
+      queuedApprovalResumesRef.current = queuedApprovalResumesRef.current.filter(
+        (entry) => !ids.has(entry.item.approvalId),
+      );
+      addBotMessage(
+        'Approval was recorded, but its exact OpenSwan continuation binding could not be verified. Nothing ran. Please ask OpenSwan to continue the task again.',
+        undefined,
+        {
+          outcomeVerdict: 'blocked',
+          source: { actor: 'OpenSwan', surface: 'main_chat_approval_resume_unavailable' },
+        },
+      );
+      return;
+    }
+    approvalResumeInFlightRef.current = true;
+    let custodyTransferred = false;
+    void sendMessage(origin.originalUserTaskText, {
+      displayText: queued.length > 1 ? 'Continue approved actions' : 'Continue approved action',
+      modeOverride: 'execute',
+      openSwanApprovalResume: Object.freeze({
+        binding,
+        sourceRunId: origin.sourceRunId,
+        sourceUserMessageId: origin.sourceUserMessageId,
+        originalUserTaskText: origin.originalUserTaskText,
+        multiActionLedger: origin.multiActionLedger,
+      }),
+      openSwanApprovalResumeCustody: Object.freeze({
+        accepted: () => {
+          custodyTransferred = true;
+          const ids = new Set(queued.map((entry) => entry.item.approvalId));
+          queuedApprovalResumesRef.current = queuedApprovalResumesRef.current.filter(
+            (entry) => !ids.has(entry.item.approvalId),
+          );
+          addBotMessage(
+            `✅ Approval${queued.length > 1 ? 's' : ''} granted — continuing the original task now.`,
+            undefined,
+            { localOnly: true, durability: 'ephemeral' },
+          );
+        },
+        terminalWithoutCustody: () => {
+          if (custodyTransferred) return;
+          const ids = new Set(queued.map((entry) => entry.item.approvalId));
+          queuedApprovalResumesRef.current = queuedApprovalResumesRef.current.filter(
+            (entry) => !ids.has(entry.item.approvalId),
+          );
+          const noticeKey = `terminal-without-custody:${origin.sourceRunId}`;
+          if (!approvalResumeRecoveryNoticeKeysRef.current.has(noticeKey)) {
+            approvalResumeRecoveryNoticeKeysRef.current.add(noticeKey);
+            addBotMessage(
+              'The approval check ended without transferring the encrypted action to OpenSwan. Nothing was dispatched. This tab will not loop or reconstruct the request; a still-live approval can be retried from an authoritative recovery update.',
+              undefined,
+              { localOnly: true, durability: 'ephemeral' },
+            );
+          }
+        },
+      }),
+    }).finally(() => {
+      approvalResumeInFlightRef.current = false;
+      // Transient readiness/composer guards leave the binding queued; a
+      // definitive preflight/source/boundary failure calls
+      // terminalWithoutCustody and removes it. Runtime acceptance remains the
+      // only successful custody transfer. Do not recurse here: state changes
+      // own the next bounded flush attempt.
+    });
+  };
+  flushDesktopAttachmentApprovalResumesRef.current = () => {
+    if (queuedDesktopAttachmentApprovalResumesRef.current.length === 0) return;
+    if (desktopAttachmentApprovalResumeInFlightRef.current) return;
+    if (approvalResumeInFlightRef.current) return;
+    if (runStatus === 'running' || runStatus === 'delegated' || botTyping || sendLockRef.current) return;
+    if (
+      attachments.length > 0
+      || stagedFiles.length > 0
+      || !currentUserId
+      || !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+    ) return;
+    // A queued decision from an unmounted thread must not head-of-line block
+    // an eligible decision for the exact thread currently on screen. Preserve
+    // every item's immutable origin scope and decision while selecting.
+    const eligibleIndex = queuedDesktopAttachmentApprovalResumesRef.current.findIndex((queued) => (
+      queued.userId === currentUserId
+      && queued.circleId === circleId
+      && queued.threadId === activeThreadId
+    ));
+    if (eligibleIndex < 0) return;
+    const [queued] = queuedDesktopAttachmentApprovalResumesRef.current.splice(eligibleIndex, 1);
+    if (!queued) return;
+    desktopAttachmentApprovalResumeInFlightRef.current = true;
+    void handleDesktopAttachmentApprovalResumeRef.current(queued)
+      .finally(() => {
+        desktopAttachmentApprovalResumeInFlightRef.current = false;
+        flushDesktopAttachmentApprovalResumesRef.current();
+      });
   };
   // Drives the rotating "is noodling / is pondering / is cooking …"
   // verbs in the typing indicator. Ticks only while the bot is
@@ -5301,6 +6260,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // STOP button for OpenSwan typed-loop turns — holds the live turn's cancel
   // handle so the steering bar can abort it at the next loop boundary.
   const openSwanAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    // A navigation/logout unmount is also a STOP boundary. Abort the exact
+    // live turn before hooks/refs disappear so an approved mutation waiting on
+    // database or target revalidation cannot continue in the background.
+    openSwanAbortRef.current?.abort();
+    openSwanAbortRef.current = null;
+  }, []);
   const codingWorkbenchStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const builderDragContainerRef = useRef<HTMLDivElement | null>(null);
   const builderDraggingRef = useRef(false);
@@ -5699,7 +6665,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
         const { rows } = await loadThreadMessages(circleId, activeThreadId);
         if (cancelled || generation !== threadLoadGenerationRef.current) return;
-        const nextMessages = await mapLoadedThreadMessages(rows, activeThreadId, currentUserId || undefined, agentName);
+        const nextMessages = await mapLoadedThreadMessages(rows, circleId, activeThreadId, currentUserId || undefined, agentName);
         const storedDraft = currentUserId
           ? await storage.getItem(draftKey({ circleId, threadId: activeThreadId, userId: currentUserId })).catch(() => null)
           : null;
@@ -5763,7 +6729,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         || activeThreadScopeRef.current.circleId !== scopedCircleId
         || activeThreadScopeRef.current.threadId !== scopedThreadId
       ) return;
-      const older = await mapLoadedThreadMessages(rows, scopedThreadId, currentUserId || undefined, agentName);
+      const older = await mapLoadedThreadMessages(rows, scopedCircleId, scopedThreadId, currentUserId || undefined, agentName);
       if (
         generation !== threadLoadGenerationRef.current
         || activeThreadScopeRef.current.circleId !== scopedCircleId
@@ -6394,7 +7360,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const assignable = new Map<string, AssignableAgent>();
         const pushAgent = (agent: AssignableAgent | null | undefined) => {
           if (!agent?.id) return;
-          const key = agent.sessionKey ? `${agent.provider}::${agent.sessionKey}` : `db::${agent.id}`;
+          const key = agent.sessionKey
+            ? agent.source === 'openswan-session'
+              ? `${agent.provider}::${agent.connectionId || 'missing-connection'}::${agent.sessionKey}`
+              : `${agent.provider}::${agent.sessionKey}`
+            : `db::${agent.id}`;
           const existing = assignable.get(key);
           if (!existing) {
             assignable.set(key, agent);
@@ -6409,6 +7379,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             owner_display_name: agent.owner_display_name || existing.owner_display_name,
             current_task: agent.current_task || existing.current_task,
             sessionKey: agent.sessionKey || existing.sessionKey,
+            connectionId: agent.connectionId || existing.connectionId,
             source: agent.source || existing.source,
             terminalConfig: agent.terminalConfig || existing.terminalConfig,
           });
@@ -6425,6 +7396,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           circle_id: circleId,
           model: DEFAULT_AGENT.model,
           sessionKey: null,
+          connectionId: null,
           source: 'default',
         });
 
@@ -6453,7 +7425,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
         try {
           const bridgeProviders = [
-            { provider: 'claude-code', label: 'Claude Code', port: 7778, color: '#22d3ee' },
+            { provider: 'claude-code', label: 'Claude Code', port: 7778, color: '#6366f1' },
             { provider: 'codex', label: 'Codex', port: 7779, color: '#10a37f' },
             { provider: 'gemini', label: 'Gemini CLI', port: 7780, color: '#4285f4' },
             { provider: 'cursor', label: 'Cursor', port: 7781, color: '#8b5cf6' },
@@ -6532,22 +7504,84 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
   }, [circleId, showAssignPanel, showSpawnPanel]);
 
-  const resolveOpenSwanConnection = useCallback(async (): Promise<OpenSwanConfig | null> => {
+  const resolveOpenSwanConnection = useCallback(async (connectionId?: string | null) => {
     try {
-      const connections = await loadConnections();
-      const match = connections.find(conn => conn.provider === 'openswan' && !!conn.token);
-      return match ? { endpoint: match.endpoint, token: match.token } : null;
+      const liveConnections = getAutoConnectConnections();
+      const connections = liveConnections.length > 0 ? liveConnections : await loadConnections();
+      return resolveExactOpenSwanConnection(connections, connectionId ?? undefined);
     } catch {
-      return null;
+      return resolveExactOpenSwanConnection([], connectionId ?? undefined);
     }
   }, []);
+
+  const attachAcceptedHandoffRun = useCallback(async (
+    candidate: ConnectedAgentHandoffReceipt,
+    task: string,
+    agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null,
+    external?: {
+      externalDispatchKind?: ConnectedAgentExternalDispatchKind | null;
+      externalConnectionId?: string | null;
+    },
+  ): Promise<ConnectedAgentHandoffReceipt> => {
+    if (candidate.status !== 'accepted' || candidate.runId || !currentUserId) return candidate;
+    const run = await recordConnectedAgentAcceptedRun({
+      circleId,
+      userId: currentUserId,
+      task,
+      // circle_chat_threads and legacy chat_sessions are different tables.
+      // The canonical writer keeps this id in bounded metadata only.
+      threadId: activeThreadId,
+      externalDispatchKind: external?.externalDispatchKind || null,
+      externalConnectionId: external?.externalConnectionId || null,
+      receipt: candidate,
+      agentSubjectMetadata: agentSubjectMetadata || null,
+    }).catch(() => null);
+    if (!run) {
+      return buildConnectedAgentHandoffReceipt({
+        ...candidate,
+        runId: null,
+        message: `_The task was accepted, but Office tracking is unavailable. Completion remains unverified._\n\n${candidate.message}`,
+      });
+    }
+    return buildConnectedAgentHandoffReceipt({
+      ...candidate,
+      runId: run.id,
+    });
+  }, [activeThreadId, circleId, currentUserId]);
 
   const dispatchAssignedAgentTask = useCallback(async (
     agent: AssignableAgent,
     task: string,
     visionArtifacts: readonly ChatVisualBriefArtifact[] = [],
-  ): Promise<string> => {
+  ): Promise<ConnectedAgentHandoffReceipt> => {
+    const agentSubjectMetadata = buildAssignableAgentSubjectMetadata(agent);
     const normalizedProvider = (agent.provider || '').toLowerCase().replace(/\s+/g, '-');
+    const receipt = (
+      status: ConnectedAgentHandoffReceipt['status'],
+      message: string,
+      sessionId?: string | null,
+      providerRunId?: string | null,
+    ): ConnectedAgentHandoffReceipt => buildConnectedAgentHandoffReceipt({
+      status,
+      provider: normalizedProvider,
+      actor: agent.name,
+      sessionId,
+      providerRunId,
+      // The provider acknowledgement never owns a local agent_runs UUID.
+      // attachAcceptedHandoffRun may add one only after canonical persistence.
+      runId: null,
+      message,
+    });
+    const trackedReceipt = (
+      candidate: ConnectedAgentHandoffReceipt,
+      external?: {
+        externalDispatchKind?: ConnectedAgentExternalDispatchKind | null;
+        externalConnectionId?: string | null;
+      },
+      subjectOverride?: AgentRuntimeSubjectMetadata | null,
+    ) => (
+      attachAcceptedHandoffRun(candidate, task, subjectOverride || agentSubjectMetadata, external)
+    );
     const terminalConfig = agent.terminalConfig || null;
     const preferredModel = (terminalConfig?.defaultModel || agent.model) && (terminalConfig?.defaultModel || agent.model) !== 'auto'
       ? (terminalConfig?.defaultModel || agent.model || undefined)
@@ -6559,13 +7593,111 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       : taskWithVisualContext;
 
     if (normalizedProvider === 'openswan') {
-      const config = await resolveOpenSwanConnection();
-      if (config) {
+      if (agent.source === 'db') {
+        if (
+          !currentUserId
+          || !agent.ownerId
+          || agent.ownerId !== currentUserId
+          || agent.isOwn !== true
+        ) {
+          throw new Error(
+            `**${agent.name}** belongs to another circle member. Chat cannot route that public Office profile through your local OpenSwan runtime. Ask the owner to run it, or use an explicitly authorized remote handoff.`,
+          );
+        }
+
+        const binding = await readOfficeAgentSessionBinding(agent.id);
+        if (!binding) {
+          throw new Error(
+            `**${agent.name}** is not bound to an exact OpenSwan session on this device. Open the agent in Office, choose a live session, and bind it before sending work.`,
+          );
+        }
+        const sessionSnapshot = buildOfficeSessionSnapshot(
+          getAutoConnectConnections(),
+          getAutoConnectSessions(),
+          getAutoConnectSessionFingerprints(),
+        );
+        const bindingResolution = resolveOfficeAgentSessionBinding({
+          officeAgentId: agent.id,
+          binding,
+          connections: sessionSnapshot.connections,
+          sessionsByConnection: sessionSnapshot.sessionsByConnection,
+          sessionFingerprintsByConnection: sessionSnapshot.sessionFingerprintsByConnection,
+        });
+        if (!bindingResolution.ok) {
+          throw new Error(
+            `**${agent.name}** does not currently resolve to one exact live OpenSwan session (${bindingResolution.reason}). Refresh Office or repair its session binding before sending work.`,
+          );
+        }
+
+        const boundTarget = bindingResolution.target;
+        const sessionResult = await sendSessionMessage(
+          boundTarget.config,
+          boundTarget.sessionKey,
+          taskWithVisualContext,
+        );
+        if (sessionResult.ok) {
+          return trackedReceipt(
+            receipt(
+              'accepted',
+              `**${agent.name}** [bound OpenSwan session ${boundTarget.sessionKey} · task accepted]:\n\n_The exact Office session accepted this task. Completion has not been verified yet._\n\n${sessionResult.reply || 'Message sent.'}`,
+              sessionResult.sessionKey || boundTarget.sessionKey,
+              sessionResult.providerRunId,
+            ),
+            {
+              externalDispatchKind: 'sessions_send',
+              externalConnectionId: boundTarget.connectionId,
+            },
+          );
+        }
+        if (sessionResult.transportAccepted !== false) {
+          return receipt(
+            'unknown',
+            `**${agent.name}** [bound OpenSwan session ${boundTarget.sessionKey} · dispatch outcome unknown]:\n\n_OpenSwan could not prove whether this task began. It was not replayed. Check the exact bound session before retrying._\n\n${sessionResult.error || 'No trustworthy session-send acknowledgement was returned.'}`,
+            sessionResult.sessionKey || boundTarget.sessionKey,
+            sessionResult.providerRunId,
+          );
+        }
+        throw new Error(
+          sessionResult.error || `The bound OpenSwan session ${boundTarget.sessionKey} rejected the handoff before dispatch.`,
+        );
+      }
+
+      if (agent.source === 'openswan-session' && !agent.connectionId) {
+        throw new Error('This OpenSwan session has no exact connection identity. Refresh the agent list before sending.');
+      }
+      const connectionResolution = await resolveOpenSwanConnection(agent.connectionId);
+      if (!connectionResolution.ok) {
+        throw new Error(agent.connectionId
+          ? 'The exact OpenSwan connection for this session is not currently available. Refresh the agent list before sending.'
+          : 'Chat could not select one exact connected OpenSwan runtime. Connect exactly one runtime or choose a live session.');
+      }
+      const config = connectionResolution.config;
+      const externalConnectionId = connectionResolution.connectionId;
         if (agent.sessionKey && agent.source === 'openswan-session') {
           const sessionResult = await sendSessionMessage(config, agent.sessionKey, taskWithVisualContext);
           if (sessionResult.ok) {
-            return `**${agent.name}** [OpenSwan session ${agent.sessionKey}]:\n\n${sessionResult.reply || 'Message sent.'}`;
+            return trackedReceipt(
+              receipt(
+                'accepted',
+                `**${agent.name}** [OpenSwan session ${agent.sessionKey} · task accepted]:\n\n_The connected session accepted this task. Completion has not been verified yet._\n\n${sessionResult.reply || 'Message sent.'}`,
+                sessionResult.sessionKey || agent.sessionKey,
+                sessionResult.providerRunId,
+              ),
+              { externalDispatchKind: 'sessions_send', externalConnectionId },
+            );
           }
+          if (sessionResult.transportAccepted !== false) {
+            return receipt(
+              'unknown',
+              `**${agent.name}** [OpenSwan session ${agent.sessionKey} · dispatch outcome unknown]:\n\n_OpenSwan could not prove whether this task began. The task was not replayed. Check the session before retrying._\n\n${sessionResult.error || 'No trustworthy session-send acknowledgement was returned.'}`,
+              sessionResult.sessionKey || agent.sessionKey,
+              sessionResult.providerRunId,
+            );
+          }
+          // An exact-session send may have crossed the process boundary even
+          // when its response is unavailable. Never replay the same task by
+          // silently spawning a second session after a send attempt.
+          throw new Error(sessionResult.error || `OpenSwan session ${agent.sessionKey} could not confirm the handoff.`);
         }
 
         const preface = [
@@ -6576,18 +7708,64 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         ].filter(Boolean).join('\n');
         const spawnResult = await spawnSubAgent(config, preface, preferredModel);
         if (spawnResult.ok) {
-          return `**${agent.name}** [spawned OpenSwan session${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${spawnResult.reply || 'Session started.'}`;
+          return trackedReceipt(
+            receipt(
+              'accepted',
+              `**${agent.name}** [OpenSwan session started${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n_The connected session is working on the task. Completion has not been verified yet._\n\n${spawnResult.reply || 'Task accepted.'}`,
+              spawnResult.sessionKey,
+              spawnResult.providerRunId,
+            ),
+            { externalDispatchKind: 'sessions_spawn', externalConnectionId },
+          );
         }
-      }
+        if (spawnResult.transportAccepted !== false) {
+          return receipt(
+            'unknown',
+            `**${agent.name}** [OpenSwan session spawn · dispatch outcome unknown]:\n\n_OpenSwan could not prove whether the child session started. No fallback execution was launched. Check the session list before retrying._\n\n${spawnResult.error || 'No trustworthy spawn acknowledgement was returned.'}`,
+            spawnResult.sessionKey,
+            spawnResult.providerRunId,
+          );
+        }
+        // A spawn request already crossed the OpenSwan tool boundary. Even
+        // when its structured acknowledgement is malformed or unavailable,
+        // do not fall through to another execution lane for the same task.
+        throw new Error(spawnResult.error || 'OpenSwan could not confirm the session spawn. Check the session list before retrying.');
     }
 
     const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
     if (bridgeProviders.includes(normalizedProvider)) {
+      if (
+        agent.source === 'db'
+        && (
+          !currentUserId
+          || !agent.ownerId
+          || agent.ownerId !== currentUserId
+          || agent.isOwn !== true
+        )
+      ) {
+        throw new Error(
+          `**${agent.name}** belongs to another circle member. Chat cannot launch your local ${formatChatAgentProviderLabel(normalizedProvider)} runtime for that public Office profile. Ask the owner to run it or use an explicitly authorized remote handoff.`,
+        );
+      }
       if (agent.sessionKey && agent.source === 'bridge-session') {
         const sendResult = await sendTerminalAgentSessionMessage(normalizedProvider, agent.sessionKey, profiledTask);
         if (sendResult.ok) {
-          return `**${agent.name}** [managed terminal session ${agent.sessionKey.slice(0, 12)}]:\n\n${sendResult.response || 'Message sent.'}`;
+          return trackedReceipt(receipt(
+            'accepted',
+            `**${agent.name}** [managed terminal session ${agent.sessionKey.slice(0, 12)} · task accepted]:\n\n_The connected session accepted this task. Completion has not been verified yet._\n\n${sendResult.response || 'Message sent.'}`,
+            sendResult.sessionId || agent.sessionKey,
+          ));
         }
+        if (sendResult.transportAccepted !== false) {
+          return receipt(
+            'unknown',
+            `**${agent.name}** [managed terminal session ${agent.sessionKey.slice(0, 12)} · dispatch outcome unknown]:\n\n_The bridge could not prove whether this task began. It was not replayed or launched in another session. Check the exact session before retrying._\n\n${sendResult.error || 'No trustworthy terminal-session acknowledgement was returned.'}`,
+            sendResult.sessionId || agent.sessionKey,
+          );
+        }
+        // The user selected one exact session. Even a proven pre-dispatch
+        // rejection is not authority to silently create a different session.
+        throw new Error(sendResult.error || `The selected ${agent.name} session rejected the handoff before dispatch.`);
       }
 
       const dbId = agent.id?.startsWith('bridge::') ? undefined : agent.id;
@@ -6606,7 +7784,41 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       );
       if (result.ok) {
         const providerLabel = formatChatAgentProviderLabel(normalizedProvider);
-        return `**${agent.name}** [executed via ${providerLabel}${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${result.response || 'Done'}`;
+        if (result.dispatchedVia === 'bridge') {
+          if (!result.sessionId) {
+            return receipt(
+              'unknown',
+              `**${agent.name}** [${providerLabel} bridge · exact session lineage unavailable]:\n\n_The bridge acknowledged the request but did not return one exact session identity. No fallback was launched, the task was not replayed, and no accepted Office run was created._\n\n${result.response || 'Check the provider session list before retrying.'}`,
+            );
+          }
+          const launchedActor = result.displayName || agent.name;
+          const launchedSubject = result.sessionId
+            ? buildAgentRuntimeSubject({
+                id: result.sessionId,
+                name: launchedActor,
+                sessionKey: result.sessionId,
+                providerType: normalizedProvider as any,
+              }).metadata
+            : agentSubjectMetadata;
+          const trackedSubject = agent.source === 'db'
+            ? agentSubjectMetadata
+            : launchedSubject;
+          return trackedReceipt(receipt(
+            'accepted',
+            `**${agent.name}** [sent to ${providerLabel}${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n_The connected agent accepted this task. Completion has not been verified yet._\n\n${result.response || 'Task accepted by the bridge.'}`,
+            result.sessionId,
+          ), undefined, trackedSubject);
+        }
+        return receipt(
+          'drafted',
+          `**${agent.name}** [AI fallback draft via ${providerLabel}${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n_This is a synchronous draft, not verified completion of a connected-agent run._\n\n${result.response || 'A draft was returned.'}`,
+        );
+      }
+      if (result.transportAccepted !== false) {
+        return receipt(
+          'unknown',
+          `**${agent.name}** [${formatChatAgentProviderLabel(normalizedProvider)} bridge · dispatch outcome unknown]:\n\n_The bridge could not prove whether the launch began. It was not replayed through another endpoint or fallback._\n\n${result.error || 'No trustworthy bridge acknowledgement was returned.'}`,
+        );
       }
     }
 
@@ -6617,13 +7829,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         name: agent.name,
         provider: normalizedProvider,
         gatewayUrl: agent.gatewayUrl || undefined,
+        ownerId: agent.ownerId || undefined,
+        currentUserId: currentUserId || undefined,
+        isOwn: agent.isOwn === true,
+        source: agent.source,
         circleId,
         model: preferredModel || agent.model || undefined,
         sessionKey: agent.sessionKey || undefined,
       }, profiledTask, connections);
       if (customResult.ok) {
         const providerLabel = formatChatAgentProviderLabel(normalizedProvider);
-        return `**${agent.name}** [sent to ${providerLabel} bridge${customResult.path ? ` · ${customResult.path}` : ''}]:\n\n${customResult.response || 'Task accepted.'}`;
+        return trackedReceipt(receipt(
+          'accepted',
+          `**${agent.name}** [sent to ${providerLabel} bridge${customResult.path ? ` · ${customResult.path}` : ''}]:\n\n_The bridge accepted this task. Completion has not been verified yet._\n\n${customResult.response || 'Task accepted.'}`,
+          agent.sessionKey,
+        ));
+      }
+      if (customResult.transportAccepted !== false) {
+        return receipt(
+          'unknown',
+          `**${agent.name}** [${formatChatAgentProviderLabel(normalizedProvider)} bridge · dispatch outcome unknown]:\n\n_The bridge could not prove whether this task began. It was not replayed. Check the target before retrying._\n\n${customResult.error || 'No trustworthy bridge acknowledgement was returned.'}`,
+          agent.sessionKey,
+        );
       }
       throw new Error(customResult.error || `${formatChatAgentProviderLabel(normalizedProvider)} bridge could not accept the task.`);
     }
@@ -6652,13 +7879,67 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       spiritId: agent.spirit || undefined,
     });
     const viaLabel = preferredModel ? `${normalizedProvider || 'ai'} · ${preferredModel}` : (normalizedProvider || 'ai');
-    return `**${agent.name}** [AI draft via ${viaLabel}]:\n\n${aiResp}`;
-  }, [circleId, currentUserId, currentUserName, resolveOpenSwanConnection]);
+    return receipt(
+      'drafted',
+      `**${agent.name}** [AI draft via ${viaLabel}]:\n\n_This draft is not verified completion of a connected-agent run._\n\n${aiResp}`,
+      agent.sessionKey,
+    );
+  }, [attachAcceptedHandoffRun, circleId, currentUserId, currentUserName, resolveOpenSwanConnection]);
 
-  const spawnDedicatedOpenSwanSession = useCallback(async (agent: AssignableAgent, task: string): Promise<string> => {
-    const config = await resolveOpenSwanConnection();
-    if (!config) {
-      throw new Error('No connected OpenSwan runtime found');
+  const spawnDedicatedOpenSwanSession = useCallback(async (
+    agent: AssignableAgent,
+    task: string,
+  ): Promise<ConnectedAgentHandoffReceipt> => {
+    let config: OpenSwanConfig;
+    let externalConnectionId: string;
+    if (agent.source === 'db') {
+      if (
+        !currentUserId
+        || !agent.ownerId
+        || agent.ownerId !== currentUserId
+        || agent.isOwn !== true
+      ) {
+        throw new Error(
+          `**${agent.name}** belongs to another circle member. Chat cannot spawn a session on your local OpenSwan runtime for that public Office profile.`,
+        );
+      }
+      const binding = await readOfficeAgentSessionBinding(agent.id);
+      if (!binding) {
+        throw new Error(
+          `**${agent.name}** is not bound to an exact OpenSwan connection. Bind a live session in Office before spawning a dedicated session for this profile.`,
+        );
+      }
+      const sessionSnapshot = buildOfficeSessionSnapshot(
+        getAutoConnectConnections(),
+        getAutoConnectSessions(),
+        getAutoConnectSessionFingerprints(),
+      );
+      const bindingResolution = resolveOfficeAgentSessionBinding({
+        officeAgentId: agent.id,
+        binding,
+        connections: sessionSnapshot.connections,
+        sessionsByConnection: sessionSnapshot.sessionsByConnection,
+        sessionFingerprintsByConnection: sessionSnapshot.sessionFingerprintsByConnection,
+      });
+      if (!bindingResolution.ok) {
+        throw new Error(
+          `**${agent.name}** does not resolve to one exact live OpenSwan connection (${bindingResolution.reason}). Refresh Office or repair its binding before spawning.`,
+        );
+      }
+      config = bindingResolution.target.config;
+      externalConnectionId = bindingResolution.target.connectionId;
+    } else {
+      if (agent.source === 'openswan-session' && !agent.connectionId) {
+        throw new Error('This OpenSwan session has no exact connection identity. Refresh the agent list before spawning.');
+      }
+      const connectionResolution = await resolveOpenSwanConnection(agent.connectionId);
+      if (!connectionResolution.ok) {
+        throw new Error(agent.connectionId
+          ? 'The exact OpenSwan connection for this session is not currently available.'
+          : 'Chat could not select one exact connected OpenSwan runtime. Connect exactly one runtime or choose a live session.');
+      }
+      config = connectionResolution.config;
+      externalConnectionId = connectionResolution.connectionId;
     }
     const preferredModel = agent.model && agent.model !== 'auto' ? agent.model : undefined;
     const launchTask = [
@@ -6669,10 +7950,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     ].filter(Boolean).join('\n');
     const result = await spawnSubAgent(config, launchTask, preferredModel);
     if (!result.ok) {
+      if (result.transportAccepted !== false) {
+        return buildConnectedAgentHandoffReceipt({
+          status: 'unknown',
+          provider: 'openswan',
+          actor: agent.name,
+          sessionId: result.sessionKey || null,
+          providerRunId: result.providerRunId || null,
+          runId: null,
+          message: `**${agent.name}** [dedicated OpenSwan session · dispatch outcome unknown]:\n\n_OpenSwan could not prove whether the child session started. The task was not replayed. Check the session list before retrying._\n\n${result.error || 'No trustworthy spawn acknowledgement was returned.'}`,
+        });
+      }
       throw new Error(result.error || 'Failed to spawn OpenSwan session');
     }
-    return `**${agent.name}** [dedicated OpenSwan session${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${result.reply || 'Session spawned and ready.'}`;
-  }, [resolveOpenSwanConnection]);
+    const receipt = buildConnectedAgentHandoffReceipt({
+      status: 'accepted',
+      provider: 'openswan',
+      actor: agent.name,
+      sessionId: result.sessionKey || null,
+      providerRunId: result.providerRunId || null,
+      runId: null,
+      message: `**${agent.name}** [dedicated OpenSwan session started${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n_The new session accepted this task. Completion has not been verified yet._\n\n${result.reply || 'Task accepted.'}`,
+    });
+    return attachAcceptedHandoffRun(
+      receipt,
+      task.trim() || `Start a dedicated OpenSwan session for ${agent.name}`,
+      buildAssignableAgentSubjectMetadata(agent),
+      {
+        externalDispatchKind: 'sessions_spawn',
+        externalConnectionId,
+      },
+    );
+  }, [attachAcceptedHandoffRun, currentUserId, resolveOpenSwanConnection]);
 
   useEffect(() => {
     if (showPluginPicker) {
@@ -6935,6 +8244,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           if (!isMountedScope()) return;
           const snapshot = await mapLoadedThreadMessages(
             rows,
+            circleId,
             activeThreadId,
             currentUserId,
             agentName,
@@ -7043,6 +8353,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               id: msg.id,
               timestamp: msg.timestamp,
               userName: msg.userName,
+              authorId: msg.authorId,
             };
             messagesRef.current = next;
             return next;
@@ -7109,6 +8420,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 runId: undefined,
                 requestId: undefined,
                 requestAuthorId: undefined,
+                requestSourceMessageId: undefined,
                 recoveryOptions: undefined,
                 recoveryReliability: undefined,
                 computerTaskStatus: undefined,
@@ -7263,11 +8575,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   // ─── Add Message (local-first) ───────────────────────────────────────────
 
-  const addUserMessage = (content: string): ChatMessage => {
+  const addUserMessage = (
+    content: string,
+    persistenceObserver?: UserMessagePersistenceObserver,
+  ): ChatMessage => {
     const isCheckIn = content.toLowerCase().includes('check') || content.toLowerCase().includes('done');
     const isAchievement = content.toLowerCase().includes('achievement') || content.toLowerCase().includes('unlocked');
     const messageThreadId = activeThreadId;
     const replyToId = replyTo?.dbId || null;
+    let persistenceSettled = false;
+    const settlePersistence = (outcome: UserMessagePersistenceOutcome) => {
+      if (!persistenceObserver || persistenceSettled) return;
+      persistenceSettled = true;
+      persistenceObserver.settle(outcome);
+    };
     
     const msg: ChatMessage = {
       id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -7313,18 +8634,34 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             isBot: false,
             reactions: {},
           });
-          if (dbId) {
-            void removePendingBotMessage(messageThreadId, msg.id).catch(() => {});
-            setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
+          if (!dbId) {
+            settlePersistence(Object.freeze({
+              ok: false,
+              reason: 'The persisted user-message row did not return an exact id.',
+            }));
+            return;
           }
+          void removePendingBotMessage(messageThreadId, msg.id).catch(() => {});
+          setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
+          settlePersistence(Object.freeze({ ok: true, persistedMessageId: dbId }));
         } catch (e) {
           console.error('[ChatTab] Unexpected error persisting:', e);
           if (attempt < 3) {
-            setTimeout(() => persistMessage(attempt + 1), 1000 * (attempt + 1));
+            setTimeout(() => { void persistMessage(attempt + 1); }, 1000 * (attempt + 1));
+          } else {
+            settlePersistence(Object.freeze({
+              ok: false,
+              reason: e instanceof Error ? e.message : 'The user-message row could not be persisted.',
+            }));
           }
         }
       };
-      persistMessage();
+      void persistMessage();
+    } else {
+      settlePersistence(Object.freeze({
+        ok: false,
+        reason: 'A signed-in user and exact thread are required to persist this attachment turn.',
+      }));
     }
 
     // reference-nav-chips: resolve "open the Acme mission"-style entity
@@ -7394,6 +8731,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       || null;
     const messageRequestId = String(extra?.requestId || routedRequestId || '').trim().slice(0, 96) || null;
     const messageRequestAuthorId = String(extra?.requestAuthorId || currentUserId || '').trim().slice(0, 160) || null;
+    const messageRequestSourceMessageId = String(extra?.requestSourceMessageId || '').trim().slice(0, 160) || null;
     const messageAgentSubjectMetadata = extra?.agentSubjectMetadata
       || selectedAgentSubjectContext.agentSubjectMetadata;
     // Flywheel: derive the outcome verdict from the data already in scope so
@@ -7422,7 +8760,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         || (extra?.bestOfN?.candidates?.length || 0) > 0,
       producedText: (content || '').trim().length > 0,
     });
-    const finalizeVerdict = authoritativeOutcomeSignal?.verdict || inferredFinalizeVerdict;
+    // Runtime-owned terminal evidence wins. When there is none, a typed lane
+    // may explicitly prevent clean acknowledgement prose from being inferred
+    // as completed (connected-agent bridge acceptance is the first consumer).
+    const finalizeVerdict = authoritativeOutcomeSignal?.verdict
+      || extra?.outcomeVerdict
+      || inferredFinalizeVerdict;
     const initialOutcomeSignal: NonNullable<ChatMessage['outcomeSignal']> = {
       verdict: finalizeVerdict,
       lane: messageSource.surface || undefined,
@@ -7455,6 +8798,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       content,
       isBot: true,
       isUser: false,
+      // Persisted bot rows are written under the requesting user. Preserve
+      // that same owner on the optimistic row so approval ownership checks do
+      // not briefly depend on a later realtime hydration round-trip.
+      authorId: currentUserId || undefined,
       userName: agentName,
       timestamp: new Date(),
       reactions: {},
@@ -7464,12 +8811,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       source: messageSource,
       durability,
       agentSubjectMetadata: messageAgentSubjectMetadata,
+      connectedAgentHandoff: extra?.connectedAgentHandoff,
+      openSwanTerminal: extra?.openSwanTerminal,
+      openSwanResumeLocator: extra?.openSwanResumeLocator,
+      openSwanMultiActionCompletion: extra?.openSwanMultiActionCompletion,
       usage: extra?.usage || undefined,
       delegatedTo: extra?.delegatedTo,
       delegatedSubagents: extra?.delegatedSubagents,
       runId: extra?.runId,
       requestId: messageRequestId,
       requestAuthorId: messageRequestAuthorId,
+      requestSourceMessageId: messageRequestSourceMessageId,
       memoriesUsed: extra?.memoriesUsed,
       memoryRefs: extra?.memoryRefs,
       memoryRecommendations: extra?.memoryRecommendations,
@@ -7658,6 +9010,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     touched?: string[];
     messageSource?: ChatMessageSource;
     launchIfMissing?: boolean;
+    outcomeStatus?: ComputerTaskOutcomeStatus;
+    replayPolicy?: 'normal' | 'manual_verify_only';
+    mutationDispatched?: boolean;
+    verificationOnlyTools?: string[];
+    computerHandoff?: ChatComputerHandoffMetadata | null;
+    messageSuffix?: string;
   }): Promise<void> => {
     const failureMessage = details.error instanceof Error
       ? details.error.message
@@ -7673,17 +9031,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       task: details.task,
       failureMessage,
       failureStack,
-      outcomeStatus: 'failed',
+      outcomeStatus: details.outcomeStatus || 'failed',
       executionKind: details.executionKind,
       source: details.source,
       launchIfMissing: details.launchIfMissing ?? true,
+      replayPolicy: details.replayPolicy || 'normal',
+      mutationDispatched: details.mutationDispatched === true,
+      verificationOnlyTools: details.verificationOnlyTools || [],
       touched: details.touched,
     });
-    addBotMessage(`${details.title}: ${failureMessage}${recovery.message}`, undefined, {
+    // The raw provider/bridge exception is archived above. Chat gets one
+    // customer-safe recovery sentence and its primary action; never repeat the
+    // exception here and again inside the recovery payload.
+    addBotMessage(`${details.title}.${recovery.message}${details.messageSuffix || ''}`, undefined, {
       localOnly: true,
       hadError: true,
       recoveryOptions: recovery.recoveryOptions,
       recoveryReliability: recovery.recoveryReliability,
+      computerTaskStatus: details.outcomeStatus || 'failed',
+      computerHandoff: details.computerHandoff || undefined,
       source: details.messageSource || {
         actor: 'OpenSwan',
         surface: `${details.source}_message`,
@@ -7692,7 +9058,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     });
   };
 
-  const addPendingBotMessage = (content: string, extra?: { taskPlan?: OpenSwanTaskPlan }) => {
+  const addPendingBotMessage = (
+    content: string,
+    extra?: { taskPlan?: OpenSwanTaskPlan; requestSourceMessageId?: string | null },
+  ) => {
     const msgId = `bot-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
       id: msgId,
@@ -7700,7 +9069,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       isBot: true,
       isUser: false,
       userName: agentName,
+      authorId: currentUserId || undefined,
       requestAuthorId: currentUserId || null,
+      requestSourceMessageId: extra?.requestSourceMessageId || null,
       timestamp: new Date(),
       reactions: {},
       taskPlan: extra?.taskPlan,
@@ -7888,7 +9259,36 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // to chat once. Deduped via a ref keyed on runId so React StrictMode
   // double-invocation doesn't double-post.
   useEffect(() => {
-    const { status, outcomeStatus, result, errorMessage, runId, sessionId, task } = computerUseTask.state;
+    const {
+      status,
+      outcomeStatus,
+      requestedActionContract,
+      result,
+      errorMessage,
+      runId,
+      sessionId,
+      task,
+      actions,
+    } = computerUseTask.state;
+    const mutationMayHaveDispatched = actions.length > 0 || Boolean(sessionId);
+    const replayPolicy = mutationMayHaveDispatched ? 'manual_verify_only' as const : 'normal' as const;
+    const buildTerminalBrowserHandoff = (
+      terminalStatus: ComputerTaskOutcomeStatus,
+      blockers: string[] = [],
+    ) => buildChatComputerHandoffContext({
+      task: task || 'Browser computer task',
+      entrypoint: 'browser_runtime',
+      adapterId: 'browser_adapter',
+      taskKind: 'browser_task',
+      taskLabel: 'Browser task',
+      runId: runId || null,
+      outcomeStatus: terminalStatus,
+      replayPolicy,
+      mutationDispatched: mutationMayHaveDispatched,
+      verificationOnlyTools: replayPolicy === 'manual_verify_only' ? ['browser.dom_snapshot'] : [],
+      requestedActionContract,
+      blockers,
+    });
     if (status === 'idle' || status === 'starting' || status === 'running') {
       // Every fresh attempt gets a fresh terminal-dedupe namespace, including
       // booking continuations that may reuse the same task/session identity.
@@ -7919,8 +9319,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const key = `done::${runId || sessionId || task}`;
       if (computerUsePostedKeyRef.current === key) return;
       computerUsePostedKeyRef.current = key;
+      const terminalStatus: ComputerTaskOutcomeStatus = outcomeStatus === 'partial'
+        ? 'partial'
+        : 'completed';
+      const terminalHandoff = buildTerminalBrowserHandoff(terminalStatus);
+      const requestedActionCoverageBlock = terminalStatus === 'partial'
+        ? formatChatComputerHandoffForMessage(terminalHandoff)
+        : '';
       void recordComputerTaskLaneTerminal({
-        status: 'completed',
+        status: terminalStatus,
         message: result.summary,
         executionKind: 'browser_computer_use',
         runId: runId || sessionId || null,
@@ -7929,15 +9336,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         task,
         taskKind: 'browser_task',
         taskLabel: 'Browser task',
-        phase: 'completed',
-        outcomeStatus: 'completed',
+        phase: terminalStatus === 'completed' ? 'completed' : 'blocked',
+        outcomeStatus: terminalStatus,
         adapterId: 'browser_adapter',
         runId: runId || null,
         sessionId: sessionId || null,
         liveUrl: computerUseTask.state.liveUrl || null,
         grantedAccess: pendingComputerUseGrantIds,
         accessPlan: pendingComputerUseGrantSummary || null,
-        nextSteps: [],
+        nextSteps: terminalStatus === 'completed'
+          ? []
+          : ['Verify each requested action against fresh browser state before reporting whole-task completion'],
         grounding: computerTaskState?.grounding || null,
         capabilityBuildout: computerTaskState?.capabilityBuildout || null,
         complexity: computerTaskState?.complexity || null,
@@ -7946,7 +9355,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       });
       recordSessionArchiveEvent({
         kind: 'computer_task',
-        summary: `Computer task completed: ${task}`,
+        summary: terminalStatus === 'completed'
+          ? `Computer task completed: ${task}`
+          : `Computer task run ended with requested-action verification pending: ${task}`,
         touched: [
           'surface:computer_use',
           'surface:browser',
@@ -7954,7 +9365,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           computerUseTask.state.liveUrl ? `url:${computerUseTask.state.liveUrl}` : '',
         ].filter(Boolean),
         metadata: {
-          computerTaskStatus: 'completed',
+          handoff: terminalHandoff.metadata,
+          computerTaskStatus: terminalStatus,
           runId: runId || null,
           sessionId: sessionId || null,
           iterations: result.iterations,
@@ -7962,7 +9374,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         },
       });
       const tokenTotal = (result.tokens?.input || 0) + (result.tokens?.output || 0);
-      const header = `**Computer Use** complete — ${result.iterations} step${result.iterations === 1 ? '' : 's'}, ${tokenTotal.toLocaleString()} tokens`;
+      const header = terminalStatus === 'completed'
+        ? `**Computer Use** complete — ${result.iterations} step${result.iterations === 1 ? '' : 's'}, ${tokenTotal.toLocaleString()} tokens`
+        : `**Computer Use** run finished — requested-action verification pending · ${result.iterations} step${result.iterations === 1 ? '' : 's'}, ${tokenTotal.toLocaleString()} tokens`;
       const findings = result.findings && result.findings.length
         ? '\n\n' + result.findings.map((f, i) => {
             const parts = [`${i + 1}. **${f.title || 'Item'}**`];
@@ -8025,11 +9439,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           }
         } catch { /* diff is a bonus — never delay or drop the result */ }
         addBotMessage(
-          `${header}\n\n${diffBlock ? `${diffBlock}\n\n` : ''}${result.summary}${findings}${extractedData}`,
+          `${header}\n\n${diffBlock ? `${diffBlock}\n\n` : ''}${result.summary}${findings}${extractedData}${requestedActionCoverageBlock}`,
           undefined,
           {
             runId,
-            computerTaskStatus: 'completed',
+            computerTaskStatus: terminalStatus,
+            computerHandoff: terminalHandoff.metadata,
             computerFindings: computerFindings || undefined,
             quickReplies: bookQuickReplies,
           },
@@ -8038,15 +9453,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     } else if (status === 'error' && errorMessage) {
       const terminalStatus: ComputerTaskOutcomeStatus = outcomeStatus === 'cancelled'
         ? 'cancelled'
-        : 'failed';
+        : outcomeStatus === 'blocked'
+          ? 'blocked'
+          : 'failed';
       const key = `${terminalStatus}::${runId || sessionId || task}::${errorMessage.slice(0, 80)}`;
       if (computerUsePostedKeyRef.current === key) return;
       computerUsePostedKeyRef.current = key;
+      const terminalHandoff = buildTerminalBrowserHandoff(terminalStatus, [errorMessage]);
       void recordComputerTaskLaneTerminal({
         status: terminalStatus,
         message: errorMessage,
         executionKind: 'browser_computer_use',
         runId: runId || sessionId || null,
+        replayPolicy,
+        mutationDispatched: mutationMayHaveDispatched,
       });
       if (terminalStatus === 'cancelled') {
         // Cancellation is a neutral, user-directed stop. Clear the durable
@@ -8058,6 +9478,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           summary: `Computer task cancelled: ${task || 'Browser computer task'}`,
           touched: ['surface:computer_use', task ? `computer_task:${task}` : ''].filter(Boolean),
           metadata: {
+            handoff: terminalHandoff.metadata,
             computerTaskStatus: 'cancelled',
             runId: runId || null,
             sessionId: sessionId || null,
@@ -8066,7 +9487,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addBotMessage('**Computer Use** stopped. No further actions will run.', undefined, {
           computerTaskStatus: 'cancelled',
           runId: runId || null,
+          computerHandoff: terminalHandoff.metadata,
         });
+        return;
+      }
+      if (terminalStatus === 'blocked') {
+        void persistComputerTaskState({
+          task,
+          taskKind: 'browser_task',
+          taskLabel: 'Browser task',
+          phase: 'blocked',
+          outcomeStatus: 'blocked',
+          adapterId: 'browser_adapter',
+          runId: runId || null,
+          sessionId: sessionId || null,
+          blockers: [errorMessage],
+          nextSteps: ['Split the intact request into bounded continuations before running it'],
+        });
+        recordSessionArchiveEvent({
+          kind: 'computer_task',
+          summary: `Computer task blocked before dispatch: ${task || 'Browser computer task'}`,
+          touched: ['surface:computer_use', task ? `computer_task:${task}` : ''].filter(Boolean),
+          metadata: {
+            handoff: terminalHandoff.metadata,
+            computerTaskStatus: 'blocked',
+            runId: runId || null,
+            sessionId: sessionId || null,
+          },
+        });
+        addBotMessage(
+          `**Computer Use** blocked before execution. ${errorMessage}${formatChatComputerHandoffForMessage(terminalHandoff)}`,
+          undefined,
+          {
+            computerTaskStatus: 'blocked',
+            runId: runId || null,
+            computerHandoff: terminalHandoff.metadata,
+          },
+        );
         return;
       }
       const checkpointRecovery = diagnoseComputerTaskCheckpointFailure({
@@ -8084,7 +9541,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         taskKind: 'browser_task',
         taskLabel: 'Browser task',
         phase: 'failed',
-        outcomeStatus: 'failed',
+        outcomeStatus: terminalStatus,
         adapterId: 'browser_adapter',
         runId: runId || null,
         sessionId: sessionId || null,
@@ -8107,25 +9564,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const recovery = await startMainChatFailureRecoveryPayload({
           task: task || 'Browser computer task',
           failureMessage: errorMessage,
-          outcomeStatus: 'failed',
+          outcomeStatus: terminalStatus,
           executionKind: 'browser_computer_use',
           runId: runId || sessionId || null,
           source: 'computer_use_agent_error',
           launchIfMissing: true,
           checkpointRecovery,
+          replayPolicy,
+          mutationDispatched: mutationMayHaveDispatched,
+          verificationOnlyTools: replayPolicy === 'manual_verify_only' ? ['browser.dom_snapshot'] : [],
           touched: [
             'surface:computer_use',
             task ? `computer_task:${task}` : '',
             checkpointRecovery ? `checkpoint:${checkpointRecovery.failedCheckpointId}` : '',
           ].filter(Boolean),
         });
-        addBotMessage(appendCustomerSafeRecoveryMessage(
+        addBotMessage(`${appendCustomerSafeRecoveryMessage(
           '**Computer Use** could not complete that task. Technical details were saved for recovery.',
           recovery.message,
-        ), undefined, {
+        )}${formatChatComputerHandoffForMessage(terminalHandoff)}`, undefined, {
           recoveryOptions: recovery.recoveryOptions,
           recoveryReliability: recovery.recoveryReliability,
           computerTaskStatus: 'failed',
+          computerHandoff: terminalHandoff.metadata,
         });
       })();
     }
@@ -8630,6 +10091,56 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return false;
     }
 
+    const runId = runnable.sourceRunId || runnable.id;
+    const requestedActionExecutionGate = buildChatComputerRequestedActionExecutionGate(runnable.task);
+    const requestedActionContract = requestedActionExecutionGate.contract;
+    const buildLocalBrowserHandoff = (
+      outcomeStatus: ComputerTaskOutcomeStatus,
+      mutationDispatched: boolean,
+      blockers: string[] = [],
+    ) => buildChatComputerHandoffContext({
+      task: runnable.task,
+      entrypoint: 'browser_runtime',
+      adapterId: 'browser_adapter',
+      taskKind: 'browser_task',
+      taskLabel: 'Browser task',
+      runId,
+      outcomeStatus,
+      replayPolicy: mutationDispatched ? 'manual_verify_only' : 'normal',
+      mutationDispatched,
+      verificationOnlyTools: mutationDispatched ? ['browser.dom_snapshot'] : [],
+      requestedActionContract,
+      blockers,
+    });
+    if (requestedActionExecutionGate.blocked) {
+      const blocker = requestedActionExecutionGate.blocker
+        || 'The request must be decomposed before any browser action runs.';
+      const blockedHandoff = buildLocalBrowserHandoff('blocked', false, [blocker]);
+      await persistComputerTaskState({
+        task: runnable.task,
+        taskKind: 'browser_task',
+        taskLabel: 'Browser task',
+        phase: 'blocked',
+        outcomeStatus: 'blocked',
+        adapterId: 'browser_adapter',
+        runId,
+        blockers: [blocker],
+        nextSteps: requestedActionExecutionGate.fixAction
+          ? [requestedActionExecutionGate.fixAction]
+          : [],
+      });
+      addBotMessage(
+        `**Computer Use** blocked before execution. ${blocker}${formatChatComputerHandoffForMessage(blockedHandoff)}`,
+        undefined,
+        {
+          localOnly: true,
+          computerTaskStatus: 'blocked',
+          computerHandoff: blockedHandoff.metadata,
+        },
+      );
+      return true;
+    }
+
     const attempt: LocalComputerUseAttempt = {
       id: `local-computer-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       sessionId: runnable.id,
@@ -8638,8 +10149,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     localComputerUseAttemptRef.current = attempt;
     const isCurrentAttempt = () => localComputerUseAttemptRef.current?.id === attempt.id
       && !attempt.controller.signal.aborted;
-    const runId = runnable.sourceRunId || runnable.id;
     const executingSession: ComputerUseSession = { ...runnable, status: 'executing' };
+    let localMutationMayHaveDispatched = executingSession.actions.some((action) => (
+      action.status === 'executing'
+      || action.status === 'completed'
+      || action.status === 'failed'
+      || Boolean(action.executedAt)
+    ));
     setComputerUseSession(executingSession);
     if (options.markLaunched) finalizeBrowserPlanFromSession(executingSession);
     if (options.announceStart) addBotMessage(`**Computer Use** running locally — ${runnable.task}`);
@@ -8647,6 +10163,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     try {
       const result = await executeComputerUsePlan(executingSession, (completedAction, idx) => {
         if (!isCurrentAttempt()) return;
+        if (
+          completedAction.status === 'executing'
+          || completedAction.status === 'completed'
+          || completedAction.status === 'failed'
+          || Boolean(completedAction.executedAt)
+        ) {
+          localMutationMayHaveDispatched = true;
+        }
         setComputerUseSession((current) => {
           if (!current || current.id !== runnable.id || !isCurrentAttempt()) return current;
           const nextActions = [...current.actions];
@@ -8660,8 +10184,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // archive, lane, or recovery authority after invalidation.
       if (!isCurrentAttempt() || result.cancelled) return true;
       const outcomeStatus = deriveComputerUseResultOutcomeStatus(result);
+      const mutationDispatched = localMutationMayHaveDispatched || result.actions.some((action) => (
+        action.status === 'executing'
+        || action.status === 'completed'
+        || action.status === 'failed'
+        || Boolean(action.executedAt)
+      ));
+      const replayPolicy = mutationDispatched ? 'manual_verify_only' as const : 'normal' as const;
 
       if (outcomeStatus === 'waiting_approval') {
+        const waitingHandoff = buildLocalBrowserHandoff('waiting_approval', mutationDispatched);
         const waitingSession: ComputerUseSession = {
           ...executingSession,
           status: 'awaiting_approval',
@@ -8693,17 +10225,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           executionKind: options.executionKind,
           runId,
           isAuthoritative: isCurrentAttempt,
+          replayPolicy,
+          mutationDispatched,
         });
         if (!isCurrentAttempt()) return true;
         setComputerUseSession(waitingSession);
-        addBotMessage(`**Computer Use** paused for approval. ${result.message}`, undefined, {
+        addBotMessage(`**Computer Use** paused for approval. ${result.message}${formatChatComputerHandoffForMessage(waitingHandoff)}`, undefined, {
           localOnly: true,
           computerTaskStatus: 'waiting_approval',
+          computerHandoff: waitingHandoff.metadata,
         });
         return true;
       }
 
       if (outcomeStatus === 'blocked') {
+        const blockedHandoff = buildLocalBrowserHandoff('blocked', mutationDispatched, [result.message]);
         const blockedSession: ComputerUseSession = {
           ...executingSession,
           status: 'blocked',
@@ -8738,11 +10274,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           executionKind: options.executionKind,
           runId,
           isAuthoritative: isCurrentAttempt,
+          replayPolicy,
+          mutationDispatched,
         });
         if (!isCurrentAttempt()) return true;
-        addBotMessage(`**Computer Use** stopped at a rejected step. Later actions were not run. Review or replan before continuing.`, undefined, {
+        addBotMessage(`**Computer Use** stopped at a rejected step. Later actions were not run. Review or replan before continuing.${formatChatComputerHandoffForMessage(blockedHandoff)}`, undefined, {
           localOnly: true,
           computerTaskStatus: 'blocked',
+          computerHandoff: blockedHandoff.metadata,
         });
         return true;
       }
@@ -8755,20 +10294,40 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         backendSessionId: result.backendSessionId || executingSession.backendSessionId,
         backendLiveUrl: result.backendLiveUrl || executingSession.backendLiveUrl,
       };
+      const preliminaryTerminalHandoff = buildLocalBrowserHandoff(
+        outcomeStatus,
+        mutationDispatched,
+        outcomeStatus === 'failed' ? [result.message] : [],
+      );
+      const requestedActionCoverageNeedsVerification = outcomeStatus === 'completed'
+        && Boolean(preliminaryTerminalHandoff.metadata.requestedActionCoverage)
+        && preliminaryTerminalHandoff.metadata.requestedActionCoverage?.allActionsVerified !== true;
+      const taskOutcomeStatus: ComputerTaskOutcomeStatus = requestedActionCoverageNeedsVerification
+        ? 'partial'
+        : outcomeStatus;
+      const terminalHandoff = requestedActionCoverageNeedsVerification
+        ? buildLocalBrowserHandoff(taskOutcomeStatus, mutationDispatched)
+        : preliminaryTerminalHandoff;
       setComputerUseSession(terminalSession);
       finalizeBrowserPlanFromSession(terminalSession, result);
       await persistComputerTaskState({
         task: runnable.task,
         taskKind: 'browser_task',
         taskLabel: 'Browser task',
-        phase: outcomeStatus === 'completed' ? 'completed' : 'failed',
-        outcomeStatus: outcomeStatus,
+        phase: taskOutcomeStatus === 'completed'
+          ? 'completed'
+          : taskOutcomeStatus === 'partial'
+            ? 'blocked'
+            : 'failed',
+        outcomeStatus: taskOutcomeStatus,
         adapterId: 'browser_adapter',
         blockers: outcomeStatus === 'failed' ? [result.message] : [],
         runId,
         sessionId: result.backendSessionId || runnable.id,
         liveUrl: result.backendLiveUrl || runnable.backendLiveUrl || null,
-        nextSteps: [],
+        nextSteps: taskOutcomeStatus === 'partial'
+          ? ['Verify each requested action against fresh browser state before reporting whole-task completion']
+          : [],
         resultSummary: result.message,
       });
       if (!isCurrentAttempt()) {
@@ -8776,14 +10335,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return true;
       }
       await recordComputerTaskLaneTerminal({
-        status: outcomeStatus,
+        status: taskOutcomeStatus,
         message: result.message,
         executionKind: options.executionKind,
         runId,
         isAuthoritative: isCurrentAttempt,
+        replayPolicy,
+        mutationDispatched,
       });
       if (outcomeStatus === 'completed') {
-        addBotMessage(`**Computer Use** completed locally: ${result.message}`);
+        addBotMessage(requestedActionCoverageNeedsVerification
+          ? `**Computer Use** actions finished locally; requested-action verification is still pending: ${result.message}${formatChatComputerHandoffForMessage(terminalHandoff)}`
+          : `**Computer Use** completed locally: ${result.message}`, undefined, {
+          computerTaskStatus: taskOutcomeStatus,
+          computerHandoff: terminalHandoff.metadata,
+        });
       } else {
         await addRecoverableChatErrorMessage({
           title: '**Computer Use** failed locally',
@@ -8792,6 +10358,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           executionKind: options.executionKind,
           source: `${options.executionKind}_failed`,
           touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${runnable.task}`],
+          outcomeStatus,
+          replayPolicy,
+          mutationDispatched,
+          verificationOnlyTools: mutationDispatched ? ['browser.dom_snapshot'] : [],
+          computerHandoff: terminalHandoff.metadata,
+          messageSuffix: formatChatComputerHandoffForMessage(terminalHandoff),
           messageSource: {
             actor: 'OpenSwan',
             surface: 'main_chat_local_browser_plan_error',
@@ -8804,6 +10376,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     } catch (error: any) {
       if (!isCurrentAttempt()) return true;
       const failedSession: ComputerUseSession = { ...executingSession, status: 'failed' };
+      const mutationDispatched = localMutationMayHaveDispatched;
+      const replayPolicy = mutationDispatched ? 'manual_verify_only' as const : 'normal' as const;
+      const failureMessage = error?.message || 'Local browser plan failed.';
+      const failedHandoff = buildLocalBrowserHandoff('failed', mutationDispatched, [failureMessage]);
       setComputerUseSession(failedSession);
       finalizeBrowserPlanFromSession(failedSession, { success: false });
       await persistComputerTaskState({
@@ -8813,7 +10389,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         phase: 'failed',
         outcomeStatus: 'failed',
         adapterId: 'browser_adapter',
-        blockers: [error?.message || 'Local browser plan failed.'],
+        blockers: [failureMessage],
         runId,
         sessionId: runnable.backendSessionId || runnable.id,
         liveUrl: runnable.backendLiveUrl || null,
@@ -8824,10 +10400,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
       await recordComputerTaskLaneTerminal({
         status: 'failed',
-        message: error?.message || 'Local browser plan failed.',
+        message: failureMessage,
         executionKind: options.executionKind,
         runId,
         isAuthoritative: isCurrentAttempt,
+        replayPolicy,
+        mutationDispatched,
       });
       await addRecoverableChatErrorMessage({
         title: '**Computer Use** failed locally',
@@ -8836,6 +10414,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         executionKind: options.executionKind,
         source: `${options.executionKind}_exception`,
         touched: ['surface:computer_use', 'surface:local_browser', `computer_task:${runnable.task}`],
+        outcomeStatus: 'failed',
+        replayPolicy,
+        mutationDispatched,
+        verificationOnlyTools: mutationDispatched ? ['browser.dom_snapshot'] : [],
+        computerHandoff: failedHandoff.metadata,
+        messageSuffix: formatChatComputerHandoffForMessage(failedHandoff),
         messageSource: {
           actor: 'OpenSwan',
           surface: 'main_chat_local_browser_plan_error',
@@ -9184,11 +10768,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const sendMessageUnsafe = async (
     overrideText?: string,
-    options?: {
-      displayText?: string;
-      modeOverride?: string | null;
-      modelOverride?: string | null;
-    },
+    options?: ChatSendOptions,
   ) => {
     if (sendLockRef.current) return;
     if (
@@ -9204,7 +10784,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const requestedContent = (overrideText || input).trim();
     const hasPendingAttachments = attachments.length > 0 || stagedFiles.length > 0;
     const content = requestedContent || (hasPendingAttachments ? 'Open the attached file.' : '');
-    const conversationOnlyTurn = !hasPendingAttachments && isConversationOnlyTurn(content);
+    const boundOpenSwanResume = options?.openSwanResume || null;
+    const boundOpenSwanApprovalResume = options?.openSwanApprovalResume || null;
+    const boundDesktopAttachmentResume = options?.desktopAttachmentResume || null;
+    if (boundOpenSwanResume && hasPendingAttachments) {
+      addBotMessage(
+        'The saved **Continue** action cannot consume files waiting in the composer. Your attachments are still here. Send them as a new request, or remove them before continuing the earlier run.',
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return;
+    }
+    if (boundDesktopAttachmentResume && hasPendingAttachments) {
+      addBotMessage(
+        'The saved **Continue** action cannot consume files waiting in the composer. Your attachments are still here. Send them as a new request, or remove them before continuing the earlier run.',
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return;
+    }
+    if (boundOpenSwanApprovalResume && hasPendingAttachments) {
+      addBotMessage(
+        'Approval saved. The approved action cannot consume files waiting in the composer. Your attachments are untouched; send or remove them and OpenSwan will continue afterward.',
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return;
+    }
+    const conversationOnlyTurn = !boundOpenSwanResume
+      && !boundOpenSwanApprovalResume
+      && !boundDesktopAttachmentResume
+      && !hasPendingAttachments
+      && isConversationOnlyTurn(content);
     // Pre-send guard: a friendly hint instead of silently swallowing an empty
     // send. Only 'block' is enforced (an empty message with no attachment);
     // confirm/send both proceed so no new hoop is added to normal sends.
@@ -9219,13 +10830,175 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const effectiveSelectedModel = options?.modelOverride && options.modelOverride !== 'auto'
       ? options.modelOverride
       : selectedModel;
+    // Resolve Auto once for the entire turn. Capability routing and the final
+    // transport must reason about the same concrete executor; using raw
+    // `auto` here previously let those two decisions disagree.
+    const resolvedTurnModel = effectiveSelectedModel !== 'auto'
+      ? (isLocalOllamaBlackSwan(effectiveSelectedModel) ? BLACKSWAN_ENDPOINT_MODEL_ID : effectiveSelectedModel)
+      : resolveSendModel(content);
+    const escapedAgentNameForPreflight = agentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const leadingMentionHandle = content.trim().match(/^@([a-z0-9_.:-]+)\b/i)?.[1] || null;
+    // Exact loaded member identity wins over every text alias. This prevents a
+    // real member named "swan" (or matching a custom bot name) from silently
+    // becoming an OpenSwan attachment recipient.
+    const leadingMentionMember = leadingMentionHandle
+      ? members.find((member) => String(member?.username || '').toLowerCase() === leadingMentionHandle.toLowerCase()) || null
+      : null;
+    const addressedToCurrentAgentForPreflight = boundDesktopAttachmentResume || boundOpenSwanApprovalResume
+      ? true
+      : leadingMentionMember
+        ? leadingMentionMember.id === BLACKSWAN_ID
+        : Boolean(leadingMentionHandle && new RegExp(
+            `^(?:agent|blackswan|swanbot|swan|${escapedAgentNameForPreflight})$`,
+            'i',
+          ).test(leadingMentionHandle));
+    const addressedElsewhereForPreflight = Boolean(
+      !boundDesktopAttachmentResume
+      && !boundOpenSwanApprovalResume
+      && leadingMentionHandle
+      && !addressedToCurrentAgentForPreflight,
+    );
+    const preservesConnectedAgentExecutorForPreflight = !boundDesktopAttachmentResume
+      && !boundOpenSwanApprovalResume && (
+      Boolean(
+        selectedChatAgentTarget
+        && (!isOpenSwanChatAgentTarget(selectedChatAgentTarget) || !selectedChatAgentTarget.isDefault)
+      )
+        || isTerminalAgentSendRequest(content)
+        || Boolean(parseTerminalAgentLaunchRequest(content))
+        || /^(?:\/(?:assign|agent|terminal|term|multi|roundtable)\b|(?:tell|ask)\s+(?:all\s+|every\s+)?(?:claude(?:\s+code)?|codex|gemini(?:\s+cli)?|cursor)(?:\s+#?\d+)?\s+to\b)/i.test(content.trim())
+    );
+    // Preflight the pure planner before every stateful/transport shortcut,
+    // including model readiness. A bounded compound turn is executed by the
+    // OpenSwan runtime, which resolves its own tool-capable model; a stale
+    // plain-chat model selection must not discard the A1-A3 contract.
+    const basePreflightAutomationForTurn = (!content.startsWith('/') || !!boundOpenSwanApprovalResume)
+      ? buildChatAutomationPlan({
+          message: content,
+          attachments: attachments.map((attachment) => ({
+            uri: attachment.uri,
+            type: attachment.type,
+            id: attachment.id,
+          })),
+          selectedMode: effectiveChatMode,
+        })
+      : null;
+    const attachmentBoundPreflight = basePreflightAutomationForTurn
+      ? bindChatAttachmentActionContract(basePreflightAutomationForTurn, {
+          message: content,
+          hasCurrentTurnAttachment: hasPendingAttachments,
+          addressedToCurrentAgent: addressedToCurrentAgentForPreflight,
+          preserveExistingExecutor: preservesConnectedAgentExecutorForPreflight,
+        })
+      : null;
+    const desktopResumePreflight = boundDesktopAttachmentResume && attachmentBoundPreflight
+      ? {
+          ...attachmentBoundPreflight,
+          execution: {
+            kind: 'run_openswan' as const,
+            routeId: attachmentBoundPreflight.execution.routeId,
+            commandText: boundDesktopAttachmentResume.originalUserTaskText,
+          },
+          multiActionLedger: boundDesktopAttachmentResume.ledger,
+          multiActionOverflow: undefined,
+        }
+      : attachmentBoundPreflight;
+    const preflightAutomationForTurn = boundOpenSwanApprovalResume && desktopResumePreflight
+      ? bindChatApprovalResumeActionContract(desktopResumePreflight, {
+          originalUserTaskText: boundOpenSwanApprovalResume.originalUserTaskText,
+          ledger: boundOpenSwanApprovalResume.multiActionLedger,
+        })
+      : desktopResumePreflight;
+    if (
+      boundOpenSwanApprovalResume
+      && (
+        !preflightAutomationForTurn
+        || content !== boundOpenSwanApprovalResume.originalUserTaskText
+        || boundOpenSwanApprovalResume.binding.sourceRunId !== boundOpenSwanApprovalResume.sourceRunId
+        || boundOpenSwanApprovalResume.binding.userId !== currentUserId
+        || boundOpenSwanApprovalResume.binding.circleId !== circleId
+        || boundOpenSwanApprovalResume.binding.threadId !== activeThreadId
+        || !boundOpenSwanApprovalResume.sourceUserMessageId
+      )
+    ) {
+      addBotMessage(
+        'The approved continuation no longer matches its original OpenSwan task and conversation. Nothing ran. Please ask OpenSwan to continue again.',
+        undefined,
+        { outcomeVerdict: 'blocked', source: { actor: 'OpenSwan', surface: 'main_chat_approval_resume_unavailable' } },
+      );
+      // This is a definitive binding failure, not a transient Chat-readiness
+      // return. Release the queued continuation exactly once so later UI
+      // state changes cannot retry the same irrecoverable approval forever.
+      options?.openSwanApprovalResumeCustody?.terminalWithoutCustody();
+      return;
+    }
+    if (
+      boundDesktopAttachmentResume
+      && (
+        !preflightAutomationForTurn
+        || content !== boundDesktopAttachmentResume.originalUserTaskText
+        || preflightAutomationForTurn.multiActionLedger !== boundDesktopAttachmentResume.ledger
+      )
+    ) {
+      addBotMessage(
+        'The approved attachment-open continuation no longer matches its exact task ledger. Nothing was opened. Reattach the file and ask again.',
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return;
+    }
+    const preflightHasAuthoritativeMultiActionContract = Boolean(
+      preflightAutomationForTurn?.multiActionLedger
+      || preflightAutomationForTurn?.multiActionOverflow,
+    );
+    if (hasPendingAttachments && content.startsWith('/')) {
+      addBotMessage(
+        'Attachments cannot run through a slash shortcut yet because that path cannot preserve the exact message-to-file proof. Your files are still attached. Send the same instruction as a normal Chat request so OpenSwan can seal and verify them first.',
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return;
+    }
+    // A curated shelf is discovery, not credential authority. Once the shared
+    // account catalogs have loaded, stop a disconnected or verified-absent
+    // hosted model before capability work, persistence, or provider I/O.
+    if (resolvedTurnModel && marketplaceModelGroups.length > 0) {
+      const modelReadiness = resolveModelSelectionReadiness({
+        route: resolvePlainChatModelRoute(resolvedTurnModel),
+        groups: marketplaceModelGroups,
+      });
+      const shouldBlockForReadiness = !modelReadiness.ready && (
+        effectiveSelectedModel === 'auto'
+        || modelReadiness.state === 'connection_required'
+      );
+      if (
+        shouldBlockForReadiness
+        && !preflightHasAuthoritativeMultiActionContract
+        && !addressedElsewhereForPreflight
+        && !preservesConnectedAgentExecutorForPreflight
+      ) {
+        const requestedLabel = formatModelDisplayName(resolvedTurnModel);
+        const accessSentence = effectiveSelectedModel === 'auto'
+          ? `Auto resolved to **${requestedLabel}**, but ${modelReadiness.message.charAt(0).toLowerCase()}${modelReadiness.message.slice(1)}`
+          : `**${requestedLabel}** is not ready: ${modelReadiness.message}`;
+        addBotMessage(
+          `**Model access needed**\n${accessSentence} Choose a ready model or connect/update that provider in Marketplace. Nothing ran.`,
+          undefined,
+          { localOnly: true, durability: 'ephemeral' },
+        );
+        return;
+      }
+    }
 
     // ── Resume a pending clarification ──────────────────────────────────────
     // If we recently asked the user for a missing detail, treat this reply as
     // the answer: reconstruct a well-specified request and route THAT, while
     // still displaying the user's actual words. Cancel words abort cleanly.
     if (
-      !conversationOnlyTurn
+      !preflightHasAuthoritativeMultiActionContract
+      && !addressedElsewhereForPreflight
+      && !preservesConnectedAgentExecutorForPreflight
+      && !conversationOnlyTurn
       && !overrideText?.startsWith('__')
       && !content.startsWith('/')
       && !resolvingClarificationRef.current
@@ -9269,7 +11042,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // live confirmation is open) — matchBookingFollowup fails closed to none
     // for unrelated chat, so a false positive can't hijack a normal message.
     if (
-      !conversationOnlyTurn
+      !preflightHasAuthoritativeMultiActionContract
+      && !addressedElsewhereForPreflight
+      && !preservesConnectedAgentExecutorForPreflight
+      && !conversationOnlyTurn
       && !overrideText?.startsWith('__')
       && !content.startsWith('/')
       && !resolvingClarificationRef.current
@@ -9392,6 +11168,51 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Capture current attachments before clearing
     const currentAttachments = [...attachments];
     const currentStagedFiles = [...stagedFiles];
+    // Legacy picker-only values have no durable `message_attachments` row, so
+    // they cannot cross a model, vision, connected-agent, or desktop boundary.
+    // Web picker/drop/paste already use the canonical staged upload path.
+    if (currentAttachments.length > 0) {
+      addBotMessage(
+        'This attachment has not finished entering the secure upload path, so nothing was sent or opened. Reattach it with the upload button/drop zone and wait for the upload chip to finish, then retry.',
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return;
+    }
+    const unavailableStagedFile = currentStagedFiles.find(
+      (file) => file.uploading || file.error || !file.attachment,
+    );
+    if (unavailableStagedFile) {
+      addBotMessage(
+        unavailableStagedFile.error
+          ? `**${unavailableStagedFile.name}** did not upload cleanly. Remove it or upload it again; nothing was sent or opened.`
+          : `**${unavailableStagedFile.name}** is still uploading. Wait for the secure upload to finish, then send again; nothing was sent or opened.`,
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return;
+    }
+    const requiresAuthoritativeAttachmentSources = Boolean(
+      preflightAutomationForTurn?.multiActionLedger
+      && (currentStagedFiles.length > 0 || boundDesktopAttachmentResume),
+    );
+    let desktopAttachmentRequest: DesktopAttachmentRequestClassification | null = boundDesktopAttachmentResume
+      ? Object.freeze({
+          intent: 'desktop_open' as const,
+          supported: true as const,
+          attachmentId: boundDesktopAttachmentResume.attachmentId,
+          messageId: boundDesktopAttachmentResume.messageId,
+        })
+      : null;
+    const requiresAttachmentPersistence = currentStagedFiles.length > 0;
+    let settlePersistedUserMessage: ((outcome: UserMessagePersistenceOutcome) => void) | null = null;
+    // Observe every canonical user-row insert without delaying plain Chat.
+    // Only an attachment consumer or the tool-capable OpenSwan path awaits
+    // this promise. That gives every durable run an exact source-message id
+    // while preserving the streaming fast path's latency.
+    const persistedUserMessageOutcome = new Promise<UserMessagePersistenceOutcome>((resolve) => {
+      settlePersistedUserMessage = resolve;
+    });
     const turnImageAttachmentCount = currentAttachments.filter((attachment) => attachment.type === 'image').length
       + currentStagedFiles.filter((file) => !file.error && (file.mimeType || '').startsWith('image/')).length;
     const turnHasImageAttachments = turnImageAttachmentCount > 0;
@@ -9417,30 +11238,117 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const briefs = await visualBriefPromise;
       return isVisualBriefScopeCurrent() ? briefs : [];
     };
-    const requireTurnVisualBriefs = async (destination: string): Promise<ChatVisualBriefArtifact[] | null> => {
+    const addVisualBriefBlockedMessage = (
+      message: string,
+      plan?: ChatAutomationPlan | null,
+    ) => {
+      const ledger = plan?.multiActionLedger;
+      if (!ledger) {
+        addBotMessage(message, undefined, { localOnly: true });
+        return;
+      }
+      const blockedCompletion = projectPersistedOpenSwanMultiActionCompletion({
+        schemaVersion: 1,
+        disposition: 'blocked',
+        completionVerified: false,
+        inputValid: true,
+        actions: ledger.actions.map((action) => ({
+          actionId: action.id,
+          status: 'blocked',
+          evidenceCount: 0,
+        })),
+        unresolvedActionIds: ledger.actions.map((action) => action.id),
+        issues: [],
+      });
+      addBotMessage(
+        `${message}\n\n**Requested actions**\n${ledger.actions.map((action) => `- ${action.id} · Blocked before execution`).join('\n')}\n\nNothing ran. Retry once the image can be inspected safely.`,
+        undefined,
+        {
+          source: {
+            actor: 'Chat',
+            surface: 'chat_visual_brief_blocked',
+            selectedModel: 'claude-sonnet-4-6',
+            effectiveModel: 'deterministic-visual-brief-gate',
+          },
+          outcomeVerdict: 'blocked',
+          openSwanTerminal: projectPersistedOpenSwanTerminal({
+            state: 'partial',
+            reason: 'action_coverage_incomplete',
+            completionVerified: false,
+            resumable: false,
+            checkpointAvailable: false,
+          }),
+          openSwanMultiActionCompletion: blockedCompletion,
+        },
+      );
+    };
+    const addAuthoritativeAttachmentBlockedMessage = (
+      message: string,
+      plan?: ChatAutomationPlan | null,
+      recoveryPayload?: DesktopBridgeRecoveryPayload | null,
+    ) => {
+      const ledger = plan?.multiActionLedger;
+      if (!ledger) {
+        addBotMessage(message, undefined, {
+          localOnly: true,
+          recoveryOptions: recoveryPayload?.recoveryOptions,
+        });
+        return;
+      }
+      const blockedCompletion = projectPersistedOpenSwanMultiActionCompletion({
+        schemaVersion: 1,
+        disposition: 'blocked',
+        completionVerified: false,
+        inputValid: true,
+        actions: ledger.actions.map((action) => ({
+          actionId: action.id,
+          status: 'blocked',
+          evidenceCount: 0,
+        })),
+        unresolvedActionIds: ledger.actions.map((action) => action.id),
+        issues: [],
+      });
+      addBotMessage(
+        `${message}\n\n**Requested actions**\n${ledger.actions.map((action) => `- ${action.id} · Blocked before execution`).join('\n')}\n\nNo OpenSwan tool or automation action ran. Fix the attachment issue and retry the full request.`,
+        undefined,
+        {
+          source: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_attachment_source_blocked',
+            selectedModel: effectiveSelectedModel,
+            effectiveModel: 'deterministic-attachment-source-gate',
+          },
+          outcomeVerdict: 'blocked',
+          recoveryOptions: recoveryPayload?.recoveryOptions,
+          openSwanTerminal: projectPersistedOpenSwanTerminal({
+            state: 'partial',
+            reason: 'action_coverage_incomplete',
+            completionVerified: false,
+            resumable: false,
+            checkpointAvailable: false,
+          }),
+          openSwanMultiActionCompletion: blockedCompletion,
+        },
+      );
+    };
+    const requireTurnVisualBriefs = async (
+      destination: string,
+      plan?: ChatAutomationPlan | null,
+    ): Promise<ChatVisualBriefArtifact[] | null> => {
       if (!turnHasImageAttachments) return [];
       if (turnImageAttachmentCount > 3) {
-        addBotMessage(
+        addVisualBriefBlockedMessage(
           `I can inspect up to 3 images in one message before sending a visual brief to ${destination}. Remove ${turnImageAttachmentCount - 3} image${turnImageAttachmentCount - 3 === 1 ? '' : 's'} and retry; no task was sent.`,
-          undefined,
-          { localOnly: true },
+          plan,
         );
         return null;
       }
       const briefs = await getTurnVisualBriefs();
       if (!isVisualBriefScopeCurrent()) return null;
       if (briefs.length === turnImageAttachmentCount) return briefs;
-      addBotMessage(
+      addVisualBriefBlockedMessage(
         `I could not inspect the attached image safely, so I did not send guessed image contents to ${destination}. Reattach a supported JPEG, PNG, GIF, or WebP image under 5 MB and verify the Anthropic connection in Marketplace, then retry.`,
-        undefined,
-        {
-          localOnly: true,
-          source: {
-            actor: 'Chat',
-            surface: 'chat_visual_brief_blocked',
-            selectedModel: 'claude-sonnet-4-6',
-          },
-        },
+        plan,
       );
       return null;
     };
@@ -9457,14 +11365,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // image in Photoshop before the selected agent lane ever ran.
     const explicitlyTargetsConnectedCodingAgent = Boolean(
       selectedChatAgentTarget
-      && !isOpenSwanChatAgentTarget(selectedChatAgentTarget),
+      && (!isOpenSwanChatAgentTarget(selectedChatAgentTarget) || !selectedChatAgentTarget.isDefault),
     )
       || isTerminalAgentSendRequest(content)
       || Boolean(parseTerminalAgentLaunchRequest(content))
       || /^(?:\/(?:assign|agent|terminal|term|multi|roundtable)\b|(?:tell|ask)\s+(?:all\s+|every\s+)?(?:claude(?:\s+code)?|codex|gemini(?:\s+cli)?|cursor)(?:\s+#?\d+)?\s+to\b)/i.test(content.trim());
     const codingAgentOwnsAttachmentTurn = explicitlyTargetsConnectedCodingAgent
       || isCodingGenerationRequest(content, sessionProfile);
-    const shouldRunDesktopAttachmentTask = !codingAgentOwnsAttachmentTurn
+    // Disabled permanently: this legacy branch serializes staged local paths
+    // into a public task string before the authenticated tool boundary. The
+    // sealed attachment/OpenSwan lane below owns every current upload now; an
+    // opaque desktop capability will replace this code without reviving it.
+    const legacyDesktopAttachmentRouteEnabled = false;
+    const shouldRunDesktopAttachmentTask = !preflightHasAuthoritativeMultiActionContract
+      && legacyDesktopAttachmentRouteEnabled
+      && !addressedElsewhereForPreflight
+      && !codingAgentOwnsAttachmentTurn
       && shouldRouteAttachedFilesToDesktop(content, desktopAttachmentCandidates);
     if (shouldRunDesktopAttachmentTask) {
       const uploading = currentStagedFiles.find((file) => file.uploading || (!file.attachment && !file.error));
@@ -9529,26 +11445,216 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setBuilderFigmaRefs(resolvedFigmaRefs);
     setSelectedBuilderFigmaRefId(nextSelectedFigmaRefId);
 
-    // Add user message immediately
-    const userMessage = addUserMessage(displayContent);
-    setInput('');
+    // Approval continuations are runtime re-entry, not a new user utterance.
+    // Reuse the exact persisted source row so Chat does not manufacture a
+    // "Continue approved action" user bubble, clear an unrelated composer
+    // draft, or teach the profile/activity systems that the original request
+    // was sent twice. Ordinary turns still keep the existing local-first UX.
+    const resumedSourceMessageId = boundOpenSwanApprovalResume?.sourceUserMessageId
+      || boundDesktopAttachmentResume?.messageId
+      || null;
+    const resumedSourceUserMessage = resumedSourceMessageId
+      ? messagesRef.current.find((message) => (
+          message.isUser
+          && message.dbId === resumedSourceMessageId
+          && message.authorId === currentUserId
+        )) || null
+      : null;
+    if (resumedSourceMessageId && !resumedSourceUserMessage) {
+      addBotMessage(
+        boundDesktopAttachmentResume
+          ? 'The approved private-file open could not find its exact source message in this conversation. Nothing was opened. Reattach the file and ask again.'
+          : 'The approved OpenSwan action could not find its exact original request in this conversation. Nothing ran. Ask OpenSwan to continue the task again.',
+        undefined,
+        boundDesktopAttachmentResume
+          ? { localOnly: true, durability: 'ephemeral' }
+          : {
+              outcomeVerdict: 'blocked',
+              runId: boundOpenSwanApprovalResume?.sourceRunId || null,
+              requestSourceMessageId: resumedSourceMessageId,
+              source: { actor: 'OpenSwan', surface: 'main_chat_approval_resume_unavailable' },
+            },
+      );
+      if (boundOpenSwanApprovalResume) {
+        // The authoritative source row is part of the sealed resume scope.
+        // Its absence cannot be repaired by re-flushing the same queue item.
+        options?.openSwanApprovalResumeCustody?.terminalWithoutCustody();
+      }
+      return;
+    }
+    const userMessage = resumedSourceUserMessage || addUserMessage(
+      displayContent,
+      settlePersistedUserMessage
+        ? { settle: settlePersistedUserMessage }
+        : undefined,
+    );
+    if (!resumedSourceUserMessage) {
+      setInput('');
+      setReplyTo(null);
+      setExpandedCategory(null);
+    }
+
+    // A resumed approval points back to the exact original request, not the
+    // synthetic "Continue approved action" row. A desktop continuation has
+    // the same invariant through its already-linked source message.
+    let persistedSourceUserMessageId: string | null = boundOpenSwanApprovalResume?.sourceUserMessageId
+      || boundDesktopAttachmentResume?.messageId
+      || null;
+    let persistedUserMessageResolution: Promise<string> | null = null;
+    const requirePersistedUserMessageId = (): Promise<string> => {
+      if (persistedSourceUserMessageId) return Promise.resolve(persistedSourceUserMessageId);
+      if (!persistedUserMessageResolution) {
+        persistedUserMessageResolution = (async () => {
+          let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
+          const persistenceOutcome = await Promise.race<UserMessagePersistenceOutcome>([
+            persistedUserMessageOutcome,
+            new Promise<UserMessagePersistenceOutcome>((resolve) => {
+              persistenceTimer = setTimeout(() => resolve(Object.freeze({
+                ok: false,
+                reason: 'Secure message persistence timed out.',
+              })), 15_000);
+            }),
+          ]);
+          if (persistenceTimer !== undefined) clearTimeout(persistenceTimer);
+          if (!persistenceOutcome.ok) throw new Error(persistenceOutcome.reason);
+          persistedSourceUserMessageId = persistenceOutcome.persistedMessageId;
+          return persistenceOutcome.persistedMessageId;
+        })();
+      }
+      return persistedUserMessageResolution;
+    };
+
+    // Every attachment consumer shares one durability barrier. No vision,
+    // connected-agent, OpenSwan, desktop bridge, plan save, or optional web
+    // lane may run until the exact user row exists and each uploaded row has
+    // been compare-and-set linked to it with returned-row verification.
+    let persistedAttachmentMessageId: string | null = boundDesktopAttachmentResume?.messageId || null;
+    if (requiresAttachmentPersistence) {
+      try {
+        if (!currentUserId || !activeThreadId) {
+          throw new Error('The secure Chat message scope was unavailable. Reload this thread and retry.');
+        }
+        const persistedMessageId = await requirePersistedUserMessageId();
+        if (
+          activeThreadScopeRef.current.circleId !== circleId
+          || activeThreadScopeRef.current.threadId !== activeThreadId
+        ) {
+          throw new Error('The active conversation changed while the attachment was being linked.');
+        }
+        const attachmentIds = currentStagedFiles.map((file) => file.attachment!.id);
+        if (new Set(attachmentIds).size !== attachmentIds.length) {
+          throw new Error('The attachment upload identities were ambiguous.');
+        }
+        await linkAttachmentsToMessage(
+          attachmentIds,
+          persistedMessageId,
+          { circleId, threadId: activeThreadId, userId: currentUserId },
+        );
+        persistedAttachmentMessageId = persistedMessageId;
+        desktopAttachmentRequest = classifyDesktopAttachmentRequest({
+          requestText: content,
+          attachments: currentStagedFiles.map((file) => ({
+            ...stagedFileDesktopCandidate(file),
+            durableLink: {
+              linkState: 'durable_linked' as const,
+              attachmentId: file.attachment!.id,
+              messageId: persistedMessageId,
+              circleId,
+              threadId: activeThreadId,
+            },
+          })),
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'The secure attachment link could not be verified.';
+        addAuthoritativeAttachmentBlockedMessage(
+          `**Attachment link needed**\n${reason} No provider, agent, model, or desktop action was dispatched. The uploaded file remains in the composer so you can retry.`,
+          preflightAutomationForTurn,
+        );
+        setInput(displayContent);
+        persistDraftForThread(activeThreadId, displayContent);
+        setBotTyping(false);
+        return;
+      }
+    }
     setAttachments([]);
     setStagedFiles([]);
     revokeStagedPreviews(currentStagedFiles);
-    setReplyTo(null);
-    setExpandedCategory(null);
 
-    // Track user message in behavior profile
-    if (profileRef.current) {
-      profileRef.current = updateProfileFromMessage(profileRef.current, displayContent, true);
-      saveUserProfile(profileRef.current).catch(() => {});
+    // A human-addressed upload is now durably attached to that message. It is
+    // not also sent to OpenSwan, vision, web search, a connected agent, or the
+    // desktop bridge merely because the message contains task-like words.
+    if (addressedElsewhereForPreflight && requiresAttachmentPersistence) {
+      return;
     }
-    recordChatActivity(circleId, 'message').catch(() => {});
-    if (content.startsWith('/')) {
-      recordChatActivity(circleId, 'slash').catch(() => {});
+    if (
+      preservesConnectedAgentExecutorForPreflight
+      && effectiveChatMode !== 'plan'
+      && currentStagedFiles.some((file) => !file.mimeType.startsWith('image/'))
+    ) {
+      addBotMessage(
+        'The selected connected agent cannot receive this private file through a verified source capability yet, so I did not substitute OpenSwan or send filename-only context. The upload is safely linked to this message. Use the default OpenSwan agent for a supported readable file, or retry after the connected-agent file capability is available.',
+        undefined,
+        {
+          outcomeVerdict: 'blocked',
+          source: {
+            actor: 'Chat',
+            surface: 'connected_agent_attachment_source_blocked',
+            selectedModel: effectiveSelectedModel || null,
+          },
+        },
+      );
+      return;
+    }
+    if (desktopAttachmentRequest?.intent === 'desktop_edit') {
+      addAuthoritativeAttachmentBlockedMessage(
+        '**Desktop edit not supported yet**\nThe upload is safely linked to this message, but this path can currently open one exact file only. It cannot edit, save, export, annotate, transform, or overwrite the file, so nothing was opened or changed.',
+        preflightAutomationForTurn,
+      );
+      return;
+    }
+    if (
+      desktopAttachmentRequest?.intent === 'ambiguous'
+      && (
+        desktopAttachmentRequest.code !== 'desktop_attachment_request_ambiguous'
+        || /\b(open|load|preview|show)\b/i.test(content)
+      )
+    ) {
+      const reason = desktopAttachmentRequest.code === 'desktop_attachment_count_unsupported'
+        ? 'Open exactly one uploaded file at a time.'
+        : desktopAttachmentRequest.code === 'desktop_attachment_type_unsupported'
+          ? 'That file type is not allowed through the native-app open capability.'
+          : desktopAttachmentRequest.code === 'desktop_attachment_linkage_required'
+            ? 'The exact uploaded file could not be bound to this persisted message.'
+            : 'Separate content inspection from native-app opening so each action has exact proof.';
+      addAuthoritativeAttachmentBlockedMessage(
+        `**Desktop open needs a narrower request**\n${reason} Nothing was opened or changed.`,
+        preflightAutomationForTurn,
+      );
+      return;
+    }
+    const desktopOpenRequest = desktopAttachmentRequest?.intent === 'desktop_open'
+      && desktopAttachmentRequest.supported
+      ? desktopAttachmentRequest
+      : null;
+    const opensDesktopAttachment = desktopOpenRequest !== null;
+
+    // A resume reuses the already-recorded user request; counting it again
+    // would distort both learned preferences and activity analytics.
+    if (!resumedSourceUserMessage) {
+      if (profileRef.current) {
+        profileRef.current = updateProfileFromMessage(profileRef.current, displayContent, true);
+        saveUserProfile(profileRef.current).catch(() => {});
+      }
+      recordChatActivity(circleId, 'message').catch(() => {});
+      if (content.startsWith('/')) {
+        recordChatActivity(circleId, 'slash').catch(() => {});
+      }
     }
     const lowerContent = content.toLowerCase().trim();
     const directRecoverySelection = conversationOnlyTurn
+      || preflightHasAuthoritativeMultiActionContract
+      || addressedElsewhereForPreflight
+      || preservesConnectedAgentExecutorForPreflight
       ? null
       : parseChatFailureRecoveryOptionSelection(content);
     if (isDesktopBridgeRecoverySelection(directRecoverySelection)) {
@@ -9570,7 +11676,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
-    if (isLastTaskModelQuestion(content)) {
+    if (
+      !preflightHasAuthoritativeMultiActionContract
+      && !addressedElsewhereForPreflight
+      && !preservesConnectedAgentExecutorForPreflight
+      && isLastTaskModelQuestion(content)
+    ) {
       addBotMessage(describeLastTaskModel(messages), undefined, {
         localOnly: true,
         source: {
@@ -9590,22 +11701,66 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const terminalControlNeedsVisualBrief = turnHasImageAttachments
       && isTerminalAgentSendRequest(content);
     try {
-      if (terminalControlNeedsVisualBrief) setBotTyping(true);
+      if (terminalControlNeedsVisualBrief && !preflightHasAuthoritativeMultiActionContract) setBotTyping(true);
       const terminalControlVisualBriefs = terminalControlNeedsVisualBrief
+        && !preflightHasAuthoritativeMultiActionContract
         ? await requireTurnVisualBriefs('the terminal agent')
         : [];
       if (terminalControlVisualBriefs === null) {
         setBotTyping(false);
         return;
       }
-      const terminalAgentControl = await executeTerminalAgentControlFromChat(content, {
-        visionArtifacts: terminalControlVisualBriefs,
-        circleId,
-        launchIfMissing: true,
-      });
+      const terminalAgentControl = preflightHasAuthoritativeMultiActionContract
+        ? null
+        : await executeTerminalAgentControlFromChat(content, {
+            visionArtifacts: terminalControlVisualBriefs,
+            circleId,
+            launchIfMissing: true,
+          });
       if (terminalAgentControl) {
         if (terminalControlNeedsVisualBrief) setBotTyping(false);
-        addBotMessage(terminalAgentControl.message, undefined, { localOnly: true });
+        if (terminalAgentControl.kind === 'status_query') {
+          addBotMessage(terminalAgentControl.message, undefined, {
+            localOnly: true,
+            durability: 'ephemeral',
+            source: { actor: 'OpenSwan', surface: 'terminal_agent_status' },
+          });
+          return;
+        }
+        const terminalControlStatus = terminalAgentControl.ok
+          ? 'accepted'
+          : terminalAgentControl.transportAccepted === false
+            ? 'failed'
+            : 'unknown';
+        const rawReceipt = buildConnectedAgentHandoffReceipt({
+          status: terminalControlStatus,
+          provider: terminalAgentControl.provider,
+          actor: terminalAgentControl.actor || 'Terminal agent',
+          sessionId: terminalAgentControl.sessionId,
+          runId: null,
+          message: terminalAgentControl.ok
+            ? `${terminalAgentControl.message}\n\n_The terminal session accepted this task. Completion has not been verified yet._`
+            : terminalAgentControl.message,
+        });
+        const handoff = await attachAcceptedHandoffRun(
+          rawReceipt,
+          content,
+          terminalAgentControl.agentSubjectMetadata,
+        );
+        addBotMessage(handoff.message, undefined, {
+          delegatedTo: terminalAgentControl.ok ? handoff.actor : undefined,
+          connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(handoff) || undefined,
+          agentSubjectMetadata: terminalAgentControl.agentSubjectMetadata,
+          outcomeVerdict: terminalControlStatus === 'failed' ? 'failed' : 'unknown',
+          hadError: terminalControlStatus === 'failed',
+          runId: handoff.runId,
+          showRunTrace: !!handoff.runId,
+          source: {
+            actor: handoff.actor,
+            surface: 'terminal_agent_control',
+            provider: handoff.provider,
+          },
+        });
         return;
       }
       if (terminalControlNeedsVisualBrief) setBotTyping(false);
@@ -9628,22 +11783,96 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const terminalLaunchNeedsVisualBrief = turnHasImageAttachments
       && Boolean(parseTerminalAgentLaunchRequest(content));
     try {
-      if (terminalLaunchNeedsVisualBrief) setBotTyping(true);
+      if (terminalLaunchNeedsVisualBrief && !preflightHasAuthoritativeMultiActionContract) setBotTyping(true);
       const terminalLaunchVisualBriefs = terminalLaunchNeedsVisualBrief
+        && !preflightHasAuthoritativeMultiActionContract
         ? await requireTurnVisualBriefs('the new terminal agent session')
         : [];
       if (terminalLaunchVisualBriefs === null) {
         setBotTyping(false);
         return;
       }
-      const terminalAgentLaunch = await executeTerminalAgentLaunchFromChat(content, {
-        circleId,
-        userId: currentUserId || undefined,
-        visionArtifacts: terminalLaunchVisualBriefs,
-      });
+      const terminalAgentLaunch = preflightHasAuthoritativeMultiActionContract
+        ? null
+        : await executeTerminalAgentLaunchFromChat(content, {
+            circleId,
+            userId: currentUserId || undefined,
+            visionArtifacts: terminalLaunchVisualBriefs,
+          });
       if (terminalAgentLaunch) {
         if (terminalLaunchNeedsVisualBrief) setBotTyping(false);
-        addBotMessage(terminalAgentLaunch.message, undefined, { localOnly: true });
+        const { plan: launchPlan, result: launchResult } = terminalAgentLaunch;
+        if (launchPlan.usedDefaultPrompts && launchResult.launched > 0) {
+          addBotMessage(terminalAgentLaunch.message, undefined, {
+            localOnly: true,
+            outcomeVerdict: launchResult.launched === launchPlan.count && launchResult.failed.length === 0
+              ? 'completed'
+              : 'partial',
+            source: {
+              actor: 'OpenSwan',
+              surface: 'terminal_agent_standby_launch',
+              provider: launchPlan.provider,
+            },
+          });
+          setTimeout(() => { void refreshAssignableAgentsRef.current?.(); }, 1500);
+          return;
+        }
+
+        const firstSession = launchResult.launched === 1
+          && launchResult.sessions[0]
+          && typeof launchResult.sessions[0] === 'object'
+          ? launchResult.sessions[0] as Record<string, unknown>
+          : null;
+        const launchedSessionId = typeof firstSession?.sessionId === 'string'
+          ? firstSession.sessionId
+          : null;
+        const launchActor = launchResult.launched === 1
+          ? String(firstSession?.displayName || launchPlan.names[0] || launchPlan.providerLabel)
+          : `${launchResult.launched} ${launchPlan.providerLabel} sessions`;
+        const launchSubject = launchedSessionId
+          ? buildAgentRuntimeSubject({
+              id: launchedSessionId,
+              name: launchActor,
+              sessionKey: launchedSessionId,
+              providerType: launchPlan.provider as any,
+            }).metadata
+          : null;
+        const launchHandoffStatus = launchResult.launched > 0
+          ? 'accepted'
+          : launchResult.transportAccepted === false
+            ? 'failed'
+            : 'unknown';
+        const rawReceipt = buildConnectedAgentHandoffReceipt({
+          status: launchHandoffStatus,
+          provider: launchPlan.provider,
+          actor: launchActor,
+          sessionId: launchedSessionId,
+          providerRunId: launchResult.launchId || null,
+          runId: null,
+          message: launchResult.launched > 0
+            ? `${terminalAgentLaunch.message}\n\n_The launched sessions accepted their delegated work. Completion has not been verified yet._`
+            : launchHandoffStatus === 'unknown'
+              ? `${terminalAgentLaunch.message}\n\n_The bridge could not prove whether the launch began. Nothing was replayed; check the provider before retrying._`
+              : terminalAgentLaunch.message,
+        });
+        const handoff = await attachAcceptedHandoffRun(rawReceipt, content, launchSubject);
+        addBotMessage(handoff.message, undefined, {
+          delegatedTo: launchResult.launched > 0 ? handoff.actor : undefined,
+          delegatedSubagents: launchResult.launched > 1
+            ? launchPlan.names.slice(0, launchResult.launched)
+            : undefined,
+          connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(handoff) || undefined,
+          agentSubjectMetadata: launchSubject,
+          outcomeVerdict: launchHandoffStatus === 'failed' ? 'failed' : 'unknown',
+          hadError: launchHandoffStatus === 'failed',
+          runId: handoff.runId,
+          showRunTrace: !!handoff.runId,
+          source: {
+            actor: handoff.actor,
+            surface: 'terminal_agent_launch',
+            provider: handoff.provider,
+          },
+        });
         setTimeout(() => {
           void refreshAssignableAgentsRef.current?.();
         }, 1500);
@@ -9668,7 +11897,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // AutomationProposalCard the user can confirm. Falls through to LLM
     // when the parser doesn't recognize the input as an automation
     // request, so normal chat is unaffected.
-    if (!content.startsWith('/')) {
+    if (!preflightHasAuthoritativeMultiActionContract && !content.startsWith('/')) {
       const proposal = parseAutomationRequest(content);
       if (proposal) {
         addBotMessage(
@@ -9687,7 +11916,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // ─── Multi-agent dispatch intercept ────────────────────────────────────
     // Supports /multi, /roundtable, leading @mentions, and natural
     // "ask all Codex agents to..." fan-outs across OpenSwan + bridge agents.
-    const multiAgentPlan = parseMultiAgentOrchestrationRequest(content, liveAgents);
+    const multiAgentPlan = preflightHasAuthoritativeMultiActionContract
+      ? null
+      : parseMultiAgentOrchestrationRequest(content, liveAgents);
     if (multiAgentPlan) {
       if (multiAgentPlan.kind === 'help') {
         addBotMessage(formatMultiAgentHelp(liveAgents, multiAgentPlan.reason), undefined, {
@@ -9760,9 +11991,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       );
       setBotTyping(true);
 
-      type MultiAgentChatResult = { agent: AssignableAgent; ok: boolean; reply: string };
+      type MultiAgentChatResult = {
+        agent: AssignableAgent;
+        ok: boolean;
+        reply: string;
+        receipt?: ConnectedAgentHandoffReceipt;
+      };
       const addMultiAgentReply = (result: MultiAgentChatResult) => {
         addBotMessage(result.reply, undefined, {
+          delegatedTo: result.agent.name,
+          connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(result.receipt) || undefined,
+          agentSubjectMetadata: buildAssignableAgentSubjectMetadata(result.agent),
+          outcomeVerdict: result.receipt?.status === 'failed' || !result.ok ? 'failed' : 'unknown',
+          hadError: !result.ok,
+          runId: result.receipt?.runId || null,
+          showRunTrace: !!result.receipt?.runId,
           source: {
             actor: result.agent.name,
             surface: `${strategySurface}_reply`,
@@ -9772,19 +12015,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         });
       };
       const addMultiAgentCompletion = (results: MultiAgentChatResult[]) => {
+        const accepted = results.filter((result) => result.receipt?.status === 'accepted');
+        const drafted = results.filter((result) => result.receipt?.status === 'drafted');
+        const unknown = results.filter((result) => result.receipt?.status === 'unknown');
+        const failed = results.filter((result) => !result.receipt || result.receipt.status === 'failed');
+        const lines = [
+          `Multi-agent ${formatMultiAgentStrategyLabel(multiAgentPlan.strategy)} dispatch update: ${accepted.length} accepted, ${drafted.length} draft${drafted.length === 1 ? '' : 's'} returned, ${unknown.length} unknown, ${failed.length} failed.`,
+          `Task: ${multiAgentPlan.prompt}`,
+        ];
+        if (accepted.length > 0) {
+          lines.push(`Working in connected sessions: ${accepted.map((result) => result.agent.name).join(', ')}`);
+        }
+        if (drafted.length > 0) {
+          lines.push(`Drafts returned: ${drafted.map((result) => result.agent.name).join(', ')}`);
+        }
+        if (unknown.length > 0) {
+          lines.push(`Check before retrying: ${unknown.map((result) => result.agent.name).join(', ')}`);
+        }
+        if (failed.length > 0) {
+          lines.push(`Needs attention: ${failed.map((result) => result.agent.name).join(', ')}`);
+        }
+        if (accepted.length > 0) {
+          lines.push('', '_Accepted handoffs are still awaiting typed completion from their connected sessions._');
+        }
+        if (unknown.length > 0) {
+          lines.push('', '_Unknown dispatches were not replayed. Check the connected sessions before retrying._');
+        }
         addBotMessage(
-          formatMultiAgentRunSummary(multiAgentPlan, results.map(result => ({
-            agentName: result.agent.name,
-            provider: result.agent.provider,
-            ok: result.ok,
-            replyPreview: result.reply,
-          }))),
+          lines.join('\n'),
           undefined,
           {
             localOnly: true,
+            delegatedSubagents: results.filter((result) => result.ok).map((result) => result.agent.name),
+            outcomeVerdict: accepted.length > 0 || drafted.length > 0 || unknown.length > 0 ? 'unknown' : 'failed',
+            hadError: accepted.length === 0 && drafted.length === 0 && unknown.length === 0 && failed.length > 0,
             source: {
               actor: 'OpenSwan',
-              surface: `${strategySurface}_complete`,
+              surface: `${strategySurface}_dispatch_update`,
               selectedModel: selectedModel || null,
             },
           },
@@ -9795,31 +12062,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         (async () => {
           const results: MultiAgentChatResult[] = [];
           let priorContext = '';
+          let pausedAfterIndex: number | null = null;
           for (let index = 0; index < targets.length; index += 1) {
             const agent = targets[index];
             try {
               const task = buildMultiAgentDispatchPrompt(multiAgentPlan, agent, index, priorContext);
-              const reply = await dispatchAssignedAgentTask(agent, task, multiAgentVisualBriefs);
-              const result = { agent, ok: true, reply };
+              const handoff = await dispatchAssignedAgentTask(agent, task, multiAgentVisualBriefs);
+              const result = { agent, ok: handoff.status !== 'failed', reply: handoff.message, receipt: handoff };
               results.push(result);
               addMultiAgentReply(result);
+              if (handoff.status !== 'drafted') {
+                // Sequential means the next agent depends on usable upstream
+                // output. Acceptance/unknown/failure prose is not that output,
+                // so wait for typed reconciliation instead of fan-out.
+                pausedAfterIndex = index;
+                break;
+              }
               priorContext = [
                 priorContext,
-                `Agent: ${agent.name}`,
-                reply.slice(0, 3000),
+                `Synchronous draft from ${agent.name}:`,
+                handoff.message.slice(0, 3000),
               ].filter(Boolean).join('\n\n');
             } catch (err: any) {
               const result = { agent, ok: false, reply: `**${agent.name}** error: ${err?.message || 'unknown'}` };
               results.push(result);
               addMultiAgentReply(result);
-              priorContext = [
-                priorContext,
-                `Agent: ${agent.name}`,
-                `Blocked: ${err?.message || 'unknown error'}`,
-              ].filter(Boolean).join('\n\n');
+              pausedAfterIndex = index;
+              break;
             }
           }
           setBotTyping(false);
+          if (pausedAfterIndex !== null && pausedAfterIndex < targets.length - 1) {
+            const waiting = targets.slice(pausedAfterIndex + 1);
+            const blocker = results[results.length - 1];
+            const blockerStatus = blocker?.receipt?.status || 'failed';
+            addBotMessage(
+              `Sequential chain paused after **${blocker?.agent.name || 'the current agent'}** (${blockerStatus}). ${waiting.length} downstream agent${waiting.length === 1 ? '' : 's'} ${waiting.map((agent) => `@${agent.name}`).join(' ')} remain undispatched until usable upstream output is available.`,
+              undefined,
+              {
+                localOnly: true,
+                outcomeVerdict: blockerStatus === 'failed' ? 'failed' : 'unknown',
+                hadError: blockerStatus === 'failed',
+                source: {
+                  actor: 'OpenSwan',
+                  surface: `${strategySurface}_paused`,
+                  selectedModel: selectedModel || null,
+                },
+              },
+            );
+          }
           addMultiAgentCompletion(results);
         })().catch((err: any) => {
           setBotTyping(false);
@@ -9844,8 +12135,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         targets.map(async (agent, index) => {
           try {
             const task = buildMultiAgentDispatchPrompt(multiAgentPlan, agent, index);
-            const reply = await dispatchAssignedAgentTask(agent, task, multiAgentVisualBriefs);
-            return { agent, ok: true, reply };
+            const handoff = await dispatchAssignedAgentTask(agent, task, multiAgentVisualBriefs);
+            return { agent, ok: handoff.status !== 'failed', reply: handoff.message, receipt: handoff };
           } catch (err: any) {
             return { agent, ok: false, reply: `**${agent.name}** error: ${err?.message || 'unknown'}` };
           }
@@ -9906,10 +12197,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // turns. Slash commands and explicit multi-agent requests still keep their
     // deterministic handlers; ordinary task text goes to the selected agent.
     if (
+      !preflightHasAuthoritativeMultiActionContract
+      &&
       !conversationOnlyTurn
       && !content.startsWith('/')
       && selectedChatAgentTarget
-      && !isOpenSwanChatAgentTarget(selectedChatAgentTarget)
+      && (!isOpenSwanChatAgentTarget(selectedChatAgentTarget) || !selectedChatAgentTarget.isDefault)
     ) {
       if (!selectedChatAgentTarget.connected || !selectedChatAgentTarget.agent) {
         addBotMessage(buildChatAgentSetupMessage(selectedChatAgentTarget), undefined, {
@@ -9929,12 +12222,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       try {
         const selectedAgentVisualBriefs = await requireTurnVisualBriefs(selectedDispatchAgent.name);
         if (selectedAgentVisualBriefs === null) return;
-        const response = await dispatchAssignedAgentTask(selectedDispatchAgent, content, selectedAgentVisualBriefs);
-        addBotMessage(response, undefined, {
+        const handoff = await dispatchAssignedAgentTask(selectedDispatchAgent, content, selectedAgentVisualBriefs);
+        addBotMessage(handoff.message, undefined, {
+          delegatedTo: handoff.actor,
+          connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(handoff) || undefined,
+          agentSubjectMetadata: buildAssignableAgentSubjectMetadata(selectedDispatchAgent),
+          outcomeVerdict: 'unknown',
+          runId: handoff.runId,
+          showRunTrace: !!handoff.runId,
           source: {
-            actor: selectedDispatchAgent.name,
+            actor: handoff.actor,
             surface: 'selected_chat_agent_dispatch',
-            provider: selectedDispatchAgent.provider,
+            provider: handoff.provider || selectedDispatchAgent.provider,
             selectedModel: selectedDispatchAgent.model || selectedModel || null,
           },
         });
@@ -10133,10 +12432,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       try {
         const draft = buildAgentPlanDraft({
           task: taskText,
+          chatPlan: preflightAutomationForTurn,
           selectedMode: 'plan',
           selectedModel: effectiveSelectedModel || null,
           threadId: activeThreadId || null,
-          sourceMessageId: userMessage.id,
+          sourceMessageId: persistedAttachmentMessageId || userMessage.id,
           circleId,
           createdBy: currentUserId || null,
         });
@@ -10145,7 +12445,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               circleId,
               userId: currentUserId,
               threadId: activeThreadId || null,
-              sourceMessageId: userMessage.id,
+              sourceMessageId: persistedAttachmentMessageId || userMessage.id,
               draft,
             })
           : {
@@ -10196,6 +12496,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // ─── Conversational intent routing (natural language → actions) ─────────
     // Catches "post this to WordPress", "create a task", "remember that...", etc.
     // Only fires for non-slash-command messages
+    let plannedAutomationForTurn: ChatAutomationPlan | null = preflightAutomationForTurn;
     if (!lowerContent.startsWith('/')) {
       // Wave-2 preference learning: a conservative, verb-anchored "use
       // Pixelmator (instead)" follow-up against the previous route's app
@@ -10223,7 +12524,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           .catch(() => {});
       }
 
-      const photoshopGenerativeFillClarification = buildPhotoshopGenerativeFillClarification(content);
+      const photoshopGenerativeFillClarification = preflightHasAuthoritativeMultiActionContract
+        ? { route: false, question: '', suggestions: [] }
+        : buildPhotoshopGenerativeFillClarification(content);
       if (photoshopGenerativeFillClarification.route) {
         addBotMessage([
           photoshopGenerativeFillClarification.question,
@@ -10243,7 +12546,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return;
       }
 
-      const indesignBannerClarification = buildInDesignBannerClarification(content);
+      const indesignBannerClarification = preflightHasAuthoritativeMultiActionContract
+        ? { route: false, question: '', suggestions: [] }
+        : buildInDesignBannerClarification(content);
       if (indesignBannerClarification.route) {
         addBotMessage([
           indesignBannerClarification.question,
@@ -10263,20 +12568,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return;
       }
 
-      const plan = buildChatAutomationPlan({
-        message: content,
-        attachments: currentAttachments.map((attachment) => ({
-          uri: attachment.uri,
-          type: attachment.type,
-          id: attachment.id,
-        })),
-        selectedMode: effectiveChatMode,
-      });
-      // multi-intent-loop: compound-message notice. The single-intent execution
-      // lanes below (command handler / build discovery) classify ONE ask per
-      // turn and early-return, silently dropping the later asks — so when the
-      // deterministic segmenter finds 2-3 verb-led asks, post a local notice
-      // with the later asks as "tap to run next" chips BEFORE lane #1 runs.
+      const plan = plannedAutomationForTurn || buildChatAutomationPlan({
+          message: content,
+          attachments: currentAttachments.map((attachment) => ({
+            uri: attachment.uri,
+            type: attachment.type,
+            id: attachment.id,
+          })),
+          selectedMode: effectiveChatMode,
+        });
+      plannedAutomationForTurn = plan;
+      // multi-intent-loop: compound-message notice. The planner promotes
+      // bounded 2-3 ask command/build matches into one intact OpenSwan turn,
+      // so those plans must not claim that only ask #1 is currently running.
+      // Keep the legacy follow-up notice only for lanes that are not covered
+      // by that planner-owned dispatch contract.
       // Excluded on purpose: run_computer_task because its shared runtime owns
       // the complete original task as one ordered workflow; splitting or
       // previewing only #1 contradicts what is actually dispatched.
@@ -10301,6 +12607,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           && multiAsk.segments.length <= 3
           && laterAsks.length === multiAsk.segments.length - 1
           && multiAsk.segments[0].text.trim().length > 0
+          && !plan.multiActionLedger
           && shouldSurfaceMultiIntentNotice(plan.execution.kind)
         ) {
           const firstAsk = multiAsk.segments[0].text.length > 80
@@ -10336,7 +12643,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return;
         }
       }
-      if (plan.execution.kind === 'run_openswan') {
+      if (plan.execution.kind === 'run_openswan' && !plan.multiActionLedger) {
         const handledLocalDesktop = await executeLocalComputerAwarenessRequest(content);
         if (handledLocalDesktop) {
           return;
@@ -10774,10 +13081,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     }
 
+    // Once the planner has accepted a bounded A1-A3 contract, the intact
+    // request belongs to the authoritative OpenSwan terminal. Legacy
+    // single-purpose shortcuts below must not peel off one matching clause
+    // and return before the remaining actions run.
+    const hasAuthoritativeMultiActionContract = Boolean(
+      plannedAutomationForTurn?.multiActionLedger
+      || plannedAutomationForTurn?.multiActionOverflow,
+    );
+
     // ─── Governance commands ───────────────────────────────────────
 
     // /poll "Question" "Option A" "Option B" ...
-    if (lowerContent.startsWith('/poll ') || lowerContent.startsWith('poll ')) {
+    if (
+      !hasAuthoritativeMultiActionContract
+      && (lowerContent.startsWith('/poll ') || lowerContent.startsWith('poll '))
+    ) {
       const pollText = content.replace(/^\/?poll\s+/i, '');
       const parts = pollText.match(/"([^"]+)"/g);
       if (parts && parts.length >= 3) {
@@ -10800,7 +13119,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // /propose Title | Description
-    if (lowerContent.startsWith('/propose ') || lowerContent.startsWith('propose ')) {
+    if (
+      !hasAuthoritativeMultiActionContract
+      && (lowerContent.startsWith('/propose ') || lowerContent.startsWith('propose '))
+    ) {
       const propText = content.replace(/^\/?propose\s+/i, '');
       const [title, ...descParts] = propText.split('|');
       handleCreateProposal(title.trim(), descParts.join('|').trim() || undefined);
@@ -10903,25 +13225,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         });
         return;
       }
-      // Inline mode: /assign @<name> <task>
-      const m = rest.match(/^@?([\w][\w-]*)\s+(.+)$/);
-      if (!m) {
-        addBotMessage('Usage: `/assign @<agent> <task description>`. Type `/assign` alone to see all agents.', undefined, { localOnly: true, durability: 'ephemeral' });
+      // Inline mode supports an immutable picker id, a quoted display name,
+      // or the legacy one-token alias. Name collisions fail closed.
+      const parsedAssignment = parseChatAgentAssignmentCommand(content);
+      if (!parsedAssignment) {
+        addBotMessage('Usage: `/assign @agent <task>`, `/assign @"Claude Code #1" <task>`, or type `/assign` to pick an exact agent.', undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
-      const [, alias, task] = m;
-      const target = liveAgents.find(a => a.name.toLowerCase() === alias.toLowerCase());
-      if (!target) {
-        addBotMessage(`No agent named "@${alias}" in this circle. Type \`/assign\` alone to see all agents.`, undefined, { localOnly: true, durability: 'ephemeral' });
+      const assignmentResolution = resolveChatAgentAssignmentTarget(liveAgents, parsedAssignment);
+      if (!assignmentResolution.ok) {
+        const copy = assignmentResolution.reason === 'ambiguous'
+          ? `More than one agent matches "${parsedAssignment.selector}". Type \`/assign\` and choose the exact row; nothing was dispatched.`
+          : `No exact agent matches "${parsedAssignment.selector}" in this circle. Type \`/assign\` to refresh the picker.`;
+        addBotMessage(copy, undefined, { localOnly: true, durability: 'ephemeral' });
         return;
       }
+      const target = assignmentResolution.agent;
+      const task = parsedAssignment.task;
       addBotMessage(`Assigning to **${target.name}**…`, undefined, { localOnly: true, durability: 'ephemeral' });
       setBotTyping(true);
       (async () => {
         const visualBriefs = await requireTurnVisualBriefs(target.name);
         if (visualBriefs === null) return;
-        const reply = await dispatchAssignedAgentTask(target, task, visualBriefs);
-        addBotMessage(reply);
+        const handoff = await dispatchAssignedAgentTask(target, task, visualBriefs);
+        addBotMessage(handoff.message, undefined, {
+          delegatedTo: handoff.actor,
+          connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(handoff) || undefined,
+          agentSubjectMetadata: buildAssignableAgentSubjectMetadata(target),
+          outcomeVerdict: 'unknown',
+          runId: handoff.runId,
+          showRunTrace: !!handoff.runId,
+          source: {
+            actor: handoff.actor,
+            surface: 'assign_agent_command',
+            provider: handoff.provider || target.provider,
+            selectedModel: target.model || selectedModel || null,
+          },
+        });
       })()
         .catch((err: any) => addRecoverableChatErrorMessage({
           title: `**${target.name}** assignment failed`,
@@ -11049,7 +13389,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // that…" — actually saves/forgets and confirms, instead of the model
     // replying "Saved." without saving. Conservative: natural language only
     // fires on an explicit lead with real content and not a question.
-    {
+    if (!hasAuthoritativeMultiActionContract) {
       const { parseMemoryCommand, detectMemoryIntent, MEMORY_COMMAND_USAGE } =
         await import('../../../lib/memoryIntentCore');
       const cmd = parseMemoryCommand(content);
@@ -11296,7 +13636,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // task. Rewrite them into the real /watch pipeline (same resend pattern as
     // bare PR links → /review). Conservative: message must START with a watch
     // verb AND contain a URL or a folder-watch target.
-    if (!lowerContent.startsWith('/') && /^(?:please\s+)?(?:watch|monitor|keep\s+an\s+eye\s+on)\s+/i.test(content)) {
+    if (
+      !hasAuthoritativeMultiActionContract
+      && !lowerContent.startsWith('/')
+      && /^(?:please\s+)?(?:watch|monitor|keep\s+an\s+eye\s+on)\s+/i.test(content)
+    ) {
       try {
         const { detectFolderWatchRequest } = await import('../../../lib/folderWatchModel');
         const hasUrl = /https?:\/\/[^\s]+|(?:^|\s)[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/[^\s]*)?(?=\s|$)/i.test(content);
@@ -11610,7 +13954,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // opt-in flag is set (default OFF) and this isn't a /command. Keeps the
     // common path zero-cost.
     if (
-      !content.trim().startsWith('/')
+      !hasAuthoritativeMultiActionContract
+      && !content.trim().startsWith('/')
       && (() => { try { const v = (globalThis as any)?.localStorage?.getItem?.('uc_auto_best_of_n'); return v === '1' || v === 'true' || v === 'on'; } catch { return false; } })()
     ) {
       let autoRace: { race: boolean; models: string[] } | null = null;
@@ -11934,20 +14279,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // ─── Lightweight local SwanBot commands — short-circuit before OpenSwan ─
-    try {
-      const localCommandResponse = await tryHandleLocalSwanBotCommand(content, {
-        userId: currentUserId || 'anonymous',
-        circleId,
-        userName: currentUserName,
-        ...selectedAgentSubjectContext,
-        model: selectedModel !== 'auto' ? selectedModel : undefined,
-      });
-      if (localCommandResponse) {
-        addBotMessage(localCommandResponse);
-        return;
+    if (!hasAuthoritativeMultiActionContract) {
+      try {
+        const localCommandResponse = await tryHandleLocalSwanBotCommand(content, {
+          userId: currentUserId || 'anonymous',
+          circleId,
+          userName: currentUserName,
+          ...selectedAgentSubjectContext,
+          model: selectedModel !== 'auto' ? selectedModel : undefined,
+        });
+        if (localCommandResponse) {
+          addBotMessage(localCommandResponse);
+          return;
+        }
+      } catch (localCmdErr) {
+        console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
       }
-    } catch (localCmdErr) {
-      console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
     }
 
     // ─── Did-you-mean for unrecognized slash commands (2026-07-14 UX core) ──
@@ -12011,7 +14358,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const { decideWebSearchForTurn, runOptionalWebSearchLane } = await import('../../../lib/webSearchAutoDetect');
     const webDecision = decideWebSearchForTurn(content, webSearchEnabled);
     let webSearchDegradationContext = '';
-    if (webDecision.attach) {
+    if (webDecision.attach && !hasAuthoritativeMultiActionContract) {
       setBotTyping(true);
       const webSearchVisualBriefs = await requireTurnVisualBriefs('the web-search model');
       if (webSearchVisualBriefs === null) {
@@ -12064,16 +14411,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // bytes stay inside the authenticated vision request; ordinary Chat and
     // connected agents receive only the bounded, redacted text artifact.
     let turnVisualBriefContext = '';
-    if (turnHasImageAttachments) {
+    let turnVisualBriefArtifacts: ChatVisualBriefArtifact[] = [];
+    if (turnHasImageAttachments && !opensDesktopAttachment) {
       setBotTyping(true);
-      const briefs = await requireTurnVisualBriefs('the selected chat model');
+      const briefs = await requireTurnVisualBriefs('the selected chat model', plannedAutomationForTurn);
       setBotTyping(false);
       if (briefs === null) return;
+      turnVisualBriefArtifacts = briefs;
       turnVisualBriefContext = formatVisualBriefsForConnectedAgent(briefs);
     }
 
     // ─── Model capability routing — images, webpages, etc. ──────────────────
-    if (!conversationOnlyTurn) {
+    if (
+      !conversationOnlyTurn
+      && !boundOpenSwanResume
+      && !hasAuthoritativeMultiActionContract
+      && !addressedElsewhereForPreflight
+    ) {
       try {
         const { routeByCapability } = await import('../../../lib/modelCapabilities');
         const attachmentPromptContext = buildAttachmentPromptContext(currentAttachments);
@@ -12086,7 +14440,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
         if (shouldShowWorkbench) startCodingWorkbench(contentWithAttachments);
         setBotTyping(true);
-        const capResult = await routeByCapability(contentWithAttachments, selectedModel);
+        const capResult = await routeByCapability(
+          contentWithAttachments,
+          resolvedTurnModel || effectiveSelectedModel,
+        );
         setBotTyping(false);
         if (shouldShowWorkbench) stopCodingWorkbench();
         if (capResult.handled) {
@@ -12112,13 +14469,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // Trigger Agent AI — always responds UNLESS the user is @mentioning another member
-    const escapedName = agentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const isAtMentioningSomeoneElse = new RegExp(`^@(?!agent|blackswan|swanbot|swan|${escapedName}\\b)\\w`, 'i').test(content.trim());
+    const escapedName = escapedAgentNameForPreflight;
+    const isAtMentioningSomeoneElse = addressedElsewhereForPreflight;
 
     if (!isAtMentioningSomeoneElse) {
       let cleanContent = content.replace(new RegExp(`@(agent|blackswan|swanbot|swan|${escapedName})\\s*`, 'gi'), '').trim() || content;
       const latestRecoveryOptionsMessage = findLatestRecoveryOptionsMessage(messages);
-      const recoveryFollowup = !conversationOnlyTurn && latestRecoveryOptionsMessage
+      const recoveryFollowup = !hasAuthoritativeMultiActionContract
+        && !conversationOnlyTurn
+        && latestRecoveryOptionsMessage
         ? resolveChatFailureRecoveryOptionFollowup(cleanContent, latestRecoveryOptionsMessage.recoveryOptions)
         : null;
       if (recoveryFollowup) {
@@ -12150,7 +14509,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const who = m.isBot ? agentName : (m.userName || 'User');
         const when = m.timestamp ? m.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '';
         const ago = m.timestamp ? formatTimeAgo(m.timestamp) : '';
-        return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, mi === lastBotMessageIdx ? 2000 : 300)}`;
+        const historyContent = mi === lastBotMessageIdx
+          ? m.content.slice(-2000)
+          : m.content.slice(0, 300);
+        return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${historyContent}`;
       }).join('\n');
 
       // If replying to a specific message, prepend that context
@@ -12159,80 +14521,98 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         : '';
 
       // Build attachment context for AI
-      const attachmentContext = [
-        buildAttachmentPromptContext(currentAttachments),
-        figmaPromptContext,
-        turnVisualBriefContext,
-      ].filter(Boolean).join('\n\n');
+      // An authoritative attachment turn uses the sealed runtime boundary
+      // below. Its private text/visual values must never be duplicated into
+      // the ordinary prompt, metadata, archive, or workbench context.
+      const attachmentContext = requiresAuthoritativeAttachmentSources
+        ? ''
+        : [
+            buildAttachmentPromptContext(currentAttachments),
+            figmaPromptContext,
+            turnVisualBriefContext,
+          ].filter(Boolean).join('\n\n');
 
       // P20 — attached images + WordPress wording → deterministic upload
       // directive: exact wp.upload_media recipes with the real storage paths,
       // approval-gated as always, drafts by default. Advisory lane — any
       // failure here must never block the send.
       let wpImageDirective = '';
-      try {
-        const stagedImageUploads = currentStagedFiles.filter(
-          (f) => (f.mimeType || '').startsWith('image/') && f.attachment?.storagePath,
-        );
-        const pickerImages = currentAttachments.filter((a) => a.type === 'image');
-        const imageCount = stagedImageUploads.length + pickerImages.length;
-        if (imageCount > 0) {
-          const { detectWordPressImagePostIntent, buildWpImageUploadDirective, summarizeWpImagePlanForUser } =
-            await import('../../../lib/wpImagePostFlow');
-          const wpIntent = detectWordPressImagePostIntent({ text: content, imageAttachmentCount: imageCount });
-          if (wpIntent) {
-            // Picker images carry base64 but no storage path — stage them now
-            // (web only) so wp.upload_media can reach the bytes.
-            const pickerUploads: Array<{ name: string; mimeType: string; storagePath: string }> = [];
-            if (Platform.OS === 'web' && currentUserId) {
-              for (const att of pickerImages) {
-                if (!att.base64) continue;
-                try {
-                  const bytes = Uint8Array.from(atob(att.base64), (c) => c.charCodeAt(0));
-                  const file = new File([bytes], att.name || 'image.jpg', { type: att.mimeType || 'image/jpeg' });
-                  const uploaded = await uploadAttachment({ file, circleId, threadId: activeThreadId, userId: currentUserId });
-                  if (uploaded?.storagePath) {
-                    pickerUploads.push({ name: file.name, mimeType: file.type, storagePath: uploaded.storagePath });
+      if (!requiresAuthoritativeAttachmentSources) {
+        try {
+          const stagedImageUploads = currentStagedFiles.filter(
+            (f) => (f.mimeType || '').startsWith('image/') && f.attachment?.storagePath,
+          );
+          const pickerImages = currentAttachments.filter((a) => a.type === 'image');
+          const imageCount = stagedImageUploads.length + pickerImages.length;
+          if (imageCount > 0) {
+            const { detectWordPressImagePostIntent, buildWpImageUploadDirective, summarizeWpImagePlanForUser } =
+              await import('../../../lib/wpImagePostFlow');
+            const wpIntent = detectWordPressImagePostIntent({ text: content, imageAttachmentCount: imageCount });
+            if (wpIntent) {
+              // Picker images carry base64 but no storage path — stage them now
+              // (web only) so wp.upload_media can reach the bytes.
+              const pickerUploads: Array<{ name: string; mimeType: string; storagePath: string }> = [];
+              if (Platform.OS === 'web' && currentUserId) {
+                for (const att of pickerImages) {
+                  if (!att.base64) continue;
+                  try {
+                    const bytes = Uint8Array.from(atob(att.base64), (c) => c.charCodeAt(0));
+                    const file = new File([bytes], att.name || 'image.jpg', { type: att.mimeType || 'image/jpeg' });
+                    const uploaded = await uploadAttachment({ file, circleId, threadId: activeThreadId, userId: currentUserId });
+                    if (uploaded?.storagePath) {
+                      pickerUploads.push({ name: file.name, mimeType: file.type, storagePath: uploaded.storagePath });
+                    }
+                  } catch {
+                    // Best-effort — unstaged picker images are simply left out.
                   }
-                } catch {
-                  // Best-effort — unstaged picker images are simply left out.
                 }
               }
-            }
-            const wpAttachments = [
-              ...stagedImageUploads.map((f) => ({ name: f.name, mimeType: f.mimeType, storagePath: f.attachment!.storagePath })),
-              ...pickerUploads,
-            ];
-            if (wpAttachments.length > 0) {
-              wpImageDirective = buildWpImageUploadDirective({
-                attachments: wpAttachments,
-                siteUrl: wpIntent.siteUrl,
-                wantsSlide: wpIntent.wantsSlide,
-                wantsPost: wpIntent.wantsPost,
-              });
-              addBotMessage(
-                summarizeWpImagePlanForUser({
-                  count: wpAttachments.length,
+              const wpAttachments = [
+                ...stagedImageUploads.map((f) => ({ name: f.name, mimeType: f.mimeType, storagePath: f.attachment!.storagePath })),
+                ...pickerUploads,
+              ];
+              if (wpAttachments.length > 0) {
+                wpImageDirective = buildWpImageUploadDirective({
+                  attachments: wpAttachments,
                   siteUrl: wpIntent.siteUrl,
                   wantsSlide: wpIntent.wantsSlide,
                   wantsPost: wpIntent.wantsPost,
-                }),
-                undefined,
-                { localOnly: true },
-              );
+                });
+                addBotMessage(
+                  summarizeWpImagePlanForUser({
+                    count: wpAttachments.length,
+                    siteUrl: wpIntent.siteUrl,
+                    wantsSlide: wpIntent.wantsSlide,
+                    wantsPost: wpIntent.wantsPost,
+                  }),
+                  undefined,
+                  { localOnly: true },
+                );
+              }
             }
           }
+        } catch {
+          // Advisory only.
         }
-      } catch {
-        // Advisory only.
       }
 
+      const terminalPlan = plannedAutomationForTurn || buildChatAutomationPlan({
+        message: content,
+        attachments: currentAttachments.map((attachment) => ({
+          uri: attachment.uri,
+          type: attachment.type,
+          id: attachment.id,
+        })),
+        selectedMode: effectiveChatMode,
+      });
+      const boundedMultiActionPromptBlock = formatChatBoundedMultiActionPromptBlock(terminalPlan);
       const fullPrompt = [
         attachmentContext,
         wpImageDirective,
         replyContext,
         recoveryOptionPromptContext,
         webSearchDegradationContext,
+        boundedMultiActionPromptBlock,
         cleanContent,
       ].filter(Boolean).join('\n');
 
@@ -12254,9 +14634,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       let pendingMessage: ChatMessage | null = null;
       try {
         const sessionArchiveContext = await loadSessionArchiveContext();
-        const sendModel = effectiveSelectedModel !== 'auto'
-          ? effectiveSelectedModel
-          : resolveSendModel(cleanContent);
+        const sendModel = resolvedTurnModel;
         const context: SwanBotContext = {
           userId: currentUserId || 'anonymous',
           circleId,
@@ -12286,7 +14664,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
 
         // Use unified agent runtime only when user explicitly selects a specialized mode
-        if (!conversationOnlyTurn && effectiveChatMode !== 'none' && effectiveChatMode !== 'talk') {
+        if (
+          !terminalPlan.multiActionLedger
+          && !conversationOnlyTurn
+          && effectiveChatMode !== 'none'
+          && effectiveChatMode !== 'talk'
+        ) {
           const result = await executeAgentRun({
             surface: 'main_chat',
             circleId,
@@ -12332,8 +14715,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const integrationPreflight = missingConnectors.length > 0
               ? `## Integration Preflight\nMissing circle integrations: ${missingConnectors.join(', ')}\nDo not claim end-to-end ownership of workflows that depend on those systems without first flagging the missing integrations.`
               : '';
-            const augmentedPrompt = [pluginPrompt, integrationPreflight, fullPrompt].filter(Boolean).join('\n\n');
-
             // Phase C2 — SSE streaming fast-path. Fires when the message is
             // simple enough (solo delegation, no Figma, no specialized agent
             // mode) so 90% of normal chat turns get token-by-token output.
@@ -12346,15 +14727,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // BlackSwan actually call rooms.create / circle.update_* /
             // missions.* instead of replying "I can't do that."
             const streamCandidateModel = sendModel || 'claude-haiku-4-5';
-            const terminalPlan = buildChatAutomationPlan({
-              message: content,
-              attachments: currentAttachments.map((attachment) => ({
-                uri: attachment.uri,
-                type: attachment.type,
-                id: attachment.id,
-              })),
-              selectedMode: effectiveChatMode,
-            });
+            const augmentedPrompt = [pluginPrompt, integrationPreflight, fullPrompt].filter(Boolean).join('\n\n');
             const terminalTransport = chooseChatTerminalTransport({
               executionKind: terminalPlan.execution.kind,
               chatMode: effectiveChatMode,
@@ -12362,7 +14735,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               hasSelectedRecoveryOption: Boolean(selectedRecoveryOption),
               isFigmaBuildRequest,
               isCodingGenerationRequest: isCodingGenerationRequest(cleanContent, sessionProfile),
-              looksLikeActionRequest: looksLikeActionRequest(cleanContent),
+              looksLikeActionRequest: !!boundOpenSwanResume
+                || !!terminalPlan.multiActionLedger
+                || looksLikeActionRequest(cleanContent),
+              requiresAuthoritativeCompletion: !!terminalPlan.multiActionLedger,
               canStreamAnthropic: canUseAnthropicChatStream(streamCandidateModel),
               conversationOnly: conversationOnlyTurn,
             });
@@ -13108,6 +15484,244 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               return;
             }
 
+            let attachmentTurnSources: OpenSwanAttachmentTurnSources | undefined = boundDesktopAttachmentResume?.sources;
+            let stagedDesktopOpenCapability: DesktopAttachmentOpenCapability | null = null;
+            let stagedDesktopOpenScope: DesktopAttachmentOpenScope | null = null;
+            if (
+              terminalPlan.multiActionLedger
+              && requiresAuthoritativeAttachmentSources
+              && !boundDesktopAttachmentResume
+            ) {
+              let attachmentBlockReason = '';
+              let attachmentBridgeRecoveryPayload: DesktopBridgeRecoveryPayload | null = null;
+              try {
+                if (!persistedAttachmentMessageId || !currentUserId || !activeThreadId) {
+                  throw new Error('The exact persisted message-to-attachment link was unavailable. Reload this thread, then retry the full request.');
+                }
+                if (
+                  activeThreadScopeRef.current.circleId !== circleId
+                  || activeThreadScopeRef.current.threadId !== activeThreadId
+                ) {
+                  throw new Error('The active conversation changed while the attachment turn was being prepared. Return to the original thread and retry.');
+                }
+                if (
+                  currentStagedFiles.length === 0
+                  || currentStagedFiles.some((file) => file.uploading || file.error || !file.attachment)
+                ) {
+                  throw new Error('Every file in a compound task must finish uploading before execution. Remove any failed upload or wait for it to finish, then retry.');
+                }
+
+                const stagedImages = currentStagedFiles.filter((file) => file.mimeType.startsWith('image/'));
+                const stagedImageByBasename = new Map(stagedImages.map((file) => [file.name, file]));
+                const briefBasenames = new Set(turnVisualBriefArtifacts.map((brief) => brief.fileName));
+                if (
+                  !opensDesktopAttachment
+                  && (
+                    stagedImages.length !== turnVisualBriefArtifacts.length
+                    || stagedImageByBasename.size !== stagedImages.length
+                    || briefBasenames.size !== turnVisualBriefArtifacts.length
+                    || turnVisualBriefArtifacts.some((brief) => !stagedImageByBasename.has(brief.fileName))
+                  )
+                ) {
+                  throw new Error('The visual evidence could not be bound to each exact uploaded image. Reattach the images with distinct names and retry.');
+                }
+
+                const stagedByByteSourceId = new Map(currentStagedFiles.map((file) => [file.id, file]));
+                const assembled = await assembleOpenSwanAttachmentTurnSources({
+                  manifestId: `attachment-manifest-${userMessage.id}`,
+                  circleId,
+                  threadId: activeThreadId,
+                  originLocalMessageId: userMessage.id,
+                  mediaAttachments: [],
+                  stagedFiles: currentStagedFiles.map((file) => {
+                    const uploaded = file.attachment!;
+                    return {
+                      id: file.id,
+                      name: file.name,
+                      mimeType: file.mimeType,
+                      sizeBytes: file.sizeBytes,
+                      uploading: false,
+                      attachment: {
+                        id: uploaded.id,
+                        circleId: uploaded.circleId,
+                        threadId: uploaded.threadId,
+                        originalName: uploaded.originalName,
+                        mimeType: uploaded.mimeType,
+                        sizeBytes: uploaded.sizeBytes,
+                      },
+                      byteSourceId: file.id,
+                    };
+                  }),
+                  visualBriefs: (opensDesktopAttachment ? [] : turnVisualBriefArtifacts).map((brief) => ({
+                    attachmentId: stagedImageByBasename.get(brief.fileName)!.attachment!.id,
+                    version: brief.version,
+                    fileName: brief.fileName,
+                    observation: brief.observation,
+                    redactionApplied: brief.redactionApplied,
+                  })),
+                }, {
+                  digestSha256: async (bytes) => {
+                    if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable.');
+                    const digestBytes = new Uint8Array(bytes.byteLength);
+                    digestBytes.set(bytes);
+                    return globalThis.crypto.subtle.digest('SHA-256', digestBytes.buffer);
+                  },
+                  resolveBytes: async (request) => {
+                    if (request.lane !== 'staged') return null;
+                    const file = stagedByByteSourceId.get(request.byteSourceId);
+                    if (
+                      !file
+                      || file.attachment?.id !== request.attachmentId
+                      || file.sizeBytes !== request.sizeBytes
+                    ) return null;
+                    const bytes = await file.file.arrayBuffer();
+                    return bytes.byteLength === request.sizeBytes ? bytes : null;
+                  },
+                });
+                if (!assembled.ok) {
+                  throw new Error(`The exact attachment source could not be sealed (${assembled.code}). Reattach the file and retry.`);
+                }
+                const unreadable = assembled.manifest.attachments.filter(
+                  (attachment) => attachment.contentAvailability === 'unavailable',
+                );
+                if (!opensDesktopAttachment && unreadable.length > 0) {
+                  const names = unreadable.map((attachment) => `**${attachment.basename}**`).join(', ');
+                  throw new Error(`${names} has no verified readable text or visual observation yet. Reattach a supported text/image file, or provide extracted text, then retry the full compound task.`);
+                }
+                if (
+                  activeThreadScopeRef.current.circleId !== circleId
+                  || activeThreadScopeRef.current.threadId !== activeThreadId
+                ) {
+                  throw new Error('The active conversation changed before attachment verification finished. Return to the original thread and retry.');
+                }
+                if (opensDesktopAttachment) {
+                  const stagedFile = currentStagedFiles[0];
+                  const manifestItem = assembled.manifest.attachments[0];
+                  if (
+                    currentStagedFiles.length !== 1
+                    || assembled.manifest.attachments.length !== 1
+                    || !stagedFile
+                    || !stagedFile.attachment
+                    || !manifestItem
+                    || manifestItem.attachmentId !== desktopOpenRequest!.attachmentId
+                    || stagedFile.attachment.id !== desktopOpenRequest!.attachmentId
+                    || desktopOpenRequest!.messageId !== persistedAttachmentMessageId
+                  ) {
+                    throw new Error('The native-open request no longer matched one exact linked upload. Reattach one file and retry.');
+                  }
+                  // A broadly supported bridge is not necessarily current for
+                  // this exact private capability. Recheck immediately before
+                  // staging so an older process never receives bytes or turns
+                  // a typed update/restart blocker into a generic retry.
+                  const bridgePreparation = await autoConnectDesktopBridge().catch(() => null);
+                  const bridgeReadiness = bridgePreparation?.bridgeReadiness
+                    || classifyDesktopBridgeHealth(null, { requiredTools: ['attachment_open_capability'] });
+                  if (!bridgeReadiness.attachmentOpenReady) {
+                    attachmentBridgeRecoveryPayload = bridgePreparation?.recoveryPayload
+                      || buildDesktopBridgeReadinessRecoveryPayload(bridgeReadiness);
+                    throw new Error(attachmentBridgeRecoveryPayload.content);
+                  }
+                  const base64 = await base64FromExactFile(stagedFile.file);
+                  if (!base64) {
+                    throw new Error('The exact uploaded bytes could not be prepared for the local desktop bridge. Nothing was opened.');
+                  }
+                  const explicitDesktopApp = resolveExplicitDesktopAttachmentApp(content);
+                  const openScope: DesktopAttachmentOpenScope = Object.freeze({
+                    userId: currentUserId,
+                    circleId,
+                    threadId: activeThreadId,
+                    messageId: persistedAttachmentMessageId,
+                    attachmentId: manifestItem.attachmentId,
+                  });
+                  const stagedCapability = await stageDesktopAttachmentOpenCapability({
+                    scope: openScope,
+                    filename: stagedFile.name,
+                    mimeType: stagedFile.mimeType,
+                    base64,
+                    sizeBytes: manifestItem.sizeBytes,
+                    sha256: manifestItem.sha256,
+                    preferredAppName: explicitDesktopApp,
+                  });
+                  if (!stagedCapability.ok || !stagedCapability.data) {
+                    throw new Error('The local desktop bridge could not mint a one-shot open capability. Check the bridge connection, then retry; nothing was opened.');
+                  }
+                  stagedDesktopOpenCapability = stagedCapability.data;
+                  stagedDesktopOpenScope = openScope;
+                  const authority = issueOpenSwanDesktopAttachmentAuthority({
+                    sources: assembled,
+                    linkedAttachments: [{
+                      linkState: 'durable_linked',
+                      attachmentId: manifestItem.attachmentId,
+                      messageId: persistedAttachmentMessageId,
+                      circleId,
+                      threadId: activeThreadId,
+                    }],
+                    operation: 'desktop_open',
+                    privateCapability: stagedCapability.data,
+                  });
+                  if (!authority.ok) {
+                    await revokeDesktopAttachmentOpenCapability(stagedCapability.data, openScope).catch(() => {});
+                    stagedDesktopOpenCapability = null;
+                    stagedDesktopOpenScope = null;
+                    throw new Error(`The local open capability could not be bound to the exact Chat source (${authority.code}). Nothing was opened.`);
+                  }
+                }
+                attachmentTurnSources = assembled;
+              } catch (error) {
+                if (stagedDesktopOpenCapability && stagedDesktopOpenScope) {
+                  await revokeDesktopAttachmentOpenCapability(
+                    stagedDesktopOpenCapability,
+                    stagedDesktopOpenScope,
+                  ).catch(() => {});
+                  stagedDesktopOpenCapability = null;
+                  stagedDesktopOpenScope = null;
+                }
+                attachmentBlockReason = error instanceof Error
+                  ? error.message
+                  : 'The exact attachment source could not be verified.';
+              }
+              if (!attachmentTurnSources) {
+                addAuthoritativeAttachmentBlockedMessage(
+                  attachmentBridgeRecoveryPayload?.content
+                    || `**Attachment evidence needed**\n${attachmentBlockReason}`,
+                  terminalPlan,
+                  attachmentBridgeRecoveryPayload,
+                );
+                setRunStatus('idle');
+                setBotTyping(false);
+                stopCodingWorkbench();
+                return;
+              }
+            }
+
+            // Durable run ownership is anchored to the exact persisted user
+            // row before any model/tool dispatch. Plain streaming responses do
+            // not wait here; only the OpenSwan batch path crosses this gate.
+            if (!persistedSourceUserMessageId) {
+              try {
+                persistedSourceUserMessageId = await requirePersistedUserMessageId();
+              } catch (error) {
+                const reason = error instanceof Error
+                  ? error.message
+                  : 'The source message could not be persisted.';
+                addBotMessage(
+                  `**Conversation sync needed**\n${reason} OpenSwan did not start, so no tool or external action ran. Retry once this conversation is online.`,
+                  undefined,
+                  {
+                    localOnly: true,
+                    durability: 'ephemeral',
+                    outcomeVerdict: 'blocked',
+                    source: { actor: 'OpenSwan', surface: 'main_chat_source_message_unavailable' },
+                  },
+                );
+                setRunStatus('idle');
+                setBotTyping(false);
+                stopCodingWorkbench();
+                return;
+              }
+            }
+            const exactSourceUserMessageId = persistedSourceUserMessageId;
+
             setRunStatus('running');
             setActiveSubagent(null);
             setActiveDelegatedSubagents([]);
@@ -13117,28 +15731,71 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 // Use a verb from the shared rotation so the pending
                 // stub matches the typing indicator's tone.
                 : `${pickThinkingVerb(Math.floor(Date.now() / 1500))}…`,
+              { requestSourceMessageId: exactSourceUserMessageId },
             );
             const pendingMessageId = pendingMessage.id;
             const openSwanController = new AbortController();
             openSwanAbortRef.current = openSwanController;
+            if (boundDesktopAttachmentResume) {
+              if (!options?.desktopAttachmentResumeCustody) {
+                throw new Error('The approved attachment-open continuation had no exact runtime custody observer. Nothing was opened.');
+              }
+              // Last Chat-owned boundary: every persistence, scope, source,
+              // ledger, and capability check has passed. From this point the
+              // OpenSwan runtime owns terminal cleanup on every outcome.
+              options.desktopAttachmentResumeCustody.accepted();
+            }
+            if (boundOpenSwanApprovalResume) {
+              if (!options?.openSwanApprovalResumeCustody) {
+                throw new Error('The approved OpenSwan continuation had no exact Chat custody observer. Nothing ran.');
+              }
+            }
             const structured = await runOpenSwanSessionTurn({
               message: augmentedPrompt,
-            context,
-            signal: openSwanController.signal,
-            connectedProviders: connectedProviderSet,
-            surface: 'main_chat',
-            chatSessionId: activeThreadId,
-            mode: 'talk',
-            title: cleanContent.slice(0, 100) || 'OpenSwan Session',
-            goal: cleanContent.slice(0, 500),
-            sessionProfile: resolvedSessionProfile,
-            delegationMode: sessionDelegationMode,
-            activePluginIds: activePlugins,
-            metadata: {
+              originalUserTaskText: content,
+              context,
+              signal: openSwanController.signal,
+              connectedProviders: connectedProviderSet,
+              surface: 'main_chat',
+              chatSessionId: activeThreadId,
+              resumeLocator: boundOpenSwanResume?.locator,
+              resumeSourceMessageId: boundOpenSwanResume?.sourceMessageId || null,
+              resumeSourceRunId: boundOpenSwanResume?.sourceRunId || null,
+              originMessageId: pendingMessageId,
+              multiActionContract: terminalPlan.multiActionLedger || null,
+              attachmentTurnSources,
+              desktopAttachmentMessageId: opensDesktopAttachment
+                ? persistedAttachmentMessageId
+                : null,
+              multiActionLedgerReference: opensDesktopAttachment
+                ? terminalPlan.multiActionLedger || null
+                : null,
+              approvalResumeBinding: boundOpenSwanApprovalResume?.binding || null,
+              // Exact persisted source-user lineage is carried privately on
+              // both the original approval-producing turn and its resume.
+              // It never enters the prompt or public run metadata.
+              approvalResumeSourceMessageId: exactSourceUserMessageId,
+              // Queue custody transfers only after the new durable run exists
+              // and the runtime atomically proves the complete sealed call
+              // set. A throw leaves every lease and queued item available;
+              // no tool has dispatched at this point.
+              onApprovalResumeAccepted: boundOpenSwanApprovalResume
+                ? () => options?.openSwanApprovalResumeCustody?.accepted()
+                : undefined,
+              // An actionable A# ledger needs the execute-mode tool catalog even
+              // when the ordinary Chat selector says Talk. Plan mode exits above
+              // as a nonexecuting draft, so it never reaches this branch.
+              mode: terminalPlan.multiActionLedger ? 'execute' : 'talk',
+              title: cleanContent.slice(0, 100) || 'OpenSwan Session',
+              goal: cleanContent.slice(0, 500),
+              sessionProfile: resolvedSessionProfile,
+              delegationMode: sessionDelegationMode,
+              activePluginIds: activePlugins,
+              metadata: {
               selectedModel: effectiveSelectedModel,
               effectiveModel: sendModel || null,
               threadId: activeThreadId,
-              attachmentCount: currentAttachments.length,
+              attachmentCount: currentAttachments.length + currentStagedFiles.length,
               delegationMode: sessionDelegationMode,
               activePluginIds: activePlugins,
               selectedRecoveryOption: selectedRecoveryOption ? {
@@ -13167,6 +15824,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 sourceSurface: selectedRecoveryOption.context?.sourceSurface || null,
               } : null,
             },
+            onRunStarted: (runId) => {
+              if (!currentUserId || !activeThreadId) return;
+              const owner: ChatOpenSwanRunOwner = Object.freeze({
+                userId: currentUserId,
+                circleId,
+                threadId: activeThreadId,
+                pendingMessageId,
+                sourceUserMessageId: exactSourceUserMessageId,
+                originalUserTaskText: content,
+                multiActionLedger: terminalPlan.multiActionLedger || null,
+              });
+              chatOpenSwanRunOwnersRef.current.set(runId, owner);
+              while (chatOpenSwanRunOwnersRef.current.size > 32) {
+                const oldest = chatOpenSwanRunOwnersRef.current.keys().next().value;
+                if (typeof oldest !== 'string') break;
+                chatOpenSwanRunOwnersRef.current.delete(oldest);
+              }
+              // Publish the same ownership to the local transcript promptly;
+              // the ref above remains the synchronous approval-race authority.
+              setMessages((prev) => prev.map((message) => (
+                message.id === pendingMessageId
+                  ? {
+                      ...message,
+                      runId,
+                      authorId: currentUserId,
+                      requestAuthorId: currentUserId,
+                      requestSourceMessageId: exactSourceUserMessageId,
+                    }
+                  : message
+              )));
+            },
             onStageChange: (stage, label) => {
               setRunStatus(stage === 'delegating' ? 'delegated' : 'running');
               setCurrentRunStep(label);
@@ -13180,9 +15868,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   color: subagents[0].color,
                 });
               }
-            },
-          });
+              },
+            });
+            if (boundOpenSwanApprovalResume) {
+              options?.openSwanApprovalResumeCustody?.terminalWithoutCustody();
+            }
             openSwanAbortRef.current = null; // turn settled — release the STOP handle
+            // The runtime receipt is the only completion authority for this
+            // lane. A provider can return useful prose after a cap, guard,
+            // edge failure, or user STOP; none of those are a completed turn.
+            const {
+              normalizeOpenSwanTerminalOutcome,
+              buildChatLaneOutcomeTags,
+              summarizeChatLaneOutcomeForTelemetry,
+            } = await import('../../../lib/chatLaneOutcome');
+            const openSwanTerminalOutcome = normalizeOpenSwanTerminalOutcome(structured);
+            const openSwanLaneTags = buildChatLaneOutcomeTags(openSwanTerminalOutcome);
+            if (openSwanTerminalOutcome.status !== 'completed') {
+              console.warn(
+                '[ChatTab] OpenSwan lane terminal:',
+                JSON.stringify(summarizeChatLaneOutcomeForTelemetry(openSwanTerminalOutcome)),
+              );
+            }
             // Map the runtime's tool actions (rooms.create, circle.update_*,
             // agent.update_appearance, etc) into the UI's toolEvent shape
             // so the execution strip on the assistant message actually
@@ -13190,15 +15897,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // like nothing happened. Previously hardcoded to [], which is
             // why "ask it to add a room and the screen just refreshes"
             // felt like a silent no-op.
-            // X7 (P48): record the clean batch terminal so lane failure rates
-            // have a denominator (visible routing fallback carried through).
+            // X7 (P48): record the receipt-shaped terminal so clean turns are
+            // the denominator while partial/cancelled/failed turns retain
+            // their truthful neutral/failure classification.
             try {
-              const { recordChatLaneTerminalNow } = await import('../../../lib/chatLaneHealthRegistry');
-              recordChatLaneTerminalNow({
-                lane: 'openswan_v2',
-                status: 'completed',
-                fallback: !!structured.routing?.routing_fallback,
-              });
+              const { recordChatLaneOutcomeNow } = await import('../../../lib/chatLaneHealthRegistry');
+              recordChatLaneOutcomeNow(openSwanTerminalOutcome);
             } catch {}
             const runtimeToolEvents: OpenSwanToolEvent[] = (structured.toolEvents || []).map((evt: any) => ({
               tool: evt.tool,
@@ -13217,6 +15921,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               .filter((e) => e.status === 'passed')
               .map((e) => e.summary)
               .filter(Boolean);
+            const openSwanTerminalOutcomeSignal = deriveOpenSwanTerminalChatOutcomeSignal(structured.terminal);
+            const openSwanTerminalVerdict = openSwanTerminalOutcomeSignal?.verdict || 'unknown';
+            const openSwanTerminalStatusCopy = describeOpenSwanTerminalForChat(structured.terminal);
+            const persistedMultiActionCompletion = projectPersistedOpenSwanMultiActionCompletion(
+              structured.multiActionCompletion,
+            );
+            const multiActionStatusCopy = describeOpenSwanMultiActionCompletionForChat(
+              terminalPlan.multiActionLedger,
+              persistedMultiActionCompletion,
+            );
+            let openSwanRecovery: ChatFailureRecoveryPayload | null = null;
+            if (structured.terminal.state === 'partial' || structured.terminal.state === 'failed') {
+              openSwanRecovery = await startMainChatFailureRecoveryPayload({
+                task: cleanContent,
+                failureMessage: openSwanTerminalStatusCopy,
+                outcomeStatus: structured.terminal.state,
+                executionKind: 'run_openswan',
+                runId: structured.runId || null,
+                planSummary: structured.taskPlan?.summary || cleanContent,
+                source: 'main_chat_openswan_terminal',
+                // The recovery cards can offer a bounded connected-agent
+                // repair, but a returned terminal never launches one itself.
+                launchIfMissing: false,
+                touched: [
+                  'surface:main_chat',
+                  'runtime:openswan',
+                  `openswan_terminal:${structured.terminal.state}`,
+                  `openswan_reason:${structured.terminal.reason}`,
+                  ...openSwanLaneTags,
+                ],
+              });
+            }
             // Verification receipt (honest proof-of-work): the typed tool
             // loop already computed "edited N files · checks passed ·
             // committed sha" — surface the bounded summary line at the top
@@ -13228,11 +15964,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const baseBotResponse = (structured.response && structured.response.trim())
               ? structured.response
               : (successfulToolSummaries.length > 0
-                  ? `Done:\n- ${successfulToolSummaries.join('\n- ')}`
+                  ? `${structured.terminal.state === 'succeeded' && structured.terminal.completionVerified ? 'Done' : 'Progress before the stop'}:\n- ${successfulToolSummaries.join('\n- ')}`
                   : '');
-            const botResponse = verificationReceiptLine
-              ? [verificationReceiptLine, baseBotResponse].filter(Boolean).join('\n\n')
-              : baseBotResponse;
+            const openSwanTerminalRecoveryCopy = structured.terminal.state === 'partial'
+              || structured.terminal.state === 'failed'
+              ? openSwanRecovery?.message || openSwanTerminalStatusCopy
+              : openSwanTerminalStatusCopy;
+            const botResponse = structured.terminal.state === 'succeeded'
+              && structured.terminal.completionVerified
+              ? [multiActionStatusCopy, verificationReceiptLine, baseBotResponse].filter(Boolean).join('\n\n')
+              : [
+                  openSwanTerminalRecoveryCopy,
+                  multiActionStatusCopy,
+                  verificationReceiptLine,
+                  baseBotResponse,
+                ].filter(Boolean).join('\n\n');
             const { wikiRefs, researchRefs } = await buildChatInfluenceReferences({
               prompt: cleanContent,
               response: botResponse,
@@ -13251,6 +15997,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             };
             const structuredMessageSnapshot: ChatMessage = {
               ...pendingMessage,
+              authorId: currentUserId || undefined,
               content: botResponse,
               artifacts: structured.artifacts,
               wikiRefs,
@@ -13269,6 +16016,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               routing: structured.routing,
               source: structuredSource,
               usage: structured.usage,
+              openSwanTerminal: projectPersistedOpenSwanTerminal(structured.terminal),
+              openSwanResumeLocator: projectPersistedOpenSwanResumeLocator(structured.terminal.resumeLocator),
+              openSwanMultiActionCompletion: persistedMultiActionCompletion,
+              recoveryOptions: openSwanRecovery?.recoveryOptions,
+              recoveryReliability: openSwanRecovery?.recoveryReliability,
+              // Continue is derived only after the exact locator resolves
+              // against this device's local transcript; never from resumable
+              // or checkpointAvailable alone.
+              quickReplies: undefined,
+              quickRepliesLabel: undefined,
+              // Runtime-owned terminal truth must be present before metadata
+              // projection; generic clean-prose inference never gets a vote.
+              outcomeSignal: {
+                verdict: openSwanTerminalVerdict,
+                lane: 'main_chat_openswan',
+                model: structured.usage?.model || sendModel || undefined,
+              },
               isPending: false,
               timestamp: new Date(),
             };
@@ -13314,17 +16078,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 },
               });
             }
-            const handoff = detectHandoff(botResponse, 'main_chat');
+            const handoff = structured.terminal.state === 'succeeded'
+              && structured.terminal.completionVerified
+              ? detectHandoff(botResponse, 'main_chat')
+              : null;
             if (handoff) {
               setPendingHandoff(handoff);
+            }
+            if (
+              structured.runId
+              && structured.terminal.state === 'succeeded'
+              && structured.terminal.completionVerified
+            ) {
+              // An approval resolved while its original loop was still alive
+              // may have been consumed by that same run. Required-tool truth
+              // prevents a waiting/failed call from reaching this branch, so
+              // verified success safely cancels the redundant cross-run turn.
+              queuedApprovalResumesRef.current = queuedApprovalResumesRef.current.filter(
+                (entry) => entry.sourceRunId !== structured.runId,
+              );
             }
             setRunStatus('idle');
             setActiveSubagent(null);
             setActiveDelegatedSubagents([]);
             setCurrentRunStep('');
           } catch (batchErr) {
+            if (boundOpenSwanApprovalResume) {
+              options?.openSwanApprovalResumeCustody?.terminalWithoutCustody();
+            }
             const batchMessage = batchErr instanceof Error ? batchErr.message : String(batchErr || 'Unknown error');
             const batchStack = batchErr instanceof Error ? batchErr.stack || null : null;
+            if (batchErr instanceof OpenSwanResumeUnavailableError) {
+              finalizeFailedBotMessage({
+                pendingMessage,
+                content: batchErr.message,
+                source: {
+                  actor: agentName,
+                  surface: 'main_chat_openswan_resume_unavailable',
+                  selectedModel,
+                  effectiveModel: sendModel || null,
+                },
+              });
+              setRunStatus('idle');
+              setActiveSubagent(null);
+              setActiveDelegatedSubagents([]);
+              setCurrentRunStep('');
+              setBotTyping(false);
+              stopCodingWorkbench();
+              return;
+            }
             if (conversationOnlyTurn) {
               const failure = buildPlainChatFailurePresentation(
                 batchErr,
@@ -13511,15 +16313,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // leave Chat looking permanently unresponsive.
   const sendMessage = async (
     overrideText?: string,
-    options?: {
-      displayText?: string;
-      modeOverride?: string | null;
-      modelOverride?: string | null;
-    },
+    options?: ChatSendOptions,
   ): Promise<void> => {
     try {
       await sendMessageUnsafe(overrideText, options);
     } catch (error) {
+      // A thrown outer send boundary has terminally ended this concrete
+      // resume attempt before runtime custody. Do this before any recovery UI
+      // branch returns so the resolved approval cannot enter a retry loop.
+      options?.openSwanApprovalResumeCustody?.terminalWithoutCustody();
       sendLockRef.current = false;
       setBotTyping(false);
       setRunStatus('idle');
@@ -13578,6 +16380,163 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             },
           },
         );
+      }
+    }
+  };
+
+  const addDurableDesktopAttachmentResumeUnavailableMessage = (
+    queued: QueuedDesktopAttachmentApprovalResume,
+  ): void => {
+    const { approval } = queued;
+    if (
+      queued.status !== 'approved'
+      || !currentUserId
+      || !activeThreadId
+      || queued.userId !== currentUserId
+      || queued.circleId !== circleId
+      || queued.threadId !== activeThreadId
+      || activeThreadScopeRef.current.circleId !== queued.circleId
+      || activeThreadScopeRef.current.threadId !== queued.threadId
+    ) return;
+    const noticeKeys = desktopAttachmentResumeUnavailableNoticeKeysRef.current;
+    if (noticeKeys.has(approval.id)) return;
+    noticeKeys.add(approval.id);
+    while (noticeKeys.size > 64) {
+      const oldest = noticeKeys.values().next().value;
+      if (typeof oldest !== 'string') break;
+      noticeKeys.delete(oldest);
+    }
+    addBotMessage(
+      'Approval was recorded, but this device-private attachment open could not resume. Nothing was opened. Reattach one file and ask again.',
+      undefined,
+      {
+        localOnly: true,
+        durability: 'transcript',
+        runId: approval.run_id,
+        requestAuthorId: queued.userId,
+        outcomeVerdict: 'blocked',
+        source: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_desktop_attachment_resume_unavailable',
+          selectedModel: selectedModel || null,
+        },
+      },
+    );
+  };
+
+  handleDesktopAttachmentApprovalResumeRef.current = async (queued) => {
+    const { approval } = queued;
+    if (
+      !currentUserId
+      || !activeThreadId
+      || queued.userId !== currentUserId
+      || queued.circleId !== circleId
+      || queued.threadId !== activeThreadId
+      || activeThreadScopeRef.current.circleId !== queued.circleId
+      || activeThreadScopeRef.current.threadId !== queued.threadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== queued.threadId
+      || (
+        queued.resumeDisposition === 'continue'
+        && (
+          sendLockRef.current
+          || attachments.length > 0
+          || stagedFiles.length > 0
+        )
+      )
+    ) {
+      // The approval is already durable, but custody has not moved. Keep the
+      // exact scope queued instead of claiming it under a new thread or while
+      // composer files would make sendMessage return early.
+      if (!queuedDesktopAttachmentApprovalResumesRef.current.some((entry) => entry.approval.id === approval.id)) {
+        queuedDesktopAttachmentApprovalResumesRef.current.unshift(queued);
+      }
+      return;
+    }
+    const claimed = claimOpenSwanDesktopAttachmentApprovalResumeLease({
+      approvalId: approval.id,
+      sourceRunId: approval.run_id,
+      userId: currentUserId,
+      circleId,
+      threadId: activeThreadId,
+    });
+    if (!claimed.ok) {
+      if (queued.status === 'approved') {
+        addDurableDesktopAttachmentResumeUnavailableMessage(queued);
+      }
+      return;
+    }
+    const scope: DesktopAttachmentOpenScope = Object.freeze({
+      userId: currentUserId,
+      circleId: claimed.expected.circleId,
+      threadId: claimed.expected.threadId,
+      messageId: claimed.expected.messageId,
+      attachmentId: claimed.expected.attachmentId,
+    });
+    const privateCapability = isDesktopAttachmentOpenCapability(claimed.privateCapability)
+      ? claimed.privateCapability
+      : null;
+    const exactLedger = isChatBoundedMultiActionLedger(claimed.ledgerReference)
+      ? claimed.ledgerReference
+      : null;
+    if (queued.resumeDisposition === 'stale_batch_revoke') {
+      try {
+        if (queued.status === 'approved') {
+          addDurableDesktopAttachmentResumeUnavailableMessage(queued);
+        }
+      } finally {
+        if (privateCapability) {
+          await revokeDesktopAttachmentOpenCapability(privateCapability, scope).catch(() => {});
+        }
+      }
+      return;
+    }
+    if (queued.status === 'rejected') {
+      if (privateCapability) {
+        await revokeDesktopAttachmentOpenCapability(privateCapability, scope).catch(() => {});
+      }
+      return;
+    }
+    if (!privateCapability || !exactLedger) {
+      if (privateCapability) {
+        await revokeDesktopAttachmentOpenCapability(privateCapability, scope).catch(() => {});
+      }
+      addDurableDesktopAttachmentResumeUnavailableMessage(queued);
+      return;
+    }
+    if (!isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now())) {
+      await revokeDesktopAttachmentOpenCapability(privateCapability, scope).catch(() => {});
+      addDurableDesktopAttachmentResumeUnavailableMessage(queued);
+      return;
+    }
+    let custodyTransferred = false;
+    try {
+      await sendMessage(claimed.originalUserTaskText, {
+        displayText: 'Continue approved attachment open',
+        modeOverride: 'execute',
+        desktopAttachmentResume: Object.freeze({
+          sources: claimed.sources,
+          messageId: claimed.expected.messageId,
+          attachmentId: claimed.expected.attachmentId,
+          sourceRunId: approval.run_id,
+          originalUserTaskText: claimed.originalUserTaskText,
+          ledger: exactLedger,
+        }),
+        desktopAttachmentResumeCustody: Object.freeze({
+          accepted: () => {
+            custodyTransferred = true;
+            addBotMessage('✅ Approval granted — resuming the exact one-file open now.', undefined, {
+              localOnly: true,
+              durability: 'ephemeral',
+            });
+          },
+        }),
+      });
+    } finally {
+      if (!custodyTransferred && isDesktopAttachmentOpenCapability(privateCapability)) {
+        try { addDurableDesktopAttachmentResumeUnavailableMessage(queued); } finally {
+          await revokeDesktopAttachmentOpenCapability(privateCapability, scope).catch(() => {});
+        }
       }
     }
   };
@@ -13685,6 +16644,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     sendMessage(actionText);
   }, [nukeCurrentThread, sendMessage, wallet]);
+
+  const handleOpenSwanResume = useCallback((message: ChatMessage) => {
+    const locator = projectPersistedOpenSwanResumeLocator(message.openSwanResumeLocator);
+    const threadId = activeThreadScopeRef.current.threadId;
+    const userId = currentUserId;
+    const sourceMessageId = message.persistedMetadataSnapshot?.localMessageId || message.id;
+    const unavailable = () => {
+      setOpenSwanResumeAvailability((current) => ({ ...current, [message.id]: false }));
+      addBotMessage(
+        'This saved OpenSwan checkpoint is no longer available on this device. Resend the task to start a fresh run.',
+        undefined,
+        {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'main_chat_openswan_resume_unavailable',
+            selectedModel: selectedModel || null,
+          },
+          outcomeVerdict: 'blocked',
+        },
+      );
+    };
+    if (
+      !locator
+      || !threadId
+      || !userId
+      || locator.circleId !== circleId
+      || locator.userId !== userId
+      || locator.threadId !== threadId
+      || locator.runId !== (message.runId || null)
+      || locator.messageId !== sourceMessageId
+      || openSwanResumeAvailability[message.id] !== true
+    ) {
+      unavailable();
+      return;
+    }
+    // The claim occurs synchronously in the click stack, before sendMessage's
+    // async lock or any transcript/storage read. A second click dispatches 0.
+    if (openSwanResumeClaimGateRef.current.claim(locator) !== 'claimed') return;
+    setOpenSwanResumeAvailability((current) => ({ ...current, [message.id]: false }));
+    void sendMessage('Continue', {
+      displayText: 'Continue',
+      openSwanResume: {
+        locator,
+        sourceMessageId,
+        sourceRunId: message.runId || null,
+      },
+    });
+  }, [addBotMessage, circleId, currentUserId, openSwanResumeAvailability, selectedModel, sendMessage]);
 
   // ─── Governance Handlers ─────────────────────────────────────────────────
 
@@ -14374,8 +17382,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       extractEngineeringCapturesFromToolEvents((item.toolEvents as any) || []),
     );
     const recoveryReliabilityCard = buildRecoveryReliabilityCard(item.recoveryReliability);
-    const visibleContent = item.recoveryOptions && item.recoveryOptions.length > 0
-      ? stripChatFailureRecoveryOptionsText(item.content)
+    const recoveryPresentation = (
+      (item.recoveryOptions && item.recoveryOptions.length > 0)
+      || manualVerificationAction
+    ) ? buildChatMinimalRecoveryPresentation({
+      failureMessage: item.content,
+      recoveryMessage: stripChatFailureRecoveryOptionsText(item.content),
+      recoveryOptions: item.recoveryOptions,
+      detailMetadata: item.recoveryReliability ?? null,
+      authorizedManualVerificationAction: manualVerificationAction,
+    }) : null;
+    // The reason lives beside the single primary action below. Keeping only
+    // the short status here prevents the transcript body and recovery card
+    // from repeating the same failure paragraph.
+    const visibleContent = recoveryPresentation
+      ? recoveryPresentation.statusLine
       : item.content;
     const bodyContent = appChoiceCard
       ? stripChatAppChoiceLine(visibleContent, handoffMetadata?.requestNotice?.appChoiceLine)
@@ -14653,6 +17674,51 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       />
     ) : null;
 
+    const triggerRecoveryOption = (option: ChatFailureRecoveryOption): void => {
+      const actionIntent = buildChatRecoveryActionIntent(option, {
+        sourceSurface: item.source?.surface || null,
+        platform: Platform.OS,
+      });
+      if (actionIntent.kind === 'connect_desktop_bridge') {
+        void (async () => {
+          setBotTyping(true);
+          try {
+            await addDesktopBridgeAutoConnectMessage(item.source?.surface || 'desktop_bridge_recovery_card');
+          } catch (error: any) {
+            await addRecoverableChatErrorMessage({
+              title: 'App connection needs attention',
+              task: 'Start or repair the local desktop bridge from a recovery option card',
+              error,
+              executionKind: 'desktop_bridge_recovery_card',
+              source: 'desktop_bridge_recovery_card_error',
+              touched: ['src/lib/desktopBridgeAutoConnect.ts', 'src/lib/desktopBridge.ts', 'scripts/claude-bridge.js'],
+            });
+          } finally {
+            setBotTyping(false);
+          }
+        })();
+        return;
+      }
+      const prompt = buildRecoveryOptionComposerPrompt(option, item);
+      if (actionIntent.autoSendsPrompt) {
+        void sendMessage(prompt, {
+          displayText: formatChatRecoveryActionDisplayText(option, actionIntent),
+        });
+      } else {
+        setInput(prompt);
+        inputRef.current?.focus();
+      }
+    };
+    const recoveryPrimaryIsDetails = recoveryPresentation?.primaryAction.kind === 'details'
+      || recoveryPresentation?.primaryAction.label === 'Show details';
+    const primaryRecoveryOption = !recoveryPrimaryIsDetails
+      && recoveryPresentation?.primaryAction.kind === 'recovery_option'
+      ? recoveryPresentation.primaryAction.option
+      : null;
+    const secondaryRecoveryOptions = recoveryPrimaryIsDetails
+      ? recoveryPresentation?.details.recoveryOptions.slice(0, 4) || []
+      : recoveryPresentation?.secondaryOptions.slice(0, 4) || [];
+
     return (
       <View>
         {/* Pending "BUILDING NOW" chip removed — the rotating verb in
@@ -14861,14 +17927,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             : (checkId) => handleRetryVerificationCheck(item, checkId)}
           retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
         />
-        {manualVerificationAction ? (
+        {recoveryPresentation?.primaryAction.kind === 'manual_verification' && manualVerificationAction ? (
           <View style={styles.recoveryOptionSection}>
-            <Text style={styles.messageSourceLabel}>Safe recovery</Text>
+            <Text style={styles.messageSourceLabel}>Next step</Text>
             <View style={[styles.recoveryOptionCard, { borderColor: '#38bdf855', backgroundColor: '#38bdf810' }]}>
               <View style={styles.recoveryOptionHeader}>
                 <View style={styles.recoveryOptionTitleWrap}>
-                  <Text style={[styles.recoveryOptionTitle, { color: '#38bdf8' }]}>Check without repeating the action</Text>
-                  <Text style={styles.recoveryOptionMeta}>READ ONLY • CURRENT TASK</Text>
+                  <Text style={[styles.recoveryOptionTitle, { color: '#38bdf8' }]}>Check the current state</Text>
+                  <Text style={styles.recoveryOptionMeta}>READ ONLY</Text>
                 </View>
                 <Pressable
                   accessibilityRole="button"
@@ -14886,95 +17952,92 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   ]}
                 >
                   <Text style={[styles.recoveryOptionButtonText, { color: '#38bdf8' }]}>
-                    {manualVerificationMessageId === item.id ? 'CHECKING' : manualVerificationAction.label.toUpperCase()}
+                    {manualVerificationMessageId === item.id
+                      ? 'CHECKING'
+                      : recoveryPresentation.primaryAction.label.toUpperCase()}
                   </Text>
                 </Pressable>
               </View>
-              <Text style={styles.recoveryOptionDetail} numberOfLines={3}>
-                Reads the current app, browser, or file state once. It cannot rerun the original prompt or dispatch a mutation.
-              </Text>
+              <Text style={styles.recoveryOptionDetail} numberOfLines={2}>{recoveryPresentation.reason}</Text>
             </View>
           </View>
         ) : null}
-        {/* P22: the "Recovery Status" card moved into the Details disclosure
-            near the top of computer-task messages; the actionable Recovery
-            Options below stay always-visible. */}
-        {!isInactiveDesignTask && !mutationReplayBlocked && item.recoveryOptions && item.recoveryOptions.length > 0 ? (
+        {!isInactiveDesignTask && !mutationReplayBlocked && primaryRecoveryOption && recoveryPresentation ? (
           <View style={styles.recoveryOptionSection}>
-            <Text style={styles.messageSourceLabel}>Recovery Options</Text>
-            {item.recoveryOptions.slice(0, 5).map((option) => {
-              const color = getRecoveryOptionAccent(option);
-              const executionPlan = buildChatFailureRecoveryExecutionPlan(option);
-              const policyBadges = getRecoveryOptionPolicyBadges(option);
-              const actionIntent = buildChatRecoveryActionIntent(option, {
-                sourceSurface: item.source?.surface || null,
-                platform: Platform.OS,
-              });
-              return (
-                <View
-                  key={option.id}
-                  style={[
-                    styles.recoveryOptionCard,
-                    { borderColor: `${color}55`, backgroundColor: `${color}10` },
+            <Text style={styles.messageSourceLabel}>Next step</Text>
+            <View style={[styles.recoveryOptionCard, { borderColor: '#38bdf855', backgroundColor: '#38bdf810' }]}>
+              <View style={styles.recoveryOptionHeader}>
+                <View style={styles.recoveryOptionTitleWrap}>
+                  <Text style={[styles.recoveryOptionTitle, { color: '#38bdf8' }]} numberOfLines={1}>
+                    What to do next
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={recoveryPresentation.primaryAction.label}
+                  onPress={() => triggerRecoveryOption(primaryRecoveryOption)}
+                  style={({ pressed }) => [
+                    styles.recoveryOptionButton,
+                    { borderColor: '#38bdf866', backgroundColor: pressed ? '#38bdf824' : '#0b1220' },
+                    Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
                 >
-                  <View style={styles.recoveryOptionHeader}>
-                    <View style={styles.recoveryOptionTitleWrap}>
-                      <Text style={[styles.recoveryOptionTitle, { color }]} numberOfLines={2}>
-                        {option.label}
-                      </Text>
-                      <Text style={styles.recoveryOptionMeta}>
-                        {[getRecoveryOptionActorLabel(option.actor).toUpperCase(), option.recommended ? 'RECOMMENDED' : '', ...policyBadges].filter(Boolean).join(' • ')}
-                      </Text>
+                  <Text style={[styles.recoveryOptionButtonText, { color: '#38bdf8' }]}>
+                    {recoveryPresentation.primaryAction.label}
+                  </Text>
+                </Pressable>
+              </View>
+              <Text style={styles.recoveryOptionDetail} numberOfLines={2}>{recoveryPresentation.reason}</Text>
+            </View>
+          </View>
+        ) : null}
+        {!isInactiveDesignTask && !mutationReplayBlocked && recoveryPresentation && (
+          secondaryRecoveryOptions.length > 0 || recoveryPrimaryIsDetails
+        ) ? (
+          <View style={styles.recoveryOptionSection}>
+            <ChatMessageDetailsDisclosure
+              summary={secondaryRecoveryOptions.length > 0 ? `More options (${secondaryRecoveryOptions.length})` : recoveryPresentation.detailsLabel}
+              statusTone="neutral"
+              accentColor={accentColor}
+            >
+              {secondaryRecoveryOptions.map((option) => {
+                const color = getRecoveryOptionAccent(option);
+                const actionIntent = buildChatRecoveryActionIntent(option, {
+                  sourceSurface: item.source?.surface || null,
+                  platform: Platform.OS,
+                });
+                return (
+                  <View
+                    key={option.id}
+                    style={[styles.recoveryOptionCard, { borderColor: `${color}55`, backgroundColor: `${color}10` }]}
+                  >
+                    <View style={styles.recoveryOptionHeader}>
+                      <View style={styles.recoveryOptionTitleWrap}>
+                        <Text style={[styles.recoveryOptionTitle, { color }]} numberOfLines={2}>{option.label}</Text>
+                      </View>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`${actionIntent.label}: ${actionIntent.detail}`}
+                        onPress={() => triggerRecoveryOption(option)}
+                        style={({ pressed }) => [
+                          styles.recoveryOptionButton,
+                          { borderColor: `${color}66`, backgroundColor: pressed ? `${color}24` : '#0b1220' },
+                          Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                        ]}
+                      >
+                        <Text style={[styles.recoveryOptionButtonText, { color }]}>{actionIntent.label}</Text>
+                      </Pressable>
                     </View>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`${actionIntent.label}: ${actionIntent.detail}`}
-                      onPress={() => {
-                        if (actionIntent.kind === 'connect_desktop_bridge') {
-                          void (async () => {
-                            setBotTyping(true);
-                            try {
-                              await addDesktopBridgeAutoConnectMessage(item.source?.surface || 'desktop_bridge_recovery_card');
-                            } catch (error: any) {
-                              await addRecoverableChatErrorMessage({
-                                title: 'Desktop bridge recovery failed',
-                                task: 'Start or repair the local desktop bridge from a recovery option card',
-                                error,
-                                executionKind: 'desktop_bridge_recovery_card',
-                                source: 'desktop_bridge_recovery_card_error',
-                                touched: ['src/lib/desktopBridgeAutoConnect.ts', 'src/lib/desktopBridge.ts', 'scripts/claude-bridge.js'],
-                              });
-                            } finally {
-                              setBotTyping(false);
-                            }
-                          })();
-                          return;
-                        }
-                        const prompt = buildRecoveryOptionComposerPrompt(option, item);
-                        if (actionIntent.autoSendsPrompt) {
-                          void sendMessage(prompt, {
-                            displayText: formatChatRecoveryActionDisplayText(option, actionIntent),
-                          });
-                        } else {
-                          setInput(prompt);
-                          inputRef.current?.focus();
-                        }
-                      }}
-                      style={({ pressed }) => [
-                        styles.recoveryOptionButton,
-                        { borderColor: `${color}66`, backgroundColor: pressed ? `${color}24` : '#0b1220' },
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
-                      ]}
-                    >
-                      <Text style={[styles.recoveryOptionButtonText, { color }]}>{actionIntent.label}</Text>
-                    </Pressable>
+                    <Text style={styles.recoveryOptionDetail} numberOfLines={3}>{option.detail}</Text>
                   </View>
-                  <Text style={styles.recoveryOptionDetail} numberOfLines={3}>{option.detail}</Text>
-                  <Text style={styles.recoveryOptionPlan} numberOfLines={2}>{executionPlan.userSummary}</Text>
-                </View>
-              );
-            })}
+                );
+              })}
+              {secondaryRecoveryOptions.length === 0 ? (
+                <Text style={styles.recoveryOptionDetail}>
+                  {stripChatFailureRecoveryOptionsText(item.content)}
+                </Text>
+              ) : null}
+            </ChatMessageDetailsDisclosure>
           </View>
         ) : null}
         {(item.memoryRefs && item.memoryRefs.length > 0) || (item.memoriesUsed && item.memoriesUsed.length > 0) ? (
@@ -15184,17 +18247,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   };
 
   // Shared tab jump (hoisted from handleFollowupChipPress so the reference
-  // chips below reuse it): web rides the existing uc:switch-tab event;
-  // native falls back to route params.
-  const goTab = (tab: string) => {
+  // chips below reuse it). A canonical entity handle survives both the web
+  // event and native route-param paths, so the destination can focus the
+  // exact run instead of dropping the user on a generic surface.
+  const tabNavigationRequestRef = useRef(0);
+  const goTab = (tab: string, handle?: EntityHandle | null) => {
+    const focus = handle ? encodeEntityHandle(handle) : '';
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab } })); } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent('uc:switch-tab', {
+          detail: focus ? { tab, focus } : { tab },
+        }));
+      } catch {}
       return;
     }
+    const routeTs = Date.now();
+    tabNavigationRequestRef.current += 1;
+    const routeParams = {
+      tab,
+      focus: focus || null,
+      _tabTs: routeTs,
+      _focusTs: tabNavigationRequestRef.current,
+    };
     try {
-      navigation.setParams?.({ tab, _tabTs: Date.now() });
+      navigation.setParams?.(routeParams);
     } catch {
-      navigation.navigate?.('CircleDetail', { circleId, tab, _tabTs: Date.now() });
+      navigation.navigate?.('CircleDetail', { circleId, ...routeParams });
     }
   };
 
@@ -15219,7 +18297,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
       case 'open_run':
       case 'request_approval':
-        goTab('OFFICE');
+        goTab('OFFICE', followup.handle);
         return;
       case 'retry_run': {
         const priorPrompt = findPriorUserPromptForMessage(messages, item.id);
@@ -15227,7 +18305,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setInput(priorPrompt);
           inputRef.current?.focus();
         } else if (followup.handle) {
-          goTab('OFFICE');
+          goTab('OFFICE', followup.handle);
         } else {
           inputRef.current?.focus();
         }
@@ -15241,7 +18319,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           inputRef.current?.focus();
         } else if (followup.surface === 'feed') goTab('FEED');
         else if (followup.surface === 'rooms') goTab('ROOMS');
-        else if (followup.surface === 'office') goTab('OFFICE');
+        else if (followup.surface === 'office') goTab('OFFICE', followup.handle);
       }
     }
   };
@@ -15249,11 +18327,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // reference-nav-chips: dispatch a tapped jump-to chip on a USER message.
   // mission/task ride the same localStorage deeplink keys the mention chips
   // use (consumers: MissionsTab / FeedTab, web only — native lands on the tab
-  // best-effort); run lands on OFFICE only (no run-focus consumer exists —
-  // AgentRunsPanel is 3 UI layers deep, so the chip hint must not promise
-  // "opens the run"); room lands on ROOMS. We hold the typed handle here, so
-  // nothing on this path encodes/decodes the entity-handle string form
-  // (decodeEntityHandle stays consumer-less).
+  // best-effort); run lands on OFFICE and focuses the existing run drawer;
+  // room lands on ROOMS. The canonical encoded handle keeps the same contract
+  // across web events and native route params.
   const handleReferenceChipPress = (match: SurfaceReferenceMatch) => {
     const { kind, id, surface } = match.handle;
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
@@ -15263,7 +18339,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } catch {}
     }
     // Tab keys are the UPPERCASE surface names (CircleDetailScreen TABS).
-    goTab((surface || 'chat').toUpperCase());
+    goTab((surface || 'chat').toUpperCase(), match.handle);
   };
 
   // reference-nav-chips: bounded chip labels ("Open mission: Acme redesign").
@@ -15375,7 +18451,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 agents={item.assignPickerAgents}
                 accentColor={accentColor}
                 onPick={(agent) => {
-                  setInput(`/assign @${agent.name} `);
+                  setInput(buildChatAgentAssignmentCommand(agent.id));
                   inputRef.current?.focus();
                 }}
               />
@@ -15448,6 +18524,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             {!isInactiveDesignTaskMessage(item)
               && !mutationReplayBlocked
               && item.quickReplies && item.quickReplies.length > 0
+              && !item.openSwanResumeLocator
               && !(item.computerFindings && (item.computerFindings.items?.length || 0) > 0) ? (
               <QuickReplyChips
                 replies={item.quickReplies}
@@ -15470,8 +18547,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     }
                     return;
                   }
+                  if (reply === 'Continue' && item.openSwanResumeLocator) {
+                    handleOpenSwanResume(item);
+                    return;
+                  }
                   void sendMessage(reply);
                 }}
+              />
+            ) : null}
+            {!isInactiveDesignTaskMessage(item)
+              && !mutationReplayBlocked
+              && item.openSwanTerminal?.resumable === true
+              && item.openSwanResumeLocator
+              && openSwanResumeAvailability[item.id] === true ? (
+              <QuickReplyChips
+                replies={['Continue']}
+                accentColor={accentColor}
+                label="Resume saved work"
+                onPick={() => handleOpenSwanResume(item)}
               />
             ) : null}
             {!isInactiveDesignTaskMessage(item)
@@ -15747,6 +18840,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     latestCompletedComputerTaskAt,
     latestCompletedComputerTaskSessionKey: chatAutomationApprovalSessionKey,
   });
+  // Live plan approvals already have their complete approve/edit/reject card
+  // immediately below the attention strip. Keep them in the runtime-facing
+  // attention snapshot (so OpenSwan can mention genuinely blocked work), but
+  // remove them from the presentation snapshot so the user sees one approval
+  // surface, not a duplicate "Needs you" banner plus the real card.
+  const chatAttentionForDisplay = buildChatAttentionState({
+    approvals: approvalsForAttention.filter((approval) => (
+      !isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now())
+    )),
+    pendingClarification: pendingClarificationRef.current.get(activeThreadId || 'main') || null,
+    pendingTaskQuestion: computerUseTask.state.pendingConfirmation,
+    recoveryOptions: attentionRecoverySource?.recoveryOptions ?? null,
+    recoveryContextLabel: attentionRecoverySource?.recoveryReliability?.targetName
+      ?? attentionRecoverySource?.recoveryReliability?.taskFamily
+      ?? null,
+    recoveryRefId: attentionRecoverySource?.id ?? null,
+    providerBlockers: attentionProviderBlocker ? [attentionProviderBlocker] : null,
+  }, {
+    dismissedIds: dismissedAttentionIds,
+    latestCompletedComputerTaskAt,
+    latestCompletedComputerTaskSessionKey: chatAutomationApprovalSessionKey,
+  });
   // Proactive surfacing: expose the CURRENT attention items to sendMessage
   // (declared far above this derived block) through a ref — read at send
   // time, so there is no TDZ on the render-scoped const and no stale
@@ -15755,7 +18870,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // still open with them.
   const chatAttentionItemsRef = useRef<ChatAttentionItem[]>([]);
   chatAttentionItemsRef.current = chatAttention.items;
-  const chatAttentionItems = chatAttention.items.filter((item) =>
+  const chatAttentionItems = chatAttentionForDisplay.items.filter((item) =>
     // Live pending approvals already render with approve/reject buttons in
     // HitlApprovalBanner directly below the strip; keep them out of the row
     // list (the status line still counts them) and show only the states
@@ -15764,7 +18879,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     item.kind !== 'approval_pending'
       && item.kind !== 'approval_expiring',
   );
-  const chatAttentionActive = chatAttention.statusLine !== null;
+  const chatAttentionActive = chatAttentionForDisplay.statusLine !== null;
   useEffect(() => {
     // Reclassify countdowns/expiry while something is waiting on the user.
     if (!chatAttentionActive) return;
@@ -16010,7 +19125,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
       <Modal
         visible={builderModalOpen}
-        animationType="slide"
+        animationType="fade"
         transparent
         onRequestClose={() => setBuilderModalOpen(false)}
       >
@@ -16811,7 +19926,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             multiline
           />
 
-          {selectedAgent?.provider === 'openswan' && (
+          {selectedAgent?.provider === 'openswan'
+            && (selectedAgent.source !== 'db'
+              || (selectedAgent.isOwn === true && selectedAgent.ownerId === currentUserId)) && (
             <Pressable
               onPress={async () => {
                 if (!selectedAgent || assigning) return;
@@ -16820,23 +19937,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 const requestedTask = taskPrompt.trim();
                 if (requestedTask) addUserMessage(`@${selectedAgent.name}: spawn dedicated OpenSwan session for "${requestedTask}"`);
                 try {
-                  if (selectedAgent.id && selectedAgent.id !== DEFAULT_AGENT.id) {
-                    await supabase.from('circle_office_agents')
-                      .update({
-                        current_task: requestedTask ? requestedTask.slice(0, 120) : 'Launching dedicated OpenSwan session',
-                        status: 'building',
-                        updated_at: new Date().toISOString(),
-                        last_active_at: new Date().toISOString(),
-                      })
-                      .eq('id', selectedAgent.id);
-                  }
-                  const response = await spawnDedicatedOpenSwanSession(selectedAgent, requestedTask);
-                  addBotMessage(response);
-                  if (selectedAgent.id && selectedAgent.id !== DEFAULT_AGENT.id) {
-                    await supabase.from('circle_office_agents')
-                      .update({ current_task: null, status: 'idle' })
-                      .eq('id', selectedAgent.id);
-                  }
+                  const handoff = await spawnDedicatedOpenSwanSession(selectedAgent, requestedTask);
+                  addBotMessage(handoff.message, undefined, {
+                    delegatedTo: handoff.actor,
+                    connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(handoff) || undefined,
+                    agentSubjectMetadata: buildAssignableAgentSubjectMetadata(selectedAgent),
+                    outcomeVerdict: 'unknown',
+                    runId: handoff.runId,
+                    showRunTrace: !!handoff.runId,
+                    source: {
+                      actor: handoff.actor,
+                      surface: 'dedicated_openswan_spawn',
+                      provider: handoff.provider || 'openswan',
+                      selectedModel: selectedAgent.model || selectedModel || null,
+                    },
+                  });
                 } catch (e: any) {
                   await addRecoverableChatErrorMessage({
                     title: `**${selectedAgent.name}** failed to spawn a dedicated OpenSwan session`,
@@ -16896,23 +20011,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 addUserMessage(`@${selectedAgent.name}: ${assignedTask}`);
                 setBotTyping(true);
                 try {
-                  if (selectedAgent.id && !selectedAgent.id.startsWith('bridge::') && selectedAgent.id !== DEFAULT_AGENT.id) {
-                    await supabase.from('circle_office_agents')
-                      .update({
-                        current_task: assignedTask.slice(0, 120),
-                        status: 'building',
-                        updated_at: new Date().toISOString(),
-                        last_active_at: new Date().toISOString(),
-                      })
-                      .eq('id', selectedAgent.id);
-                  }
-                  const response = await dispatchAssignedAgentTask(selectedAgent, assignedTask);
-                  addBotMessage(response);
-                  if (selectedAgent.id && !selectedAgent.id.startsWith('bridge::') && selectedAgent.id !== DEFAULT_AGENT.id) {
-                    await supabase.from('circle_office_agents')
-                      .update({ current_task: null, status: 'idle' })
-                      .eq('id', selectedAgent.id);
-                  }
+                  const handoff = await dispatchAssignedAgentTask(selectedAgent, assignedTask);
+                  addBotMessage(handoff.message, undefined, {
+                    delegatedTo: handoff.actor,
+                    connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(handoff) || undefined,
+                    agentSubjectMetadata: buildAssignableAgentSubjectMetadata(selectedAgent),
+                    outcomeVerdict: 'unknown',
+                    runId: handoff.runId,
+                    showRunTrace: !!handoff.runId,
+                    source: {
+                      actor: handoff.actor,
+                      surface: 'assign_panel_agent',
+                      provider: handoff.provider || selectedAgent.provider,
+                      selectedModel: selectedAgent.model || selectedModel || null,
+                    },
+                  });
                 } catch (e: any) {
                   await addRecoverableChatErrorMessage({
                     title: `**${selectedAgent.name}** failed`,
@@ -17286,7 +20399,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
       {/* Run Status Bar — shows active delegation/processing */}
       <RunStatusBar
-        status={runStatus}
+        status={Platform.OS === 'web' && agentMonitorTask ? 'idle' : runStatus}
         subagentName={activeSubagent?.name}
         subagentIcon={activeSubagent?.icon}
         subagentColor={activeSubagent?.color}
@@ -17422,7 +20535,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           questions, recovery choices, and provider blockers into one summary
           so blocked work stops dying silently. */}
       <ChatAttentionStrip
-        state={chatAttention}
+        state={chatAttentionForDisplay}
         items={chatAttentionItems}
         onAction={handleChatAttentionAction}
         accentColor={accentColor}
@@ -17497,8 +20610,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           userId={currentUserId}
           accentColor={accentColor}
           onPendingChange={setPendingApprovalCount}
+          allowApproval={(approval) => (
+            approval.requested_by === currentUserId
+            && !!approval.run_id
+            && !!resolveChatOpenSwanRunOwnerRef.current(
+              approval.run_id,
+              approval.requested_by,
+            )
+          )}
+          allowDevicePrivateApproval={(approval) => {
+            if (
+              readOpenSwanApprovalAuditToolName(approval.payload) !== 'desktop.open_attachment'
+              || approval.requested_by !== currentUserId
+              || !approval.run_id
+              || !activeThreadId
+            ) return false;
+            const immediateOwner = chatOpenSwanRunOwnersRef.current.get(approval.run_id);
+            return (
+              immediateOwner?.userId === currentUserId
+              && immediateOwner.circleId === circleId
+              && immediateOwner.threadId === activeThreadId
+            ) || messages.some((message) => (
+              message.runId === approval.run_id
+              && message.requestAuthorId === currentUserId
+            ));
+          }}
           onResolved={(approval, status) => {
-            if (status !== 'approved') return;
             // Ownership gate (fail closed): getPendingRunApprovals is
             // circle-wide, so this banner also shows approvals filed by
             // OpenSwan console sessions, Office runs, automation-executor and
@@ -17512,16 +20649,75 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // runs under surface 'main_chat', so a tag can't distinguish this
             // tab from a console session.) Rows without a matching run just
             // show the banner (fail closed — no auto-resume).
-            const approvalPayload = (approval.payload || null) as Record<string, unknown> | null;
-            const isChatOwnedRun = !!approval.run_id && messages.some((m) => m.runId === approval.run_id);
-            if (!isChatOwnedRun) return;
-            const payloadTool = approvalPayload?.tool;
-            const toolName = typeof payloadTool === 'string' && payloadTool ? payloadTool : 'the approved action';
-            // Multi-approve safety: queue + single combined continuation via
-            // the flush ref (declared next to the run pill state). Approvals
-            // granted mid-turn drain when the turn ends.
-            queuedApprovalResumesRef.current.push({ id: approval.id, tool: toolName });
-            flushQueuedApprovalResumesRef.current();
+            const toolName = readOpenSwanApprovalAuditToolName(approval.payload) || 'the approved action';
+            if (toolName === 'desktop.open_attachment') {
+              if (!approval.run_id || !activeThreadId || approval.requested_by !== currentUserId) return;
+              const immediateOwner = chatOpenSwanRunOwnersRef.current.get(approval.run_id);
+              const isExactPrivateOwner = (
+                immediateOwner?.userId === currentUserId
+                && immediateOwner.circleId === circleId
+                && immediateOwner.threadId === activeThreadId
+              ) || messages.some((message) => (
+                message.runId === approval.run_id
+                && message.requestAuthorId === currentUserId
+              ));
+              if (!isExactPrivateOwner) return;
+              const queued: QueuedDesktopAttachmentApprovalResume = Object.freeze({
+                approval,
+                status,
+                resumeDisposition: 'continue',
+                userId: currentUserId,
+                circleId,
+                threadId: activeThreadId,
+              });
+              if (status === 'rejected') {
+                void handleDesktopAttachmentApprovalResumeRef.current(queued);
+                return;
+              }
+              if (!queuedDesktopAttachmentApprovalResumesRef.current.some((entry) => entry.approval.id === approval.id)) {
+                queuedDesktopAttachmentApprovalResumesRef.current.push(queued);
+              }
+              flushDesktopAttachmentApprovalResumesRef.current();
+              return;
+            }
+            if (!currentUserId || !activeThreadId || !approval.run_id) return;
+            if (status === 'rejected') {
+              const owner = resolveChatOpenSwanRunOwnerRef.current(
+                approval.run_id,
+                approval.requested_by,
+              );
+              if (owner) {
+                void deleteOpenSwanApprovalResumeOutboxCalls({
+                  userId: currentUserId,
+                  circleId,
+                  threadId: activeThreadId,
+                  approvalIds: [approval.id],
+                });
+              }
+              return;
+            }
+            const approvalOwner = resolveChatOpenSwanRunOwnerRef.current(
+              approval.run_id,
+              approval.requested_by,
+            );
+            const recordedNoticeKey = `recorded:${approval.id}`;
+            if (
+              approvalOwner
+              && !approvalResumeRecoveryNoticeKeysRef.current.has(recordedNoticeKey)
+            ) {
+              approvalResumeRecoveryNoticeKeysRef.current.add(recordedNoticeKey);
+              while (approvalResumeRecoveryNoticeKeysRef.current.size > 64) {
+                const oldest = approvalResumeRecoveryNoticeKeysRef.current.values().next().value;
+                if (typeof oldest !== 'string') break;
+                approvalResumeRecoveryNoticeKeysRef.current.delete(oldest);
+              }
+              addBotMessage(
+                'Approval recorded — securely verifying the exact OpenSwan action before continuing.',
+                undefined,
+                { localOnly: true, durability: 'ephemeral' },
+              );
+            }
+            void enqueueApprovedOpenSwanApprovalsRef.current([approval]);
           }}
           onResolvedBatch={(batchApprovals, status) => {
             // approval-batch: an "Approve all N" card delivers every resolved
@@ -17531,18 +20727,120 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // two continuations). Same fail-closed run-ownership gate as
             // onResolved above: only rows whose run_id this chat surface
             // originated auto-resume; foreign rows resolve without one.
-            if (status !== 'approved') return;
-            let queued = false;
-            for (const approval of batchApprovals) {
-              const isChatOwnedRun = !!approval.run_id && messages.some((m) => m.runId === approval.run_id);
-              if (!isChatOwnedRun) continue;
-              const approvalPayload = (approval.payload || null) as Record<string, unknown> | null;
-              const payloadTool = approvalPayload?.tool;
-              const toolName = typeof payloadTool === 'string' && payloadTool ? payloadTool : 'the approved action';
-              queuedApprovalResumesRef.current.push({ id: approval.id, tool: toolName });
-              queued = true;
+            const desktopApprovals = batchApprovals.filter((approval) => {
+              if (
+                readOpenSwanApprovalAuditToolName(approval.payload) !== 'desktop.open_attachment'
+                || !approval.run_id
+                || !activeThreadId
+                || approval.requested_by !== currentUserId
+              ) return false;
+              const immediateOwner = chatOpenSwanRunOwnersRef.current.get(approval.run_id);
+              return (
+                immediateOwner?.userId === currentUserId
+                && immediateOwner.circleId === circleId
+                && immediateOwner.threadId === activeThreadId
+              ) || messages.some((message) => (
+                message.runId === approval.run_id
+                && message.requestAuthorId === currentUserId
+              ));
+            });
+            if (desktopApprovals.length > 0) {
+              for (const approval of desktopApprovals) {
+                // Defensive fail-closed path: the approval planner marks this
+                // one-shot tool non-batchable: Private-file opens must be approved one at a time.
+                // If a stale client still batches it,
+                // consume the private lease only to revoke the capability;
+                // never dispatch multiple native opens from one callback. An
+                // actual approval receives the same durable blocked terminal
+                // as every other lost-custody path; rejection stays silent.
+                if (activeThreadId) {
+                  void handleDesktopAttachmentApprovalResumeRef.current(Object.freeze({
+                    approval,
+                    status,
+                    resumeDisposition: 'stale_batch_revoke',
+                    userId: currentUserId,
+                    circleId,
+                    threadId: activeThreadId,
+                  }));
+                }
+              }
             }
-            if (queued) flushQueuedApprovalResumesRef.current();
+            if (!currentUserId || !activeThreadId) return;
+            const genericApprovals = batchApprovals.filter((approval) => (
+              readOpenSwanApprovalAuditToolName(approval.payload) !== 'desktop.open_attachment'
+            ));
+            if (status === 'rejected') {
+              const byRun = new Map<string, AgentRunApproval[]>();
+              for (const approval of genericApprovals) {
+                if (!approval.run_id) continue;
+                const owner = resolveChatOpenSwanRunOwnerRef.current(
+                  approval.run_id,
+                  approval.requested_by,
+                );
+                if (!owner) continue;
+                byRun.set(approval.run_id, [...(byRun.get(approval.run_id) || []), approval]);
+              }
+              for (const approvals of byRun.values()) {
+                void deleteOpenSwanApprovalResumeOutboxCalls({
+                  userId: currentUserId,
+                  circleId,
+                  threadId: activeThreadId,
+                  approvalIds: approvals.map((approval) => approval.id),
+                });
+              }
+              return;
+            }
+            const byRun = new Map<string, AgentRunApproval[]>();
+            for (const approval of genericApprovals) {
+              if (!approval.run_id) continue;
+              byRun.set(approval.run_id, [...(byRun.get(approval.run_id) || []), approval]);
+            }
+            for (const approvals of byRun.values()) {
+              const first = approvals[0];
+              const owner = first
+                ? resolveChatOpenSwanRunOwnerRef.current(first.run_id, first.requested_by)
+                : null;
+              const recordedNoticeKey = first ? `recorded-batch:${first.run_id}` : '';
+              if (
+                owner
+                && recordedNoticeKey
+                && !approvalResumeRecoveryNoticeKeysRef.current.has(recordedNoticeKey)
+              ) {
+                approvalResumeRecoveryNoticeKeysRef.current.add(recordedNoticeKey);
+                while (approvalResumeRecoveryNoticeKeysRef.current.size > 64) {
+                  const oldest = approvalResumeRecoveryNoticeKeysRef.current.values().next().value;
+                  if (typeof oldest !== 'string') break;
+                  approvalResumeRecoveryNoticeKeysRef.current.delete(oldest);
+                }
+                addBotMessage(
+                  'Approvals recorded — securely verifying the exact OpenSwan actions and their original order.',
+                  undefined,
+                  { localOnly: true, durability: 'ephemeral' },
+                );
+              }
+              void enqueueApprovedOpenSwanApprovalsRef.current(approvals);
+            }
+          }}
+          onApprovedUnconsumedChange={(approvedRows) => {
+            // Realtime/reload recovery. The database row is only a value-free
+            // wake-up: exact run/source lineage and encrypted local call
+            // custody are re-proven by the shared helper before queueing.
+            const authoritativeIds = new Set(approvedRows.map((approval) => approval.id));
+            approvedUnconsumedApprovalIdsRef.current = authoritativeIds;
+            queuedApprovalResumesRef.current = queuedApprovalResumesRef.current.filter(
+              (entry) => authoritativeIds.has(entry.item.approvalId),
+            );
+            const byRun = new Map<string, AgentRunApproval[]>();
+            for (const approval of approvedRows) {
+              if (
+                !approval.run_id
+                || readOpenSwanApprovalAuditToolName(approval.payload) === 'desktop.open_attachment'
+              ) continue;
+              byRun.set(approval.run_id, [...(byRun.get(approval.run_id) || []), approval]);
+            }
+            for (const approvals of byRun.values()) {
+              void enqueueApprovedOpenSwanApprovalsRef.current(approvals);
+            }
           }}
         />
       ) : null}
@@ -17571,6 +20869,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const attachmentThreadId = activeThreadId;
           const results = await pickAttachments();
           if (results.length === 0 || !attachmentThreadId) return;
+          const sourceFiles = results
+            .map((attachment) => attachment.sourceFile)
+            .filter((file): file is File => (
+              typeof File !== 'undefined' && file instanceof File
+            ));
+          if (Platform.OS === 'web' && sourceFiles.length === results.length) {
+            addDroppedFiles(sourceFiles);
+            return;
+          }
           if (
             activeThreadScopeRef.current.circleId === attachmentCircleId
             && activeThreadScopeRef.current.threadId === attachmentThreadId
@@ -18695,26 +22002,32 @@ type ChatPickerModel = {
 };
 
 const POPULAR_OPENROUTER_MODELS: ChatPickerModel[] = [
-  { id: 'openrouter/tencent/hy3-preview:free', label: 'Hy3 preview (free)', desc: '#1 OpenRouter weekly usage | tencent | 3.71T tokens | +168% weekly', color: '#f59e0b', icon: '1', group: 'popular', tags: ['text', 'free'] },
-  { id: 'openrouter/moonshotai/kimi-k2.6', label: 'Kimi K2.6', desc: '#2 OpenRouter weekly usage | moonshotai | 1.79T tokens | -10% weekly', color: '#f59e0b', icon: '2', group: 'popular', tags: ['text', 'code'] },
-  { id: 'openrouter/anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6', desc: '#3 OpenRouter weekly usage | anthropic | 1.36T tokens | -1% weekly', color: '#6366f1', icon: '3', group: 'popular', tags: ['code', 'text', 'web'] },
-  { id: 'openrouter/google/gemini-3-flash-preview', label: 'Gemini 3 Flash Preview', desc: '#4 OpenRouter weekly usage | google | 992B tokens | -2% weekly', color: '#3b82f6', icon: '4', group: 'popular', tags: ['text', 'vision', 'web'] },
-  { id: 'openrouter/anthropic/claude-opus-4.7', label: 'Claude Opus 4.7', desc: '#5 OpenRouter weekly usage | anthropic | 956B tokens | -16% weekly', color: '#a855f7', icon: '5', group: 'popular', tags: ['reason', 'code', 'text'] },
-  { id: 'openrouter/deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', desc: '#6 OpenRouter weekly usage | deepseek | 870B tokens | +111% weekly', color: '#ef4444', icon: '6', group: 'popular', tags: ['speed', 'code'] },
-  { id: 'openrouter/deepseek/deepseek-v3.2', label: 'DeepSeek V3.2', desc: '#7 OpenRouter weekly usage | deepseek | 809B tokens | -29% weekly', color: '#ef4444', icon: '7', group: 'popular', tags: ['code', 'text'] },
-  { id: 'openrouter/minimax/minimax-m2.7', label: 'MiniMax M2.7', desc: '#8 OpenRouter weekly usage | minimax | 745B tokens | -1% weekly', color: '#fb7185', icon: '8', group: 'popular', tags: ['text', 'long'] },
-  { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', desc: '#10 OpenRouter weekly usage | deepseek | 652B tokens | +409% weekly', color: '#ef4444', icon: '10', group: 'popular', tags: ['reason', 'code'] },
-  { id: 'openrouter/google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', desc: '#11 OpenRouter weekly usage | google | 645B tokens | +3% weekly', color: '#3b82f6', icon: '11', group: 'popular', tags: ['speed', 'vision'] },
-  { id: 'openrouter/stepfun/step-3.5-flash', label: 'Step 3.5 Flash', desc: '#12 OpenRouter weekly usage | stepfun | 616B tokens | -27% weekly', color: '#22c55e', icon: '12', group: 'popular', tags: ['speed', 'text'] },
-  { id: 'openrouter/google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', desc: '#13 OpenRouter weekly usage | google | 585B tokens | -4% weekly', color: '#3b82f6', icon: '13', group: 'popular', tags: ['speed', 'vision', 'web'] },
-  { id: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', label: 'Nemotron 3 Super (free)', desc: '#14 OpenRouter weekly usage | nvidia | 528B tokens | -21% weekly', color: '#84cc16', icon: '14', group: 'popular', tags: ['text', 'free'] },
-  { id: 'openrouter/inclusionai/ling-2.6-1t:free', label: 'Ling-2.6-1T (free)', desc: '#15 OpenRouter weekly usage | inclusionai | 470B tokens | -5% weekly', color: '#10b981', icon: '15', group: 'popular', tags: ['text', 'free'] },
-  { id: 'openrouter/anthropic/claude-opus-4.6', label: 'Claude Opus 4.6', desc: '#16 OpenRouter weekly usage | anthropic | 429B tokens | -33% weekly', color: '#a855f7', icon: '16', group: 'popular', tags: ['reason', 'code', 'text'] },
-  { id: 'openrouter/openai/gpt-oss-120b', label: 'gpt-oss-120b', desc: '#17 OpenRouter weekly usage | openai | 397B tokens | +10% weekly', color: '#10b981', icon: '17', group: 'popular', tags: ['open', 'text'] },
-  { id: 'openrouter/z-ai/glm-5.1', label: 'GLM 5.1', desc: '#18 OpenRouter weekly usage | z-ai | 357B tokens | -7% weekly', color: '#22d3ee', icon: '18', group: 'popular', tags: ['reason', 'text'] },
-  { id: 'openrouter/google/gemini-3.1-flash-lite-preview', label: 'Gemini 3.1 Flash Lite Preview', desc: '#19 OpenRouter weekly usage | google | 318B tokens | +11% weekly', color: '#3b82f6', icon: '19', group: 'popular', tags: ['speed', 'vision'] },
-  { id: 'openrouter/google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', desc: '#20 OpenRouter weekly usage | google | 293B tokens | -17% weekly', color: '#3b82f6', icon: '20', group: 'popular', tags: ['reason', 'vision'] },
+  { id: 'openrouter/openai/gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#10b981', icon: 'OR', group: 'popular', tags: ['reason', 'code', 'text'] },
+  { id: 'openrouter/openai/gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#10b981', icon: 'OR', group: 'popular', tags: ['code', 'text'] },
+  { id: 'openrouter/anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#6366f1', icon: 'OR', group: 'popular', tags: ['code', 'text', 'web'] },
+  { id: 'openrouter/anthropic/claude-opus-5', label: 'Claude Opus 5', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#a855f7', icon: 'OR', group: 'popular', tags: ['reason', 'code', 'text'] },
+  { id: 'openrouter/google/gemini-3.6-flash', label: 'Gemini 3.6 Flash', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#3b82f6', icon: 'OR', group: 'popular', tags: ['speed', 'vision', 'web'] },
+  { id: 'openrouter/google/gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#3b82f6', icon: 'OR', group: 'popular', tags: ['speed', 'vision'] },
+  { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#ef4444', icon: 'OR', group: 'popular', tags: ['reason', 'code'] },
+  { id: 'openrouter/deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#ef4444', icon: 'OR', group: 'popular', tags: ['speed', 'code'] },
+  { id: 'openrouter/moonshotai/kimi-k2.6', label: 'Kimi K2.6', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#f59e0b', icon: 'OR', group: 'popular', tags: ['text', 'code'] },
+  { id: 'openrouter/minimax/minimax-m2.7', label: 'MiniMax M2.7', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#fb7185', icon: 'OR', group: 'popular', tags: ['text', 'long'] },
+  { id: 'openrouter/qwen/qwen3.5-397b-a17b', label: 'Qwen 3.5 397B', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#ec4899', icon: 'OR', group: 'popular', tags: ['reason', 'code'] },
+  { id: 'openrouter/z-ai/glm-5.1', label: 'GLM 5.1', desc: 'Current-model fallback · exact OpenRouter access checked for your key', color: '#6366f1', icon: 'OR', group: 'popular', tags: ['reason', 'text'] },
 ];
+
+const RETIRED_POPULAR_OPENROUTER_MODEL_IDS = new Set([
+  'gpt-4o', 'gpt-4o-mini', 'gpt-4.1-nano', 'o3-mini', 'o4-mini',
+  'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.1-pro-preview',
+  'deepseek-chat', 'deepseek-reasoner',
+]);
+
+function isAllowedPopularOpenRouterModel(modelId: string): boolean {
+  const parts = String(modelId || '').toLowerCase().replace(/^openrouter\//, '').split('/');
+  const tail = (parts.at(-1) || '').replace(/:.*$/, '');
+  if (!tail || RETIRED_POPULAR_OPENROUTER_MODEL_IDS.has(tail)) return false;
+  return !parts.some((part) => part === 'x-ai' || part === 'xai' || part === 'grok' || part.startsWith('grok-'));
+}
 
 function colorForOpenRouterAuthor(author?: string): string {
   const colors: Record<string, string> = {
@@ -18728,8 +22041,8 @@ function colorForOpenRouterAuthor(author?: string): string {
     openai: '#10b981',
     stepfun: '#22c55e',
     tencent: '#f59e0b',
-    'x-ai': '#22d3ee',
-    'z-ai': '#22d3ee',
+    'x-ai': '#6366f1',
+    'z-ai': '#6366f1',
   };
   return colors[author || ''] || '#a78bfa';
 }
@@ -18781,6 +22094,10 @@ const CHAT_MODELS: ChatPickerModel[] = [
   // activate tools, apps, and agents instead of bypassing the runtime.
   { id: 'auto', label: 'Auto', desc: 'Picks the best connected model, then activates OpenSwan/tools/agents for the task.', color: '#22c55e', icon: 'A', group: 'auto', tags: ['text', 'code', 'reason'] },
   // ── Coding & Engineering ──
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', desc: 'OpenAI deep tier for the hardest reasoning, coding, and agent work.', color: '#059669', icon: '5S', group: 'code', tags: ['code', 'text', 'web', 'reason', 'vision'] },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', desc: 'OpenAI balanced agentic model for everyday builds and tool work.', color: '#10b981', icon: '5T', group: 'code', tags: ['code', 'text', 'web', 'reason', 'vision'] },
+  { id: 'claude-opus-5', label: 'Opus 5', desc: 'Claude premium tier for long-horizon architecture and agentic coding.', color: '#7c3aed', icon: 'O5', group: 'code', tags: ['code', 'text', 'web', 'reason', 'vision'] },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', desc: 'Claude balanced tier for fast, capable coding and tool use.', color: '#6366f1', icon: 'S5', group: 'code', tags: ['code', 'text', 'web', 'reason', 'vision'] },
   { id: 'gpt-5.5', label: 'GPT-5.5', desc: 'OpenAI frontier. Professional coding, reasoning, and agent work.', color: '#10b981', icon: '55', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
   { id: 'gpt-5.5-pro', label: 'GPT-5.5 Pro', desc: 'Highest-compute GPT-5.5 for the hardest professional tasks.', color: '#059669', icon: '5P', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
   { id: 'claude-fable-5', label: 'Fable 5', desc: 'Claude top tier for demanding long-horizon agent work.', color: '#7c3aed', icon: 'F', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
@@ -18789,42 +22106,36 @@ const CHAT_MODELS: ChatPickerModel[] = [
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', desc: 'Fast coding. Great for iteration.', color: '#6366f1', icon: 'S', group: 'code', tags: ['code', 'text', 'web'] },
   { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'OpenAI affordable flagship for code and professional work.', color: '#10b981', icon: '54', group: 'code', tags: ['code', 'text', 'web'] },
   { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Strong mini model for coding, computer use, and subagents.', color: '#10b981', icon: '5m', group: 'code', tags: ['code', 'text', 'web'] },
-  { id: 'codex-mini', label: 'Codex Mini', desc: 'Built for code. Cheap + fast.', color: '#10a37f', icon: 'Cx', group: 'code', tags: ['code'] },
-  { id: 'deepseek-v3.2', label: 'DeepSeek V3.2', desc: 'MoE. Exceptional at code.', color: '#ef4444', icon: 'DS', group: 'code', tags: ['code', 'text'] },
-  { id: 'qwen-3.5-coder', label: 'Qwen Coder', desc: 'Apache 2.0. Code specialist.', color: '#ec4899', icon: 'QC', group: 'code', tags: ['code'] },
+  { id: 'groq/openai/gpt-oss-120b', label: 'GPT-OSS 120B', desc: 'Open-weight reasoning and coding through Groq.', color: '#10a37f', icon: 'OS', group: 'code', tags: ['code', 'text', 'reason'] },
+  { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', desc: 'DeepSeek current professional tier with 1M context and tool use.', color: '#ef4444', icon: 'D4', group: 'code', tags: ['code', 'text', 'reason'] },
+  { id: 'together_ai/Qwen/Qwen3.5-397B-A17B', label: 'Qwen 3.5 397B', desc: 'Current large Qwen model through Together AI.', color: '#ec4899', icon: 'QC', group: 'code', tags: ['code', 'text', 'reason'] },
 
   // ── Reasoning & Research ──
-  { id: 'deepseek-r1', label: 'DeepSeek R1', desc: 'Chain-of-thought. Open source.', color: '#ef4444', icon: 'R1', group: 'reason', tags: ['reason', 'code'] },
+  { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', desc: 'DeepSeek current fast tier for low-cost code and reasoning.', color: '#ef4444', icon: 'DF', group: 'reason', tags: ['reason', 'code', 'speed'] },
+  { id: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash', desc: 'Google fast agentic model with broad multimodal context.', color: '#3b82f6', icon: 'G6', group: 'reason', tags: ['reason', 'vision', 'web', 'code'] },
   { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', desc: 'Google stable frontier model for agentic and coding tasks.', color: '#3b82f6', icon: 'G5', group: 'reason', tags: ['reason', 'vision', 'web'] },
-  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', desc: 'Google preview. Advanced agentic and coding work.', color: '#3b82f6', icon: 'G3', group: 'reason', tags: ['reason', 'vision', 'web'] },
-  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', desc: 'Google. Long context king.', color: '#3b82f6', icon: 'Gm', group: 'reason', tags: ['reason', 'vision', 'web'] },
   { id: 'sonar-deep-research', label: 'Sonar Deep Research', desc: 'Perplexity exhaustive web research with cited synthesis.', color: '#0ea5e9', icon: 'DR', group: 'reason', tags: ['reason', 'web', 'text'] },
   { id: 'sonar-reasoning-pro', label: 'Sonar Reasoning Pro', desc: 'Perplexity search-grounded reasoning for structured answers.', color: '#0ea5e9', icon: 'SR', group: 'reason', tags: ['reason', 'web', 'text'] },
 
   // ── Speed & Cost ──
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', desc: 'Lightning fast. Cheapest Claude.', color: '#22d3ee', icon: 'H', group: 'speed', tags: ['text', 'code', 'web'] },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', desc: 'OpenAI low-cost tier for extraction, summaries, and bounded workers.', color: '#10b981', icon: '5L', group: 'speed', tags: ['text', 'code', 'vision'] },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', desc: 'Google low-latency tier for high-volume lightweight work.', color: '#3b82f6', icon: 'GL', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', desc: 'Lightning fast. Cheapest Claude.', color: '#6366f1', icon: 'H', group: 'speed', tags: ['text', 'code', 'web'] },
   { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', desc: 'Google stable low-cost frontier-class speed.', color: '#3b82f6', icon: 'G1', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
-  { id: 'gemini-2.5-flash', label: 'Gemini Flash', desc: 'Google. Fastest + free tier.', color: '#3b82f6', icon: 'Gf', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
-  { id: 'gemini-2.5-flash-lite', label: 'Gemini Flash-Lite', desc: 'Fastest budget model in the Gemini 2.5 family.', color: '#3b82f6', icon: 'Gl', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
   { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano', desc: 'OpenAI cheapest GPT-5.4 class model for high-volume simple work.', color: '#10b981', icon: '5n', group: 'speed', tags: ['text', 'code'] },
-  { id: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', desc: 'OpenAI cheapest. Edge tasks.', color: '#10b981', icon: 'Gn', group: 'speed', tags: ['text', 'code'] },
-  { id: 'qwen-3.5-flash', label: 'Qwen Flash', desc: 'Fast. Free tier on Alibaba.', color: '#ec4899', icon: 'Qf', group: 'speed', tags: ['text', 'code'] },
+  { id: 'groq/llama-3.1-8b-instant', label: 'Llama 3.1 8B Instant', desc: 'Groq low-latency model for lightweight agent work.', color: '#f97316', icon: 'Gq', group: 'speed', tags: ['text', 'code'] },
 
   // ── Creative & Multimodal ──
-  { id: 'gpt-4o', label: 'GPT-4o', desc: 'Multimodal. Images + audio + text.', color: '#10b981', icon: '4o', group: 'creative', tags: ['images', 'vision', 'text', 'web'] },
-  { id: 'gemini-2.5-flash-preview', label: 'Gemini Flash Preview', desc: 'Image gen + understanding.', color: '#3b82f6', icon: 'Gp', group: 'creative', tags: ['images', 'vision', 'text', 'web'] },
   { id: 'flux-schnell', label: 'Flux Schnell', desc: 'Fast open image generation.', color: '#84cc16', icon: 'Fx', group: 'creative', tags: ['images'] },
   { id: 'flux-dev', label: 'Flux Dev', desc: 'Higher-quality image generation.', color: '#84cc16', icon: 'Fd', group: 'creative', tags: ['images'] },
   { id: 'stable-diffusion-xl', label: 'Stable Diffusion XL', desc: 'Classic open image model.', color: '#84cc16', icon: 'SD', group: 'creative', tags: ['images'] },
 
   // ── Open Source ──
-  { id: 'llama-4-scout', label: 'Llama 4 Scout', desc: '10M context. 109B MoE.', color: '#f59e0b', icon: 'L4', group: 'open', tags: ['text', 'code'] },
-  { id: 'llama-4-maverick', label: 'Llama 4 Maverick', desc: '400B MoE. Top open model.', color: '#f59e0b', icon: 'Lm', group: 'open', tags: ['text', 'code', 'reason'] },
-  { id: 'qwen-3.5-plus', label: 'Qwen 3.5 Plus', desc: 'Apache 2.0. 1M context.', color: '#ec4899', icon: 'Q+', group: 'open', tags: ['text', 'code'] },
-  { id: 'mistral-large-3', label: 'Mistral Large 3', desc: 'EU. 128K context.', color: '#ff6b35', icon: 'ML', group: 'open', tags: ['text', 'code'] },
-  { id: 'deepseek-v3', label: 'DeepSeek V3', desc: '671B MoE. Open weights.', color: '#ef4444', icon: 'D3', group: 'open', tags: ['text', 'code'] },
-  { id: 'glm-5', label: 'GLM-5', desc: 'z.ai flagship. Strong reasoning + thinking mode.', color: '#22d3ee', icon: 'G5', group: 'open', tags: ['text', 'code', 'reason'] },
-  { id: 'MiniMax-M1', label: 'MiniMax M1', desc: 'MiniMax flagship. 1M context.', color: '#fb7185', icon: 'Mx', group: 'open', tags: ['text', 'code', 'reason'] },
+  { id: 'together_ai/moonshotai/Kimi-K2.6', label: 'Kimi K2.6', desc: 'Current Kimi open-weight agent model through Together AI.', color: '#f59e0b', icon: 'K2', group: 'open', tags: ['text', 'code', 'reason'] },
+  { id: 'together_ai/Qwen/Qwen3.6-Plus', label: 'Qwen 3.6 Plus', desc: 'Current long-context Qwen model through Together AI.', color: '#ec4899', icon: 'Q+', group: 'open', tags: ['text', 'code'] },
+  { id: 'mistral_ai/mistral-large-2512', label: 'Mistral Large 3', desc: 'Current Mistral Large model with 256K context.', color: '#ff6b35', icon: 'ML', group: 'open', tags: ['text', 'code', 'reason'] },
+  { id: 'zai/glm-5.1', label: 'GLM-5.1', desc: 'Z.AI current flagship with 200K context and tool calling.', color: '#6366f1', icon: 'G5', group: 'open', tags: ['text', 'code', 'reason'] },
+  { id: 'minimax/MiniMax-M2.7', label: 'MiniMax M2.7', desc: 'MiniMax current agentic model with 204K context.', color: '#fb7185', icon: 'M2', group: 'open', tags: ['text', 'code', 'reason'] },
 ];
 
 const MODEL_GROUPS: { key: string; label: string; color: string }[] = [
@@ -18884,7 +22195,7 @@ const MODEL_SECTION_FALLBACK_COLORS = [
   '#0ea5e9',
 ];
 
-function modelSectionAccent(sectionKey: string, fallback = '#22d3ee'): string {
+function modelSectionAccent(sectionKey: string, fallback = '#6366f1'): string {
   const explicit = MODEL_SECTION_ACCENTS[sectionKey];
   if (explicit) return explicit;
   let hash = 0;
@@ -18925,7 +22236,7 @@ function modelSectionTransitionStyle() {
 // Dots pulse on hover like loading indicators. Title letters cycle through
 // the dot colors so the whole header comes alive on mouseover.
 
-const QA_DOT_COLORS = ['#22d3ee', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
+const QA_DOT_COLORS = ['#6366f1', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
 const QA_TITLE = 'Quick Actions';
 const toTitleCaseWords = (value: string) =>
   value
@@ -19130,7 +22441,7 @@ const CONTROL_PANEL_LAUNCHERS = [
     label: 'Browser',
     desc: 'Websites, forms, admin pages',
     seed: 'Use the browser to ',
-    color: '#22d3ee',
+    color: '#6366f1',
   },
   {
     label: 'Computer',
@@ -19163,7 +22474,7 @@ function modelPickerProviderColor(provider?: string, connected = true): string {
   if (provider === 'anthropic') return '#d97706';     // Anthropic amber
   if (provider === 'openai') return '#10a37f';        // OpenAI teal
   if (provider === 'openrouter') return '#a78bfa';    // OpenRouter purple
-  if (provider === 'blackswan') return '#22d3ee';     // BlackSwan cyan
+  if (provider === 'blackswan') return '#6366f1';     // BlackSwan cyan
   if (provider === 'openai_compatible') return '#14b8a6';
   if (provider === 'hugging_face' || provider === 'huggingface') return '#f59e0b';
   if (provider === 'replicate') return '#38bdf8';
@@ -19178,7 +22489,7 @@ function modelPickerProviderColor(provider?: string, connected = true): string {
   if (provider === 'z_ai') return '#0ea5e9';
   if (provider === 'minimax') return '#ec4899';
   if (provider === 'ollama') return '#5b21b6';
-  return '#22d3ee';
+  return '#6366f1';
 }
 
 function modelPickerProviderIcon(provider?: string): string {
@@ -19228,6 +22539,7 @@ type ModelBrowserItem = {
   provider?: string;
   color?: string;
   icon?: string;
+  availability?: ModelGroup['models'][number]['availability'];
 };
 
 type ModelBrowserSection = {
@@ -19239,6 +22551,8 @@ type ModelBrowserSection = {
   hint?: string;
   models: ModelBrowserItem[];
   sourceLabel?: string;
+  catalogStatus?: ModelGroup['catalogStatus'];
+  catalogLabel?: string;
 };
 
 function ModelSectionBrowserPanel({
@@ -19257,6 +22571,7 @@ function ModelSectionBrowserPanel({
   const connected = section?.connected !== false;
   const accent = section?.color || '#a78bfa';
   const icon = section?.icon || 'AI';
+  const readyModelCount = models.filter((model) => model.ready !== false).length;
   const filteredModels = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return models;
@@ -19275,9 +22590,11 @@ function ModelSectionBrowserPanel({
           <Text style={styles.providerBrowserSubtitle}>
             {models.length > 0
               ? connected
-                ? `${models.length} models available${section?.sourceLabel ? ` from ${section.sourceLabel}` : ''}`
+                ? `${readyModelCount} ready${readyModelCount !== models.length ? ` · ${models.length - readyModelCount} need access` : ''}${section?.sourceLabel ? ` from ${section.sourceLabel}` : ''}${section?.catalogLabel ? ` · ${section.catalogLabel}` : ''}`
                 : `${models.length} preview models. Connect this provider to run them.`
-              : 'No models loaded for this section yet'}
+              : connected && section?.catalogStatus === 'account_verified_empty'
+                ? 'Account checked · no supported chat models were listed'
+                : 'No models loaded for this section yet'}
           </Text>
         </View>
         <Pressable
@@ -19293,6 +22610,14 @@ function ModelSectionBrowserPanel({
         <View style={styles.providerBrowserNotice}>
           <Text style={styles.providerBrowserNoticeText}>
             API key required to run these models.
+          </Text>
+        </View>
+      ) : null}
+
+      {connected && section?.catalogStatus && !['account_verified', 'circle_integration'].includes(section.catalogStatus) ? (
+        <View style={styles.providerBrowserNotice}>
+          <Text style={styles.providerBrowserNoticeText}>
+            {section.hint || 'This catalog is not account-verified. Exact access is checked when a run starts.'}
           </Text>
         </View>
       ) : null}
@@ -19344,7 +22669,13 @@ function ModelSectionBrowserPanel({
                   {model.label}
                 </Text>
                 <Text style={styles.providerBrowserModelMeta} numberOfLines={1}>
-                  {[model.description, contextLabel, model.id.replace(/^[^/]+\//, '')].filter(Boolean).join(' | ')}
+                  {[
+                    model.description,
+                    model.availability === 'account_listed' ? 'listed for this key' : null,
+                    model.availability === 'curated_fallback' ? 'access checked at run time' : null,
+                    contextLabel,
+                    model.id.replace(/^[^/]+\//, ''),
+                  ].filter(Boolean).join(' | ')}
                 </Text>
               </View>
               {isActive ? <View style={[styles.dropdownActiveDot, { backgroundColor: rowAccent }]} /> : null}
@@ -19408,6 +22739,7 @@ function EnhancedInput({
   const [activeModelBrowserKey, setActiveModelBrowserKey] = useState<string | null>(null);
   const [customModels, setCustomModels] = useState<any[]>([]);
   const [popularModels, setPopularModels] = useState<ChatPickerModel[]>(POPULAR_OPENROUTER_MODELS);
+  const [popularModelsSource, setPopularModelsSource] = useState<'curated' | 'live'>('curated');
   const [hoveredModel, setHoveredModel] = useState<string | null>(null);
   const [hoveredAction, setHoveredAction] = useState<number | null>(null);
   const [expandedActionSections, setExpandedActionSections] = useState<Record<string, boolean>>({
@@ -19452,12 +22784,18 @@ function EnhancedInput({
         if (error) throw error;
         const rankedModels = Array.isArray((data as any)?.models) ? (data as any).models : [];
         if (!cancelled && rankedModels.length > 0) {
-          setPopularModels(rankedModels.map(popularRankingToChatModel));
+          const allowedModels: ChatPickerModel[] = rankedModels
+            .map(popularRankingToChatModel)
+            .filter((model: ChatPickerModel) => isAllowedPopularOpenRouterModel(model.id));
+          if (allowedModels.length > 0) {
+            setPopularModels(allowedModels);
+            setPopularModelsSource('live');
+          }
         }
       })
       .catch((error) => {
         rememberOpenRouterRankingsFailure();
-        console.debug?.('[ChatTab] OpenRouter popular ranking refresh failed; using seeded list.', error);
+        console.debug?.('[ChatTab] OpenRouter popular ranking refresh failed; using current curated fallback.', error);
       });
 
     return () => {
@@ -19469,6 +22807,15 @@ function EnhancedInput({
   // here and the send-time auto-resolution in the parent agree on
   // which providers are connected.
   const marketplaceModelGroups: ModelGroup[] = marketplaceModelGroupsProp || [];
+  const pickerModelReadiness = useCallback((modelId: string) => {
+    if (!modelId || modelId === 'auto' || marketplaceModelGroups.length === 0) {
+      return { ready: true, state: 'route_unmanaged' as const, message: '' };
+    }
+    return resolveModelSelectionReadiness({
+      route: resolvePlainChatModelRoute(modelId),
+      groups: marketplaceModelGroups,
+    });
+  }, [marketplaceModelGroups]);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -19586,14 +22933,25 @@ function EnhancedInput({
     );
   }, [marketplaceModelGroups]);
   const selectedMarketplaceModel = marketplaceModelOptions.find((model) => model.id === selectedModel);
-  const currentModel = allModels.find(m => m.id === selectedModel) || (selectedMarketplaceModel ? {
+  const selectedBuiltInModel = allModels.find(m => m.id === selectedModel);
+  const selectedSavedModel = !selectedBuiltInModel && !selectedMarketplaceModel && selectedModel && selectedModel !== 'auto'
+    ? {
+        id: selectedModel,
+        label: formatModelDisplayName(selectedModel),
+        desc: 'Saved model for this conversation. It is kept visible even when it is no longer offered for new selections.',
+        group: 'saved',
+        icon: 'SV',
+        color: '#94a3b8',
+      }
+    : null;
+  const currentModel = selectedBuiltInModel || (selectedMarketplaceModel ? {
     id: selectedMarketplaceModel.id,
     label: selectedMarketplaceModel.label,
     desc: selectedMarketplaceModel.description || selectedMarketplaceModel.groupLabel,
     group: 'marketplace',
     icon: modelPickerProviderIcon(selectedMarketplaceModel.provider),
     color: modelPickerProviderColor(selectedMarketplaceModel.provider, selectedMarketplaceModel.groupConnected),
-  } : CHAT_MODELS[0]);
+  } : selectedSavedModel || CHAT_MODELS[0]);
   const browseableBaseModelSections: ModelBrowserSection[] = useMemo(() => {
     return MODEL_GROUPS.map((group) => {
       const sectionColor = modelSectionAccent(`base:${group.key}`, group.color);
@@ -19606,20 +22964,29 @@ function EnhancedInput({
         color: sectionColor,
         icon: group.label.slice(0, 2).replace(/\s/g, '') || 'M',
         connected: true,
-        sourceLabel: group.key === 'popular' ? 'live OpenRouter weekly rankings' : 'built-in model shortlist',
-        models: groupModels
-          .map((model: ChatPickerModel) => ({
+        sourceLabel: group.key === 'popular'
+          ? (popularModelsSource === 'live' ? 'live OpenRouter weekly rankings' : 'current curated fallback')
+          : 'built-in model shortlist',
+        models: groupModels.map((model: ChatPickerModel) => {
+          const readiness = pickerModelReadiness(model.id);
+          return {
             id: model.id,
             label: model.label,
-            description: model.desc,
-            ready: true,
+            description: readiness.ready || readiness.state === 'route_unmanaged'
+              ? model.desc
+              : `${model.desc} · ${readiness.message}`,
+            ready: readiness.ready,
+            availability: readiness.state === 'ready'
+              ? (readiness.catalogStatus === 'account_verified' ? 'account_listed' as const : 'curated_fallback' as const)
+              : undefined,
             color: model.color,
             icon: model.icon,
             contextWindow: model.contextWindow,
-          })),
+          };
+        }),
       };
     });
-  }, [popularModels]);
+  }, [popularModels, popularModelsSource, pickerModelReadiness]);
   const marketplaceModelBrowserSections: ModelBrowserSection[] = useMemo(() => {
     return marketplaceModelGroups
       .map((group) => {
@@ -19634,7 +23001,14 @@ function EnhancedInput({
           color,
           icon: modelPickerProviderIcon(provider),
           connected: group.connected,
-          sourceLabel: provider === 'openrouter' && group.connected ? 'the live OpenRouter catalog' : 'Marketplace Models',
+          sourceLabel: group.catalogStatus === 'account_verified'
+            ? 'your account catalog'
+            : group.catalogStatus === 'circle_integration'
+              ? 'your circle integration'
+              : 'the curated fallback catalog',
+          hint: group.hint,
+          catalogStatus: group.catalogStatus,
+          catalogLabel: group.catalogLabel,
           models: group.models.map((model) => ({
             id: model.id,
             label: model.label,
@@ -19644,33 +23018,58 @@ function EnhancedInput({
             provider: model.provider,
             color,
             icon: modelPickerProviderIcon(provider),
+            availability: model.availability,
           })),
         };
       });
   }, [marketplaceModelGroups]);
   const customModelBrowserSections: ModelBrowserSection[] = useMemo(() => {
     if (customModels.length === 0) return [];
+    const huggingFaceConnected = marketplaceModelGroups.length === 0
+      || marketplaceModelGroups.some((group) => (
+        (group.provider === 'hugging_face' || group.provider === 'huggingface') && group.connected
+      ));
     return [{
       key: 'custom:hf-hub',
       label: 'Custom HF Hub Models',
       color: modelSectionAccent('custom:hf-hub', '#f59e0b'),
       icon: 'HF',
-      connected: true,
+      connected: huggingFaceConnected,
       sourceLabel: 'your saved Hugging Face Hub models',
       models: customModels.map((model: ChatPickerModel) => ({
         id: model.id,
         label: model.label,
         description: model.desc,
-        ready: true,
+        ready: huggingFaceConnected,
+        availability: huggingFaceConnected ? 'curated_fallback' : 'connection_required',
         color: model.color || '#f59e0b',
         icon: model.icon || 'HF',
         contextWindow: model.contextWindow,
       })),
     }];
-  }, [customModels]);
+  }, [customModels, marketplaceModelGroups]);
+  const savedModelBrowserSections: ModelBrowserSection[] = useMemo(() => {
+    if (!selectedSavedModel) return [];
+    return [{
+      key: 'saved:conversation-model',
+      label: 'Saved Conversation Model',
+      color: '#94a3b8',
+      icon: 'SV',
+      connected: true,
+      sourceLabel: 'this conversation',
+      models: [{
+        id: selectedSavedModel.id,
+        label: selectedSavedModel.label,
+        description: selectedSavedModel.desc,
+        ready: true,
+        color: selectedSavedModel.color,
+        icon: selectedSavedModel.icon,
+      }],
+    }];
+  }, [selectedSavedModel]);
   const modelBrowserSections = useMemo(() => {
-    return [...browseableBaseModelSections, ...marketplaceModelBrowserSections, ...customModelBrowserSections];
-  }, [browseableBaseModelSections, marketplaceModelBrowserSections, customModelBrowserSections]);
+    return [...savedModelBrowserSections, ...browseableBaseModelSections, ...marketplaceModelBrowserSections, ...customModelBrowserSections];
+  }, [savedModelBrowserSections, browseableBaseModelSections, marketplaceModelBrowserSections, customModelBrowserSections]);
   const activeModelBrowserSection = activeModelBrowserKey
     ? modelBrowserSections.find((section) => section.key === activeModelBrowserKey) || null
     : null;
@@ -19702,7 +23101,7 @@ function EnhancedInput({
   const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
     return new Set(
       marketplaceModelGroups
-        .filter((g) => g.connected)
+        .filter((g) => g.connected && g.models.some((model) => model.ready))
         .map((g) => normalizeConnectedProviderKey(g.provider as string)),
     );
   }, [marketplaceModelGroups]);
@@ -19740,10 +23139,18 @@ function EnhancedInput({
     }
   }, [selectedModel, input, sessionProfile, connectedProviderSet]);
 
+  const autoResolvedReadiness = useMemo(() => {
+    if (!autoResolvedModel) return null;
+    return pickerModelReadiness(autoResolvedModel);
+  }, [autoResolvedModel, pickerModelReadiness]);
+
   const autoResolvedShortLabel = useMemo(() => {
     if (!autoResolvedModel) return null;
-    return autoModelDisplayName(autoResolvedModel);
-  }, [autoResolvedModel]);
+    const label = autoModelDisplayName(autoResolvedModel);
+    return autoResolvedReadiness && !autoResolvedReadiness.ready
+      ? `${label} · access needed`
+      : label;
+  }, [autoResolvedModel, autoResolvedReadiness]);
   // Auto defaults to Claude Sonnet; the routing ladder now RECOMMENDS an
   // alternative (cheaper/specialist) instead of silently switching. Manual
   // weak-tier picks get a Sonnet recommendation for action-shaped drafts.
@@ -19751,7 +23158,10 @@ function EnhancedInput({
     try {
       const draft = (input || '').trim();
       if (selectedModel !== 'auto') {
-        return suggestModelForManualPick(selectedModel, draft);
+        const recommendation = suggestModelForManualPick(selectedModel, draft);
+        return recommendation && pickerModelReadiness(recommendation.model).ready
+          ? recommendation
+          : null;
       }
       const route = draft.length > 0
         ? analyzeMessageRouting(draft, 'main_chat').route
@@ -19759,7 +23169,7 @@ function EnhancedInput({
       const providerSetForTurn = looksLikeActionRequest(draft)
         ? new Set(Array.from(connectedProviderSet).filter((provider) => provider !== 'blackswan'))
         : connectedProviderSet;
-      return suggestAutoModelAlternative(
+      const recommendation = suggestAutoModelAlternative(
         (sessionProfile as any) || 'senior',
         route?.intent,
         providerSetForTurn,
@@ -19767,17 +23177,23 @@ function EnhancedInput({
         { appGroundedHint: looksLikeAppGroundedMessage(draft) },
         draft,
       );
+      return recommendation && pickerModelReadiness(recommendation.model).ready
+        ? recommendation
+        : null;
     } catch {
       return null;
     }
-  }, [selectedModel, input, sessionProfile, connectedProviderSet]);
+  }, [selectedModel, input, sessionProfile, connectedProviderSet, pickerModelReadiness]);
   const autoModelReason = useMemo(() => {
     if (selectedModel !== 'auto') return null;
+    if (autoResolvedReadiness && !autoResolvedReadiness.ready) {
+      return `${autoResolvedReadiness.message} Connect that provider or pick a ready model before sending.`;
+    }
     if (modelRecommendation) {
       return `Tip: ${autoModelDisplayName(modelRecommendation.model)} — ${modelRecommendation.reason} Tap to use it.`;
     }
     return 'Sonnet is the Auto default; lighter or specialist models are suggested here when they fit better.';
-  }, [selectedModel, modelRecommendation]);
+  }, [selectedModel, modelRecommendation, autoResolvedReadiness]);
   const activeModeConfig = CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk')) || CHAT_MODE_CONFIG[0];
   const controlAccent = selectedChatAgentTarget?.color || activeModeConfig?.color || accentColor;
   const draftText = String(input || '').trim();
@@ -19866,13 +23282,20 @@ function EnhancedInput({
           const isActive = model.id === selectedModel;
           const isHovered = hoveredModel === model.id;
           const isAuto = model.id === 'auto';
+          const readiness = pickerModelReadiness(model.id);
+          const modelReady = readiness.ready;
           const autoExtra = isAuto && autoResolvedShortLabel
             ? ` · resolves to ${autoResolvedShortLabel}${input.trim() ? ' for this prompt' : ' by default'}`
             : '';
           return (
             <Pressable
               key={model.id}
-              onPress={() => { onModelChange(model.id); setShowModelPicker(false); }}
+              onPress={() => {
+                if (!modelReady) return;
+                onModelChange(model.id);
+                setShowModelPicker(false);
+              }}
+              disabled={!modelReady}
               onHoverIn={() => setHoveredModel(model.id)}
               onHoverOut={() => setHoveredModel(null)}
               accessibilityRole="button"
@@ -19881,7 +23304,8 @@ function EnhancedInput({
                 isActive && { backgroundColor: model.color + '18', borderColor: model.color + '40' },
                 isHovered && !isActive && { backgroundColor: '#1a1a28' },
                 isAuto && !isActive && { borderColor: model.color + '40' },
-                ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
+                !modelReady && { opacity: 0.42 },
+                ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: modelReady ? 'pointer' : 'not-allowed' } as any] : []),
               ]}
             >
               <View style={[styles.dropdownItemIcon, { backgroundColor: model.color + '20' }]}>
@@ -19894,11 +23318,13 @@ function EnhancedInput({
                     <Text style={{ color: model.color, fontWeight: '600', fontSize: 11 }}>{`  →  ${autoResolvedShortLabel}`}</Text>
                   ) : null}
                 </Text>
-                <Text style={styles.dropdownItemDesc}>{model.desc}{autoExtra}</Text>
+                <Text style={styles.dropdownItemDesc}>
+                  {model.desc}{autoExtra}{!modelReady ? ` · ${readiness.message}` : ''}
+                </Text>
                 {(model as any).tags && (
                   <View style={{ flexDirection: 'row', gap: 3, marginTop: 2, flexWrap: 'wrap' }}>
                     {((model as any).tags as string[]).map((tag: string) => {
-                      const tagColors: Record<string, string> = { images: '#84cc16', vision: '#22d3ee', code: '#a855f7', text: '#606075', web: '#f59e0b', reason: '#ec4899' };
+                      const tagColors: Record<string, string> = { images: '#84cc16', vision: '#6366f1', code: '#a855f7', text: '#606075', web: '#f59e0b', reason: '#ec4899' };
                       return (
                         <View key={tag} style={{ backgroundColor: (tagColors[tag] || '#606075') + '15', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
                           <Text style={{ color: tagColors[tag] || '#606075', fontSize: 7, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{toTitleCaseWords(tag)}</Text>
@@ -20023,7 +23449,7 @@ function EnhancedInput({
             <Text style={[styles.dropdownItemLabel, { color: labelColor }]}>{group.label}</Text>
             <Text style={[styles.dropdownItemDesc, detailColor ? { color: detailColor } : null]} numberOfLines={1}>
               {modelCount > 0
-                ? `${modelCount} model${modelCount === 1 ? '' : 's'}${group.connected ? '' : ' · connect to run'}`
+                ? `${modelCount} model${modelCount === 1 ? '' : 's'}${group.connected ? ` · ${group.catalogLabel}` : ' · connect to run'}`
                 : group.hint || 'No models loaded yet'}
             </Text>
           </View>
@@ -21062,7 +24488,7 @@ function EnhancedSendInputButton({ onPress, disabled, accentColor }: any) {
 
 const TOOL_COLORS: Record<string, string> = {
   'claude-code': '#f97316', 'cowork': '#3b82f6', 'openswan': '#a855f7',
-  'codex': '#22c55e', 'gemini': '#22d3ee', 'cursor': '#ec4899', 'other': '#6366f1',
+  'codex': '#22c55e', 'gemini': '#6366f1', 'cursor': '#ec4899', 'other': '#6366f1',
 };
 const TOOL_ICONS: Record<string, string> = {
   'claude-code': '💻', 'cowork': '💼', 'openswan': '🐾',
@@ -23277,10 +26703,10 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(99, 102, 241, 0.67)',
     backgroundColor: 'rgba(8, 15, 28, 0.92)',
     alignItems: 'center',
-    ...(Platform.OS === 'web' ? { boxShadow: '0 16px 60px rgba(34, 211, 238, 0.18)', backdropFilter: 'blur(10px)' } as any : {}),
+    ...(Platform.OS === 'web' ? { boxShadow: '0 16px 60px rgba(99, 102, 241, 0.18)', backdropFilter: 'blur(10px)' } as any : {}),
   },
   globalDropTitle: {
-    color: '#22d3ee',
+    color: '#6366f1',
     fontSize: 16,
     fontWeight: '800',
     letterSpacing: 1.2,

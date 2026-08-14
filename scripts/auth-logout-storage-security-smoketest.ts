@@ -187,8 +187,26 @@ async function main() {
     'clearLocalFileSessionGrant',
     'clearBridgeAuthStateForLogout',
     'clearDesktopBridgeTokenForLogout',
+    'clearOpenSwanApprovalResumeOutboxForLogout',
   ]) {
     assert.ok(logoutSource.includes(requirement), `central logout cleanup includes ${requirement}`);
+  }
+  for (const officeStoragePrefix of [
+    '@office_layout_cache_v2:',
+    '@office_private_v2:',
+    '@local_secret:office_telegram_bot_token_v1:',
+    '@office_telegram_config',
+    '@office_session_cache_v2:',
+    '@office_daily_costs_v2:',
+    '@office_session_tags_v2:',
+    '@office_tag_suggestions_v2:',
+    '@session_tags_backup_v2:',
+    '@office_addon_catalog_preferences_v1:',
+    '@office_floors',
+    '@office_floors_updated_at',
+    '@office_current_floor',
+  ]) {
+    assert.ok(logoutSource.includes(`'${officeStoragePrefix}'`), `logout clears Office storage prefix ${officeStoragePrefix}`);
   }
   assert.ok(appSource.includes('clearLocalAuthResidualAuthority(signedOutUserId)'),
     'external/expired SIGNED_OUT events trigger residual-authority cleanup');

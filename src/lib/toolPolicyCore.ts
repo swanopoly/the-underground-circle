@@ -10,15 +10,22 @@
 //
 // Posture (fail-closed): an UNKNOWN tool/scope with no matching policy defaults
 // to 'ask' (never silent auto). A resolved 'blocked' policy always wins. A
-// floor action (pay / delete / login / grant) can NEVER be 'auto' no matter what
-// a policy says — the floor forces at least 'ask' and cannot be downgraded.
+// canonical exact-floor action can NEVER be 'auto' no matter what a policy says
+// — the floor forces at least 'ask' and cannot be downgraded.
 // requireReview and hitting the per-day rate cap also force 'ask'. Over-asking is
 // safe; the only real failure would be silently auto-running a floor/blocked/
 // unknown action, so the ordering below is deliberate.
 //
-// PURITY: zero runtime imports, tsx-loadable (smoke: tool-policy-core). Fully
+// PURITY: only the dependency-free effect core is imported; tsx-loadable
+// (smoke: tool-policy-core). Fully
 // DETERMINISTIC — the caller passes `now`; no Date.now()/Math.random(). Never
 // throws — every input is guarded and coerced to a safe default.
+
+import {
+  ALWAYS_EXACT_APPROVAL_EFFECTS,
+  classifyApprovalEffect,
+  requiresExactApproval,
+} from './approvalEffectPolicyCore';
 
 export type ToolApprovalMode = 'auto' | 'ask' | 'blocked';
 
@@ -40,7 +47,7 @@ export type ToolUsageWindow = Record<string, number[]>;
  * one of these, the floor forces at least 'ask' even if a policy says 'auto'.
  * The floor is non-waivable: no policy can downgrade it.
  */
-export const FLOOR_ACTION_CATEGORIES = ['pay', 'delete', 'login', 'grant'] as const;
+export const FLOOR_ACTION_CATEGORIES = ALWAYS_EXACT_APPROVAL_EFFECTS;
 
 const DEFAULT_WINDOW_MS = 86_400_000; // 24h
 const WILDCARD_SCOPES = new Set(['*', '']);
@@ -68,28 +75,17 @@ function usageKey(toolId: string, scope: string): string {
 }
 
 /**
- * True if any action tag is a non-waivable floor category. Guarded: a missing,
- * non-array, or non-string-laden tag list is treated as NOT a floor action.
+ * True if the action tags classify to a non-waivable exact effect. Missing,
+ * malformed, ambiguous, and unknown tags fail closed to the exact floor.
  */
 export function isFloorAction(actionTags: string[] | undefined): boolean {
-  if (!Array.isArray(actionTags)) return false;
-  for (const tag of actionTags) {
-    if (typeof tag !== 'string') continue;
-    const t = tag.trim().toLowerCase();
-    if ((FLOOR_ACTION_CATEGORIES as readonly string[]).includes(t)) return true;
-  }
-  return false;
+  return requiresExactApproval(actionTags);
 }
 
 /** The floor category that tripped, for a human-readable reason string. */
 function firstFloorCategory(actionTags: string[] | undefined): string | null {
-  if (!Array.isArray(actionTags)) return null;
-  for (const tag of actionTags) {
-    if (typeof tag !== 'string') continue;
-    const t = tag.trim().toLowerCase();
-    if ((FLOOR_ACTION_CATEGORIES as readonly string[]).includes(t)) return t;
-  }
-  return null;
+  const effect = classifyApprovalEffect(actionTags);
+  return requiresExactApproval(effect) ? effect : null;
 }
 
 /**

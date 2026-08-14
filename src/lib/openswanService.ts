@@ -3,6 +3,35 @@
 import { Platform } from 'react-native';
 import { estimateCostWithCache } from './modelPricing';
 import { diagnoseConnection, DiagnosticResult } from './connectionDiagnostics';
+import {
+  parseOpenSwanSessionSendHandle as parseOpenSwanSessionSendHandleCore,
+  parseOpenSwanSpawnDisposition as parseOpenSwanSpawnDispositionCore,
+  parseOpenSwanSpawnHandle as parseOpenSwanSpawnHandleCore,
+  parseOpenSwanSubagentLifecycleSnapshot as parseOpenSwanSubagentLifecycleSnapshotCore,
+  type OpenSwanSessionSendHandle,
+  type OpenSwanSpawnDisposition,
+  type OpenSwanSpawnHandle,
+  type OpenSwanSubagentLifecycleSnapshot,
+} from './openswanSubagentLifecycleCore';
+
+export {
+  classifyOpenSwanSubagentLifecycle,
+  findOpenSwanSubagentLifecycleByProviderRunId,
+  lookupOpenSwanSubagentLifecycleByProviderRunId,
+  OPENSWAN_SUBAGENT_LIFECYCLE_LIMITS,
+} from './openswanSubagentLifecycleCore';
+export type {
+  OpenSwanSessionSendHandle,
+  OpenSwanSessionSendPhase,
+  OpenSwanSpawnDisposition,
+  OpenSwanSpawnPhase,
+  OpenSwanSpawnHandle,
+  OpenSwanSubagentLifecycleClassification,
+  OpenSwanSubagentLifecycleLookup,
+  OpenSwanSubagentLifecycleRecord,
+  OpenSwanSubagentLifecycleSnapshot,
+  OpenSwanSubagentRuntimeStatus,
+} from './openswanSubagentLifecycleCore';
 
 const LEGACY_RUNTIME_PREFIX = `open${'claw'}`;
 const LEGACY_AGENT_HEADER = `x-${LEGACY_RUNTIME_PREFIX}-agent-id`;
@@ -50,6 +79,28 @@ export interface OpenSwanToolResult {
   ok: boolean;
   result?: any;
   error?: { type: string; message: string };
+}
+
+/** Read only the current gateway's structured details; never infer ids from prose. */
+export function parseOpenSwanSpawnHandle(value: unknown): OpenSwanSpawnHandle | null {
+  return parseOpenSwanSpawnHandleCore(value);
+}
+
+/** Preserve structured spawn errors whose child may already have started. */
+export function parseOpenSwanSpawnDisposition(value: unknown): OpenSwanSpawnDisposition | null {
+  return parseOpenSwanSpawnDispositionCore(value);
+}
+
+/** Read only the structured sessions_send disposition; visible prose is non-authoritative. */
+export function parseOpenSwanSessionSendHandle(value: unknown): OpenSwanSessionSendHandle | null {
+  return parseOpenSwanSessionSendHandleCore(value);
+}
+
+/** Read current structured subagents list buckets without inferring lifecycle from text. */
+export function parseOpenSwanSubagentLifecycleSnapshot(
+  value: unknown,
+): OpenSwanSubagentLifecycleSnapshot | null {
+  return parseOpenSwanSubagentLifecycleSnapshotCore(value);
 }
 
 function isWebDirectLocalGateway(endpoint: string): boolean {
@@ -539,16 +590,77 @@ export async function spawnSubAgent(
   config: OpenSwanConfig,
   task: string,
   model?: string,
-): Promise<{ ok: boolean; reply?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  reply?: string;
+  error?: string;
+  providerRunId?: string;
+  sessionKey?: string;
+  providerStatus?: string;
+  transportAccepted?: boolean | null;
+}> {
   try {
     const params: any = { task };
     if (model) params.model = model;
     const result = await invokeToolRaw(config, 'sessions_spawn', params);
-    if (!result.ok) return { ok: false, error: result.error?.message };
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error?.message,
+        transportAccepted: null,
+      };
+    }
+    const disposition = parseOpenSwanSpawnDispositionCore(result.result);
+    if (!disposition) {
+      return {
+        ok: false,
+        error: 'OpenSwan returned no structured spawn disposition. The dispatch outcome is unknown; check the session list before retrying.',
+        transportAccepted: null,
+      };
+    }
+    const lineage = {
+      providerRunId: disposition.providerRunId || undefined,
+      sessionKey: disposition.childSessionKey || undefined,
+      providerStatus: disposition.providerStatus,
+      transportAccepted: disposition.transportAccepted,
+    };
+    if (disposition.transportAccepted === false) {
+      return {
+        ok: false,
+        error: `OpenSwan rejected the session spawn (${disposition.providerStatus}).`,
+        ...lineage,
+      };
+    }
+    if (disposition.transportAccepted !== true) {
+      return {
+        ok: false,
+        error: `OpenSwan returned ${disposition.providerStatus}, but could not prove whether the child session started. Check the session list before retrying.`,
+        ...lineage,
+      };
+    }
+    // Current OpenSwan acceptance includes both identities. A missing,
+    // malformed, or non-accepted structured result cannot be promoted to a
+    // successful handoff: the caller needs exact lineage before it creates a
+    // canonical local run or offers another dispatch attempt.
+    if (!disposition.providerRunId || !disposition.childSessionKey) {
+      return {
+        ok: false,
+        error: 'OpenSwan did not return a trustworthy structured spawn acceptance. The dispatch outcome is unknown; check the session list before retrying.',
+        ...lineage,
+        transportAccepted: null,
+      };
+    }
     const text = result.result?.content?.[0]?.text || JSON.stringify(result.result);
-    return { ok: true, reply: text };
+    return {
+      ok: true,
+      reply: text,
+      providerRunId: disposition.providerRunId,
+      sessionKey: disposition.childSessionKey,
+      providerStatus: disposition.providerStatus,
+      transportAccepted: true,
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.message, transportAccepted: null };
   }
 }
 
@@ -617,14 +729,90 @@ export async function sendSessionMessage(
   config: OpenSwanConfig,
   sessionKey: string,
   message: string,
-): Promise<{ ok: boolean; reply?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  reply?: string;
+  error?: string;
+  providerRunId?: string;
+  sessionKey?: string;
+  providerStatus?: string;
+  transportAccepted?: boolean | null;
+}> {
   try {
-    const result = await invokeToolRaw(config, 'sessions_send', { sessionKey, message });
-    if (!result.ok) return { ok: false, error: result.error?.message };
-    const text = result.result?.content?.[0]?.text || 'Message sent';
-    return { ok: true, reply: text };
+    // Keep a margin inside invokeToolRaw's 30s client timeout so OpenSwan can
+    // return its structured `timeout` disposition instead of leaving dispatch
+    // acceptance ambiguous at the HTTP boundary.
+    const result = await invokeToolRaw(config, 'sessions_send', { sessionKey, message, timeoutSeconds: 25 });
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error?.message,
+        transportAccepted: null,
+      };
+    }
+    const handle = parseOpenSwanSessionSendHandleCore(result.result);
+    if (!handle) {
+      return {
+        ok: false,
+        error: 'OpenSwan returned no structured session-send disposition; dispatch outcome is unknown.',
+        transportAccepted: null,
+      };
+    }
+    // Current accepted/ended/timeout dispositions carry both exact identities.
+    // Require the provider run id and require the echoed session to match the
+    // requested session before exposing any positive acceptance signal.
+    if (
+      handle.transportAccepted === true
+      && (!handle.providerRunId || !handle.sessionKey || handle.sessionKey !== sessionKey)
+    ) {
+      return {
+        ok: false,
+        error: 'OpenSwan returned a session-send disposition without trustworthy matching lineage. The dispatch outcome is unknown; the task was not replayed.',
+        providerRunId: handle.providerRunId || undefined,
+        sessionKey: handle.sessionKey || undefined,
+        providerStatus: handle.providerStatus,
+        transportAccepted: null,
+      };
+    }
+    const lineage = {
+      providerRunId: handle.providerRunId || undefined,
+      sessionKey: handle.sessionKey || undefined,
+      providerStatus: handle.providerStatus,
+      transportAccepted: handle.transportAccepted,
+    };
+    if (handle.transportAccepted === false) {
+      return {
+        ok: false,
+        error: `OpenSwan rejected the session send (${handle.providerStatus}).`,
+        ...lineage,
+      };
+    }
+    if (handle.transportAccepted !== true) {
+      return {
+        ok: false,
+        error: `OpenSwan returned ${handle.providerStatus}, but could not prove whether the session send began. The task was not replayed.`,
+        ...lineage,
+      };
+    }
+    if (handle.phase === 'response_timeout') {
+      return {
+        ok: true,
+        reply: 'The session accepted the task. Its response is still pending.',
+        ...lineage,
+      };
+    }
+    let structuredReply = '';
+    try {
+      const rawReply = result.result?.details?.reply;
+      if (typeof rawReply === 'string') structuredReply = rawReply.trim().slice(0, 4_000);
+    } catch {}
+    return {
+      ok: true,
+      reply: structuredReply || (handle.phase === 'turn_ended' ? 'The provider turn ended; task completion remains unverified.' : 'Message accepted.'),
+      ...lineage,
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.message, transportAccepted: null };
   }
 }
 
@@ -818,6 +1006,13 @@ export interface OpenSwanSubAgent {
   task?: string;
 }
 
+function readOpenSwanSubagentDisplayField(value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  return text.slice(0, maxChars);
+}
+
 export async function listSubAgentsDetailed(
   config: OpenSwanConfig,
 ): Promise<{ ok: boolean; subagents: OpenSwanSubAgent[]; error?: string }> {
@@ -827,8 +1022,41 @@ export async function listSubAgentsDetailed(
     const raw = result.result;
     let subagents: OpenSwanSubAgent[] = [];
 
-    // Parse structured details if available
-    if (raw?.details?.subagents && Array.isArray(raw.details.subagents)) {
+    // Current OpenSwan returns exact active/recent lifecycle buckets. Lifecycle
+    // identity/status comes only from the pure structured parser; label/task
+    // fields below are bounded display copy and never completion evidence.
+    const lifecycle = parseOpenSwanSubagentLifecycleSnapshotCore(raw);
+    if (lifecycle) {
+      const displayRows = [
+        ...(Array.isArray(raw?.details?.active) ? raw.details.active : []),
+        ...(Array.isArray(raw?.details?.recent) ? raw.details.recent : []),
+      ];
+      subagents = [...lifecycle.active, ...lifecycle.recent].map((record) => {
+        let display: any = null;
+        try {
+          const matches = displayRows.filter((candidate: any) => (
+            candidate
+            && typeof candidate === 'object'
+            && candidate.runId === record.providerRunId
+            && candidate.sessionKey === record.childSessionKey
+          ));
+          if (matches.length === 1) display = matches[0];
+        } catch {}
+        const displayField = (key: 'label' | 'model' | 'task', maxChars: number) => {
+          try { return readOpenSwanSubagentDisplayField(display?.[key], maxChars); } catch { return undefined; }
+        };
+        return {
+          id: record.providerRunId,
+          name: displayField('label', 96),
+          sessionKey: record.childSessionKey,
+          status: record.runtimeStatus,
+          model: displayField('model', 120),
+          task: displayField('task', 240),
+        };
+      });
+    } else if (raw?.details?.subagents && Array.isArray(raw.details.subagents)) {
+      // Structured legacy compatibility only. Prose/JSON-text fallback is
+      // intentionally not used for lifecycle identity.
       subagents = raw.details.subagents.map((s: any) => ({
         id: s.id || s.sessionKey || '',
         name: s.name || s.displayName || undefined,
@@ -846,22 +1074,9 @@ export async function listSubAgentsDetailed(
         model: s.model || undefined,
         task: s.task || undefined,
       }));
-    } else if (raw?.content?.[0]?.text) {
-      // Try parsing from text
-      try {
-        const parsed = JSON.parse(raw.content[0].text);
-        if (Array.isArray(parsed)) {
-          subagents = parsed.map((s: any) => ({
-            id: typeof s === 'string' ? s : s.id || '',
-            name: s.name || undefined,
-            sessionKey: s.sessionKey || undefined,
-            status: s.status || 'unknown',
-          }));
-        }
-      } catch {}
     }
 
-    return { ok: true, subagents };
+    return { ok: true, subagents: subagents.filter((subagent) => !!subagent.id) };
   } catch (e: any) {
     return { ok: false, subagents: [], error: e.message };
   }

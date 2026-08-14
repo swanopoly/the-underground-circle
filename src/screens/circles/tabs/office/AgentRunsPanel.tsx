@@ -8,6 +8,8 @@ import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard 
 import { buildRunMetadataSummaryProps } from '../../../../lib/runMetadataSummary';
 import { getRunSubjectSummary } from '../../../../lib/agentRunSubjectSummary';
 import { planRunReap } from '../../../../lib/runStallPolicyCore';
+import { isAwaitingConnectedAgentResultMetadata } from '../../../../lib/officeOpsBoard';
+import { bucketRunForHistory, describeRunHistoryStatus } from '../../../../lib/runHistoryFilterCore';
 
 type StatusFilter = 'all' | 'completed' | 'running' | 'failed';
 
@@ -59,17 +61,12 @@ function getWeakestSignalLabel(observedEval: any): string | null {
 
 // Matches a run object to the active filter. `running` bucket covers any
 // "in progress" state users conceptually think of as "currently working".
-function matchesFilter(run: any, filter: StatusFilter): boolean {
+function matchesFilter(run: any, filter: StatusFilter, nowMs: number): boolean {
   if (filter === 'all') return true;
-  if (filter === 'completed') return run.status === 'completed';
-  if (filter === 'failed') return run.status === 'failed';
-  if (filter === 'running') {
-    return run.status === 'running'
-      || run.status === 'planning'
-      || run.status === 'queued'
-      || run.status === 'paused'
-      || run.status === 'waiting_approval';
-  }
+  const bucket = bucketRunForHistory(run, nowMs);
+  if (filter === 'completed') return bucket === 'succeeded';
+  if (filter === 'failed') return bucket === 'failed';
+  if (filter === 'running') return bucket === 'running';
   return true;
 }
 
@@ -86,10 +83,16 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [freshnessTick, setFreshnessTick] = useState(0);
   // Run-reaper dedupe: run ids this mount already issued a DB reap for, so
   // dep-change effect re-runs (pageSize / identity) don't re-fire writes while
   // the conditional status flip is still in flight.
   const reapedRunIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const timer = setInterval(() => setFreshnessTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -172,16 +175,16 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
   };
 
   const visibleRuns = useMemo(
-    () => runs.filter(r => matchesFilter(r, statusFilter)),
-    [runs, statusFilter],
+    () => runs.filter(r => matchesFilter(r, statusFilter, Date.now())),
+    [runs, statusFilter, freshnessTick],
   );
 
   const filterCounts = useMemo(() => ({
     all: runs.length,
-    completed: runs.filter(r => matchesFilter(r, 'completed')).length,
-    running: runs.filter(r => matchesFilter(r, 'running')).length,
-    failed: runs.filter(r => matchesFilter(r, 'failed')).length,
-  }), [runs]);
+    completed: runs.filter(r => matchesFilter(r, 'completed', Date.now())).length,
+    running: runs.filter(r => matchesFilter(r, 'running', Date.now())).length,
+    failed: runs.filter(r => matchesFilter(r, 'failed', Date.now())).length,
+  }), [runs, freshnessTick]);
   const qualityAggregate = useMemo(
     () => buildOpenSwanObservedEvalAggregate(
       runs
@@ -198,7 +201,7 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
   const filters: Array<{ key: StatusFilter; label: string; color: string }> = [
     { key: 'all', label: 'ALL', color: '#a0a0b0' },
     { key: 'completed', label: 'DONE', color: '#22c55e' },
-    { key: 'running', label: 'RUNNING', color: '#3b82f6' },
+    { key: 'running', label: 'ACTIVE', color: '#3b82f6' },
     { key: 'failed', label: 'FAILED', color: '#ef4444' },
   ];
 
@@ -268,7 +271,9 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
           <>
             {visibleRuns.map((run: any) => {
               const isExpanded = expandedRun === run.id;
-              const sc = STATUS_COLORS[run.status] || '#606075';
+              const awaitingExternalResult = isAwaitingConnectedAgentResultMetadata(run.metadata);
+              const runPresentation = describeRunHistoryStatus(run, Date.now());
+              const sc = runPresentation.stale ? '#f59e0b' : awaitingExternalResult ? '#60a5fa' : (STATUS_COLORS[run.status] || '#606075');
               // Compact summary pieces — coalesce into a single subtitle line
               const tokenSummary = run.input_tokens > 0 || run.output_tokens > 0
                 ? `${formatTokens((run.input_tokens || 0) + (run.output_tokens || 0))} tokens`
@@ -299,7 +304,11 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
                       {staleRunIds.has(run.id) ? (
                         <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>STALLED?</Text>
                       ) : null}
-                      <Text style={{ color: sc, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
+                      <Text style={{ color: sc, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
+                        {runPresentation.stale
+                          ? (awaitingExternalResult ? 'ACCEPTED · UPDATE MISSING · NOT ACTIVE' : runPresentation.label)
+                          : (awaitingExternalResult ? 'ACCEPTED · AWAITING UPDATE' : runPresentation.label)}
+                      </Text>
                     </View>
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 3 }}>
                       <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.surface}</Text>

@@ -127,7 +127,7 @@ function main() {
   // Falsy floor signals do NOT floor.
   assertEq(kind({ isFloorAction: false }), 'require_approval', '2.8 floor false → falls through (default require)');
   assertEq(
-    kind({ isFloorAction: false, toolApprovalMode: 'auto', mutatesState: false, externalSideEffect: false }),
+    kind({ isFloorAction: false, toolApprovalMode: 'auto', tool: 'desktop.launch_app', mutatesState: false, externalSideEffect: false }),
     'auto_approve',
     '2.9 floor false does not block a safe auto path',
   );
@@ -135,18 +135,18 @@ function main() {
   assertEq(kind({ isFloorAction: 0 }), 'require_approval', '2.11 floor 0 → not floor');
   {
     const d = resolveApprovalDecision({ isFloorAction: true });
-    assert(/floor/i.test(d.reason), '2.12 floor reason mentions floor', d.reason);
+    assert(/exact/i.test(d.reason), '2.12 floor reason mentions exact boundary', d.reason);
   }
 
   // ── Group 3: tool policy 'auto' + provably safe → auto_approve ────────────
   assertEq(
-    kind({ toolApprovalMode: 'auto', mutatesState: false, externalSideEffect: false }),
+    kind({ toolApprovalMode: 'auto', tool: 'memory.read', mutatesState: false, externalSideEffect: false }),
     'auto_approve',
     '3.1 auto + non-mutating + non-external → auto',
   );
-  assertEq(kind({ toolApprovalMode: 'auto' }), 'auto_approve', '3.2 auto + absent flags → auto');
-  assertEq(kind({ toolApprovalMode: 'AUTO' }), 'auto_approve', '3.3 mode case-insensitive');
-  assertEq(kind({ toolApprovalMode: '  auto ' }), 'auto_approve', '3.4 mode trims whitespace');
+  assertEq(kind({ toolApprovalMode: 'auto' }), 'require_approval', '3.2 auto + unknown effect → exact ask');
+  assertEq(kind({ toolApprovalMode: 'AUTO', tool: 'desktop.launch_app' }), 'auto_approve', '3.3 mode case-insensitive');
+  assertEq(kind({ toolApprovalMode: '  auto ', tool: 'desktop.focus_app' }), 'auto_approve', '3.4 mode trims whitespace');
   // Tightening: an 'auto' tool that mutates does NOT auto via the tool path.
   assertEq(
     kind({ toolApprovalMode: 'auto', mutatesState: true }),
@@ -169,11 +169,11 @@ function main() {
     assert(typeof d.reason === 'string' && d.reason.length > 0, '3.8 tool-auto reason non-empty');
     assertEq(d.category, undefined, '3.9 no category → category omitted');
   }
-  // But an 'auto' MUTATING tool the user opted into by category still autos.
+  // A mutating tool cannot be rescued by a broad category preference.
   assertEq(
     kind({ toolApprovalMode: 'auto', mutatesState: true, category: 'memory_write', userAutoApprove: ['memory_write'] }),
-    'auto_approve',
-    '3.10 mutating auto tool rescued by user-auto category',
+    'require_approval',
+    '3.10 mutating auto tool stays exact despite user-auto category',
   );
 
   // ── Group 4: user-auto category → auto_approve ────────────────────────────
@@ -188,9 +188,9 @@ function main() {
     '4.2 category in auto Set → auto',
   );
   assertEq(
-    kind({ category: 'skill_run', userAutoApprove: 'skill_run' }),
+    kind({ category: 'memory_read', userAutoApprove: 'memory_read' }),
     'auto_approve',
-    '4.3 category equal to auto string → auto',
+    '4.3 safe category equal to auto string → auto',
   );
   assertEq(
     kind({ category: 'MEMORY_READ', userAutoApprove: ['memory_read'] }),
@@ -242,7 +242,7 @@ function main() {
   );
   {
     const d = resolveApprovalDecision({});
-    assert(/fail-closed/i.test(d.reason), '5.8 default reason marks fail-closed', d.reason);
+    assert(/exact/i.test(d.reason), '5.8 unknown default reason marks exact boundary', d.reason);
   }
 
   // ── Group 6: precedence ordering (forbidden > floor > autos > default) ─────
@@ -367,13 +367,12 @@ function main() {
 
   // ── Group 8: ALWAYS_ASK_FLOOR_MARKERS constant contract ───────────────────
   assert(Array.isArray(ALWAYS_ASK_FLOOR_MARKERS), '8.1 markers is an array');
-  assertEq(ALWAYS_ASK_FLOOR_MARKERS.length, 4, '8.2 exactly four floor markers');
-  assert(ALWAYS_ASK_FLOOR_MARKERS.includes('pay'), '8.3 includes pay');
+  assertEq(ALWAYS_ASK_FLOOR_MARKERS.length, 19, '8.2 canonical exact effect count');
+  assert(ALWAYS_ASK_FLOOR_MARKERS.includes('payment'), '8.3 includes payment');
   assert(ALWAYS_ASK_FLOOR_MARKERS.includes('delete'), '8.4 includes delete');
   assert(ALWAYS_ASK_FLOOR_MARKERS.includes('login'), '8.5 includes login');
-  assert(ALWAYS_ASK_FLOOR_MARKERS.includes('grant'), '8.6 includes grant');
-  // Mirrors computerGrantGate.STICKY_FLOOR_CATEGORIES order.
-  assertEq(ALWAYS_ASK_FLOOR_MARKERS.join(','), 'pay,delete,login,grant', '8.7 canonical order preserved');
+  assert(ALWAYS_ASK_FLOOR_MARKERS.includes('permission'), '8.6 includes permission');
+  assert(ALWAYS_ASK_FLOOR_MARKERS.includes('private_file'), '8.7 includes private file');
 
   // ── Group 9: floor markers substring-match category + tool (defense-in-depth) ──
   assertEq(kind({ category: 'delete_file' }), 'require_approval', '9.1 variant category delete_file floors via substring');
@@ -391,12 +390,12 @@ function main() {
   assertEq(matchesAlwaysAskFloor('  paywall  '), true, '10.4 trimmed paywall (contains pay) → floor');
   assertEq(matchesAlwaysAskFloor('grant_access'), true, '10.5 grant variant → floor');
   assertEq(matchesAlwaysAskFloor('memory_read'), false, '10.6 non-floor category → false');
-  assertEq(matchesAlwaysAskFloor(''), false, '10.7 empty string → false');
-  assertEq(matchesAlwaysAskFloor(null), false, '10.8 null → false, no throw');
-  assertEq(matchesAlwaysAskFloor(undefined), false, '10.9 undefined → false, no throw');
-  assertEq(matchesAlwaysAskFloor(42), false, '10.10 number → false, no throw');
-  assertEq(matchesAlwaysAskFloor({ toString() { throw new Error('hostile'); } }), false, '10.11 hostile object → false, no throw');
-  assertEq(matchesAlwaysAskFloor('x'.repeat(100_000) + 'delete'), false, '10.12 marker past the 200-char bound is ignored (bounded scan)');
+  assertEq(matchesAlwaysAskFloor(''), true, '10.7 empty string → unknown exact');
+  assertEq(matchesAlwaysAskFloor(null), true, '10.8 null → unknown exact, no throw');
+  assertEq(matchesAlwaysAskFloor(undefined), true, '10.9 undefined → unknown exact, no throw');
+  assertEq(matchesAlwaysAskFloor(42), true, '10.10 number → unknown exact, no throw');
+  assertEq(matchesAlwaysAskFloor({ toString() { throw new Error('hostile'); } }), true, '10.11 hostile object → unknown exact, no throw');
+  assertEq(matchesAlwaysAskFloor('x'.repeat(100_000) + 'delete'), true, '10.12 truncated unclassified string fails exact');
   assertEq(matchesAlwaysAskFloor('delete' + 'x'.repeat(100_000)), true, '10.13 marker inside the bound still matches');
 
   if (failures > 0) {

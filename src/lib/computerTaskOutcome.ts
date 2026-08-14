@@ -17,6 +17,81 @@ export type ComputerTaskOutcomeStatus =
   | 'cancelled';
 
 /**
+ * Request-level status for one A1…An action in a compound computer task.
+ * These values are deliberately stricter than tool success: only an
+ * authoritative `completed` ComputerTaskOutcomeStatus may promote an action
+ * to `verified`. When a mutation may have crossed the bridge but the runtime
+ * cannot bind proof to individual A-ids, every action remains
+ * `outcome_unknown` instead of borrowing confidence from prose.
+ */
+export type ComputerTaskRequestedActionStatus =
+  | 'verified'
+  | 'pending'
+  | 'blocked'
+  | 'awaiting_approval'
+  | 'needs_input'
+  | 'failed'
+  | 'cancelled'
+  | 'outcome_unknown';
+
+export type ComputerTaskRequestedActionOverallStatus =
+  | 'complete'
+  | 'pending'
+  | 'blocked'
+  | 'awaiting_approval'
+  | 'needs_input'
+  | 'failed'
+  | 'cancelled'
+  | 'outcome_unknown'
+  | 'requires_decomposition';
+
+/**
+ * Value-free progress from the deterministic desktop-bridge file sequence.
+ * It can preserve a verified read-only prefix plus one blocked action across
+ * reload, but it carries no mutation authority and cannot complete the outer
+ * task without the separate runtime-owned completion bit.
+ */
+export interface ComputerTaskRequestedActionProgress {
+  schemaVersion: 1;
+  source: 'deterministic_read_only_file_sequence';
+  terminalStatus: 'completed' | 'partial' | 'blocked';
+  actionCount: number;
+  verifiedActionCount: number;
+  actions: ReadonlyArray<Readonly<{
+    id: string;
+    ordinal: number;
+    status: 'verified' | 'blocked' | 'pending';
+  }>>;
+}
+
+export interface ComputerTaskRequestedActionCoverage {
+  schemaVersion: 1;
+  mode: 'all_actions_required';
+  overallStatus: ComputerTaskRequestedActionOverallStatus;
+  terminalStatus: ComputerTaskOutcomeStatus | null;
+  actionCount: number;
+  verifiedActionCount: number;
+  allActionsVerified: boolean;
+  /** Runtime-owned outer acceptance bit; model prose/status cannot set this. */
+  taskCompletionVerified: boolean;
+  mutationDispatched: boolean;
+  source:
+    | 'verified_task_outcome'
+    | 'deterministic_read_only_progress'
+    | 'task_proof_missing'
+    | 'decomposition_gate'
+    | 'preflight_terminal'
+    | 'mutation_uncertain'
+    | 'pending';
+  actions: ReadonlyArray<{
+    id: string;
+    ordinal: number;
+    status: ComputerTaskRequestedActionStatus;
+  }>;
+  unresolvedActionIds: ReadonlyArray<string>;
+}
+
+/**
  * Mutation replay authority is independent from terminal status. A task can
  * be `partial` because post-change proof was lost after the mutation crossed
  * the bridge; that must never be converted into a generic retry.
@@ -2331,6 +2406,296 @@ export function normalizeComputerTaskOutcomeStatus(
   return typeof value === 'string' && COMPUTER_TASK_OUTCOME_STATUSES.has(value as ComputerTaskOutcomeStatus)
     ? value as ComputerTaskOutcomeStatus
     : null;
+}
+
+interface ComputerTaskRequestedActionContractLike {
+  schemaVersion?: unknown;
+  mode?: unknown;
+  actionCount?: unknown;
+  capped?: unknown;
+  requiresDecompositionBeforeMutation?: unknown;
+  actions?: unknown;
+}
+
+/**
+ * Normalize the sole supported per-action progress shape. Valid sequences are
+ * either all verified, or a verified prefix followed by exactly one blocked
+ * action and pending suffix. Unknown statuses, gaps, and forged ordering are
+ * discarded rather than promoted.
+ */
+export function buildDeterministicReadOnlyFileRequestedActionProgress(input: {
+  actionResults?: unknown;
+  outcomeStatus?: unknown;
+}): ComputerTaskRequestedActionProgress | null {
+  try {
+    const terminalStatus = input?.outcomeStatus;
+    if (!['completed', 'partial', 'blocked'].includes(String(terminalStatus))) return null;
+    if (!Array.isArray(input.actionResults)) return null;
+    if (input.actionResults.length < 2 || input.actionResults.length > 8) return null;
+    let blockedSeen = false;
+    let verifiedActionCount = 0;
+    const actions = input.actionResults.map((rawAction, index) => {
+      if (!rawAction || typeof rawAction !== 'object') throw new Error('invalid action progress');
+      const action = rawAction as { id?: unknown; ordinal?: unknown; status?: unknown };
+      const expectedId = `A${index + 1}`;
+      if (action.id !== expectedId || action.ordinal !== index + 1) throw new Error('invalid action identity');
+      const rawStatus = action.status === 'incomplete' ? 'blocked' : action.status;
+      if (!['verified', 'blocked', 'pending'].includes(String(rawStatus))) throw new Error('invalid action status');
+      const status = rawStatus as 'verified' | 'blocked' | 'pending';
+      if (status === 'verified') {
+        if (blockedSeen) throw new Error('verified action after terminal action');
+        verifiedActionCount += 1;
+      } else if (status === 'blocked') {
+        if (blockedSeen) throw new Error('multiple blocked actions');
+        blockedSeen = true;
+      } else if (!blockedSeen) {
+        throw new Error('pending action before terminal action');
+      }
+      return Object.freeze({ id: expectedId, ordinal: index + 1, status });
+    });
+    const normalizedTerminalStatus = terminalStatus as ComputerTaskRequestedActionProgress['terminalStatus'];
+    const terminalMatches = normalizedTerminalStatus === 'completed'
+      ? verifiedActionCount === actions.length && !blockedSeen
+      : normalizedTerminalStatus === 'partial'
+        ? verifiedActionCount > 0 && verifiedActionCount < actions.length && blockedSeen
+        : verifiedActionCount === 0 && blockedSeen;
+    if (!terminalMatches) return null;
+    return Object.freeze({
+      schemaVersion: 1 as const,
+      source: 'deterministic_read_only_file_sequence' as const,
+      terminalStatus: normalizedTerminalStatus,
+      actionCount: actions.length,
+      verifiedActionCount,
+      actions: Object.freeze(actions),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Strict persisted/cross-module reader for the exact value-free marker. */
+export function normalizeDeterministicReadOnlyFileRequestedActionProgress(
+  value: unknown,
+): ComputerTaskRequestedActionProgress | null {
+  try {
+    if (!value || typeof value !== 'object') return null;
+    const progress = value as Record<string, unknown>;
+    if (
+      progress.schemaVersion !== 1
+      || progress.source !== 'deterministic_read_only_file_sequence'
+      || !Number.isInteger(progress.actionCount)
+      || !Number.isInteger(progress.verifiedActionCount)
+    ) return null;
+    const normalized = buildDeterministicReadOnlyFileRequestedActionProgress({
+      actionResults: progress.actions,
+      outcomeStatus: progress.terminalStatus,
+    });
+    if (
+      !normalized
+      || normalized.actionCount !== progress.actionCount
+      || normalized.verifiedActionCount !== progress.verifiedActionCount
+    ) return null;
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+function requestedActionStatusForPreflight(
+  status: ComputerTaskOutcomeStatus,
+): Exclude<ComputerTaskRequestedActionStatus, 'verified' | 'pending' | 'outcome_unknown'> {
+  switch (status) {
+    case 'waiting_approval': return 'awaiting_approval';
+    case 'needs_input': return 'needs_input';
+    case 'failed': return 'failed';
+    case 'cancelled': return 'cancelled';
+    case 'partial':
+    case 'completed':
+    case 'blocked':
+    default:
+      return 'blocked';
+  }
+}
+
+/**
+ * Build a bounded, fail-closed A1…An coverage snapshot from the canonical
+ * request ledger and the typed task outcome. This evaluator intentionally does
+ * not accept model prose or tool-result text. Its only per-action input is the
+ * value-free, strictly normalized deterministic read-only file prefix above;
+ * that progress can never authorize a mutation or replace outer completion.
+ *
+ * - authoritative `completed` + runtime-owned outer task proof + an uncapped
+ *   ledger => every A-id verified;
+ * - any possible mutation without request-bound completion => every A-id
+ *   outcome-unknown (there is no truthful generic A-id/tool-receipt join yet);
+ * - a pre-dispatch terminal blocks A1 and leaves later work pending;
+ * - an overflow/capped ledger never completes and must be decomposed first.
+ */
+export function buildComputerTaskRequestedActionCoverage(input: {
+  contract?: ComputerTaskRequestedActionContractLike | null;
+  outcomeStatus?: unknown;
+  taskCompletionVerified?: unknown;
+  mutationDispatched?: unknown;
+  requestedActionProgress?: unknown;
+}): ComputerTaskRequestedActionCoverage | null {
+  try {
+    const contract = input?.contract;
+    if (!contract || contract.schemaVersion !== 1 || contract.mode !== 'all_actions_required') return null;
+    if (!Array.isArray(contract.actions)) return null;
+    const rawActionCount = contract.actions.length;
+    const hasDeclaredActionCount = Object.prototype.hasOwnProperty.call(contract, 'actionCount');
+    const declaredActionCount = contract.actionCount;
+    const actionLedgerShapeMismatch = rawActionCount > 8 || (
+      hasDeclaredActionCount
+      && (!Number.isInteger(declaredActionCount)
+        || Number(declaredActionCount) !== rawActionCount)
+    );
+    const actionIds: string[] = [];
+    for (let index = 0; index < Math.min(rawActionCount, 8); index += 1) {
+      const action = contract.actions[index];
+      if (!action || typeof action !== 'object') return null;
+      const expectedId = `A${index + 1}`;
+      if ((action as { id?: unknown }).id !== expectedId) return null;
+      actionIds.push(expectedId);
+    }
+    const requiresDecomposition = contract.capped === true
+      || contract.requiresDecompositionBeforeMutation === true
+      || actionLedgerShapeMismatch;
+    if (actionIds.length < 2 && !requiresDecomposition) return null;
+
+    const terminalStatus = normalizeComputerTaskOutcomeStatus(input.outcomeStatus);
+    const taskCompletionVerified = terminalStatus === 'completed'
+      && input.taskCompletionVerified === true;
+    const mutationDispatched = input.mutationDispatched === true;
+    const requestedActionProgress = normalizeDeterministicReadOnlyFileRequestedActionProgress(
+      input.requestedActionProgress,
+    );
+    const progressMatchesContract = !mutationDispatched
+      && requestedActionProgress != null
+      && requestedActionProgress.actionCount === actionIds.length
+      && requestedActionProgress.terminalStatus === terminalStatus;
+    let overallStatus: ComputerTaskRequestedActionOverallStatus = 'pending';
+    let source: ComputerTaskRequestedActionCoverage['source'] = 'pending';
+    let statuses: ComputerTaskRequestedActionStatus[] = actionIds.map(() => 'pending');
+
+    if (requiresDecomposition) {
+      overallStatus = 'requires_decomposition';
+      source = mutationDispatched ? 'mutation_uncertain' : 'decomposition_gate';
+      statuses = actionIds.map(() => mutationDispatched ? 'outcome_unknown' : 'pending');
+    } else if (taskCompletionVerified) {
+      overallStatus = 'complete';
+      source = 'verified_task_outcome';
+      statuses = actionIds.map(() => 'verified');
+    } else if (
+      progressMatchesContract
+      && requestedActionProgress
+      && requestedActionProgress.terminalStatus !== 'completed'
+    ) {
+      overallStatus = 'blocked';
+      source = 'deterministic_read_only_progress';
+      statuses = requestedActionProgress.actions.map((action) => action.status);
+    } else if (terminalStatus === 'completed') {
+      overallStatus = 'outcome_unknown';
+      source = 'task_proof_missing';
+      statuses = actionIds.map(() => 'outcome_unknown');
+    } else if (mutationDispatched || terminalStatus === 'partial') {
+      overallStatus = 'outcome_unknown';
+      source = 'mutation_uncertain';
+      statuses = actionIds.map(() => 'outcome_unknown');
+    } else if (terminalStatus) {
+      const firstStatus = requestedActionStatusForPreflight(terminalStatus);
+      overallStatus = firstStatus;
+      source = 'preflight_terminal';
+      statuses = actionIds.map((_, index) => index === 0 ? firstStatus : 'pending');
+    }
+
+    const actions = Object.freeze(actionIds.map((id, index) => Object.freeze({
+      id,
+      ordinal: index + 1,
+      status: statuses[index],
+    })));
+    const verifiedActionCount = actions.filter((action) => action.status === 'verified').length;
+    const unresolvedActionIds = Object.freeze(
+      actions.filter((action) => action.status !== 'verified').map((action) => action.id),
+    );
+    return Object.freeze({
+      schemaVersion: 1 as const,
+      mode: 'all_actions_required' as const,
+      overallStatus,
+      terminalStatus,
+      actionCount: actions.length,
+      verifiedActionCount,
+      allActionsVerified: actions.length > 0 && verifiedActionCount === actions.length,
+      taskCompletionVerified,
+      mutationDispatched,
+      source,
+      actions,
+      unresolvedActionIds,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function compactRequestedActionIds(ids: ReadonlyArray<string>): string {
+  if (ids.length === 0) return '';
+  if (ids.length >= 3) {
+    const ordinals = ids.map((id) => Number(id.slice(1)));
+    const contiguous = ordinals.every((ordinal, index) => (
+      Number.isInteger(ordinal) && (index === 0 || ordinal === ordinals[index - 1] + 1)
+    ));
+    if (contiguous) return `${ids[0]}–${ids[ids.length - 1]}`;
+  }
+  return ids.join(', ');
+}
+
+/** Compact, ID-only user copy. It never repeats request text or provider prose. */
+export function formatComputerTaskRequestedActionCoverage(
+  coverage: ComputerTaskRequestedActionCoverage | null | undefined,
+): string {
+  if (!coverage?.actions?.length) return '';
+  if (coverage.overallStatus === 'complete') {
+    return `${compactRequestedActionIds(coverage.actions.map((action) => action.id))} verified.`;
+  }
+  if (coverage.overallStatus === 'requires_decomposition') {
+    const ids = compactRequestedActionIds(coverage.actions.map((action) => action.id));
+    return coverage.mutationDispatched
+      ? `${ids} outcome unknown; the request exceeded the safe action bound and completion is not verified.`
+      : `${ids} retained; decompose the request before any action runs.`;
+  }
+  const groups = new Map<ComputerTaskRequestedActionStatus, string[]>();
+  for (const action of coverage.actions) {
+    const ids = groups.get(action.status) || [];
+    ids.push(action.id);
+    groups.set(action.status, ids);
+  }
+  const labels: Record<ComputerTaskRequestedActionStatus, string> = {
+    verified: 'verified',
+    pending: 'pending',
+    blocked: 'blocked',
+    awaiting_approval: 'awaiting approval',
+    needs_input: 'needs input',
+    failed: 'failed',
+    cancelled: 'cancelled',
+    outcome_unknown: 'outcome unknown',
+  };
+  const order: ComputerTaskRequestedActionStatus[] = [
+    'verified',
+    'blocked',
+    'awaiting_approval',
+    'needs_input',
+    'failed',
+    'cancelled',
+    'outcome_unknown',
+    'pending',
+  ];
+  const summary = order
+    .filter((status) => groups.has(status))
+    .map((status) => `${compactRequestedActionIds(groups.get(status)!)} ${labels[status]}`)
+    .join('; ');
+  return coverage.overallStatus === 'outcome_unknown'
+    ? `${summary}; completion is not verified.`
+    : `${summary}.`;
 }
 
 export function deriveAgentTaskTerminalOutcome(input: {

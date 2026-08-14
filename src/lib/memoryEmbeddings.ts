@@ -49,6 +49,7 @@
 
 import { supabase } from './supabase';
 import { shouldBlockExternalAiProvider } from './privacyMode';
+import { storage } from './storage';
 import {
   EMBEDDING_BATCH_MAX,
   EMBEDDING_COALESCE_MS,
@@ -83,6 +84,11 @@ import {
   type EmbeddingRepairSchedule,
   type MemoryEmbeddingRepairCursor,
 } from './memoryEmbeddingPolicyCore';
+import {
+  getLLMProxyCredentialRecoveryPresentation,
+  readLLMProxyInvokeError,
+  shouldRetryLLMProxyFailure,
+} from './llmProxyErrorCore';
 
 export const EMBEDDING_MODEL = 'text-embedding-3-small';
 export const EMBEDDING_DIMS = 1536;
@@ -103,52 +109,288 @@ interface EmbedResponse {
 // is exactly what used to orphan rows permanently.
 let breakerState: EmbeddingBreakerState = createEmbeddingBreakerState();
 let repairSchedule: EmbeddingRepairSchedule = createEmbeddingRepairSchedule();
+let credentialUnavailableUntilMs = 0;
+
+// A missing or unreadable stored credential does not heal like a transport
+// timeout. Remember the exact key version that failed so a reload does not
+// immediately replay the same doomed request. Rotating/re-saving the key
+// changes `updated_at`, which re-opens the gate immediately; otherwise one
+// bounded daily probe covers server-side encryption-key recovery.
+const EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY = 'uc_memory_embedding_credential_block_v1';
+const EMBEDDING_CREDENTIAL_BLOCK_TTL_MS = 24 * 60 * 60_000;
+const EMBEDDING_CREDENTIAL_METADATA_TTL_MS = 60_000;
+const EMBEDDING_CREDENTIAL_METADATA_RETRY_MS = 30_000;
+type EmbeddingCredentialGateState = 'unknown' | 'ready' | 'missing' | 'blocked' | 'unavailable';
+type PersistedEmbeddingCredentialBlock = {
+  fingerprint: string;
+  code: 'key_missing' | 'credential_unreadable';
+  expiresAtMs: number;
+};
+let embeddingCredentialGateState: EmbeddingCredentialGateState = 'unknown';
+let embeddingCredentialGateExpiresAtMs = 0;
+let embeddingCredentialFingerprint: string | null = null;
+let embeddingCredentialPreflight: Promise<boolean> | null = null;
+let embeddingCredentialSubscriptionInstalled = false;
+let embeddingCredentialRepairTimer: ReturnType<typeof setTimeout> | null = null;
+let embeddingCredentialRepairDueAtMs = 0;
+
+// Throttled warn — the embed path runs in background bursts, and one flaky
+// proxy window used to print two lines per batch. Log the first hit per
+// reason, then stay quiet for 5 minutes while counting suppressed repeats.
+const WARN_THROTTLE_MS = 5 * 60_000;
+const warnThrottleState = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+function warnThrottled(key: string, ...parts: unknown[]): void {
+  const now = Date.now();
+  const entry = warnThrottleState.get(key);
+  if (entry && now - entry.lastLoggedAt < WARN_THROTTLE_MS) {
+    entry.suppressed += 1;
+    return;
+  }
+  const suffix = entry?.suppressed ? ` (+${entry.suppressed} similar suppressed)` : '';
+  warnThrottleState.set(key, { lastLoggedAt: now, suppressed: 0 });
+  console.warn(...parts, suffix);
+}
 
 /**
  * Record rows we could not embed. This is the ONLY thing standing between a
  * proxy outage and a permanently unsearchable memory: it arms the repair sweep,
  * which finds the rows again through `embedding IS NULL`.
  */
-function noteOrphans(count: number, why: string): void {
+function noteOrphans(count: number, why: string, opts: { warn?: boolean } = {}): void {
   if (!count || count <= 0) return;
   repairSchedule = markEmbeddingOrphans(repairSchedule, count, Date.now());
-  console.warn(`[memoryEmbeddings] ${count} memory row(s) left un-embedded (${why}) — queued for repair sweep`);
+  if (opts.warn !== false) {
+    warnThrottled(`orphans:${why}`, `[memoryEmbeddings] ${count} memory row(s) left un-embedded (${why}) — queued for repair sweep`);
+  }
 }
+
+function armEmbeddingCredentialRepair(delayMs: number): void {
+  const dueAtMs = Date.now() + Math.max(0, delayMs);
+  if (embeddingCredentialRepairTimer && embeddingCredentialRepairDueAtMs <= dueAtMs) return;
+  if (embeddingCredentialRepairTimer) clearTimeout(embeddingCredentialRepairTimer);
+  embeddingCredentialRepairDueAtMs = dueAtMs;
+  embeddingCredentialRepairTimer = setTimeout(() => {
+    embeddingCredentialRepairTimer = null;
+    embeddingCredentialRepairDueAtMs = 0;
+    void drainEmbedQueue().catch(() => {});
+  }, Math.max(0, delayMs));
+  const timerWithUnref = embeddingCredentialRepairTimer as any;
+  if (typeof timerWithUnref?.unref === 'function') timerWithUnref.unref();
+}
+
+function parsePersistedCredentialBlock(raw: string | null): PersistedEmbeddingCredentialBlock | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<PersistedEmbeddingCredentialBlock>;
+    if (
+      typeof parsed.fingerprint !== 'string'
+      || !parsed.fingerprint
+      || (parsed.code !== 'key_missing' && parsed.code !== 'credential_unreadable')
+      || !Number.isFinite(parsed.expiresAtMs)
+    ) return null;
+    return parsed as PersistedEmbeddingCredentialBlock;
+  } catch {
+    return null;
+  }
+}
+
+function resetEmbeddingCredentialGateAfterKeyChange(): void {
+  embeddingCredentialGateState = 'unknown';
+  embeddingCredentialGateExpiresAtMs = 0;
+  embeddingCredentialFingerprint = null;
+  credentialUnavailableUntilMs = 0;
+  breakerState = createEmbeddingBreakerState();
+  if (embeddingCredentialRepairTimer) clearTimeout(embeddingCredentialRepairTimer);
+  embeddingCredentialRepairTimer = null;
+  embeddingCredentialRepairDueAtMs = 0;
+  void storage.removeItem(EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY);
+  armEmbeddingCredentialRepair(EMBEDDING_COALESCE_MS);
+}
+
+async function installEmbeddingCredentialChangeListener(): Promise<void> {
+  if (embeddingCredentialSubscriptionInstalled) return;
+  try {
+    const { subscribeUserApiKeyChanges } = await import('./llmProviders');
+    subscribeUserApiKeyChanges(resetEmbeddingCredentialGateAfterKeyChange);
+    embeddingCredentialSubscriptionInstalled = true;
+  } catch {
+    // A later preflight retries installation. Embedding remains fail-closed.
+  }
+}
+
+async function hasUsableEmbeddingCredential(force = false): Promise<boolean> {
+  const now = Date.now();
+  if (!force && embeddingCredentialGateState !== 'unknown' && now < embeddingCredentialGateExpiresAtMs) {
+    return embeddingCredentialGateState === 'ready';
+  }
+  if (embeddingCredentialPreflight) return embeddingCredentialPreflight;
+
+  const run = (async () => {
+    await installEmbeddingCredentialChangeListener();
+    let rows: any[] | null = null;
+    try {
+      const { data, error } = await supabase.rpc('list_user_api_keys');
+      if (error || !Array.isArray(data)) throw error || new Error('provider key metadata unavailable');
+      rows = data;
+    } catch {
+      embeddingCredentialGateState = 'unavailable';
+      embeddingCredentialGateExpiresAtMs = Date.now() + EMBEDDING_CREDENTIAL_METADATA_RETRY_MS;
+      armEmbeddingCredentialRepair(EMBEDDING_CREDENTIAL_METADATA_RETRY_MS);
+      return false;
+    }
+
+    const activeKey = rows
+      .filter((row) => String(row?.provider || '').toLowerCase() === 'openai' && row?.is_active !== false)
+      .sort((a, b) => String(b?.updated_at || '').localeCompare(String(a?.updated_at || '')))[0];
+    if (!activeKey?.id) {
+      embeddingCredentialGateState = 'missing';
+      embeddingCredentialGateExpiresAtMs = Date.now() + EMBEDDING_CREDENTIAL_METADATA_TTL_MS;
+      embeddingCredentialFingerprint = null;
+      credentialUnavailableUntilMs = 0;
+      return false;
+    }
+
+    const fingerprint = `${String(activeKey.id)}:${String(activeKey.updated_at || '')}`;
+    embeddingCredentialFingerprint = fingerprint;
+    const block = parsePersistedCredentialBlock(
+      await storage.getItem(EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY),
+    );
+    const checkedAt = Date.now();
+    if (block && block.fingerprint === fingerprint && block.expiresAtMs > checkedAt) {
+      embeddingCredentialGateState = 'blocked';
+      embeddingCredentialGateExpiresAtMs = Math.min(
+        block.expiresAtMs,
+        checkedAt + EMBEDDING_CREDENTIAL_METADATA_TTL_MS,
+      );
+      credentialUnavailableUntilMs = block.expiresAtMs;
+      armEmbeddingCredentialRepair(block.expiresAtMs - checkedAt + EMBEDDING_COALESCE_MS);
+      return false;
+    }
+    if (block) void storage.removeItem(EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY);
+
+    embeddingCredentialGateState = 'ready';
+    embeddingCredentialGateExpiresAtMs = checkedAt + EMBEDDING_CREDENTIAL_METADATA_TTL_MS;
+    credentialUnavailableUntilMs = 0;
+    return true;
+  })();
+
+  embeddingCredentialPreflight = run;
+  try {
+    return await run;
+  } finally {
+    if (embeddingCredentialPreflight === run) embeddingCredentialPreflight = null;
+  }
+}
+
+function startCredentialUnavailableCooldown(
+  code: 'key_missing' | 'credential_unreadable',
+): void {
+  const expiresAtMs = Date.now() + EMBEDDING_CREDENTIAL_BLOCK_TTL_MS;
+  credentialUnavailableUntilMs = expiresAtMs;
+  embeddingCredentialGateState = 'blocked';
+  embeddingCredentialGateExpiresAtMs = Date.now() + EMBEDDING_CREDENTIAL_METADATA_TTL_MS;
+  if (embeddingCredentialFingerprint) {
+    const block: PersistedEmbeddingCredentialBlock = {
+      fingerprint: embeddingCredentialFingerprint,
+      code,
+      expiresAtMs,
+    };
+    void storage.setItem(EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY, JSON.stringify(block));
+  }
+  armEmbeddingCredentialRepair(EMBEDDING_CREDENTIAL_BLOCK_TTL_MS + EMBEDDING_COALESCE_MS);
+}
+
+async function invokeEmbedProxyOnce(inputs: string[]): Promise<{ data: any; error: any }> {
+  return supabase.functions.invoke('llm-proxy', {
+    body: {
+      provider: 'openai-embed',
+      model: EMBEDDING_MODEL,
+      input: inputs,
+      messages: [],
+    },
+  });
+}
+
+// All embed calls share one lane. The live drain queue and the repair sweep
+// used to overlap, and the proxy's stored-key lookup visibly flakes under
+// concurrent requests (drain batches 409 while sweep pages succeed).
+// Serializing removes the overlap; embedding is background work, so the
+// added latency is free.
+let embedCallLane: Promise<unknown> = Promise.resolve();
 
 async function callEmbedProxy(inputs: string[]): Promise<EmbedResponse | null> {
   if (inputs.length === 0) return { embeddings: [], model: EMBEDDING_MODEL, dimensions: EMBEDDING_DIMS, input_tokens: 0 };
   if (shouldBlockExternalAiProvider('openai')) return null;
 
-  // Circuit breaker — if we've failed N times in a row, stop trying for 5 min
-  if (isEmbeddingBreakerOpen(breakerState, Date.now())) {
+  const run = () => callEmbedProxyNow(inputs);
+  const gated = embedCallLane.then(run, run);
+  embedCallLane = gated.catch(() => undefined);
+  return gated;
+}
+
+async function callEmbedProxyNow(inputs: string[]): Promise<EmbedResponse | null> {
+  // Circuit breaker — if we've failed N times in a row, stop trying for 5 min.
+  // Checked inside the lane so it reflects state at execution time, not at
+  // enqueue time.
+  const now = Date.now();
+  if (isEmbeddingBreakerOpen(breakerState, now)) {
     return null;
   }
+  if (!(await hasUsableEmbeddingCredential())) return null;
 
   try {
-    const { data, error } = await supabase.functions.invoke('llm-proxy', {
-      body: {
-        provider: 'openai-embed',
-        model: EMBEDDING_MODEL,
-        input: inputs,
-        messages: [],
-      },
-    });
+    let retried = false;
+    let { data, error } = await invokeEmbedProxyOnce(inputs);
     if (error) {
+      const firstDetails = await readLLMProxyInvokeError(error, 'openai');
+      if (firstDetails.code === 'key_missing' || firstDetails.code === 'credential_unreadable') {
+        startCredentialUnavailableCooldown(firstDetails.code);
+        breakerState = recordEmbeddingFailure(breakerState, Date.now());
+        const recovery = getLLMProxyCredentialRecoveryPresentation(firstDetails);
+        warnThrottled(
+          `proxy-credential:${firstDetails.code}`,
+          `[memoryEmbeddings] ${recovery?.message ?? firstDetails.message} Pending rows remain on the repair ledger; embedding is paused until the credential changes or the daily recheck.`,
+        );
+        return null;
+      }
+      if (shouldRetryLLMProxyFailure(firstDetails)) {
+        retried = true;
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        ({ data, error } = await invokeEmbedProxyOnce(inputs));
+      }
+    }
+    if (error) {
+      const details = await readLLMProxyInvokeError(error, 'openai');
+      if (details.code === 'key_missing' || details.code === 'credential_unreadable') {
+        startCredentialUnavailableCooldown(details.code);
+      }
       breakerState = recordEmbeddingFailure(breakerState, Date.now());
-      console.warn('[memoryEmbeddings] proxy error:', error.message, '| status:', (error as any).status, '| context:', JSON.stringify(error).slice(0, 200));
+      warnThrottled(
+        `proxy-error:${details.code ?? details.status ?? 'transport'}`,
+        `[memoryEmbeddings] embedding proxy request failed${retried ? ' after one retry' : ''}:`,
+        details.message,
+        '| code:',
+        details.code ?? 'unknown',
+        '| status:',
+        details.status ?? 'unknown',
+      );
       return null;
     }
     if (!data?.embeddings || !Array.isArray(data.embeddings) || data.embeddings.length === 0) {
       breakerState = recordEmbeddingFailure(breakerState, Date.now());
-      console.warn('[memoryEmbeddings] proxy returned unexpected data:', JSON.stringify(data).slice(0, 300));
+      warnThrottled('proxy-shape', '[memoryEmbeddings] proxy returned unexpected data:', JSON.stringify(data).slice(0, 300));
       return null;
     }
     // Success — reset circuit breaker
     breakerState = recordEmbeddingSuccess(breakerState);
+    credentialUnavailableUntilMs = 0;
+    embeddingCredentialGateState = 'ready';
+    embeddingCredentialGateExpiresAtMs = Date.now() + EMBEDDING_CREDENTIAL_METADATA_TTL_MS;
+    void storage.removeItem(EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY);
     return data as EmbedResponse;
   } catch (err) {
     breakerState = recordEmbeddingFailure(breakerState, Date.now());
-    console.warn('[memoryEmbeddings] proxy call failed:', err);
+    warnThrottled('proxy-throw', '[memoryEmbeddings] proxy call failed:', err);
     return null;
   }
 }
@@ -359,7 +601,13 @@ async function drainEmbedQueue(): Promise<void> {
           // Failed batches are NOT requeued — that risks an infinite retry loop
           // against a broken proxy. They become orphans, and the sweep (which
           // reads `embedding IS NULL` from the database) is the retry.
-          noteOrphans(batch.length, 'embed proxy failure');
+          const credentialPaused = embeddingCredentialGateState !== 'ready'
+            && embeddingCredentialGateState !== 'unknown';
+          noteOrphans(
+            batch.length,
+            credentialPaused ? 'embedding credential unavailable' : 'embed proxy failure',
+            { warn: !credentialPaused },
+          );
           continue;
         }
 
@@ -429,7 +677,7 @@ function persistCursor(cursor: MemoryEmbeddingRepairCursor): void {
 
 export interface MemoryEmbeddingRepairResult {
   ran: boolean;
-  /** Why the pass stopped: done | max_pages | max_rows | deadline | breaker_open | fetch_failed | privacy_blocked | cooling_down | idle */
+  /** Why the pass stopped: done | max_pages | max_rows | deadline | breaker_open | credential_unavailable | fetch_failed | privacy_blocked | cooling_down | idle */
   reason: string;
   cursor: MemoryEmbeddingRepairCursor;
   scanned: number;
@@ -550,11 +798,21 @@ export async function repairMemoryEmbeddings(opts?: {
   // in the id space, so "done" means "done with this pass", not "done forever".
   let cursor = persisted && !persisted.done ? persisted : createRepairCursor(Date.now());
 
+  // Metadata preflight plus the persisted exact-key block prevents both a DB
+  // scan and a repeat proxy 409 while the credential remains unchanged.
+  if (!dryRun && !(await hasUsableEmbeddingCredential())) {
+    return repairResult(cursor, 'credential_unavailable', false, 0, dryRun);
+  }
+
   let eligibleTotal = 0;
   let stopReason = 'done';
 
   for (;;) {
     const now = Date.now();
+    if (!dryRun && now < credentialUnavailableUntilMs) {
+      stopReason = 'credential_unavailable';
+      break;
+    }
     const gate = shouldContinueRepair(cursor, {
       maxPages,
       maxRows: opts?.maxRows,
@@ -585,16 +843,34 @@ export async function repairMemoryEmbeddings(opts?: {
 
     let pageEmbedded = 0;
     let pageFailed = 0;
+    let credentialInterrupted = false;
     if (!dryRun) {
       for (const chunk of planEmbeddingBatches(jobs, EMBEDDING_BATCH_MAX)) {
         const res = await callEmbedProxy(chunk.map((job) => job.text));
-        if (!res) { pageFailed += chunk.length; continue; }
+        if (!res) {
+          if (
+            Date.now() < credentialUnavailableUntilMs
+            || (embeddingCredentialGateState !== 'ready' && embeddingCredentialGateState !== 'unknown')
+          ) {
+            credentialInterrupted = true;
+            break;
+          }
+          pageFailed += chunk.length;
+          continue;
+        }
         await Promise.all(chunk.map(async (job, i) => {
           const vector = res.embeddings?.[i];
           const ok = Array.isArray(vector) ? await storeEmbedding(job.id, vector, res.model || EMBEDDING_MODEL) : false;
           if (ok) pageEmbedded += 1; else pageFailed += 1;
         }));
       }
+    }
+    // Do not advance beyond a page that was interrupted by a credential
+    // failure. Successful rows no longer match `embedding IS NULL`, and every
+    // unfinished row on this page will be fetched again after reconnection.
+    if (credentialInterrupted) {
+      stopReason = 'credential_unavailable';
+      break;
     }
 
     cursor = advanceRepairCursor(
@@ -643,6 +919,7 @@ export async function ensureMemoryEmbeddingCoverage(opts?: {
 
   if (shouldBlockExternalAiProvider('openai')) return { ...idle, reason: 'privacy_blocked' };
   if (repairInFlight) return repairInFlight;
+  if (!(await hasUsableEmbeddingCredential())) return { ...idle, reason: 'credential_unavailable' };
 
   const decision = shouldRunEmbeddingRepair({
     schedule: repairSchedule,
@@ -653,6 +930,16 @@ export async function ensureMemoryEmbeddingCoverage(opts?: {
   });
   if (!decision.run) return { ...idle, reason: decision.reason };
 
+  // Orphans can be inserted anywhere in UUID/id order. Resuming an older
+  // cursor would skip a newly failed row that sorts before `lastId`, so debt
+  // repair always starts fresh. Routine first/due sweeps remain resumable.
+  const retryingOrphans = repairSchedule.repairOwed || repairSchedule.orphanCount > 0;
+  const resume = !retryingOrphans;
+  const persistedBeforeRun = resume ? readPersistedCursor() : null;
+  const baseline = persistedBeforeRun && !persistedBeforeRun.done
+    ? persistedBeforeRun
+    : createRepairCursor(now);
+
   // Same rule as the drain: the in-flight marker is cleared by the caller, so a
   // synchronous failure path cannot wedge it before the assignment below.
   const run = (async (): Promise<MemoryEmbeddingRepairResult> => {
@@ -662,14 +949,25 @@ export async function ensureMemoryEmbeddingCoverage(opts?: {
         pageSize: opts?.pageSize,
         maxPages: opts?.maxPages,
         maxRows: opts?.maxRows,
+        resume,
       });
+      const embeddedThisPass = Math.max(0, result.embedded - baseline.embedded);
+      const failedThisPass = Math.max(0, result.failed - baseline.failed);
+      const skippedThisPass = Math.max(0, result.skipped - baseline.skipped);
+      const scannedThisPass = Math.max(0, result.scanned - baseline.scanned);
+      const pagesThisPass = Math.max(0, result.pages - baseline.pagesDone);
       // The debt clears only on a CLEAN, COMPLETE pass. A partial or partly
       // failed sweep keeps the ledger armed so the next one retries.
       repairSchedule = noteEmbeddingRepairRun(repairSchedule, Date.now(), {
-        clearedOrphans: result.done && result.failed === 0,
+        clearedOrphans: result.reason === 'done' && result.done && result.failed === 0,
       });
-      if (result.embedded > 0 || result.failed > 0) {
-        console.info(`[memoryEmbeddings] repair (${decision.reason}): ${result.summary}`);
+      if (embeddedThisPass > 0 || failedThisPass > 0) {
+        const disposition = result.done ? 'done' : `paused:${result.reason}`;
+        console.info(
+          `[memoryEmbeddings] repair (${decision.reason}): `
+          + `${embeddedThisPass} embedded / ${failedThisPass} failed / ${skippedThisPass} skipped `
+          + `of ${scannedThisPass} scanned across ${pagesThisPass} page(s) this pass — ${disposition}`,
+        );
       }
       return result;
     } catch (err) {

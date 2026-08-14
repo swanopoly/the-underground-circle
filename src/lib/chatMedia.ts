@@ -19,6 +19,10 @@ export interface ChatAttachment {
   uploadedUrl?: string; // after Supabase storage upload
   extractText?: string;
   isFigma?: boolean;
+  /** Web-only in-memory authority used to migrate picker attachments into the
+   * canonical staged upload flow. Never persist or include this object in a
+   * model prompt. */
+  sourceFile?: File;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -208,6 +212,7 @@ export async function pickAttachments(): Promise<ChatAttachment[]> {
           base64,
           extractText,
           isFigma: isFigmaLikeAttachment(file.name, mimeType),
+          sourceFile: file,
         };
       }));
       resolve(picked.filter(Boolean) as ChatAttachment[]);

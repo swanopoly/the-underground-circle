@@ -988,10 +988,12 @@ async function callBlackSwanLLM(_systemPrompt: string, _userMessage: string): Pr
 // used those must pass `thinking: {type: "adaptive"}` instead.
 const CLAUDE_MODEL_MAP: Record<string, string> = {
   "claude-haiku":  "claude-haiku-4-5",
-  "claude-sonnet": "claude-sonnet-4-6",
+  "claude-sonnet": "claude-sonnet-5",
   "claude-fable":  "claude-fable-5",
   "claude-fable-5": "claude-fable-5",
-  "claude-opus":   "claude-opus-4-8",
+  "claude-opus-5": "claude-opus-5",
+  "claude-sonnet-5": "claude-sonnet-5",
+  "claude-opus":   "claude-opus-5",
   "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
   "claude-opus-4-6": "claude-opus-4-6",
@@ -3461,8 +3463,10 @@ const CLAUDE_USAGE_PRICES: Record<string, [number, number]> = {
   "claude-haiku-4-5-20251001": [1.00, 5.00],
   "claude-haiku-4-5":          [1.00, 5.00],
   "claude-sonnet-4-6":         [3.00, 15.00],
+  "claude-sonnet-5":           [3.00, 15.00],
   "claude-sonnet-4-5":         [3.00, 15.00],
   "claude-fable-5":            [10.00, 50.00],
+  "claude-opus-5":             [5.00, 25.00],
   "claude-opus-4-8":           [5.00, 25.00],
   "claude-opus-4-6":           [5.00, 25.00],
   "claude-opus-4-7":           [5.00, 25.00],
@@ -3481,6 +3485,20 @@ function costForModel(model: string): [number, number] {
   // pinning an exhaustive catalog.
   if (model.startsWith("openrouter/")) {
     const slug = model.slice("openrouter/".length).toLowerCase();
+    if (slug.includes("claude-opus-5"))                     return [5.00, 25.00];
+    if (slug.includes("claude-sonnet-5"))                   return [3.00, 15.00];
+    if (slug.includes("gpt-5.6-sol"))                       return [5.00, 30.00];
+    if (slug.includes("gpt-5.6-terra"))                     return [2.50, 15.00];
+    if (slug.includes("gpt-5.6-luna"))                      return [1.00, 6.00];
+    if (slug.includes("gpt-5.5-pro"))                       return [30.00, 180.00];
+    if (slug.includes("gpt-5.5"))                           return [5.00, 30.00];
+    if (slug.includes("gpt-5.4-mini"))                      return [0.75, 4.50];
+    if (slug.includes("gpt-5.4-nano"))                      return [0.20, 1.20];
+    if (slug.includes("gpt-5.4"))                           return [2.50, 15.00];
+    if (slug.includes("o3-pro"))                            return [20.00, 80.00];
+    if (/(^|\/)o3(?:$|[:/])/.test(slug))                    return [10.00, 40.00];
+    if (slug.includes("gemini-3.6-flash"))                  return [1.50, 7.50];
+    if (slug.includes("gemini-3.5-flash-lite"))             return [0.30, 2.50];
     if (slug.includes("opus"))                                return [15.00, 75.00];
     if (slug.includes("sonnet"))                              return [3.00, 15.00];
     if (slug.includes("gpt-5-mini") || slug.includes("gpt-4o-mini")) return [0.50, 2.00];
@@ -3495,6 +3513,9 @@ function costForModel(model: string): [number, number] {
   }
   if (model.startsWith("openai/")) {
     const slug = model.slice("openai/".length).toLowerCase();
+    if (slug.includes("gpt-5.6-sol")) return [5.00, 30.00];
+    if (slug.includes("gpt-5.6-terra")) return [2.50, 15.00];
+    if (slug.includes("gpt-5.6-luna")) return [1.00, 6.00];
     if (slug.includes("gpt-5.5")) return [5.00, 30.00];
     if (slug.includes("gpt-5.4-mini") || slug.includes("gpt-5-mini")) return [0.75, 4.50];
     if (slug.includes("gpt-5.4-nano") || slug.includes("gpt-5-nano")) return [0.20, 1.20];
@@ -3508,6 +3529,14 @@ function costForModel(model: string): [number, number] {
     if (slug.includes("o3-pro")) return [20.00, 80.00];
     if (slug.includes("o3")) return [10.00, 40.00];
     return [2.50, 10.00];
+  }
+  if (model.startsWith("google_ai/")) {
+    const slug = model.slice("google_ai/".length).toLowerCase();
+    if (slug.includes("gemini-3.6-flash")) return [1.50, 7.50];
+    if (slug.includes("gemini-3.5-flash-lite")) return [0.30, 2.50];
+    if (slug.includes("flash-lite")) return [0.04, 0.15];
+    if (slug.includes("flash")) return [0.15, 0.60];
+    if (slug.includes("pro")) return [1.25, 10.00];
   }
   if (model.startsWith("huggingface/") || model.startsWith("replicate/")) {
     return [1.00, 3.00];

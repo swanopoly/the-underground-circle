@@ -26,7 +26,7 @@ interface Props {
   accentColor?: string;
 }
 
-export default function ChatSourcesRow({ content, toolEvents, accentColor = '#22d3ee' }: Props) {
+export default function ChatSourcesRow({ content, toolEvents, accentColor = '#6366f1' }: Props) {
   const [expanded, setExpanded] = useState(false);
 
   // MUST stay memoized: this renders inside an inverted list and each build

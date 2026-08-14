@@ -7,12 +7,13 @@
  * Supabase's JS client auto-refreshes tokens in the background, but that
  * refresh can lag behind an active request (no-op lock on web, tab-visibility
  * hiccups, laptop sleep). This helper forces an in-line refresh whenever the
- * cached session is within the expiry threshold.
+ * cached session is within the expiry threshold. Browser refreshes remain
+ * serialized by Supabase's Web Locks integration across tabs.
  *
  * Also exports `safeGetUser` / `safeGetSession` — drop-in replacements for the
  * raw supabase.auth calls that never throw (Supabase can emit AbortError when
- * a tab is backgrounded, or fail silently when the no-op lock on web collides
- * with a token refresh). Every unhandled rejection we ship is a potential
+ * a tab is backgrounded or a bounded Web Lock acquisition is interrupted).
+ * Every unhandled rejection we ship is a potential
  * white-screen, so use the safe helpers at call sites that only need "who is
  * this user, or null".
  */
@@ -23,13 +24,23 @@ import { shouldRefreshAccessToken } from './authSessionRefreshPolicy';
 
 /**
  * Hang guard. try/catch converts a REJECTION into a null result, but a GoTrue
- * call that never settles (backgrounded-tab AbortController limbo, no-op web
- * lock collisions, a wedged network socket) hangs the awaiting caller forever
+ * call that never settles (backgrounded-tab AbortController limbo, a stalled
+ * Web Lock acquisition, or a wedged network socket) hangs the awaiting caller forever
  * — the catch never runs. Every export here races the auth call against a
  * bounded timer and settles with the fallback, so "safe" means hang-safe, not
  * just rejection-safe. The underlying promise is left to resolve in the void.
  */
 const AUTH_CALL_TIMEOUT_MS = 6_000;
+
+/** Supabase/Web-Lock cancellations are expected during tab or auth lifecycle changes. */
+export function isBenignAuthAbort(error: unknown): boolean {
+  const name = typeof error === 'object' && error !== null
+    ? String((error as { name?: unknown }).name || '')
+    : '';
+  const message = error instanceof Error ? error.message : String(error || '');
+  return name === 'AbortError'
+    || /signal is aborted|operation (?:was )?aborted|AbortError/i.test(message);
+}
 
 function withAuthTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs = AUTH_CALL_TIMEOUT_MS): Promise<T> {
   return new Promise<T>((resolve) => {
@@ -64,8 +75,8 @@ export async function getFreshAccessToken(): Promise<string | null> {
     // Close to (or past) expiry: force a refresh so the next request lands
     // with a fresh JWT instead of getting rejected with 401.
     //
-    // refreshSession() can *throw* (AbortError on a backgrounded tab, no-op
-    // web-lock collision) exactly like the getSession/getUser calls this file
+    // refreshSession() can *throw* (AbortError on a backgrounded tab or an
+    // interrupted Web Lock wait) exactly like the getSession/getUser calls this file
     // documents. If we let that throw hit the outer catch we'd return null and
     // discard the still-usable stale token below. Contain it here so a thrown
     // refresh degrades to the same "fall back to the stale token" path as an
@@ -97,12 +108,15 @@ export async function getFreshAccessToken(): Promise<string | null> {
 
 export type SafeAuthResult<T> = { value: T | null; error: Error | null };
 
-/** Resolves to the current user or null. Never throws, never hangs. */
-export async function safeGetUser(): Promise<SafeAuthResult<User>> {
+async function resolveSafeUserLookup(
+  request: Promise<Awaited<ReturnType<typeof supabase.auth.getUser>>>,
+  timeoutMs: number,
+): Promise<SafeAuthResult<User>> {
   try {
     const { data, error } = await withAuthTimeout(
-      supabase.auth.getUser(),
+      request,
       { data: { user: null }, error: new Error('auth call timed out') } as unknown as Awaited<ReturnType<typeof supabase.auth.getUser>>,
+      timeoutMs,
     );
     if (error) return { value: null, error };
     return { value: data.user ?? null, error: null };
@@ -111,12 +125,32 @@ export async function safeGetUser(): Promise<SafeAuthResult<User>> {
   }
 }
 
+/** Resolves to the current user or null. Never throws, never hangs. */
+export async function safeGetUser(timeoutMs = AUTH_CALL_TIMEOUT_MS): Promise<SafeAuthResult<User>> {
+  return resolveSafeUserLookup(supabase.auth.getUser(), timeoutMs);
+}
+
+/**
+ * Server-verify one exact cached/event session token without reacquiring the
+ * browser's session-storage Web Lock. Supabase's explicit-JWT getUser path is
+ * still an authenticated network request; it simply avoids coupling identity
+ * verification to an unrelated tab's refresh/storage lock.
+ */
+export async function safeGetUserForAccessToken(
+  accessToken: string,
+  timeoutMs = AUTH_CALL_TIMEOUT_MS,
+): Promise<SafeAuthResult<User>> {
+  if (!accessToken) return { value: null, error: new Error('missing access token') };
+  return resolveSafeUserLookup(supabase.auth.getUser(accessToken), timeoutMs);
+}
+
 /** Resolves to the current session or null. Never throws, never hangs. */
-export async function safeGetSession(): Promise<SafeAuthResult<Session>> {
+export async function safeGetSession(timeoutMs = AUTH_CALL_TIMEOUT_MS): Promise<SafeAuthResult<Session>> {
   try {
     const { data, error } = await withAuthTimeout(
       supabase.auth.getSession(),
       { data: { session: null }, error: new Error('auth call timed out') } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>,
+      timeoutMs,
     );
     if (error) return { value: null, error };
     return { value: data.session ?? null, error: null };

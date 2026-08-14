@@ -58,7 +58,7 @@ Summary:`;
     const { data, error } = await supabase.functions.invoke('llm-proxy', {
       body: {
         provider: 'google_ai',
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         messages: [{ role: 'user', content: prompt }],
         max_tokens: 800,
         temperature: 0.1,

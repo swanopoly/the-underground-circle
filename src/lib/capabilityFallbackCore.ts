@@ -134,12 +134,10 @@ const MAX_PROVIDER_SCAN = 256;
 // disagree. platformDefault candidates ride the always-reachable Anthropic
 // platform spine; the others are eligible only when their provider is connected.
 //
-// NOTE (spec deviation, intentional): the design sketch labelled gpt-4.1 as
-// "coding strong", but getModelCapabilityFlags('gpt-4.1') resolves via the
-// /^(gpt-4o|gpt-4.1|gpt-5)/ family pattern to TOOL_VISION_FLAGS → codingTier
-// 'basic'. Mirroring modelCapabilities.ts (the caller's own injected source)
-// is the governing rule, so gpt-4.1 is 'basic' here. It still serves as the
-// alt long-context anchor for pure context-window gaps.
+// GPT-5.6 Terra is the current OpenAI long-context anchor. Its capability facts
+// intentionally mirror modelCapabilities.ts; it remains a basic coding-tier
+// substitute here because this ladder is for capability preservation rather
+// than the stronger coding-model policy owned elsewhere.
 
 const HAIKU_FLAGS: ModelCapabilityFlags = Object.freeze({
   toolUse: true,
@@ -169,7 +167,7 @@ const GEMINI_PRO_FLAGS: ModelCapabilityFlags = Object.freeze({
   maxOutputTokens: 8192,
   codingTier: 'strong',
 });
-const GPT_41_FLAGS: ModelCapabilityFlags = Object.freeze({
+const GPT_TERRA_FLAGS: ModelCapabilityFlags = Object.freeze({
   toolUse: true,
   computerUse: false,
   vision: true,
@@ -198,8 +196,8 @@ export interface CapabilityCandidate {
 export const CANONICAL_CAPABILITY_CANDIDATES: readonly CapabilityCandidate[] = Object.freeze([
   Object.freeze({ id: 'claude-haiku-4-5', provider: 'anthropic', platformDefault: true, flags: HAIKU_FLAGS, contextWindow: 200_000 }),
   Object.freeze({ id: 'claude-sonnet-4-6', provider: 'anthropic', platformDefault: true, flags: SONNET_FLAGS, contextWindow: 200_000 }),
-  Object.freeze({ id: 'gemini-2.5-pro', provider: 'google_ai', platformDefault: false, flags: GEMINI_PRO_FLAGS, contextWindow: 1_000_000 }),
-  Object.freeze({ id: 'gpt-4.1', provider: 'openai', platformDefault: false, flags: GPT_41_FLAGS, contextWindow: 1_000_000 }),
+  Object.freeze({ id: 'gemini-3.6-flash', provider: 'google_ai', platformDefault: false, flags: GEMINI_PRO_FLAGS, contextWindow: 1_048_576 }),
+  Object.freeze({ id: 'gpt-5.6-terra', provider: 'openai', platformDefault: false, flags: GPT_TERRA_FLAGS, contextWindow: 1_050_000 }),
 ]);
 
 // ─── Total primitives ────────────────────────────────────────────────────────

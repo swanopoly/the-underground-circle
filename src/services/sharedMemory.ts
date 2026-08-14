@@ -11,6 +11,7 @@
  */
 
 import { supabase } from '../lib/supabase';
+import { safeGetUserForAccessToken } from '../lib/authSession';
 import { useEffect, useState } from 'react';
 import {
   ALL_MEMORY_DOC_KINDS,
@@ -61,6 +62,10 @@ export type MemoryDocBeforeMutationResult =
 
 export type UpdateMemoryDocOptions = {
   guardBaseContent?: string | null;
+  /** Captured identity used to bind every read and write in this invocation. */
+  capturedAuth?: Readonly<{ userId: string; accessToken: string }>;
+  /** Optional lifecycle fence checked before every database mutation. */
+  isAuthorityCurrent?: () => boolean;
   /**
    * Optional one-shot authority gate invoked after the read-only write plan has
    * ruled out refusal/no-op, and immediately before the first database write.
@@ -73,13 +78,17 @@ export type UpdateMemoryDocOptions = {
 export async function getMemoryDoc(
   circleId: string,
   docKind: MemoryDocKind = 'brief',
+  capturedAccessToken?: string,
 ): Promise<MemoryDoc | null> {
-  const { data } = await supabase
+  const accessToken = typeof capturedAccessToken === 'string' ? capturedAccessToken.trim() : '';
+  if (capturedAccessToken !== undefined && (!accessToken || accessToken.length > 16_384)) return null;
+  let query = supabase
     .from('circle_memory')
     .select('*')
     .eq('circle_id', circleId)
-    .eq('doc_kind', docKind)
-    .maybeSingle();
+    .eq('doc_kind', docKind);
+  if (accessToken) query = query.setHeader('Authorization', `Bearer ${accessToken}`);
+  const { data } = await query.maybeSingle();
   return data as MemoryDoc | null;
 }
 
@@ -138,6 +147,43 @@ export async function updateMemoryDoc(
   let attempt = 0;
   let lastMessage = 'Write did not run.';
   let mutationAuthorized = !opts?.beforeMutation;
+  const capturedUserId = String(opts?.capturedAuth?.userId || '').trim();
+  const capturedAccessToken = String(opts?.capturedAuth?.accessToken || '').trim();
+  const exactAuthRequested = opts?.capturedAuth !== undefined;
+  const authorityIsCurrent = (): boolean => {
+    if (!opts?.isAuthorityCurrent) return true;
+    try {
+      return opts.isAuthorityCurrent() === true;
+    } catch {
+      return false;
+    }
+  };
+  const authFailure = (message: string): MemoryDocWriteResult => ({
+    ok: false,
+    status: 'error',
+    docKind,
+    version: null,
+    conflict: null,
+    refusedReason: null,
+    historyRecorded: false,
+    attempts: attempt,
+    message,
+  });
+  if (
+    exactAuthRequested
+    && (
+      !capturedUserId
+      || capturedUserId !== userId
+      || !capturedAccessToken
+      || capturedAccessToken.length > 16_384
+    )
+  ) return authFailure('Captured memory authority is invalid.');
+  if (exactAuthRequested) {
+    const { value: verifiedUser } = await safeGetUserForAccessToken(capturedAccessToken);
+    if (verifiedUser?.id !== capturedUserId || !authorityIsCurrent()) {
+      return authFailure('Captured memory authority is no longer valid.');
+    }
+  }
 
   const authorizeFirstMutation = async (
     plannedDocKind: MemoryDocKind,
@@ -171,7 +217,11 @@ export async function updateMemoryDoc(
 
   while (attempt < MEMORY_WRITE_MAX_ATTEMPTS) {
     attempt += 1;
-    const existing = await getMemoryDoc(circleId, docKind);
+    const existing = await getMemoryDoc(
+      circleId,
+      docKind,
+      exactAuthRequested ? capturedAccessToken : undefined,
+    );
     const plan = planMemoryDocWrite({
       circleId,
       existing,
@@ -204,7 +254,12 @@ export async function updateMemoryDoc(
         attempt,
       );
       if (gateFailure) return gateFailure;
-      const { error } = await supabase.from('circle_memory').insert(plan.patch as Record<string, unknown>);
+      if (!authorityIsCurrent()) return authFailure('Captured memory authority retired before insert.');
+      let insertQuery = supabase.from('circle_memory').insert(plan.patch as Record<string, unknown>);
+      if (exactAuthRequested) {
+        insertQuery = insertQuery.setHeader('Authorization', `Bearer ${capturedAccessToken}`);
+      }
+      const { error } = await insertQuery;
       if (!error) {
         return {
           ok: true, status: 'inserted', docKind: plan.docKind, version: plan.nextVersion,
@@ -227,11 +282,16 @@ export async function updateMemoryDoc(
       attempt,
     );
     if (gateFailure) return gateFailure;
+    if (!authorityIsCurrent()) return authFailure('Captured memory authority retired before update.');
     let historyRecorded = false;
     if (plan.history) {
-      const { error: historyError } = await supabase
+      let historyQuery = supabase
         .from('circle_memory_history')
         .insert(plan.history as unknown as Record<string, unknown>);
+      if (exactAuthRequested) {
+        historyQuery = historyQuery.setHeader('Authorization', `Bearer ${capturedAccessToken}`);
+      }
+      const { error: historyError } = await historyQuery;
       if (historyError) {
         console.warn('[sharedMemory] history insert failed:', historyError.message);
       } else {
@@ -247,6 +307,10 @@ export async function updateMemoryDoc(
     if (plan.expectedVersion !== null) {
       updateQuery = updateQuery.eq('version', plan.expectedVersion);
     }
+    if (!authorityIsCurrent()) return authFailure('Captured memory authority retired before update write.');
+    if (exactAuthRequested) {
+      updateQuery = updateQuery.setHeader('Authorization', `Bearer ${capturedAccessToken}`);
+    }
     const { data: updated, error: updateError } = await updateQuery.select('id');
 
     if (updateError) {
@@ -260,7 +324,13 @@ export async function updateMemoryDoc(
     const outcome = classifyMemoryWriteOutcome({
       plan,
       rowsAffected: updated?.length ?? 0,
-      latest: (updated?.length ?? 0) === 0 ? await getMemoryDoc(circleId, docKind) : null,
+      latest: (updated?.length ?? 0) === 0
+        ? await getMemoryDoc(
+            circleId,
+            docKind,
+            exactAuthRequested ? capturedAccessToken : undefined,
+          )
+        : null,
       attempt,
       maxAttempts: MEMORY_WRITE_MAX_ATTEMPTS,
     });

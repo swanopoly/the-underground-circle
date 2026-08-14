@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, Pressable, Platform, Image } from 'react-native';
-import { OfficeTheme, OFFICE_THEMES, FurnitureItem, FurnitureType, EnvironmentType, isInteractiveFurniture, FURNITURE_CATALOG } from '../../../../lib/officeConfig';
+import { OfficeTheme, OFFICE_THEMES, FurnitureItem, FurnitureType, EnvironmentType, isInteractiveFurniture, FURNITURE_CATALOG, getOfficeAddonRuntimeState } from '../../../../lib/officeConfig';
 import type { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   OFFICE_DESK_POSITIONS,
@@ -8,6 +8,7 @@ import {
   OFFICE_FLOOR_HEIGHT,
   OFFICE_FLOOR_WIDTH,
 } from './officeFloorLayout';
+import { constrainOfficeFurnitureGeometry } from '../../../../lib/officeValidation';
 import {
   EnterKeyItem, ButtonPanelItem, AlarmBellItem, LaunchPadItem,
   JukeboxItem, DiceRollerItem, GongItem, ConfettiCannonItem,
@@ -48,10 +49,17 @@ const DESK_POSITIONS = OFFICE_DESK_POSITIONS;
 interface Props {
   theme?: OfficeTheme;
   furniture?: FurnitureItem[];
+  /**
+   * Desktop agent sprites share the floor stacking context so placed tools can
+   * sit above them without making the floor art cover the agents.
+   */
+  agentLayer?: React.ReactNode;
   onFloorPress?: (x: number, y: number) => void;
   onFurniturePress?: (id: string) => void;
+  onFurnitureDelete?: (id: string) => void;
   onFurnitureMove?: (id: string, x: number, y: number) => void;
   onFurnitureResize?: (id: string, w: number, h: number) => void;
+  onFurnitureTransform?: (id: string, fields: { x: number; y: number; itemWidth: number; itemHeight: number }) => void;
   onFurnitureInteract?: (id: string, type: FurnitureType) => void;
   onFurnitureItemUpdate?: (id: string, fields: Partial<FurnitureItem>) => void;
   onPokerAction?: (id: string, action: string, amount?: number) => void;
@@ -2569,21 +2577,32 @@ function findParentScale(el: HTMLElement): number {
 
 const MIN_ITEM_SIZE = 16;
 
-function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract, onItemUpdate, onPokerAction, editMode, selected, agents }: {
+function FurnitureRenderer({ item, theme, onPress, onDelete, onMove, onResize, onTransform, onInteract, onItemUpdate, onPokerAction, editMode, selected, agents, layerIndex, runtimeNow }: {
   item: FurnitureItem;
   theme: OfficeTheme;
   onPress: () => void;
+  onDelete?: () => void;
   onMove?: (x: number, y: number) => void;
   onResize?: (w: number, h: number) => void;
+  onTransform?: (fields: { x: number; y: number; itemWidth: number; itemHeight: number }) => void;
   onInteract?: () => void;
   onItemUpdate?: (fields: Partial<FurnitureItem>) => void;
   onPokerAction?: (action: string, amount?: number) => void;
   editMode?: boolean;
   selected?: boolean;
   agents?: OfficeAgent[];
+  layerIndex: number;
+  runtimeNow: number;
 }) {
   const content = renderFurnitureContent(item, theme, agents, item.type === 'poker_table' ? onPokerAction : undefined, onItemUpdate);
   const isInteractive = isInteractiveFurniture(item.type);
+  // Farm/Pet/Whack-a-Mole expose their own labelled controls. Treating the entire wrapper
+  // as a second button made keyboard/screen-reader activation a no-op and
+  // created nested interactive elements on web.
+  const hasNestedControls = item.type === 'farm_plot'
+    || item.type === 'office_pet'
+    || item.type === 'whack_a_mole';
+  const wrapperInteractive = isInteractive && !hasNestedControls;
 
   // Look up the catalog natural size for this item type
   const catalog = FURNITURE_CATALOG.find(c => c.type === item.type);
@@ -2593,6 +2612,23 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
   const currentH = item.itemHeight || naturalH;
   const scaleX = currentW / naturalW;
   const scaleY = currentH / naturalH;
+  const rotation = Number.isFinite(item.rotation) ? item.rotation as number : 0;
+  const itemName = catalog?.name || item.type.replace(/_/g, ' ');
+  const itemLabel = item.label?.trim();
+  const runtimeState = getOfficeAddonRuntimeState(item, { nowMs: runtimeNow });
+  const showRuntimeState = catalog?.category === 'connected';
+  const baseAccessibilityLabel = itemLabel ? `${itemName}, ${itemLabel}` : itemName;
+  const accessibilityLabel = showRuntimeState ? `${baseAccessibilityLabel}, ${runtimeState.label}` : baseAccessibilityLabel;
+  const accessibilityHint = editMode
+    ? selected
+      ? 'Use arrow keys to move by one grid step. Hold Shift for five steps. Press Delete or Backspace to remove.'
+      : 'Press Enter or Space to select this item for editing.'
+    : wrapperInteractive
+      ? `Press Enter or Space to ${catalog?.description?.toLowerCase() || 'activate this item'}.`
+      : undefined;
+  const accessibilityValue = editMode
+    ? { text: `Position ${item.x}, ${item.y}. Size ${currentW} by ${currentH}. Rotation ${rotation} degrees.` }
+    : undefined;
 
   // Refs for drag
   const dragRef = React.useRef<{ startX: number; startY: number; itemX: number; itemY: number; dragging: boolean } | null>(null);
@@ -2600,16 +2636,36 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
   const elRef = React.useRef<any>(null);
   const moveRef = React.useRef(onMove);
   const resizeRef = React.useRef(onResize);
+  const transformRef = React.useRef(onTransform);
   const pressRef = React.useRef(onPress);
+  const deleteRef = React.useRef(onDelete);
   const interactRef = React.useRef(onInteract);
+  const contentRef = React.useRef<any>(null);
   const posRef = React.useRef({ x: item.x, y: item.y });
   const sizeRef = React.useRef({ w: currentW, h: currentH });
+  const activePointerCleanupRef = React.useRef<(() => void) | null>(null);
   moveRef.current = onMove;
   resizeRef.current = onResize;
+  transformRef.current = onTransform;
   pressRef.current = onPress;
+  deleteRef.current = onDelete;
   interactRef.current = onInteract;
   posRef.current = { x: item.x, y: item.y };
   sizeRef.current = { w: currentW, h: currentH };
+
+  React.useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const contentElement = contentRef.current as HTMLElement | null;
+    const wrapperElement = elRef.current as HTMLElement | null;
+    if (!contentElement) return;
+    if (editMode) {
+      contentElement.setAttribute('inert', '');
+      if (contentElement.contains(document.activeElement)) wrapperElement?.focus?.();
+    } else {
+      contentElement.removeAttribute('inert');
+    }
+    return () => contentElement.removeAttribute('inert');
+  }, [editMode]);
 
   // ── Refs for 4 resize-handle DOM elements ──
   const handleTLRef = React.useRef<any>(null);
@@ -2622,8 +2678,18 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
   // ── Shared: start a resize drag via native pointerdown ──
   const startResize = React.useCallback((e: PointerEvent, corner: 'tl' | 'tr' | 'bl' | 'br') => {
     if (!resizeRef.current) return;
+    if (activePointerCleanupRef.current) return;
+    if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
     e.stopPropagation();
     e.preventDefault();
+    const pointerId = e.pointerId;
+    const captureTarget = e.currentTarget as HTMLElement | null;
+    try {
+      captureTarget?.setPointerCapture(pointerId);
+    } catch {
+      // Capture can be unavailable for synthetic or already-cancelled pointers.
+      // Document listeners plus the window-blur fallback still close the gesture.
+    }
     resizingRef.current = true;
     const startX = e.clientX;
     const startY = e.clientY;
@@ -2635,6 +2701,7 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
     const contentEl = el?.querySelector('[data-resize-content]') as HTMLElement | null;
 
     const onMove = (me: PointerEvent) => {
+      if (me.pointerId !== pointerId) return;
       const scale = findParentScale(el);
       const dx = (me.clientX - startX) / scale;
       const dy = (me.clientY - startY) / scale;
@@ -2661,6 +2728,21 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
         newY = startItemY + (startH - newH);
       }
 
+      const geometry = constrainOfficeFurnitureGeometry({
+        x: newX,
+        y: newY,
+        itemWidth: newW,
+        itemHeight: newH,
+        rotation,
+        floorWidth: FLOOR_W,
+        floorHeight: FLOOR_H,
+        minItemSize: MIN_ITEM_SIZE,
+      });
+      newX = geometry.x;
+      newY = geometry.y;
+      newW = geometry.itemWidth;
+      newH = geometry.itemHeight;
+
       // Live preview via DOM
       if (contentEl) {
         contentEl.style.transform = `scale(${newW / naturalW}, ${newH / naturalH})`;
@@ -2672,21 +2754,62 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
       (el as any).__pendingResize = { w: newW, h: newH, x: newX, y: newY };
     };
 
-    const onUp = () => {
+    let closed = false;
+    const detach = (restore: boolean) => {
+      if (closed) return;
+      closed = true;
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onCancel);
+      captureTarget?.removeEventListener('lostpointercapture', onLostPointerCapture);
+      window.removeEventListener('blur', onWindowBlur);
+      try {
+        if (captureTarget?.hasPointerCapture(pointerId)) captureTarget.releasePointerCapture(pointerId);
+      } catch {
+        // The browser may already have released capture during cancellation.
+      }
       resizingRef.current = false;
+      if (restore) {
+        el.style.left = `${startItemX}px`;
+        el.style.top = `${startItemY}px`;
+        el.style.width = `${startW}px`;
+        el.style.height = `${startH}px`;
+        if (contentEl) contentEl.style.transform = `scale(${startW / naturalW}, ${startH / naturalH})`;
+      }
+      delete (el as any).__pendingResize;
+      if (activePointerCleanupRef.current === cancelActive) activePointerCleanupRef.current = null;
+    };
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
       const pending = (el as any).__pendingResize;
+      detach(false);
       if (pending) {
-        resizeRef.current?.(pending.w, pending.h);
-        moveRef.current?.(pending.x, pending.y);
-        delete (el as any).__pendingResize;
+        if (transformRef.current) {
+          transformRef.current({ x: pending.x, y: pending.y, itemWidth: pending.w, itemHeight: pending.h });
+        } else {
+          resizeRef.current?.(pending.w, pending.h);
+          moveRef.current?.(pending.x, pending.y);
+        }
       }
     };
+    const onCancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId !== pointerId) return;
+      detach(true);
+    };
+    const onLostPointerCapture = (lostEvent: PointerEvent) => {
+      if (lostEvent.pointerId !== pointerId) return;
+      detach(true);
+    };
+    const onWindowBlur = () => detach(true);
+    const cancelActive = () => detach(true);
 
+    activePointerCleanupRef.current = cancelActive;
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
-  }, [naturalW, naturalH]);
+    document.addEventListener('pointercancel', onCancel);
+    captureTarget?.addEventListener('lostpointercapture', onLostPointerCapture);
+    window.addEventListener('blur', onWindowBlur);
+  }, [naturalW, naturalH, rotation]);
 
   // ── Attach native pointerdown on resize handles + drag-to-move on main el ──
   React.useEffect(() => {
@@ -2714,14 +2837,28 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
 
     // ── Move: native pointerdown on main element ──
     const handlePointerDown = (e: PointerEvent) => {
-      // If the click landed on a resize handle, skip — that handler owns it
-      if (handles.has(e.target as HTMLElement)) return;
+      // Nested controls own their gesture; do not turn delete/resize into a move.
+      const target = e.target as Node | null;
+      const hitResizeHandle = target
+        ? Array.from(handles).some(handle => handle === target || handle.contains(target))
+        : false;
+      if (hitResizeHandle) return;
       if (!moveRef.current) return;
+      if (activePointerCleanupRef.current) return;
+      if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
       e.stopPropagation();
       e.preventDefault();
+      const pointerId = e.pointerId;
+      const captureTarget = e.currentTarget as HTMLElement | null;
+      try {
+        captureTarget?.setPointerCapture(pointerId);
+      } catch {
+        // Document listeners plus the window-blur fallback still close the gesture.
+      }
       dragRef.current = { startX: e.clientX, startY: e.clientY, itemX: posRef.current.x, itemY: posRef.current.y, dragging: false };
 
       const onPointerMove = (me: PointerEvent) => {
+        if (me.pointerId !== pointerId) return;
         if (!dragRef.current) return;
         const dx = me.clientX - dragRef.current.startX;
         const dy = me.clientY - dragRef.current.startY;
@@ -2730,72 +2867,239 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
         }
         if (dragRef.current.dragging) {
           const scale = findParentScale(el);
-          const newX = Math.round((dragRef.current.itemX + dx / scale) / GRID_SIZE) * GRID_SIZE;
-          const newY = Math.round((dragRef.current.itemY + dy / scale) / GRID_SIZE) * GRID_SIZE;
-          el.style.left = newX + 'px';
-          el.style.top = newY + 'px';
+          const geometry = constrainOfficeFurnitureGeometry({
+            x: Math.round((dragRef.current.itemX + dx / scale) / GRID_SIZE) * GRID_SIZE,
+            y: Math.round((dragRef.current.itemY + dy / scale) / GRID_SIZE) * GRID_SIZE,
+            itemWidth: sizeRef.current.w,
+            itemHeight: sizeRef.current.h,
+            rotation,
+            floorWidth: FLOOR_W,
+            floorHeight: FLOOR_H,
+            minItemSize: MIN_ITEM_SIZE,
+          });
+          el.style.left = `${geometry.x}px`;
+          el.style.top = `${geometry.y}px`;
+          (el as any).__pendingMove = { x: geometry.x, y: geometry.y };
         }
       };
 
-      const onPointerUp = (ue: PointerEvent) => {
+      let closed = false;
+      const detach = (restore: boolean) => {
+        if (closed) return;
+        closed = true;
         document.removeEventListener('pointermove', onPointerMove);
         document.removeEventListener('pointerup', onPointerUp);
-        if (dragRef.current?.dragging) {
-          const scale = findParentScale(el);
-          const dx = ue.clientX - dragRef.current.startX;
-          const dy = ue.clientY - dragRef.current.startY;
-          const newX = Math.max(0, Math.min(FLOOR_W - 20, Math.round((dragRef.current.itemX + dx / scale) / GRID_SIZE) * GRID_SIZE));
-          const newY = Math.max(0, Math.min(FLOOR_H - 20, Math.round((dragRef.current.itemY + dy / scale) / GRID_SIZE) * GRID_SIZE));
-          moveRef.current?.(newX, newY);
+        document.removeEventListener('pointercancel', onPointerCancel);
+        captureTarget?.removeEventListener('lostpointercapture', onLostPointerCapture);
+        window.removeEventListener('blur', onWindowBlur);
+        try {
+          if (captureTarget?.hasPointerCapture(pointerId)) captureTarget.releasePointerCapture(pointerId);
+        } catch {
+          // The browser may already have released capture during cancellation.
+        }
+        if (restore) {
+          el.style.left = `${posRef.current.x}px`;
+          el.style.top = `${posRef.current.y}px`;
+        }
+        delete (el as any).__pendingMove;
+        dragRef.current = null;
+        if (activePointerCleanupRef.current === cancelActive) activePointerCleanupRef.current = null;
+      };
+      const onPointerUp = (upEvent: PointerEvent) => {
+        if (upEvent.pointerId !== pointerId) return;
+        const wasDragging = !!dragRef.current?.dragging;
+        const pending = (el as any).__pendingMove as { x: number; y: number } | undefined;
+        detach(false);
+        if (wasDragging && pending) {
+          moveRef.current?.(pending.x, pending.y);
         } else {
           pressRef.current();
         }
-        dragRef.current = null;
       };
+      const onPointerCancel = (cancelEvent: PointerEvent) => {
+        if (cancelEvent.pointerId !== pointerId) return;
+        detach(true);
+      };
+      const onLostPointerCapture = (lostEvent: PointerEvent) => {
+        if (lostEvent.pointerId !== pointerId) return;
+        detach(true);
+      };
+      const onWindowBlur = () => detach(true);
+      const cancelActive = () => detach(true);
 
+      activePointerCleanupRef.current = cancelActive;
       document.addEventListener('pointermove', onPointerMove);
       document.addEventListener('pointerup', onPointerUp);
+      document.addEventListener('pointercancel', onPointerCancel);
+      captureTarget?.addEventListener('lostpointercapture', onLostPointerCapture);
+      window.addEventListener('blur', onWindowBlur);
     };
 
     el.addEventListener('pointerdown', handlePointerDown);
 
     return () => {
+      activePointerCleanupRef.current?.();
       el.removeEventListener('pointerdown', handlePointerDown);
       handleMap.forEach((fn, h) => h.removeEventListener('pointerdown', fn));
     };
-  }, [editMode, selected, startResize]);
+  }, [editMode, rotation, selected, startResize]);
 
   const handleInteractClick = React.useCallback(() => {
-    if (!editMode && isInteractive && interactRef.current) {
+    if (!editMode && wrapperInteractive && interactRef.current) {
       interactRef.current();
     }
-  }, [editMode, isInteractive]);
+  }, [editMode, wrapperInteractive]);
+
+  const moveByKeyboard = React.useCallback((dx: number, dy: number) => {
+    if (!editMode || !selected || !moveRef.current) return;
+    const geometry = constrainOfficeFurnitureGeometry({
+      x: posRef.current.x + dx,
+      y: posRef.current.y + dy,
+      itemWidth: sizeRef.current.w,
+      itemHeight: sizeRef.current.h,
+      rotation,
+      floorWidth: FLOOR_W,
+      floorHeight: FLOOR_H,
+      minItemSize: MIN_ITEM_SIZE,
+    });
+    moveRef.current(geometry.x, geometry.y);
+  }, [editMode, rotation, selected]);
+
+  const handleKeyDown = React.useCallback((event: any) => {
+    const key = String(event?.key || event?.nativeEvent?.key || '');
+    if (editMode && selected && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(key)) {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      const step = GRID_SIZE * (event.shiftKey || event.nativeEvent?.shiftKey ? 5 : 1);
+      if (key === 'ArrowLeft') moveByKeyboard(-step, 0);
+      if (key === 'ArrowRight') moveByKeyboard(step, 0);
+      if (key === 'ArrowUp') moveByKeyboard(0, -step);
+      if (key === 'ArrowDown') moveByKeyboard(0, step);
+      return;
+    }
+    if (editMode && selected && (key === 'Delete' || key === 'Backspace') && deleteRef.current) {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      deleteRef.current();
+      return;
+    }
+    if ((key === 'Enter' || key === ' ') && (editMode || wrapperInteractive)) {
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      if (editMode) pressRef.current();
+      else interactRef.current?.();
+    }
+  }, [editMode, moveByKeyboard, selected, wrapperInteractive]);
+
+  const handleAccessibilityAction = React.useCallback((event: any) => {
+    const action = event?.nativeEvent?.actionName;
+    const step = GRID_SIZE;
+    if (action === 'activate') {
+      if (editMode) pressRef.current();
+      else interactRef.current?.();
+    } else if (action === 'moveLeft') moveByKeyboard(-step, 0);
+    else if (action === 'moveRight') moveByKeyboard(step, 0);
+    else if (action === 'moveUp') moveByKeyboard(0, -step);
+    else if (action === 'moveDown') moveByKeyboard(0, step);
+    else if (action === 'delete') deleteRef.current?.();
+  }, [editMode, moveByKeyboard]);
+
+  const accessibilityActions = editMode
+    ? selected
+      ? [
+          { name: 'activate', label: `Edit ${itemName}` },
+          { name: 'moveLeft', label: `Move ${itemName} left` },
+          { name: 'moveRight', label: `Move ${itemName} right` },
+          { name: 'moveUp', label: `Move ${itemName} up` },
+          { name: 'moveDown', label: `Move ${itemName} down` },
+          ...(onDelete ? [{ name: 'delete', label: `Delete ${itemName}` }] : []),
+        ]
+      : [{ name: 'activate', label: `Select ${itemName}` }]
+    : wrapperInteractive
+      ? [{ name: 'activate', label: `Activate ${itemName}` }]
+      : [];
 
   return (
     <Pressable
       ref={elRef}
-      onPress={!editMode && isInteractive ? handleInteractClick : undefined}
+      testID={`office-floor-item-${item.id}`}
+      onPress={editMode
+        ? Platform.OS === 'web' ? undefined : onPress
+        : wrapperInteractive ? handleInteractClick : undefined}
+      accessible={editMode || wrapperInteractive}
+      focusable={editMode || wrapperInteractive}
+      accessibilityRole={editMode || wrapperInteractive ? 'button' : undefined}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
+      accessibilityState={{ selected: !!selected }}
+      accessibilityValue={accessibilityValue}
+      accessibilityActions={accessibilityActions as any}
+      onAccessibilityAction={handleAccessibilityAction}
+      {...(Platform.OS === 'web' ? ({
+        onKeyDown: handleKeyDown,
+        tabIndex: editMode || wrapperInteractive ? 0 : -1,
+        'aria-pressed': editMode ? !!selected : undefined,
+        dataSet: {
+          officeAddonType: item.type,
+          officeAddonId: item.id,
+          officeAddonX: item.x,
+          officeAddonY: item.y,
+          officeAddonWidth: currentW,
+          officeAddonHeight: currentH,
+          officeAddonRotation: rotation,
+        },
+      } as any) : {})}
       style={[s.placedWrap,
-        { left: item.x, top: item.y, width: currentW, height: currentH },
-        Platform.OS === 'web' && { cursor: editMode ? 'grab' : (isInteractive ? 'pointer' : 'default'), userSelect: 'none' } as any,
+        {
+          left: item.x,
+          top: item.y,
+          width: currentW,
+          height: currentH,
+          transform: rotation ? [{ rotate: `${rotation}deg` }] : undefined,
+          transformOrigin: 'center center',
+          // Read-mode decorations stay below agent sprites (zIndex 7), while
+          // actionable tools stay above them. Edit mode raises every placed
+          // item because agents are non-interactive while arranging the room.
+          zIndex: selected ? 1000 : (editMode || wrapperInteractive) ? 30 + layerIndex : 4,
+        } as any,
+        Platform.OS === 'web' && { cursor: editMode ? 'grab' : (wrapperInteractive ? 'pointer' : 'default'), userSelect: 'none' } as any,
         selected && s.placedSelected,
-        !editMode && isInteractive && s.placedInteractive,
+        !editMode && wrapperInteractive && s.placedInteractive,
       ]}
     >
       {/* Scaled content wrapper — transforms the natural-size content to the user's custom size */}
       <View
+        ref={contentRef}
+        pointerEvents={editMode ? 'none' : 'auto'}
+        accessibilityElementsHidden={!!editMode}
+        importantForAccessibility={editMode ? 'no-hide-descendants' : 'auto'}
         style={{ width: naturalW, height: naturalH, transformOrigin: 'top left', overflow: 'hidden', transform: [{ scaleX }, { scaleY }] } as any}
-        {...({ dataSet: { resizeContent: 'true' } } as any)}
+        {...({
+          dataSet: { resizeContent: 'true' },
+          ...(Platform.OS === 'web' && editMode ? { 'aria-hidden': true } : {}),
+        } as any)}
       >
         {content}
       </View>
 
+      {showRuntimeState ? (
+        <View
+          pointerEvents="none"
+          style={[
+            s.addonStateBadge,
+            runtimeState.state === 'live' && s.addonStateLive,
+            runtimeState.state === 'demo' && s.addonStateDemo,
+            runtimeState.state === 'setup' && s.addonStateSetup,
+            (runtimeState.state === 'stale' || runtimeState.state === 'error') && s.addonStateError,
+          ]}
+        >
+          <Text style={s.addonStateText}>{runtimeState.label.toUpperCase()}</Text>
+        </View>
+      ) : null}
+
       {/* Edit mode controls */}
       {editMode && selected && (
         <>
-          <Pressable onPress={() => { pressRef.current(); }} style={s.editDeleteBtn}>
-            <Text style={s.editDeleteText}>DELETE</Text>
-          </Pressable>
           {/* Size label */}
           <View style={{ position: 'absolute', bottom: -16, left: 0, right: 0, alignItems: 'center', zIndex: 30 }}>
             <Text style={{ color: '#3b82f6', fontSize: 7, fontWeight: '800', fontFamily: 'monospace' }}>
@@ -2803,10 +3107,10 @@ function FurnitureRenderer({ item, theme, onPress, onMove, onResize, onInteract,
             </Text>
           </View>
           {/* Corner resize handles — refs used for native pointerdown in useEffect */}
-          <View ref={handleTLRef} style={{ position: 'absolute', top: -6, left: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nwse-resize' } : {}) } as any} />
-          <View ref={handleTRRef} style={{ position: 'absolute', top: -6, right: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nesw-resize' } : {}) } as any} />
-          <View ref={handleBLRef} style={{ position: 'absolute', bottom: -6, left: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nesw-resize' } : {}) } as any} />
-          <View ref={handleBRRef} style={{ position: 'absolute', bottom: -6, right: -6, width: 12, height: 12, borderRadius: 6, backgroundColor: '#3b82f6', borderWidth: 2, borderColor: '#fff', zIndex: 30, ...(Platform.OS === 'web' ? { cursor: 'nwse-resize' } : {}) } as any} />
+          <View ref={handleTLRef} testID={`office-floor-resize-${item.id}-tl`} accessible={false} style={[s.resizeHandle, s.resizeHandleTL, Platform.OS === 'web' && { cursor: 'nwse-resize' } as any]} />
+          <View ref={handleTRRef} testID={`office-floor-resize-${item.id}-tr`} accessible={false} style={[s.resizeHandle, s.resizeHandleTR, Platform.OS === 'web' && { cursor: 'nesw-resize' } as any]} />
+          <View ref={handleBLRef} testID={`office-floor-resize-${item.id}-bl`} accessible={false} style={[s.resizeHandle, s.resizeHandleBL, Platform.OS === 'web' && { cursor: 'nesw-resize' } as any]} />
+          <View ref={handleBRRef} testID={`office-floor-resize-${item.id}-br`} accessible={false} style={[s.resizeHandle, s.resizeHandleBR, Platform.OS === 'web' && { cursor: 'nwse-resize' } as any]} />
         </>
       )}
       {editMode && !selected && (
@@ -2826,6 +3130,20 @@ function renderFurnitureContent(
   onItemUpdate?: (fields: Partial<FurnitureItem>) => void,
 ) {
   switch (item.type) {
+    case 'desk':
+      return (
+        <View style={{ width: 100, height: 50, position: 'relative', alignItems: 'center' }}>
+          <View style={{ width: 96, height: 13, marginTop: 18, borderRadius: 3, borderWidth: 2, borderColor: theme.deskBorder, backgroundColor: theme.deskColor }}>
+            <View style={{ position: 'absolute', top: -16, left: 34, width: 30, height: 17, borderRadius: 2, borderWidth: 1, borderColor: theme.accentGlow + '88', backgroundColor: '#07111f', alignItems: 'center', justifyContent: 'center' }}>
+              <View style={{ width: 20, height: 2, borderRadius: 1, backgroundColor: theme.accentGlow + '88' }} />
+            </View>
+            <View style={{ position: 'absolute', top: 3, left: 14, width: 30, height: 4, borderRadius: 2, backgroundColor: '#111827' }} />
+            <View style={{ position: 'absolute', top: 2, right: 12, width: 6, height: 6, borderRadius: 3, backgroundColor: '#94a3b8' }} />
+          </View>
+          <View style={{ position: 'absolute', top: 31, left: 8, width: 6, height: 18, backgroundColor: theme.deskBorder }} />
+          <View style={{ position: 'absolute', top: 31, right: 8, width: 6, height: 18, backgroundColor: theme.deskBorder }} />
+        </View>
+      );
     case 'plant':
       return (
         <View style={s.fPlant}>
@@ -2874,7 +3192,7 @@ function renderFurnitureContent(
         <View style={s.fTV}>
           <View style={[s.fTVScreen, { backgroundColor: '#0a0a1f', borderColor: theme.accentGlow }]}>
             <View style={[s.fTVGlow, { backgroundColor: theme.accentGlow + '30' }]} />
-            <Text style={[s.fTVText, { color: theme.accentGlow }]}>LIVE</Text>
+            <Text style={[s.fTVText, { color: theme.accentGlow }]}>DASH</Text>
           </View>
           <View style={s.fTVStand} />
           <View style={s.fTVBase} />
@@ -3106,7 +3424,7 @@ function renderFurnitureContent(
     case 'trivia_screen': return <TriviaScreenItem item={item} theme={theme} />;
     case 'retro_console': return <RetroConsoleItem item={item} theme={theme} />;
     case 'scrabble_board': return <ScrabbleBoardItem item={item} theme={theme} />;
-    case 'farm_plot': return <FarmPlotItem item={item} theme={theme} />;
+    case 'farm_plot': return <FarmPlotItem item={item} theme={theme} onItemUpdate={onItemUpdate} />;
     case 'office_pet': return <OfficePetItem item={item} theme={theme} onItemUpdate={onItemUpdate} />;
     case 'crypto_ticker': return <CryptoTickerItem item={item} theme={theme} />;
     case 'github_feed': return <GitHubFeedItem item={item} theme={theme} />;
@@ -3115,6 +3433,34 @@ function renderFurnitureContent(
     case 'music_visualizer': return <MusicVisualizerItem item={item} theme={theme} />;
     case 'figma_board': return <FigmaBoardItem item={item} theme={theme} />;
     case 'email_hub': return <EmailHubItem item={item} theme={theme} />;
+    case 'hf_explorer':
+      return (
+        <View style={{ width: 86, height: 66, borderRadius: 8, borderWidth: 1, borderColor: '#fbbf2466', backgroundColor: '#17130a', overflow: 'hidden' }}>
+          <View style={{ height: 18, paddingHorizontal: 5, backgroundColor: '#fbbf2422', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={{ color: '#fde68a', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>HF</Text>
+            <Text style={{ color: '#fbbf24', fontSize: 4, fontWeight: '800', fontFamily: 'monospace' }}>EXPLORE</Text>
+          </View>
+          <View style={{ flex: 1, padding: 5, gap: 3, justifyContent: 'center' }}>
+            {[32, 54, 42].map((width, index) => (
+              <View key={index} style={{ height: 5, width, borderRadius: 2, backgroundColor: index === 1 ? '#fbbf2433' : '#ffffff12' }} />
+            ))}
+            <Text style={{ color: '#94a3b8', fontSize: 4, marginTop: 2, fontFamily: 'monospace' }}>BROWSE MODELS</Text>
+          </View>
+        </View>
+      );
+    case 'hf_runner':
+      return (
+        <View style={{ width: 86, height: 66, borderRadius: 8, borderWidth: 1, borderColor: '#a78bfa66', backgroundColor: '#100b1b', overflow: 'hidden' }}>
+          <View style={{ height: 18, paddingHorizontal: 5, backgroundColor: '#8b5cf622', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={{ color: '#ddd6fe', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>HF</Text>
+            <Text style={{ color: '#a78bfa', fontSize: 4, fontWeight: '800', fontFamily: 'monospace' }}>RUNNER</Text>
+          </View>
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: '#c4b5fd', fontSize: 13 }}>▶</Text>
+            <Text style={{ color: '#94a3b8', fontSize: 4, marginTop: 3, fontFamily: 'monospace' }}>OPEN TOOL RUNNER</Text>
+          </View>
+        </View>
+      );
     default:
       return <Text style={{ fontSize: 20 }}>📦</Text>;
   }
@@ -3124,9 +3470,14 @@ function renderFurnitureContent(
 //  MAIN FLOOR COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFurniturePress, onFurnitureMove, onFurnitureResize, onFurnitureInteract, onFurnitureItemUpdate, onPokerAction, agents, selectedFurnitureId, editMode }: Props) {
+function OfficeFloorInner({ theme: themeProp, furniture = [], agentLayer, onFloorPress, onFurniturePress, onFurnitureDelete, onFurnitureMove, onFurnitureResize, onFurnitureTransform, onFurnitureInteract, onFurnitureItemUpdate, onPokerAction, agents, selectedFurnitureId, editMode }: Props) {
   const theme = themeProp || OFFICE_THEMES.underground;
   const env = theme.environmentType || 'office';
+  const [runtimeNow, setRuntimeNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const timer = setInterval(() => setRuntimeNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
 
   const bgSource = THEME_BACKGROUNDS[env] || null;
   const useSprite = !!bgSource;
@@ -3169,7 +3520,13 @@ function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFu
   };
 
   return (
-    <Pressable ref={floorRef} onPress={handlePress} style={[s.floor, { backgroundColor: theme.floorColor }]}>
+    <Pressable
+      ref={floorRef}
+      testID="office-floor-canvas"
+      onPress={handlePress}
+      accessibilityLabel={onFloorPress ? 'Office floor placement canvas' : 'Office floor'}
+      style={[s.floor, { backgroundColor: theme.floorColor }]}
+    >
       {/* PNG sprite background (replaces walls/windows/decor/floor pattern) */}
       {useSprite && bgSource ? (
         <Image source={bgSource} style={s.bgImage} resizeMode="cover" />
@@ -3188,21 +3545,28 @@ function OfficeFloorInner({ theme: themeProp, furniture = [], onFloorPress, onFu
       {/* Environment desks (always render as Views for agent positioning) */}
       {deskElements}
 
+      {/* Agent sprites intentionally sit between floor art and placed items. */}
+      {agentLayer}
+
       {/* User-placed furniture (2D rendering + click handlers) */}
-      {furniture.map(item => (
+      {furniture.map((item, layerIndex) => (
         <FurnitureRenderer
           key={item.id}
           item={item}
           theme={theme}
           onPress={() => onFurniturePress?.(item.id)}
+          onDelete={onFurnitureDelete ? () => onFurnitureDelete(item.id) : undefined}
           onMove={onFurnitureMove ? (x, y) => onFurnitureMove(item.id, x, y) : undefined}
           onResize={onFurnitureResize ? (w, h) => onFurnitureResize(item.id, w, h) : undefined}
+          onTransform={onFurnitureTransform ? (fields) => onFurnitureTransform(item.id, fields) : undefined}
           onInteract={onFurnitureInteract ? () => onFurnitureInteract(item.id, item.type) : undefined}
           onItemUpdate={onFurnitureItemUpdate ? (fields) => onFurnitureItemUpdate(item.id, fields) : undefined}
           onPokerAction={onPokerAction ? (action, amount) => onPokerAction(item.id, action, amount) : undefined}
           editMode={editMode}
           selected={selectedFurnitureId === item.id}
           agents={agents}
+          layerIndex={layerIndex}
+          runtimeNow={runtimeNow}
         />
       ))}
 
@@ -3257,13 +3621,24 @@ const s = StyleSheet.create({
   floorLabel: { fontSize: 7, color: '#444', fontFamily: 'monospace', letterSpacing: 2 },
 
   placedWrap: { position: 'absolute', zIndex: 8 },
-  placedSelected: { zIndex: 20, ...(Platform.OS === 'web' ? { outlineStyle: 'solid', outlineWidth: 2, outlineColor: '#3b82f6', outlineOffset: 2, borderRadius: 2 } as any : { borderWidth: 2, borderColor: '#3b82f6', borderRadius: 2 }) },
-  placedInteractive: { zIndex: 12 },
+  placedSelected: { ...(Platform.OS === 'web' ? { outlineStyle: 'solid', outlineWidth: 2, outlineColor: '#3b82f6', outlineOffset: 2, borderRadius: 2 } as any : { borderWidth: 2, borderColor: '#3b82f6', borderRadius: 2 }) },
+  placedInteractive: {},
+  addonStateBadge: { position: 'absolute', top: -14, left: 0, minHeight: 13, paddingHorizontal: 4, borderRadius: 4, borderWidth: 1, borderColor: '#475569', backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center', zIndex: 24 },
+  addonStateLive: { borderColor: '#22c55e88', backgroundColor: '#052e16' },
+  addonStateDemo: { borderColor: '#f59e0b88', backgroundColor: '#451a03' },
+  addonStateSetup: { borderColor: '#60a5fa88', backgroundColor: '#172554' },
+  addonStateError: { borderColor: '#ef444488', backgroundColor: '#450a0a' },
+  addonStateText: { color: '#f8fafc', fontSize: 6, lineHeight: 9, fontWeight: '900', fontFamily: 'monospace' },
   fInteractive: { alignItems: 'center' as const, justifyContent: 'center' as const, borderWidth: 1, overflow: 'hidden' as const },
-  editDeleteBtn: { position: 'absolute', top: -20, left: '50%' as any, marginLeft: -22, width: 44, height: 18, borderRadius: 4, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', zIndex: 12, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
-  editDeleteText: { color: '#fff', fontSize: 7, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.5 },
-  editGrabHint: { position: 'absolute', top: -2, right: -8, width: 12, height: 12, borderRadius: 2, backgroundColor: '#ffffff30', alignItems: 'center', justifyContent: 'center', zIndex: 10 },
-  editGrabText: { color: '#fff', fontSize: 6, fontWeight: '800', lineHeight: 10 },
+  editDeleteBtn: { position: 'absolute', top: -34, left: '50%' as any, marginLeft: -34, width: 68, minHeight: 28, borderRadius: 6, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center', zIndex: 32, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) },
+  editDeleteText: { color: '#fff', fontSize: 9, fontWeight: '800', letterSpacing: 0.3 },
+  editGrabHint: { position: 'absolute', top: -4, right: -12, width: 24, height: 24, borderRadius: 12, backgroundColor: '#ffffff30', alignItems: 'center', justifyContent: 'center', zIndex: 10 },
+  editGrabText: { color: '#fff', fontSize: 10, fontWeight: '800', lineHeight: 18 },
+  resizeHandle: { position: 'absolute', width: 24, height: 24, borderRadius: 12, backgroundColor: '#3b82f6', borderWidth: 3, borderColor: '#fff', zIndex: 30 },
+  resizeHandleTL: { top: -12, left: -12 },
+  resizeHandleTR: { top: -12, right: -12 },
+  resizeHandleBL: { bottom: -12, left: -12 },
+  resizeHandleBR: { bottom: -12, right: -12 },
 
   fPlant: { alignItems: 'center', width: 24, height: 28 },
   fPlantLeaf: { position: 'absolute', top: 0, width: 10, height: 12, borderRadius: 6 },

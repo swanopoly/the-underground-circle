@@ -5,7 +5,7 @@
  *
  * Resilience features:
  *  - Exponential backoff retry (5s → 10s → 20s → 30s cap)
- *  - Connects to OpenSwan gateway directly (:18789)
+ *  - Uses the CORS/auth proxy on web and the direct gateway on native
  *  - Visibility-change listener: instantly retries when user switches back to tab
  *  - Poller error detection: marks connection as error after 3 consecutive failures
  *  - Singleton — safe to call start() multiple times.
@@ -54,6 +54,7 @@ import {
   loadConnections,
   saveConnections,
   autoDiscoverLocalAgents,
+  getLocalOpenSwanDiscoveryEndpoints,
   probeEndpointHealth,
 } from './connectionManager';
 import {
@@ -63,10 +64,16 @@ import {
   testConnection,
 } from './openswanService';
 import { OfficeAgent } from './officeAgents';
+import type { CircleOfficeAuthScope } from './circleOffice';
+import {
+  buildOpenSwanConnectionFingerprint,
+  matchesOpenSwanConnectionFingerprint,
+  type OpenSwanConnectionFingerprint,
+} from './officeAgentSessionBindingCore';
 import { areBridgesAvailable } from './bridgeEnvironment';
 import { Platform } from 'react-native';
 import { devLog } from './devLog';
-import { safeGetUserId } from './authSession';
+import { isBenignAuthAbort, safeGetUserId } from './authSession';
 import {
   clearAutoConnectStateListeners,
   publishAutoConnectSnapshot,
@@ -75,6 +82,7 @@ import {
 
 export {
   getAutoConnectConnections,
+  getAutoConnectSessionFingerprints,
   getAutoConnectSessions,
   isAutoConnectRunning,
   subscribeAutoConnect,
@@ -85,6 +93,7 @@ export {
 let _running = false;
 let _connections: AgentConnection[] = [];
 let _sessionsMap = new Map<string, any[]>();
+let _sessionFingerprints = new Map<string, OpenSwanConnectionFingerprint>();
 let _ccPoller: ClaudeCodePoller | null = null;
 let _ccPublished = false;
 let _ccStarting = false;   // Prevents duplicate poller creation
@@ -98,6 +107,8 @@ let _cursorPoller: CursorPoller | null = null;
 let _cursorPublished = false;
 let _cursorStarting = false;
 let _ocPollers = new Map<string, OpenSwanPoller>();
+let _ocPollerGenerations = new Map<string, number>();
+let _authScope: CircleOfficeAuthScope | null = null;
 // Memory save throttle — 30s per provider
 let _lastMemorySave: Record<string, number> = {};
 const MEMORY_SAVE_THROTTLE_MS = 30_000;
@@ -111,6 +122,7 @@ let _cachedUserIdAt = 0;
 const USER_ID_CACHE_MS = 60_000;
 
 async function _getUserId(): Promise<string | null> {
+  if (_authScope?.userId) return _authScope.userId;
   if (_cachedUserId && Date.now() - _cachedUserIdAt < USER_ID_CACHE_MS) {
     return _cachedUserId;
   }
@@ -118,8 +130,6 @@ async function _getUserId(): Promise<string | null> {
   if (uid) {
     _cachedUserId = uid;
     _cachedUserIdAt = Date.now();
-  } else {
-    console.warn('[agentAutoConnect] _getUserId: no user authenticated');
   }
   return uid;
 }
@@ -162,6 +172,34 @@ let _retryAttempt = 0; // for exponential backoff
 // any local bridges running — no reason to fire 24 fetches/min into the
 // void. Resets the moment any bridge is detected.
 let _bridgeMissCount = 0;
+type LocalBridgeProvider = 'cc' | 'codex' | 'gemini' | 'cursor';
+const BRIDGE_OFFLINE_CONFIRM_MISSES = 3;
+const _bridgeProviderMisses: Record<LocalBridgeProvider, number> = {
+  cc: 0,
+  codex: 0,
+  gemini: 0,
+  cursor: 0,
+};
+
+function _bridgeConfirmedOffline(provider: LocalBridgeProvider, detected: boolean): boolean {
+  if (detected) {
+    _bridgeProviderMisses[provider] = 0;
+    return false;
+  }
+  _bridgeProviderMisses[provider] = Math.min(
+    BRIDGE_OFFLINE_CONFIRM_MISSES,
+    _bridgeProviderMisses[provider] + 1,
+  );
+  return _bridgeProviderMisses[provider] >= BRIDGE_OFFLINE_CONFIRM_MISSES;
+}
+
+function _resetBridgeDetectionMisses(): void {
+  _bridgeMissCount = 0;
+  _bridgeProviderMisses.cc = 0;
+  _bridgeProviderMisses.codex = 0;
+  _bridgeProviderMisses.gemini = 0;
+  _bridgeProviderMisses.cursor = 0;
+}
 // Consecutive reconnect-cycle failures (resets on any success). Separate
 // from `_retryAttempt` (which caps at 4 to bound the backoff ceiling) so we
 // can detect "this has been failing for real time" independently of the
@@ -182,11 +220,6 @@ const OC_RECONNECT_INTERVAL = 20000; // OpenSwan reconnect check interval (20s)
 // session and cuts request volume in half vs the old 5s default.
 const BRIDGE_POLL_INTERVAL_MS = 10000;
 
-// OpenSwan endpoints to try (direct gateway — CORS proxy removed)
-const OPENCLAW_FALLBACK_ENDPOINTS = [
-  'http://localhost:18789', // Direct gateway
-];
-
 function hasAuthFailure(conn: AgentConnection): boolean {
   return typeof conn.error === 'string' && /authentication failed|wrong or missing token/i.test(conn.error);
 }
@@ -196,6 +229,7 @@ function _notify() {
     running: _running,
     connections: _connections,
     sessionsMap: _sessionsMap,
+    sessionFingerprints: _sessionFingerprints,
     circleId: _circleId,
   });
 }
@@ -209,11 +243,19 @@ export function setAutoConnectCircleId(circleId: string) {
 /** Allow OfficeTab to update connections (e.g. user adds/removes) */
 export function updateAutoConnectConnections(conns: AgentConnection[]) {
   for (const [connId, poller] of _ocPollers.entries()) {
+    const previousConn = _connections.find((conn) => conn.id === connId);
     const nextConn = conns.find((conn) => conn.id === connId);
-    if (!nextConn || nextConn.provider !== 'openswan' || nextConn.enabled === false || nextConn.status === 'disconnected') {
+    const capturedFingerprint = _sessionFingerprints.get(connId);
+    const connectionChanged = !previousConn
+      || !nextConn
+      || !capturedFingerprint
+      || !matchesOpenSwanConnectionFingerprint(capturedFingerprint, nextConn);
+    if (!nextConn || nextConn.provider !== 'openswan' || nextConn.enabled === false || nextConn.status !== 'connected' || connectionChanged) {
       poller.stop();
       _ocPollers.delete(connId);
+      _ocPollerGenerations.set(connId, (_ocPollerGenerations.get(connId) || 0) + 1);
       _sessionsMap.delete(connId);
+      _sessionFingerprints.delete(connId);
     }
   }
   _connections = conns;
@@ -301,7 +343,14 @@ function _getRetryInterval(): number {
 
 // ── Start (called once from App.tsx after auth) ──────────────────────────────
 
-export async function startAgentAutoConnect() {
+export async function startAgentAutoConnect(authScope?: CircleOfficeAuthScope) {
+  const userId = String(authScope?.userId || '').trim();
+  const accessToken = String(authScope?.accessToken || '').trim();
+  if (userId && accessToken) {
+    _authScope = Object.freeze({ userId, accessToken });
+    _cachedUserId = userId;
+    _cachedUserIdAt = Date.now();
+  }
   if (_running) return;
   _running = true;
   _retryAttempt = 0;
@@ -403,8 +452,10 @@ export function stopAgentAutoConnect() {
     poller.stop();
   }
   _ocPollers.clear();
+  _ocPollerGenerations.clear();
   _connections = [];
   _sessionsMap.clear();
+  _sessionFingerprints.clear();
   _ccPublished = false;
   _ccStarting = false;
   _codexPublished = false;
@@ -415,8 +466,12 @@ export function stopAgentAutoConnect() {
   _cursorStarting = false;
   _visibilityDebounce = false;
   _circleId = null;
+  _authScope = null;
+  _cachedUserId = null;
+  _cachedUserIdAt = 0;
   setAutoConnectCircleContext(null);
   _retryAttempt = 0;
+  _resetBridgeDetectionMisses();
   _stopVisibilityListener();
   _notify();
   clearAutoConnectStateListeners();
@@ -448,6 +503,14 @@ function _startRetryLoop() {
 
   const tickBridgeProbe = async () => {
     if (!_running) return;
+    if (
+      Platform.OS === 'web'
+      && typeof document !== 'undefined'
+      && document.visibilityState === 'hidden'
+    ) {
+      _retryTimer = setTimeout(tickBridgeProbe, nextBridgeProbeDelay());
+      return;
+    }
 
     // Detect all bridges in parallel instead of sequentially
     const [ccDetected, codexDetected, geminiDetected, cursorDetected] = await Promise.all([
@@ -456,6 +519,22 @@ function _startRetryLoop() {
       detectGeminiCliBridge().catch(() => false),
       detectCursorBridge().catch(() => false),
     ]);
+    // Visibility may change while the parallel probes are in flight. Do not
+    // let a late result restart or tear down pollers after the hidden handler
+    // has deliberately paused them.
+    if (!_running) return;
+    if (
+      Platform.OS === 'web'
+      && typeof document !== 'undefined'
+      && document.visibilityState === 'hidden'
+    ) {
+      _retryTimer = setTimeout(tickBridgeProbe, nextBridgeProbeDelay());
+      return;
+    }
+    const ccConfirmedOffline = _bridgeConfirmedOffline('cc', ccDetected);
+    const codexConfirmedOffline = _bridgeConfirmedOffline('codex', codexDetected);
+    const geminiConfirmedOffline = _bridgeConfirmedOffline('gemini', geminiDetected);
+    const cursorConfirmedOffline = _bridgeConfirmedOffline('cursor', cursorDetected);
 
     // Track miss/hit for backoff. Reset on ANY hit.
     if (ccDetected || codexDetected || geminiDetected || cursorDetected) {
@@ -469,7 +548,7 @@ function _startRetryLoop() {
       _startCCPoller();
       _retryAttempt = 0;
       console.log('[agentAutoConnect] Claude Code bridge came online');
-    } else if (!ccDetected && _ccPoller) {
+    } else if (ccConfirmedOffline && _ccPoller) {
       _ccPoller.stop();
       _ccPoller = null;
       _ccStarting = false;
@@ -516,7 +595,7 @@ function _startRetryLoop() {
     if (codexDetected && !_codexPoller) {
       _startCodexPoller();
       console.log('[agentAutoConnect] Codex bridge came online');
-    } else if (!codexDetected && _codexPoller) {
+    } else if (codexConfirmedOffline && _codexPoller) {
       _codexPoller.stop();
       _codexPoller = null;
       _codexStarting = false;
@@ -536,7 +615,7 @@ function _startRetryLoop() {
     if (geminiDetected && !_geminiPoller) {
       _startGeminiPoller();
       console.log('[agentAutoConnect] Gemini CLI bridge came online');
-    } else if (!geminiDetected && _geminiPoller) {
+    } else if (geminiConfirmedOffline && _geminiPoller) {
       _geminiPoller.stop();
       _geminiPoller = null;
       _geminiStarting = false;
@@ -556,7 +635,7 @@ function _startRetryLoop() {
     if (cursorDetected && !_cursorPoller) {
       _startCursorPoller();
       console.log('[agentAutoConnect] Cursor bridge came online');
-    } else if (!cursorDetected && _cursorPoller) {
+    } else if (cursorConfirmedOffline && _cursorPoller) {
       _cursorPoller.stop();
       _cursorPoller = null;
       _cursorStarting = false;
@@ -675,6 +754,13 @@ function _stopAllBridgePollersForBackground() {
     try { poller.stop(); } catch {}
   }
   _ocPollers.clear();
+  for (const connId of _ocPollerGenerations.keys()) {
+    _ocPollerGenerations.set(connId, (_ocPollerGenerations.get(connId) || 0) + 1);
+  }
+  _sessionsMap.clear();
+  _sessionFingerprints.clear();
+  _resetBridgeDetectionMisses();
+  _notify();
 }
 
 function _startVisibilityListener() {
@@ -710,6 +796,11 @@ function _startVisibilityListener() {
       detectGeminiCliBridge().catch(() => false),
       detectCursorBridge().catch(() => false),
     ]).then(([cc, codex, gemini, cursor]) => {
+      if (!_running || document.visibilityState !== 'visible') return;
+      _bridgeConfirmedOffline('cc', cc);
+      _bridgeConfirmedOffline('codex', codex);
+      _bridgeConfirmedOffline('gemini', gemini);
+      _bridgeConfirmedOffline('cursor', cursor);
       if (cc && !_ccPoller) {
         _startCCPoller();
         console.log('[agentAutoConnect] Claude Code bridge reconnected on tab focus');
@@ -760,15 +851,18 @@ function _startCCPoller() {
     // Publish to circle DB if we have a circleId — pass sessions for multi-agent support
     if (!_ccPublished && _circleId) {
       _ccPublished = true;
-      publishClaudeCodeAgent(_circleId, sessions.length, sessions).catch(err =>
-        console.error('[agentAutoConnect] Failed to publish CC agent:', err),
-      );
+      publishClaudeCodeAgent(_circleId, sessions.length, sessions, _authScope || undefined)
+        .then((result) => { if (result.error) _ccPublished = false; })
+        .catch((err) => {
+          _ccPublished = false;
+          if (!isBenignAuthAbort(err)) console.error('[agentAutoConnect] Failed to publish CC agent:', err);
+        });
     } else if (_ccPublished && _circleId) {
       // Re-publish if session count changed (new session started) — creates new pixel agents
-      publishClaudeCodeAgent(_circleId, sessions.length, sessions).catch(() => {});
+      publishClaudeCodeAgent(_circleId, sessions.length, sessions, _authScope || undefined).catch(() => {});
     }
     if (_ccPublished && _circleId) {
-      updateClaudeCodeAgentStatus(_circleId, sessions).catch(() => {});
+      updateClaudeCodeAgentStatus(_circleId, sessions, _authScope || undefined).catch(() => {});
     }
     _maybeSaveBridgeMemory('cc', sessions, saveCCSessionsToMemory);
   });
@@ -788,14 +882,17 @@ function _startCodexPoller() {
     // Publish to circle DB if we have a circleId
     if (!_codexPublished && _circleId) {
       _codexPublished = true;
-      publishCodexAgent(_circleId, sessions.length, sessions).catch(err =>
-        console.error('[agentAutoConnect] Failed to publish Codex agent:', err),
-      );
+      publishCodexAgent(_circleId, sessions.length, sessions, _authScope || undefined)
+        .then((result) => { if (result.error) _codexPublished = false; })
+        .catch((err) => {
+          _codexPublished = false;
+          if (!isBenignAuthAbort(err)) console.error('[agentAutoConnect] Failed to publish Codex agent:', err);
+        });
     } else if (_codexPublished && _circleId) {
-      publishCodexAgent(_circleId, sessions.length, sessions).catch(() => {});
+      publishCodexAgent(_circleId, sessions.length, sessions, _authScope || undefined).catch(() => {});
     }
     if (_codexPublished && _circleId) {
-      updateCodexAgentStatus(_circleId, sessions).catch(() => {});
+      updateCodexAgentStatus(_circleId, sessions, _authScope || undefined).catch(() => {});
     }
     _maybeSaveBridgeMemory('codex', sessions, saveCodexSessionsToMemory);
   });
@@ -815,14 +912,17 @@ function _startGeminiPoller() {
     // Publish to circle DB if we have a circleId
     if (!_geminiPublished && _circleId) {
       _geminiPublished = true;
-      publishGeminiCliAgent(_circleId, sessions.length, sessions).catch(err =>
-        console.error('[agentAutoConnect] Failed to publish Gemini CLI agent:', err),
-      );
+      publishGeminiCliAgent(_circleId, sessions.length, sessions, _authScope || undefined)
+        .then((result) => { if (result.error) _geminiPublished = false; })
+        .catch((err) => {
+          _geminiPublished = false;
+          if (!isBenignAuthAbort(err)) console.error('[agentAutoConnect] Failed to publish Gemini CLI agent:', err);
+        });
     } else if (_geminiPublished && _circleId) {
-      publishGeminiCliAgent(_circleId, sessions.length, sessions).catch(() => {});
+      publishGeminiCliAgent(_circleId, sessions.length, sessions, _authScope || undefined).catch(() => {});
     }
     if (_geminiPublished && _circleId) {
-      updateGeminiCliAgentStatus(_circleId, sessions).catch(() => {});
+      updateGeminiCliAgentStatus(_circleId, sessions, _authScope || undefined).catch(() => {});
     }
     _maybeSaveBridgeMemory('gemini', sessions, saveGeminiSessionsToMemory);
   });
@@ -841,12 +941,15 @@ function _startCursorPoller() {
 
     if (!_cursorPublished && _circleId) {
       _cursorPublished = true;
-      publishCursorAgent(_circleId, sessions.length).catch(err =>
-        console.error('[agentAutoConnect] Failed to publish Cursor agent:', err),
-      );
+      publishCursorAgent(_circleId, sessions.length, _authScope || undefined)
+        .then((result) => { if (result.error) _cursorPublished = false; })
+        .catch((err) => {
+          _cursorPublished = false;
+          if (!isBenignAuthAbort(err)) console.error('[agentAutoConnect] Failed to publish Cursor agent:', err);
+        });
     }
     if (_cursorPublished && _circleId) {
-      updateCursorAgentStatus(_circleId, sessions).catch(() => {});
+      updateCursorAgentStatus(_circleId, sessions, _authScope || undefined).catch(() => {});
     }
     _maybeSaveBridgeMemory('cursor', sessions, saveCursorSessionsToMemory);
   });
@@ -863,7 +966,7 @@ async function _probeWithFallbacks(conn: AgentConnection): Promise<boolean> {
 
   // For OpenSwan connections, try alternate endpoints
   if (conn.provider === 'openswan') {
-    for (const fallback of OPENCLAW_FALLBACK_ENDPOINTS) {
+    for (const fallback of getLocalOpenSwanDiscoveryEndpoints()) {
       if (fallback === conn.endpoint) continue; // Already tried
       const ok = await probeEndpointHealth(fallback);
       if (ok) {
@@ -886,6 +989,13 @@ async function _probeWithFallbacks(conn: AgentConnection): Promise<boolean> {
 // ── Internal: Connect with endpoint fallback ─────────────────────────────────
 
 async function _connectWithFallback(conn: AgentConnection) {
+  const generation = (_ocPollerGenerations.get(conn.id) || 0) + 1;
+  _ocPollerGenerations.set(conn.id, generation);
+  const priorPoller = _ocPollers.get(conn.id);
+  if (priorPoller) priorPoller.stop();
+  _ocPollers.delete(conn.id);
+  _sessionsMap.delete(conn.id);
+  _sessionFingerprints.delete(conn.id);
   // Update status to connecting
   _connections = _connections.map(c =>
     c.id === conn.id ? { ...c, status: 'connecting' as const, error: undefined } : c,
@@ -898,7 +1008,7 @@ async function _connectWithFallback(conn: AgentConnection) {
 
   // If failed and this is an OpenSwan connection, try fallback endpoints
   if (!result.ok && conn.provider === 'openswan') {
-    for (const fallback of OPENCLAW_FALLBACK_ENDPOINTS) {
+    for (const fallback of getLocalOpenSwanDiscoveryEndpoints()) {
       if (fallback === conn.endpoint) continue; // Already tried
       const fallbackConfig: OpenSwanConfig = { endpoint: fallback, token: conn.token };
       const fallbackResult = await testConnection(fallbackConfig);
@@ -933,8 +1043,19 @@ async function _connectWithFallback(conn: AgentConnection) {
     return;
   }
 
+  if (_ocPollerGenerations.get(conn.id) !== generation) return;
+  const connectionFingerprint = buildOpenSwanConnectionFingerprint(conn);
+  if (!connectionFingerprint) {
+    _connections = _connections.map(c => c.id === conn.id
+      ? { ...c, status: 'error' as const, error: 'Invalid OpenSwan connection identity' }
+      : c);
+    _notify();
+    return;
+  }
+
   // Store initial sessions
   _sessionsMap.set(conn.id, result.sessions || []);
+  _sessionFingerprints.set(conn.id, connectionFingerprint);
 
   // Agent listing is optional and can be incompatible on some bridge/proxy
   // endpoints. Do not probe it during initial auto-connect; fetch lazily in
@@ -956,11 +1077,18 @@ async function _connectWithFallback(conn: AgentConnection) {
   );
 
   // Start poller
-  const oldPoller = _ocPollers.get(conn.id);
-  if (oldPoller) oldPoller.stop();
-
-  const poller = new OpenSwanPoller(config, (update: OpenSwanUpdate) => {
+  let poller: OpenSwanPoller;
+  poller = new OpenSwanPoller(config, (update: OpenSwanUpdate) => {
+    const currentConnection = _connections.find((candidate) => candidate.id === conn.id);
+    if (
+      _ocPollerGenerations.get(conn.id) !== generation
+      || _ocPollers.get(conn.id) !== poller
+      || !currentConnection
+      || currentConnection.status !== 'connected'
+      || !matchesOpenSwanConnectionFingerprint(connectionFingerprint, currentConnection)
+    ) return;
     _sessionsMap.set(conn.id, update.sessions);
+    _sessionFingerprints.set(conn.id, connectionFingerprint);
     _connections = _connections.map(c =>
       c.id === conn.id && c.status === 'connected'
         ? { ...c, sessionCount: update.sessions.length }
@@ -968,11 +1096,13 @@ async function _connectWithFallback(conn: AgentConnection) {
     );
     _notify();
   }, (error: string) => {
+    if (_ocPollerGenerations.get(conn.id) !== generation || _ocPollers.get(conn.id) !== poller) return;
     // Poller detected persistent failure — mark connection as error so retry timer picks it up
     const unsupported = /does not support openswan tool rpcs/i.test(error);
     if (unsupported) {
       console.log('[agentAutoConnect] Poller disabled for', conn.id, ':', error);
       _ocPollers.delete(conn.id);
+      _ocPollerGenerations.set(conn.id, generation + 1);
       _connections = _connections.map(c =>
         c.id === conn.id
           ? {
@@ -987,6 +1117,9 @@ async function _connectWithFallback(conn: AgentConnection) {
     }
     console.log('[agentAutoConnect] Poller error for', conn.id, ':', error);
     _ocPollers.delete(conn.id);
+    _ocPollerGenerations.set(conn.id, generation + 1);
+    _sessionsMap.delete(conn.id);
+    _sessionFingerprints.delete(conn.id);
     _connections = _connections.map(c =>
       c.id === conn.id
         ? { ...c, status: 'error' as const, error }

@@ -1701,8 +1701,8 @@ for (const readOnlyMode of ['list', 'read', 'search', 'stat'] as const) {
 }
 assert.match(
   deterministicFileGate,
-  /if \(shouldRunDeterministicReadOnlyFileAdapter\) \{[\s\S]*?await executeComputerFileTask\(/,
-  'executeComputerFileTask is reachable only through the read-only gate',
+  /if \(shouldRunDeterministicReadOnlyFileAdapter\) \{[\s\S]*?await executeDesktopBridgeFileTask\(args\.task\)/,
+  'the exact desktop-bridge file task is reachable only through the read-only gate',
 );
 assert.match(
   deterministicFileGate,
@@ -1710,7 +1710,7 @@ assert.match(
   'app mutation classification is computed before either deterministic or agent dispatch',
 );
 assert.equal(
-  (computerRuntimeSource.match(/await executeComputerFileTask\(/g) || []).length,
+  (computerRuntimeSource.match(/await executeDesktopBridgeFileTask\(args\.task\)/g) || []).length,
   1,
   'there is exactly one deterministic file adapter dispatch site',
 );

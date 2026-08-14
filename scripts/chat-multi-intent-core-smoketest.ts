@@ -12,7 +12,8 @@
  *       with a curated imperative ACTION VERB. Coordinated objects ("fix the
  *       header and footer"), narrative "and" ("I opened it and it crashed"), and
  *       pure questions collapse to ONE 'lead' segment.
- *     • connectives: enumerated > newline > semicolon > then (sequential) > also
+ *     • connectives: enumerated / newline / semicolon / comma / then
+ *       (sequential) / also
  *       (additive); first segment is always 'lead'.
  *     • sequential is forward-looking: seg[i].sequential is true iff seg[i+1]
  *       arrived via a 'then'-class boundary (the last segment is always false).
@@ -70,7 +71,7 @@ function seqs(msg: unknown): boolean[] { return res(msg).segments.map((s) => s.s
 function texts(msg: unknown): string[] { return res(msg).segments.map((s) => s.text); }
 function count(msg: unknown): number { return res(msg).segments.length; }
 
-const ALLOWED_CONNECTIVES = new Set(['lead', 'then', 'also', 'enumerated', 'newline', 'semicolon']);
+const ALLOWED_CONNECTIVES = new Set(['lead', 'then', 'also', 'comma', 'enumerated', 'newline', 'semicolon']);
 
 /** Structural invariants any result must satisfy for any input. */
 function invariantsHold(msg: unknown): boolean {
@@ -235,6 +236,61 @@ function main(): void {
   assertJson(cons('fix the bug\nupdate the docs'), ['lead', 'newline'], '(6) newline connective');
   assertEq(res('fix the bug\nupdate the docs').reason, 'multi-additive', '(6) newline defaults to additive flavor');
   assertJson(cons('fix the bug; deploy the site'), ['lead', 'semicolon'], '(6) semicolon connective');
+  assertJson(
+    verbs('Open Illustrator. Create a new document. Export it as PNG.'),
+    ['open', 'create', 'export'],
+    '(6) sentence-separated imperatives remain three requested actions',
+  );
+  assertJson(
+    cons('List the folder. Read report.pdf. Summarize it.'),
+    ['lead', 'then', 'then'],
+    '(6) sentence-separated file steps retain ordered dependencies',
+  );
+  assertEq(
+    isCompoundRequest('The app is version 1. It is stable.'),
+    false,
+    '(6) sentence punctuation without imperative heads does not create actions',
+  );
+  assertJson(
+    verbs('Please do the following. Open Illustrator. Create a document. Export it.'),
+    ['open', 'create', 'export'],
+    '(6) a bounded instruction preamble does not hide the first requested action',
+  );
+  assertJson(
+    verbs('Here is the task: Open Illustrator. Create a document.'),
+    ['open', 'create'],
+    '(6) a colon task preamble retains both sentence-separated actions',
+  );
+  assertJson(
+    verbs('Open Illustrator before creating a document, then export it.'),
+    ['open', 'create', 'export'],
+    '(6) a temporal before-gerund retains the dependent action',
+  );
+  assertJson(
+    verbs('After opening Illustrator, create a document, add a circle, and export it.'),
+    ['open', 'create', 'add', 'export'],
+    '(6) a leading after-gerund retains the prerequisite action',
+  );
+  assertJson(
+    verbs('Open Illustrator and after it opens create a document and save it.'),
+    ['open', 'create', 'save'],
+    '(6) a ready transition without a comma still exposes the next action',
+  );
+  assertJson(
+    verbs('Open Illustrator and once ready create a document and export it.'),
+    ['open', 'create', 'export'],
+    '(6) concise once-ready language still exposes every following action',
+  );
+  assertEq(
+    isCompoundRequest('Here is the status: the app is stable. The document is ready.'),
+    false,
+    '(6) a narrative status preamble does not manufacture an action',
+  );
+  assertEq(
+    isCompoundRequest('I left before opening the file and it crashed.'),
+    false,
+    '(6) a narrative temporal gerund does not become a compound command',
+  );
   assertEq(isCompoundRequest('- fix the bug\n- deploy the site'), true, '(6) dash bullets split');
   assertJson(cons('- fix the bug\n- deploy the site'), ['lead', 'enumerated'], '(6) bullet markers are enumerated');
 
@@ -253,6 +309,101 @@ function main(): void {
   assertJson(verbs('please fix the bug and can you deploy it'), ['fix', 'deploy'], '(7) courtesy prefixes stripped for verb detection');
   assertEq(res('please fix the bug and can you deploy it').segments[0].text, 'please fix the bug', '(7) segment text keeps the user words');
   assertEq(segmentChatIntents('just quickly deploy it').segments[0].verb, 'deploy', '(7) leading adverbs stripped');
+
+  // ─── (7b) desktop multi-action lists + polite gerunds ──────────────────────
+  {
+    const msg = 'Open Illustrator, create a new document, add a blue circle, and export it as PNG';
+    const r = segmentChatIntents(msg);
+    assertEq(r.isMultiIntent, true, '(7b) comma-delimited desktop actions are retained');
+    assertJson(verbs(msg), ['open', 'create', 'add', 'export'], '(7b) comma desktop verbs');
+    assertJson(cons(msg), ['lead', 'comma', 'comma', 'also'], '(7b) comma and final-and connectives');
+    assertJson(
+      texts(msg),
+      ['Open Illustrator', 'create a new document', 'add a blue circle', 'export it as PNG'],
+      '(7b) every comma-delimited action remains independently visible',
+    );
+  }
+  {
+    const msg = 'Would you mind opening Illustrator, creating a blank document, adding a blue circle, and saving it';
+    assertJson(verbs(msg), ['open', 'create', 'add', 'save'], '(7b) explicit mind frame normalizes bounded gerund action heads');
+    assertEq(res(msg).segments.length, 4, '(7b) polite gerund list retains all four actions');
+  }
+  assertJson(
+    verbs('Hey, can you please open Illustrator, then create a document, and export it?'),
+    ['open', 'create', 'export'],
+    '(7b) stacked greeting/courtesy wording does not hide the first action',
+  );
+  assertEq(
+    isCompoundRequest('I was running reports and opening files and deleting old entries'),
+    false,
+    '(7b) gerunds outside an explicit request frame remain narrative',
+  );
+  assertEq(
+    isCompoundRequest('Open Illustrator, Photoshop, and Figma'),
+    false,
+    '(7b) comma-delimited object names do not become phantom actions',
+  );
+  assertEq(
+    isCompoundRequest('Create a 600 x 600 document, RGB, transparent background'),
+    false,
+    '(7b) comma-delimited attributes remain one requested action',
+  );
+  assertJson(
+    verbs('Visit the store, buy the selected item, and stop if a CAPTCHA appears'),
+    ['visit', 'buy'],
+    '(7b) a conditional safety stop stays attached to the preceding action',
+  );
+  assertEq(
+    texts('Visit the store, buy the selected item, and stop if a CAPTCHA appears')[1],
+    'buy the selected item, and stop if a CAPTCHA appears',
+    '(7b) conditional safety wording is preserved verbatim in the action it constrains',
+  );
+  assertJson(
+    verbs('Open Music and stop playback'),
+    ['open', 'stop'],
+    '(7b) a direct stop command remains an independently tracked action',
+  );
+  assertJson(
+    verbs('Open Music and pause the current track'),
+    ['open', 'pause'],
+    '(7b) a direct pause command remains an independently tracked action',
+  );
+  assertJson(
+    verbs('Open Illustrator and once the app is ready, create a document, add a circle, and export it'),
+    ['open', 'create', 'add', 'export'],
+    '(7b) a bounded ready-state transition does not hide the next imperative',
+  );
+  assertJson(
+    verbs('Visit the dashboard and when the page loads, read the account name and report it'),
+    ['visit', 'read', 'report'],
+    '(7b) browser ready-state wording retains each requested follow-up',
+  );
+
+  // ─── (7c) universal app action heads + conservative negatives ──────────────
+  for (const [msg, expectedVerbs] of [
+    ['Open NovaBoard and read the active project title', ['open', 'read']],
+    ['Use BeamStudio and paste Welcome into the Description text box', ['use', 'paste']],
+    ['Visit https://example.com and report the page title', ['visit', 'report']],
+    ['Go to https://example.com and search for pricing', ['go', 'search']],
+    ['Open SecurePanel and sign in with my saved account', ['open', 'sign']],
+    ['Launch SyncPanel and grant calendar permission', ['launch', 'grant']],
+    ['In Chrome, open https://example.com and read the main heading', ['open', 'read']],
+    ['Open Word and apply Bold to the selected text', ['open', 'apply']],
+    ['Open Music and mute the current track', ['open', 'mute']],
+  ] as const) {
+    assertEq(isCompoundRequest(msg), true, `(7c) universal app workflow is multi-action :: ${msg}`);
+    assertJson(verbs(msg), expectedVerbs, `(7c) universal app action heads survive :: ${msg}`);
+  }
+  for (const msg of [
+    'Use salt and pepper',
+    'Read the header and footer',
+    'I use Chrome and it crashes',
+    'In my opinion, the app is stable and fast',
+    'We visited the site and read the article',
+    'Can I open the app and read the file?',
+  ]) {
+    assertEq(isCompoundRequest(msg), false, `(7c) narrative/object/question remains one intent :: ${msg}`);
+  }
 
   // ─── (8) bounds — segment cap + tail fold ───────────────────────────────────
   {

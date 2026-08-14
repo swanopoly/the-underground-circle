@@ -2364,7 +2364,7 @@ export async function compactConversation(
     const { data, error } = await supabase.functions.invoke('llm-proxy', {
       body: {
         provider: 'google_ai',
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         messages: [{ role: 'user', content: `Analyze this conversation and extract:
 1. A concise summary (2-3 sentences max)
 2. Key decisions made (array of strings)

@@ -1,6 +1,13 @@
 # Office Feature Improvements - AI Agent Farm
 *Research & Implementation Plan*
 
+> **Historical research plan.** It is not the current source-of-truth for
+> Office behavior. Use `docs/AGENTS_ROADMAP.md`, `CLAUDE.md`, and
+> `docs/UC_APP_STACK_REFERENCE.md` for current ownership and proof boundaries.
+> The 2026-08-12 addon/editor wave now owns the exhaustive catalog, truthful
+> runtime states, search/filters, five room kits, bounded undo/redo, and
+> mobile/keyboard editing; aspirational metrics below are not live evidence.
+
 ---
 
 ## 🎯 Phase 1: Enhanced Tracking & Observability

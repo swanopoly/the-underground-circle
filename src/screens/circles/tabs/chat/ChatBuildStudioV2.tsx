@@ -211,7 +211,7 @@ function consoleLevelStyle(level: string) {
   const l = level.toLowerCase();
   if (l === 'error') return { color: '#ef4444', borderColor: '#ef4444' };
   if (l === 'warn')  return { color: '#f59e0b', borderColor: '#f59e0b' };
-  if (l === 'info')  return { color: '#22d3ee', borderColor: 'rgba(99, 102, 241, 0.67)' };
+  if (l === 'info')  return { color: '#6366f1', borderColor: 'rgba(99, 102, 241, 0.67)' };
   return { color: '#94a3b8', borderColor: '#334155' };
 }
 
@@ -1462,7 +1462,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
   },
   pointDrawerTitle: {
-    color: '#22d3ee', fontSize: 10, fontWeight: '900',
+    color: '#6366f1', fontSize: 10, fontWeight: '900',
     letterSpacing: 0.8, fontFamily: 'monospace', flex: 1,
   },
   pointDrawerClose: {

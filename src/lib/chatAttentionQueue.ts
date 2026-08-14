@@ -71,6 +71,8 @@ export type ChatAttentionBlockedRunInput = {
   status: string;
   surface?: string | null;
   started_at?: string | null;
+  /** Last canonical status/heartbeat write; owns stale-blocker visibility. */
+  updated_at?: string | null;
   created_at?: string | null;
 };
 
@@ -103,6 +105,11 @@ export type ChatAttentionOptions = {
    * passed; nagging about a stale row is noise). Default 60 min.
    */
   expiredVisibilityMs?: number;
+  /**
+   * A paused/waiting run quiet longer than this is stale history, not a live
+   * interruption. Defaults to the shared run freshness window (30 minutes).
+   */
+  blockedVisibilityMs?: number;
   /**
    * Deprecated compatibility input. Thread chronology cannot safely correlate
    * a completion with an approval because one thread can contain many tasks.
@@ -407,8 +414,14 @@ function blockedRunItem(run: ChatAttentionBlockedRunInput, now: number): ChatAtt
   const waitingMs = Number.isFinite(since) ? Math.max(0, now - since) : null;
   const waitLabel = waitingMs !== null ? ` — blocked ${formatChatAttentionDuration(waitingMs)}` : '';
   const isPaused = String(run.status) === 'paused';
+  const revisionMs = Date.parse(String(run.updated_at || ''));
+  // A revision-aware id makes a durable acknowledgement suppress this exact
+  // blocked episode while allowing a later status/update episode to surface.
+  const revision = Number.isFinite(revisionMs)
+    ? Math.floor(revisionMs).toString(36)
+    : String(run.status || 'blocked').replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || 'blocked';
   return {
-    id: `run:${run.id}`,
+    id: `run:${run.id}:${revision}`,
     kind: 'run_blocked',
     title: isPaused
       ? `Run paused: ${clampText(run.title || 'untitled run', 70)}`
@@ -484,6 +497,9 @@ export function buildChatAttentionState(
   const now = opts.now ?? Date.now();
   const expiringThresholdMs = opts.expiringThresholdMs ?? DEFAULT_EXPIRING_THRESHOLD_MS;
   const expiredVisibilityMs = opts.expiredVisibilityMs ?? DEFAULT_EXPIRED_VISIBILITY_MS;
+  const blockedVisibilityMs = typeof opts.blockedVisibilityMs === 'number' && Number.isFinite(opts.blockedVisibilityMs)
+    ? Math.max(0, opts.blockedVisibilityMs)
+    : 30 * 60_000;
 
   const items: ChatAttentionItem[] = [];
 
@@ -506,6 +522,8 @@ export function buildChatAttentionState(
     if (!run || !run.id) continue;
     const status = String(run.status || '');
     if (status !== 'waiting_approval' && status !== 'paused') continue;
+    const lastBlockedUpdate = Date.parse(String(run.updated_at || run.started_at || run.created_at || ''));
+    if (Number.isFinite(lastBlockedUpdate) && now - lastBlockedUpdate > blockedVisibilityMs) continue;
     items.push(blockedRunItem(run, now));
   }
 

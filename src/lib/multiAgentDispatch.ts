@@ -70,7 +70,11 @@ export interface MultiAgentRunResult {
   replyPreview?: string | null;
 }
 
-const MENTION_HEAD = /^@([\w][\w.-]*)/;
+// Immutable runtime ids use `::` (for example
+// `bridge::codex::session-id` and `connection-id::session-key`). A colon is
+// part of a mention only when another id segment follows it, so `@agent: task`
+// still leaves the prompt delimiter untouched.
+const MENTION_HEAD = /^@([A-Za-z0-9_][A-Za-z0-9_.-]*(?::+[A-Za-z0-9_][A-Za-z0-9_.-]*)*)/;
 
 export function parseMultiAgentRequest(
   input: string,
@@ -168,20 +172,34 @@ function isActiveAgent(agent: MultiAgentAvailableAgent): boolean {
   return status === 'active' || status === 'building' || status === 'idle' || !status;
 }
 
-export function buildMultiAgentAliasMap(agents: MultiAgentAvailableAgent[]): Record<string, string> {
+type MultiAgentAliasIndex = {
+  aliases: Record<string, string>;
+  agentIds: Record<string, string>;
+  ambiguous: Set<string>;
+};
+
+function buildMultiAgentAliasIndex(agents: MultiAgentAvailableAgent[]): MultiAgentAliasIndex {
+  const candidates = new Map<string, Map<string, string>>();
   const aliases: Record<string, string> = {};
-  const add = (alias: string, name: string) => {
+  const agentIds: Record<string, string> = {};
+  const ambiguous = new Set<string>();
+  const add = (alias: string, agent: MultiAgentAvailableAgent) => {
+    const raw = String(alias || '').trim().toLowerCase().replace(/^@/, '');
     const normalized = normalizeAlias(alias);
-    if (normalized && !aliases[normalized]) aliases[normalized] = name;
     const compact = compactAlias(alias);
-    if (compact && !aliases[compact]) aliases[compact] = name;
+    for (const key of new Set([raw, normalized, compact])) {
+      if (!key) continue;
+      const matches = candidates.get(key) || new Map<string, string>();
+      matches.set(agent.id, agent.name);
+      candidates.set(key, matches);
+    }
   };
 
   for (const agent of uniqueAgents(agents)) {
-    add(agent.name, agent.name);
-    add(agent.id, agent.name);
-    if (agent.provider) add(`${agent.provider} ${agent.name}`, agent.name);
-    if (agent.name.includes('#')) add(agent.name.replace('#', ''), agent.name);
+    add(agent.name, agent);
+    add(agent.id, agent);
+    if (agent.provider) add(`${agent.provider} ${agent.name}`, agent);
+    if (agent.name.includes('#')) add(agent.name.replace('#', ''), agent);
   }
 
   const openswan = agents.find(agent =>
@@ -190,31 +208,78 @@ export function buildMultiAgentAliasMap(agents: MultiAgentAvailableAgent[]): Rec
     || agent.id === 'default::blackswan'
   );
   if (openswan) {
-    for (const alias of BLACKSWAN_ALIASES) add(alias, openswan.name);
-    add('open swan', openswan.name);
-    add('openswan', openswan.name);
+    for (const alias of BLACKSWAN_ALIASES) add(alias, openswan);
+    add('open swan', openswan);
+    add('openswan', openswan);
   }
 
-  return aliases;
+  for (const [key, matches] of candidates) {
+    if (matches.size === 1) {
+      const [agentId, agentName] = Array.from(matches.entries())[0];
+      aliases[key] = agentName;
+      agentIds[key] = agentId;
+    } else {
+      ambiguous.add(key);
+    }
+  }
+
+  return { aliases, agentIds, ambiguous };
+}
+
+export function buildMultiAgentAliasMap(agents: MultiAgentAvailableAgent[]): Record<string, string> {
+  return buildMultiAgentAliasIndex(agents).aliases;
+}
+
+function findExplicitAmbiguousAlias(raw: string, ambiguous: Set<string>): string | null {
+  for (const match of raw.matchAll(/@([A-Za-z0-9_][A-Za-z0-9_.-]*(?::+[A-Za-z0-9_][A-Za-z0-9_.-]*)*)/g)) {
+    const candidate = match[1] || '';
+    const normalized = normalizeAlias(candidate);
+    const compact = compactAlias(candidate);
+    if (ambiguous.has(normalized) || ambiguous.has(compact)) return candidate;
+  }
+
+  const colon = raw.indexOf(':');
+  if (colon > 0) {
+    const targetText = raw.slice(0, colon).replace(/^\/(?:multi|multi-agent|all-agents|roundtable|agent-roundtable|sequence|sequential|agent-chain|debate|agent-debate|agents)\b/i, '');
+    for (const candidate of splitTargetList(targetText)) {
+      const normalized = normalizeAlias(candidate);
+      const compact = compactAlias(candidate);
+      if (ambiguous.has(normalized) || ambiguous.has(compact)) return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveUniqueAgentsByIds(
+  ids: string[],
+  agents: MultiAgentAvailableAgent[],
+): MultiAgentAvailableAgent[] | null {
+  const resolved: MultiAgentAvailableAgent[] = [];
+  for (const id of ids) {
+    const matches = agents.filter(agent => agent.id === id);
+    if (matches.length !== 1) return null;
+    if (!resolved.some(agent => agent.id === matches[0].id)) resolved.push(matches[0]);
+  }
+  return resolved;
 }
 
 function resolveTargetsByMentions(
   raw: string,
   agents: MultiAgentAvailableAgent[],
   resolver: AliasResolver,
-): { targetNames: string[]; prompt: string } | null {
+): { targetIds: string[]; prompt: string } | null {
   const parsed = parseMultiAgentRequest(raw, resolver);
   if (!parsed) return null;
-  const availableNames = new Set(agents.map(agent => agent.name.toLowerCase()));
-  const names = parsed.agents
+  const availableIds = new Set(agents.map(agent => agent.id));
+  const ids = parsed.agents
     .map(ref => ref.resolvedName)
-    .filter(name => availableNames.has(name.toLowerCase()));
-  if (names.length < 2) return null;
-  return { targetNames: names, prompt: parsed.cleanedPrompt };
+    .filter(id => availableIds.has(id));
+  if (ids.length < 2) return null;
+  return { targetIds: ids, prompt: parsed.cleanedPrompt };
 }
 
 function splitTargetList(value: string): string[] {
-  const matches = Array.from(value.matchAll(/"([^"]+)"|'([^']+)'|@?([\w][\w#.\-\s]*?)(?=,|&|\band\b|$)/gi));
+  const matches = Array.from(value.matchAll(/"([^"]+)"|'([^']+)'|@?([\w][\w#.:\-\s]*?)(?=,|&|\band\b|$)/gi));
   if (matches.length > 0) {
     return matches
       .map(match => (match[1] || match[2] || match[3] || '').trim())
@@ -223,13 +288,36 @@ function splitTargetList(value: string): string[] {
   return value.split(/\s*(?:,|&|\band\b)\s*/i).map(part => part.trim()).filter(Boolean);
 }
 
-function resolveTargetName(input: string, aliases: Record<string, string>): string | null {
+function resolveTargetId(input: string, aliases: Record<string, string>): string | null {
+  const raw = String(input || '').trim().toLowerCase().replace(/^@/, '');
+  if (aliases[raw]) return aliases[raw];
   const key = normalizeAlias(input);
   if (aliases[key]) return aliases[key];
   const compact = compactAlias(input);
   if (aliases[compact]) return aliases[compact];
-  const found = Object.entries(aliases).find(([alias]) => alias.startsWith(key) || key.startsWith(alias));
-  return found?.[1] || null;
+  const matches = Array.from(new Set(
+    Object.entries(aliases)
+      .filter(([alias]) => alias.startsWith(key) || key.startsWith(alias))
+      .map(([, id]) => id),
+  ));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function splitNamedTargetsAndPrompt(body: string): { targetText: string; prompt: string } | null {
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if ((char === '"' || char === "'") && body[index - 1] !== '\\') {
+      quote = quote === char ? null : quote || char;
+      continue;
+    }
+    if (char !== ':' || quote) continue;
+    if (body[index - 1] === ':' || body[index + 1] === ':') continue;
+    const targetText = body.slice(0, index).trim();
+    const prompt = body.slice(index + 1).trim();
+    if (targetText && prompt) return { targetText, prompt };
+  }
+  return null;
 }
 
 function providerKeysFromText(value: string): string[] {
@@ -431,21 +519,35 @@ function parseSlashMultiAgent(
 
   const mentionTargets = resolveTargetsByMentions(body, agents, makeAliasResolver(aliases));
   if (mentionTargets) {
-    const scoped = mentionTargets.targetNames
-      .map(name => agents.find(agent => agent.name.toLowerCase() === name.toLowerCase()))
-      .filter((agent): agent is MultiAgentAvailableAgent => !!agent);
-    return makeDispatchPlan({ agents: scoped, prompt: mentionTargets.prompt, strategy, targetDescription: mentionTargets.targetNames.map(name => `@${name}`).join(' ') });
+    const scoped = resolveUniqueAgentsByIds(mentionTargets.targetIds, agents);
+    if (!scoped) {
+      return makeDispatchPlan({
+        agents: [],
+        prompt: '',
+        strategy,
+        targetDescription: 'ambiguous agent targets',
+        reason: 'Two or more agents share that name. Choose targets by their unique session or agent id.',
+      });
+    }
+    return makeDispatchPlan({ agents: scoped, prompt: mentionTargets.prompt, strategy, targetDescription: scoped.map(agent => `@${agent.name}`).join(' ') });
   }
 
-  const namedMatch = body.match(/^(.+?)\s*:\s*([\s\S]+)$/);
-  if (namedMatch && /[@'",]|\band\b/i.test(namedMatch[1])) {
-    const names = splitTargetList(namedMatch[1])
-      .map(part => resolveTargetName(part, aliases))
-      .filter((name): name is string => !!name);
-    const scoped = Array.from(new Set(names))
-      .map(name => agents.find(agent => agent.name.toLowerCase() === name.toLowerCase()))
-      .filter((agent): agent is MultiAgentAvailableAgent => !!agent);
-    return makeDispatchPlan({ agents: scoped, prompt: namedMatch[2], strategy, targetDescription: names.map(name => `@${name}`).join(' ') || 'selected agents' });
+  const namedMatch = splitNamedTargetsAndPrompt(body);
+  if (namedMatch && /[@'",]|\band\b/i.test(namedMatch.targetText)) {
+    const ids = splitTargetList(namedMatch.targetText)
+      .map(part => resolveTargetId(part, aliases))
+      .filter((id): id is string => !!id);
+    const scoped = resolveUniqueAgentsByIds(Array.from(new Set(ids)), agents);
+    if (!scoped) {
+      return makeDispatchPlan({
+        agents: [],
+        prompt: '',
+        strategy,
+        targetDescription: 'ambiguous agent targets',
+        reason: 'Two or more agents share that name. Choose targets by their unique session or agent id.',
+      });
+    }
+    return makeDispatchPlan({ agents: scoped, prompt: namedMatch.prompt, strategy, targetDescription: scoped.map(agent => `@${agent.name}`).join(' ') || 'selected agents' });
   }
 
   if (strategy === 'roundtable') {
@@ -553,21 +655,39 @@ export function parseMultiAgentOrchestrationRequest(
   const raw = String(input || '').trim();
   if (!raw) return null;
   const agents = uniqueAgents(availableAgents);
-  const aliases = buildMultiAgentAliasMap(agents);
+  const aliasIndex = buildMultiAgentAliasIndex(agents);
+  const ambiguousAlias = findExplicitAmbiguousAlias(raw, aliasIndex.ambiguous);
+  if (ambiguousAlias) {
+    return makeDispatchPlan({
+      agents: [],
+      prompt: '',
+      strategy: 'parallel',
+      targetDescription: `ambiguous @${ambiguousAlias}`,
+      reason: `More than one connected agent matches @${ambiguousAlias}. Choose targets by their unique session or agent id.`,
+    });
+  }
+  const aliases = aliasIndex.agentIds;
 
   const slash = parseSlashMultiAgent(raw, agents, aliases);
   if (slash) return slash;
 
   const mentionTargets = resolveTargetsByMentions(raw, agents, makeAliasResolver(aliases));
   if (mentionTargets) {
-    const scoped = mentionTargets.targetNames
-      .map(name => agents.find(agent => agent.name.toLowerCase() === name.toLowerCase()))
-      .filter((agent): agent is MultiAgentAvailableAgent => !!agent);
+    const scoped = resolveUniqueAgentsByIds(mentionTargets.targetIds, agents);
+    if (!scoped) {
+      return makeDispatchPlan({
+        agents: [],
+        prompt: '',
+        strategy: 'parallel',
+        targetDescription: 'ambiguous agent targets',
+        reason: 'Two or more agents share that name. Choose targets by their unique session or agent id.',
+      });
+    }
     return makeDispatchPlan({
       agents: scoped,
       prompt: mentionTargets.prompt,
       strategy: 'parallel',
-      targetDescription: mentionTargets.targetNames.map(name => `@${name}`).join(' '),
+      targetDescription: scoped.map(agent => `@${agent.name}`).join(' '),
     });
   }
 
@@ -577,7 +697,7 @@ export function parseMultiAgentOrchestrationRequest(
 export function formatMultiAgentHelp(agents: MultiAgentAvailableAgent[], reason?: string): string {
   const available = uniqueAgents(agents).filter(isUsableAgent);
   const roster = available.length > 0
-    ? available.slice(0, 12).map(agent => `- @${agent.name} · ${agent.provider || 'agent'} · ${agent.status || 'ready'} · ${describeAgentCapabilities(agent)}`).join('\n')
+    ? available.slice(0, 12).map(agent => `- @${agent.name} · id: \`${agent.id}\` · ${agent.provider || 'agent'} · ${agent.status || 'ready'} · ${describeAgentCapabilities(agent)}`).join('\n')
     : '- No available agents detected. Start terminal sessions or connect agents in Office.';
 
   return [

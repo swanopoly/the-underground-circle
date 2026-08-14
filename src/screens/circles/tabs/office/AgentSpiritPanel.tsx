@@ -1,9 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import FlatIcon, { ICON_CATALOG } from '../../../../components/FlatIcon';
 import SessionTagInput from '../../../../components/SessionTagInput';
 import { OfficeAgent } from '../../../../lib/officeAgents';
-import { SessionTag } from '../../../../lib/sessionTags';
+import { SessionTag, type OfficeSessionStorageScope } from '../../../../lib/sessionTags';
 import { getTemplatesByCategory, detectTemplate } from '../../../../lib/soulTemplates';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById } from '../../../../lib/agentSpirits';
 import {
@@ -17,9 +17,16 @@ import {
 } from '../../../../lib/spiritOperationsProfiles';
 import { buildCircleCapabilityPreflight, classifyCircleOwnershipReadiness, getSpiritIntegrationRequirements } from '../../../../lib/circleIntegrations';
 import { updateAgentSpirit } from '../../../../lib/circleOffice';
-import { getAgentIdentityKey, loadAgentIdentities, updateAgentIdentity } from '../../../../lib/agentIdentity';
+import {
+  getAgentIdentityKey,
+  loadAgentIdentitiesExact,
+  updateAgentIdentityExact,
+  type AgentIdentity,
+  type AgentIdentityExactAuthority,
+} from '../../../../lib/agentIdentity';
 import { loadCircleSiteCredentials, loadSiteCredentials } from '../../../../lib/siteAutomation';
 import { supabase } from '../../../../lib/supabase';
+import { isUuidLike } from '../../../../lib/agentRuntimeSubject';
 
 interface Props {
   agent: OfficeAgent;
@@ -29,6 +36,19 @@ interface Props {
   currentTags?: SessionTag[];
   onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
   onRemoveSessionTag?: (sessionKey: string, tagKey: string) => void;
+  sessionStorageScope?: OfficeSessionStorageScope;
+  identityAuthority?: AgentIdentityExactAuthority | null;
+}
+
+function normalizeSpiritIdentityAuthority(
+  circleId: string | undefined,
+  authority: AgentIdentityExactAuthority | null | undefined,
+): AgentIdentityExactAuthority | null {
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  if (!circleId || !userId || authorityCircleId !== circleId || !accessToken) return null;
+  return { userId, circleId: authorityCircleId, accessToken };
 }
 
 export default function AgentSpiritPanel({
@@ -39,6 +59,8 @@ export default function AgentSpiritPanel({
   currentTags = [],
   onAddSessionTag,
   onRemoveSessionTag,
+  sessionStorageScope,
+  identityAuthority,
 }: Props) {
   const [showSoul, setShowSoul] = useState(false);
   const [soulText, setSoulText] = useState('');
@@ -63,7 +85,7 @@ export default function AgentSpiritPanel({
   const [saveProfileName, setSaveProfileName] = useState('');
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [currentSpirit, setCurrentSpirit] = useState<string | null>(null);
-  const [dbAgentId, setDbAgentId] = useState<string | null>(null);
+  const [dbAgentLink, setDbAgentLink] = useState<{ agentKey: string; dbAgentId: string } | null>(null);
   const [roleArtifact, setRoleArtifact] = useState<{ title: string; content: string } | null>(null);
   const [roleActionStatus, setRoleActionStatus] = useState('');
   const [savingRoleArtifact, setSavingRoleArtifact] = useState(false);
@@ -76,6 +98,30 @@ export default function AgentSpiritPanel({
   const personalityScrollRef = useRef<ScrollView>(null);
   const personalityScrollX = useRef(0);
   const stableSessionKey = sessionKey || getAgentIdentityKey(agent);
+  const exactIdentityAuthority = useMemo(
+    () => normalizeSpiritIdentityAuthority(circleId, identityAuthority),
+    [circleId, identityAuthority?.accessToken, identityAuthority?.circleId, identityAuthority?.userId],
+  );
+  const identityRequestKey = exactIdentityAuthority
+    ? `${exactIdentityAuthority.userId}\u0000${exactIdentityAuthority.circleId}\u0000${agent.id}\u0000${stableSessionKey}`
+    : '';
+  const latestIdentityRequestKeyRef = useRef(identityRequestKey);
+  const latestIdentityAccessTokenRef = useRef(exactIdentityAuthority?.accessToken || '');
+  latestIdentityRequestKeyRef.current = identityRequestKey;
+  latestIdentityAccessTokenRef.current = exactIdentityAuthority?.accessToken || '';
+  const capturedIdentityAccessToken = exactIdentityAuthority?.accessToken || '';
+  const isIdentityRequestCurrent = useCallback(
+    (capturedRequestKey: string) => (
+      !!capturedRequestKey
+      && latestIdentityRequestKeyRef.current === capturedRequestKey
+      && latestIdentityAccessTokenRef.current === capturedIdentityAccessToken
+    ),
+    [capturedIdentityAccessToken],
+  );
+  const publishedDbAgentId = agent.connectionId === 'db-agent' && isUuidLike(agent.sessionKey)
+    ? agent.sessionKey
+    : null;
+  const dbAgentId = dbAgentLink?.agentKey === stableSessionKey ? dbAgentLink.dbAgentId : null;
   const currentSpiritProfile = currentSpirit && !currentSpirit.startsWith('custom::')
     ? getSpiritCareerProfile(currentSpirit)
     : null;
@@ -92,18 +138,36 @@ export default function AgentSpiritPanel({
 
   const ensureDbAgent = useCallback(async (): Promise<string | null> => {
     if (dbAgentId) return dbAgentId;
-    if (!agent || !circleId) return null;
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return null;
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!agent || !circleId || !authority || !capturedRequestKey) return null;
+    // Published Office rows already carry their exact durable UUID. Resolve
+    // that row only for its owner; never name-match a public teammate's agent
+    // into a new local row merely because its Spirit panel was opened.
+    if (publishedDbAgentId) {
+      const { data } = await supabase
+        .from('circle_office_agents')
+        .select('id, spirit, spirit_emoji')
+        .eq('id', publishedDbAgentId)
+        .eq('circle_id', circleId)
+        .eq('owner_id', authority.userId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+        .maybeSingle();
+      if (!data || !isIdentityRequestCurrent(capturedRequestKey)) return null;
+      setDbAgentLink({ agentKey: stableSessionKey, dbAgentId: data.id });
+      setCurrentSpirit(data.spirit || null);
+      return data.id;
+    }
     const { data } = await supabase
       .from('circle_office_agents')
       .select('id, spirit, spirit_emoji')
       .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id)
+      .eq('owner_id', authority.userId)
       .ilike('name', agent.name)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
       .maybeSingle();
-    if (data) {
-      setDbAgentId(data.id);
+    if (data && isIdentityRequestCurrent(capturedRequestKey)) {
+      setDbAgentLink({ agentKey: stableSessionKey, dbAgentId: data.id });
       setCurrentSpirit(data.spirit || null);
       return data.id;
     }
@@ -111,32 +175,53 @@ export default function AgentSpiritPanel({
       .from('circle_office_agents')
       .upsert({
         circle_id: circleId,
-        owner_id: auth.user.id,
+        owner_id: authority.userId,
         name: agent.name,
         provider: agent.providerType || 'claude-code',
         status: agent.status || 'idle',
         color: agent.color || '#6366f1',
       }, { onConflict: 'circle_id,owner_id,name' })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
       .select('id')
       .single();
-    if (created && !error) {
-      setDbAgentId(created.id);
+    if (created && !error && isIdentityRequestCurrent(capturedRequestKey)) {
+      setDbAgentLink({ agentKey: stableSessionKey, dbAgentId: created.id });
       return created.id;
     }
     return null;
-  }, [agent, circleId, dbAgentId]);
+  }, [agent, circleId, dbAgentId, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, publishedDbAgentId, stableSessionKey]);
+
+  const persistIdentityPatch = useCallback(async (updates: Partial<AgentIdentity>): Promise<boolean> => {
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!authority || !capturedRequestKey) return false;
+    const receipt = await updateAgentIdentityExact(stableSessionKey, updates, authority);
+    return receipt.localSaved && isIdentityRequestCurrent(capturedRequestKey);
+  }, [exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, stableSessionKey]);
 
   useEffect(() => {
-    setDbAgentId(null);
+    setDbAgentLink(null);
     setCurrentSpirit(null);
     setEditingSpirit(false);
     setShowSoul(false);
+    setSoulSaving(false);
     setSoulStatus('');
     setRoleArtifact(null);
     setRoleActionStatus('');
     setOpsArtifact(null);
     setOpsActionStatus('');
-  }, [agent.id]);
+    setSoulLoaded(null);
+    setSoulText('');
+    setCustomProfiles([]);
+    setCustomProfilesLoaded(false);
+    setSavingProfile(false);
+    setShowSaveForm(false);
+    setSaveProfileName('');
+    setSavingRoleArtifact(false);
+    setSavingOpsArtifact(false);
+    setWordpressStatus({ connected: false });
+    setIntegrationReadiness(null);
+  }, [agent.id, capturedIdentityAccessToken, identityRequestKey]);
 
   useEffect(() => {
     setRoleArtifact(null);
@@ -146,30 +231,56 @@ export default function AgentSpiritPanel({
   }, [currentSpirit]);
 
   useEffect(() => {
-    ensureDbAgent();
-  }, [ensureDbAgent]);
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!publishedDbAgentId || !circleId || !authority || !capturedRequestKey) return;
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase
+        .from('circle_office_agents')
+        .select('id, spirit, spirit_emoji')
+        .eq('id', publishedDbAgentId)
+        .eq('circle_id', circleId)
+        .eq('owner_id', authority.userId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+        .maybeSingle();
+      if (!cancelled && data && isIdentityRequestCurrent(capturedRequestKey)) {
+        setDbAgentLink({ agentKey: stableSessionKey, dbAgentId: data.id });
+        setCurrentSpirit(data.spirit || null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [circleId, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, publishedDbAgentId, stableSessionKey]);
 
   useEffect(() => {
-    if (customProfilesLoaded) return;
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (customProfilesLoaded || !authority || !capturedRequestKey) return;
+    let cancelled = false;
     (async () => {
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) return;
       const { data } = await supabase
         .from('custom_agent_profiles')
         .select('*')
-        .eq('user_id', auth.user.id)
-        .order('name');
-      if (data) setCustomProfiles(data);
+        .eq('user_id', authority.userId)
+        .order('name')
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      if (cancelled || !isIdentityRequestCurrent(capturedRequestKey)) return;
+      setCustomProfiles(data || []);
       setCustomProfilesLoaded(true);
     })();
-  }, [customProfilesLoaded]);
+    return () => { cancelled = true; };
+  }, [customProfilesLoaded, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent]);
 
   useEffect(() => {
-    if (!agent || !circleId) return;
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!agent || !circleId || !authority || !capturedRequestKey) return;
     const agentKey = agent.name || 'default';
     if (soulLoaded === agentKey) return;
+    let cancelled = false;
     (async () => {
-      const identities = await loadAgentIdentities();
+      const identities = await loadAgentIdentitiesExact(authority);
+      if (cancelled || !isIdentityRequestCurrent(capturedRequestKey)) return;
       const identity = identities.get(stableSessionKey);
       if (identity?.spiritId) {
         setCurrentSpirit(identity.spiritId);
@@ -179,30 +290,33 @@ export default function AgentSpiritPanel({
         setSoulLoaded(agentKey);
         return;
       }
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth.user) return;
       const { data } = await supabase
         .from('agent_personalities')
         .select('personality')
-        .eq('user_id', auth.user.id)
+        .eq('user_id', authority.userId)
         .eq('circle_id', circleId)
         .eq('agent_name', agentKey)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .maybeSingle();
+      if (cancelled || !isIdentityRequestCurrent(capturedRequestKey)) return;
       if (!data?.personality) {
         const { data: defaultData } = await supabase
           .from('agent_personalities')
           .select('personality')
-          .eq('user_id', auth.user.id)
+          .eq('user_id', authority.userId)
           .eq('circle_id', circleId)
           .eq('agent_name', 'default')
+          .setHeader('Authorization', `Bearer ${authority.accessToken}`)
           .maybeSingle();
+        if (cancelled || !isIdentityRequestCurrent(capturedRequestKey)) return;
         setSoulText(defaultData?.personality || '');
       } else {
         setSoulText(data.personality);
       }
       setSoulLoaded(agentKey);
     })();
-  }, [agent, circleId, soulLoaded, stableSessionKey]);
+    return () => { cancelled = true; };
+  }, [agent, circleId, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, soulLoaded, stableSessionKey]);
 
   useEffect(() => {
     if (!agent) {
@@ -214,12 +328,17 @@ export default function AgentSpiritPanel({
   }, [agent]);
 
   useEffect(() => {
+    const capturedRequestKey = identityRequestKey;
+    if (!exactIdentityAuthority || !capturedRequestKey) {
+      setWordpressStatus({ connected: false });
+      return;
+    }
     let cancelled = false;
     (async () => {
       const credentials = circleId
         ? await loadCircleSiteCredentials(circleId, 'wordpress').then(rows => rows.length > 0 ? rows : loadSiteCredentials('wordpress'))
         : await loadSiteCredentials('wordpress');
-      if (cancelled) return;
+      if (cancelled || !isIdentityRequestCurrent(capturedRequestKey)) return;
       const primary = credentials.find(cred => cred.isActive) || credentials[0];
       setWordpressStatus(primary ? {
         connected: true,
@@ -231,12 +350,13 @@ export default function AgentSpiritPanel({
     return () => {
       cancelled = true;
     };
-  }, [circleId]);
+  }, [circleId, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent]);
 
   useEffect(() => {
+    const capturedRequestKey = identityRequestKey;
     let cancelled = false;
     (async () => {
-      if (!circleId || !currentSpirit || currentSpirit.startsWith('custom::')) {
+      if (!circleId || !exactIdentityAuthority || !capturedRequestKey || !currentSpirit || currentSpirit.startsWith('custom::')) {
         setIntegrationReadiness(null);
         return;
       }
@@ -250,31 +370,36 @@ export default function AgentSpiritPanel({
         requiredConnectors: requirements.requiredConnectors,
         requiredCapabilities: requirements.requiredCapabilities,
       });
-      if (!cancelled) setIntegrationReadiness(result);
+      if (!cancelled && isIdentityRequestCurrent(capturedRequestKey)) setIntegrationReadiness(result);
     })();
     return () => {
       cancelled = true;
     };
-  }, [circleId, currentSpirit]);
+  }, [circleId, currentSpirit, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent]);
 
   const handleSaveSoul = async () => {
-    if (!circleId || !agent) return;
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!circleId || !agent || !authority || !capturedRequestKey) return;
     setSoulSaving(true);
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) { setSoulSaving(false); return; }
     const agentKey = agent.name || 'default';
     const { error } = await supabase
       .from('agent_personalities')
       .upsert({
-        user_id: auth.user.id,
+        user_id: authority.userId,
         circle_id: circleId,
         agent_name: agentKey,
         personality: soulText.trim(),
-      }, { onConflict: 'user_id,circle_id,agent_name' });
-    await updateAgentIdentity(stableSessionKey, {
+      }, { onConflict: 'user_id,circle_id,agent_name' })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    const identitySaved = await persistIdentityPatch({
       soulPrompt: soulText.trim(),
       isCustomized: true,
     });
+    if (!identitySaved || !isIdentityRequestCurrent(capturedRequestKey)) {
+      if (isIdentityRequestCurrent(capturedRequestKey)) setSoulSaving(false);
+      return;
+    }
     onAgentIdentityChange?.();
     setSoulStatus(error ? `Error: ${error.message}` : 'Soul saved!');
     setSoulSaving(false);
@@ -289,9 +414,10 @@ export default function AgentSpiritPanel({
   };
 
   const handleSaveRoleArtifact = async () => {
-    if (!circleId || !roleArtifact) return;
-    const { data: auth } = await supabase.auth.getUser();
-    const userId = auth.user?.id;
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!circleId || !roleArtifact || !authority || !capturedRequestKey) return;
+    const userId = authority.userId;
     if (!userId) {
       setRoleActionStatus('Sign in required to save');
       return;
@@ -314,11 +440,14 @@ export default function AgentSpiritPanel({
         currentSoulKey: currentSpirit ? `soul:${currentSpirit}` : null,
         feedback: `Saved role readiness artifact for ${currentSpiritProfile?.seniorRoleTitle || currentSpirit || 'active spirit'}.`,
       });
+      if (!isIdentityRequestCurrent(capturedRequestKey)) return;
       setRoleActionStatus('Saved to Spirit memory');
       onAgentIdentityChange?.();
     } catch (err: any) {
+      if (!isIdentityRequestCurrent(capturedRequestKey)) return;
       setRoleActionStatus(err?.message || 'Failed to save artifact');
     }
+    if (!isIdentityRequestCurrent(capturedRequestKey)) return;
     setSavingRoleArtifact(false);
     setTimeout(() => setRoleActionStatus(''), 2500);
   };
@@ -331,9 +460,10 @@ export default function AgentSpiritPanel({
   };
 
   const handleSaveOpsArtifact = async () => {
-    if (!circleId || !opsArtifact) return;
-    const { data: auth } = await supabase.auth.getUser();
-    const userId = auth.user?.id;
+    const authority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!circleId || !opsArtifact || !authority || !capturedRequestKey) return;
+    const userId = authority.userId;
     if (!userId) {
       setOpsActionStatus('Sign in required to save');
       return;
@@ -356,11 +486,14 @@ export default function AgentSpiritPanel({
         currentSoulKey: currentSpirit ? `soul:${currentSpirit}` : null,
         feedback: `Saved company operations artifact for ${currentOperationsProfile?.companyFunction || currentSpirit || 'active spirit'}.`,
       });
+      if (!isIdentityRequestCurrent(capturedRequestKey)) return;
       setOpsActionStatus('Saved to Spirit memory');
       onAgentIdentityChange?.();
     } catch (err: any) {
+      if (!isIdentityRequestCurrent(capturedRequestKey)) return;
       setOpsActionStatus(err?.message || 'Failed to save artifact');
     }
+    if (!isIdentityRequestCurrent(capturedRequestKey)) return;
     setSavingOpsArtifact(false);
     setTimeout(() => setOpsActionStatus(''), 2500);
   };
@@ -451,16 +584,21 @@ export default function AgentSpiritPanel({
                       <Text style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: '700', color: editingSpirit ? '#6366f1' : '#888' }}>{editingSpirit ? 'EDITING' : 'EDIT'}</Text>
                     </Pressable>
                     <Pressable onPress={async () => {
+                      const authority = exactIdentityAuthority;
+                      const capturedRequestKey = identityRequestKey;
+                      if (!authority || !capturedRequestKey) return;
                       const id = await ensureDbAgent();
                       if (id) {
-                        await updateAgentSpirit(id, null, null);
-                        await updateAgentIdentity(stableSessionKey, {
+                        const spiritResult = await updateAgentSpirit(id, null, null, authority);
+                        if (spiritResult.error || !isIdentityRequestCurrent(capturedRequestKey)) return;
+                        const identitySaved = await persistIdentityPatch({
                           spiritId: null,
                           spiritEmoji: null,
                           customProfileId: null,
                           customProfileName: null,
                           isCustomized: true,
                         });
+                        if (!identitySaved || !isIdentityRequestCurrent(capturedRequestKey)) return;
                         onAgentIdentityChange?.();
                         setCurrentSpirit(null);
                         setEditingSpirit(false);
@@ -730,22 +868,23 @@ export default function AgentSpiritPanel({
                           <Pressable
                             onPress={async () => {
                               if (!saveProfileName.trim()) return;
+                              const authority = exactIdentityAuthority;
+                              const capturedRequestKey = identityRequestKey;
+                              if (!authority || !capturedRequestKey) return;
                               setSavingProfile(true);
-                              const { data: auth } = await supabase.auth.getUser();
-                              if (!auth.user) {
-                                console.warn('[AgentSpiritPanel] Cannot save profile: no authenticated user');
-                                setSavingProfile(false);
-                                return;
-                              }
                               const { data, error } = await supabase.from('custom_agent_profiles').upsert({
-                                user_id: auth.user.id, name: saveProfileName.trim(),
+                                user_id: authority.userId, name: saveProfileName.trim(),
                                 system_prompt: customPrompt, skill_bundle: customKnobs.skillBundle,
                                 risk_tier: customKnobs.riskTier, action_posture: customKnobs.actionPosture,
                                 evidence_posture: customKnobs.evidencePosture, communication_density: customKnobs.communicationDensity,
                                 skepticism: customKnobs.skepticism, escalation_trigger: customKnobs.escalationTrigger,
                                 emoji: getSpiritById(currentSpirit)?.emoji || '🤖', color: getSpiritById(currentSpirit)?.color || '#6366f1',
                                 tagline: `Custom ${s.name} profile`,
-                              }, { onConflict: 'user_id,name' }).select().single();
+                              }, { onConflict: 'user_id,name' })
+                                .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+                                .select()
+                                .single();
+                              if (!isIdentityRequestCurrent(capturedRequestKey)) return;
                               if (error) {
                                 // Surface the failure instead of silently no-op'ing. User
                                 // sees an Alert and the console gets the full error.
@@ -793,34 +932,50 @@ export default function AgentSpiritPanel({
                   return (
                     <Pressable key={profile.id}
                       onPress={async () => {
+                        const authority = exactIdentityAuthority;
+                        const capturedRequestKey = identityRequestKey;
+                        if (!authority || !capturedRequestKey) return;
                         const id = await ensureDbAgent();
                         if (id) {
-                          await updateAgentSpirit(id, `custom::${profile.id}`, profile.emoji);
-                          await updateAgentIdentity(stableSessionKey, {
+                          const spiritResult = await updateAgentSpirit(id, `custom::${profile.id}`, profile.emoji, authority);
+                          if (spiritResult.error || !isIdentityRequestCurrent(capturedRequestKey)) return;
+                          const identitySaved = await persistIdentityPatch({
                             spiritId: `custom::${profile.id}`,
                             spiritEmoji: profile.emoji || null,
                             customProfileId: profile.id,
                             customProfileName: profile.name,
                             isCustomized: true,
                           });
+                          if (!identitySaved || !isIdentityRequestCurrent(capturedRequestKey)) return;
                           onAgentIdentityChange?.();
                           setCurrentSpirit(`custom::${profile.id}`);
                         }
                       }}
                       onLongPress={async () => {
-                        await supabase.from('custom_agent_profiles').delete().eq('id', profile.id);
+                        const authority = exactIdentityAuthority;
+                        const capturedRequestKey = identityRequestKey;
+                        if (!authority || !capturedRequestKey) return;
+                        const { error } = await supabase
+                          .from('custom_agent_profiles')
+                          .delete()
+                          .eq('id', profile.id)
+                          .eq('user_id', authority.userId)
+                          .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+                        if (error || !isIdentityRequestCurrent(capturedRequestKey)) return;
                         setCustomProfiles(prev => prev.filter(p => p.id !== profile.id));
                         if (currentSpirit === `custom::${profile.id}`) {
                           const dbId = await ensureDbAgent();
                           if (dbId) {
-                            await updateAgentSpirit(dbId, null, null);
-                            await updateAgentIdentity(stableSessionKey, {
+                            const spiritResult = await updateAgentSpirit(dbId, null, null, authority);
+                            if (spiritResult.error || !isIdentityRequestCurrent(capturedRequestKey)) return;
+                            const identitySaved = await persistIdentityPatch({
                               spiritId: null,
                               spiritEmoji: null,
                               customProfileId: null,
                               customProfileName: null,
                               isCustomized: true,
                             });
+                            if (!identitySaved || !isIdentityRequestCurrent(capturedRequestKey)) return;
                             onAgentIdentityChange?.();
                             setCurrentSpirit(null);
                           }
@@ -849,16 +1004,21 @@ export default function AgentSpiritPanel({
                     <Pressable
                       key={spirit.id}
                       onPress={async () => {
+                        const authority = exactIdentityAuthority;
+                        const capturedRequestKey = identityRequestKey;
+                        if (!authority || !capturedRequestKey) return;
                         const id = await ensureDbAgent();
                         if (id) {
-                          await updateAgentSpirit(id, spirit.id, spirit.emoji);
-                          await updateAgentIdentity(stableSessionKey, {
+                          const spiritResult = await updateAgentSpirit(id, spirit.id, spirit.emoji, authority);
+                          if (spiritResult.error || !isIdentityRequestCurrent(capturedRequestKey)) return;
+                          const identitySaved = await persistIdentityPatch({
                             spiritId: spirit.id,
                             spiritEmoji: spirit.emoji,
                             customProfileId: null,
                             customProfileName: null,
                             isCustomized: true,
                           });
+                          if (!identitySaved || !isIdentityRequestCurrent(capturedRequestKey)) return;
                           onAgentIdentityChange?.();
                           setCurrentSpirit(spirit.id);
                         }
@@ -983,6 +1143,7 @@ export default function AgentSpiritPanel({
             currentTags={currentTags}
             onAddTag={(tag) => onAddSessionTag(sessionKey, tag)}
             onRemoveTag={(tagKey) => onRemoveSessionTag(sessionKey, tagKey)}
+            storageScope={sessionStorageScope}
           />
         </View>
       )}

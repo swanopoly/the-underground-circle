@@ -23,7 +23,7 @@ export const AGENT_MODES: AgentMode[] = [
   { key: 'talk',     label: 'Talk',     icon: '..',  color: '#22c55e', description: 'Natural conversation' },
   { key: 'plan',     label: 'Plan',     icon: 'P',   color: '#6366f1', description: 'Break down and strategize' },
   { key: 'execute',  label: 'Execute',  icon: '!',   color: '#f59e0b', description: 'Concrete actions and code' },
-  { key: 'review',   label: 'Review',   icon: '?',   color: '#22d3ee', description: 'Critique and improve' },
+  { key: 'review',   label: 'Review',   icon: '?',   color: '#6366f1', description: 'Critique and improve' },
   { key: 'research', label: 'Research', icon: 'R',   color: '#a855f7', description: 'Cite sources, compare, report' },
   { key: 'support',  label: 'Support',  icon: 'S',   color: '#3b82f6', description: 'Answer questions, escalate' },
   { key: 'design',   label: 'Design',   icon: 'D',   color: '#ec4899', description: 'Visual approach and mockups' },

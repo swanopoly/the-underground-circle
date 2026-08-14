@@ -10,7 +10,7 @@
  *   3. See ALL other members' agents in real time
  */
 
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { subscribeWithReconnect } from './subscribeWithReconnect';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -107,6 +107,61 @@ export type PublishAgentInput = {
   gatewayUrl?: string;
   isPublic?: boolean;
 };
+
+/**
+ * Immutable authority captured by the caller at the beginning of an Office
+ * operation. Every database request in this module binds this bearer token
+ * directly instead of relying on the Supabase client's mutable global session.
+ */
+export type CircleOfficeAuthScope = Readonly<{
+  userId: string;
+  accessToken: string;
+}>;
+
+type ResolvedCircleOfficeAuthority = Readonly<{
+  userId: string;
+  accessToken: string;
+}>;
+
+function normalizeAuthScope(scope: CircleOfficeAuthScope | undefined): ResolvedCircleOfficeAuthority | null {
+  if (!scope) return null;
+  const userId = String(scope.userId || '').trim();
+  const accessToken = String(scope.accessToken || '').trim();
+  if (!userId || userId.length > 200 || !accessToken || accessToken.length > 16_384) return null;
+  return { userId, accessToken };
+}
+
+function normalizeResourceId(value: string): string | null {
+  const normalized = String(value || '').trim();
+  return normalized && normalized.length <= 200 ? normalized : null;
+}
+
+/**
+ * Resolve one cohesive user/token pair and verify the token against Supabase.
+ * Passing a scope never falls back to the current session: an invalid, stale,
+ * or mismatched captured scope fails closed.
+ */
+async function resolveAuthority(
+  capturedScope?: CircleOfficeAuthScope,
+): Promise<ResolvedCircleOfficeAuthority | null> {
+  let authority: ResolvedCircleOfficeAuthority | null;
+
+  if (capturedScope !== undefined) {
+    authority = normalizeAuthScope(capturedScope);
+  } else {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) return null;
+    authority = normalizeAuthScope(data.session ? {
+      userId: data.session.user.id,
+      accessToken: data.session.access_token,
+    } : undefined);
+  }
+
+  if (!authority) return null;
+  const { data, error } = await supabase.auth.getUser(authority.accessToken);
+  if (error || !data.user || data.user.id !== authority.userId) return null;
+  return authority;
+}
 
 // ─── Provider → Icon + Color map ─────────────────────────────────────────────
 
@@ -216,20 +271,21 @@ function fromRow(row: any, currentUserId?: string): CircleOfficeAgent {
   };
 }
 
-// ─── Get current user ─────────────────────────────────────────────────────────
+// ─── Resolve the public owner profile under exact authority ──────────────────
 
-async function getCurrentUser(): Promise<{ id: string; displayName: string; username: string } | null> {
-  const { data: auth } = await supabase.auth.getUser();
-  if (!auth.user) return null;
-
-  const { data: profile } = await supabase
+async function getAuthorityUser(
+  authority: ResolvedCircleOfficeAuthority,
+): Promise<{ id: string; displayName: string; username: string }> {
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const { data: profile } = await exactClient
     .from('profiles')
     .select('display_name, username')
-    .eq('id', auth.user.id)
-    .single();
+    .eq('id', authority.userId)
+    .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+    .maybeSingle();
 
   return {
-    id: auth.user.id,
+    id: authority.userId,
     displayName: profile?.display_name || profile?.username || 'Unknown',
     username: profile?.username || '',
   };
@@ -237,28 +293,37 @@ async function getCurrentUser(): Promise<{ id: string; displayName: string; user
 
 // ─── Load all agents in a circle ──────────────────────────────────────────────
 
-export async function loadCircleOfficeAgents(circleId: string): Promise<{
+export async function loadCircleOfficeAgents(
+  circleId: string,
+  capturedScope?: CircleOfficeAuthScope,
+): Promise<{
   agents: CircleOfficeAgent[];
   error?: string;
 }> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    const currentUserId = auth.user?.id;
+    const normalizedCircleId = normalizeResourceId(circleId);
+    if (!normalizedCircleId) return { agents: [], error: 'Invalid circle.' };
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return { agents: [], error: 'Not authenticated' };
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
-    const { data, error } = await supabase
+    const { data, error } = await exactClient
       .from('circle_office_agents')
       .select('*')
-      .eq('circle_id', circleId)
+      .eq('circle_id', normalizedCircleId)
       .eq('is_published', true)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
       .order('created_at', { ascending: true });
 
     if (error) return { agents: [], error: error.message };
-    const agents = (data || []).map(r => fromRow(r, currentUserId));
+    const agents = (data || [])
+      .filter((row) => row?.circle_id === normalizedCircleId)
+      .map((row) => fromRow(row, authority.userId));
 
     // Always include BlackSwan as the first agent (unless one is already published by name)
     const hasBlackSwan = agents.some(a => a.name.toLowerCase() === 'blackswan');
     if (!hasBlackSwan) {
-      agents.unshift(createBlackSwanAgent(circleId));
+      agents.unshift(createBlackSwanAgent(normalizedCircleId));
     }
 
     return { agents };
@@ -268,50 +333,57 @@ export async function loadCircleOfficeAgents(circleId: string): Promise<{
 }
 
 // ─── Hidden-agent suppression ─────────────────────────────────────────────────
-// In-memory set of `${circleId}::${name}` keys whose owners have explicitly
+// In-memory set of `${userId}::${circleId}::${name}` keys whose owners have explicitly
 // removed them from the office. Bridge pollers re-publish on every tick (every
 // 5s), so without this the row would be re-created seconds after deletion.
 // The set lives until the next tab reload — which is the right scope: a fresh
 // session means the user wants their agents discoverable again.
 const _hiddenAgents = new Set<string>();
 
-function hiddenKey(circleId: string, name: string): string {
-  return `${circleId}::${name.toLowerCase()}`;
+function hiddenKey(userId: string, circleId: string, name: string): string {
+  return `${userId}::${circleId}::${name.toLowerCase()}`;
 }
 
-export function hideAgentInOffice(circleId: string, name: string): void {
-  _hiddenAgents.add(hiddenKey(circleId, name));
+export function hideAgentInOffice(userId: string, circleId: string, name: string): void {
+  _hiddenAgents.add(hiddenKey(userId, circleId, name));
 }
 
-export function unhideAgentInOffice(circleId: string, name: string): void {
-  _hiddenAgents.delete(hiddenKey(circleId, name));
+export function unhideAgentInOffice(userId: string, circleId: string, name: string): void {
+  _hiddenAgents.delete(hiddenKey(userId, circleId, name));
 }
 
-export function isAgentHiddenInOffice(circleId: string, name: string): boolean {
-  return _hiddenAgents.has(hiddenKey(circleId, name));
+export function isAgentHiddenInOffice(userId: string, circleId: string, name: string): boolean {
+  return _hiddenAgents.has(hiddenKey(userId, circleId, name));
 }
 
 // ─── Publish an agent to the circle office ────────────────────────────────────
 
-export async function publishAgentToCircle(input: PublishAgentInput): Promise<{
+export async function publishAgentToCircle(
+  input: PublishAgentInput,
+  capturedScope?: CircleOfficeAuthScope,
+): Promise<{
   agent?: CircleOfficeAgent;
   error?: string;
 }> {
   try {
-    if (isAgentHiddenInOffice(input.circleId, input.name)) {
+    const normalizedCircleId = normalizeResourceId(input.circleId);
+    if (!normalizedCircleId) return { error: 'Invalid circle.' };
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return { error: 'Not authenticated' };
+    if (isAgentHiddenInOffice(authority.userId, normalizedCircleId, input.name)) {
       return { error: 'agent_hidden' };
     }
-    const user = await getCurrentUser();
-    if (!user) return { error: 'Not authenticated' };
-    const cooldownKey = buildPublishCooldownKey(input.circleId, user.id, input.name);
+    const user = await getAuthorityUser(authority);
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const cooldownKey = buildPublishCooldownKey(normalizedCircleId, user.id, input.name);
     if (hasForbiddenPublishCooldown(cooldownKey)) {
       return { error: 'publish_forbidden_cooldown' };
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await exactClient
       .from('circle_office_agents')
       .upsert({
-        circle_id: input.circleId,
+        circle_id: normalizedCircleId,
         owner_id: user.id,
         owner_display_name: user.displayName,
         owner_username: user.username,
@@ -326,6 +398,7 @@ export async function publishAgentToCircle(input: PublishAgentInput): Promise<{
       }, {
         onConflict: 'circle_id,owner_id,name',
       })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
       .select()
       .single();
 
@@ -349,12 +422,22 @@ export async function publishAgentToCircle(input: PublishAgentInput): Promise<{
 
 // ─── Remove an agent from the circle office ───────────────────────────────────
 
-export async function unpublishAgentFromCircle(agentId: string): Promise<{ error?: string }> {
+export async function unpublishAgentFromCircle(
+  agentId: string,
+  capturedScope?: CircleOfficeAuthScope,
+): Promise<{ error?: string }> {
   try {
-    const { error } = await supabase
+    const normalizedAgentId = normalizeResourceId(agentId);
+    if (!normalizedAgentId) return { error: 'Invalid agent.' };
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return { error: 'Not authenticated' };
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { error } = await exactClient
       .from('circle_office_agents')
       .delete()
-      .eq('id', agentId);
+      .eq('id', normalizedAgentId)
+      .eq('owner_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
     if (error) return { error: error.message };
     return {};
   } catch (e: any) {
@@ -372,11 +455,15 @@ export async function updateAgentStatus(
     currentGoal?: string;
     sessionUrl?: string;
     returnTime?: string;
-  } = {}
+  } = {},
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ error?: string }> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return { error: 'Not authenticated' };
+    const normalizedCircleId = normalizeResourceId(circleId);
+    if (!normalizedCircleId) return { error: 'Invalid circle.' };
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return { error: 'Not authenticated' };
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
     const updatePayload: any = {
       status,
@@ -390,11 +477,12 @@ export async function updateAgentStatus(
       updatePayload.last_active_at = new Date().toISOString();
     }
 
-    const { error } = await supabase
+    const { error } = await exactClient
       .from('circle_office_agents')
       .update(updatePayload)
-      .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id);
+      .eq('circle_id', normalizedCircleId)
+      .eq('owner_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
 
     if (error) return { error: error.message };
     return {};
@@ -405,32 +493,48 @@ export async function updateAgentStatus(
 
 // ─── Set all user's agents in a circle to idle/offline ───────────────────────
 
-export async function setAgentsOffline(circleId: string): Promise<void> {
+export async function setAgentsOffline(
+  circleId: string,
+  capturedScope?: CircleOfficeAuthScope,
+): Promise<void> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
-    await supabase
+    const normalizedCircleId = normalizeResourceId(circleId);
+    if (!normalizedCircleId) return;
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return;
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    await exactClient
       .from('circle_office_agents')
       .update({ status: 'offline', current_task: null, current_goal: null })
-      .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id);
+      .eq('circle_id', normalizedCircleId)
+      .eq('owner_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
   } catch {}
 }
 
 // ─── Check if user has any published agents in a circle ──────────────────────
 
-export async function getUserCircleAgents(circleId: string): Promise<CircleOfficeAgent[]> {
+export async function getUserCircleAgents(
+  circleId: string,
+  capturedScope?: CircleOfficeAuthScope,
+): Promise<CircleOfficeAgent[]> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return [];
+    const normalizedCircleId = normalizeResourceId(circleId);
+    if (!normalizedCircleId) return [];
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return [];
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
-    const { data } = await supabase
+    const { data } = await exactClient
       .from('circle_office_agents')
       .select('*')
-      .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id);
+      .eq('circle_id', normalizedCircleId)
+      .eq('owner_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
 
-    return (data || []).map(r => fromRow(r, auth.user!.id));
+    return (data || [])
+      .filter((row) => row?.circle_id === normalizedCircleId && row?.owner_id === authority.userId)
+      .map((row) => fromRow(row, authority.userId));
   } catch { return []; }
 }
 
@@ -440,18 +544,20 @@ export function subscribeToCircleOffice(
   circleId: string,
   onUpdate: () => void
 ): () => void {
+  const normalizedCircleId = normalizeResourceId(circleId);
+  if (!normalizedCircleId) return () => {};
   // Resilient path (next-gaps FINDING 1): a bare `.subscribe()` here meant that
   // after any network blip or laptop sleep/wake the Office roster stopped
   // updating FOREVER — no error, no retry, just a dashboard quietly frozen on
   // whatever it last saw. `onUpdate` is already the caller's full refetch, so it
   // doubles as the catch-up that backfills whatever changed while we were down.
   const handle = subscribeWithReconnect({
-    channelName: `circle-office-${circleId}`,
+    channelName: `circle-office-${normalizedCircleId}`,
     setup: (channel) => channel.on('postgres_changes', {
       event: '*',
       schema: 'public',
       table: 'circle_office_agents',
-      filter: `circle_id=eq.${circleId}`,
+      filter: `circle_id=eq.${normalizedCircleId}`,
     }, onUpdate),
     onCatchUp: onUpdate,
   });
@@ -465,16 +571,24 @@ export async function updateAgentSpirit(
   agentId: string,
   spirit: string | null,
   spiritEmoji: string | null,
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ error?: string }> {
   try {
-    const { error } = await supabase
+    const normalizedAgentId = normalizeResourceId(agentId);
+    if (!normalizedAgentId) return { error: 'Invalid agent.' };
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return { error: 'Not authenticated' };
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { error } = await exactClient
       .from('circle_office_agents')
       .update({
         spirit: spirit || null,
         spirit_emoji: spiritEmoji || null,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', agentId);
+      .eq('id', normalizedAgentId)
+      .eq('owner_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
     return error ? { error: error.message } : {};
   } catch (e: any) {
     return { error: e.message };
@@ -486,13 +600,21 @@ export async function updateAgentSpirit(
 export async function updateAgentGatewayUrl(
   agentId: string,
   gatewayUrl: string | null,
-  isPublic: boolean
+  isPublic: boolean,
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ error?: string }> {
   try {
-    const { error } = await supabase
+    const normalizedAgentId = normalizeResourceId(agentId);
+    if (!normalizedAgentId) return { error: 'Invalid agent.' };
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return { error: 'Not authenticated' };
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { error } = await exactClient
       .from('circle_office_agents')
       .update({ gateway_url: gatewayUrl, is_public: isPublic, updated_at: new Date().toISOString() })
-      .eq('id', agentId);
+      .eq('id', normalizedAgentId)
+      .eq('owner_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
     return error ? { error: error.message } : {};
   } catch (e: any) {
     return { error: e.message };
@@ -502,17 +624,22 @@ export async function updateAgentGatewayUrl(
 // ─── Remove a published agent row owned by the current user ─────────────────
 
 export async function removeCircleOfficeAgent(
-  agentId: string
+  agentId: string,
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ error?: string }> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return { error: 'Not authenticated' };
+    const normalizedAgentId = normalizeResourceId(agentId);
+    if (!normalizedAgentId) return { error: 'Invalid agent.' };
+    const authority = await resolveAuthority(capturedScope);
+    if (!authority) return { error: 'Not authenticated' };
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
-    const { error } = await supabase
+    const { error } = await exactClient
       .from('circle_office_agents')
       .delete()
-      .eq('id', agentId)
-      .eq('owner_id', auth.user.id);
+      .eq('id', normalizedAgentId)
+      .eq('owner_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
 
     return error ? { error: error.message } : {};
   } catch (e: any) {

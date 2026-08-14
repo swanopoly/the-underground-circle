@@ -26,8 +26,8 @@ export function colorForOpenRouterAuthor(author?: string): string {
     openai: '#10b981',
     stepfun: '#22c55e',
     tencent: '#f59e0b',
-    'x-ai': '#22d3ee',
-    'z-ai': '#22d3ee',
+    'x-ai': '#6366f1',
+    'z-ai': '#6366f1',
   };
   return colors[author || ''] || '#a78bfa';
 }
@@ -80,9 +80,9 @@ export const MODEL_SECTION_FALLBACK_COLORS = [
   '#0ea5e9',
 ];
 
-export function modelSectionAccent(sectionKey: string, fallback = '#22d3ee'): string {
+export function modelSectionAccent(sectionKey: string, fallback = '#6366f1'): string {
   if (typeof sectionKey !== 'string') {
-    return typeof fallback === 'string' ? fallback : '#22d3ee';
+    return typeof fallback === 'string' ? fallback : '#6366f1';
   }
   const explicit = MODEL_SECTION_ACCENTS[sectionKey];
   if (explicit) return explicit;

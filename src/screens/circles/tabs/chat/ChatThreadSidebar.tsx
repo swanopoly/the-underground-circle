@@ -54,9 +54,9 @@ export function persistSidebarCollapsed(collapsed: boolean): void {
 // On native we drive an Animated rotation. Six dots positioned on the ring;
 // each dot pulses opacity slightly out-of-phase so the whole thing breathes.
 
-const DOT_COLORS = ['#22d3ee', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
+const DOT_COLORS = ['#6366f1', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
 const SIDEBAR_ACTIONS = [
-  { key: 'new', label: 'New', icon: 'create', tone: '#22d3ee' },
+  { key: 'new', label: 'New', icon: 'create', tone: '#6366f1' },
   { key: 'agent', label: 'New Agent', icon: 'agents', tone: '#a855f7' },
   { key: 'automations', label: 'Automations', icon: 'rocket', tone: '#22c55e' },
   { key: 'marketplace', label: 'Marketplace', icon: 'integrations', tone: '#f59e0b' },
@@ -202,9 +202,9 @@ function SidebarActionButton({
   }, []);
   const rainbowHover = Platform.OS === 'web' && hovered
     ? ({
-        backgroundImage: 'linear-gradient(120deg, rgba(34,211,238,0.22), rgba(168,85,247,0.24), rgba(236,72,153,0.22), rgba(250,204,21,0.2), rgba(34,197,94,0.22))',
+        backgroundImage: 'linear-gradient(120deg, rgba(99,102,241,0.22), rgba(168,85,247,0.24), rgba(236,72,153,0.22), rgba(250,204,21,0.2), rgba(34,197,94,0.22))',
         backgroundSize: '260% 260%',
-        boxShadow: '0 0 24px rgba(34,211,238,0.14), 0 0 34px rgba(168,85,247,0.16), inset 0 0 0 1px rgba(255,255,255,0.12)',
+        boxShadow: '0 0 24px rgba(99,102,241,0.14), 0 0 34px rgba(168,85,247,0.16), inset 0 0 0 1px rgba(255,255,255,0.12)',
       } as any)
     : null;
 

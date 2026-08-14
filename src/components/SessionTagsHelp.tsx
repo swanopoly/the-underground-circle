@@ -304,8 +304,8 @@ const styles = StyleSheet.create({
   },
   code: {
     fontFamily: 'monospace',
-    color: '#22d3ee',
-    backgroundColor: '#22d3ee15',
+    color: '#6366f1',
+    backgroundColor: '#6366f115',
     paddingHorizontal: 4,
     paddingVertical: 2,
     borderRadius: 4,

@@ -2,11 +2,11 @@
  * openswanConsoleIntentCore — pure intent + guardrail task builders for the
  * OpenSwan Control Panel (decomposition unit U3).
  *
- * This is a VERBATIM extraction of the helper-intent and guardrail
- * task-string machinery that used to live inline at the top of
- * `src/components/openswan/OpenSwanConsole.tsx`. Behavior is preserved
- * exactly — the component now imports these symbols instead of declaring
- * them. Component-only render-state types (LaunchReadinessSnapshot,
+ * This began as the helper-intent and guardrail task-string machinery that
+ * lived inline at the top of `src/components/openswan/OpenSwanConsole.tsx`.
+ * It now also owns task-first automatic routing and the pure decision for
+ * when live capability preflight may gate launch. Component-only render-state
+ * types (LaunchReadinessSnapshot,
  * ControlPanelSectionKey/OpenState, readiness/tunnel consts) intentionally
  * stay behind in the component.
  *
@@ -221,25 +221,52 @@ export function inferIntentFromTask(text: string): HelperIntent | null {
   if (!lower) return null;
   const seeded = HELPER_INTENTS.find((intent) => lower.startsWith(intent.seed.toLowerCase().trim()));
   if (seeded) return seeded;
+
+  // Prefer the user's overall job over incidental nouns inside it. For
+  // example, "build a weekly code-review automation" is an automation job,
+  // not a one-off file edit, and "research browser automation options" is a
+  // research job, not a request to drive a browser right now. This ordering
+  // also makes the classifier less sensitive to one extra word in a prompt.
+  if (/\b(research|compare|investigate|audit|evaluate|review options|recommend)\b/.test(lower)) {
+    return HELPER_INTENTS.find((intent) => intent.key === 'research') || null;
+  }
+  if (/\b(automate|automation|repeat(?:able)?|schedule|scheduled|recurring|every (?:day|week|month)|daily|weekly|monthly|cron)\b/.test(lower)) {
+    return HELPER_INTENTS.find((intent) => intent.key === 'automation') || null;
+  }
   if (/\b(wordpress|login|log in|password|credential|vault|shopify|webflow|squarespace|admin)\b/.test(lower)) {
     return HELPER_INTENTS.find((intent) => intent.key === 'website') || null;
   }
   if (/\b(browser|website|web page|url|http|form|click|checkout|browserbase|stagehand|scrape|extract data|web data retrieval|structured data|submit form|data entry)\b/.test(lower)) {
     return HELPER_INTENTS.find((intent) => intent.key === 'browser') || null;
   }
-  if (/\b(desktop|computer|app|window|finder|slack|figma|notion|excel|chrome)\b/.test(lower)) {
+  const namedDesktopApp = /\b(finder|slack|figma|notion|excel|chrome|adobe|illustrator|photoshop|premiere|after effects|indesign|lightroom|acrobat|blender|autocad|solidworks|fusion 360|sketch|pages|numbers|keynote|powerpoint|outlook|teams|discord|zoom|notes|calendar)\b/.test(lower);
+  const ambiguousDeveloperApp = /\b(cursor|terminal|xcode|visual studio code|vscode)\b/.test(lower);
+  const genericDesktopTarget = /\b(desktop|computer|app|window)\b/.test(lower);
+  const desktopAction = /\b(open|launch|focus|use|click|type|enter|work (?:in|inside)|edit (?:in|with)|create (?:in|with)|close|quit|move|drag)\b/.test(lower);
+  const explicitDeveloperAppControl = ambiguousDeveloperApp
+    && /\b(open|launch|focus|click|type (?:in|into)|work (?:in|inside)|close|quit)\b/.test(lower);
+  if (namedDesktopApp || explicitDeveloperAppControl || (genericDesktopTarget && desktopAction)) {
     return HELPER_INTENTS.find((intent) => intent.key === 'desktop') || null;
   }
   if (/\b(file|code|repo|component|screen|function|typecheck|test|build)\b/.test(lower)) {
     return HELPER_INTENTS.find((intent) => intent.key === 'files') || null;
   }
-  if (/\b(research|compare|investigate|audit|review options|recommend)\b/.test(lower)) {
-    return HELPER_INTENTS.find((intent) => intent.key === 'research') || null;
-  }
-  if (/\b(automate|automation|repeat|schedule|every day|daily|weekly|cron)\b/.test(lower)) {
-    return HELPER_INTENTS.find((intent) => intent.key === 'automation') || null;
-  }
   return null;
+}
+
+/**
+ * A workflow preflight may disable LAUNCH only when the user is asking the
+ * panel to perform/review concrete work now. Planning, research, support,
+ * design, and ordinary conversation can still describe or prepare a workflow
+ * when device-local capabilities are offline; the runtime will re-check exact
+ * authority before any later mutation.
+ */
+export function shouldRequireLiveCapabilityPreflight(
+  intent: HelperIntent | null | undefined,
+  mode: OpenSwanChatMode | string | null | undefined,
+): boolean {
+  if (!intent) return false;
+  return mode === 'execute' || mode === 'build' || mode === 'review';
 }
 
 export function stripIntentFraming(text: string): string {

@@ -144,7 +144,7 @@ export const WIKI_CATEGORIES: Omit<WikiCategoryInfo, 'articleCount'>[] = [
     title: 'Open Source AI',
     subtitle: 'Running and fine-tuning models on your own hardware',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
   },
   {
     id: 'mcp',
@@ -2441,7 +2441,7 @@ function parseAutomationRequest(input: unknown): AutomationRequest | null {
     subtitle: 'How builders actually run models with open serving layers such as vLLM and TGI.',
     category: 'open-source',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['serving', 'vllm', 'tgi', 'inference', 'self-hosting'],
     content: [
       {
@@ -2564,7 +2564,7 @@ function parseAutomationRequest(input: unknown): AutomationRequest | null {
     subtitle: 'How modern AI systems work with images, audio, transcripts, and reusable media artifacts.',
     category: 'open-source',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['media', 'hf', 'image', 'audio', 'transcription'],
     content: [
       {
@@ -2689,7 +2689,7 @@ function parseAutomationRequest(input: unknown): AutomationRequest | null {
     subtitle: 'How good agent products make memory visible, editable, and compact enough to stay useful over long runs.',
     category: 'frameworks',
     icon: '{}',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['memory ui', 'compaction', 'chat ux', 'session state', 'workspace memory'],
     content: [
       {
@@ -2812,7 +2812,7 @@ function parseAutomationRequest(input: unknown): AutomationRequest | null {
     subtitle: 'Why open-model cost comparisons depend on serving, utilization, and operations rather than model price alone.',
     category: 'open-source',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['economics', 'deployment', 'vllm', 'self-hosting', 'cost'],
     content: [
       {
@@ -3206,7 +3206,7 @@ claude --continue`,
           'Open source under Apache 2.0 -- fork and customize freely',
           'Lightweight Node.js-based CLI with minimal dependencies',
           'Full file system access for reading, writing, and executing',
-          'Powered by OpenAI models including GPT-4.1 and o4-mini',
+          'Works with account-supported OpenAI coding models, including current GPT-5 and GPT-4.1 families',
           'Supports sandboxed execution for safe code running',
         ],
       },
@@ -3224,7 +3224,7 @@ claude --continue`,
       {
         title: 'Models & Configuration',
         content:
-          'By default Codex CLI uses the o4-mini model for a balance of speed and capability. You can switch to GPT-4.1 for more complex tasks or o3 for advanced reasoning. Configuration is stored in a simple config file, and you can set model preferences, approval modes, and custom instructions.',
+          'Codex model availability and defaults depend on the installed client and signed-in account. You can pin an exact supported model when reproducibility matters, or keep the client default so OpenAI can apply the current recommended coding model. Configuration also supports model preferences, approval modes, and custom instructions.',
         codeExample: `# Install
 npm install -g @openai/codex
 
@@ -3251,7 +3251,7 @@ codex --approval-mode full-auto "add unit tests for utils/"`,
           headers: ['Feature', 'Claude Code', 'Codex CLI'],
           rows: [
             ['License', 'Proprietary (free to use)', 'Apache 2.0'],
-            ['Models', 'Claude Opus/Sonnet/Haiku', 'GPT-4.1, o4-mini, o3'],
+            ['Models', 'Claude Opus/Sonnet/Haiku', 'Current account-supported GPT and Codex models'],
             ['MCP Support', 'Yes', 'No'],
             ['Hooks', 'Yes', 'No'],
             ['Subagents', 'Yes', 'No'],
@@ -3274,10 +3274,10 @@ codex --approval-mode full-auto "add unit tests for utils/"`,
       {
         title: 'Overview',
         content:
-          'Gemini CLI is Google\'s entry into the agentic coding space, released as an open-source tool that brings Gemini models directly into your terminal. It stands out with an extremely generous free tier -- 60 model requests per minute and 1,000 requests per day at no cost when authenticated with a personal Google account. It supports Gemini 2.5 Pro with its massive 1 million token context window, making it capable of understanding very large codebases in a single pass.',
+          'Gemini CLI is Google\'s open-source agentic coding tool for bringing account-supported Gemini models into the terminal. Current model availability is account- and region-dependent, so the CLI and UC both discover the provider catalog instead of assuming one permanent default. Long-context Gemini models can work across large codebases in a single task.',
         bulletPoints: [
-          'Free tier: 60 requests/minute, 1,000 requests/day with Google account',
-          'Powered by Gemini 2.5 Pro with 1M token context window',
+          'Free and paid limits depend on the current Google account and region',
+          'Current Gemini families include long-context multimodal and low-latency tiers',
           'Open source -- community contributions welcome',
           'Supports file editing, shell commands, and code generation',
           'MCP server integration for extended tool access',
@@ -3312,7 +3312,7 @@ gemini
 gemini -p "explain what this project does"
 
 # With a specific model
-gemini --model gemini-2.5-pro`,
+gemini --model gemini-3.6-flash`,
       },
       {
         title: 'Pricing Tiers',
@@ -3604,7 +3604,7 @@ aider --model ollama/deepseek-coder-v2`,
   {
     id: 'claude-models',
     title: 'Claude Model Family',
-    subtitle: 'Anthropic\'s Claude models: Opus 4.6 for deep reasoning, Sonnet 4.6 for daily work, Haiku 4.5 for speed.',
+    subtitle: 'Anthropic\'s current Claude tiers: Fable 5, Opus 5, Sonnet 5, plus Haiku 4.5 for speed.',
     category: 'models',
     icon: 'AI',
     color: '#6366f1',
@@ -3613,13 +3613,13 @@ aider --model ollama/deepseek-coder-v2`,
       {
         title: 'The Claude Lineup',
         content:
-          'Anthropic\'s Claude model family consists of three tiers designed for different use cases. Opus 4.6 is the flagship model -- the most intelligent, capable of sustained reasoning over extremely complex tasks. Sonnet 4.6 hits the sweet spot of intelligence and speed, making it ideal for everyday coding, writing, and analysis. Haiku 4.5 is the speed champion, delivering fast responses at low cost for simpler tasks.',
+          'Anthropic\'s current catalog has multiple capability and cost tiers. Fable 5 is the highest-capability option, Opus 5 is the premium long-horizon tier, Sonnet 5 balances capability and speed for daily agent work, and Haiku 4.5 remains the low-latency tier. Availability is checked from the signed-in account and merged with UC\'s curated fallback.',
         bulletPoints: [
-          'Opus 4.6: Most capable model for complex reasoning and coding',
-          'Sonnet 4.6: Balanced performance for everyday tasks',
+          'Fable 5: Highest-capability tier for the most demanding long-horizon work',
+          'Opus 5: Premium reasoning, architecture, and coding tier',
+          'Sonnet 5: Balanced performance for everyday agent and tool tasks',
           'Haiku 4.5: Fast and affordable for simple queries and high-volume tasks',
-          'All models share the same safety training and instruction-following capabilities',
-          'Extended thinking mode available on Opus and Sonnet for step-by-step reasoning',
+          'Older exact IDs remain readable for saved agents and conversations but are not silently rewritten',
         ],
       },
       {
@@ -3627,12 +3627,12 @@ aider --model ollama/deepseek-coder-v2`,
         content:
           'All Claude models support large context windows, enabling them to process entire codebases, lengthy documents, and complex conversations. The models are multimodal, accepting both text and images as input. Extended thinking mode allows the models to "think out loud" before responding, significantly improving performance on math, coding, and logical reasoning tasks.',
         tableData: {
-          headers: ['Model', 'Context Window', 'Max Output', 'Extended Thinking'],
+          headers: ['Model', 'Context Window', 'Max Output', 'Reasoning Mode'],
           rows: [
-            ['Opus 4.6 (1M)', '1,000,000 tokens', '32,000 tokens', 'Yes'],
-            ['Opus 4.6', '200,000 tokens', '32,000 tokens', 'Yes'],
-            ['Sonnet 4.6', '200,000 tokens', '16,000 tokens', 'Yes'],
-            ['Haiku 4.5', '200,000 tokens', '8,192 tokens', 'No'],
+            ['Fable 5', '1,000,000 tokens', '128,000 tokens', 'Adaptive, always on'],
+            ['Opus 5', '1,000,000 tokens', '128,000 tokens', 'Adaptive'],
+            ['Sonnet 5', '1,000,000 tokens', '128,000 tokens', 'Adaptive'],
+            ['Haiku 4.5', '200,000 tokens', '64,000 tokens', 'Extended thinking'],
           ],
         },
       },
@@ -3643,9 +3643,10 @@ aider --model ollama/deepseek-coder-v2`,
         tableData: {
           headers: ['Model', 'Input / 1M tokens', 'Output / 1M tokens', 'Cache Read / 1M tokens'],
           rows: [
-            ['Opus 4.6', '$15.00', '$75.00', '$1.50'],
-            ['Sonnet 4.6', '$3.00', '$15.00', '$0.30'],
-            ['Haiku 4.5', '$0.80', '$4.00', '$0.08'],
+            ['Fable 5', '$10.00', '$50.00', '$1.00'],
+            ['Opus 5', '$5.00', '$25.00', '$0.50'],
+            ['Sonnet 5', '$3.00', '$15.00', '$0.30'],
+            ['Haiku 4.5', '$1.00', '$5.00', '$0.10'],
           ],
         },
       },
@@ -3678,7 +3679,7 @@ aider --model ollama/deepseek-coder-v2`,
   {
     id: 'gpt-models',
     title: 'GPT Model Family',
-    subtitle: 'OpenAI\'s model lineup from GPT-4o to the reasoning-focused o3 and o4-mini.',
+    subtitle: 'OpenAI\'s current GPT-5.6 tiers, GPT-5.5/5.4 families, GPT-4.1, and o3 reasoning models.',
     category: 'models',
     icon: 'AI',
     color: '#6366f1',
@@ -3687,53 +3688,56 @@ aider --model ollama/deepseek-coder-v2`,
       {
         title: 'Overview',
         content:
-          'OpenAI offers two main tracks of models: the GPT series for general-purpose intelligence and the "o" series for advanced reasoning. GPT-4o remains the flagship general model with strong multimodal capabilities. GPT-4.1 was trained specifically for coding and instruction-following. The o-series models (o3, o4-mini) use chain-of-thought reasoning to tackle complex math, science, and coding problems that stump traditional models.',
+          'OpenAI\'s current API catalog spans GPT-5.6 Sol, Terra, and Luna for deep, balanced, and fast agent work; GPT-5.5 and GPT-5.4 families for professional and cost-scaled workloads; GPT-4.1 for long-context compatibility; and o3/o3 Pro for explicit reasoning workloads. UC discovers the account catalog and keeps a curated offline fallback.',
         bulletPoints: [
-          'GPT-4o: Multimodal flagship -- text, image, audio in and out',
-          'GPT-4.1: Optimized for coding, long context, and instruction following',
-          'o3: Advanced reasoning model for the hardest problems',
-          'o4-mini: Fast, affordable reasoning with strong coding ability',
-          'All accessible via the OpenAI API and ChatGPT interface',
+          'GPT-5.6 Sol: Deep tier for hardest reasoning, coding, and agent tasks',
+          'GPT-5.6 Terra: Balanced tier for everyday professional tool work',
+          'GPT-5.6 Luna: Fast, lower-cost tier for bounded workers and extraction',
+          'GPT-5.4 Mini/Nano: Cost-scaled options for subagents and high-volume work',
+          'o3 and o3 Pro: Explicit reasoning options retained for supported accounts',
         ],
       },
       {
         title: 'Model Comparison',
         content:
-          'Each model has distinct strengths. GPT-4o is the most versatile, handling text, images, and audio natively. GPT-4.1 excels at code generation and following complex instructions. o3 and o4-mini use internal reasoning chains that improve performance on tasks requiring multi-step logic.',
+          'Pick the smallest model that still satisfies the task\'s reasoning, tool, context, and quality requirements. Auto makes that selection from connected providers; an exact pick stays pinned for the turn and does not silently fall through to another model.',
         tableData: {
           headers: ['Model', 'Context Window', 'Strengths', 'Best For'],
           rows: [
-            ['GPT-4o', '128K tokens', 'Multimodal, fast', 'Chat, content, vision tasks'],
-            ['GPT-4.1', '1M tokens', 'Coding, instruction following', 'Development, long docs'],
-            ['o3', '200K tokens', 'Deep reasoning', 'Math, science, hard coding'],
-            ['o4-mini', '200K tokens', 'Fast reasoning', 'Coding, analysis, cost-effective'],
+            ['GPT-5.6 Sol', '1.05M tokens', 'Deep reasoning and coding', 'Hardest builds and agent work'],
+            ['GPT-5.6 Terra', '1.05M tokens', 'Balanced quality and cost', 'Everyday professional tasks'],
+            ['GPT-5.6 Luna', '1.05M tokens', 'Low latency and cost', 'Extraction and bounded workers'],
+            ['GPT-4.1', '~1.05M tokens', 'Long-context compatibility', 'Development and long documents'],
+            ['o3 / o3 Pro', '200K tokens', 'Explicit reasoning', 'Math, science, hard analysis'],
           ],
         },
       },
       {
         title: 'Pricing',
         content:
-          'OpenAI\'s pricing varies significantly across models. The reasoning models charge for both visible output tokens and internal reasoning tokens. GPT-4.1 offers strong coding performance at a competitive price point.',
+          'OpenAI pricing varies significantly by tier. These are provider-published base rates; UC applies a separate 25% planning buffer in cost forecasts and always prefers live usage data when available.',
         tableData: {
           headers: ['Model', 'Input / 1M tokens', 'Output / 1M tokens'],
           rows: [
-            ['GPT-4o', '$2.50', '$10.00'],
+            ['GPT-5.6 Sol', '$5.00', '$30.00'],
+            ['GPT-5.6 Terra', '$2.50', '$15.00'],
+            ['GPT-5.6 Luna', '$1.00', '$6.00'],
             ['GPT-4.1', '$2.00', '$8.00'],
             ['o3', '$10.00', '$40.00'],
-            ['o4-mini', '$1.10', '$4.40'],
+            ['o3 Pro', '$20.00', '$80.00'],
           ],
         },
       },
       {
         title: 'Reasoning Models Deep Dive',
         content:
-          'The o-series models represent a different approach to AI capability. Instead of generating answers directly, they "think" through problems step by step using internal reasoning tokens. This makes them dramatically better at complex logic, mathematical proofs, and multi-step coding tasks. The trade-off is higher latency and cost, since reasoning tokens are generated before the visible response.',
+          'Current GPT and o-series models can allocate additional reasoning effort before returning a visible answer. This can improve difficult logic, mathematical, and multi-step coding work, but increases latency and cost. UC exposes reasoning effort only where the selected model supports it and keeps those internal tokens out of user-visible chain-of-thought.',
         bulletPoints: [
           'Internal chain-of-thought reasoning before generating response',
           'Dramatically better at math, logic, and algorithmic problems',
           'Higher latency due to reasoning phase',
           'Reasoning tokens count toward cost but are not visible to users',
-          'o4-mini offers a budget-friendly way to access reasoning capabilities',
+          'GPT-5.6 Terra or Luna can be better value when maximum reasoning depth is unnecessary',
         ],
       },
     ],
@@ -3762,12 +3766,13 @@ aider --model ollama/deepseek-coder-v2`,
       {
         title: 'Model Variants',
         content:
-          'Gemini comes in two main sizes. Gemini 2.5 Pro is the full-power model with reasoning capabilities and massive context. Gemini 2.5 Flash is the faster, more affordable option that retains strong capabilities at lower latency and cost.',
+          'The current UC fallback highlights Gemini 3.6 Flash for broad multimodal agent work, Gemini 3.5 Flash for a stable general tier, and Gemini 3.5 Flash-Lite for low-latency, high-volume tasks. The signed-in account\'s live catalog can add other supported text-generation models.',
         tableData: {
           headers: ['Model', 'Context', 'Strengths', 'Best For'],
           rows: [
-            ['Gemini 2.5 Pro', '1M tokens', 'Reasoning, multimodal, code', 'Complex tasks, long docs, video'],
-            ['Gemini 2.5 Flash', '1M tokens', 'Speed, efficiency', 'High-volume, real-time, cost-sensitive'],
+            ['Gemini 3.6 Flash', '~1.05M tokens', 'Reasoning, multimodal, code', 'Agent tasks, long docs, media'],
+            ['Gemini 3.5 Flash', '1M tokens', 'Stable general capability', 'Daily multimodal work'],
+            ['Gemini 3.5 Flash-Lite', '~1.05M tokens', 'Speed and efficiency', 'High-volume, cost-sensitive work'],
           ],
         },
       },
@@ -3790,8 +3795,9 @@ aider --model ollama/deepseek-coder-v2`,
         tableData: {
           headers: ['Model', 'Input / 1M tokens', 'Output / 1M tokens', 'Free Tier'],
           rows: [
-            ['2.5 Pro', '$1.25 (<=200K) / $2.50 (>200K)', '$10.00', 'Yes (rate limited)'],
-            ['2.5 Flash', '$0.15 (<=200K) / $0.30 (>200K)', '$0.60 (non-thinking)', 'Yes (rate limited)'],
+            ['3.6 Flash', '$1.50', '$7.50', 'Account dependent'],
+            ['3.5 Flash', '$1.50', '$9.00', 'Account dependent'],
+            ['3.5 Flash-Lite', '$0.30', '$2.50', 'Account dependent'],
           ],
         },
       },
@@ -4995,7 +5001,7 @@ const tokens = {
     subtitle: 'A guide to Ollama, llama.cpp, LM Studio, and running AI models on your own hardware.',
     category: 'open-source',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['local', 'inference', 'ollama'],
     content: [
       {
@@ -5091,7 +5097,7 @@ curl http://localhost:11434/v1/chat/completions \\
     subtitle: 'How to customize AI models with Unsloth, QLoRA, TRL, and proper data preparation.',
     category: 'open-source',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['training', 'fine-tune'],
     content: [
       {
@@ -5212,7 +5218,7 @@ model.save_pretrained_gguf("./gguf_model", tokenizer,
     subtitle: 'Embeddings, vector search, and retrieval-augmented generation with Chroma, Pinecone, and Qdrant.',
     category: 'open-source',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['rag', 'vector', 'database'],
     content: [
       {
@@ -5327,7 +5333,7 @@ answer = ask("How do I add auth to my Next.js app?")`,
     subtitle: 'The hub for open-source AI: models, datasets, Spaces, and the Inference API.',
     category: 'open-source',
     icon: 'OS',
-    color: '#22d3ee',
+    color: '#6366f1',
     tags: ['platform', 'hub'],
     content: [
       {

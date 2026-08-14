@@ -314,24 +314,46 @@ expect(
   const state = buildChatAttentionState(
     {
       blockedRuns: [
-        { id: 'run-1', title: 'Publish the pricing page', status: 'waiting_approval', surface: 'main_chat', started_at: new Date(NOW - 45 * MINUTE).toISOString() },
-        { id: 'run-2', title: 'Nightly sweep', status: 'paused', created_at: new Date(NOW - 5 * MINUTE).toISOString() },
+        { id: 'run-1', title: 'Publish the pricing page', status: 'waiting_approval', surface: 'main_chat', started_at: new Date(NOW - 45 * MINUTE).toISOString(), updated_at: new Date(NOW - 10 * MINUTE).toISOString() },
+        { id: 'run-2', title: 'Nightly sweep', status: 'paused', created_at: new Date(NOW - 5 * MINUTE).toISOString(), updated_at: new Date(NOW - 5 * MINUTE).toISOString() },
+        { id: 'run-stale', title: 'Old orphan', status: 'paused', created_at: new Date(NOW - 17 * 60 * MINUTE).toISOString(), updated_at: new Date(NOW - 17 * 60 * MINUTE).toISOString() },
         { id: 'run-3', title: 'Active build', status: 'running' },
       ],
     },
     { now: NOW },
   );
   const blocked = state.items.filter((item) => item.kind === 'run_blocked');
-  expect(blocked.length === 2, 'only waiting_approval/paused runs become items (running ignored)');
-  expect(blocked.some((item) => item.id === 'run:run-1'), 'blocked-run item id keyed by run id');
-  const waiting = state.items.find((item) => item.id === 'run:run-1');
+  expect(blocked.length === 2, 'only fresh waiting_approval/paused runs become items (running + stale blocked ignored)');
+  expect(blocked.some((item) => item.id.startsWith('run:run-1:')), 'blocked-run item id keys exact run + blocked revision');
+  const waiting = state.items.find((item) => item.id.startsWith('run:run-1:'));
   expect(waiting!.title.includes('waiting on a decision'), 'waiting_approval wording');
   expect(waiting!.detail.includes('blocked 45m'), 'blocked-run detail carries waiting time');
   expect(waiting!.primaryAction.kind === 'open_run', 'blocked run offers View run');
-  const paused = state.items.find((item) => item.id === 'run:run-2');
+  const paused = state.items.find((item) => item.id.startsWith('run:run-2:'));
   expect(paused!.title.startsWith('Run paused:'), 'paused wording');
   expect(String(state.statusLine).includes('2 runs blocked'), 'status line counts blocked runs');
   pass('blocked runs: filtering, wait time, status line');
+}
+
+// A durable dismissal hides the exact blocked revision, but a later canonical
+// update generates a new id and may surface again.
+{
+  const first = buildChatAttentionState({ blockedRuns: [{
+    id: 'run-revision', title: 'Waiting', status: 'paused',
+    updated_at: new Date(NOW - MINUTE).toISOString(),
+  }] }, { now: NOW });
+  const firstId = first.items[0].id;
+  const dismissed = buildChatAttentionState({ blockedRuns: [{
+    id: 'run-revision', title: 'Waiting', status: 'paused',
+    updated_at: new Date(NOW - MINUTE).toISOString(),
+  }] }, { now: NOW, dismissedIds: new Set([firstId]) });
+  expect(dismissed.items.length === 0, 'durable exact-revision dismissal suppresses the current blocker');
+  const changed = buildChatAttentionState({ blockedRuns: [{
+    id: 'run-revision', title: 'Waiting again', status: 'paused',
+    updated_at: new Date(NOW).toISOString(),
+  }] }, { now: NOW, dismissedIds: new Set([firstId]) });
+  expect(changed.items.length === 1 && changed.items[0].id !== firstId, 'new blocked revision is not hidden forever');
+  pass('blocked run dismissal revision');
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

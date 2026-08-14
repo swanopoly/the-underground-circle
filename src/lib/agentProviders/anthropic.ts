@@ -31,6 +31,8 @@ import type {
 } from '../agentExecutionCore';
 
 export type AnthropicModelId =
+  | 'claude-opus-5'
+  | 'claude-sonnet-5'
   | 'claude-opus-4-7'
   | 'claude-opus-4-7-20260401'
   | 'claude-sonnet-4-6'

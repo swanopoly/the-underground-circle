@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { View, Text, Animated, Easing, Pressable, Platform, Linking } from 'react-native';
 import { animLoop } from '../../../../lib/animationHelpers';
-import type { FurnitureItem, OfficeTheme } from '../../../../lib/officeConfig';
+import { getOfficeAddonRuntimeState, getOfficeYouTubeEmbedUrl, type FurnitureItem, type OfficeTheme } from '../../../../lib/officeConfig';
 import type { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   CROP_INFO, CropType, CROP_TYPES, getPlotState, getPlotGrowthPercent, harvestPlot,
@@ -24,21 +24,6 @@ const S: any = Platform.OS === 'web' ? { cursor: 'default' } : {};
 
 // ── Embed URL helpers (web only) ─────────────────────────────────────────────
 
-/** Convert a YouTube watch/share URL into an embeddable URL */
-function youtubeEmbedUrl(url: string): string | null {
-  try {
-    // https://www.youtube.com/watch?v=VIDEO_ID
-    const m1 = url.match(/[?&]v=([A-Za-z0-9_-]{11})/);
-    if (m1) return `https://www.youtube.com/embed/${m1[1]}?autoplay=1&mute=1`;
-    // https://youtu.be/VIDEO_ID
-    const m2 = url.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
-    if (m2) return `https://www.youtube.com/embed/${m2[1]}?autoplay=1&mute=1`;
-    // https://www.youtube.com/embed/VIDEO_ID (already embed)
-    if (url.includes('youtube.com/embed/')) return url;
-    return null;
-  } catch { return null; }
-}
-
 /** Build a Twitch player embed URL */
 function twitchEmbedUrl(channel: string): string | null {
   if (!channel) return null;
@@ -50,13 +35,67 @@ function twitchEmbedUrl(channel: string): string | null {
 function getTvEmbedUrl(app: string, contentUrl?: string): string | null {
   if (!contentUrl) return null;
   switch (app) {
-    case 'youtube': return youtubeEmbedUrl(contentUrl);
+    case 'youtube': return getOfficeYouTubeEmbedUrl(contentUrl);
     case 'twitch': {
       // Extract channel from twitch.tv URL or use as-is
       const m = contentUrl.match(/twitch\.tv\/([A-Za-z0-9_]+)/);
       return twitchEmbedUrl(m ? m[1] : contentUrl);
     }
     default: return null; // netflix/hulu/disney don't allow iframe embedding
+  }
+}
+
+interface OfficeClockTime {
+  hour: string;
+  minute: string;
+  isDay: boolean;
+  valid: boolean;
+}
+
+/**
+ * Resolve both current IANA timezone values and legacy numeric UTC offsets.
+ * New layouts persist IANA identifiers so daylight-saving changes remain
+ * accurate; the numeric branch keeps older saved floors readable.
+ */
+function getOfficeClockTime(timezone: string, now: Date): OfficeClockTime {
+  const normalized = String(timezone || '').trim();
+  const legacyOffset = normalized.match(/^([+-]?\d{1,2})(?::(\d{2}))?$/);
+  if (legacyOffset) {
+    const sign = legacyOffset[1].startsWith('-') ? -1 : 1;
+    const wholeHours = Math.abs(Number.parseInt(legacyOffset[1], 10));
+    const offsetMinutes = Number.parseInt(legacyOffset[2] || '0', 10);
+    if (wholeHours > 14 || offsetMinutes >= 60 || (wholeHours === 14 && offsetMinutes > 0)) {
+      return { hour: '--', minute: '--', isDay: false, valid: false };
+    }
+    const shifted = new Date(now.getTime() + sign * (wholeHours * 60 + offsetMinutes) * 60_000);
+    const hours = shifted.getUTCHours();
+    return {
+      hour: String(hours).padStart(2, '0'),
+      minute: String(shifted.getUTCMinutes()).padStart(2, '0'),
+      isDay: hours >= 6 && hours < 20,
+      valid: true,
+    };
+  }
+
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: normalized,
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(now);
+    const hour = parts.find(part => part.type === 'hour')?.value;
+    const minute = parts.find(part => part.type === 'minute')?.value;
+    const hourNumber = Number.parseInt(hour || '', 10);
+    if (!hour || !minute || !Number.isFinite(hourNumber)) throw new Error('Invalid timezone result');
+    return {
+      hour,
+      minute,
+      isDay: hourNumber >= 6 && hourNumber < 20,
+      valid: true,
+    };
+  } catch {
+    return { hour: '--', minute: '--', isDay: false, valid: false };
   }
 }
 
@@ -1868,7 +1907,8 @@ export function SpotifyJukeboxItem({ item, theme }: ItemProps) {
     return () => l.stop();
   }, []);
 
-  const connected = item.spotifyConnected;
+  const connected = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state === 'live' && !!item.spotifyConnected;
+  const configured = !!item.spotifyUrl;
   const trackName = item.spotifyTrackName || 'No Track';
   const artist = item.spotifyArtist || '';
   const playing = item.spotifyPlaying;
@@ -1877,7 +1917,7 @@ export function SpotifyJukeboxItem({ item, theme }: ItemProps) {
   const glowOp = pulse.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.3, 0.6, 0.3] });
 
   return (
-    <View style={{ width: 66, height: 86, backgroundColor: '#191414', borderWidth: 2, borderColor: connected ? '#1DB954' : '#333', borderRadius: 10, alignItems: 'center', overflow: 'hidden' }}>
+    <View style={{ width: 66, height: 86, backgroundColor: '#191414', borderWidth: 2, borderColor: connected || configured ? '#1DB954' : '#333', borderRadius: 10, alignItems: 'center', overflow: 'hidden' }}>
       {/* Spotify green glow */}
       <Animated.View style={{ position: 'absolute', top: -4, left: -4, right: -4, bottom: -4, borderRadius: 12, backgroundColor: '#1DB95420', opacity: connected ? glowOp : 0 }} />
 
@@ -1913,7 +1953,7 @@ export function SpotifyJukeboxItem({ item, theme }: ItemProps) {
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 4 }}>
           <Text style={{ fontSize: 18 }}>🔗</Text>
-          <Text style={{ color: '#1DB954', fontSize: 5, fontFamily: 'monospace', textAlign: 'center', marginTop: 2 }}>TAP TO{'\n'}CONNECT</Text>
+          <Text style={{ color: '#1DB954', fontSize: 5, fontFamily: 'monospace', textAlign: 'center', marginTop: 2 }}>{configured ? 'OPEN LINK' : 'SET UP'}</Text>
         </View>
       )}
     </View>
@@ -1933,7 +1973,8 @@ export function DiscordHubItem({ item, theme }: ItemProps) {
     return () => l.stop();
   }, []);
 
-  const connected = item.discordConnected;
+  const connected = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state === 'live' && !!item.discordConnected;
+  const configured = !!item.discordUrl;
   const channel = item.discordChannel || 'general';
   const status = item.discordStatus || 'offline';
   const members = item.discordMemberCount || 0;
@@ -1944,7 +1985,7 @@ export function DiscordHubItem({ item, theme }: ItemProps) {
   const dotPulse = pulseAnim.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.6, 1, 0.6] });
 
   return (
-    <View style={{ width: 76, height: 66, backgroundColor: '#36393f', borderWidth: 2, borderColor: connected ? '#5865F2' : '#40444b', borderRadius: 8, overflow: 'hidden' }}>
+    <View style={{ width: 76, height: 66, backgroundColor: '#36393f', borderWidth: 2, borderColor: connected || configured ? '#5865F2' : '#40444b', borderRadius: 8, overflow: 'hidden' }}>
       {/* Header */}
       <View style={{ height: 16, backgroundColor: '#5865F2', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 }}>
         <Text style={{ fontSize: 7, fontWeight: '800', color: '#fff', fontFamily: 'monospace' }}>DISCORD</Text>
@@ -1984,7 +2025,7 @@ export function DiscordHubItem({ item, theme }: ItemProps) {
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
           <Text style={{ fontSize: 16 }}>💬</Text>
-          <Text style={{ color: '#5865F2', fontSize: 5, fontFamily: 'monospace', marginTop: 2 }}>CONNECT</Text>
+          <Text style={{ color: '#5865F2', fontSize: 5, fontFamily: 'monospace', marginTop: 2 }}>{configured ? 'OPEN LINK' : 'SET UP'}</Text>
         </View>
       )}
     </View>
@@ -2017,16 +2058,16 @@ export function VideoCallItem({ item, theme }: ItemProps) {
     return () => { r.stop(); d.stop(); };
   }, [item.videoCallActive]);
 
-  const active = item.videoCallActive;
-  const provider = item.videoCallProvider || 'meet';
-  const participants = item.videoCallParticipants || 0;
+  const active = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state === 'live' && !!item.videoCallActive;
+  const provider = item.videoCallProvider?.trim().toLowerCase() || '';
+  const participants = item.videoCallParticipants ?? 0;
 
   const providerInfo: Record<string, { color: string; label: string; icon: string }> = {
     zoom: { color: '#2D8CFF', label: 'ZOOM', icon: '🔵' },
     meet: { color: '#00897B', label: 'MEET', icon: '🟢' },
     teams: { color: '#6264A7', label: 'TEAMS', icon: '🟣' },
   };
-  const prov = providerInfo[provider] || providerInfo.meet;
+  const prov = providerInfo[provider] || { color: '#475569', label: 'VIDEO CALL', icon: '📹' };
 
   const ringScale = ringPulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.15] });
   const ringOp = ringPulse.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] });
@@ -2074,7 +2115,7 @@ export function VideoCallItem({ item, theme }: ItemProps) {
           {/* Pulsing ring */}
           <Animated.View style={{ position: 'absolute', width: 34, height: 34, borderRadius: 17, borderWidth: 2, borderColor: prov.color, transform: [{ scale: ringScale }], opacity: ringOp }} />
           <Text style={{ fontSize: 20 }}>📹</Text>
-          <Text style={{ color: prov.color, fontSize: 5, fontFamily: 'monospace', marginTop: 2 }}>START CALL</Text>
+          <Text style={{ color: prov.color, fontSize: 5, fontFamily: 'monospace', marginTop: 2 }}>{item.videoCallLink ? 'OPEN LINK' : 'SET UP'}</Text>
         </View>
       )}
     </View>
@@ -2084,9 +2125,14 @@ export function VideoCallItem({ item, theme }: ItemProps) {
 // ── Message Board ────────────────────────────────────────────────────────────
 export function MessageBoardItem({ item, theme }: ItemProps) {
   const notifBounce = useRef(new Animated.Value(0)).current;
+  // Nullish/finite handling is intentional: an explicit zero is authoritative
+  // and must never be replaced by a room/chat aggregate.
+  const count = typeof item.messageCount === 'number' && Number.isFinite(item.messageCount)
+    ? Math.max(0, Math.floor(item.messageCount))
+    : 0;
 
   useEffect(() => {
-    if (!item.messageCount) return;
+    if (count <= 0) return;
     const l = animLoop(() => {
       notifBounce.setValue(0);
       return Animated.sequence([
@@ -2097,18 +2143,17 @@ export function MessageBoardItem({ item, theme }: ItemProps) {
     });
     l.start();
     return () => l.stop();
-  }, [item.messageCount]);
+  }, [count, notifBounce]);
 
-  const source = item.messageSource || 'sms';
-  const preview = item.messagePreview || 'No messages yet';
-  const count = item.messageCount || 0;
+  const source = item.messageSource?.trim().toLowerCase() || '';
+  const preview = item.messagePreview?.trim() || '';
 
   const sourceInfo: Record<string, { color: string; icon: string; label: string }> = {
     imessage: { color: '#34C759', icon: '💬', label: 'iMessage' },
     sms: { color: '#34C759', icon: '💬', label: 'SMS' },
     whatsapp: { color: '#25D366', icon: '📲', label: 'WhatsApp' },
   };
-  const src = sourceInfo[source] || sourceInfo.sms;
+  const src = sourceInfo[source] || { color: '#64748b', icon: '💬', label: 'Messages' };
 
   return (
     <View style={{ width: 56, height: 86, backgroundColor: '#1c1c1e', borderWidth: 2, borderColor: src.color + '80', borderRadius: 14, overflow: 'hidden', alignItems: 'center' }}>
@@ -2130,10 +2175,9 @@ export function MessageBoardItem({ item, theme }: ItemProps) {
       {/* Message bubbles */}
       <View style={{ flex: 1, width: '100%' as any, padding: 3, gap: 2 }}>
         <View style={{ backgroundColor: '#2c2c2e', borderRadius: 6, padding: 3, maxWidth: '85%' as any, alignSelf: 'flex-start' }}>
-          <Text style={{ color: '#ddd', fontSize: 3.5, fontFamily: 'monospace' }} numberOfLines={2}>{preview}</Text>
-        </View>
-        <View style={{ backgroundColor: src.color, borderRadius: 6, padding: 3, maxWidth: '75%' as any, alignSelf: 'flex-end' }}>
-          <Text style={{ color: '#fff', fontSize: 3.5, fontFamily: 'monospace' }}>Got it 👍</Text>
+          <Text style={{ color: preview ? '#ddd' : '#777', fontSize: 3.5, fontFamily: 'monospace' }} numberOfLines={2}>
+            {preview || 'No connected messages'}
+          </Text>
         </View>
       </View>
 
@@ -2209,6 +2253,7 @@ export function SmartTVItem({ item, theme }: ItemProps) {
               <>
                 {React.createElement('iframe', {
                   src: embedUrl,
+                  title: `${a.label} video player`,
                   style: {
                     position: 'absolute',
                     top: 0,
@@ -2220,6 +2265,8 @@ export function SmartTVItem({ item, theme }: ItemProps) {
                   },
                   allow: 'autoplay; encrypted-media; fullscreen; picture-in-picture',
                   allowFullScreen: true,
+                  sandbox: 'allow-scripts allow-same-origin allow-presentation',
+                  referrerPolicy: 'strict-origin-when-cross-origin',
                   frameBorder: '0',
                 })}
                 {/* Power LED over iframe */}
@@ -2294,8 +2341,8 @@ export function WeatherStationItem({ item, theme }: ItemProps) {
     return () => { c.stop(); r.stop(); s.stop(); };
   }, []);
 
-  const city = item.weatherCity || 'New York';
-  const temp = item.weatherTemp ?? 72;
+  const city = item.weatherCity || 'SAMPLE';
+  const temp = item.weatherTemp;
   const condition = item.weatherCondition || 'sunny';
 
   const conditionInfo: Record<string, { bg: string; icon: string; accent: string }> = {
@@ -2340,7 +2387,7 @@ export function WeatherStationItem({ item, theme }: ItemProps) {
 
       {/* Temp & city */}
       <View style={{ position: 'absolute', bottom: 3, left: 0, right: 0, alignItems: 'center' }}>
-        <Text style={{ color: '#fff', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{temp}°</Text>
+        <Text style={{ color: '#fff', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>{typeof temp === 'number' ? `${temp}°` : '--'}</Text>
         <Text style={{ color: '#aaa', fontSize: 4, fontFamily: 'monospace' }} numberOfLines={1}>{city}</Text>
       </View>
     </View>
@@ -2370,7 +2417,7 @@ export function TwitchStreamItem({ item, theme }: ItemProps) {
   }, []);
 
   const channel = item.twitchChannel || 'stream';
-  const live = item.twitchLive;
+  const live = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state === 'live' && !!item.twitchLive;
   const viewers = item.twitchViewers || 0;
   const isWeb = Platform.OS === 'web';
   const embedSrc = live && channel ? twitchEmbedUrl(channel) : null;
@@ -2426,7 +2473,7 @@ export function TwitchStreamItem({ item, theme }: ItemProps) {
         ) : (
           <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
             <Text style={{ fontSize: 12 }}>🟣</Text>
-            <Text style={{ color: '#9146FF', fontSize: 5, fontFamily: 'monospace', marginTop: 2 }}>OFFLINE</Text>
+            <Text style={{ color: '#9146FF', fontSize: 5, fontFamily: 'monospace', marginTop: 2 }}>{item.twitchChannel ? 'OPEN LINK' : 'SET UP'}</Text>
           </View>
         )}
       </View>
@@ -2524,6 +2571,7 @@ export function CryptoTickerItem({ item, theme }: ItemProps) {
     p.start();
     return () => { s.stop(); p.stop(); };
   }, []);
+  const isDemo = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state !== 'live';
   const coins = (item.cryptoTickerCoins || 'SOL,ETH,BTC').split(',');
   const prices = (item.cryptoTickerPrices || '148.52,3412.80,67250.00').split(',');
   const changes = (item.cryptoTickerChanges || '+2.5,-1.2,+0.8').split(',');
@@ -2533,7 +2581,7 @@ export function CryptoTickerItem({ item, theme }: ItemProps) {
     <View style={{ width: 96, height: 46, backgroundColor: '#0a0a14', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6, overflow: 'hidden' }}>
       <View style={{ backgroundColor: '#111', paddingHorizontal: 4, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <Text style={{ color: '#888', fontSize: 4, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1 }}>CRYPTO</Text>
-        <Animated.View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#22c55e', opacity: pulse }} />
+        <Text style={{ color: isDemo ? '#f59e0b' : '#22c55e', fontSize: 3.5, fontWeight: '900', fontFamily: 'monospace' }}>{isDemo ? 'DEMO' : 'LIVE'}</Text>
       </View>
       <Animated.View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 4, paddingTop: 3, transform: [{ translateX: tickX }] }}>
         {coins.map((coin, i) => {
@@ -2560,7 +2608,8 @@ export function GitHubFeedItem({ item, theme }: ItemProps) {
     d.start();
     return () => d.stop();
   }, []);
-  const repo = item.githubRepo || 'user/repo';
+  const isDemo = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state !== 'live';
+  const repo = item.githubRepo || 'sample/repo';
   const commits = item.githubCommits || 0;
   const prs = item.githubPRs || 0;
   const activity = item.githubActivity || 'No activity yet';
@@ -2574,7 +2623,7 @@ export function GitHubFeedItem({ item, theme }: ItemProps) {
       <View style={{ paddingHorizontal: 4, paddingTop: 3, gap: 2 }}>
         <View style={{ flexDirection: 'row', gap: 6 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
-            <Animated.View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: '#22c55e', opacity: dotOp }} />
+            <Animated.View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: isDemo ? '#f59e0b' : '#22c55e', opacity: dotOp }} />
             <Text style={{ color: '#8b949e', fontSize: 4, fontFamily: 'monospace' }}>{commits} commits</Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
@@ -2603,9 +2652,9 @@ export function CalendarWidgetItem({ item, theme }: ItemProps) {
   }, []);
   const event = item.calendarEvent || 'No upcoming events';
   const time = item.calendarTime || '';
-  const provider = item.calendarProvider || 'google';
-  const count = item.calendarEvents || 0;
-  const provColor = provider === 'google' ? '#4285F4' : '#0078D4';
+  const provider = item.calendarProvider?.trim().toLowerCase() || '';
+  const count = item.calendarEvents ?? 0;
+  const provColor = provider === 'google' ? '#4285F4' : provider === 'outlook' ? '#0078D4' : '#64748b';
   const pulseOp = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] });
   const today = new Date();
   const dayNum = today.getDate();
@@ -2632,14 +2681,18 @@ export function CalendarWidgetItem({ item, theme }: ItemProps) {
 
 export function WorldClockItem({ item, theme }: ItemProps) {
   const tick = useRef(new Animated.Value(0)).current;
+  const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const t = animLoop(() => { tick.setValue(0); return Animated.timing(tick, { toValue: 1, duration: 1000, easing: Easing.linear, useNativeDriver: false }); });
     t.start();
     return () => t.stop();
   }, []);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
   const labels = (item.worldClockLabels || 'NYC,LDN,TYO').split(',');
-  const zones = (item.worldClockZones || '-5,0,+9').split(',');
-  const now = new Date();
+  const zones = (item.worldClockZones || 'America/New_York,Europe/London,Asia/Tokyo').split(',');
   const dotOp = tick.interpolate({ inputRange: [0, 0.5, 1], outputRange: [1, 0.2, 1] });
   return (
     <View style={{ width: 96, height: 46, backgroundColor: '#0a0a14', borderWidth: 1, borderColor: '#2a2a2a', borderRadius: 6, overflow: 'hidden' }}>
@@ -2648,20 +2701,16 @@ export function WorldClockItem({ item, theme }: ItemProps) {
       </View>
       <View style={{ flexDirection: 'row', justifyContent: 'space-around', paddingVertical: 3, flex: 1 }}>
         {labels.map((label, i) => {
-          const offset = parseInt(zones[i]?.trim() || '0');
-          const utcH = now.getUTCHours();
-          const h = ((utcH + offset) % 24 + 24) % 24;
-          const m = now.getMinutes();
-          const isDay = h >= 6 && h < 20;
+          const local = getOfficeClockTime(zones[i] || 'UTC', now);
           return (
             <View key={i} style={{ alignItems: 'center' }}>
-              <Text style={{ color: isDay ? '#f59e0b' : '#6366f1', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>{label.trim()}</Text>
+              <Text style={{ color: !local.valid ? '#ef4444' : local.isDay ? '#f59e0b' : '#6366f1', fontSize: 4.5, fontWeight: '900', fontFamily: 'monospace' }}>{label.trim()}</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <Text style={{ color: '#fff', fontSize: 7, fontWeight: '800', fontFamily: 'monospace' }}>{String(h).padStart(2, '0')}</Text>
+                <Text style={{ color: '#fff', fontSize: 7, fontWeight: '800', fontFamily: 'monospace' }}>{local.hour}</Text>
                 <Animated.Text style={{ color: '#fff', fontSize: 7, fontWeight: '800', fontFamily: 'monospace', opacity: dotOp }}>:</Animated.Text>
-                <Text style={{ color: '#fff', fontSize: 7, fontWeight: '800', fontFamily: 'monospace' }}>{String(m).padStart(2, '0')}</Text>
+                <Text style={{ color: '#fff', fontSize: 7, fontWeight: '800', fontFamily: 'monospace' }}>{local.minute}</Text>
               </View>
-              <Text style={{ fontSize: 4 }}>{isDay ? '☀️' : '🌙'}</Text>
+              <Text style={{ fontSize: 4 }}>{!local.valid ? 'TZ?' : local.isDay ? 'DAY' : 'NIGHT'}</Text>
             </View>
           );
         })}
@@ -2671,7 +2720,7 @@ export function WorldClockItem({ item, theme }: ItemProps) {
 }
 
 export function MusicVisualizerItem({ item, theme }: ItemProps) {
-  const bars = Array.from({ length: 12 }, () => useRef(new Animated.Value(0)).current);
+  const bars = useRef(Array.from({ length: 12 }, () => new Animated.Value(0))).current;
   const glow = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     const anims = bars.map((bar, i) => {
@@ -2715,32 +2764,36 @@ export function FigmaBoardItem({ item, theme }: ItemProps) {
     s.start();
     return () => s.stop();
   }, []);
-  const connected = item.figmaBoardConnected;
-  const preview = item.figmaBoardPreview || 'Dashboard v2';
+  const connected = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state === 'live' && !!item.figmaBoardConnected;
+  const configured = !!item.figmaBoardUrl;
+  const preview = item.figmaBoardPreview || 'Design link';
   const shimmerX = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-40, 100] });
   return (
-    <View style={{ width: 96, height: 76, backgroundColor: '#1e1e1e', borderWidth: 1, borderColor: connected ? '#a259ff' : '#333', borderRadius: 8, overflow: 'hidden' }}>
+    <View style={{ width: 96, height: 76, backgroundColor: '#1e1e1e', borderWidth: 1, borderColor: connected || configured ? '#a259ff' : '#333', borderRadius: 8, overflow: 'hidden' }}>
       <View style={{ backgroundColor: '#2c2c2c', paddingHorizontal: 4, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 2 }}>
         <Text style={{ fontSize: 6 }}>🎨</Text>
-        <Text style={{ color: connected ? '#a259ff' : '#666', fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace', flex: 1 }} numberOfLines={1}>Figma</Text>
-        <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: connected ? '#22c55e' : '#555' }} />
+        <Text style={{ color: connected || configured ? '#a259ff' : '#666', fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace', flex: 1 }} numberOfLines={1}>Figma</Text>
+        <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: connected ? '#22c55e' : configured ? '#a259ff' : '#555' }} />
       </View>
-      {connected ? (
+      {connected || configured ? (
         <View style={{ flex: 1, padding: 4 }}>
-          {/* Fake artboard preview */}
-          <View style={{ flex: 1, backgroundColor: '#fff', borderRadius: 3, overflow: 'hidden', position: 'relative' }}>
-            <View style={{ position: 'absolute', top: 4, left: 4, right: 4, height: 8, backgroundColor: '#a259ff20', borderRadius: 2 }} />
-            <View style={{ position: 'absolute', top: 16, left: 4, width: '40%' as any, height: 20, backgroundColor: '#a259ff10', borderRadius: 2 }} />
-            <View style={{ position: 'absolute', top: 16, right: 4, width: '40%' as any, height: 20, backgroundColor: '#e2e2e2', borderRadius: 2 }} />
-            <View style={{ position: 'absolute', bottom: 4, left: 4, right: 4, height: 6, backgroundColor: '#f0f0f0', borderRadius: 2 }} />
-            <Animated.View style={{ position: 'absolute', top: 0, bottom: 0, width: 20, backgroundColor: '#ffffff40', transform: [{ translateX: shimmerX }] }} />
-          </View>
+          {connected ? (
+            <View style={{ flex: 1, backgroundColor: '#fff', borderRadius: 3, overflow: 'hidden', position: 'relative' }}>
+              <View style={{ position: 'absolute', top: 4, left: 4, right: 4, height: 8, backgroundColor: '#a259ff20', borderRadius: 2 }} />
+              <Animated.View style={{ position: 'absolute', top: 0, bottom: 0, width: 20, backgroundColor: '#ffffff40', transform: [{ translateX: shimmerX }] }} />
+            </View>
+          ) : (
+            <View style={{ flex: 1, backgroundColor: '#17121f', borderRadius: 3, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#a259ff44' }}>
+              <Text style={{ fontSize: 12 }}>🔗</Text>
+              <Text style={{ color: '#a259ff', fontSize: 4, fontWeight: '900', fontFamily: 'monospace', marginTop: 2 }}>LINK READY</Text>
+            </View>
+          )}
           <Text style={{ color: '#999', fontSize: 3.5, fontWeight: '700', fontFamily: 'monospace', marginTop: 2, textAlign: 'center' }} numberOfLines={1}>{preview}</Text>
         </View>
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
           <Text style={{ fontSize: 16 }}>🎨</Text>
-          <Text style={{ color: '#555', fontSize: 4, fontFamily: 'monospace', marginTop: 2 }}>TAP TO CONNECT</Text>
+          <Text style={{ color: '#555', fontSize: 4, fontFamily: 'monospace', marginTop: 2 }}>SET UP LINK</Text>
         </View>
       )}
     </View>
@@ -2757,9 +2810,9 @@ export function EmailHubItem({ item, theme }: ItemProps) {
     s.start();
     return () => { p.stop(); s.stop(); };
   }, []);
-  const provider = item.emailProvider || 'outlook';
-  const connected = item.emailConnected;
-  const unread = item.emailUnread || 0;
+  const provider = item.emailProvider?.trim().toLowerCase() || '';
+  const connected = getOfficeAddonRuntimeState(item, { nowMs: Date.now() }).state === 'live' && !!item.emailConnected;
+  const unread = item.emailUnread ?? 0;
   const sender = item.emailSender || '';
   const subject = item.emailSubject || 'No new mail';
   const time = item.emailTime || '';
@@ -2768,7 +2821,8 @@ export function EmailHubItem({ item, theme }: ItemProps) {
     gmail: { bg: '#EA4335', accent: '#EA4335', icon: '✉️' },
     yahoo: { bg: '#6001D2', accent: '#6001D2', icon: '📬' },
   };
-  const prov = provColors[provider] || provColors.outlook;
+  const prov = provColors[provider] || { bg: '#334155', accent: '#64748b', icon: '📧' };
+  const providerLabel = provider === 'outlook' ? 'Outlook' : provider === 'gmail' ? 'Gmail' : provider === 'yahoo' ? 'Yahoo' : 'Email';
   const badgePulse = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] });
   const scrollX = slideIn.interpolate({ inputRange: [0, 1], outputRange: [0, -60] });
   return (
@@ -2778,7 +2832,7 @@ export function EmailHubItem({ item, theme }: ItemProps) {
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
           <Text style={{ fontSize: 5 }}>{prov.icon}</Text>
           <Text style={{ color: '#fff', fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace' }}>
-            {provider === 'outlook' ? 'Outlook' : provider === 'gmail' ? 'Gmail' : 'Yahoo'}
+            {providerLabel}
           </Text>
         </View>
         {connected && unread > 0 && (
@@ -2934,16 +2988,9 @@ export function CoinFlipItem({ item, theme }: ItemProps) {
 
   const result = item.coinFlipResult || '';
   const streak = item.coinFlipStreak || 0;
-  const cryptoType = item.coinFlipCryptoType || item.gameCryptoType || '';
-  const cryptoAmt = item.coinFlipCryptoAmount || item.gameCryptoWager || 0;
   const bsActive = item.coinFlipBlackswan || item.gameBlackswanActive;
   const wins = item.coinFlipWins || 0;
   const losses = item.coinFlipLosses || 0;
-
-  const cryptoColors: Record<string, string> = { SOL: '#14F195', ETH: '#627EEA', BTC: '#F7931A', USDC: '#2775CA', MATIC: '#8247E5' };
-  const cryptoSymbols: Record<string, string> = { SOL: '◎', ETH: 'Ξ', BTC: '₿', USDC: '$', MATIC: '⬡' };
-  const cColor = cryptoColors[cryptoType] || '#14F195';
-  const cSym = cryptoSymbols[cryptoType] || '◎';
 
   const shimmerOp = shimmer.interpolate({ inputRange: [0, 0.3, 0.5, 0.7, 1], outputRange: [0, 0.6, 0, 0, 0] });
 
@@ -2983,13 +3030,6 @@ export function CoinFlipItem({ item, theme }: ItemProps) {
         <Animated.View style={{ position: 'absolute', top: 1, left: 1, opacity: bsPulse }}>
           <Text style={{ fontSize: 8 }}>🦢</Text>
         </Animated.View>
-      )}
-
-      {/* Crypto wager */}
-      {cryptoAmt > 0 && (
-        <View style={{ position: 'absolute', bottom: 1, backgroundColor: '#00000080', borderRadius: 4, paddingHorizontal: 3, paddingVertical: 0.5 }}>
-          <Text style={{ color: cColor, fontSize: 4, fontWeight: '800', fontFamily: 'monospace' }}>{cSym}{cryptoAmt}</Text>
-        </View>
       )}
 
       {/* W/L record */}
@@ -3036,12 +3076,6 @@ export function RouletteWheelItem({ item, theme }: ItemProps) {
   const number = item.rouletteNumber ?? -1;
   const spinning = item.rouletteSpinning;
   const betType = item.rouletteBetType || '';
-  const cryptoType = item.rouletteCryptoType || item.gameCryptoType || '';
-  const cryptoAmt = item.rouletteCryptoAmount || item.gameCryptoWager || 0;
-  const cryptoColors: Record<string, string> = { SOL: '#14F195', ETH: '#627EEA', BTC: '#F7931A', USDC: '#2775CA', MATIC: '#8247E5' };
-  const cryptoSymbols: Record<string, string> = { SOL: '◎', ETH: 'Ξ', BTC: '₿', USDC: '$', MATIC: '⬡' };
-  const cColor = cryptoColors[cryptoType] || '#14F195';
-  const cSym = cryptoSymbols[cryptoType] || '◎';
 
   const rotation = spin.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
   const ballY = ballBounce.interpolate({ inputRange: [0, 1], outputRange: [0, -2] });
@@ -3091,7 +3125,7 @@ export function RouletteWheelItem({ item, theme }: ItemProps) {
       {betType ? (
         <View style={{ position: 'absolute', bottom: 4, backgroundColor: '#00000080', borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 }}>
           <Text style={{ color: betType === 'red' ? '#ef4444' : betType === 'black' ? '#fff' : '#22c55e', fontSize: 4, fontWeight: '800', fontFamily: 'monospace' }}>
-            {betType.toUpperCase()}{cryptoAmt > 0 ? ` ${cSym}${cryptoAmt}` : ''}
+            PLAY · {betType.toUpperCase()}
           </Text>
         </View>
       ) : (
@@ -3522,7 +3556,7 @@ export function ScrabbleBoardItem({ item, theme }: ItemProps) {
 
 // ─── Farm Plot ──────────────────────────────────────────────────────────────
 
-export function FarmPlotItem({ item, theme }: ItemProps) {
+export function FarmPlotItem({ item, theme, onItemUpdate }: ItemProps) {
   const plantedAtArr: number[] = (() => {
     try { return JSON.parse(item.farmPlantedAt || '[]'); } catch { return []; }
   })();
@@ -3537,19 +3571,47 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
   );
   const [showCropPicker, setShowCropPicker] = useState<number | null>(null);
   const [showShop, setShowShop] = useState(false);
-  const [upgrades, setUpgrades] = useState<Set<FarmUpgrade>>(new Set());
-  const [fertilizerUses, setFertilizerUses] = useState(0);
+  const [upgrades, setUpgrades] = useState<Set<FarmUpgrade>>(() => {
+    try {
+      const parsed = JSON.parse(item.farmUpgrades || '[]');
+      return new Set<FarmUpgrade>((Array.isArray(parsed) ? parsed : []).filter(
+        (entry: unknown): entry is FarmUpgrade => typeof entry === 'string' && entry !== 'fertilizer' && entry in FARM_SHOP,
+      ));
+    } catch { return new Set<FarmUpgrade>(); }
+  });
+  const [fertilizerUses, setFertilizerUses] = useState(() => Math.max(0, Math.min(999, Math.floor(item.farmFertilizerUses ?? 0))));
   const [weather, setWeather] = useState<WeatherEvent>('sunny');
   const [lastWeatherChange, setLastWeatherChange] = useState(Date.now());
   const [harvestFlash, setHarvestFlash] = useState<number | null>(null);
-  const [cropsGrown, setCropsGrown] = useState<Set<string>>(new Set());
+  const [cropsGrown, setCropsGrown] = useState<Set<string>>(() => {
+    try {
+      const parsed = JSON.parse(item.farmCropsGrown || '[]');
+      return new Set<string>((Array.isArray(parsed) ? parsed : []).filter(
+        (entry: unknown): entry is CropType => typeof entry === 'string' && CROP_TYPES.includes(entry as CropType),
+      ));
+    } catch { return new Set<string>(); }
+  });
   const [tick, setTick] = useState(0);
 
   const season = getCurrentSeason();
   const seasonInfo = SEASON_INFO[season];
   const growBonus = seasonInfo.growBonus * (fertilizerUses > 0 ? 2 : 1);
 
-  // Water decay + growth tick + weather
+  const persistPlotState = useCallback((
+    nextCrops: readonly string[],
+    nextPlanted: readonly number[],
+    fields: Partial<FurnitureItem> = {},
+  ) => {
+    onItemUpdate?.({
+      farmCrops: nextCrops.slice(0, GRID_SIZE).join(''),
+      farmPlantedAt: JSON.stringify(nextPlanted.slice(0, GRID_SIZE)),
+      ...fields,
+    });
+  }, [onItemUpdate]);
+
+  // Water decay + growth tick + weather. These background ticks intentionally
+  // stay local so the ambient simulation cannot create a persistence-write
+  // loop. User actions persist the displayed baseline explicitly below.
   useEffect(() => {
     const iv = setInterval(() => {
       const waterDecay = seasonInfo.waterDecay * (weather === 'drought' ? 2 : 1);
@@ -3581,13 +3643,18 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
         const plantedIdx = localCrops.map((c, i) => c !== '0' && localPlanted[i] ? i : -1).filter(i => i >= 0);
         if (plantedIdx.length > 0) {
           const victim = plantedIdx[Math.floor(Math.random() * plantedIdx.length)];
-          setLocalCrops(c => { const n = [...c]; n[victim] = '0'; return n; });
-          setLocalPlanted(a => { const n = [...a]; n[victim] = 0; return n; });
+          const nextCrops = [...localCrops];
+          const nextPlanted = [...localPlanted];
+          nextCrops[victim] = '0';
+          nextPlanted[victim] = 0;
+          setLocalCrops(nextCrops);
+          setLocalPlanted(nextPlanted);
+          persistPlotState(nextCrops, nextPlanted);
         }
       }
     }, 120000);
     return () => clearInterval(iv);
-  }, [localCrops, localPlanted, upgrades]);
+  }, [localCrops, localPlanted, persistPlotState, upgrades]);
 
   const waterPulse = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -3611,32 +3678,71 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
     const state = getPlotState(localPlanted[i], crop as CropType, effectiveWater, growBonus);
     if (state === '4') {
       const reward = harvestPlot(crop as CropType, upgrades.has('greenhouse'), upgrades.has('golden_hoe'));
-      setGold(g => g + reward);
-      setHarvested(h => h + 1);
-      setCropsGrown(s => new Set(s).add(crop));
-      if (fertilizerUses > 0) setFertilizerUses(f => f - 1);
-      setLocalCrops(c => { const n = [...c]; n[i] = '0'; return n; });
-      setLocalPlanted(a => { const n = [...a]; n[i] = 0; return n; });
+      const nextGold = gold + reward;
+      const nextHarvested = harvested + 1;
+      const nextCropsGrown = new Set(cropsGrown).add(crop);
+      const nextFertilizerUses = Math.max(0, fertilizerUses - (fertilizerUses > 0 ? 1 : 0));
+      const nextCrops = [...localCrops];
+      const nextPlanted = [...localPlanted];
+      nextCrops[i] = '0';
+      nextPlanted[i] = 0;
+      setGold(nextGold);
+      setHarvested(nextHarvested);
+      setCropsGrown(nextCropsGrown);
+      setFertilizerUses(nextFertilizerUses);
+      setLocalCrops(nextCrops);
+      setLocalPlanted(nextPlanted);
+      persistPlotState(nextCrops, nextPlanted, {
+        farmGold: nextGold,
+        farmHarvested: nextHarvested,
+        farmWaterLevel: waterLevel,
+        farmFertilizerUses: nextFertilizerUses,
+        farmCropsGrown: JSON.stringify(Array.from(nextCropsGrown)),
+      });
       setHarvestFlash(i);
       setTimeout(() => setHarvestFlash(null), 600);
     } else if (state === '5') {
-      setLocalCrops(c => { const n = [...c]; n[i] = '0'; return n; });
-      setLocalPlanted(a => { const n = [...a]; n[i] = 0; return n; });
+      const nextCrops = [...localCrops];
+      const nextPlanted = [...localPlanted];
+      nextCrops[i] = '0';
+      nextPlanted[i] = 0;
+      setLocalCrops(nextCrops);
+      setLocalPlanted(nextPlanted);
+      persistPlotState(nextCrops, nextPlanted);
     }
   };
 
   const plantCrop = (i: number, crop: CropType) => {
-    setLocalCrops(c => { const n = [...c]; n[i] = crop; return n; });
-    setLocalPlanted(a => { const n = [...a]; n[i] = Date.now(); return n; });
+    const nextCrops = [...localCrops];
+    const nextPlanted = [...localPlanted];
+    nextCrops[i] = crop;
+    nextPlanted[i] = Date.now();
+    setLocalCrops(nextCrops);
+    setLocalPlanted(nextPlanted);
+    persistPlotState(nextCrops, nextPlanted, { farmWaterLevel: waterLevel });
     setShowCropPicker(null);
   };
 
   const buyUpgrade = (u: FarmUpgrade) => {
     const cost = FARM_SHOP[u].cost;
     if (gold < cost || (u !== 'fertilizer' && upgrades.has(u))) return;
-    setGold(g => g - cost);
-    if (u === 'fertilizer') { setFertilizerUses(f => f + 5); }
-    else { setUpgrades(s => new Set(s).add(u)); }
+    const nextGold = gold - cost;
+    setGold(nextGold);
+    if (u === 'fertilizer') {
+      const nextFertilizerUses = Math.min(999, fertilizerUses + 5);
+      setFertilizerUses(nextFertilizerUses);
+      onItemUpdate?.({ farmGold: nextGold, farmFertilizerUses: nextFertilizerUses });
+    } else {
+      const nextUpgrades = new Set(upgrades).add(u);
+      setUpgrades(nextUpgrades);
+      onItemUpdate?.({ farmGold: nextGold, farmUpgrades: JSON.stringify(Array.from(nextUpgrades)) });
+    }
+  };
+
+  const handleWater = () => {
+    const nextWaterLevel = Math.min(100, waterLevel + 25);
+    setWaterLevel(nextWaterLevel);
+    onItemUpdate?.({ farmWaterLevel: nextWaterLevel, farmLastWatered: Date.now() });
   };
 
   const getPlotVisual = (i: number) => {
@@ -3677,6 +3783,9 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
         <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
           <Text style={{ color: '#fbbf24', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>{'\u2B50'}{gold}</Text>
           <Pressable onPress={(e) => { e.stopPropagation?.(); setShowShop(s => !s); setShowCropPicker(null); }}
+            accessibilityRole="button"
+            accessibilityLabel={showShop ? 'Close farm technology lab' : 'Open farm technology lab'}
+            accessibilityState={{ expanded: showShop }}
             style={{ backgroundColor: '#818cf820', borderRadius: 4, paddingHorizontal: 3, paddingVertical: 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
             <Text style={{ color: '#818cf8', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>TECH LAB</Text>
           </Pressable>
@@ -3685,7 +3794,9 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
 
       {/* Stats row */}
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginBottom: 3 }}>
-        <Pressable onPress={(e) => { e.stopPropagation?.(); setWaterLevel(w => Math.min(100, w + 25)); }}
+        <Pressable onPress={(e) => { e.stopPropagation?.(); handleWater(); }}
+          accessibilityRole="button"
+          accessibilityLabel={`Water farm plot, current water level ${Math.round(waterLevel)} percent`}
           style={{ ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
           <Text style={{ fontSize: 8 }}>{'\u{1F4A7}'}</Text>
         </Pressable>
@@ -3721,6 +3832,10 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
             <Pressable
               key={i}
               onPress={(e) => { e.stopPropagation?.(); handlePlot(i); }}
+              accessibilityRole="button"
+              accessibilityLabel={crop === '0'
+                ? `Farm plot ${i + 1}, empty, choose a crop`
+                : `Farm plot ${i + 1}, ${CROP_INFO[crop as CropType]?.name || 'crop'}, ${Math.round(pct)} percent grown${isReady ? ', ready to harvest' : ''}`}
               style={{
                 width: 40, height: 28, borderRadius: 3,
                 backgroundColor: isFlashing ? '#c084fc30' : visual.bg,
@@ -3764,6 +3879,8 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
           <Text style={{ color: '#818cf8', fontSize: 4, fontFamily: 'monospace', width: '100%', textAlign: 'center', marginBottom: 2 }}>PLANT DATA SEED</Text>
           {CROP_TYPES.map(c => (
             <Pressable key={c} onPress={(e) => { e.stopPropagation?.(); plantCrop(showCropPicker, c); }}
+              accessibilityRole="button"
+              accessibilityLabel={`Plant ${CROP_INFO[c].name} in farm plot ${showCropPicker + 1}, reward ${CROP_INFO[c].gold} gold`}
               style={{ alignItems: 'center', padding: 2, borderRadius: 4, backgroundColor: CROP_INFO[c].color + '15',
                 ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}), }}>
               <Text style={{ fontSize: 10 }}>{CROP_INFO[c].icon}</Text>
@@ -3786,6 +3903,9 @@ export function FarmPlotItem({ item, theme }: ItemProps) {
             const canAfford = gold >= info.cost;
             return (
               <Pressable key={key} onPress={(e) => { e.stopPropagation?.(); if (!owned && canAfford) buyUpgrade(key); }}
+                accessibilityRole="button"
+                accessibilityLabel={`${owned ? 'Owned' : 'Buy'} ${info.name}, ${info.cost} gold. ${info.desc}`}
+                accessibilityState={{ disabled: owned || !canAfford }}
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 3, padding: 2, borderRadius: 3, marginBottom: 2,
                   backgroundColor: owned ? '#818cf810' : canAfford ? '#c084fc10' : 'transparent', opacity: owned ? 0.5 : canAfford ? 1 : 0.4,
                   ...(Platform.OS === 'web' && !owned && canAfford ? { cursor: 'pointer' } as any : {}), }}>
@@ -4107,7 +4227,8 @@ export function OfficePetItem({ item, theme, onItemUpdate }: ItemProps) {
     <View style={{ width: 140, height: 130, backgroundColor: '#08081a', borderWidth: 1, borderColor: (petInfo?.color || '#333') + '40', borderRadius: 8, padding: 4, alignItems: 'center' }}>
       {/* Header */}
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', alignItems: 'center', marginBottom: 1 }}>
-        <Pressable onPress={(e) => { e.stopPropagation?.(); closeAllPopups(); setShowPicker(p => !p); }} style={{ ...CP }}>
+        <Pressable onPress={(e) => { e.stopPropagation?.(); closeAllPopups(); setShowPicker(p => !p); }} style={{ ...CP }}
+          accessibilityRole="button" accessibilityLabel={`Choose a companion type for ${name}`} accessibilityState={{ expanded: showPicker }}>
           <Text style={{ color: petInfo?.color || '#c084fc', fontSize: 5, fontWeight: '900', fontFamily: 'monospace' }}>
             {'\u{1F30C}'} {name}
           </Text>
@@ -4121,6 +4242,9 @@ export function OfficePetItem({ item, theme, onItemUpdate }: ItemProps) {
       {/* Pet display */}
       <Pressable
         onPress={(e) => { e.stopPropagation?.(); closeAllPopups(); setShowActions(a => !a); }}
+        accessibilityRole="button"
+        accessibilityLabel={`${name}, ${stage} companion, ${stats.mood}. Open care actions`}
+        accessibilityState={{ expanded: showActions }}
         style={{ alignItems: 'center', justifyContent: 'center', flex: 1, ...CP }}
       >
         <Animated.View style={{ transform: [{ translateY: bounce }] }}>
@@ -4195,31 +4319,37 @@ export function OfficePetItem({ item, theme, onItemUpdate }: ItemProps) {
         }}>
           <View style={{ flexDirection: 'row', gap: 2, justifyContent: 'center', flexWrap: 'wrap' }}>
             <Pressable onPress={(e) => { e.stopPropagation?.(); setShowActions(false); setShowFood(true); }}
+              accessibilityRole="button" accessibilityLabel={`Feed ${name}`}
               style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#22c55e15', ...CP }}>
               <Text style={{ fontSize: 8 }}>{'\u{1F35A}'}</Text>
               <Text style={{ color: '#22c55e', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>FEED</Text>
             </Pressable>
             <Pressable onPress={(e) => { e.stopPropagation?.(); handlePlay(); }}
+              accessibilityRole="button" accessibilityLabel={`Play with ${name}`}
               style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#c084fc15', ...CP }}>
               <Text style={{ fontSize: 8 }}>{'\u{1F3BE}'}</Text>
               <Text style={{ color: '#c084fc', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>PLAY</Text>
             </Pressable>
             <Pressable onPress={(e) => { e.stopPropagation?.(); handleRest(); }}
+              accessibilityRole="button" accessibilityLabel={`Let ${name} rest`}
               style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#38bdf815', ...CP }}>
               <Text style={{ fontSize: 8 }}>{'\u{1F4A4}'}</Text>
               <Text style={{ color: '#38bdf8', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>REST</Text>
             </Pressable>
             <Pressable onPress={(e) => { e.stopPropagation?.(); handleBath(); }}
+              accessibilityRole="button" accessibilityLabel={`Bathe ${name}`}
               style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#818cf815', ...CP }}>
               <Text style={{ fontSize: 8 }}>{'\u{1F6BF}'}</Text>
               <Text style={{ color: '#818cf8', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>BATH</Text>
             </Pressable>
             <Pressable onPress={(e) => { e.stopPropagation?.(); setShowActions(false); setShowTricks(true); }}
+              accessibilityRole="button" accessibilityLabel={`Teach ${name} a trick`}
               style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#fbbf2415', ...CP }}>
               <Text style={{ fontSize: 8 }}>{'\u{1F3AA}'}</Text>
               <Text style={{ color: '#fbbf24', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>TRICK</Text>
             </Pressable>
             <Pressable onPress={(e) => { e.stopPropagation?.(); setShowActions(false); setShowAccessories(true); }}
+              accessibilityRole="button" accessibilityLabel={`Choose gear for ${name}`}
               style={{ alignItems: 'center', padding: 2, borderRadius: 3, backgroundColor: '#f472b615', ...CP }}>
               <Text style={{ fontSize: 8 }}>{'\u{1F451}'}</Text>
               <Text style={{ color: '#f472b6', fontSize: 3, fontWeight: '700', fontFamily: 'monospace' }}>GEAR</Text>

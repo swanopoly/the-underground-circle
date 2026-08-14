@@ -51,7 +51,7 @@ function formatSize(bytes: number): string {
 
 export default function ChatAttachmentStrip({
   circleId, threadId, userId, staged, onStagedChange,
-  maxFiles = 10, accentColor = '#22d3ee',
+  maxFiles = 10, accentColor = '#6366f1',
   showAttachButton = true,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -205,9 +205,9 @@ const styles = StyleSheet.create({
   chipRemoveText: { fontSize: 10, fontWeight: '900', color: '#94a3b8' },
   dragHint: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: 'rgba(34,211,238,0.08)',
+    backgroundColor: 'rgba(99,102,241,0.08)',
     alignItems: 'center', justifyContent: 'center',
     borderRadius: 8,
   },
-  dragHintText: { fontSize: 12, fontWeight: '900', color: '#22d3ee', fontFamily: 'monospace' },
+  dragHintText: { fontSize: 12, fontWeight: '900', color: '#6366f1', fontFamily: 'monospace' },
 });

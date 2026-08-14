@@ -57,6 +57,74 @@ export interface ChatAgentTarget<TAgent extends ChatAgentLike = ChatAgentLike> {
 }
 
 export const DEFAULT_CHAT_AGENT_TARGET_ID = 'chat-agent::openswan';
+const DEFAULT_CHAT_AGENT_RUNTIME_ID = 'default::blackswan';
+
+export type ParsedChatAgentAssignment = Readonly<{
+  selectorKind: 'id' | 'name';
+  selector: string;
+  task: string;
+}>;
+
+export type ChatAgentAssignmentResolution<TAgent extends ChatAgentLike = ChatAgentLike> =
+  | Readonly<{ ok: true; agent: TAgent }>
+  | Readonly<{ ok: false; reason: 'invalid' | 'not_found' | 'ambiguous' }>;
+
+export function buildChatAgentAssignmentCommand(agentId: string): string {
+  const exactId = String(agentId || '').trim();
+  return exactId ? `/assign --id ${encodeURIComponent(exactId)} ` : '/assign ';
+}
+
+export function parseChatAgentAssignmentCommand(input: string): ParsedChatAgentAssignment | null {
+  const raw = String(input || '').trim().replace(/^\/assign\s+/i, '');
+  if (!raw) return null;
+
+  const idMatch = raw.match(/^--id\s+(\S+)\s+([\s\S]+)$/i);
+  if (idMatch) {
+    try {
+      const selector = decodeURIComponent(idMatch[1]).trim();
+      const task = idMatch[2].trim();
+      if (!selector || selector.length > 240 || !task) return null;
+      return Object.freeze({ selectorKind: 'id' as const, selector, task });
+    } catch {
+      return null;
+    }
+  }
+
+  const quoted = raw.match(/^@?(?:["“]([^"”]+)["”]|'([^']+)')\s+([\s\S]+)$/);
+  if (quoted) {
+    const selector = String(quoted[1] || quoted[2] || '').trim();
+    const task = quoted[3].trim();
+    if (!selector || selector.length > 120 || !task) return null;
+    return Object.freeze({ selectorKind: 'name' as const, selector, task });
+  }
+
+  const legacy = raw.match(/^@?([^\s]+)\s+([\s\S]+)$/);
+  if (!legacy) return null;
+  return Object.freeze({
+    selectorKind: 'name' as const,
+    selector: legacy[1].trim(),
+    task: legacy[2].trim(),
+  });
+}
+
+export function resolveChatAgentAssignmentTarget<TAgent extends ChatAgentLike>(
+  agents: readonly TAgent[],
+  parsed: ParsedChatAgentAssignment | null,
+  preferredAgentId?: string | null,
+): ChatAgentAssignmentResolution<TAgent> {
+  if (!parsed || !Array.isArray(agents)) return Object.freeze({ ok: false, reason: 'invalid' });
+  const exactId = String(preferredAgentId || (parsed.selectorKind === 'id' ? parsed.selector : '')).trim();
+  if (exactId) {
+    const matches = agents.filter((agent) => agent.id === exactId);
+    if (matches.length === 1) return Object.freeze({ ok: true, agent: matches[0] });
+    return Object.freeze({ ok: false, reason: matches.length > 1 ? 'ambiguous' : 'not_found' });
+  }
+  const normalizedName = parsed.selector.trim().toLowerCase();
+  if (!normalizedName) return Object.freeze({ ok: false, reason: 'invalid' });
+  const matches = agents.filter((agent) => String(agent.name || '').trim().toLowerCase() === normalizedName);
+  if (matches.length === 1) return Object.freeze({ ok: true, agent: matches[0] });
+  return Object.freeze({ ok: false, reason: matches.length > 1 ? 'ambiguous' : 'not_found' });
+}
 
 export const CHAT_AGENT_PROVIDER_PRESETS: ChatAgentProviderPreset[] = [
   {
@@ -257,7 +325,7 @@ export function buildChatAgentTargets<TAgent extends ChatAgentLike>(
     const provider = normalizeChatAgentProvider(agent.provider);
     const preset = getChatAgentProviderPreset(provider);
     connectedProviders.add(provider);
-    const isDefault = provider === 'openswan' && (agent.id.includes('default') || agent.name.toLowerCase() === 'openswan');
+    const isDefault = provider === 'openswan' && agent.id === DEFAULT_CHAT_AGENT_RUNTIME_ID;
     const label = provider === 'cursor' && /^cursor$/i.test(agent.name || '')
       ? preset.label
       : agent.name || preset.label;
@@ -329,7 +397,11 @@ export function resolveChatAgentTarget<TAgent extends ChatAgentLike>(
   targets: ChatAgentTarget<TAgent>[],
   selectedId: string | null | undefined,
 ): ChatAgentTarget<TAgent> {
+  const exactSelectedId = String(selectedId || '').trim();
   if (!targets.length) {
+    if (exactSelectedId) {
+      return buildUnavailableChatAgentTarget<TAgent>(exactSelectedId);
+    }
     const preset = getChatAgentProviderPreset('openswan');
     return {
       id: DEFAULT_CHAT_AGENT_TARGET_ID,
@@ -346,9 +418,29 @@ export function resolveChatAgentTarget<TAgent extends ChatAgentLike>(
       ...buildTargetSubjectFields<TAgent>(null, 'openswan', true),
     };
   }
-  return targets.find((target) => target.id === selectedId)
-    || targets.find((target) => target.id === DEFAULT_CHAT_AGENT_TARGET_ID)
+  if (exactSelectedId) {
+    return targets.find((target) => target.id === exactSelectedId)
+      || buildUnavailableChatAgentTarget<TAgent>(exactSelectedId);
+  }
+  return targets.find((target) => target.id === DEFAULT_CHAT_AGENT_TARGET_ID)
     || targets[0];
+}
+
+function buildUnavailableChatAgentTarget<TAgent extends ChatAgentLike>(selectedId: string): ChatAgentTarget<TAgent> {
+  return {
+    id: selectedId,
+    provider: 'unavailable',
+    label: 'Selected agent unavailable',
+    icon: '!',
+    color: '#f97316',
+    description: 'The exact previously selected agent is no longer available.',
+    status: 'offline',
+    connected: false,
+    source: 'preset',
+    setupHint: 'Refresh the agent list and explicitly choose another target. Nothing will be dispatched while this selection is unavailable.',
+    priority: Number.MAX_SAFE_INTEGER,
+    isDefault: false,
+  };
 }
 
 export function buildChatAgentSetupMessage(target: ChatAgentTarget): string {

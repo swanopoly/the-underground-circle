@@ -40,6 +40,17 @@
 --   §32 OpenSwan production readiness contract
 --   §33 Chat v2 approval auto-approve category repair
 --   §34 Universal computer-task roots
+--   §35 Office terminal nonterminal-handoff sweeper
+--   §36 Owner-private Office agent to OpenSwan session bindings
+--   §37 Office dashboard state and complete per-floor presets
+--   §38 Agent-run immutable parent authority and artifact RLS
+--   §39 Exact message-attachment linkage
+--   §40 Message-attachment visibility and private Storage integrity
+--   §41 Device-private OpenSwan run-approval privacy and authority
+--   §42 Office Google/Microsoft OAuth credential control plane
+--   §43 Personal Figma OAuth credential and callback control plane
+--   §44 Transactional OpenSwan Chat approval-resume authority
+--   §45 Owner-private, circle-scoped Office user preferences
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ─── §1. Custom themes ──────────────────────────────────────────────────────
@@ -9957,3 +9968,6313 @@ COMMENT ON FUNCTION public.settle_computer_task_root_action_v1(
 COMMIT;
 
 NOTIFY pgrst, 'reload schema';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §35. Office terminal nonterminal-handoff sweeper (2026-08-07)
+-- Source: supabase/migrations/20260807160000_office_terminal_handoff_sweeper.sql
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.sweep_stale_terminal_messages()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  UPDATE public.office_terminal_messages AS message_row
+  SET status = 'error',
+      updated_at = clock_timestamp()
+  WHERE message_row.status IN ('pending', 'invoked')
+    AND message_row.created_at < clock_timestamp() - interval '2 minutes'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.office_terminal_responses AS response_row
+      WHERE response_row.message_id = message_row.id
+        AND response_row.status = 'streaming'
+    );
+
+  UPDATE public.office_terminal_responses AS response_row
+  SET status = 'error',
+      error_message = 'Agent did not respond within 2 minutes',
+      updated_at = clock_timestamp()
+  WHERE response_row.status = 'pending'
+    AND response_row.created_at < clock_timestamp() - interval '2 minutes';
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.sweep_stale_terminal_messages()
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sweep_stale_terminal_messages()
+  TO postgres, service_role;
+
+COMMENT ON FUNCTION public.sweep_stale_terminal_messages() IS
+  'Expires unclaimed Office terminal work while preserving parent messages that have a deliberately nonterminal streaming handoff response.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §36. Owner-private Office agent → OpenSwan session bindings (2026-08-07)
+-- Source: supabase/migrations/20260807170000_office_agent_session_bindings.sql
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Owner-private linkage from one published Office agent to one exact OpenSwan
+-- connection/session configuration. This migration intentionally performs no
+-- backfill: pre-existing Office agents remain unbound until their owner makes
+-- an explicit selection through the manager RPC.
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.office_agent_session_bindings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  office_agent_id uuid NOT NULL
+    REFERENCES public.circle_office_agents(id) ON DELETE CASCADE,
+  owner_id uuid NOT NULL
+    REFERENCES auth.users(id) ON DELETE CASCADE,
+  agent_bot_id uuid NOT NULL
+    REFERENCES public.agents_bots(id) ON DELETE CASCADE,
+  session_key text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  CONSTRAINT office_agent_session_bindings_office_agent_key
+    UNIQUE (office_agent_id),
+  CONSTRAINT office_agent_session_bindings_bot_session_key
+    UNIQUE (agent_bot_id, session_key),
+  CONSTRAINT office_agent_session_bindings_session_key_length
+    CHECK (pg_catalog.char_length(session_key) BETWEEN 1 AND 160),
+  CONSTRAINT office_agent_session_bindings_session_key_grammar
+    CHECK (session_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$')
+);
+
+COMMENT ON TABLE public.office_agent_session_bindings IS
+  'Owner-private, explicit binding from one published Office agent to one exact OpenSwan connection/session configuration. No implicit or name-based fallback.';
+COMMENT ON COLUMN public.office_agent_session_bindings.agent_bot_id IS
+  'Exact public.agents_bots row for the owner-managed OpenSwan connection configuration.';
+COMMENT ON COLUMN public.office_agent_session_bindings.session_key IS
+  'Exact 1-160 character OpenSwan session key; never inferred from Office names, URLs, history, or response prose.';
+
+ALTER TABLE public.office_agent_session_bindings ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS office_agent_session_bindings_owner_select
+  ON public.office_agent_session_bindings;
+CREATE POLICY office_agent_session_bindings_owner_select
+  ON public.office_agent_session_bindings
+  FOR SELECT
+  TO authenticated
+  USING (owner_id = (SELECT auth.uid()));
+
+-- Browser clients may read only their RLS-filtered bindings. Every mutation is
+-- forced through the authenticated owner-checking manager RPCs below.
+REVOKE ALL ON TABLE public.office_agent_session_bindings
+  FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.office_agent_session_bindings
+  TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.set_office_agent_session_binding(
+  p_office_agent_id uuid,
+  p_agent_bot_id uuid,
+  p_session_key text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_office_provider text;
+  v_office_is_published boolean;
+  v_bot_provider text;
+  v_binding_id uuid;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_auth_required';
+  END IF;
+
+  IF p_office_agent_id IS NULL
+    OR p_agent_bot_id IS NULL
+    OR p_session_key IS NULL
+    OR pg_catalog.char_length(p_session_key) NOT BETWEEN 1 AND 160
+    OR p_session_key !~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+  THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_invalid_identity';
+  END IF;
+
+  SELECT office_agent.provider, office_agent.is_published
+  INTO v_office_provider, v_office_is_published
+  FROM public.circle_office_agents AS office_agent
+  WHERE office_agent.id = p_office_agent_id
+    AND office_agent.owner_id = v_uid
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_agent_ownership_required';
+  END IF;
+  IF v_office_is_published IS DISTINCT FROM true THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_published_agent_required';
+  END IF;
+  IF v_office_provider IS DISTINCT FROM 'openswan' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_office_provider_required';
+  END IF;
+
+  SELECT agent_bot.metadata ->> 'provider'
+  INTO v_bot_provider
+  FROM public.agents_bots AS agent_bot
+  WHERE agent_bot.id = p_agent_bot_id
+    AND agent_bot.owner_id = v_uid
+  FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_bot_ownership_required';
+  END IF;
+  IF v_bot_provider IS DISTINCT FROM 'openswan' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_bot_provider_required';
+  END IF;
+
+  INSERT INTO public.office_agent_session_bindings AS binding (
+    office_agent_id,
+    owner_id,
+    agent_bot_id,
+    session_key
+  )
+  VALUES (
+    p_office_agent_id,
+    v_uid,
+    p_agent_bot_id,
+    p_session_key
+  )
+  ON CONFLICT (office_agent_id) DO UPDATE
+  SET owner_id = EXCLUDED.owner_id,
+      agent_bot_id = EXCLUDED.agent_bot_id,
+      session_key = EXCLUDED.session_key,
+      updated_at = pg_catalog.clock_timestamp()
+  WHERE binding.owner_id = v_uid
+  RETURNING binding.id INTO v_binding_id;
+
+  IF v_binding_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_ownership_conflict';
+  END IF;
+
+  RETURN v_binding_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.clear_office_agent_session_binding(
+  p_office_agent_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_auth_required';
+  END IF;
+  IF p_office_agent_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_invalid_identity';
+  END IF;
+
+  PERFORM 1
+  FROM public.circle_office_agents AS office_agent
+  WHERE office_agent.id = p_office_agent_id
+    AND office_agent.owner_id = v_uid
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_agent_ownership_required';
+  END IF;
+  DELETE FROM public.office_agent_session_bindings AS binding
+  WHERE binding.office_agent_id = p_office_agent_id
+    AND binding.owner_id = v_uid;
+
+  RETURN FOUND;
+END;
+$function$;
+
+-- Version 2 composes the current canonical claim exactly once, then adds a
+-- snapshot of an exact owner-valid OpenSwan binding. A missing binding does not
+-- roll back or erase the claim: the caller receives a durable response_id and
+-- can persist the fixed pre-dispatch error against that response.
+CREATE OR REPLACE FUNCTION public.invoke_agent_v2(
+  p_message_id uuid,
+  p_circle_id uuid,
+  p_expected_command_text text,
+  p_agent_id uuid
+)
+RETURNS TABLE (
+  response_id uuid,
+  claim_disposition text,
+  canonical_message_id uuid,
+  canonical_circle_id uuid,
+  canonical_sender_id uuid,
+  canonical_command_text text,
+  canonical_target_agent_id uuid,
+  canonical_target_agent_ids uuid[],
+  canonical_target_agent_name text,
+  canonical_model text,
+  canonical_agent_id uuid,
+  canonical_agent_subject_key text,
+  canonical_agent_name text,
+  binding_contract_version integer,
+  binding_id uuid,
+  binding_agent_bot_id uuid,
+  binding_session_key text,
+  binding_status text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  RETURN QUERY
+  WITH canonical_claim AS MATERIALIZED (
+    SELECT claim.*
+    FROM public.invoke_agent(
+      p_message_id,
+      p_circle_id,
+      p_expected_command_text,
+      p_agent_id
+    ) AS claim
+  ),
+  valid_binding AS MATERIALIZED (
+    SELECT
+      binding.id,
+      binding.office_agent_id,
+      binding.agent_bot_id,
+      binding.session_key
+    FROM public.office_agent_session_bindings AS binding
+    JOIN public.circle_office_agents AS office_agent
+      ON office_agent.id = binding.office_agent_id
+     AND office_agent.owner_id = v_uid
+     AND office_agent.provider = 'openswan'
+     AND office_agent.is_published = true
+    JOIN public.agents_bots AS agent_bot
+      ON agent_bot.id = binding.agent_bot_id
+     AND agent_bot.owner_id = v_uid
+     AND agent_bot.metadata ->> 'provider' = 'openswan'
+    WHERE binding.owner_id = v_uid
+  )
+  SELECT
+    claim.response_id,
+    claim.claim_disposition,
+    claim.canonical_message_id,
+    claim.canonical_circle_id,
+    claim.canonical_sender_id,
+    claim.canonical_command_text,
+    claim.canonical_target_agent_id,
+    claim.canonical_target_agent_ids,
+    claim.canonical_target_agent_name,
+    claim.canonical_model,
+    claim.canonical_agent_id,
+    claim.canonical_agent_subject_key,
+    claim.canonical_agent_name,
+    1::integer,
+    binding.id,
+    binding.agent_bot_id,
+    binding.session_key,
+    CASE WHEN binding.id IS NULL THEN 'missing'::text ELSE 'bound'::text END
+  FROM canonical_claim AS claim
+  LEFT JOIN valid_binding AS binding
+    ON binding.office_agent_id = claim.canonical_agent_id;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.clear_office_agent_session_binding(uuid)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.invoke_agent_v2(uuid, uuid, text, uuid)
+  FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text)
+  TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.clear_office_agent_session_binding(uuid)
+  TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.invoke_agent_v2(uuid, uuid, text, uuid)
+  TO authenticated, service_role;
+
+COMMENT ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text) IS
+  'Owner-only upsert of one exact published Office-agent to OpenSwan connection/session binding.';
+COMMENT ON FUNCTION public.clear_office_agent_session_binding(uuid) IS
+  'Owner-only removal of one exact Office-agent OpenSwan session binding.';
+COMMENT ON FUNCTION public.invoke_agent_v2(uuid, uuid, text, uuid) IS
+  'Canonical Office invocation claim plus versioned owner-valid OpenSwan binding snapshot; missing bindings still retain the canonical response claim.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §37 — truthful Office dashboard state and complete per-floor presets.
+--
+-- 1. Replaces the global profiles.office_layout write target with one
+--    user+circle row and an RPC-only monotonic exact-receipt version gate
+--    (legacy blob remains readable; unsafe/far-future versions are rejected).
+-- 2. Persists Office attention dismissals across remounts/devices, binds an
+--    optional run to the same circle, and stamps acknowledgement expiry server-side.
+-- 3. Saves private complete-floor presets (theme, agents, furniture/tools/state).
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.validate_office_layout_document(p_layout jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  floor_row jsonb;
+BEGIN
+  IF p_layout IS NULL OR jsonb_typeof(p_layout) <> 'object' THEN
+    RETURN false;
+  END IF;
+  IF octet_length(p_layout::text) > 512000 THEN
+    RETURN false;
+  END IF;
+  IF jsonb_typeof(p_layout -> 'floors') <> 'array'
+     OR jsonb_array_length(p_layout -> 'floors') < 1
+     OR jsonb_array_length(p_layout -> 'floors') > 10 THEN
+    RETURN false;
+  END IF;
+  IF jsonb_typeof(p_layout -> 'currentFloorId') <> 'string'
+     OR length(p_layout ->> 'currentFloorId') > 200 THEN
+    RETURN false;
+  END IF;
+
+  FOR floor_row IN SELECT value FROM jsonb_array_elements(p_layout -> 'floors')
+  LOOP
+    IF jsonb_typeof(floor_row) <> 'object' THEN RETURN false; END IF;
+    IF jsonb_typeof(floor_row -> 'furniture') <> 'array'
+       OR jsonb_array_length(floor_row -> 'furniture') > 100 THEN
+      RETURN false;
+    END IF;
+    IF jsonb_typeof(floor_row -> 'agentIds') <> 'array'
+       OR jsonb_array_length(floor_row -> 'agentIds') > 30 THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+  RETURN true;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.validate_office_layout_document(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.validate_office_layout_document(jsonb) TO authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.office_layouts (
+  user_id uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  layout jsonb NOT NULL,
+  layout_version bigint NOT NULL CHECK (layout_version > 0),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (user_id, circle_id),
+  CONSTRAINT office_layouts_document_valid CHECK (public.validate_office_layout_document(layout)),
+  CONSTRAINT office_layouts_version_matches_document CHECK (
+    (layout ->> 'updatedAt') ~ '^[0-9]{1,18}$'
+    AND (layout ->> 'updatedAt')::bigint = layout_version
+  )
+);
+
+-- Older revisions allowed a client clock arbitrarily far in the future. Repair
+-- those rows before raw mutation authority is removed, preserving the payload
+-- while bringing its exact version field back to the migration's server clock.
+LOCK TABLE public.office_layouts IN SHARE ROW EXCLUSIVE MODE;
+WITH repair_clock AS (
+  SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS repair_version
+)
+UPDATE public.office_layouts AS ol
+SET layout = jsonb_set(ol.layout, '{updatedAt}', to_jsonb(repair_clock.repair_version), true),
+    layout_version = repair_clock.repair_version,
+    updated_at = clock_timestamp()
+FROM repair_clock
+WHERE ol.layout_version > 9007199254740991
+   OR ol.layout_version > repair_clock.repair_version + 300000;
+ALTER TABLE public.office_layouts
+  DROP CONSTRAINT IF EXISTS office_layouts_version_javascript_safe;
+ALTER TABLE public.office_layouts
+  ADD CONSTRAINT office_layouts_version_javascript_safe
+  CHECK (layout_version <= 9007199254740991);
+
+ALTER TABLE public.office_layouts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS office_layouts_select_own ON public.office_layouts;
+DROP POLICY IF EXISTS office_layouts_insert_own ON public.office_layouts;
+DROP POLICY IF EXISTS office_layouts_update_own ON public.office_layouts;
+DROP POLICY IF EXISTS office_layouts_delete_own ON public.office_layouts;
+CREATE POLICY office_layouts_select_own ON public.office_layouts FOR SELECT TO authenticated
+USING (
+  user_id = auth.uid()
+  AND EXISTS (SELECT 1 FROM public.circle_members cm WHERE cm.circle_id = office_layouts.circle_id AND cm.user_id = auth.uid())
+);
+REVOKE ALL ON TABLE public.office_layouts FROM PUBLIC, anon;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.office_layouts FROM authenticated;
+GRANT SELECT ON TABLE public.office_layouts TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.save_office_layout_v2(
+  p_circle_id uuid,
+  p_layout jsonb,
+  p_layout_version bigint
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  stored_version bigint;
+  stored_layout jsonb;
+  server_now_ms bigint := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+BEGIN
+  IF actor_id IS NULL THEN RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501'; END IF;
+  IF p_circle_id IS NULL
+     OR p_layout_version IS NULL
+     OR p_layout_version <= 0
+     OR p_layout_version > 9007199254740991
+     OR p_layout_version > server_now_ms + 300000 THEN
+    RAISE EXCEPTION 'invalid_office_layout_version' USING ERRCODE = '22023';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.circle_members cm
+    WHERE cm.circle_id = p_circle_id AND cm.user_id = actor_id
+  ) THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  IF NOT public.validate_office_layout_document(p_layout)
+     OR (p_layout ->> 'updatedAt') !~ '^[0-9]{1,18}$'
+     OR (p_layout ->> 'updatedAt')::bigint <> p_layout_version THEN
+    RAISE EXCEPTION 'invalid_office_layout_document' USING ERRCODE = '22023';
+  END IF;
+
+  INSERT INTO public.office_layouts (user_id, circle_id, layout, layout_version)
+  VALUES (actor_id, p_circle_id, p_layout, p_layout_version)
+  ON CONFLICT (user_id, circle_id) DO UPDATE
+    SET layout = EXCLUDED.layout,
+        layout_version = EXCLUDED.layout_version,
+        updated_at = clock_timestamp()
+    WHERE public.office_layouts.layout_version < EXCLUDED.layout_version;
+
+  SELECT layout_version, layout INTO stored_version, stored_layout
+  FROM public.office_layouts
+  WHERE user_id = actor_id AND circle_id = p_circle_id;
+
+  IF stored_version IS NULL THEN
+    RAISE EXCEPTION 'office_layout_not_saved' USING ERRCODE = '42501';
+  END IF;
+  RETURN jsonb_build_object(
+    'layoutVersion', stored_version,
+    -- A same-version retry is successful only when it is idempotent. Without
+    -- the payload check, two tabs could submit different layouts at the same
+    -- millisecond and the losing tab would receive a false accepted receipt.
+    'accepted', stored_version = p_layout_version AND stored_layout = p_layout
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.save_office_layout_v2(uuid, jsonb, bigint) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.save_office_layout_v2(uuid, jsonb, bigint) TO authenticated;
+
+CREATE TABLE IF NOT EXISTS public.office_attention_acknowledgements (
+  user_id uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  attention_id text NOT NULL CHECK (length(attention_id) BETWEEN 1 AND 240),
+  run_id uuid REFERENCES public.agent_runs(id) ON DELETE CASCADE,
+  acknowledged_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  expires_at timestamptz NOT NULL DEFAULT (clock_timestamp() + interval '30 days'),
+  PRIMARY KEY (user_id, circle_id, attention_id),
+  CONSTRAINT office_attention_expiry_after_ack CHECK (expires_at > acknowledged_at)
+);
+-- Lock parent before child so no concurrent run move or acknowledgement write
+-- can race cleanup and composite-FK validation. Keep this order in follow-ups.
+LOCK TABLE public.agent_runs IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE public.office_attention_acknowledgements IN SHARE ROW EXCLUSIVE MODE;
+-- Remove impossible legacy dismissals before replacing the run-only FK with a
+-- durable run+circle relationship. Acknowledgements are ephemeral UI state;
+-- retaining a cross-circle row would be less safe than surfacing the item again.
+DELETE FROM public.office_attention_acknowledgements AS acknowledgement
+WHERE acknowledgement.run_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.agent_runs AS run
+    WHERE run.id = acknowledgement.run_id
+      AND run.circle_id = acknowledgement.circle_id
+  );
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_id_circle_id_unique
+  ON public.agent_runs (id, circle_id);
+ALTER TABLE public.office_attention_acknowledgements
+  DROP CONSTRAINT IF EXISTS office_attention_acknowledgements_run_id_fkey;
+ALTER TABLE public.office_attention_acknowledgements
+  DROP CONSTRAINT IF EXISTS office_attention_acknowledgements_run_circle_fkey;
+ALTER TABLE public.office_attention_acknowledgements
+  ADD CONSTRAINT office_attention_acknowledgements_run_circle_fkey
+  FOREIGN KEY (run_id, circle_id)
+  REFERENCES public.agent_runs (id, circle_id)
+  ON UPDATE RESTRICT
+  ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS office_attention_ack_expiry_idx
+  ON public.office_attention_acknowledgements (user_id, circle_id, expires_at);
+ALTER TABLE public.office_attention_acknowledgements ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS office_attention_ack_select_own ON public.office_attention_acknowledgements;
+DROP POLICY IF EXISTS office_attention_ack_insert_own ON public.office_attention_acknowledgements;
+DROP POLICY IF EXISTS office_attention_ack_update_own ON public.office_attention_acknowledgements;
+DROP POLICY IF EXISTS office_attention_ack_delete_own ON public.office_attention_acknowledgements;
+CREATE POLICY office_attention_ack_select_own ON public.office_attention_acknowledgements FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+CREATE POLICY office_attention_ack_insert_own ON public.office_attention_acknowledgements FOR INSERT TO authenticated
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (SELECT 1 FROM public.circle_members cm WHERE cm.circle_id = office_attention_acknowledgements.circle_id AND cm.user_id = auth.uid())
+);
+CREATE POLICY office_attention_ack_update_own ON public.office_attention_acknowledgements FOR UPDATE TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM public.circle_members cm
+    WHERE cm.circle_id = office_attention_acknowledgements.circle_id
+      AND cm.user_id = auth.uid()
+  )
+);
+CREATE POLICY office_attention_ack_delete_own ON public.office_attention_acknowledgements FOR DELETE TO authenticated
+USING (user_id = auth.uid());
+REVOKE ALL ON TABLE public.office_attention_acknowledgements FROM PUBLIC, anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.office_attention_acknowledgements TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.enforce_office_attention_ack_scope()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  run_circle_id uuid;
+BEGIN
+  IF NEW.run_id IS NOT NULL THEN
+    SELECT ar.circle_id INTO run_circle_id
+    FROM public.agent_runs ar
+    WHERE ar.id = NEW.run_id;
+    IF run_circle_id IS NULL OR run_circle_id <> NEW.circle_id THEN
+      RAISE EXCEPTION 'attention_run_scope_mismatch' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  NEW.acknowledged_at := clock_timestamp();
+  NEW.expires_at := NEW.acknowledged_at + interval '30 days';
+  RETURN NEW;
+END;
+$function$;
+REVOKE ALL ON FUNCTION public.enforce_office_attention_ack_scope() FROM PUBLIC, anon, authenticated;
+DROP TRIGGER IF EXISTS office_attention_ack_scope_guard ON public.office_attention_acknowledgements;
+CREATE TRIGGER office_attention_ack_scope_guard
+BEFORE INSERT OR UPDATE ON public.office_attention_acknowledgements
+FOR EACH ROW EXECUTE FUNCTION public.enforce_office_attention_ack_scope();
+
+CREATE OR REPLACE FUNCTION public.list_active_office_attention_acknowledgements(p_circle_id uuid)
+RETURNS TABLE(attention_id text)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT acknowledgement.attention_id
+  FROM public.office_attention_acknowledgements AS acknowledgement
+  WHERE auth.uid() IS NOT NULL
+    AND acknowledgement.user_id = auth.uid()
+    AND acknowledgement.circle_id = p_circle_id
+    AND acknowledgement.expires_at > statement_timestamp()
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id = p_circle_id
+        AND membership.user_id = auth.uid()
+    )
+  ORDER BY acknowledgement.attention_id
+  LIMIT 500;
+$function$;
+REVOKE ALL ON FUNCTION public.list_active_office_attention_acknowledgements(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.list_active_office_attention_acknowledgements(uuid) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.validate_office_floor_preset_snapshot(p_snapshot jsonb)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT p_snapshot IS NOT NULL
+    AND jsonb_typeof(p_snapshot) = 'object'
+    AND p_snapshot ->> 'schemaVersion' = '1'
+    AND jsonb_typeof(p_snapshot -> 'floor') = 'object'
+    AND octet_length(p_snapshot::text) <= 256000
+    AND jsonb_typeof(p_snapshot -> 'floor' -> 'furniture') = 'array'
+    AND jsonb_array_length(p_snapshot -> 'floor' -> 'furniture') <= 100
+    AND jsonb_typeof(p_snapshot -> 'floor' -> 'agentIds') = 'array'
+    AND jsonb_array_length(p_snapshot -> 'floor' -> 'agentIds') <= 30;
+$function$;
+REVOKE ALL ON FUNCTION public.validate_office_floor_preset_snapshot(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.validate_office_floor_preset_snapshot(jsonb) TO authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.office_floor_presets (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  name text NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
+  description text CHECK (description IS NULL OR length(description) <= 240),
+  snapshot jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT office_floor_presets_owner_circle_name UNIQUE (user_id, circle_id, name),
+  CONSTRAINT office_floor_presets_snapshot_valid CHECK (public.validate_office_floor_preset_snapshot(snapshot))
+);
+
+CREATE OR REPLACE FUNCTION public.touch_office_dashboard_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  NEW.updated_at := clock_timestamp();
+  RETURN NEW;
+END;
+$function$;
+REVOKE ALL ON FUNCTION public.touch_office_dashboard_updated_at() FROM PUBLIC;
+DROP TRIGGER IF EXISTS office_floor_presets_touch_updated_at ON public.office_floor_presets;
+CREATE TRIGGER office_floor_presets_touch_updated_at
+BEFORE UPDATE ON public.office_floor_presets
+FOR EACH ROW EXECUTE FUNCTION public.touch_office_dashboard_updated_at();
+
+ALTER TABLE public.office_floor_presets ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS office_floor_presets_select_own ON public.office_floor_presets;
+DROP POLICY IF EXISTS office_floor_presets_insert_own ON public.office_floor_presets;
+DROP POLICY IF EXISTS office_floor_presets_update_own ON public.office_floor_presets;
+DROP POLICY IF EXISTS office_floor_presets_delete_own ON public.office_floor_presets;
+CREATE POLICY office_floor_presets_select_own ON public.office_floor_presets FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+CREATE POLICY office_floor_presets_insert_own ON public.office_floor_presets FOR INSERT TO authenticated
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (SELECT 1 FROM public.circle_members cm WHERE cm.circle_id = office_floor_presets.circle_id AND cm.user_id = auth.uid())
+);
+CREATE POLICY office_floor_presets_update_own ON public.office_floor_presets FOR UPDATE TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM public.circle_members cm
+    WHERE cm.circle_id = office_floor_presets.circle_id
+      AND cm.user_id = auth.uid()
+  )
+);
+CREATE POLICY office_floor_presets_delete_own ON public.office_floor_presets FOR DELETE TO authenticated
+USING (user_id = auth.uid());
+REVOKE ALL ON TABLE public.office_floor_presets FROM PUBLIC, anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.office_floor_presets TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §37 readiness (catalog presence only; this does not prove authenticated
+-- cross-device behavior or a live Office interaction).
+SELECT
+  to_regclass('public.office_layouts') IS NOT NULL AS office_layouts_ready,
+  to_regprocedure('public.save_office_layout_v2(uuid,jsonb,bigint)') IS NOT NULL AS office_layout_save_ready,
+  to_regclass('public.office_attention_acknowledgements') IS NOT NULL AS office_attention_ack_ready,
+  to_regclass('public.office_floor_presets') IS NOT NULL AS office_floor_presets_ready;
+
+-- =============================================================================
+-- §38. Agent-run artifact integrity (2026-08-12)
+-- Source: supabase/migrations/20260812_agent_run_artifact_integrity.sql
+-- =============================================================================
+-- Agent-run artifact integrity: immutable parent authority and artifacts.
+--
+-- The 20260408 base policy granted every current circle member FOR ALL access
+-- to every artifact in that circle. That made canonical Chat artifact content
+-- mutable/deletable by unrelated members. Converge to exactly two authenticated
+-- policies: circle-member SELECT and exact run-owner INSERT. The parent run's
+-- owner/circle/id becomes immutable to authenticated clients first, and new
+-- runs must belong to the authenticated creator. Authenticated artifact
+-- UPDATE/DELETE has neither a policy nor a table grant; service_role retains
+-- its normal RLS bypass for trusted maintenance/recovery.
+
+BEGIN;
+
+ALTER TABLE public.agent_runs ENABLE ROW LEVEL SECURITY;
+
+-- `agent_runs.user_id` is the artifact INSERT authority below. The historical
+-- circle-member FOR ALL policy makes that column forgeable unless the parent
+-- identity is independently locked first. Restrictive policies compose with
+-- that legacy permissive policy: authenticated clients may create only their
+-- own rows, mutate only their own rows, and directly delete only their own
+-- rows. Service-role/Postgres maintenance keeps its normal RLS bypass.
+DROP POLICY IF EXISTS agent_runs_owner_insert_guard_v1 ON public.agent_runs;
+CREATE POLICY agent_runs_owner_insert_guard_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+);
+
+DROP POLICY IF EXISTS agent_runs_owner_update_guard_v1 ON public.agent_runs;
+CREATE POLICY agent_runs_owner_update_guard_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+);
+
+-- This also closes the indirect artifact-delete path where a member deletes
+-- another member's run and relies on ON DELETE CASCADE. PostgreSQL executes a
+-- legitimate parent-circle FK cascade outside child RLS, so Circle deletion is
+-- not stranded by this direct-delete guard.
+DROP POLICY IF EXISTS agent_runs_owner_delete_guard_v1 ON public.agent_runs;
+CREATE POLICY agent_runs_owner_delete_guard_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+);
+
+CREATE OR REPLACE FUNCTION public.guard_authenticated_agent_run_identity_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  trusted_writer boolean :=
+    COALESCE(auth.role(), '') = 'service_role'
+    OR current_user IN ('postgres', 'supabase_admin', 'service_role');
+BEGIN
+  IF trusted_writer THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF actor_id IS NULL OR NEW.user_id IS DISTINCT FROM actor_id THEN
+      RAISE EXCEPTION 'agent_run_owner_required'
+        USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF actor_id IS NULL OR OLD.user_id IS DISTINCT FROM actor_id THEN
+      RAISE EXCEPTION 'agent_run_owner_required'
+        USING ERRCODE = '42501';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+       OR NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+      RAISE EXCEPTION 'agent_run_identity_immutable'
+        USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION 'agent_run_identity_guard_invalid_operation'
+    USING ERRCODE = '42501';
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS trg_guard_authenticated_agent_run_identity_v1
+ON public.agent_runs;
+CREATE TRIGGER trg_guard_authenticated_agent_run_identity_v1
+BEFORE INSERT OR UPDATE ON public.agent_runs
+FOR EACH ROW EXECUTE FUNCTION public.guard_authenticated_agent_run_identity_v1();
+
+REVOKE ALL ON FUNCTION public.guard_authenticated_agent_run_identity_v1()
+FROM PUBLIC, anon, authenticated;
+
+ALTER TABLE public.agent_run_artifacts ENABLE ROW LEVEL SECURITY;
+
+-- Remove known and unknown policy drift. PostgreSQL ORs permissive policies,
+-- so leaving one historical FOR ALL policy would reopen mutation authority.
+DO $block$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_artifacts'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.agent_run_artifacts',
+      policy_row.policyname
+    );
+  END LOOP;
+END;
+$block$;
+
+CREATE POLICY agent_run_artifacts_select_circle_member
+ON public.agent_run_artifacts
+FOR SELECT
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND public.user_is_circle_member(circle_id)
+);
+
+CREATE POLICY agent_run_artifacts_insert_run_owner
+ON public.agent_run_artifacts
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND public.user_is_circle_member(circle_id)
+  AND EXISTS (
+    SELECT 1
+    FROM public.agent_runs AS owning_run
+    WHERE owning_run.id = agent_run_artifacts.run_id
+      AND owning_run.circle_id = agent_run_artifacts.circle_id
+      AND owning_run.user_id = auth.uid()
+  )
+  AND (
+    step_id IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM public.agent_run_steps AS owning_step
+      WHERE owning_step.id = agent_run_artifacts.step_id
+        AND owning_step.run_id = agent_run_artifacts.run_id
+        AND owning_step.circle_id = agent_run_artifacts.circle_id
+    )
+  )
+);
+
+REVOKE ALL ON TABLE public.agent_run_artifacts FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON TABLE public.agent_run_artifacts TO authenticated;
+GRANT ALL ON TABLE public.agent_run_artifacts TO service_role;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- Catalog readiness only. This does not prove two-user behavioral RLS or that
+-- the migration has been applied to a target project.
+SELECT
+  to_regclass('public.agent_run_artifacts') IS NOT NULL AS agent_run_artifacts_ready,
+  to_regprocedure('public.guard_authenticated_agent_run_identity_v1()') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = 'public.agent_runs'::regclass
+        AND trigger_row.tgname = 'trg_guard_authenticated_agent_run_identity_v1'
+        AND trigger_row.tgenabled <> 'D'
+        AND NOT trigger_row.tgisinternal
+    ) AS agent_run_identity_guard_ready,
+  (
+    SELECT count(*) = 3
+      AND bool_and(permissive = 'RESTRICTIVE')
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_runs'
+      AND policyname IN (
+        'agent_runs_owner_insert_guard_v1',
+        'agent_runs_owner_update_guard_v1',
+        'agent_runs_owner_delete_guard_v1'
+      )
+  ) AS agent_run_owner_policies_ready,
+  (
+    SELECT count(*) = 2
+      AND bool_and(cmd IN ('SELECT', 'INSERT'))
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_artifacts'
+  ) AS artifact_policies_converged,
+  has_table_privilege('authenticated', 'public.agent_run_artifacts', 'SELECT')
+    AND has_table_privilege('authenticated', 'public.agent_run_artifacts', 'INSERT')
+    AND NOT has_table_privilege('authenticated', 'public.agent_run_artifacts', 'UPDATE')
+    AND NOT has_table_privilege('authenticated', 'public.agent_run_artifacts', 'DELETE')
+    AS authenticated_artifact_grants_ready;
+
+
+-- =============================================================================
+-- §39. Message-attachment link integrity (2026-08-13)
+-- Source: supabase/migrations/20260813160000_message_attachment_link_integrity.sql
+-- =============================================================================
+-- Canonical message-attachment linkage integrity.
+--
+-- The original message_attachments UPDATE policy checked only the attachment
+-- owner. That allowed an authenticated owner to rewrite attachment identity or
+-- attach a staged row to any guessed message UUID. Keep the existing direct
+-- Chat UPDATE API, but make it a database-enforced compare-and-set:
+--
+--   * only the owner, while still a circle member, may update;
+--   * authenticated INSERT always creates an unlinked staged row;
+--   * durable attachment identity/content fields are immutable;
+--   * message_id may move only from NULL to one exact, owner-authored,
+--     non-bot message in the same circle and thread (or remain unchanged for a
+--     safe retry);
+--   * ocr_text remains mutable for the owner-side OCR path;
+--   * trusted service-role/Postgres maintenance remains available.
+
+BEGIN;
+
+ALTER TABLE public.message_attachments ENABLE ROW LEVEL SECURITY;
+
+-- Deterministically quarantine legacy links that cannot prove the exact
+-- attachment/message scope. There is no safe message target to infer for such
+-- a row, so returning it to the staged (NULL) state is the only non-forging
+-- repair. Valid same-owner, same-circle, same-thread user-message links remain.
+UPDATE public.message_attachments AS attachment
+SET message_id = NULL
+WHERE attachment.message_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.messages AS target_message
+    WHERE target_message.id = attachment.message_id
+      AND target_message.circle_id = attachment.circle_id
+      AND target_message.thread_id IS NOT DISTINCT FROM attachment.thread_id
+      AND target_message.user_id = attachment.user_id
+      AND COALESCE(target_message.is_bot, false) = false
+  );
+
+-- This predicate intentionally runs with caller privileges. Its messages query
+-- therefore preserves canonical message/thread RLS instead of becoming a
+-- SECURITY DEFINER existence oracle. The explicit owner equality also keeps a
+-- caller from probing another user's message identity through this function.
+CREATE OR REPLACE FUNCTION public.message_attachment_link_target_is_valid_v1(
+  p_message_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    p_message_id IS NULL
+    OR (
+      auth.uid() IS NOT NULL
+      AND p_user_id = auth.uid()
+      AND EXISTS (
+        SELECT 1
+        FROM public.messages AS target_message
+        WHERE target_message.id = p_message_id
+          AND target_message.circle_id = p_circle_id
+          AND target_message.thread_id IS NOT DISTINCT FROM p_thread_id
+          AND target_message.user_id = p_user_id
+          AND COALESCE(target_message.is_bot, false) = false
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_link_target_is_valid_v1(uuid, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_link_target_is_valid_v1(uuid, uuid, uuid, uuid)
+TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.guard_authenticated_message_attachment_update_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  trusted_writer boolean :=
+    COALESCE(auth.role(), '') = 'service_role'
+    OR current_user IN ('postgres', 'supabase_admin', 'service_role');
+BEGIN
+  IF trusted_writer THEN
+    RETURN NEW;
+  END IF;
+
+  IF actor_id IS NULL OR OLD.user_id IS DISTINCT FROM actor_id THEN
+    RAISE EXCEPTION 'message_attachment_owner_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- message_id and ocr_text are the only authenticated-client mutable fields.
+  -- Comparing the remaining row as jsonb also fails closed if a future column
+  -- is added without an explicit decision here.
+  IF (to_jsonb(NEW) - ARRAY['message_id', 'ocr_text'])
+       IS DISTINCT FROM
+     (to_jsonb(OLD) - ARRAY['message_id', 'ocr_text']) THEN
+    RAISE EXCEPTION 'message_attachment_identity_immutable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- A linked attachment is immutable. Repeating the same message_id is an
+  -- idempotent retry; changing it or returning it to NULL is rejected.
+  IF OLD.message_id IS NOT NULL
+     AND NEW.message_id IS DISTINCT FROM OLD.message_id THEN
+    RAISE EXCEPTION 'message_attachment_relink_forbidden'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NOT public.message_attachment_link_target_is_valid_v1(
+    NEW.message_id,
+    NEW.circle_id,
+    NEW.thread_id,
+    NEW.user_id
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_target_mismatch'
+      USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS trg_guard_authenticated_message_attachment_update_v1
+ON public.message_attachments;
+CREATE TRIGGER trg_guard_authenticated_message_attachment_update_v1
+BEFORE UPDATE ON public.message_attachments
+FOR EACH ROW EXECUTE FUNCTION public.guard_authenticated_message_attachment_update_v1();
+
+REVOKE ALL ON FUNCTION public.guard_authenticated_message_attachment_update_v1()
+FROM PUBLIC, anon, authenticated;
+
+-- Permissive policies are ORed, so every historical INSERT, UPDATE, or FOR ALL
+-- policy must be removed before installing the canonical staged-insert and
+-- owner/scope-update policies. SELECT and DELETE policies are intentionally
+-- left unchanged in this focused migration.
+DO $policy_convergence$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND cmd IN ('INSERT', 'UPDATE', 'ALL')
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.message_attachments',
+      policy_row.policyname
+    );
+  END LOOP;
+END;
+$policy_convergence$;
+
+CREATE POLICY message_attachments_insert_owner_staged_v1
+ON public.message_attachments
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND message_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+);
+
+CREATE POLICY message_attachments_update_owner_exact_link_v1
+ON public.message_attachments
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+-- Keep the current PostgREST `.update({ message_id })` and owner OCR paths
+-- compatible. RLS plus the BEFORE trigger narrow this table-level grant to the
+-- two explicitly mutable fields above.
+REVOKE ALL ON TABLE public.message_attachments FROM PUBLIC, anon;
+GRANT INSERT, UPDATE ON TABLE public.message_attachments TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §39 readiness (catalog and stored-row integrity only; this does not prove a
+-- live authenticated Chat upload/link round trip).
+SELECT
+  to_regclass('public.message_attachments') IS NOT NULL
+    AS message_attachments_ready,
+  to_regprocedure('public.message_attachment_link_target_is_valid_v1(uuid,uuid,uuid,uuid)') IS NOT NULL
+    AS attachment_link_validator_ready,
+  to_regprocedure('public.guard_authenticated_message_attachment_update_v1()') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = 'public.message_attachments'::regclass
+        AND trigger_row.tgname = 'trg_guard_authenticated_message_attachment_update_v1'
+        AND trigger_row.tgenabled <> 'D'
+        AND NOT trigger_row.tgisinternal
+    ) AS attachment_update_guard_ready,
+  (
+    SELECT count(*) = 1
+      AND bool_and(policyname = 'message_attachments_insert_owner_staged_v1')
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND cmd = 'INSERT'
+  ) AS attachment_insert_policy_converged,
+  (
+    SELECT count(*) = 1
+      AND bool_and(policyname = 'message_attachments_update_owner_exact_link_v1')
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND cmd IN ('UPDATE', 'ALL')
+  ) AS attachment_update_policy_converged,
+  NOT EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    WHERE attachment.message_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.messages AS target_message
+        WHERE target_message.id = attachment.message_id
+          AND target_message.circle_id = attachment.circle_id
+          AND target_message.thread_id IS NOT DISTINCT FROM attachment.thread_id
+          AND target_message.user_id = attachment.user_id
+          AND COALESCE(target_message.is_bot, false) = false
+      )
+  ) AS stored_attachment_links_valid,
+  has_table_privilege('authenticated', 'public.message_attachments', 'UPDATE')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'INSERT')
+    AS authenticated_attachment_write_grants_ready;
+
+
+-- =============================================================================
+-- §40. Message-attachment visibility and Storage integrity (2026-08-13)
+-- Source: supabase/migrations/20260813170000_message_attachment_visibility_integrity.sql
+-- =============================================================================
+-- Canonical message-attachment visibility and Storage integrity.
+--
+-- A message attachment contains more than a filename: its row may carry the
+-- private Storage path, extracted text, and OCR. Circle membership alone is
+-- therefore not sufficient read authority. Converge the full table policy set
+-- so staged rows are owner-only and linked rows follow the exact message-thread
+-- visibility contract. Apply the same rule to the private Storage object.
+
+BEGIN;
+
+-- §40 deliberately extends §39 rather than replacing its immutable-link
+-- trigger. Abort intact if an operator tries to install visibility before the
+-- canonical compare-and-set boundary is present.
+DO $attachment_visibility_dependency_preflight$
+BEGIN
+  IF to_regprocedure('public.message_attachment_link_target_is_valid_v1(uuid,uuid,uuid,uuid)') IS NULL
+     OR to_regprocedure('public.guard_authenticated_message_attachment_update_v1()') IS NULL
+     OR NOT EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_trigger AS trigger_row
+       WHERE trigger_row.tgrelid = 'public.message_attachments'::regclass
+         AND trigger_row.tgname = 'trg_guard_authenticated_message_attachment_update_v1'
+         AND trigger_row.tgenabled <> 'D'
+         AND NOT trigger_row.tgisinternal
+     )
+     OR to_regprocedure('public.message_thread_visible_to_current_user(uuid,uuid)') IS NULL THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: apply SQL section 39 and canonical message-thread RLS first'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$attachment_visibility_dependency_preflight$;
+
+ALTER TABLE public.message_attachments ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_path_matches_row_v1(
+  p_name text,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    p_name IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND p_user_id IS NOT NULL
+    AND array_length(pg_catalog.string_to_array(p_name, '/'), 1) = 4
+    AND split_part(p_name, '/', 1) = p_circle_id::text
+    AND split_part(p_name, '/', 2) = COALESCE(p_thread_id::text, '_direct')
+    AND split_part(p_name, '/', 3) = p_user_id::text
+    AND split_part(p_name, '/', 4) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[A-Za-z0-9._-]{1,120}$';
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_storage_path_matches_row_v1(text, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_path_matches_row_v1(text, uuid, uuid, uuid)
+TO authenticated;
+
+-- Never delete or silently rewrite a user's attachment while installing an
+-- authority boundary. Legacy drift must be inspected by an operator. Abort the
+-- transaction intact if a row cannot satisfy the canonical path identity.
+DO $attachment_path_preflight$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    WHERE NOT public.message_attachment_storage_path_matches_row_v1(
+      attachment.storage_path,
+      attachment.circle_id,
+      attachment.thread_id,
+      attachment.user_id
+    )
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: invalid legacy storage path; inspect before applying'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    GROUP BY attachment.storage_path
+    HAVING count(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: duplicate legacy storage path; inspect before applying'
+      USING ERRCODE = '23505';
+  END IF;
+END
+$attachment_path_preflight$;
+
+ALTER TABLE public.message_attachments
+  DROP CONSTRAINT IF EXISTS message_attachments_storage_path_matches_scope_v1;
+ALTER TABLE public.message_attachments
+  ADD CONSTRAINT message_attachments_storage_path_matches_scope_v1
+  CHECK (
+    public.message_attachment_storage_path_matches_row_v1(
+      storage_path,
+      circle_id,
+      thread_id,
+      user_id
+    )
+  );
+
+DROP INDEX IF EXISTS public.message_attachments_storage_path_unique_v1;
+CREATE UNIQUE INDEX message_attachments_storage_path_unique_v1
+ON public.message_attachments(storage_path);
+
+-- Converge the named private bucket without deleting or replacing it. A
+-- mismatched id/name is ambiguous operator state and aborts intact.
+DO $private_bucket_identity_preflight$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM storage.buckets AS bucket
+    WHERE (bucket.id = 'chat-attachments' AND bucket.name <> 'chat-attachments')
+       OR (bucket.name = 'chat-attachments' AND bucket.id <> 'chat-attachments')
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: chat-attachments bucket identity mismatch; inspect before applying'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$private_bucket_identity_preflight$;
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit)
+VALUES ('chat-attachments', 'chat-attachments', false, 52428800)
+ON CONFLICT (id) DO UPDATE
+SET
+  name = EXCLUDED.name,
+  public = false,
+  file_size_limit = 52428800;
+
+UPDATE storage.buckets
+SET
+  public = false,
+  file_size_limit = 52428800
+WHERE id = 'chat-attachments'
+  AND name = 'chat-attachments';
+
+-- Metadata is admitted only after the exact private Storage object exists and
+-- its immutable owner matches the row/path owner. The authenticated-only
+-- owner equality prevents this SECURITY DEFINER predicate from becoming a
+-- cross-user object-existence oracle.
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_object_matches_row_v1(
+  p_name text,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_user_id = auth.uid()
+    AND public.message_attachment_storage_path_matches_row_v1(
+      p_name,
+      p_circle_id,
+      p_thread_id,
+      p_user_id
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM storage.objects AS object_row
+      WHERE object_row.bucket_id = 'chat-attachments'
+        AND object_row.name = p_name
+        AND object_row.owner_id::text = p_user_id::text
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_storage_object_matches_row_v1(text, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_object_matches_row_v1(text, uuid, uuid, uuid)
+TO authenticated;
+
+-- A missing or differently owned legacy object is not repaired by guessing.
+-- Keep every row/object intact and stop the transaction for operator review.
+DO $attachment_object_binding_preflight$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM storage.objects AS object_row
+      WHERE object_row.bucket_id = 'chat-attachments'
+        AND object_row.name = attachment.storage_path
+        AND object_row.owner_id::text = attachment.user_id::text
+    )
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: missing or owner-mismatched legacy storage object; inspect before applying'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$attachment_object_binding_preflight$;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_row_visible_v1(
+  p_message_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND p_user_id IS NOT NULL
+    AND (
+      (
+        p_message_id IS NULL
+        AND p_user_id = auth.uid()
+        AND EXISTS (
+          SELECT 1
+          FROM public.circle_members AS membership
+          WHERE membership.circle_id = p_circle_id
+            AND membership.user_id = auth.uid()
+        )
+      )
+      OR (
+        p_message_id IS NOT NULL
+        AND p_thread_id IS NOT NULL
+        AND public.message_thread_visible_to_current_user(p_circle_id, p_thread_id)
+        AND EXISTS (
+          SELECT 1
+          FROM public.messages AS target_message
+          WHERE target_message.id = p_message_id
+            AND target_message.circle_id = p_circle_id
+            AND target_message.thread_id = p_thread_id
+            AND target_message.user_id = p_user_id
+            AND COALESCE(target_message.is_bot, false) = false
+        )
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_row_visible_v1(uuid, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_row_visible_v1(uuid, uuid, uuid, uuid)
+TO authenticated;
+
+-- Permissive policies are ORed. Remove every historical table policy before
+-- installing the one canonical policy for each operation.
+DO $attachment_policy_convergence$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.message_attachments',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$attachment_policy_convergence$;
+
+CREATE POLICY message_attachments_select_exact_visibility_v1
+ON public.message_attachments
+FOR SELECT
+TO authenticated
+USING (
+  public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_insert_owner_staged_v1
+ON public.message_attachments
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND message_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_update_owner_exact_link_v1
+ON public.message_attachments
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_delete_owner_visible_v1
+ON public.message_attachments
+FOR DELETE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+-- Restrictive companions are defense in depth against a future or
+-- environment-specific permissive TO PUBLIC/FOR ALL policy. PostgreSQL ANDs
+-- every applicable restrictive policy with the permissive result.
+CREATE POLICY message_attachments_select_exact_visibility_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_insert_owner_staged_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND message_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_update_owner_exact_link_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_delete_owner_visible_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+-- Explicit anon denials ensure a hostile permissive TO PUBLIC policy cannot
+-- expose attachment metadata or content-bearing OCR/extraction columns.
+CREATE POLICY message_attachments_anon_select_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR SELECT
+TO anon
+USING (false);
+
+CREATE POLICY message_attachments_anon_insert_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR INSERT
+TO anon
+WITH CHECK (false);
+
+CREATE POLICY message_attachments_anon_update_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR UPDATE
+TO anon
+USING (false)
+WITH CHECK (false);
+
+CREATE POLICY message_attachments_anon_delete_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR DELETE
+TO anon
+USING (false);
+
+REVOKE ALL ON TABLE public.message_attachments FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.message_attachments TO authenticated;
+GRANT ALL ON TABLE public.message_attachments TO service_role;
+
+-- Storage INSERT happens before the metadata row exists, so authority comes
+-- from the exact path shape emitted by chatAttachments.ts:
+--   <circle_uuid>/<thread_uuid|_direct>/<user_uuid>/<uuid>-<safe_name>
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_insert_authorized_v1(
+  p_name text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_name IS NOT NULL
+    AND array_length(pg_catalog.string_to_array(p_name, '/'), 1) = 4
+    AND split_part(p_name, '/', 1) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND (
+      split_part(p_name, '/', 2) = '_direct'
+      OR split_part(p_name, '/', 2) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    )
+    AND split_part(p_name, '/', 3) = auth.uid()::text
+    AND split_part(p_name, '/', 4) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[A-Za-z0-9._-]{1,120}$'
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id = split_part(p_name, '/', 1)::uuid
+        AND membership.user_id = auth.uid()
+    )
+    AND (
+      split_part(p_name, '/', 2) = '_direct'
+      OR public.message_thread_visible_to_current_user(
+        split_part(p_name, '/', 1)::uuid,
+        split_part(p_name, '/', 2)::uuid
+      )
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_object_visible_v1(
+  p_name text,
+  p_owner_id text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_owner_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM public.message_attachments AS attachment
+      WHERE attachment.storage_path = p_name
+        AND attachment.user_id::text = p_owner_id
+        AND public.message_attachment_storage_path_matches_row_v1(
+          attachment.storage_path,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+        AND public.message_attachment_row_visible_v1(
+          attachment.message_id,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_object_owned_v1(
+  p_name text,
+  p_owner_id text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_owner_id = auth.uid()::text
+    AND EXISTS (
+      SELECT 1
+      FROM public.message_attachments AS attachment
+      WHERE attachment.storage_path = p_name
+        AND attachment.user_id = auth.uid()
+        AND attachment.user_id::text = p_owner_id
+        AND public.message_attachment_storage_path_matches_row_v1(
+          attachment.storage_path,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+        AND public.message_attachment_row_visible_v1(
+          attachment.message_id,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_storage_insert_authorized_v1(text)
+FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.message_attachment_storage_object_visible_v1(text, text)
+FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.message_attachment_storage_object_owned_v1(text, text)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_insert_authorized_v1(text)
+TO authenticated;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_object_visible_v1(text, text)
+TO authenticated;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_object_owned_v1(text, text)
+TO authenticated;
+
+ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS chat_attachments_select_visible_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_select_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_insert_owned_scope_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_insert_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_update_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_delete_owner_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_delete_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_select_deny_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_insert_deny_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_update_deny_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_delete_deny_v1 ON storage.objects;
+
+-- Remove the pre-release one-argument helper overloads only after their known
+-- policies are gone. An unknown dependency fails the transaction rather than
+-- cascading into another feature.
+DROP FUNCTION IF EXISTS public.message_attachment_storage_object_visible_v1(text);
+DROP FUNCTION IF EXISTS public.message_attachment_storage_object_owned_v1(text);
+
+-- Canonical permissive policies keep this bucket functional. Restrictive
+-- companion policies ensure an environment-specific broad Storage policy
+-- cannot OR around the exact Chat attachment authority.
+CREATE POLICY chat_attachments_select_visible_v1
+ON storage.objects
+FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'chat-attachments'
+  AND public.message_attachment_storage_object_visible_v1(name, owner_id::text)
+);
+
+CREATE POLICY chat_attachments_select_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  bucket_id <> 'chat-attachments'
+  OR public.message_attachment_storage_object_visible_v1(name, owner_id::text)
+);
+
+CREATE POLICY chat_attachments_insert_owned_scope_v1
+ON storage.objects
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id = 'chat-attachments'
+  AND owner_id::text = auth.uid()::text
+  AND public.message_attachment_storage_insert_authorized_v1(name)
+);
+
+CREATE POLICY chat_attachments_insert_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id <> 'chat-attachments'
+  OR (
+    owner_id::text = auth.uid()::text
+    AND public.message_attachment_storage_insert_authorized_v1(name)
+  )
+);
+
+CREATE POLICY chat_attachments_update_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (bucket_id <> 'chat-attachments')
+WITH CHECK (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_delete_owner_v1
+ON storage.objects
+FOR DELETE
+TO authenticated
+USING (
+  bucket_id = 'chat-attachments'
+  AND owner_id::text = auth.uid()::text
+  AND public.message_attachment_storage_object_owned_v1(name, owner_id::text)
+);
+
+CREATE POLICY chat_attachments_delete_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  bucket_id <> 'chat-attachments'
+  OR (
+    owner_id::text = auth.uid()::text
+    AND public.message_attachment_storage_object_owned_v1(name, owner_id::text)
+  )
+);
+
+-- A hostile or legacy permissive policy declared TO PUBLIC also applies to
+-- anon. Operation-specific restrictive anon policies make the private bucket
+-- unreachable even in that environment; other buckets remain unaffected.
+CREATE POLICY chat_attachments_anon_select_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR SELECT
+TO anon
+USING (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_anon_insert_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR INSERT
+TO anon
+WITH CHECK (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_anon_update_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR UPDATE
+TO anon
+USING (bucket_id <> 'chat-attachments')
+WITH CHECK (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_anon_delete_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR DELETE
+TO anon
+USING (bucket_id <> 'chat-attachments');
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §40 readiness (catalog and policy convergence only; follow with an
+-- authenticated two-user private/shared/circle-thread and Storage test).
+SELECT
+  EXISTS (
+    SELECT 1
+    FROM storage.buckets AS bucket
+    WHERE bucket.id = 'chat-attachments'
+      AND bucket.name = 'chat-attachments'
+      AND bucket.public = false
+      AND bucket.file_size_limit = 52428800
+  ) AS attachment_bucket_private_ready,
+  to_regprocedure('public.message_attachment_link_target_is_valid_v1(uuid,uuid,uuid,uuid)') IS NOT NULL
+    AND to_regprocedure('public.guard_authenticated_message_attachment_update_v1()') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = 'public.message_attachments'::regclass
+        AND trigger_row.tgname = 'trg_guard_authenticated_message_attachment_update_v1'
+        AND trigger_row.tgenabled <> 'D'
+        AND NOT trigger_row.tgisinternal
+    ) AS attachment_link_integrity_compatible,
+  to_regprocedure('public.message_attachment_storage_path_matches_row_v1(text,uuid,uuid,uuid)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_object_matches_row_v1(text,uuid,uuid,uuid)') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_constraint AS constraint_row
+      WHERE constraint_row.conrelid = 'public.message_attachments'::regclass
+        AND constraint_row.conname = 'message_attachments_storage_path_matches_scope_v1'
+        AND constraint_row.convalidated
+    )
+    AND to_regclass('public.message_attachments_storage_path_unique_v1') IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.message_attachments AS attachment
+      WHERE NOT public.message_attachment_storage_path_matches_row_v1(
+        attachment.storage_path,
+        attachment.circle_id,
+        attachment.thread_id,
+        attachment.user_id
+      )
+        OR NOT EXISTS (
+          SELECT 1
+          FROM storage.objects AS object_row
+          WHERE object_row.bucket_id = 'chat-attachments'
+            AND object_row.name = attachment.storage_path
+            AND object_row.owner_id::text = attachment.user_id::text
+        )
+    ) AS attachment_storage_path_identity_ready,
+  to_regprocedure('public.message_attachment_row_visible_v1(uuid,uuid,uuid,uuid)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_insert_authorized_v1(text)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_object_visible_v1(text,text)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_object_owned_v1(text,text)') IS NOT NULL
+    AS attachment_visibility_helpers_ready,
+  (
+    SELECT count(*) = 12
+      AND count(*) FILTER (WHERE permissive = 'PERMISSIVE') = 4
+      AND count(*) FILTER (WHERE permissive = 'RESTRICTIVE') = 8
+      AND count(*) FILTER (WHERE roles = ARRAY['authenticated']::name[]) = 8
+      AND count(*) FILTER (WHERE roles = ARRAY['anon']::name[]) = 4
+      AND count(*) FILTER (WHERE cmd = 'SELECT' AND qual IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'INSERT' AND with_check IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'UPDATE' AND qual IS NOT NULL AND with_check IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'DELETE' AND qual IS NOT NULL) = 3
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND policyname IN (
+        'message_attachments_select_exact_visibility_v1',
+        'message_attachments_insert_owner_staged_v1',
+        'message_attachments_update_owner_exact_link_v1',
+        'message_attachments_delete_owner_visible_v1',
+        'message_attachments_select_exact_visibility_guard_v1',
+        'message_attachments_insert_owner_staged_guard_v1',
+        'message_attachments_update_owner_exact_link_guard_v1',
+        'message_attachments_delete_owner_visible_guard_v1',
+        'message_attachments_anon_select_deny_v1',
+        'message_attachments_anon_insert_deny_v1',
+        'message_attachments_anon_update_deny_v1',
+        'message_attachments_anon_delete_deny_v1'
+      )
+  ) AS attachment_table_policies_converged,
+  (
+    SELECT count(*) = 11
+      AND count(*) FILTER (WHERE permissive = 'PERMISSIVE') = 3
+      AND count(*) FILTER (WHERE permissive = 'RESTRICTIVE') = 8
+      AND count(*) FILTER (WHERE roles = ARRAY['authenticated']::name[]) = 7
+      AND count(*) FILTER (WHERE roles = ARRAY['anon']::name[]) = 4
+      AND count(*) FILTER (WHERE cmd = 'SELECT' AND qual IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'INSERT' AND with_check IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'UPDATE' AND qual IS NOT NULL AND with_check IS NOT NULL) = 2
+      AND count(*) FILTER (WHERE cmd = 'DELETE' AND qual IS NOT NULL) = 3
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'storage'
+      AND tablename = 'objects'
+      AND policyname IN (
+        'chat_attachments_select_visible_v1',
+        'chat_attachments_select_guard_v1',
+        'chat_attachments_insert_owned_scope_v1',
+        'chat_attachments_insert_guard_v1',
+        'chat_attachments_update_guard_v1',
+        'chat_attachments_delete_owner_v1',
+        'chat_attachments_delete_guard_v1',
+        'chat_attachments_anon_select_deny_v1',
+        'chat_attachments_anon_insert_deny_v1',
+        'chat_attachments_anon_update_deny_v1',
+        'chat_attachments_anon_delete_deny_v1'
+      )
+  ) AS attachment_storage_policies_converged,
+  has_table_privilege('authenticated', 'public.message_attachments', 'SELECT')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'INSERT')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'UPDATE')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'DELETE')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'SELECT')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'INSERT')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'UPDATE')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'DELETE')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'SELECT')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'INSERT')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'UPDATE')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'DELETE')
+    AS attachment_table_grants_ready;
+
+-- =============================================================================
+-- §41. Device-private run-approval privacy and authority (2026-08-13)
+-- Source: supabase/migrations/20260813180000_device_private_run_approval_authority.sql
+-- =============================================================================
+
+-- Device-private OpenSwan approval privacy and resolver authority.
+--
+-- SQL section 28 validates schema-v2 approval state transitions, but the
+-- historical circle-wide agent_run_approvals policy lets any current circle
+-- member read the payload and attempt those transitions. The
+-- desktop.open_attachment approval is device-private authority: only the user
+-- who requested the canonical row may read, resolve, or consume it. Restrictive
+-- SELECT and UPDATE policies compose with every permissive policy, including
+-- future FOR ALL drift, without replacing the existing approval state machine.
+-- PostgreSQL and service_role maintenance retain their normal RLS bypass.
+
+BEGIN;
+
+-- §41 deliberately extends the §28 schema-v2 state machine. Abort intact if
+-- the canonical transition function is absent instead of installing a privacy
+-- boundary around otherwise unguarded approval mutations.
+DO $device_private_approval_dependency_preflight$
+BEGIN
+  IF to_regprocedure('public.guard_tool_v2_run_approval()') IS NULL THEN
+    RAISE EXCEPTION 'device_private_run_approval_authority: apply SQL section 28 first'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$device_private_approval_dependency_preflight$;
+
+ALTER TABLE public.agent_run_approvals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS agent_run_approvals_device_private_select_guard_v1
+ON public.agent_run_approvals;
+
+CREATE POLICY agent_run_approvals_device_private_select_guard_v1
+ON public.agent_run_approvals
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  NOT COALESCE(
+    payload->>'approvalSchemaVersion' = '2'
+      AND payload->>'toolName' = 'desktop.open_attachment',
+    false
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+);
+
+DROP POLICY IF EXISTS agent_run_approvals_device_private_update_guard_v1
+ON public.agent_run_approvals;
+
+CREATE POLICY agent_run_approvals_device_private_update_guard_v1
+ON public.agent_run_approvals
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  NOT COALESCE(
+    payload->>'approvalSchemaVersion' = '2'
+      AND payload->>'toolName' = 'desktop.open_attachment',
+    false
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+)
+WITH CHECK (
+  NOT COALESCE(
+    payload->>'approvalSchemaVersion' = '2'
+      AND payload->>'toolName' = 'desktop.open_attachment',
+    false
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+);
+
+-- §28's SECURITY DEFINER transition function requires auth.uid(), including
+-- when invoked by maintenance roles. Recreate only its UPDATE trigger so the
+-- state machine remains mandatory for authenticated callers while actual
+-- trusted database roles retain maintenance authority. Request/JWT fields
+-- cannot manufacture current_user membership in these roles.
+DROP TRIGGER IF EXISTS trg_guard_tool_v2_run_approval_update
+ON public.agent_run_approvals;
+
+CREATE TRIGGER trg_guard_tool_v2_run_approval_update
+BEFORE UPDATE ON public.agent_run_approvals
+FOR EACH ROW
+WHEN (
+  current_user NOT IN ('postgres', 'supabase_admin', 'service_role')
+  AND (
+    (
+      OLD.payload->>'approvalSchemaVersion' = '2'
+      AND (
+        OLD.payload ? 'toolName'
+        OR OLD.payload ? 'toolApprovalDigest'
+      )
+    )
+    OR (
+      NEW.payload->>'approvalSchemaVersion' = '2'
+      AND (
+        NEW.payload ? 'toolName'
+        OR NEW.payload ? 'toolApprovalDigest'
+      )
+    )
+  )
+)
+EXECUTE FUNCTION public.guard_tool_v2_run_approval();
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §41 readiness (catalog convergence only; follow with an authenticated
+-- two-member privacy/approve/reject/consume test plus trusted-writer
+-- maintenance).
+SELECT
+  (
+    SELECT count(*) = 1
+      AND bool_and(permissive = 'RESTRICTIVE')
+      AND bool_and(cmd = 'SELECT')
+      AND bool_and(roles = ARRAY['authenticated']::name[])
+      AND bool_and(qual IS NOT NULL)
+      AND bool_and(with_check IS NULL)
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_approvals'
+      AND policyname = 'agent_run_approvals_device_private_select_guard_v1'
+  ) AS device_private_approval_select_guard_ready,
+  (
+    SELECT count(*) = 1
+      AND bool_and(permissive = 'RESTRICTIVE')
+      AND bool_and(cmd = 'UPDATE')
+      AND bool_and(roles = ARRAY['authenticated']::name[])
+      AND bool_and(qual IS NOT NULL)
+      AND bool_and(with_check IS NOT NULL)
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_approvals'
+      AND policyname = 'agent_run_approvals_device_private_update_guard_v1'
+  ) AS device_private_approval_update_guard_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = 'public.agent_run_approvals'::regclass
+      AND trigger_row.tgname = 'trg_guard_tool_v2_run_approval_update'
+      AND trigger_row.tgfoid = 'public.guard_tool_v2_run_approval()'::regprocedure
+      AND trigger_row.tgenabled <> 'D'
+      AND NOT trigger_row.tgisinternal
+  ) AS device_private_approval_state_machine_ready;
+
+-- BEGIN SECTION 42: Office OAuth credential control plane
+-- OAuth provider credential control plane for the Office Calendar and Email
+-- integrations.
+--
+-- A provider network request cannot participate in a PostgreSQL transaction.
+-- This migration therefore uses durable intent epochs, credential revisions,
+-- and bounded refresh claims so a stale callback/refresh cannot overwrite a
+-- disconnect, a newer authorization, or another worker's rotating token.
+-- Google/Microsoft OAuth secrets leave the generic user_api_keys surface and
+-- both access and refresh tokens are encrypted at rest.
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+CREATE TABLE IF NOT EXISTS public.oauth_provider_credentials (
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  provider text NOT NULL,
+  status text NOT NULL DEFAULT 'disconnected',
+  revision bigint NOT NULL DEFAULT 0,
+  intent_epoch bigint NOT NULL DEFAULT 0,
+  authorization_operation_id uuid,
+  authorization_scopes text[] NOT NULL DEFAULT ARRAY[]::text[],
+  access_token_enc bytea,
+  refresh_token_enc bytea,
+  expires_at timestamptz,
+  account_email text NOT NULL DEFAULT '',
+  provider_subject text,
+  granted_scopes text[] NOT NULL DEFAULT ARRAY[]::text[],
+  refresh_claim_id uuid,
+  refresh_claim_expires_at timestamptz,
+  last_operation_id uuid,
+  last_operation_kind text,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (user_id, provider),
+  CONSTRAINT oauth_provider_credentials_provider_check
+    CHECK (provider IN ('google', 'microsoft')),
+  CONSTRAINT oauth_provider_credentials_status_check
+    CHECK (status IN ('connected', 'disconnected')),
+  CONSTRAINT oauth_provider_credentials_revision_check
+    CHECK (revision >= 0 AND intent_epoch >= 0),
+  CONSTRAINT oauth_provider_credentials_scope_check
+    CHECK (
+      authorization_scopes <@ ARRAY['calendar', 'email']::text[]
+      AND granted_scopes <@ ARRAY['calendar', 'email']::text[]
+    ),
+  CONSTRAINT oauth_provider_credentials_secret_shape_check
+    CHECK (
+      (status = 'connected'
+        AND access_token_enc IS NOT NULL
+        AND refresh_token_enc IS NOT NULL
+        AND expires_at IS NOT NULL
+        AND cardinality(granted_scopes) > 0)
+      OR
+      (status = 'disconnected'
+        AND access_token_enc IS NULL
+        AND refresh_token_enc IS NULL
+        AND expires_at IS NULL
+        AND cardinality(granted_scopes) = 0)
+    ),
+  CONSTRAINT oauth_provider_credentials_refresh_claim_check
+    CHECK (
+      (refresh_claim_id IS NULL AND refresh_claim_expires_at IS NULL)
+      OR
+      (status = 'connected'
+        AND refresh_claim_id IS NOT NULL
+        AND refresh_claim_expires_at IS NOT NULL)
+    )
+);
+
+ALTER TABLE public.oauth_provider_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.oauth_provider_credentials FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.oauth_provider_credentials FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.oauth_provider_credentials TO service_role;
+
+COMMENT ON TABLE public.oauth_provider_credentials IS
+  'Service-only encrypted Google/Microsoft OAuth credentials with revision, intent, and refresh-lease fencing.';
+
+ALTER TABLE public.email_calendar_oauth_states
+  ADD COLUMN IF NOT EXISTS credential_revision bigint,
+  ADD COLUMN IF NOT EXISTS intent_epoch bigint,
+  ADD COLUMN IF NOT EXISTS operation_id uuid;
+
+CREATE OR REPLACE FUNCTION public.normalize_office_oauth_scopes_v1(p_scopes text)
+RETURNS text[]
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['calendar', 'email']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      regexp_split_to_array(lower(coalesce(p_scopes, '')), E'\\s*,\\s*')
+    )
+    ORDER BY allowed.ordinal
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.normalize_office_oauth_scopes_v1(text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.normalize_office_oauth_scopes_v1(text)
+  TO service_role;
+
+CREATE OR REPLACE FUNCTION public.reserve_office_oauth_authorization_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_requested_scopes text,
+  p_operation_id uuid
+)
+RETURNS TABLE(
+  intent_epoch bigint,
+  credential_revision bigint,
+  required_scopes text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_requested text[] := public.normalize_office_oauth_scopes_v1(p_requested_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_required text[];
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft')
+     OR p_operation_id IS NULL OR cardinality(v_requested) = 0 THEN
+    RAISE EXCEPTION 'invalid_oauth_authorization_reservation' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, v_provider)
+  ON CONFLICT (user_id, provider) DO NOTHING;
+
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF v_row.authorization_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT
+      v_row.intent_epoch,
+      v_row.revision,
+      array_to_string(v_row.authorization_scopes, ',');
+    RETURN;
+  END IF;
+
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['calendar', 'email']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      v_requested
+      || v_row.authorization_scopes
+      || CASE WHEN v_row.status = 'connected'
+        THEN v_row.granted_scopes
+        ELSE ARRAY[]::text[]
+      END
+    )
+    ORDER BY allowed.ordinal
+  ) INTO v_required;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = p_operation_id,
+      authorization_scopes = v_required,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING credential.intent_epoch, credential.revision
+    INTO intent_epoch, credential_revision;
+
+  required_scopes := array_to_string(v_required, ',');
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_office_oauth_authorization_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_account_email text,
+  p_provider_subject text,
+  p_granted_scopes text,
+  p_required_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_granted text[] := public.normalize_office_oauth_scopes_v1(p_granted_scopes);
+  v_required text[] := public.normalize_office_oauth_scopes_v1(p_required_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_refresh_token text;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft')
+     OR p_operation_id IS NULL OR p_expected_intent_epoch IS NULL
+     OR p_expected_revision IS NULL
+     OR nullif(trim(coalesce(p_access_token, '')), '') IS NULL
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp()
+     OR nullif(trim(coalesce(p_provider_subject, '')), '') IS NULL
+     OR cardinality(v_required) = 0 THEN
+    RAISE EXCEPTION 'invalid_oauth_authorization_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'authorization'
+     AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.authorization_operation_id IS DISTINCT FROM p_operation_id
+     OR v_row.authorization_scopes IS DISTINCT FROM v_required THEN
+    RAISE EXCEPTION 'oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_required <@ v_granted) THEN
+    RAISE EXCEPTION 'oauth_scope_union_not_granted' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  v_refresh_token := nullif(trim(coalesce(p_refresh_token, '')), '');
+  IF v_refresh_token IS NULL
+     AND v_row.status = 'connected'
+     AND v_row.provider_subject = trim(p_provider_subject)
+     AND v_row.refresh_token_enc IS NOT NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+  IF v_refresh_token IS NULL THEN
+    RAISE EXCEPTION 'oauth_refresh_token_required' USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'connected',
+      revision = credential.revision + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = extensions.pgp_sym_encrypt(trim(p_access_token), v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      account_email = left(trim(coalesce(p_account_email, '')), 320),
+      provider_subject = left(trim(p_provider_subject), 512),
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'authorization',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+    INTO applied, credential_revision, granted_scopes;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.claim_office_oauth_refresh_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_claim_id uuid,
+  p_lease_seconds integer DEFAULT 45
+)
+RETURNS TABLE(
+  outcome text,
+  access_token text,
+  refresh_token text,
+  expires_at timestamptz,
+  account_email text,
+  provider_subject text,
+  granted_scopes text,
+  credential_revision bigint,
+  intent_epoch bigint,
+  refresh_claim_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_passphrase text;
+  v_lease_seconds integer := greatest(15, least(coalesce(p_lease_seconds, 45), 120));
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft') OR p_claim_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_oauth_refresh_claim' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF NOT FOUND OR v_row.status <> 'connected' THEN
+    RETURN QUERY SELECT 'missing'::text, NULL::text, NULL::text, NULL::timestamptz,
+      ''::text, NULL::text, ''::text, NULL::bigint, NULL::bigint, NULL::uuid;
+    RETURN;
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  IF v_row.access_token_enc IS NOT NULL
+     AND v_row.expires_at > clock_timestamp() + interval '5 minutes' THEN
+    RETURN QUERY SELECT
+      'fresh'::text,
+      extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+      NULL::text,
+      v_row.expires_at,
+      v_row.account_email,
+      v_row.provider_subject,
+      array_to_string(v_row.granted_scopes, ','),
+      v_row.revision,
+      v_row.intent_epoch,
+      NULL::uuid;
+    RETURN;
+  END IF;
+
+  IF v_row.refresh_claim_id IS NOT NULL
+     AND v_row.refresh_claim_id <> p_claim_id
+     AND v_row.refresh_claim_expires_at > clock_timestamp() THEN
+    RETURN QUERY SELECT 'busy'::text, NULL::text, NULL::text, v_row.expires_at,
+      v_row.account_email, v_row.provider_subject, array_to_string(v_row.granted_scopes, ','),
+      v_row.revision, v_row.intent_epoch, v_row.refresh_claim_id;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = p_claim_id,
+      refresh_claim_expires_at = clock_timestamp() + make_interval(secs => v_lease_seconds),
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider;
+
+  RETURN QUERY SELECT
+    'claimed'::text,
+    extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+    extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text,
+    v_row.expires_at,
+    v_row.account_email,
+    v_row.provider_subject,
+    array_to_string(v_row.granted_scopes, ','),
+    v_row.revision,
+    v_row.intent_epoch,
+    p_claim_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_office_oauth_refresh_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_provider_subject text,
+  p_granted_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_granted text[] := public.normalize_office_oauth_scopes_v1(p_granted_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_refresh_token text;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft')
+     OR p_claim_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_revision IS NULL
+     OR nullif(trim(coalesce(p_access_token, '')), '') IS NULL
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'invalid_oauth_refresh_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'refresh' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.status <> 'connected'
+     OR v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.refresh_claim_id IS DISTINCT FROM p_claim_id
+     OR v_row.refresh_claim_expires_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_row.granted_scopes <@ v_granted) THEN
+    RAISE EXCEPTION 'oauth_scope_narrowed' USING ERRCODE = '22023';
+  END IF;
+  IF v_row.provider_subject IS NOT NULL
+     AND v_row.provider_subject IS DISTINCT FROM nullif(trim(coalesce(p_provider_subject, '')), '') THEN
+    RAISE EXCEPTION 'oauth_account_mismatch' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  v_refresh_token := nullif(trim(coalesce(p_refresh_token, '')), '');
+  IF v_refresh_token IS NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET revision = credential.revision + 1,
+      access_token_enc = extensions.pgp_sym_encrypt(trim(p_access_token), v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      provider_subject = coalesce(credential.provider_subject, nullif(trim(coalesce(p_provider_subject, '')), '')),
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'refresh',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+    INTO applied, credential_revision, granted_scopes;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.release_office_oauth_refresh_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_released boolean := false;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id
+    AND credential.provider = v_provider
+    AND credential.status = 'connected'
+    AND credential.intent_epoch = p_expected_intent_epoch
+    AND credential.revision = p_expected_revision
+    AND credential.refresh_claim_id = p_claim_id;
+  v_released := FOUND;
+  RETURN v_released;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.disconnect_office_oauth_provider_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_operation_id uuid
+)
+RETURNS TABLE(disconnected boolean, credential_revision bigint, intent_epoch bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft') OR p_operation_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_oauth_disconnect' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, v_provider)
+  ON CONFLICT (user_id, provider) DO NOTHING;
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF v_row.last_operation_kind = 'disconnect' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'disconnected',
+      revision = credential.revision + 1,
+      intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = NULL,
+      refresh_token_enc = NULL,
+      expires_at = NULL,
+      account_email = '',
+      provider_subject = NULL,
+      granted_scopes = ARRAY[]::text[],
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'disconnect',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING true, credential.revision, credential.intent_epoch
+    INTO disconnected, credential_revision, intent_epoch;
+
+  DELETE FROM public.user_api_keys AS legacy
+  WHERE legacy.user_id = p_user_id
+    AND lower(legacy.provider) = v_provider
+    AND lower(coalesce(legacy.label, 'default')) = 'oauth';
+  RETURN NEXT;
+END;
+$function$;
+
+-- Preserve valid legacy Google/Microsoft OAuth rows, then remove their
+-- plaintext refresh-token metadata from the generic credential table. Legacy
+-- rows have no stable provider subject, so a later callback may not reuse their
+-- refresh token unless the provider issues a fresh one.
+DO $legacy_migration$
+DECLARE
+  v_row record;
+  v_meta jsonb;
+  v_access_token text;
+  v_refresh_token text;
+  v_expires_at timestamptz;
+  v_scopes text[];
+  v_passphrase text := public.app_encryption_key();
+BEGIN
+  FOR v_row IN
+    SELECT key_row.*
+    FROM public.user_api_keys AS key_row
+    WHERE lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    FOR UPDATE
+  LOOP
+    BEGIN
+      v_meta := coalesce(v_row.endpoint::jsonb, '{}'::jsonb);
+    EXCEPTION WHEN others THEN
+      v_meta := '{}'::jsonb;
+    END;
+    BEGIN
+      v_access_token := extensions.pgp_sym_decrypt(v_row.api_key_enc, v_passphrase)::text;
+    EXCEPTION WHEN others THEN
+      v_access_token := NULL;
+    END;
+    v_refresh_token := nullif(trim(coalesce(v_meta->>'refresh_token', '')), '');
+    BEGIN
+      v_expires_at := (v_meta->>'expires_at')::timestamptz;
+    EXCEPTION WHEN others THEN
+      v_expires_at := NULL;
+    END;
+    v_scopes := public.normalize_office_oauth_scopes_v1(v_meta->>'scopes');
+
+    IF nullif(trim(coalesce(v_access_token, '')), '') IS NOT NULL
+       AND v_refresh_token IS NOT NULL
+       AND v_expires_at IS NOT NULL
+       AND cardinality(v_scopes) > 0 THEN
+      INSERT INTO public.oauth_provider_credentials(
+        user_id, provider, status, access_token_enc, refresh_token_enc,
+        expires_at, account_email, granted_scopes
+      ) VALUES (
+        v_row.user_id,
+        lower(v_row.provider),
+        'connected',
+        extensions.pgp_sym_encrypt(trim(v_access_token), v_passphrase),
+        extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+        v_expires_at,
+        left(trim(coalesce(v_meta->>'email', '')), 320),
+        v_scopes
+      ) ON CONFLICT (user_id, provider) DO NOTHING;
+    ELSE
+      INSERT INTO public.oauth_provider_credentials(user_id, provider)
+      VALUES (v_row.user_id, lower(v_row.provider))
+      ON CONFLICT (user_id, provider) DO NOTHING;
+    END IF;
+  END LOOP;
+
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE lower(key_row.provider) IN ('google', 'microsoft')
+    AND lower(coalesce(key_row.label, 'default')) = 'oauth';
+END;
+$legacy_migration$;
+
+-- Canonical RLS keeps ordinary BYOK rows owner-managed while reserving the
+-- Google/Microsoft OAuth namespace for the service-only control plane.
+DO $policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public' AND tablename = 'user_api_keys'
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.user_api_keys', policy_row.policyname);
+  END LOOP;
+END;
+$policies$;
+
+CREATE POLICY user_api_keys_select_own_non_oauth
+  ON public.user_api_keys FOR SELECT TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_insert_own_non_oauth
+  ON public.user_api_keys FOR INSERT TO authenticated
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_update_own_non_oauth
+  ON public.user_api_keys FOR UPDATE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  )
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_delete_own_non_oauth
+  ON public.user_api_keys FOR DELETE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key(
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_user_id uuid := auth.uid();
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF v_user_id IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  IF v_provider IN ('google', 'microsoft') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (v_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key_for_user(
+  p_user_id uuid,
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF v_provider IN ('google', 'microsoft') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (p_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_user_api_key(
+  p_user_id uuid,
+  p_provider text,
+  p_label text DEFAULT 'default'
+)
+RETURNS TABLE(api_key text, endpoint text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role'
+     AND (auth.uid() IS NULL OR auth.uid() <> p_user_id) THEN
+    RAISE EXCEPTION 'not_authorized' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  RETURN QUERY
+  SELECT extensions.pgp_sym_decrypt(key_row.api_key_enc, v_passphrase)::text,
+         key_row.endpoint
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = p_user_id
+    AND key_row.provider = lower(trim(p_provider))
+    AND (p_label IS NULL OR key_row.label = p_label)
+    AND key_row.is_active = true
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.updated_at DESC
+  LIMIT 1;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.delete_user_api_key(p_key_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE key_row.id = p_key_id
+    AND key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.list_user_api_keys()
+RETURNS TABLE(
+  id uuid,
+  provider text,
+  label text,
+  endpoint text,
+  is_active boolean,
+  created_at timestamptz,
+  updated_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  RETURN QUERY
+  SELECT key_row.id, key_row.provider, key_row.label, key_row.endpoint,
+         key_row.is_active, key_row.created_at, key_row.updated_at
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.provider, key_row.label;
+END;
+$function$;
+
+DROP FUNCTION IF EXISTS public.store_oauth_credential_for_user(
+  uuid, text, text, text, timestamptz, text, text, text
+);
+
+REVOKE ALL ON FUNCTION public.store_user_api_key(text, text, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_user_api_key(uuid, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.delete_user_api_key(uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.list_user_api_keys() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key(text, text, text, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_api_key(uuid, text, text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_user_api_key(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.list_user_api_keys() TO authenticated;
+
+REVOKE ALL ON FUNCTION public.reserve_office_oauth_authorization_v1(uuid, text, text, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_office_oauth_authorization_v1(uuid, text, bigint, bigint, uuid, text, text, timestamptz, text, text, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.claim_office_oauth_refresh_v1(uuid, text, uuid, integer)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.release_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.disconnect_office_oauth_provider_v1(uuid, text, uuid)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reserve_office_oauth_authorization_v1(uuid, text, text, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_office_oauth_authorization_v1(uuid, text, bigint, bigint, uuid, text, text, timestamptz, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_office_oauth_refresh_v1(uuid, text, uuid, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.disconnect_office_oauth_provider_v1(uuid, text, uuid) TO service_role;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 42: Office OAuth credential control plane
+
+-- =============================================================================
+-- SECTION 43: Figma OAuth credential and callback control plane
+-- Source: supabase/migrations/20260813200000_figma_oauth_credential_control.sql
+-- Apply only after section 42; deploy the matching figma-oauth function after
+-- this transaction succeeds.
+-- =============================================================================
+-- Figma OAuth credential and callback control plane.
+--
+-- OAuth provider calls cannot share a PostgreSQL transaction with local state.
+-- Durable intent epochs, credential revisions, and bounded refresh leases fence
+-- stale callbacks, concurrent token rotation, and disconnect races. The Figma
+-- callback state is consumed atomically before the provider token exchange.
+-- Access tokens, refresh tokens, and PKCE verifiers are encrypted at rest and
+-- are available only to service-role RPCs.
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+-- Extend the canonical provider table without creating another secret store.
+ALTER TABLE public.oauth_provider_credentials
+  DROP CONSTRAINT IF EXISTS oauth_provider_credentials_provider_check,
+  DROP CONSTRAINT IF EXISTS oauth_provider_credentials_scope_check;
+
+ALTER TABLE public.oauth_provider_credentials
+  ADD CONSTRAINT oauth_provider_credentials_provider_check
+    CHECK (provider IN ('google', 'microsoft', 'figma')),
+  ADD CONSTRAINT oauth_provider_credentials_scope_check
+    CHECK (
+      (
+        provider IN ('google', 'microsoft')
+        AND authorization_scopes <@ ARRAY['calendar', 'email']::text[]
+        AND granted_scopes <@ ARRAY['calendar', 'email']::text[]
+      )
+      OR
+      (
+        provider = 'figma'
+        AND authorization_scopes <@ ARRAY['file_content:read']::text[]
+        AND granted_scopes <@ ARRAY['file_content:read']::text[]
+      )
+    );
+
+ALTER TABLE public.oauth_provider_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.oauth_provider_credentials FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.oauth_provider_credentials FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.oauth_provider_credentials TO service_role;
+
+COMMENT ON TABLE public.oauth_provider_credentials IS
+  'Service-only encrypted OAuth credentials with revision, intent, and refresh-lease fencing.';
+
+-- Upgrade the legacy nonce table in place. Rows from the old shape cannot be
+-- proved to carry PKCE or a credential fence, so only those rows are retired.
+ALTER TABLE public.figma_oauth_states
+  ADD COLUMN IF NOT EXISTS code_verifier_enc bytea,
+  ADD COLUMN IF NOT EXISTS client_nonce text,
+  ADD COLUMN IF NOT EXISTS operation_id uuid,
+  ADD COLUMN IF NOT EXISTS intent_epoch bigint,
+  ADD COLUMN IF NOT EXISTS credential_revision bigint,
+  ADD COLUMN IF NOT EXISTS requested_scopes text[],
+  ADD COLUMN IF NOT EXISTS claimed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS claim_expires_at timestamptz;
+
+DELETE FROM public.figma_oauth_states
+WHERE code_verifier_enc IS NULL
+   OR client_nonce IS NULL
+   OR client_nonce !~ '^[a-f0-9]{48}$'
+   OR operation_id IS NULL
+   OR intent_epoch IS NULL
+   OR credential_revision IS NULL
+   OR requested_scopes IS NULL;
+
+UPDATE public.figma_oauth_states
+SET claim_expires_at = claimed_at + interval '1 minute'
+WHERE claimed_at IS NOT NULL AND claim_expires_at IS NULL;
+UPDATE public.figma_oauth_states
+SET claim_expires_at = NULL
+WHERE claimed_at IS NULL AND claim_expires_at IS NOT NULL;
+
+ALTER TABLE public.figma_oauth_states
+  ALTER COLUMN code_verifier_enc SET NOT NULL,
+  ALTER COLUMN client_nonce SET NOT NULL,
+  ALTER COLUMN operation_id SET NOT NULL,
+  ALTER COLUMN intent_epoch SET NOT NULL,
+  ALTER COLUMN credential_revision SET NOT NULL,
+  ALTER COLUMN requested_scopes SET NOT NULL;
+
+ALTER TABLE public.figma_oauth_states
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_fence_check,
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_client_nonce_check,
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_scope_check,
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_claim_lease_check;
+
+ALTER TABLE public.figma_oauth_states
+  ADD CONSTRAINT figma_oauth_states_fence_check
+    CHECK (intent_epoch >= 0 AND credential_revision >= 0),
+  ADD CONSTRAINT figma_oauth_states_client_nonce_check
+    CHECK (client_nonce ~ '^[a-f0-9]{48}$'),
+  ADD CONSTRAINT figma_oauth_states_scope_check
+    CHECK (
+      cardinality(requested_scopes) > 0
+      AND requested_scopes <@ ARRAY['file_content:read']::text[]
+    ),
+  ADD CONSTRAINT figma_oauth_states_claim_lease_check
+    CHECK (
+      (claimed_at IS NULL AND claim_expires_at IS NULL)
+      OR
+      (claimed_at IS NOT NULL
+        AND claim_expires_at > claimed_at
+        AND claim_expires_at <= claimed_at + interval '2 minutes')
+    );
+
+ALTER TABLE public.figma_oauth_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.figma_oauth_states FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.figma_oauth_states FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.figma_oauth_states TO service_role;
+
+COMMENT ON TABLE public.figma_oauth_states IS
+  'Service-only, encrypted-PKCE, single-use Figma OAuth callback states.';
+
+CREATE OR REPLACE FUNCTION public.normalize_figma_oauth_scopes_v1(p_scopes text)
+RETURNS text[]
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['file_content:read']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      regexp_split_to_array(lower(trim(coalesce(p_scopes, ''))), E'[\\s,]+')
+    )
+    ORDER BY allowed.ordinal
+  );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.cleanup_figma_oauth_states_v1(
+  p_limit integer DEFAULT 500
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_deleted integer := 0;
+  v_limit integer := greatest(1, least(coalesce(p_limit, 500), 5000));
+  v_candidate record;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  FOR v_candidate IN
+    SELECT
+      state_row.id,
+      state_row.user_id,
+      state_row.operation_id,
+      state_row.intent_epoch,
+      state_row.credential_revision
+    FROM public.figma_oauth_states AS state_row
+    WHERE (state_row.claimed_at IS NULL AND state_row.expires_at <= clock_timestamp())
+       OR (state_row.claimed_at IS NOT NULL AND state_row.claim_expires_at <= clock_timestamp())
+    ORDER BY coalesce(state_row.claim_expires_at, state_row.expires_at), state_row.id
+    LIMIT v_limit
+  LOOP
+    -- Match reserve/claim/disconnect lock order: advisory user lock, credential
+    -- row, then state row. The unlocked candidate is only a hint and grants no
+    -- deletion or credential authority.
+    PERFORM pg_advisory_xact_lock(hashtextextended(v_candidate.user_id::text || ':figma:oauth', 0));
+    PERFORM 1
+    FROM public.oauth_provider_credentials AS credential
+    WHERE credential.user_id = v_candidate.user_id AND credential.provider = 'figma'
+    FOR UPDATE;
+
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.id = v_candidate.id
+      AND state_row.user_id = v_candidate.user_id
+      AND state_row.operation_id = v_candidate.operation_id
+      AND state_row.intent_epoch = v_candidate.intent_epoch
+      AND state_row.credential_revision = v_candidate.credential_revision
+      AND (
+        (state_row.claimed_at IS NULL AND state_row.expires_at <= clock_timestamp())
+        OR (state_row.claimed_at IS NOT NULL AND state_row.claim_expires_at <= clock_timestamp())
+      );
+    IF NOT FOUND THEN CONTINUE; END IF;
+    v_deleted := v_deleted + 1;
+
+    -- Retire only the exact abandoned pending authorization. Keep any existing
+    -- connected credential and its revision intact so ordinary refresh can
+    -- resume; a newer/superseding authorization cannot match these fences.
+    UPDATE public.oauth_provider_credentials AS credential
+    SET authorization_operation_id = NULL,
+        authorization_scopes = ARRAY[]::text[],
+        updated_at = clock_timestamp()
+    WHERE credential.user_id = v_candidate.user_id
+      AND credential.provider = 'figma'
+      AND credential.authorization_operation_id = v_candidate.operation_id
+      AND credential.intent_epoch = v_candidate.intent_epoch
+      AND credential.revision = v_candidate.credential_revision;
+  END LOOP;
+  RETURN v_deleted;
+END;
+$function$;
+
+-- Remove the unpublished pre-full-state signatures if this transaction is
+-- reapplied over an earlier reviewed draft. Leaving either overload callable
+-- would allow a service caller to reserve or consume only the server half.
+DROP FUNCTION IF EXISTS public.reserve_figma_oauth_authorization_v1(
+  uuid, text, text, text, uuid, timestamptz
+);
+DROP FUNCTION IF EXISTS public.reserve_figma_oauth_authorization_v1(
+  uuid, text, text, text, text, uuid, timestamptz
+);
+DROP FUNCTION IF EXISTS public.claim_figma_oauth_state_v1(text);
+DROP FUNCTION IF EXISTS public.claim_figma_oauth_state_v1(text, text);
+
+CREATE OR REPLACE FUNCTION public.reserve_figma_oauth_authorization_v1(
+  p_user_id uuid,
+  p_state text,
+  p_client_nonce text,
+  p_code_verifier text,
+  p_requested_scopes text,
+  p_operation_id uuid,
+  p_expires_at timestamptz
+)
+RETURNS TABLE(
+  state_id uuid,
+  intent_epoch bigint,
+  credential_revision bigint,
+  required_scopes text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_state text := trim(coalesce(p_state, ''));
+  v_client_nonce text := coalesce(p_client_nonce, '');
+  v_verifier text := trim(coalesce(p_code_verifier, ''));
+  v_requested text[] := public.normalize_figma_oauth_scopes_v1(p_requested_scopes);
+  v_required text[];
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_state_row public.figma_oauth_states%ROWTYPE;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL
+     OR v_state !~ '^[a-f0-9]{48}$'
+     OR v_client_nonce !~ '^[a-f0-9]{48}$'
+     OR v_verifier !~ '^[A-Za-z0-9._~-]{43,128}$'
+     OR cardinality(v_requested) = 0
+     OR p_expires_at IS NULL
+     OR p_expires_at <= clock_timestamp()
+     OR p_expires_at > clock_timestamp() + interval '15 minutes' THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_authorization_reservation' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, 'figma')
+  ON CONFLICT (user_id, provider) DO NOTHING;
+
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+
+  IF v_row.authorization_operation_id = p_operation_id THEN
+    SELECT * INTO v_state_row
+    FROM public.figma_oauth_states AS state_row
+    WHERE state_row.user_id = p_user_id
+      AND state_row.state = v_state
+      AND state_row.client_nonce = v_client_nonce
+      AND state_row.operation_id = p_operation_id;
+    IF FOUND THEN
+      RETURN QUERY SELECT
+        v_state_row.id,
+        v_state_row.intent_epoch,
+        v_state_row.credential_revision,
+        array_to_string(v_state_row.requested_scopes, ',');
+      RETURN;
+    END IF;
+    RAISE EXCEPTION 'figma_oauth_authorization_operation_reused' USING ERRCODE = '22023';
+  END IF;
+
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['file_content:read']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      v_requested
+      || v_row.authorization_scopes
+      || CASE WHEN v_row.status = 'connected'
+        THEN v_row.granted_scopes
+        ELSE ARRAY[]::text[]
+      END
+    )
+    ORDER BY allowed.ordinal
+  ) INTO v_required;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = p_operation_id,
+      authorization_scopes = v_required,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING credential.intent_epoch, credential.revision
+  INTO intent_epoch, credential_revision;
+
+  -- A user has one live Figma authorization intent. Superseded callback states
+  -- are removed in the same transaction as the intent-epoch advance.
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id;
+
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.figma_oauth_states(
+    state, client_nonce, user_id, expires_at, code_verifier_enc, operation_id,
+    intent_epoch, credential_revision, requested_scopes
+  ) VALUES (
+    v_state, v_client_nonce, p_user_id, p_expires_at,
+    extensions.pgp_sym_encrypt(v_verifier, v_passphrase),
+    p_operation_id, intent_epoch, credential_revision, v_required
+  )
+  RETURNING id INTO state_id;
+
+  required_scopes := array_to_string(v_required, ',');
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.claim_figma_oauth_state_v1(
+  p_state text,
+  p_client_nonce text
+)
+RETURNS TABLE(
+  user_id uuid,
+  client_nonce text,
+  code_verifier text,
+  intent_epoch bigint,
+  credential_revision bigint,
+  operation_id uuid,
+  required_scopes text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_state text := trim(coalesce(p_state, ''));
+  v_client_nonce text := coalesce(p_client_nonce, '');
+  v_user_id uuid;
+  v_state_row public.figma_oauth_states%ROWTYPE;
+  v_credential public.oauth_provider_credentials%ROWTYPE;
+  v_credential_found boolean := false;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF v_state !~ '^[a-f0-9]{48}$'
+     OR v_client_nonce !~ '^[a-f0-9]{48}$' THEN
+    RETURN;
+  END IF;
+
+  -- Read only the lock key first, then follow the canonical lock order used by
+  -- reserve/disconnect: advisory lock -> credential row -> state row. The
+  -- state is re-read under lock, so this unlocked hint grants no authority.
+  SELECT state_row.user_id INTO v_user_id
+  FROM public.figma_oauth_states AS state_row
+  WHERE state_row.state = v_state
+    AND state_row.client_nonce = v_client_nonce;
+  IF NOT FOUND THEN RETURN; END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(v_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_credential
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = v_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  v_credential_found := FOUND;
+  SELECT * INTO v_state_row
+  FROM public.figma_oauth_states AS state_row
+  WHERE state_row.state = v_state
+    AND state_row.client_nonce = v_client_nonce
+    AND state_row.user_id = v_user_id
+  FOR UPDATE;
+  IF NOT FOUND THEN RETURN; END IF;
+  IF v_state_row.claimed_at IS NOT NULL THEN RETURN; END IF;
+  IF v_state_row.expires_at <= clock_timestamp() THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.id = v_state_row.id;
+    RETURN;
+  END IF;
+  IF NOT v_credential_found
+     OR v_credential.intent_epoch <> v_state_row.intent_epoch
+     OR v_credential.revision <> v_state_row.credential_revision
+     OR v_credential.authorization_operation_id IS DISTINCT FROM v_state_row.operation_id
+     OR v_credential.authorization_scopes IS DISTINCT FROM v_state_row.requested_scopes THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.id = v_state_row.id;
+    RETURN;
+  END IF;
+
+  -- Claim before returning the PKCE verifier: one callback can cross the
+  -- provider boundary at most once, including under concurrent requests. Keep
+  -- the claimed row until commit or expiry so refresh/status can distinguish a
+  -- legitimate in-flight exchange from an abandoned authorization.
+  UPDATE public.figma_oauth_states AS state_row
+  SET claimed_at = clock_timestamp(),
+      claim_expires_at = clock_timestamp() + interval '1 minute'
+  WHERE state_row.id = v_state_row.id
+    AND state_row.claimed_at IS NULL;
+  IF NOT FOUND THEN RETURN; END IF;
+  v_passphrase := public.app_encryption_key();
+  RETURN QUERY SELECT
+    v_state_row.user_id,
+    v_state_row.client_nonce,
+    extensions.pgp_sym_decrypt(v_state_row.code_verifier_enc, v_passphrase)::text,
+    v_state_row.intent_epoch,
+    v_state_row.credential_revision,
+    v_state_row.operation_id,
+    array_to_string(v_state_row.requested_scopes, ',');
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_figma_oauth_authorization_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_provider_subject text,
+  p_granted_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_granted text[] := public.normalize_figma_oauth_scopes_v1(p_granted_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_access_token text := nullif(trim(coalesce(p_access_token, '')), '');
+  v_refresh_token text := nullif(trim(coalesce(p_refresh_token, '')), '');
+  v_subject text := nullif(trim(coalesce(p_provider_subject, '')), '');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_revision IS NULL
+     OR v_access_token IS NULL OR length(v_access_token) > 16384
+     OR (v_refresh_token IS NOT NULL AND length(v_refresh_token) > 16384)
+     OR v_subject IS NULL OR length(v_subject) > 512
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp()
+     OR cardinality(v_granted) = 0 THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_authorization_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'figma_oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'authorization'
+     AND v_row.last_operation_id = p_operation_id THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.user_id = p_user_id
+      AND state_row.operation_id = p_operation_id
+      AND state_row.intent_epoch = p_expected_intent_epoch
+      AND state_row.credential_revision = p_expected_revision
+      AND state_row.claimed_at IS NOT NULL;
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.authorization_operation_id IS DISTINCT FROM p_operation_id THEN
+    RAISE EXCEPTION 'figma_oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_row.authorization_scopes <@ v_granted) THEN
+    RAISE EXCEPTION 'figma_oauth_scope_union_not_granted' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  IF v_refresh_token IS NULL
+     AND v_row.status = 'connected'
+     AND v_row.provider_subject = v_subject
+     AND v_row.refresh_token_enc IS NOT NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+  IF v_refresh_token IS NULL THEN
+    RAISE EXCEPTION 'figma_oauth_refresh_token_required' USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'connected',
+      revision = credential.revision + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = extensions.pgp_sym_encrypt(v_access_token, v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      account_email = '',
+      provider_subject = v_subject,
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'authorization',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+  INTO applied, credential_revision, granted_scopes;
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id
+    AND state_row.operation_id = p_operation_id
+    AND state_row.intent_epoch = p_expected_intent_epoch
+    AND state_row.credential_revision = p_expected_revision
+    AND state_row.claimed_at IS NOT NULL;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.claim_figma_oauth_refresh_v1(
+  p_user_id uuid,
+  p_claim_id uuid,
+  p_lease_seconds integer DEFAULT 45
+)
+RETURNS TABLE(
+  outcome text,
+  access_token text,
+  refresh_token text,
+  expires_at timestamptz,
+  provider_subject text,
+  granted_scopes text,
+  credential_revision bigint,
+  intent_epoch bigint,
+  refresh_claim_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_passphrase text;
+  v_lease_seconds integer := greatest(15, least(coalesce(p_lease_seconds, 45), 120));
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_claim_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_refresh_claim' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND OR v_row.status <> 'connected' THEN
+    RETURN QUERY SELECT 'missing'::text, NULL::text, NULL::text, NULL::timestamptz,
+      NULL::text, ''::text, NULL::bigint, NULL::bigint, NULL::uuid;
+    RETURN;
+  END IF;
+
+  -- Self-heal an abandoned authorization while already holding the canonical
+  -- per-user lock. Refresh/status/file callers must not depend on a future
+  -- authorize request or scheduled cleanup to retire a missing/expired state.
+  IF v_row.authorization_operation_id IS NOT NULL
+     AND (
+       NOT EXISTS (
+         SELECT 1
+         FROM public.figma_oauth_states AS state_row
+         WHERE state_row.user_id = p_user_id
+           AND state_row.operation_id = v_row.authorization_operation_id
+           AND state_row.intent_epoch = v_row.intent_epoch
+           AND state_row.credential_revision = v_row.revision
+       )
+       OR EXISTS (
+         SELECT 1
+         FROM public.figma_oauth_states AS state_row
+         WHERE state_row.user_id = p_user_id
+           AND state_row.operation_id = v_row.authorization_operation_id
+           AND state_row.intent_epoch = v_row.intent_epoch
+           AND state_row.credential_revision = v_row.revision
+           AND (
+             (state_row.claimed_at IS NULL AND state_row.expires_at <= clock_timestamp())
+             OR (state_row.claimed_at IS NOT NULL AND state_row.claim_expires_at <= clock_timestamp())
+           )
+       )
+     ) THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.user_id = p_user_id
+      AND state_row.operation_id = v_row.authorization_operation_id
+      AND state_row.intent_epoch = v_row.intent_epoch
+      AND state_row.credential_revision = v_row.revision;
+    UPDATE public.oauth_provider_credentials AS credential
+    SET authorization_operation_id = NULL,
+        authorization_scopes = ARRAY[]::text[],
+        updated_at = clock_timestamp()
+    WHERE credential.user_id = p_user_id AND credential.provider = 'figma';
+    v_row.authorization_operation_id := NULL;
+    v_row.authorization_scopes := ARRAY[]::text[];
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  -- Never rotate the credential revision beneath an already-open
+  -- authorization callback. A still-valid old access token may be observed,
+  -- but an expired token reports bounded contention until that authorization
+  -- commits, is superseded, or expires and is cleaned up.
+  IF v_row.authorization_operation_id IS NOT NULL THEN
+    IF v_row.expires_at > clock_timestamp()
+       AND v_row.access_token_enc IS NOT NULL THEN
+      RETURN QUERY SELECT
+        'fresh'::text,
+        extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+        NULL::text,
+        v_row.expires_at,
+        v_row.provider_subject,
+        array_to_string(v_row.granted_scopes, ','),
+        v_row.revision,
+        v_row.intent_epoch,
+        NULL::uuid;
+    ELSE
+      RETURN QUERY SELECT
+        'busy'::text, NULL::text, NULL::text, v_row.expires_at,
+        v_row.provider_subject, array_to_string(v_row.granted_scopes, ','),
+        v_row.revision, v_row.intent_epoch, NULL::uuid;
+    END IF;
+    RETURN;
+  END IF;
+
+  IF v_row.expires_at > clock_timestamp() + interval '5 minutes' THEN
+    RETURN QUERY SELECT
+      'fresh'::text,
+      extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+      NULL::text,
+      v_row.expires_at,
+      v_row.provider_subject,
+      array_to_string(v_row.granted_scopes, ','),
+      v_row.revision,
+      v_row.intent_epoch,
+      NULL::uuid;
+    RETURN;
+  END IF;
+
+  IF v_row.refresh_claim_id IS NOT NULL
+     AND v_row.refresh_claim_id <> p_claim_id
+     AND v_row.refresh_claim_expires_at > clock_timestamp() THEN
+    RETURN QUERY SELECT
+      'busy'::text, NULL::text, NULL::text, v_row.expires_at,
+      v_row.provider_subject, array_to_string(v_row.granted_scopes, ','),
+      v_row.revision, v_row.intent_epoch, v_row.refresh_claim_id;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = p_claim_id,
+      refresh_claim_expires_at = clock_timestamp() + make_interval(secs => v_lease_seconds),
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma';
+
+  RETURN QUERY SELECT
+    'claimed'::text,
+    extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+    extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text,
+    v_row.expires_at,
+    v_row.provider_subject,
+    array_to_string(v_row.granted_scopes, ','),
+    v_row.revision,
+    v_row.intent_epoch,
+    p_claim_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_figma_oauth_refresh_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_provider_subject text,
+  p_granted_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_granted text[] := public.normalize_figma_oauth_scopes_v1(p_granted_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_access_token text := nullif(trim(coalesce(p_access_token, '')), '');
+  v_refresh_token text := nullif(trim(coalesce(p_refresh_token, '')), '');
+  v_subject text := nullif(trim(coalesce(p_provider_subject, '')), '');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_claim_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_revision IS NULL
+     OR v_access_token IS NULL OR length(v_access_token) > 16384
+     OR (v_refresh_token IS NOT NULL AND length(v_refresh_token) > 16384)
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp()
+     OR cardinality(v_granted) = 0 THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_refresh_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'figma_oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'refresh' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.status <> 'connected'
+     OR v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.refresh_claim_id IS DISTINCT FROM p_claim_id
+     OR v_row.refresh_claim_expires_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'figma_oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_row.granted_scopes <@ v_granted) THEN
+    RAISE EXCEPTION 'figma_oauth_scope_narrowed' USING ERRCODE = '22023';
+  END IF;
+  IF v_subject IS NOT NULL
+     AND v_row.provider_subject IS NOT NULL
+     AND v_row.provider_subject IS DISTINCT FROM v_subject THEN
+    RAISE EXCEPTION 'figma_oauth_account_mismatch' USING ERRCODE = '22023';
+  END IF;
+  IF v_subject IS NULL AND v_row.provider_subject IS NULL THEN
+    RAISE EXCEPTION 'figma_oauth_provider_subject_required' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  IF v_refresh_token IS NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET revision = credential.revision + 1,
+      access_token_enc = extensions.pgp_sym_encrypt(v_access_token, v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      provider_subject = coalesce(credential.provider_subject, v_subject),
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'refresh',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+  INTO applied, credential_revision, granted_scopes;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.release_figma_oauth_refresh_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_released boolean := false;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id
+    AND credential.provider = 'figma'
+    AND credential.status = 'connected'
+    AND credential.intent_epoch = p_expected_intent_epoch
+    AND credential.revision = p_expected_revision
+    AND credential.refresh_claim_id = p_claim_id;
+  v_released := FOUND;
+  RETURN v_released;
+END;
+$function$;
+
+-- A provider can reject a token after it passed the local freshness check.
+-- Invalidate only the exact credential revision that produced that provider
+-- response. A newer authorization or refresh advances the fence and survives.
+CREATE OR REPLACE FUNCTION public.invalidate_figma_oauth_credential_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_operation_id uuid
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, intent_epoch bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_intent_epoch < 0
+     OR p_expected_revision IS NULL OR p_expected_revision < 0 THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_credential_invalidation' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT false, 0::bigint, 0::bigint;
+    RETURN;
+  END IF;
+
+  IF v_row.last_operation_kind = 'provider_auth_rejection'
+     AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  IF v_row.status <> 'connected'
+     OR v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision THEN
+    RETURN QUERY SELECT false, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  -- A reconnect can be in progress while an earlier file request is still at
+  -- Figma. Remove the exact rejected secrets, but preserve the pending
+  -- authorization operation and its intent/revision fence so that the
+  -- already-open callback can still commit. Superseding authorization and
+  -- disconnect operations remain authoritative through the advisory lock.
+  IF v_row.authorization_operation_id IS NOT NULL THEN
+    UPDATE public.oauth_provider_credentials AS credential
+    SET status = 'disconnected',
+        access_token_enc = NULL,
+        refresh_token_enc = NULL,
+        expires_at = NULL,
+        account_email = '',
+        provider_subject = NULL,
+        granted_scopes = ARRAY[]::text[],
+        refresh_claim_id = NULL,
+        refresh_claim_expires_at = NULL,
+        last_operation_id = p_operation_id,
+        last_operation_kind = 'provider_auth_rejection',
+        updated_at = clock_timestamp()
+    WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+    RETURNING true, credential.revision, credential.intent_epoch
+    INTO applied, credential_revision, intent_epoch;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'disconnected',
+      revision = credential.revision + 1,
+      intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = NULL,
+      refresh_token_enc = NULL,
+      expires_at = NULL,
+      account_email = '',
+      provider_subject = NULL,
+      granted_scopes = ARRAY[]::text[],
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'provider_auth_rejection',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, credential.intent_epoch
+  INTO applied, credential_revision, intent_epoch;
+
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.disconnect_figma_oauth_provider_v1(
+  p_user_id uuid,
+  p_operation_id uuid
+)
+RETURNS TABLE(disconnected boolean, credential_revision bigint, intent_epoch bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_disconnect' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, 'figma')
+  ON CONFLICT (user_id, provider) DO NOTHING;
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+
+  IF v_row.last_operation_kind = 'disconnect' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'disconnected',
+      revision = credential.revision + 1,
+      intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = NULL,
+      refresh_token_enc = NULL,
+      expires_at = NULL,
+      account_email = '',
+      provider_subject = NULL,
+      granted_scopes = ARRAY[]::text[],
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'disconnect',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, credential.intent_epoch
+  INTO disconnected, credential_revision, intent_epoch;
+
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id;
+  DELETE FROM public.user_api_keys AS legacy
+  WHERE legacy.user_id = p_user_id
+    AND lower(legacy.provider) = 'figma'
+    AND lower(coalesce(legacy.label, 'default')) = 'oauth';
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_figma_oauth_status_v1(p_user_id uuid)
+RETURNS TABLE(
+  status text,
+  expires_at timestamptz,
+  provider_subject text,
+  granted_scopes text,
+  credential_revision bigint,
+  intent_epoch bigint
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_status' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma';
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'disconnected'::text, NULL::timestamptz, NULL::text,
+      ''::text, 0::bigint, 0::bigint;
+    RETURN;
+  END IF;
+  RETURN QUERY SELECT
+    v_row.status,
+    v_row.expires_at,
+    v_row.provider_subject,
+    array_to_string(v_row.granted_scopes, ','),
+    v_row.revision,
+    v_row.intent_epoch;
+END;
+$function$;
+
+-- Migrate only legacy rows whose full credential shape can be proved valid.
+-- Invalid/incomplete legacy OAuth rows are removed rather than exposed through
+-- the generic key surface or guessed into a connected state.
+DO $legacy_figma_oauth_migration$
+DECLARE
+  v_row record;
+  v_meta jsonb;
+  v_access_token text;
+  v_refresh_token text;
+  v_expires_at timestamptz;
+  v_subject text;
+  v_scopes text[];
+  v_passphrase text := public.app_encryption_key();
+BEGIN
+  FOR v_row IN
+    SELECT key_row.*
+    FROM public.user_api_keys AS key_row
+    WHERE lower(key_row.provider) = 'figma'
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    FOR UPDATE
+  LOOP
+    v_meta := NULL;
+    v_access_token := NULL;
+    v_refresh_token := NULL;
+    v_expires_at := NULL;
+    v_subject := NULL;
+    v_scopes := ARRAY[]::text[];
+    BEGIN
+      v_meta := v_row.endpoint::jsonb;
+      v_access_token := extensions.pgp_sym_decrypt(v_row.api_key_enc, v_passphrase)::text;
+      v_refresh_token := nullif(trim(coalesce(v_meta->>'refresh_token', '')), '');
+      v_expires_at := (v_meta->>'expires_at')::timestamptz;
+      v_subject := nullif(trim(coalesce(v_meta->>'provider_subject', v_meta->>'user_id_string', '')), '');
+      v_scopes := public.normalize_figma_oauth_scopes_v1(v_meta->>'scopes');
+    EXCEPTION WHEN OTHERS THEN
+      v_access_token := NULL;
+    END;
+
+    IF nullif(trim(coalesce(v_access_token, '')), '') IS NOT NULL
+       AND v_refresh_token IS NOT NULL
+       AND v_expires_at > clock_timestamp()
+       AND v_subject IS NOT NULL
+       AND cardinality(v_scopes) > 0 THEN
+      INSERT INTO public.oauth_provider_credentials(
+        user_id, provider, status, revision, intent_epoch,
+        access_token_enc, refresh_token_enc, expires_at, provider_subject,
+        granted_scopes, last_operation_id, last_operation_kind
+      ) VALUES (
+        v_row.user_id, 'figma', 'connected', 1, 0,
+        extensions.pgp_sym_encrypt(trim(v_access_token), v_passphrase),
+        extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+        v_expires_at, left(v_subject, 512), v_scopes,
+        extensions.gen_random_uuid(), 'legacy_migration'
+      )
+      ON CONFLICT (user_id, provider) DO NOTHING;
+    END IF;
+  END LOOP;
+
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE lower(key_row.provider) = 'figma'
+    AND lower(coalesce(key_row.label, 'default')) = 'oauth';
+END;
+$legacy_figma_oauth_migration$;
+
+-- Re-establish the generic BYOK boundary. Figma PAT/default rows remain
+-- owner-managed, while the figma/oauth label joins Google/Microsoft OAuth as a
+-- service-only reserved namespace.
+DO $figma_user_api_key_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public' AND tablename = 'user_api_keys'
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.user_api_keys', policy_row.policyname);
+  END LOOP;
+END;
+$figma_user_api_key_policies$;
+
+CREATE POLICY user_api_keys_select_own_non_oauth
+  ON public.user_api_keys FOR SELECT TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_insert_own_non_oauth
+  ON public.user_api_keys FOR INSERT TO authenticated
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_update_own_non_oauth
+  ON public.user_api_keys FOR UPDATE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  )
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_delete_own_non_oauth
+  ON public.user_api_keys FOR DELETE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key(
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_user_id uuid := auth.uid();
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF v_user_id IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  IF v_provider IN ('google', 'microsoft', 'figma') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (v_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key_for_user(
+  p_user_id uuid,
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF v_provider IN ('google', 'microsoft', 'figma') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (p_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_user_api_key(
+  p_user_id uuid,
+  p_provider text,
+  p_label text DEFAULT 'default'
+)
+RETURNS TABLE(api_key text, endpoint text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role'
+     AND (auth.uid() IS NULL OR auth.uid() <> p_user_id) THEN
+    RAISE EXCEPTION 'not_authorized' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  RETURN QUERY
+  SELECT extensions.pgp_sym_decrypt(key_row.api_key_enc, v_passphrase)::text,
+         key_row.endpoint
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = p_user_id
+    AND key_row.provider = lower(trim(p_provider))
+    AND (p_label IS NULL OR key_row.label = p_label)
+    AND key_row.is_active = true
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.updated_at DESC
+  LIMIT 1;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.delete_user_api_key(p_key_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE key_row.id = p_key_id
+    AND key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.list_user_api_keys()
+RETURNS TABLE(
+  id uuid,
+  provider text,
+  label text,
+  endpoint text,
+  is_active boolean,
+  created_at timestamptz,
+  updated_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  RETURN QUERY
+  SELECT key_row.id, key_row.provider, key_row.label, key_row.endpoint,
+         key_row.is_active, key_row.created_at, key_row.updated_at
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.provider, key_row.label;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.normalize_figma_oauth_scopes_v1(text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.cleanup_figma_oauth_states_v1(integer)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.reserve_figma_oauth_authorization_v1(uuid, text, text, text, text, uuid, timestamptz)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.claim_figma_oauth_state_v1(text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_figma_oauth_authorization_v1(uuid, bigint, bigint, uuid, text, text, timestamptz, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.claim_figma_oauth_refresh_v1(uuid, uuid, integer)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.release_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.invalidate_figma_oauth_credential_v1(uuid, bigint, bigint, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.disconnect_figma_oauth_provider_v1(uuid, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_figma_oauth_status_v1(uuid)
+  FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.normalize_figma_oauth_scopes_v1(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.cleanup_figma_oauth_states_v1(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.reserve_figma_oauth_authorization_v1(uuid, text, text, text, text, uuid, timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_figma_oauth_state_v1(text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_figma_oauth_authorization_v1(uuid, bigint, bigint, uuid, text, text, timestamptz, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_figma_oauth_refresh_v1(uuid, uuid, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.invalidate_figma_oauth_credential_v1(uuid, bigint, bigint, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.disconnect_figma_oauth_provider_v1(uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_figma_oauth_status_v1(uuid) TO service_role;
+
+-- Keep the generic BYOK functions usable, while their bodies reserve every
+-- provider-specific OAuth namespace.
+REVOKE ALL ON FUNCTION public.store_user_api_key(text, text, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_user_api_key(uuid, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.delete_user_api_key(uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.list_user_api_keys() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key(text, text, text, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_api_key(uuid, text, text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_user_api_key(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.list_user_api_keys() TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 43: Figma OAuth credential and callback control plane
+
+-- BEGIN SECTION 44: OpenSwan Chat approval-resume authority
+-- Source: supabase/migrations/20260813210000_openswan_chat_approval_resume_authority.sql
+-- Race-free OpenSwan Chat approval-resume authority.
+--
+-- A Circle Chat thread is not an agent `chat_sessions` row. Keep the exact
+-- Circle Chat thread and originating human message on `agent_runs` as their
+-- own immutable lineage. The pair is optional for compatibility with the
+-- OpenSwan Console and legacy writers, but when present it is complete,
+-- owner/circle/thread exact, and available only to main_chat OpenSwan runs.
+--
+-- Cross-run approval consumption then happens through one authenticated RPC.
+-- It locks current membership, both run rows, the thread, the source message,
+-- and the approval before it checks terminal truth and stamps the existing
+-- schema-v2 one-shot dispatch receipt. Same-run and category-auto consumption
+-- keep using the existing section-28 state machine; this migration neither
+-- replaces that trigger nor widens its table policies.
+
+BEGIN;
+
+DO $openswan_chat_resume_dependency_preflight$
+BEGIN
+  IF to_regclass('public.agent_runs') IS NULL
+     OR to_regclass('public.agent_run_approvals') IS NULL
+     OR to_regclass('public.circle_chat_threads') IS NULL
+     OR to_regclass('public.circle_chat_thread_members') IS NULL
+     OR to_regclass('public.circle_members') IS NULL
+     OR to_regclass('public.messages') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: apply the agent-run and thread-scoped Chat migrations first'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF to_regprocedure('public.is_valid_tool_v2_approval_payload(jsonb,boolean)') IS NULL
+     OR to_regprocedure('public.guard_tool_v2_run_approval()') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: apply SQL section 28 first'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF (
+    SELECT count(*)
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = 'public.agent_run_approvals'::regclass
+      AND trigger_row.tgname IN (
+        'trg_guard_tool_v2_run_approval_insert',
+        'trg_guard_tool_v2_run_approval_update',
+        'trg_guard_tool_v2_run_approval_delete'
+      )
+      AND trigger_row.tgfoid = 'public.guard_tool_v2_run_approval()'::regprocedure
+      AND trigger_row.tgenabled <> 'D'
+      AND NOT trigger_row.tgisinternal
+  ) <> 3 THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: canonical section-28 approval triggers are unavailable'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF to_regprocedure('public.guard_authenticated_message_mutation()') IS NULL
+     OR to_regprocedure('public.guard_authenticated_chat_thread_mutation()') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: apply SQL section 31 first'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF to_regprocedure('extensions.digest(bytea,text)') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: pgcrypto digest(bytea,text) is required in the extensions schema'
+      USING ERRCODE = '42883';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.messages'::regclass
+      AND attribute.attname = 'thread_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND attribute.attnotnull
+      AND NOT attribute.attisdropped
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.messages'::regclass
+      AND attribute.attname = 'user_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND NOT attribute.attisdropped
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.messages'::regclass
+      AND attribute.attname = 'is_bot'
+      AND attribute.atttypid = 'boolean'::regtype
+      AND NOT attribute.attisdropped
+  ) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: canonical thread-scoped message columns are unavailable'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$openswan_chat_resume_dependency_preflight$;
+
+ALTER TABLE public.agent_runs
+  ADD COLUMN IF NOT EXISTS thread_id uuid,
+  ADD COLUMN IF NOT EXISTS source_message_id uuid;
+
+DO $openswan_chat_resume_column_types$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.agent_runs'::regclass
+      AND attribute.attname = 'thread_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND NOT attribute.attisdropped
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.agent_runs'::regclass
+      AND attribute.attname = 'source_message_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND NOT attribute.attisdropped
+  ) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: agent-run lineage columns must be uuid'
+      USING ERRCODE = '42804';
+  END IF;
+END
+$openswan_chat_resume_column_types$;
+
+-- The lineage pair is optional by contract: OpenSwan Console and legacy
+-- main_chat rows have no Circle Chat message source.
+ALTER TABLE public.agent_runs
+  ALTER COLUMN thread_id DROP NOT NULL,
+  ALTER COLUMN source_message_id DROP NOT NULL;
+
+ALTER TABLE public.agent_runs
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_pair_v1,
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_scope_v1,
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_thread_fkey_v1,
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_message_fkey_v1;
+
+ALTER TABLE public.agent_runs
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_pair_v1
+    CHECK ((thread_id IS NULL) = (source_message_id IS NULL)),
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_scope_v1
+    CHECK (
+      thread_id IS NULL
+      OR ((surface = 'main_chat' AND provider = 'openswan') IS TRUE)
+    ),
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_thread_fkey_v1
+    FOREIGN KEY (thread_id)
+    REFERENCES public.circle_chat_threads(id)
+    ON DELETE RESTRICT,
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_message_fkey_v1
+    FOREIGN KEY (source_message_id)
+    REFERENCES public.messages(id)
+    ON DELETE RESTRICT;
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_chat_source_lineage_v1
+  ON public.agent_runs (circle_id, thread_id, source_message_id, created_at DESC)
+  WHERE thread_id IS NOT NULL AND source_message_id IS NOT NULL;
+
+ALTER TABLE public.agent_runs ENABLE ROW LEVEL SECURITY;
+
+-- Historical agent_runs policy variants are circle-wide and permissive. A
+-- peer may still read shared run telemetry, but cannot rewrite or delete a
+-- protected Chat run owned by somebody else. Restrictive policies compose
+-- with the current policy set without changing legacy/Console rows.
+DROP POLICY IF EXISTS agent_runs_chat_lineage_update_owner_v1
+ON public.agent_runs;
+CREATE POLICY agent_runs_chat_lineage_update_owner_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  thread_id IS NULL
+  OR (auth.uid() IS NOT NULL AND user_id = auth.uid())
+)
+WITH CHECK (
+  thread_id IS NULL
+  OR (auth.uid() IS NOT NULL AND user_id = auth.uid())
+);
+
+DROP POLICY IF EXISTS agent_runs_chat_lineage_delete_owner_v1
+ON public.agent_runs;
+CREATE POLICY agent_runs_chat_lineage_delete_owner_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  thread_id IS NULL
+  OR (auth.uid() IS NOT NULL AND user_id = auth.uid())
+);
+
+COMMENT ON COLUMN public.agent_runs.thread_id IS
+  'Exact circle_chat_threads id for a protected main_chat OpenSwan run. This is not legacy chat_session_id.';
+COMMENT ON COLUMN public.agent_runs.source_message_id IS
+  'Exact non-bot human message that originated a protected main_chat OpenSwan run; immutable with thread_id once set.';
+
+CREATE OR REPLACE FUNCTION public.guard_agent_run_chat_lineage_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_trusted_writer boolean :=
+    COALESCE(auth.role(), '') = 'service_role'
+    OR current_setting('role', true) IN ('postgres', 'supabase_admin', 'service_role')
+    OR (
+      COALESCE(current_setting('role', true), 'none') = 'none'
+      AND session_user IN ('postgres', 'supabase_admin', 'service_role')
+    );
+  v_thread public.circle_chat_threads%ROWTYPE;
+  v_message public.messages%ROWTYPE;
+BEGIN
+  IF (NEW.thread_id IS NULL) <> (NEW.source_message_id IS NULL) THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_pair_required'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF TG_OP = 'UPDATE' AND (
+    (
+      OLD.thread_id IS NOT NULL
+      AND (
+        NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+        OR NEW.user_id IS DISTINCT FROM OLD.user_id
+        OR NEW.surface IS DISTINCT FROM OLD.surface
+        OR NEW.provider IS DISTINCT FROM OLD.provider
+        OR NEW.thread_id IS DISTINCT FROM OLD.thread_id
+        OR NEW.source_message_id IS DISTINCT FROM OLD.source_message_id
+      )
+    )
+    OR (
+      OLD.thread_id IS NULL
+      AND NEW.thread_id IS NOT NULL
+      AND (
+        NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+        OR NEW.user_id IS DISTINCT FROM OLD.user_id
+        OR NEW.surface IS DISTINCT FROM OLD.surface
+        OR NEW.provider IS DISTINCT FROM OLD.provider
+      )
+    )
+  ) THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_immutable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF TG_OP = 'UPDATE'
+     AND OLD.thread_id IS NOT NULL
+     AND NOT v_trusted_writer
+     AND (v_uid IS NULL OR OLD.user_id IS DISTINCT FROM v_uid) THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_owner_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.thread_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- Authenticated application writers must establish lineage with the INSERT.
+  -- A trusted maintenance writer may backfill an exact legacy pair, after
+  -- which the same immutable rule above applies to every writer.
+  IF TG_OP = 'UPDATE'
+     AND OLD.thread_id IS NULL
+     AND NOT v_trusted_writer THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_must_be_set_on_insert'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.surface IS DISTINCT FROM 'main_chat'
+     OR NEW.provider IS DISTINCT FROM 'openswan' THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_scope_invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF NOT v_trusted_writer THEN
+    IF v_uid IS NULL OR NEW.user_id IS DISTINCT FROM v_uid THEN
+      RAISE EXCEPTION 'agent_run_chat_lineage_owner_required'
+        USING ERRCODE = '42501';
+    END IF;
+    PERFORM 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = NEW.circle_id
+      AND membership.user_id = v_uid
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'agent_run_chat_lineage_membership_required'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  SELECT thread.*
+  INTO v_thread
+  FROM public.circle_chat_threads AS thread
+  WHERE thread.id = NEW.thread_id
+  FOR SHARE;
+  IF NOT FOUND OR v_thread.circle_id IS DISTINCT FROM NEW.circle_id THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_thread_invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF v_thread.visibility IS DISTINCT FROM 'circle'
+     AND v_thread.created_by IS DISTINCT FROM NEW.user_id THEN
+    PERFORM 1
+    FROM public.circle_chat_thread_members AS thread_member
+    WHERE thread_member.thread_id = NEW.thread_id
+      AND thread_member.user_id = NEW.user_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'agent_run_chat_lineage_thread_access_required'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  SELECT message.*
+  INTO v_message
+  FROM public.messages AS message
+  WHERE message.id = NEW.source_message_id
+  FOR SHARE;
+  IF NOT FOUND
+     OR v_message.circle_id IS DISTINCT FROM NEW.circle_id
+     OR v_message.thread_id IS DISTINCT FROM NEW.thread_id
+     OR v_message.user_id IS DISTINCT FROM NEW.user_id
+     OR v_message.is_bot IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_source_message_invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  RETURN NEW;
+END
+$function$;
+
+DROP TRIGGER IF EXISTS trg_guard_agent_run_chat_lineage_v1
+ON public.agent_runs;
+CREATE TRIGGER trg_guard_agent_run_chat_lineage_v1
+BEFORE INSERT OR UPDATE ON public.agent_runs
+FOR EACH ROW
+EXECUTE FUNCTION public.guard_agent_run_chat_lineage_v1();
+
+REVOKE ALL ON FUNCTION public.guard_agent_run_chat_lineage_v1()
+FROM PUBLIC, anon, authenticated;
+
+-- The historical approval policy is circle-wide. Circle peers may keep the
+-- product's existing read visibility, but an explicit Chat approval is
+-- mutation authority owned by its requester. Protect both the unconsumed and
+-- consumed schema-v2 shapes so a peer cannot resolve first or mutate later.
+-- Auto approvals and non-Chat/legacy runs deliberately keep their established
+-- behavior. SECURITY DEFINER makes the source-run classification independent
+-- of permissive agent_runs RLS drift, while current membership prevents this
+-- boolean helper from becoming a cross-circle run-id oracle.
+CREATE OR REPLACE FUNCTION public.is_protected_openswan_chat_ask_approval_v1(
+  p_run_id uuid,
+  p_circle_id uuid,
+  p_payload jsonb
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT COALESCE((
+    auth.uid() IS NOT NULL
+    AND p_run_id IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND jsonb_typeof(p_payload) = 'object'
+    AND p_payload->>'approvalSchemaVersion' = '2'
+    AND p_payload->>'approvalMode' = 'ask'
+    AND (
+      public.is_valid_tool_v2_approval_payload(p_payload, false)
+      OR public.is_valid_tool_v2_approval_payload(p_payload, true)
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM public.agent_runs AS source_run
+      JOIN public.circle_members AS membership
+        ON membership.circle_id = source_run.circle_id
+       AND membership.user_id = auth.uid()
+      WHERE source_run.id = p_run_id
+        AND source_run.circle_id = p_circle_id
+        AND source_run.surface = 'main_chat'
+        AND source_run.provider = 'openswan'
+        AND source_run.thread_id IS NOT NULL
+        AND source_run.source_message_id IS NOT NULL
+    )
+  ), false);
+$function$;
+
+REVOKE ALL ON FUNCTION public.is_protected_openswan_chat_ask_approval_v1(
+  uuid, uuid, jsonb
+) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_protected_openswan_chat_ask_approval_v1(
+  uuid, uuid, jsonb
+) TO authenticated;
+
+ALTER TABLE public.agent_run_approvals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS agent_run_approvals_chat_ask_requester_update_v1
+ON public.agent_run_approvals;
+CREATE POLICY agent_run_approvals_chat_ask_requester_update_v1
+ON public.agent_run_approvals
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  NOT public.is_protected_openswan_chat_ask_approval_v1(
+    run_id,
+    circle_id,
+    payload
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+)
+WITH CHECK (
+  NOT public.is_protected_openswan_chat_ask_approval_v1(
+    run_id,
+    circle_id,
+    payload
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+);
+
+-- Read-only custody preflight. This exposes no approval payload and grants no
+-- dispatch authority: it only tells the authenticated owner whether the exact
+-- consume predicates are true in this statement snapshot. Callers must treat
+-- false, an RPC/schema-cache miss, and every error as a hard no-claim result.
+-- A subsequent race is harmless because the consuming RPC repeats the checks
+-- under row locks before it writes the one-shot dispatch receipt.
+DROP FUNCTION IF EXISTS public.can_consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+);
+
+CREATE FUNCTION public.can_consume_openswan_chat_approval_resume_v1(
+  p_approval_id uuid,
+  p_source_run_id uuid,
+  p_current_run_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_source_message_id uuid,
+  p_tool_name text,
+  p_tool_approval_digest text,
+  p_tool_use_id text,
+  p_iteration integer,
+  p_dispatch_binding_digest text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_source_run public.agent_runs%ROWTYPE;
+  v_current_run public.agent_runs%ROWTYPE;
+  v_thread public.circle_chat_threads%ROWTYPE;
+  v_message public.messages%ROWTYPE;
+  v_approval public.agent_run_approvals%ROWTYPE;
+  v_terminal jsonb;
+  v_now timestamptz;
+  v_expires_at timestamptz;
+  v_authority_json text;
+  v_expected_binding_digest text;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_auth_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_approval_id IS NULL
+     OR p_source_run_id IS NULL
+     OR p_current_run_id IS NULL
+     OR p_source_run_id = p_current_run_id
+     OR p_circle_id IS NULL
+     OR p_thread_id IS NULL
+     OR p_source_message_id IS NULL
+     OR p_tool_name IS NULL
+     OR p_tool_name !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_approval_digest IS NULL
+     OR p_tool_approval_digest !~ '^approval-v2:sha256:[0-9a-f]{64}$'
+     OR p_tool_use_id IS NULL
+     OR p_tool_use_id !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_use_id IS DISTINCT FROM 'approval-resume:' || p_approval_id::text
+     OR p_iteration IS NULL
+     OR p_iteration < 1
+     OR p_iteration > 8
+     OR p_dispatch_binding_digest IS NULL
+     OR p_dispatch_binding_digest !~ '^authority-v2:sha256:[0-9a-f]{64}$' THEN
+    RETURN false;
+  END IF;
+
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = v_uid;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  SELECT run_row.*
+  INTO v_source_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_source_run_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  SELECT run_row.*
+  INTO v_current_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_current_run_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  v_terminal := v_source_run.metadata->'terminal';
+  IF v_source_run.user_id IS DISTINCT FROM v_uid
+     OR v_source_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_source_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_source_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_source_run.provider IS DISTINCT FROM 'openswan'
+     OR v_source_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_source_run.status IS DISTINCT FROM 'failed'
+     OR jsonb_typeof(v_terminal) IS DISTINCT FROM 'object'
+     OR v_terminal->>'state' IS DISTINCT FROM 'partial'
+     OR v_terminal->>'reason' IS DISTINCT FROM 'action_coverage_incomplete'
+     OR v_terminal->'completionVerified' IS DISTINCT FROM 'false'::jsonb THEN
+    RETURN false;
+  END IF;
+
+  IF v_current_run.user_id IS DISTINCT FROM v_uid
+     OR v_current_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_current_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_current_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_current_run.provider IS DISTINCT FROM 'openswan'
+     OR v_current_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_current_run.status NOT IN ('queued', 'planning', 'running')
+     OR COALESCE(v_current_run.metadata ? 'terminal', false) THEN
+    RETURN false;
+  END IF;
+
+  SELECT thread.*
+  INTO v_thread
+  FROM public.circle_chat_threads AS thread
+  WHERE thread.id = p_thread_id;
+  IF NOT FOUND
+     OR v_thread.circle_id IS DISTINCT FROM p_circle_id
+     OR COALESCE(v_thread.archived, false) THEN
+    RETURN false;
+  END IF;
+
+  IF v_thread.visibility IS DISTINCT FROM 'circle'
+     AND v_thread.created_by IS DISTINCT FROM v_uid THEN
+    PERFORM 1
+    FROM public.circle_chat_thread_members AS thread_member
+    WHERE thread_member.thread_id = p_thread_id
+      AND thread_member.user_id = v_uid;
+    IF NOT FOUND THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  SELECT message.*
+  INTO v_message
+  FROM public.messages AS message
+  WHERE message.id = p_source_message_id;
+  IF NOT FOUND
+     OR v_message.circle_id IS DISTINCT FROM p_circle_id
+     OR v_message.thread_id IS DISTINCT FROM p_thread_id
+     OR v_message.user_id IS DISTINCT FROM v_uid
+     OR v_message.is_bot IS DISTINCT FROM false THEN
+    RETURN false;
+  END IF;
+
+  SELECT approval_row.*
+  INTO v_approval
+  FROM public.agent_run_approvals AS approval_row
+  WHERE approval_row.id = p_approval_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  v_now := statement_timestamp();
+  IF v_approval.timeout_seconds IS NULL
+     OR v_approval.timeout_seconds < 1
+     OR v_approval.timeout_seconds > 86400
+     OR v_approval.requested_at IS NULL
+     OR v_approval.resolved_at IS NULL THEN
+    RETURN false;
+  END IF;
+  v_expires_at := v_approval.requested_at
+    + make_interval(secs => v_approval.timeout_seconds);
+
+  IF v_approval.run_id IS DISTINCT FROM p_source_run_id
+     OR v_approval.circle_id IS DISTINCT FROM p_circle_id
+     OR v_approval.requested_by IS DISTINCT FROM v_uid::text
+     OR v_approval.resolved_by IS DISTINCT FROM v_uid
+     OR v_approval.status IS DISTINCT FROM 'approved'
+     OR v_approval.metadata IS DISTINCT FROM '{}'::jsonb
+     OR v_approval.requested_at > v_approval.resolved_at
+     OR v_approval.resolved_at > v_now
+     OR v_approval.resolved_at >= v_expires_at
+     OR v_now >= v_expires_at
+     OR NOT public.is_valid_tool_v2_approval_payload(v_approval.payload, false)
+     OR v_approval.payload->>'approvalMode' IS DISTINCT FROM 'ask'
+     OR v_approval.payload->>'toolName' IS DISTINCT FROM p_tool_name
+     OR v_approval.payload->>'toolName' = 'desktop.open_attachment'
+     OR v_approval.payload->>'toolApprovalDigest' IS DISTINCT FROM p_tool_approval_digest
+     OR v_approval.payload ? 'dispatchReceiptSchemaVersion'
+     OR v_approval.payload ? 'dispatchBindingDigest'
+     OR v_approval.payload ? 'dispatchConsumedAt' THEN
+    RETURN false;
+  END IF;
+
+  v_authority_json :=
+      '{"approvalDigest":' || to_json(p_tool_approval_digest)::text
+    || ',"approvalId":' || to_json(p_approval_id::text)::text
+    || ',"approvalRunId":' || to_json(p_source_run_id::text)::text
+    || ',"circleId":' || to_json(p_circle_id::text)::text
+    || ',"iteration":' || p_iteration::text
+    || ',"runId":' || to_json(p_current_run_id::text)::text
+    || ',"schemaVersion":2'
+    || ',"source":"cross_run"'
+    || ',"status":"approved"'
+    || ',"toolName":' || to_json(p_tool_name)::text
+    || ',"toolUseId":' || to_json(p_tool_use_id)::text
+    || ',"userId":' || to_json(v_uid::text)::text
+    || '}';
+  v_expected_binding_digest := 'authority-v2:sha256:' || encode(
+    extensions.digest(convert_to(v_authority_json, 'UTF8'), 'sha256'),
+    'hex'
+  );
+
+  RETURN p_dispatch_binding_digest = v_expected_binding_digest;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.can_consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.can_consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) TO authenticated;
+
+DROP FUNCTION IF EXISTS public.consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+);
+
+CREATE FUNCTION public.consume_openswan_chat_approval_resume_v1(
+  p_approval_id uuid,
+  p_source_run_id uuid,
+  p_current_run_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_source_message_id uuid,
+  p_tool_name text,
+  p_tool_approval_digest text,
+  p_tool_use_id text,
+  p_iteration integer,
+  p_dispatch_binding_digest text
+)
+RETURNS TABLE (
+  approval_id uuid,
+  approval_run_id uuid,
+  dispatch_run_id uuid,
+  circle_id uuid,
+  thread_id uuid,
+  source_message_id uuid,
+  tool_name text,
+  tool_approval_digest text,
+  receipt_source text,
+  approval_status text,
+  dispatch_binding_digest text,
+  dispatch_consumed_at text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_locked_run_count integer := 0;
+  v_source_run public.agent_runs%ROWTYPE;
+  v_current_run public.agent_runs%ROWTYPE;
+  v_thread public.circle_chat_threads%ROWTYPE;
+  v_message public.messages%ROWTYPE;
+  v_approval public.agent_run_approvals%ROWTYPE;
+  v_terminal jsonb;
+  v_now timestamptz;
+  v_expires_at timestamptz;
+  v_consumed_at_text text;
+  v_authority_json text;
+  v_expected_binding_digest text;
+  v_consumed_payload jsonb;
+  v_written_payload jsonb;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_auth_required'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_approval_id IS NULL
+     OR p_source_run_id IS NULL
+     OR p_current_run_id IS NULL
+     OR p_source_run_id = p_current_run_id
+     OR p_circle_id IS NULL
+     OR p_thread_id IS NULL
+     OR p_source_message_id IS NULL
+     OR p_tool_name IS NULL
+     OR p_tool_name !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_approval_digest IS NULL
+     OR p_tool_approval_digest !~ '^approval-v2:sha256:[0-9a-f]{64}$'
+     OR p_tool_use_id IS NULL
+     OR p_tool_use_id !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_use_id IS DISTINCT FROM 'approval-resume:' || p_approval_id::text
+     OR p_iteration IS NULL
+     OR p_iteration < 1
+     OR p_iteration > 8
+     OR p_dispatch_binding_digest IS NULL
+     OR p_dispatch_binding_digest !~ '^authority-v2:sha256:[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_identity_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- Keep membership live for the whole transaction. A concurrent revocation
+  -- must finish before or after this consume, never between its checks.
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = v_uid
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_membership_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Deterministic id order prevents two inverse source/current requests from
+  -- deadlocking. Both rows stay locked through approval consumption.
+  PERFORM run_row.id
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id IN (p_source_run_id, p_current_run_id)
+  ORDER BY run_row.id
+  FOR UPDATE;
+  GET DIAGNOSTICS v_locked_run_count = ROW_COUNT;
+  IF v_locked_run_count <> 2 THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_run_not_found'
+      USING ERRCODE = 'P0002';
+  END IF;
+
+  SELECT run_row.*
+  INTO STRICT v_source_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_source_run_id;
+
+  SELECT run_row.*
+  INTO STRICT v_current_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_current_run_id;
+
+  v_terminal := v_source_run.metadata->'terminal';
+  IF v_source_run.user_id IS DISTINCT FROM v_uid
+     OR v_source_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_source_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_source_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_source_run.provider IS DISTINCT FROM 'openswan'
+     OR v_source_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_source_run.status IS DISTINCT FROM 'failed'
+     OR jsonb_typeof(v_terminal) IS DISTINCT FROM 'object'
+     OR v_terminal->>'state' IS DISTINCT FROM 'partial'
+     OR v_terminal->>'reason' IS DISTINCT FROM 'action_coverage_incomplete'
+     OR v_terminal->'completionVerified' IS DISTINCT FROM 'false'::jsonb THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_source_run_not_eligible'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF v_current_run.user_id IS DISTINCT FROM v_uid
+     OR v_current_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_current_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_current_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_current_run.provider IS DISTINCT FROM 'openswan'
+     OR v_current_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_current_run.status NOT IN ('queued', 'planning', 'running')
+     OR COALESCE(v_current_run.metadata ? 'terminal', false) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_current_run_not_eligible'
+      USING ERRCODE = '55000';
+  END IF;
+
+  SELECT thread.*
+  INTO v_thread
+  FROM public.circle_chat_threads AS thread
+  WHERE thread.id = p_thread_id
+  FOR SHARE;
+  IF NOT FOUND
+     OR v_thread.circle_id IS DISTINCT FROM p_circle_id
+     OR COALESCE(v_thread.archived, false) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_thread_not_live'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF v_thread.visibility IS DISTINCT FROM 'circle'
+     AND v_thread.created_by IS DISTINCT FROM v_uid THEN
+    PERFORM 1
+    FROM public.circle_chat_thread_members AS thread_member
+    WHERE thread_member.thread_id = p_thread_id
+      AND thread_member.user_id = v_uid
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'openswan_chat_approval_resume_thread_access_required'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  SELECT message.*
+  INTO v_message
+  FROM public.messages AS message
+  WHERE message.id = p_source_message_id
+  FOR SHARE;
+  IF NOT FOUND
+     OR v_message.circle_id IS DISTINCT FROM p_circle_id
+     OR v_message.thread_id IS DISTINCT FROM p_thread_id
+     OR v_message.user_id IS DISTINCT FROM v_uid
+     OR v_message.is_bot IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_source_message_invalid'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT approval_row.*
+  INTO v_approval
+  FROM public.agent_run_approvals AS approval_row
+  WHERE approval_row.id = p_approval_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_found'
+      USING ERRCODE = 'P0002';
+  END IF;
+
+  v_now := clock_timestamp();
+  IF v_approval.timeout_seconds IS NULL
+     OR v_approval.timeout_seconds < 1
+     OR v_approval.timeout_seconds > 86400
+     OR v_approval.requested_at IS NULL
+     OR v_approval.resolved_at IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_live'
+      USING ERRCODE = '55000';
+  END IF;
+  v_expires_at := v_approval.requested_at
+    + make_interval(secs => v_approval.timeout_seconds);
+
+  IF v_approval.run_id IS DISTINCT FROM p_source_run_id
+     OR v_approval.circle_id IS DISTINCT FROM p_circle_id
+     OR v_approval.requested_by IS DISTINCT FROM v_uid::text
+     OR v_approval.resolved_by IS DISTINCT FROM v_uid
+     OR v_approval.status IS DISTINCT FROM 'approved'
+     OR v_approval.metadata IS DISTINCT FROM '{}'::jsonb
+     OR v_approval.requested_at > v_approval.resolved_at
+     OR v_approval.resolved_at > v_now
+     OR v_approval.resolved_at >= v_expires_at
+     OR v_now >= v_expires_at
+     OR NOT public.is_valid_tool_v2_approval_payload(v_approval.payload, false)
+     OR v_approval.payload->>'approvalMode' IS DISTINCT FROM 'ask'
+     OR v_approval.payload->>'toolName' IS DISTINCT FROM p_tool_name
+     OR v_approval.payload->>'toolName' = 'desktop.open_attachment'
+     OR v_approval.payload->>'toolApprovalDigest' IS DISTINCT FROM p_tool_approval_digest
+     OR v_approval.payload ? 'dispatchReceiptSchemaVersion'
+     OR v_approval.payload ? 'dispatchBindingDigest'
+     OR v_approval.payload ? 'dispatchConsumedAt' THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_live'
+      USING ERRCODE = '55000';
+  END IF;
+
+  -- Match `stableApprovalJson` exactly. Its flat authority object is sorted by
+  -- key and JSON.stringify emits no whitespace. The database recomputes this
+  -- digest instead of trusting an arbitrary client-provided receipt binding.
+  v_authority_json :=
+      '{"approvalDigest":' || to_json(p_tool_approval_digest)::text
+    || ',"approvalId":' || to_json(p_approval_id::text)::text
+    || ',"approvalRunId":' || to_json(p_source_run_id::text)::text
+    || ',"circleId":' || to_json(p_circle_id::text)::text
+    || ',"iteration":' || p_iteration::text
+    || ',"runId":' || to_json(p_current_run_id::text)::text
+    || ',"schemaVersion":2'
+    || ',"source":"cross_run"'
+    || ',"status":"approved"'
+    || ',"toolName":' || to_json(p_tool_name)::text
+    || ',"toolUseId":' || to_json(p_tool_use_id)::text
+    || ',"userId":' || to_json(v_uid::text)::text
+    || '}';
+  v_expected_binding_digest := 'authority-v2:sha256:' || encode(
+    extensions.digest(convert_to(v_authority_json, 'UTF8'), 'sha256'),
+    'hex'
+  );
+  IF p_dispatch_binding_digest IS DISTINCT FROM v_expected_binding_digest THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_dispatch_binding_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- Re-sample database time immediately before the write. The approval may
+  -- have been barely live when its locked row was first read.
+  v_now := clock_timestamp();
+  IF v_now >= v_expires_at THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_live'
+      USING ERRCODE = '55000';
+  END IF;
+
+  v_consumed_at_text := to_char(
+    v_now AT TIME ZONE 'UTC',
+    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+  );
+  v_consumed_payload := v_approval.payload || jsonb_build_object(
+    'dispatchReceiptSchemaVersion', 2,
+    'dispatchBindingDigest', v_expected_binding_digest,
+    'dispatchConsumedAt', v_consumed_at_text
+  );
+  IF NOT public.is_valid_tool_v2_approval_payload(v_consumed_payload, true) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_consumed_payload_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.agent_run_approvals AS approval_row
+  SET payload = v_consumed_payload
+  WHERE approval_row.id = p_approval_id
+    AND approval_row.run_id = p_source_run_id
+    AND approval_row.circle_id = p_circle_id
+    AND approval_row.requested_by = v_uid::text
+    AND approval_row.resolved_by = v_uid
+    AND approval_row.status = 'approved'
+    AND approval_row.payload IS NOT DISTINCT FROM v_approval.payload
+    AND clock_timestamp() < v_expires_at
+  RETURNING approval_row.payload INTO v_written_payload;
+  IF NOT FOUND
+     OR v_written_payload->>'dispatchBindingDigest'
+       IS DISTINCT FROM v_expected_binding_digest THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_consume_conflict'
+      USING ERRCODE = '40001';
+  END IF;
+
+  RETURN QUERY SELECT
+    p_approval_id,
+    p_source_run_id,
+    p_current_run_id,
+    p_circle_id,
+    p_thread_id,
+    p_source_message_id,
+    p_tool_name,
+    p_tool_approval_digest,
+    'cross_run'::text,
+    'approved'::text,
+    v_expected_binding_digest,
+    v_consumed_at_text;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- Catalog readiness only. Follow with authenticated cross-user/thread/replay
+-- and locked status-race behavior before relying on this authority boundary.
+SELECT
+  (
+    SELECT count(*) = 2
+      AND bool_and(attribute.atttypid = 'uuid'::regtype)
+      AND bool_and(NOT attribute.attnotnull)
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.agent_runs'::regclass
+      AND attribute.attname IN ('thread_id', 'source_message_id')
+      AND NOT attribute.attisdropped
+  ) AS openswan_chat_run_lineage_columns_ready,
+  (
+    SELECT count(*) = 4
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.agent_runs'::regclass
+      AND constraint_row.conname IN (
+        'agent_runs_chat_thread_lineage_pair_v1',
+        'agent_runs_chat_thread_lineage_scope_v1',
+        'agent_runs_chat_thread_lineage_thread_fkey_v1',
+        'agent_runs_chat_thread_lineage_message_fkey_v1'
+      )
+      AND constraint_row.convalidated
+  ) AS openswan_chat_run_lineage_constraints_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.agent_runs'::regclass
+      AND constraint_row.conname = 'agent_runs_chat_thread_lineage_thread_fkey_v1'
+      AND constraint_row.confrelid = 'public.circle_chat_threads'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.confdeltype = 'r'
+      AND constraint_row.convalidated
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.agent_runs'::regclass
+      AND constraint_row.conname = 'agent_runs_chat_thread_lineage_message_fkey_v1'
+      AND constraint_row.confrelid = 'public.messages'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.confdeltype = 'r'
+      AND constraint_row.convalidated
+  ) AS openswan_chat_run_lineage_exact_fks_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = 'public.agent_runs'::regclass
+      AND trigger_row.tgname = 'trg_guard_agent_run_chat_lineage_v1'
+      AND trigger_row.tgfoid = 'public.guard_agent_run_chat_lineage_v1()'::regprocedure
+      AND trigger_row.tgenabled <> 'D'
+      AND NOT trigger_row.tgisinternal
+  ) AS openswan_chat_run_lineage_trigger_ready,
+  (
+    SELECT count(*) = 2
+      AND bool_and(permissive = 'RESTRICTIVE')
+      AND bool_and(cmd IN ('UPDATE', 'DELETE'))
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_runs'
+      AND policyname IN (
+        'agent_runs_chat_lineage_update_owner_v1',
+        'agent_runs_chat_lineage_delete_owner_v1'
+      )
+  ) AS openswan_chat_run_lineage_owner_policies_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_approvals'
+      AND policyname = 'agent_run_approvals_chat_ask_requester_update_v1'
+      AND permissive = 'RESTRICTIVE'
+      AND cmd = 'UPDATE'
+  )
+  AND to_regprocedure(
+    'public.is_protected_openswan_chat_ask_approval_v1(uuid,uuid,jsonb)'
+  ) IS NOT NULL AS openswan_chat_approval_requester_policy_ready,
+  to_regprocedure(
+    'public.can_consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)'
+  ) IS NOT NULL
+  AND has_function_privilege(
+    'authenticated',
+    'public.can_consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'anon',
+    'public.can_consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  ) AS openswan_chat_approval_resume_preflight_rpc_ready,
+  to_regprocedure(
+    'public.consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)'
+  ) IS NOT NULL
+  AND has_function_privilege(
+    'authenticated',
+    'public.consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'anon',
+    'public.consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  ) AS openswan_chat_approval_resume_rpc_ready;
+-- END SECTION 44: OpenSwan Chat approval-resume authority
+-- BEGIN SECTION 45: Owner-private Office user preferences
+-- Source: supabase/migrations/20260813220000_office_user_preferences.sql
+-- Owner-private, circle-scoped Office preferences with atomic patch authority.
+--
+-- `profiles.office_preferences` is a flat profile blob and profile rows are
+-- readable by fellow circle members. It therefore cannot own private Office
+-- state or credentials. This migration introduces an exact owner+circle row,
+-- limits it to reviewed non-secret fields, and makes one server-side patch RPC
+-- the only authenticated mutation surface.
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.office_preferences_contains_secret_key_v1(
+  p_value jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  object_entry record;
+  array_entry jsonb;
+  normalized_key text;
+BEGIN
+  CASE jsonb_typeof(p_value)
+    WHEN 'object' THEN
+      FOR object_entry IN SELECT key, value FROM jsonb_each(p_value)
+      LOOP
+        normalized_key := regexp_replace(lower(object_entry.key), '[^a-z0-9]', '', 'g');
+        IF lower(object_entry.key) IN ('__proto__', 'prototype', 'constructor')
+           OR normalized_key ~ '(password|passwd|secret|token|apikey|accesskey|privatekey|credential|authorization|bearer|cookie|sessionkey|webhook)' THEN
+          RETURN true;
+        END IF;
+        IF public.office_preferences_contains_secret_key_v1(object_entry.value) THEN
+          RETURN true;
+        END IF;
+      END LOOP;
+    WHEN 'array' THEN
+      FOR array_entry IN SELECT value FROM jsonb_array_elements(p_value)
+      LOOP
+        IF public.office_preferences_contains_secret_key_v1(array_entry) THEN
+          RETURN true;
+        END IF;
+      END LOOP;
+    ELSE
+      NULL;
+  END CASE;
+  RETURN false;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.office_preferences_contains_secret_key_v1(jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.validate_office_user_preferences_v1(
+  p_preferences jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  preference_entry record;
+  nested_entry record;
+  behavior_entry record;
+  state_key text;
+  numeric_value numeric;
+  entry_count integer;
+  text_value text;
+BEGIN
+  IF jsonb_typeof(p_preferences) <> 'object'
+     OR octet_length(p_preferences::text) > 131072
+     OR public.office_preferences_contains_secret_key_v1(p_preferences) THEN
+    RETURN false;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_object_keys(p_preferences) AS preference_key
+    WHERE preference_key NOT IN (
+      'agentNames',
+      'appearances',
+      'whiteboardNotes',
+      'budgetConfig',
+      'idleConfig',
+      'agentFilterMode',
+      'telegramMetadata'
+    )
+  ) THEN
+    RETURN false;
+  END IF;
+
+  FOR preference_entry IN SELECT key, value FROM jsonb_each(p_preferences)
+  LOOP
+    CASE preference_entry.key
+      WHEN 'agentNames' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count > 128 THEN RETURN false; END IF;
+        FOR nested_entry IN SELECT key, value FROM jsonb_each(preference_entry.value)
+        LOOP
+          IF length(nested_entry.key) NOT BETWEEN 1 AND 240
+             OR octet_length(nested_entry.key) > 960
+             OR jsonb_typeof(nested_entry.value) <> 'string' THEN
+            RETURN false;
+          END IF;
+          text_value := nested_entry.value #>> '{}';
+          IF length(btrim(text_value)) NOT BETWEEN 1 AND 80
+             OR octet_length(text_value) > 320 THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'appearances' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count > 128 THEN RETURN false; END IF;
+        FOR nested_entry IN SELECT key, value FROM jsonb_each(preference_entry.value)
+        LOOP
+          IF length(nested_entry.key) NOT BETWEEN 1 AND 240
+             OR octet_length(nested_entry.key) > 960
+             OR jsonb_typeof(nested_entry.value) <> 'object' THEN
+            RETURN false;
+          END IF;
+          SELECT count(*) INTO entry_count FROM jsonb_object_keys(nested_entry.value);
+          IF entry_count <> 15
+             OR EXISTS (
+               SELECT 1 FROM jsonb_object_keys(nested_entry.value) AS appearance_key
+               WHERE appearance_key NOT IN (
+                 'skinTone', 'hairStyle', 'hairColor', 'shirtColor', 'pantsColor',
+                 'shoeColor', 'accessory', 'hat', 'expression', 'backItem',
+                 'eyeColor', 'facialHair', 'pet', 'aura', 'handItem'
+               )
+             ) THEN
+            RETURN false;
+          END IF;
+          FOREACH state_key IN ARRAY ARRAY[
+            'skinTone', 'hairStyle', 'hairColor', 'shirtColor', 'pantsColor',
+            'shoeColor', 'accessory', 'hat', 'expression', 'backItem',
+            'eyeColor', 'facialHair', 'pet', 'aura', 'handItem'
+          ]
+          LOOP
+            IF jsonb_typeof(nested_entry.value -> state_key) <> 'string' THEN
+              RETURN false;
+            END IF;
+          END LOOP;
+          FOREACH state_key IN ARRAY ARRAY[
+            'skinTone', 'hairColor', 'shirtColor', 'pantsColor', 'shoeColor', 'eyeColor'
+          ]
+          LOOP
+            IF (nested_entry.value ->> state_key) !~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$' THEN
+              RETURN false;
+            END IF;
+          END LOOP;
+          IF (nested_entry.value ->> 'hairStyle') NOT IN (
+               'flat', 'spiky', 'mohawk', 'long', 'bald', 'cap', 'curly',
+               'ponytail', 'buzzcut', 'afro', 'undercut', 'pigtails'
+             )
+             OR (nested_entry.value ->> 'accessory') NOT IN (
+               'none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie',
+               'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing',
+               'visor_shades', 'gas_mask'
+             )
+             OR (nested_entry.value ->> 'hat') NOT IN (
+               'none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns',
+               'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet',
+               'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'
+             )
+             OR (nested_entry.value ->> 'expression') NOT IN (
+               'neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry',
+               'surprised', 'smirk', 'crying'
+             )
+             OR (nested_entry.value ->> 'backItem') NOT IN (
+               'none', 'cape', 'backpack', 'wings', 'jetpack', 'shield',
+               'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket',
+               'scroll', 'boombox'
+             )
+             OR (nested_entry.value ->> 'facialHair') NOT IN (
+               'none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu',
+               'sideburns', 'soul_patch'
+             )
+             OR (nested_entry.value ->> 'pet') NOT IN (
+               'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab',
+               'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones', 'swan'
+             )
+             OR (nested_entry.value ->> 'aura') NOT IN (
+               'none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow',
+               'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'
+             )
+             OR (nested_entry.value ->> 'handItem') NOT IN (
+               'none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand',
+               'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'
+             ) THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'whiteboardNotes' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'array'
+           OR jsonb_array_length(preference_entry.value) > 8 THEN
+          RETURN false;
+        END IF;
+        FOR nested_entry IN SELECT value FROM jsonb_array_elements(preference_entry.value)
+        LOOP
+          IF jsonb_typeof(nested_entry.value) <> 'string' THEN RETURN false; END IF;
+          text_value := nested_entry.value #>> '{}';
+          IF length(btrim(text_value)) NOT BETWEEN 1 AND 80
+             OR octet_length(text_value) > 320 THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'budgetConfig' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object'
+           OR jsonb_typeof(preference_entry.value -> 'enabled') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS budget_key
+          WHERE budget_key NOT IN ('enabled', 'daily', 'weekly', 'monthly', 'hardLimit')
+        ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'hardLimit'
+           AND jsonb_typeof(preference_entry.value -> 'hardLimit') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        FOREACH state_key IN ARRAY ARRAY['daily', 'weekly', 'monthly']
+        LOOP
+          IF preference_entry.value ? state_key THEN
+            IF jsonb_typeof(preference_entry.value -> state_key) <> 'number' THEN
+              RETURN false;
+            END IF;
+            numeric_value := (preference_entry.value ->> state_key)::numeric;
+            IF numeric_value <= 0 OR numeric_value > 1000000 THEN RETURN false; END IF;
+          END IF;
+        END LOOP;
+
+      WHEN 'idleConfig' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object'
+           OR jsonb_typeof(preference_entry.value -> 'masterEnabled') <> 'boolean'
+           OR jsonb_typeof(preference_entry.value -> 'behaviors') <> 'object' THEN
+          RETURN false;
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS idle_key
+          WHERE idle_key NOT IN ('masterEnabled', 'behaviors')
+        ) THEN
+          RETURN false;
+        END IF;
+        SELECT count(*) INTO entry_count
+        FROM jsonb_object_keys(preference_entry.value -> 'behaviors');
+        IF entry_count > 64 THEN RETURN false; END IF;
+        FOR behavior_entry IN
+          SELECT key, value FROM jsonb_each(preference_entry.value -> 'behaviors')
+        LOOP
+          IF length(behavior_entry.key) NOT BETWEEN 1 AND 80
+             OR octet_length(behavior_entry.key) > 320
+             OR jsonb_typeof(behavior_entry.value) <> 'object'
+             OR jsonb_typeof(behavior_entry.value -> 'enabled') <> 'boolean'
+             OR jsonb_typeof(behavior_entry.value -> 'cooldownMinutes') <> 'number'
+             OR NOT (behavior_entry.value ? 'lastRanAt') THEN
+            RETURN false;
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM jsonb_object_keys(behavior_entry.value) AS behavior_key
+            WHERE behavior_key NOT IN ('enabled', 'cooldownMinutes', 'lastRanAt')
+          ) THEN
+            RETURN false;
+          END IF;
+          numeric_value := (behavior_entry.value ->> 'cooldownMinutes')::numeric;
+          IF numeric_value <> trunc(numeric_value)
+             OR numeric_value < 1
+             OR numeric_value > 10080 THEN
+            RETURN false;
+          END IF;
+          IF jsonb_typeof(behavior_entry.value -> 'lastRanAt') = 'string' THEN
+            text_value := behavior_entry.value ->> 'lastRanAt';
+            IF length(text_value) > 40
+               OR text_value !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$' THEN
+              RETURN false;
+            END IF;
+          ELSIF jsonb_typeof(behavior_entry.value -> 'lastRanAt') <> 'null' THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'agentFilterMode' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'string'
+           OR (preference_entry.value #>> '{}') NOT IN ('all', 'mine', 'active', 'bonded') THEN
+          RETURN false;
+        END IF;
+
+      WHEN 'telegramMetadata' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count NOT BETWEEN 1 AND 2
+           OR EXISTS (
+             SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS telegram_key
+             WHERE telegram_key NOT IN ('chatId', 'botName')
+           ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'chatId' THEN
+          IF jsonb_typeof(preference_entry.value -> 'chatId') <> 'string'
+             OR (preference_entry.value ->> 'chatId') !~ '^(-?[0-9]{1,20}|@[A-Za-z0-9_]{5,64})$' THEN
+            RETURN false;
+          END IF;
+        END IF;
+        IF preference_entry.value ? 'botName' THEN
+          IF jsonb_typeof(preference_entry.value -> 'botName') <> 'string'
+             OR (preference_entry.value ->> 'botName') !~ '^[A-Za-z0-9_]{1,64}$' THEN
+            RETURN false;
+          END IF;
+        END IF;
+
+      ELSE
+        RETURN false;
+    END CASE;
+  END LOOP;
+
+  RETURN true;
+EXCEPTION WHEN OTHERS THEN
+  RETURN false;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.validate_office_user_preferences_v1(jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.office_user_preferences (
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  preferences jsonb NOT NULL DEFAULT '{}'::jsonb,
+  revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (user_id, circle_id)
+);
+
+ALTER TABLE public.office_user_preferences
+  DROP CONSTRAINT IF EXISTS office_user_preferences_document_valid;
+ALTER TABLE public.office_user_preferences
+  ADD CONSTRAINT office_user_preferences_document_valid
+  CHECK (public.validate_office_user_preferences_v1(preferences));
+
+ALTER TABLE public.office_user_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.office_user_preferences FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS office_user_preferences_select_own ON public.office_user_preferences;
+CREATE POLICY office_user_preferences_select_own
+ON public.office_user_preferences
+FOR SELECT
+TO authenticated
+USING (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = office_user_preferences.circle_id
+      AND membership.user_id = auth.uid()
+  )
+);
+
+REVOKE ALL ON TABLE public.office_user_preferences FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.office_user_preferences TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.read_my_office_preferences_v1(
+  p_circle_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  stored_preferences jsonb;
+  stored_revision bigint;
+  stored_updated_at timestamptz;
+BEGIN
+  IF actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501';
+  END IF;
+  IF p_circle_id IS NULL THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = actor_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT preferences, revision, updated_at
+  INTO stored_preferences, stored_revision, stored_updated_at
+  FROM public.office_user_preferences
+  WHERE user_id = actor_id
+    AND circle_id = p_circle_id;
+
+  RETURN jsonb_build_object(
+    'preferences', coalesce(stored_preferences, '{}'::jsonb),
+    'revision', coalesce(stored_revision, 0),
+    'updatedAt', to_jsonb(stored_updated_at)
+  );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.patch_my_office_preferences_v1(
+  p_circle_id uuid,
+  p_patch jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  patch_entry record;
+  next_preferences jsonb;
+  accepted_revision bigint;
+  accepted_updated_at timestamptz;
+  patch_key_count integer;
+BEGIN
+  IF actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501';
+  END IF;
+  IF p_circle_id IS NULL THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = actor_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  IF p_patch IS NULL
+     OR jsonb_typeof(p_patch) <> 'object'
+     OR octet_length(p_patch::text) > 131072 THEN
+    RAISE EXCEPTION 'invalid_office_preferences_patch' USING ERRCODE = '22023';
+  END IF;
+  SELECT count(*) INTO patch_key_count FROM jsonb_object_keys(p_patch);
+  IF patch_key_count NOT BETWEEN 1 AND 7
+     OR EXISTS (
+       SELECT 1
+       FROM jsonb_object_keys(p_patch) AS patch_key
+       WHERE patch_key NOT IN (
+         'agentNames',
+         'appearances',
+         'whiteboardNotes',
+         'budgetConfig',
+         'idleConfig',
+         'agentFilterMode',
+         'telegramMetadata'
+       )
+     )
+     OR public.office_preferences_contains_secret_key_v1(p_patch) THEN
+    RAISE EXCEPTION 'invalid_office_preferences_patch' USING ERRCODE = '22023';
+  END IF;
+
+  -- Establish and lock the exact owner+circle row. A concurrent first writer
+  -- waits on the same unique key, then reads the winner before applying its own
+  -- disjoint top-level patch; no client read/merge race is possible.
+  INSERT INTO public.office_user_preferences(user_id, circle_id)
+  VALUES (actor_id, p_circle_id)
+  ON CONFLICT (user_id, circle_id) DO NOTHING;
+
+  SELECT preferences
+  INTO next_preferences
+  FROM public.office_user_preferences
+  WHERE user_id = actor_id
+    AND circle_id = p_circle_id
+  FOR UPDATE;
+
+  IF next_preferences IS NULL THEN
+    RAISE EXCEPTION 'office_preferences_row_unavailable' USING ERRCODE = '55000';
+  END IF;
+
+  FOR patch_entry IN SELECT key, value FROM jsonb_each(p_patch)
+  LOOP
+    next_preferences := next_preferences - patch_entry.key;
+    IF patch_entry.value <> 'null'::jsonb THEN
+      next_preferences := next_preferences || jsonb_build_object(patch_entry.key, patch_entry.value);
+    END IF;
+  END LOOP;
+
+  IF NOT public.validate_office_user_preferences_v1(next_preferences)
+     OR octet_length(next_preferences::text) > 131072 THEN
+    RAISE EXCEPTION 'invalid_office_preferences_document' USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.office_user_preferences
+  SET preferences = next_preferences,
+      revision = revision + 1,
+      updated_at = clock_timestamp()
+  WHERE user_id = actor_id
+    AND circle_id = p_circle_id
+  RETURNING revision, updated_at INTO accepted_revision, accepted_updated_at;
+
+  -- Value-free receipt: it proves the server-accepted revision and timestamp
+  -- without reflecting any preference or credential-adjacent caller input.
+  RETURN jsonb_build_object(
+    'schemaVersion', 1,
+    'accepted', true,
+    'revision', accepted_revision,
+    'updatedAt', accepted_updated_at
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.read_my_office_preferences_v1(uuid)
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.read_my_office_preferences_v1(uuid)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)
+  TO authenticated;
+
+-- Remove the known legacy Telegram credential object from the circle-readable
+-- profile blob. The UPDATE transforms rows in place and never selects, returns,
+-- logs, or copies the values. Reapplication is a no-op once the key is absent.
+DO $legacy_telegram_scrub$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'office_preferences'
+         AND NOT attisdropped
+     ) THEN
+    UPDATE public.profiles
+    SET office_preferences = office_preferences
+      - 'telegramConfig'
+      - 'agentNames'
+      - 'whiteboardNotes'
+      - 'budgetConfig'
+      - 'idleConfig'
+      - 'agentFilterMode'
+      - 'appearances'
+    WHERE jsonb_typeof(office_preferences) = 'object'
+      AND office_preferences ?| ARRAY[
+        'telegramConfig',
+        'agentNames',
+        'whiteboardNotes',
+        'budgetConfig',
+        'idleConfig',
+        'agentFilterMode',
+        'appearances'
+      ];
+  END IF;
+END;
+$legacy_telegram_scrub$;
+
+-- `profiles.agent_appearance` was a second circle-readable legacy store for
+-- the same private appearance map. Erase it in place without projecting its
+-- contents. The canonical owner-private copy now lives in
+-- `office_user_preferences.preferences.appearances`.
+DO $legacy_agent_appearance_scrub$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'agent_appearance'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     ) THEN
+    UPDATE public.profiles
+    SET agent_appearance = '{}'::jsonb
+    WHERE agent_appearance IS DISTINCT FROM '{}'::jsonb;
+  END IF;
+END;
+$legacy_agent_appearance_scrub$;
+
+CREATE OR REPLACE FUNCTION public.strip_legacy_private_office_profile_keys_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF NEW.office_preferences IS NOT NULL
+     AND jsonb_typeof(NEW.office_preferences) = 'object' THEN
+    NEW.office_preferences := NEW.office_preferences
+      - 'telegramConfig'
+      - 'agentNames'
+      - 'whiteboardNotes'
+      - 'budgetConfig'
+      - 'idleConfig'
+      - 'agentFilterMode'
+      - 'appearances';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.strip_legacy_private_office_profile_keys_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+DO $legacy_profile_trigger$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'office_preferences'
+         AND NOT attisdropped
+     ) THEN
+    DROP TRIGGER IF EXISTS strip_legacy_private_office_profile_keys_v1
+      ON public.profiles;
+    CREATE TRIGGER strip_legacy_private_office_profile_keys_v1
+    BEFORE INSERT OR UPDATE OF office_preferences ON public.profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION public.strip_legacy_private_office_profile_keys_v1();
+  END IF;
+END;
+$legacy_profile_trigger$;
+
+-- Keep the legacy appearance column empty even while older clients still
+-- include it in profile inserts or updates. Only this deprecated field is
+-- normalized; every unrelated NEW profile field passes through unchanged.
+CREATE OR REPLACE FUNCTION public.strip_legacy_private_office_agent_appearance_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  NEW.agent_appearance := '{}'::jsonb;
+  RETURN NEW;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.strip_legacy_private_office_agent_appearance_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+DO $legacy_agent_appearance_trigger$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'agent_appearance'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     ) THEN
+    DROP TRIGGER IF EXISTS strip_legacy_private_office_agent_appearance_v1
+      ON public.profiles;
+    CREATE TRIGGER strip_legacy_private_office_agent_appearance_v1
+    BEFORE INSERT OR UPDATE OF agent_appearance ON public.profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION public.strip_legacy_private_office_agent_appearance_v1();
+  END IF;
+END;
+$legacy_agent_appearance_trigger$;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 45: Owner-private Office user preferences

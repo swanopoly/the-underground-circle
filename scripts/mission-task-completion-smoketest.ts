@@ -11,11 +11,64 @@
  */
 
 import assert from 'node:assert/strict';
+import type { OpenSwanTerminalReceipt } from '../src/lib/openswanSessionRuntimeAdapters';
 
 import {
   assessMissionTaskCompletion,
   shouldMarkMissionTaskComplete,
 } from '../src/lib/missionTaskCompletion';
+
+function terminal(
+  state: OpenSwanTerminalReceipt['state'],
+  completionVerified: boolean,
+  reason: OpenSwanTerminalReceipt['reason'],
+  resumable = false,
+): OpenSwanTerminalReceipt {
+  return { state, reason, completionVerified, resumable, checkpoint: null };
+}
+
+for (const [receipt, reason] of [
+  [terminal('partial', false, 'step_cap', true), 'terminal_partial'],
+  [terminal('failed', false, 'edge_failure'), 'terminal_failed'],
+  [terminal('cancelled', false, 'user_cancelled'), 'terminal_cancelled'],
+  [terminal('succeeded', false, 'clean_end_turn'), 'terminal_unverified'],
+] as const) {
+  const a = assessMissionTaskCompletion({
+    response: 'Everything is done, shipped, and verified successfully.',
+    toolEvents: [{ status: 'completed' }],
+    verificationResults: [{ ok: true, status: 'completed' }],
+    artifacts: [{ kind: 'file' }],
+    terminal: receipt,
+  });
+  assert.equal(a.completed, false, `${receipt.state}/${receipt.completionVerified} cannot be talked into done`);
+  assert.equal(a.reason, reason, `${receipt.state}/${receipt.completionVerified} keeps typed reason`);
+}
+
+{
+  const malformed = assessMissionTaskCompletion({
+    response: 'Done.',
+    terminal: { completionVerified: true } as any,
+  });
+  assert.equal(malformed.completed, false, 'malformed supplied terminal fails closed');
+  assert.equal(malformed.reason, 'terminal_failed');
+}
+
+// A verified terminal is necessary but legacy evidence checks remain active.
+{
+  const verified = terminal('succeeded', true, 'clean_end_turn');
+  assert.equal(
+    assessMissionTaskCompletion({ response: 'Shipped and verified.', terminal: verified }).completed,
+    true,
+    'succeeded + verified terminal may complete',
+  );
+  const failedTool = assessMissionTaskCompletion({
+    response: 'Done.',
+    terminal: verified,
+    toolEvents: [{ status: 'failed' }],
+  });
+  assert.equal(failedTool.completed, false, 'typed success does not conceal contradictory failed evidence');
+  assert.equal(failedTool.reason, 'failed_tool');
+}
 
 // ── A clean, evidenced run reads done ────────────────────────────────────────
 {
@@ -72,9 +125,9 @@ for (const phrase of [
 }
 
 // ── Fail-closed: PARTIAL / step-cap runs → not done ──────────────────────────
-// The session runtime drops the typed `incomplete` flag before the dispatcher;
-// the "partial / resumable / step cap / continue" wording in the reply is the
-// last defense against a truncated run reading as complete.
+// Legacy callers may omit the terminal receipt; the "partial / resumable / step
+// cap / continue" wording remains their last defense against a truncated run
+// reading as complete.
 for (const phrase of [
   'Hit the per-turn step cap after 12 steps; partial and resumable.',
   'The tool loop hit its step cap before finishing; the response may be partial.',

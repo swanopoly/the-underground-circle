@@ -88,8 +88,8 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
             { label: 'INPUT', value: formatTokens(agent.inputTokens) },
             { label: 'OUTPUT', value: formatTokens(agent.outputTokens) },
             { label: 'CACHED', value: formatTokens(agent.cachedTokens) },
-            { label: 'SESSION COST', value: `$${agent.costToday.toFixed(4)}` },
-            { label: 'COST / TURN', value: agent.turns > 0 ? `$${(agent.costToday / agent.turns).toFixed(4)}` : '—' },
+            { label: 'COST TODAY', value: `$${agent.costToday.toFixed(4)}` },
+            { label: 'COST / TURN', value: agent.turns > 0 ? `$${((agent.sessionCostToday ?? agent.costToday) / agent.turns).toFixed(4)}` : '—' },
           ].map(metric => (
             <View key={metric.label} style={{ width: '31%' }}>
               <Text style={{ color: '#f0f0f5', fontSize: 16, fontWeight: '700', fontFamily: MONO }}>{metric.value}</Text>

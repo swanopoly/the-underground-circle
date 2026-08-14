@@ -411,7 +411,7 @@ function textStyleFor(block: Block): any {
     return { fontSize: sizes[(block.level || 2) as 1 | 2 | 3], fontWeight: "900", letterSpacing: 2, color: "#fff" };
   }
   if (block.type === "code") {
-    return { backgroundColor: "#0a0a0a", padding: 8, borderWidth: 1, borderColor: "#333", borderRadius: 2, color: "#22d3ee", fontSize: 12 };
+    return { backgroundColor: "#0a0a0a", padding: 8, borderWidth: 1, borderColor: "#333", borderRadius: 2, color: "#6366f1", fontSize: 12 };
   }
   if (block.type === "callout") {
     return { backgroundColor: "#0a0a0a", padding: 8, borderWidth: 1, borderColor: "#f59e0b", borderRadius: 2, borderLeftWidth: 3, color: "#fff", fontSize: 13 };
@@ -490,7 +490,7 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   codeIconText: {
-    color: "#22d3ee",
+    color: "#6366f1",
     fontFamily: "monospace",
     fontSize: 10,
     fontWeight: "900",
@@ -578,18 +578,18 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(99, 102, 241, 0.67)",
     borderRadius: 2,
-    backgroundColor: "#22d3ee15",
+    backgroundColor: "#6366f115",
   },
   aiBadgeText: {
-    color: "#22d3ee",
+    color: "#6366f1",
     fontFamily: "monospace",
     fontSize: 9,
     fontWeight: "900",
     letterSpacing: 1.5,
   },
   mentionChip: {
-    color: "#22d3ee",
-    backgroundColor: "#22d3ee15",
+    color: "#6366f1",
+    backgroundColor: "#6366f115",
     fontWeight: "900",
   },
 });

@@ -34,6 +34,13 @@ import {
   evaluateDedupeEligibility,
   memoryWriteScopePolicy,
 } from './memoryWritePolicyCore';
+import { buildAgentRuntimeSubjectPayload, type AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+import {
+  buildConnectedAgentAcceptedRunProjection,
+  type ConnectedAgentHandoffReceipt,
+} from './connectedAgentHandoffCore';
+import { bucketRunForHistory } from './runHistoryFilterCore';
+import { isAwaitingConnectedAgentResultMetadata } from './officeOpsBoard';
 
 /**
  * Fire-and-forget embed-on-write.
@@ -55,6 +62,15 @@ function queueMemoryEmbeddingSafe(memoryId: string, title?: string | null, conte
 
 export type RunSurface = 'main_chat' | 'room_chat' | 'feed_task' | 'office_terminal' | 'floating_chat' | 'scheduled' | 'api';
 export type RunStatus = 'queued' | 'planning' | 'running' | 'waiting_approval' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type GuardedRunFinalizationResult =
+  | { outcome: 'applied'; status: 'completed' | 'failed' }
+  | { outcome: 'cancelled'; status: 'cancelled' }
+  | { outcome: 'not_found'; status: null }
+  | {
+      outcome: 'error';
+      status: RunStatus | null;
+      reason: 'write_failed' | 'reconcile_failed' | 'guard_not_applied';
+    };
 export type StepKind = 'plan' | 'thinking' | 'tool_call' | 'tool_result' | 'message' | 'artifact_create' | 'approval_request' | 'approval_result' | 'delegation' | 'error' | 'finalize' | 'context_edit';
 export type ArtifactKind = 'text' | 'code_patch' | 'image' | 'screenshot' | 'report' | 'webpage' | 'table' | 'research_brief' | 'design_spec' | 'social_post' | 'email_draft' | 'spec_doc' | 'checklist' | 'link_bundle' | 'audio' | 'video' | 'file' | 'diff' | 'translation' | 'classification' | 'test_result';
 export type ApprovalKind = 'tool_use' | 'publish' | 'external_send' | 'file_write' | 'browser_action' | 'cost_threshold' | 'privileged_action' | 'plan_approval' | 'deliverable_review';
@@ -71,6 +87,10 @@ export interface AgentRun {
   room_id?: string;
   task_id?: string;
   chat_session_id?: string;
+  /** Canonical Circle Chat thread lineage. Distinct from legacy chat_sessions. */
+  thread_id?: string;
+  /** Exact persisted user message that originated this run. */
+  source_message_id?: string;
   title: string;
   goal?: string;
   mode: string;
@@ -259,6 +279,7 @@ export function projectPersistedRunStepForDisplay(step: Pick<
 export interface RunArtifact {
   id: string;
   run_id: string;
+  circle_id: string;
   step_id?: string;
   artifact_kind: ArtifactKind;
   title: string;
@@ -269,6 +290,179 @@ export interface RunArtifact {
   is_published: boolean;
   created_at: string;
   metadata: Record<string, unknown>;
+}
+
+export const AGENT_RUN_ARTIFACT_CONTENT_DIGEST_VERSION = 1 as const;
+export const AGENT_RUN_ARTIFACT_CONTENT_DIGEST_PREFIX = 'sha256:' as const;
+const AGENT_RUN_ARTIFACT_CONTENT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+export interface AgentRunArtifactContentDigestMetadata {
+  contentDigestVersion: typeof AGENT_RUN_ARTIFACT_CONTENT_DIGEST_VERSION;
+  contentDigest: string;
+}
+
+/**
+ * UTF-8 bytes without a platform crypto/TextEncoder dependency. Agent artifacts
+ * are created on web and native surfaces, so the durable content binding must
+ * not silently disappear when Web Crypto is unavailable in one runtime.
+ */
+function artifactContentUtf8Bytes(value: string): number[] {
+  const bytes: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    let codePoint = value.charCodeAt(index);
+    if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + (low - 0xdc00);
+        index += 1;
+      } else {
+        codePoint = 0xfffd;
+      }
+    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
+      codePoint = 0xfffd;
+    }
+
+    if (codePoint <= 0x7f) {
+      bytes.push(codePoint);
+    } else if (codePoint <= 0x7ff) {
+      bytes.push(0xc0 | (codePoint >>> 6), 0x80 | (codePoint & 0x3f));
+    } else if (codePoint <= 0xffff) {
+      bytes.push(
+        0xe0 | (codePoint >>> 12),
+        0x80 | ((codePoint >>> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    } else {
+      bytes.push(
+        0xf0 | (codePoint >>> 18),
+        0x80 | ((codePoint >>> 12) & 0x3f),
+        0x80 | ((codePoint >>> 6) & 0x3f),
+        0x80 | (codePoint & 0x3f),
+      );
+    }
+  }
+  return bytes;
+}
+
+/** Pure, deterministic SHA-256 for the exact UTF-8 artifact content bytes. */
+export function buildAgentRunArtifactContentDigest(content: string): string {
+  const bytes = artifactContentUtf8Bytes(content);
+  const bitLength = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  const highBits = Math.floor(bitLength / 0x100000000);
+  const lowBits = bitLength >>> 0;
+  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((highBits >>> shift) & 0xff);
+  for (let shift = 24; shift >= 0; shift -= 8) bytes.push((lowBits >>> shift) & 0xff);
+
+  const roundConstants = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const state = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+  const rotateRight = (value: number, count: number): number => (
+    (value >>> count) | (value << (32 - count))
+  );
+
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    const words = new Array<number>(64).fill(0);
+    for (let word = 0; word < 16; word += 1) {
+      const byteOffset = offset + word * 4;
+      words[word] = (
+        (bytes[byteOffset]! << 24)
+        | (bytes[byteOffset + 1]! << 16)
+        | (bytes[byteOffset + 2]! << 8)
+        | bytes[byteOffset + 3]!
+      ) >>> 0;
+    }
+    for (let word = 16; word < 64; word += 1) {
+      const first = words[word - 15]!;
+      const second = words[word - 2]!;
+      const sigma0 = rotateRight(first, 7) ^ rotateRight(first, 18) ^ (first >>> 3);
+      const sigma1 = rotateRight(second, 17) ^ rotateRight(second, 19) ^ (second >>> 10);
+      words[word] = (words[word - 16]! + sigma0 + words[word - 7]! + sigma1) >>> 0;
+    }
+
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let round = 0; round < 64; round += 1) {
+      const sum1 = rotateRight(e!, 6) ^ rotateRight(e!, 11) ^ rotateRight(e!, 25);
+      const choose = (e! & f!) ^ (~e! & g!);
+      const temporary1 = (h! + sum1 + choose + roundConstants[round]! + words[round]!) >>> 0;
+      const sum0 = rotateRight(a!, 2) ^ rotateRight(a!, 13) ^ rotateRight(a!, 22);
+      const majority = (a! & b!) ^ (a! & c!) ^ (b! & c!);
+      const temporary2 = (sum0 + majority) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d! + temporary1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temporary1 + temporary2) >>> 0;
+    }
+    state[0] = (state[0]! + a!) >>> 0;
+    state[1] = (state[1]! + b!) >>> 0;
+    state[2] = (state[2]! + c!) >>> 0;
+    state[3] = (state[3]! + d!) >>> 0;
+    state[4] = (state[4]! + e!) >>> 0;
+    state[5] = (state[5]! + f!) >>> 0;
+    state[6] = (state[6]! + g!) >>> 0;
+    state[7] = (state[7]! + h!) >>> 0;
+  }
+
+  return AGENT_RUN_ARTIFACT_CONTENT_DIGEST_PREFIX
+    + state.map((word) => word!.toString(16).padStart(8, '0')).join('');
+}
+
+export function readAgentRunArtifactContentDigest(
+  metadata: unknown,
+): AgentRunArtifactContentDigestMetadata | null {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const record = metadata as Record<string, unknown>;
+  if (
+    record.contentDigestVersion !== AGENT_RUN_ARTIFACT_CONTENT_DIGEST_VERSION
+    || typeof record.contentDigest !== 'string'
+    || !AGENT_RUN_ARTIFACT_CONTENT_DIGEST_RE.test(record.contentDigest)
+  ) return null;
+  return {
+    contentDigestVersion: AGENT_RUN_ARTIFACT_CONTENT_DIGEST_VERSION,
+    contentDigest: record.contentDigest,
+  };
+}
+
+/**
+ * A canonical row is usable only when its recomputed content hash agrees with
+ * both the row-owned digest and the independently persisted Chat pointer.
+ */
+export function verifyAgentRunArtifactContentDigest(
+  content: unknown,
+  rowMetadata: unknown,
+  pointerMetadata: unknown,
+): boolean {
+  if (typeof content !== 'string') return false;
+  const rowDigest = readAgentRunArtifactContentDigest(rowMetadata);
+  const pointerDigest = readAgentRunArtifactContentDigest(pointerMetadata);
+  return rowDigest !== null
+    && pointerDigest !== null
+    && rowDigest.contentDigest === pointerDigest.contentDigest
+    && buildAgentRunArtifactContentDigest(content) === rowDigest.contentDigest;
 }
 
 export interface RunApproval {
@@ -371,16 +565,22 @@ function readAgentSubjectKeyFromRunMetadata(
     || clean(targetSubject.agentSubjectKey);
 }
 
-/** True for the PostgREST/Postgres shapes of "that column isn't there".
- *  Lets `createRun` write `agent_id` before the O6 migration has been applied to
- *  a given database without ever failing the run itself. */
-function isMissingAgentIdColumnError(error: unknown): boolean {
-  const e = error as { code?: string; message?: string } | null;
-  if (!e) return false;
+/**
+ * Resolve one optional forward-compatible run column from Postgres/PostgREST's
+ * "column missing" shapes. We retry only an exact known key; arbitrary schema
+ * or constraint failures still fail closed.
+ */
+function readMissingOptionalRunColumn(
+  error: unknown,
+  candidates: readonly string[],
+): string | null {
+  const e = error as { code?: string; message?: string; details?: string; hint?: string } | null;
+  if (!e) return null;
   // 42703 = undefined_column (Postgres); PGRST204 = unknown column (PostgREST cache)
-  if (e.code === '42703' || e.code === 'PGRST204') return true;
-  const msg = String(e.message || '').toLowerCase();
-  return msg.includes('agent_id') && (msg.includes('column') || msg.includes('schema cache'));
+  if (e.code !== '42703' && e.code !== 'PGRST204') return null;
+  const serialized = [e.message, e.details, e.hint].map((value) => String(value || '')).join(' ').toLowerCase();
+  if (!serialized.includes('column') && !serialized.includes('schema cache')) return null;
+  return candidates.find((candidate) => serialized.includes(candidate.toLowerCase())) || null;
 }
 
 export async function createRun(opts: {
@@ -394,6 +594,10 @@ export async function createRun(opts: {
   provider?: string;
   roomId?: string;
   taskId?: string;
+  /** Canonical `circle_chat_threads.id`; never write it to chat_session_id. */
+  threadId?: string;
+  /** Exact persisted source user-message UUID for Chat-originated runs. */
+  sourceMessageId?: string;
   chatSessionId?: string;
   parentRunId?: string;
   delegatedTo?: string;
@@ -414,6 +618,8 @@ export async function createRun(opts: {
     provider: opts.provider,
     room_id: opts.roomId,
     task_id: opts.taskId,
+    thread_id: opts.threadId,
+    source_message_id: opts.sourceMessageId,
     chat_session_id: opts.chatSessionId,
     parent_run_id: opts.parentRunId,
     delegated_to: opts.delegatedTo,
@@ -431,19 +637,88 @@ export async function createRun(opts: {
   const insert = (payload: Record<string, unknown>) =>
     supabase.from('agent_runs').insert(payload).select().single();
 
-  let { data, error } = await insert(agentId ? { ...base, agent_id: agentId } : base);
+  let payload: Record<string, unknown> = agentId ? { ...base, agent_id: agentId } : { ...base };
+  let { data, error } = await insert(payload);
 
-  // Fail-soft: a database that hasn't run RUN_THIS_SQL.sql §25 yet must still be
-  // able to create runs. Retry without the column rather than losing the run —
-  // attribution degrades to the name-matching fallback, which is exactly the
-  // pre-O6 behaviour.
-  if (error && agentId && isMissingAgentIdColumnError(error)) {
-    console.warn('[AgentRunSystem] agent_runs.agent_id missing — run RUN_THIS_SQL.sql §25; falling back to name attribution');
-    ({ data, error } = await insert(base));
+  // Forward-compatible rollout: source/thread lineage and canonical agent
+  // identity are independently optional on an older database. Drop only the
+  // exact column PostgREST says is missing, retry each at most once, and keep
+  // every unrelated constraint/RLS/FK failure fatal.
+  const optionalColumns = ['agent_id', 'thread_id', 'source_message_id'] as const;
+  const omitted = new Set<string>();
+  while (error && omitted.size < optionalColumns.length) {
+    const missing = readMissingOptionalRunColumn(
+      error,
+      optionalColumns.filter((column) => Object.prototype.hasOwnProperty.call(payload, column)),
+    );
+    if (!missing) break;
+    omitted.add(missing);
+    const { [missing]: _omitted, ...retryPayload } = payload;
+    payload = retryPayload;
+    console.warn(`[AgentRunSystem] agent_runs.${missing} missing; run the canonical consolidated SQL. Retrying without that optional lineage column.`);
+    ({ data, error } = await insert(payload));
   }
 
   if (error) { console.error('[AgentRunSystem] createRun error:', error); return null; }
   return mapRun(data);
+}
+
+/**
+ * Record a bridge/session acceptance as a canonical, deliberately nonterminal
+ * Office-visible run. The external provider has not yet supplied a typed final
+ * result, so this row stays `queued`, has no heartbeat, and cannot be promoted
+ * to completed by this helper. The circle-chat thread id is metadata only: it
+ * is not the unrelated legacy `chat_sessions` foreign key.
+ */
+export async function recordConnectedAgentAcceptedRun(opts: {
+  circleId: string;
+  userId: string;
+  task: string;
+  taskId?: string | null;
+  sourceTaskRunId?: string | null;
+  threadId?: string | null;
+  surface?: 'main_chat' | 'office_terminal' | 'feed_task';
+  externalDispatchKind?: 'sessions_send' | 'sessions_spawn' | null;
+  externalConnectionId?: string | null;
+  receipt: ConnectedAgentHandoffReceipt;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+}): Promise<AgentRun | null> {
+  const circleId = String(opts.circleId || '').trim();
+  const userId = String(opts.userId || '').trim();
+  if (!circleId || !userId) return null;
+
+  const projection = buildConnectedAgentAcceptedRunProjection({
+    receipt: opts.receipt,
+    task: opts.task,
+    threadId: opts.threadId,
+    surface: opts.surface,
+    externalDispatchKind: opts.externalDispatchKind,
+    externalConnectionId: opts.externalConnectionId,
+  });
+  if (!projection) return null;
+
+  const subjectPayload = buildAgentRuntimeSubjectPayload({
+    agentName: opts.receipt.actor,
+    agentSubjectMetadata: opts.agentSubjectMetadata || null,
+  });
+  const sourceTaskRunId = normalizeSourceRunId(opts.sourceTaskRunId);
+  return createRun({
+    circleId,
+    userId,
+    surface: projection.surface,
+    title: projection.title,
+    goal: projection.goal,
+    mode: projection.mode,
+    provider: projection.provider,
+    taskId: opts.taskId || undefined,
+    delegatedTo: projection.delegatedTo,
+    agentId: subjectPayload.subject?.agentSubjectKey,
+    metadata: {
+      ...projection.metadata,
+      ...subjectPayload.runMetadata,
+      ...(sourceTaskRunId ? { sourceTaskRunId } : {}),
+    },
+  });
 }
 
 // ── 2. Update Run Status ────────────────────────────────────────────────────
@@ -471,24 +746,77 @@ export async function updateRunStatus(
 // 'completed'. Callers that KNOW the turn was cancelled should keep using
 // updateRunStatus(runId, 'cancelled', extras) so the honest partial
 // usage/cost receipt still lands on the row.
-export async function completeRunUnlessCancelled(
+type GuardedRunFinalizationExtras = Partial<{
+  plan_summary: string;
+  current_step_index: number;
+  total_steps: number;
+  completed_at: string;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  estimated_cost: number;
+  metadata: Record<string, unknown>;
+}>;
+
+async function finalizeRunUnlessCancelled(
   runId: string,
-  extra?: Partial<{ plan_summary: string; current_step_index: number; total_steps: number; completed_at: string; input_tokens: number; output_tokens: number; cached_tokens: number; estimated_cost: number; metadata: Record<string, unknown> }>,
-): Promise<boolean> {
+  status: 'completed' | 'failed',
+  extra?: GuardedRunFinalizationExtras,
+): Promise<GuardedRunFinalizationResult> {
   const updates: Record<string, unknown> = {
-    status: 'completed',
+    status,
     updated_at: new Date().toISOString(),
     completed_at: new Date().toISOString(),
   };
   if (extra) Object.assign(updates, extra);
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('agent_runs')
     .update(updates)
     .eq('id', runId)
-    .neq('status', 'cancelled');
-  if (error) { console.error('[AgentRunSystem] completeRunUnlessCancelled error:', error); return false; }
-  return true;
+    .neq('status', 'cancelled')
+    .select('status')
+    .maybeSingle();
+  if (error) {
+    console.error(`[AgentRunSystem] ${status} unless cancelled write error:`, error);
+    return { outcome: 'error', status: null, reason: 'write_failed' };
+  }
+
+  const appliedStatus = (data as { status?: RunStatus } | null)?.status;
+  if (appliedStatus === status) return { outcome: 'applied', status };
+  if (appliedStatus === 'cancelled') return { outcome: 'cancelled', status: 'cancelled' };
+  if (data) {
+    return {
+      outcome: 'error',
+      status: appliedStatus || null,
+      reason: 'guard_not_applied',
+    };
+  }
+
+  // The guarded update matched no row. Reconcile once so callers can tell a
+  // real concurrent STOP from a missing/RLS-hidden row; never guess that every
+  // no-op was cancellation.
+  const { data: current, error: reconcileError } = await supabase
+    .from('agent_runs')
+    .select('status')
+    .eq('id', runId)
+    .maybeSingle();
+  if (reconcileError) {
+    console.error(`[AgentRunSystem] ${status} unless cancelled reconcile error:`, reconcileError);
+    return { outcome: 'error', status: null, reason: 'reconcile_failed' };
+  }
+  if (!current) return { outcome: 'not_found', status: null };
+
+  const currentStatus = (current as { status?: RunStatus }).status || null;
+  if (currentStatus === 'cancelled') return { outcome: 'cancelled', status: 'cancelled' };
+  return { outcome: 'error', status: currentStatus, reason: 'guard_not_applied' };
+}
+
+export async function completeRunUnlessCancelled(
+  runId: string,
+  extra?: GuardedRunFinalizationExtras,
+): Promise<GuardedRunFinalizationResult> {
+  return finalizeRunUnlessCancelled(runId, 'completed', extra);
 }
 
 // Cancel-guarded failure finalize: the mirror of completeRunUnlessCancelled but
@@ -499,22 +827,9 @@ export async function completeRunUnlessCancelled(
 // stuck at 'running' until a heartbeat reaper claims it ~RUN_STALL_DEAD_MS later.
 export async function failRunUnlessCancelled(
   runId: string,
-  extra?: Partial<{ plan_summary: string; current_step_index: number; total_steps: number; completed_at: string; input_tokens: number; output_tokens: number; cached_tokens: number; estimated_cost: number; metadata: Record<string, unknown> }>,
-): Promise<boolean> {
-  const updates: Record<string, unknown> = {
-    status: 'failed',
-    updated_at: new Date().toISOString(),
-    completed_at: new Date().toISOString(),
-  };
-  if (extra) Object.assign(updates, extra);
-
-  const { error } = await supabase
-    .from('agent_runs')
-    .update(updates)
-    .eq('id', runId)
-    .neq('status', 'cancelled');
-  if (error) { console.error('[AgentRunSystem] failRunUnlessCancelled error:', error); return false; }
-  return true;
+  extra?: GuardedRunFinalizationExtras,
+): Promise<GuardedRunFinalizationResult> {
+  return finalizeRunUnlessCancelled(runId, 'failed', extra);
 }
 
 // Cancel-guarded 'running' progress write: same shape as
@@ -540,33 +855,92 @@ export async function updateRunProgressUnlessCancelled(
   return true;
 }
 
+// `agent_runs.metadata` is a JSON object updated through a read/merge/write
+// sequence. Serialize those sequences per run inside this client, then use
+// updated_at as an optimistic cross-client compare-and-swap. A returned row
+// plus exact patch verification is required: Supabase may otherwise report no
+// error for an RLS-filtered/zero-row update, which must never count as durable
+// action proof.
+const runMetadataMergeBarriers = new Map<string, Promise<void>>();
+
+function metadataValueMatches(actual: unknown, expected: unknown): boolean {
+  if (Object.is(actual, expected)) return true;
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual)
+      && actual.length === expected.length
+      && expected.every((value, index) => metadataValueMatches(actual[index], value));
+  }
+  if (expected && typeof expected === 'object') {
+    if (!actual || typeof actual !== 'object' || Array.isArray(actual)) return false;
+    return Object.entries(expected as Record<string, unknown>).every(([key, value]) => (
+      Object.prototype.hasOwnProperty.call(actual, key)
+      && metadataValueMatches((actual as Record<string, unknown>)[key], value)
+    ));
+  }
+  return false;
+}
+
 export async function mergeRunMetadata(runId: string, patch: Record<string, unknown>): Promise<boolean> {
+  const definedPatch = Object.fromEntries(
+    Object.entries(patch).filter(([, value]) => value !== undefined),
+  );
+  const previous = runMetadataMergeBarriers.get(runId) ?? Promise.resolve();
+  let release!: () => void;
+  const ownBarrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  runMetadataMergeBarriers.set(runId, ownBarrier);
+
+  await previous.catch(() => undefined);
   try {
-    const { data, error } = await supabase
-      .from('agent_runs')
-      .select('metadata')
-      .eq('id', runId)
-      .single();
-    if (error) {
-      console.error('[AgentRunSystem] mergeRunMetadata load error:', error);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const { data, error } = await supabase
+        .from('agent_runs')
+        .select('metadata, updated_at')
+        .eq('id', runId)
+        .maybeSingle();
+      if (error || !data) {
+        console.error('[AgentRunSystem] mergeRunMetadata load error:', error || 'run_not_visible');
+        return false;
+      }
+      const observedUpdatedAt = String((data as { updated_at?: unknown }).updated_at || '');
+      if (!observedUpdatedAt) return false;
+      const nextMetadata = {
+        ...(((data as { metadata?: unknown }).metadata as Record<string, unknown> | null) || {}),
+        ...definedPatch,
+      };
+      const observedUpdatedAtMs = Date.parse(observedUpdatedAt);
+      const nextUpdatedAt = new Date(Math.max(
+        Date.now(),
+        Number.isFinite(observedUpdatedAtMs) ? observedUpdatedAtMs + 1 : Date.now(),
+      )).toISOString();
+      const { data: updated, error: updateError } = await supabase
+        .from('agent_runs')
+        .update({ metadata: nextMetadata, updated_at: nextUpdatedAt })
+        .eq('id', runId)
+        .eq('updated_at', observedUpdatedAt)
+        .select('metadata, updated_at')
+        .maybeSingle();
+      if (updateError) {
+        console.error('[AgentRunSystem] mergeRunMetadata update error:', updateError);
+        return false;
+      }
+      if (!updated) continue; // concurrent writer won; reload and merge again
+      const persistedMetadata = (updated as { metadata?: unknown }).metadata;
+      if (metadataValueMatches(persistedMetadata, definedPatch)) return true;
+      console.error('[AgentRunSystem] mergeRunMetadata verification failed');
       return false;
     }
-    const nextMetadata = {
-      ...((data as any)?.metadata || {}),
-      ...patch,
-    };
-    const { error: updateError } = await supabase
-      .from('agent_runs')
-      .update({ metadata: nextMetadata, updated_at: new Date().toISOString() })
-      .eq('id', runId);
-    if (updateError) {
-      console.error('[AgentRunSystem] mergeRunMetadata update error:', updateError);
-      return false;
-    }
-    return true;
+    console.error('[AgentRunSystem] mergeRunMetadata contention limit reached');
+    return false;
   } catch (err) {
     console.error('[AgentRunSystem] mergeRunMetadata exception:', err);
     return false;
+  } finally {
+    release();
+    if (runMetadataMergeBarriers.get(runId) === ownBarrier) {
+      runMetadataMergeBarriers.delete(runId);
+    }
   }
 }
 
@@ -830,6 +1204,25 @@ export async function addArtifact(opts: {
   filePath?: string;
   metadata?: Record<string, unknown>;
 }): Promise<RunArtifact | null> {
+  if (opts.content !== undefined && typeof opts.content !== 'string') return null;
+  const callerMetadata = Object.fromEntries(
+    Object.entries(opts.metadata || {}).filter(([key, value]) => (
+      value !== undefined
+      && key !== 'contentDigestVersion'
+      && key !== 'contentDigest'
+    )),
+  );
+  const contentDigestMetadata: AgentRunArtifactContentDigestMetadata | Record<string, never> =
+    typeof opts.content === 'string'
+      ? {
+          contentDigestVersion: AGENT_RUN_ARTIFACT_CONTENT_DIGEST_VERSION,
+          contentDigest: buildAgentRunArtifactContentDigest(opts.content),
+        }
+      : {};
+  const persistedMetadata = {
+    ...callerMetadata,
+    ...contentDigestMetadata,
+  };
   const { data, error } = await supabase
     .from('agent_run_artifacts')
     .insert({
@@ -841,13 +1234,43 @@ export async function addArtifact(opts: {
       content: opts.content,
       url: opts.url,
       file_path: opts.filePath,
-      metadata: opts.metadata || {},
+      metadata: persistedMetadata,
     })
     .select()
     .single();
 
   if (error) { console.error('[AgentRunSystem] addArtifact error:', error); return null; }
-  return mapArtifact(data);
+  const artifact = mapArtifact(data);
+  const optionalTextMatches = (actual: unknown, expected: string | undefined): boolean => (
+    expected === undefined ? actual == null : actual === expected
+  );
+  const exactRowMatches = (
+    typeof artifact.id === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(artifact.id)
+    && artifact.run_id === opts.runId
+    && artifact.circle_id === opts.circleId
+    && optionalTextMatches(artifact.step_id, opts.stepId)
+    && artifact.artifact_kind === opts.artifactKind
+    && artifact.title === opts.title
+    && optionalTextMatches(artifact.content, opts.content)
+    && optionalTextMatches(artifact.url, opts.url)
+    && optionalTextMatches(artifact.file_path, opts.filePath)
+    && metadataValueMatches(artifact.metadata, persistedMetadata)
+    && metadataValueMatches(persistedMetadata, artifact.metadata)
+    && (
+      typeof opts.content !== 'string'
+      || verifyAgentRunArtifactContentDigest(
+        artifact.content,
+        artifact.metadata,
+        contentDigestMetadata,
+      )
+    )
+  );
+  if (!exactRowMatches) {
+    console.error('[AgentRunSystem] addArtifact returned row failed exact verification');
+    return null;
+  }
+  return artifact;
 }
 
 // ── 5. Request Approval ─────────────────────────────────────────────────────
@@ -1019,7 +1442,23 @@ export async function listChatSessionRuns(
   return data.map(mapRun);
 }
 
-export async function getActiveRuns(circleId: string): Promise<AgentRun[]> {
+export interface GetActiveRunsOptions {
+  /**
+   * Compatibility-safe switch for surfaces whose label literally says Active.
+   * The default remains the broader open-run family because Office attention
+   * still consumes paused/approval-waiting rows from this established API.
+   */
+  activeOnly?: boolean;
+  /** Keep exact connected-agent acceptance receipts for a separate awaiting lane. */
+  includeAcceptedHandoffs?: boolean;
+  /** Deterministic freshness clock for tests/callers; defaults to the read time. */
+  nowMs?: number;
+}
+
+export async function getActiveRuns(
+  circleId: string,
+  opts?: GetActiveRunsOptions,
+): Promise<AgentRun[]> {
   const { data, error } = await supabase
     .from('agent_runs')
     .select('*')
@@ -1027,7 +1466,17 @@ export async function getActiveRuns(circleId: string): Promise<AgentRun[]> {
     .in('status', ['queued', 'planning', 'running', 'waiting_approval', 'paused'])
     .order('created_at', { ascending: false });
   if (error || !data) return [];
-  return data.map(mapRun);
+  const runs = data.map(mapRun);
+  if (!opts?.activeOnly) return runs;
+
+  const nowMs = typeof opts.nowMs === 'number' && Number.isFinite(opts.nowMs)
+    ? opts.nowMs
+    : Date.now();
+  return runs.filter((run) =>
+    bucketRunForHistory(run, nowMs) === 'running'
+      || (opts.includeAcceptedHandoffs === true
+        && isAwaitingConnectedAgentResultMetadata(run.metadata)),
+  );
 }
 
 /**
@@ -1253,6 +1702,28 @@ export async function getRunSteps(runId: string): Promise<RunStep[]> {
 
 export async function getRunArtifacts(runId: string): Promise<RunArtifact[]> {
   const { data, error } = await supabase.from('agent_run_artifacts').select('*').eq('run_id', runId).order('created_at');
+  if (error || !data) return [];
+  return data.map(mapArtifact);
+}
+
+/** One bounded page-hydration query for opaque artifact pointers. Callers
+ * must still verify each returned row's run_id against the message/run that
+ * carried the pointer; circle scope and RLS are enforced here first. */
+export async function getRunArtifactsByIds(
+  circleId: string,
+  artifactIds: readonly string[],
+): Promise<RunArtifact[]> {
+  const safeIds = Array.from(new Set(artifactIds.filter((value) => (
+    typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  )))).slice(0, 32);
+  if (!circleId || safeIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from('agent_run_artifacts')
+    .select('*')
+    .eq('circle_id', circleId)
+    .in('id', safeIds)
+    .limit(32);
   if (error || !data) return [];
   return data.map(mapArtifact);
 }
@@ -1842,6 +2313,7 @@ function mapRun(d: any): AgentRun {
   return {
     id: d.id, agent_id: d.agent_id, circle_id: d.circle_id, user_id: d.user_id, surface: d.surface,
     room_id: d.room_id, task_id: d.task_id, chat_session_id: d.chat_session_id,
+    thread_id: d.thread_id, source_message_id: d.source_message_id,
     title: d.title, goal: d.goal, mode: d.mode, model: d.model, provider: d.provider,
     status: d.status, plan_summary: d.plan_summary,
     current_step_index: d.current_step_index || 0, total_steps: d.total_steps || 0,
@@ -1865,7 +2337,7 @@ function mapStep(d: any): RunStep {
 
 function mapArtifact(d: any): RunArtifact {
   return {
-    id: d.id, run_id: d.run_id, step_id: d.step_id, artifact_kind: d.artifact_kind,
+    id: d.id, run_id: d.run_id, circle_id: d.circle_id, step_id: d.step_id, artifact_kind: d.artifact_kind,
     title: d.title, content: d.content, url: d.url, file_path: d.file_path,
     version: d.version || 1, is_published: d.is_published || false,
     created_at: d.created_at, metadata: d.metadata || {},

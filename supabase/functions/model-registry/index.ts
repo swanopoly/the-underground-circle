@@ -37,8 +37,9 @@ async function fetchOpenAIModels(apiKey: string): Promise<ModelEntry[]> {
     const data = await res.json();
 
     // Filter to chat-relevant models only
-    const CHAT_PREFIXES = ['gpt-4', 'gpt-5', 'chatgpt'];
+    const CHAT_PREFIXES = ['gpt-4', 'gpt-5', 'chatgpt', 'o3'];
     const SKIP_PATTERNS = ['realtime', 'audio', 'tts', 'whisper', 'dall-e', 'davinci', 'babbage', 'embedding', 'moderation', 'search', 'instruct-preview'];
+    const RETIRED = new Set(['gpt-4o', 'gpt-4o-mini', 'gpt-4.1-nano', 'o3-mini', 'o4-mini']);
 
     const now = new Date().toISOString();
     const models: ModelEntry[] = [];
@@ -48,13 +49,16 @@ async function fetchOpenAIModels(apiKey: string): Promise<ModelEntry[]> {
       // Skip non-chat models
       if (SKIP_PATTERNS.some(p => id.includes(p))) continue;
       if (!CHAT_PREFIXES.some(p => id.startsWith(p))) continue;
+      if (RETIRED.has(id)) continue;
       // Skip dated snapshots (keep the alias)
       if (/\d{4}-\d{2}-\d{2}$/.test(id)) continue;
 
-      const isReasoning = id.startsWith('o1') || id.startsWith('o3') || id.startsWith('o4');
+      const isReasoning = id.startsWith('o1') || id.startsWith('o3') || id.startsWith('o4') || id === 'gpt-5.6-sol';
       const isCode = id.includes('codex');
       const isMini = id.includes('mini');
       const isNano = id.includes('nano');
+      const isLuna = id === 'gpt-5.6-luna';
+      const isTerra = id === 'gpt-5.6-terra';
       const isFrontier = id.includes('gpt-5') || id === 'o3' || id === 'o3-pro';
 
       models.push({
@@ -62,11 +66,11 @@ async function fetchOpenAIModels(apiKey: string): Promise<ModelEntry[]> {
         model_id: id,
         label: formatOpenAILabel(id),
         category: isCode ? 'code' : isReasoning ? 'reasoning' : 'chat',
-        tier: isFrontier ? 'frontier' : (isMini || isNano) ? 'budget' : 'mid',
+        tier: isLuna ? 'budget' : isTerra ? 'mid' : isFrontier ? 'frontier' : (isMini || isNano) ? 'budget' : 'mid',
         input_cost_per_m: estimateOpenAICost(id, 'input'),
         output_cost_per_m: estimateOpenAICost(id, 'output'),
-        context_window: id.includes('gpt-4.1') ? 1000000 : id.includes('gpt-5') ? 1000000 : 128000,
-        supports_vision: !isReasoning && !isCode,
+        context_window: id.includes('gpt-5.6') ? 1050000 : id.includes('gpt-4.1') ? 1000000 : id.includes('gpt-5') ? 1000000 : 128000,
+        supports_vision: id.includes('gpt-5.6') ? true : !isReasoning && !isCode,
         supports_tools: true,
         released_at: m.created ? new Date(m.created * 1000).toISOString() : null,
         is_active: true,
@@ -93,15 +97,22 @@ function formatOpenAILabel(id: string): string {
 }
 
 function estimateOpenAICost(id: string, type: 'input' | 'output'): number {
-  // Rough estimates — updated as pricing changes
+  // Exact current production tiers first; broad family fallbacks come later.
+  if (id === 'gpt-5.6-sol') return type === 'input' ? 5.00 : 30.00;
+  if (id === 'gpt-5.6-terra') return type === 'input' ? 2.50 : 15.00;
+  if (id === 'gpt-5.6-luna') return type === 'input' ? 1.00 : 6.00;
+  if (id === 'gpt-5.5-pro') return type === 'input' ? 30.00 : 180.00;
+  if (id === 'gpt-5.5') return type === 'input' ? 5.00 : 30.00;
+  if (id === 'gpt-5.4') return type === 'input' ? 2.50 : 15.00;
+  if (id === 'gpt-5.4-mini') return type === 'input' ? 0.75 : 4.50;
+  if (id === 'gpt-5.4-nano') return type === 'input' ? 0.20 : 1.20;
   if (id.includes('nano')) return type === 'input' ? 0.10 : 0.40;
   if (id.includes('mini') && id.includes('4o')) return type === 'input' ? 0.15 : 0.60;
   if (id.includes('mini') && id.includes('4.1')) return type === 'input' ? 0.40 : 1.60;
   if (id.includes('mini')) return type === 'input' ? 0.40 : 1.60;
   if (id.includes('gpt-4o') && !id.includes('mini')) return type === 'input' ? 2.50 : 10.00;
   if (id.includes('gpt-4.1') && !id.includes('mini')) return type === 'input' ? 2.00 : 8.00;
-  if (id.includes('gpt-5.4')) return type === 'input' ? 10.00 : 40.00;
-  if (id.includes('gpt-5')) return type === 'input' ? 8.00 : 32.00;
+  if (id.includes('gpt-5')) return type === 'input' ? 5.00 : 30.00;
   if (id === 'o3-pro') return type === 'input' ? 20.00 : 80.00;
   if (id === 'o3') return type === 'input' ? 10.00 : 40.00;
   if (id.includes('o4-mini') || id.includes('o3-mini')) return type === 'input' ? 1.10 : 4.40;
@@ -119,6 +130,7 @@ async function fetchGeminiModels(apiKey: string): Promise<ModelEntry[]> {
 
     const CHAT_PATTERNS = ['gemini'];
     const SKIP = ['embedding', 'aqa', 'text-'];
+    const RETIRED = new Set(['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.1-pro-preview']);
     const now = new Date().toISOString();
     const models: ModelEntry[] = [];
     const seen = new Set<string>();
@@ -129,22 +141,23 @@ async function fetchGeminiModels(apiKey: string): Promise<ModelEntry[]> {
 
       if (SKIP.some(p => id.includes(p))) continue;
       if (!CHAT_PATTERNS.some(p => id.includes(p))) continue;
+      if (RETIRED.has(id)) continue;
+      if (Array.isArray(m.supportedGenerationMethods) && !m.supportedGenerationMethods.includes('generateContent')) continue;
       if (seen.has(id)) continue;
       seen.add(id);
 
       const isPro = id.includes('pro');
-      const isFlash = id.includes('flash');
       const isLite = id.includes('lite');
-      const isPreview = id.includes('preview');
 
+      const [inputCost, outputCost] = estimateGeminiCost(id);
       models.push({
         provider: 'google',
         model_id: id,
         label: formatGeminiLabel(id),
         category: id.includes('image') ? 'image' : 'chat',
         tier: isPro ? 'frontier' : isLite ? 'budget' : 'mid',
-        input_cost_per_m: isLite ? 0.25 : isFlash ? 0.15 : isPro ? 1.25 : 0.50,
-        output_cost_per_m: isLite ? 0.50 : isFlash ? 0.60 : isPro ? 10.00 : 2.00,
+        input_cost_per_m: inputCost,
+        output_cost_per_m: outputCost,
         context_window: m.inputTokenLimit || 1000000,
         supports_vision: m.supportedGenerationMethods?.includes('generateContent') ?? true,
         supports_tools: !id.includes('image'),
@@ -170,6 +183,15 @@ function formatGeminiLabel(id: string): string {
     .replace('-lite', ' Lite')
     .split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ')
     .replace(/\s+/g, ' ').trim();
+}
+
+function estimateGeminiCost(id: string): [number, number] {
+  if (id === 'gemini-3.6-flash') return [1.50, 7.50];
+  if (id === 'gemini-3.5-flash-lite') return [0.30, 2.50];
+  if (id.includes('lite')) return [0.25, 0.50];
+  if (id.includes('flash')) return [0.15, 0.60];
+  if (id.includes('pro')) return [1.25, 10.00];
+  return [0.50, 2.00];
 }
 
 async function fetchHuggingFaceModels(): Promise<ModelEntry[]> {

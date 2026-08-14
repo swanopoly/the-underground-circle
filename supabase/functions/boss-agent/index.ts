@@ -23,11 +23,13 @@ const TELEGRAM_API = "https://api.telegram.org/bot";
 
 const MODEL_MAP: Record<string, string> = {
   "claude-haiku":  "claude-haiku-4-5",
-  "claude-sonnet": "claude-sonnet-4-6",
+  "claude-sonnet": "claude-sonnet-5",
+  "claude-sonnet-5": "claude-sonnet-5",
   "claude-fable":  "claude-fable-5",
   "claude-fable-5": "claude-fable-5",
-  // Opus points at the latest Opus per canonical model IDs.
-  "claude-opus":   "claude-opus-4-8",
+  // Floating Opus points at the current stable tier.
+  "claude-opus":   "claude-opus-5",
+  "claude-opus-5": "claude-opus-5",
   "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
 };

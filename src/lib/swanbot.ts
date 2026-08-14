@@ -28,6 +28,7 @@ import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExt
 import type { OpenSwanMemoryStores } from './openswanMemoryStores';
 import type { OpenSwanChatMode } from './openswanModePolicy';
 import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
+import type { OpenSwanAttachmentTurnSources } from './openSwanAttachmentTurnSources';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
 import {
@@ -170,9 +171,12 @@ import {
   buildOpenSwanToolApprovalKey,
   buildOpenSwanToolApprovalDigest,
   createOpenSwanRuntimeApprovalReceipt,
+  findOpenSwanApprovalResumeItem,
   isOpenSwanApprovalAuditPayload,
   isOpenSwanRuntimeApprovalCallIdentity,
+  normalizeOpenSwanApprovalResumeBindingV1,
   resolveOpenSwanRuntimeApprovalDecision,
+  type OpenSwanApprovalResumeBindingV1,
   type OpenSwanRuntimeApprovalAuthority,
   type OpenSwanRuntimeApprovalCallIdentity,
   type OpenSwanRuntimeApprovalReceipt,
@@ -273,6 +277,8 @@ export type SwanBotContext = {
    * exact canonical tool handler owns the durable runtime approval boundary.
    */
   threadId?: string;
+  /** Runtime-private exact rows allowed to authorize this approval retry. */
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   activePluginIds?: string[];
   signal?: AbortSignal;
   toolApprovalGate?: (call: { name: string; input: unknown }) => Promise<'approve' | 'reject'>;
@@ -1227,6 +1233,7 @@ type V2CallResult = {
 type SwanbotV2ClientLoopContext = Pick<
   SwanBotContext,
   | 'threadId'
+  | 'approvalResumeBinding'
   | 'activePluginIds'
   | 'signal'
   | 'toolApprovalGate'
@@ -1442,6 +1449,7 @@ async function callSwanBotV2(
           targetAgentName: agentSubject?.agentDisplayName,
           targetAgentSubject: agentSubject ?? null,
           threadId: clientLoopContext?.threadId,
+          approvalResumeBinding: clientLoopContext?.approvalResumeBinding || null,
           activePluginIds: clientLoopContext?.activePluginIds,
           signal: clientLoopContext?.signal,
           toolApprovalGate: clientLoopContext?.toolApprovalGate,
@@ -1649,6 +1657,8 @@ async function callSwanBotV2(
         circleId,
         userId,
         runId: response.continuationRunId,
+        threadId: clientLoopContext?.threadId,
+        approvalResumeBinding: clientLoopContext?.approvalResumeBinding || null,
         iteration: i + 1,
         activePluginIds: clientLoopContext?.activePluginIds?.slice(0, 32),
         toolApprovalGate: clientLoopContext?.toolApprovalGate,
@@ -1994,7 +2004,11 @@ type SwanBotV2EdgeClientToolContext = {
   circleId: string;
   userId: string;
   runId: string;
+  threadId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   iteration?: number;
+  /** 1-indexed position in this edge provider tool-call batch. */
+  sourceCallOrdinal?: number;
   activePluginIds?: SwanbotV2ClientLoopContext['activePluginIds'];
   toolApprovalGate?: SwanbotV2ClientLoopContext['toolApprovalGate'];
   userConstraints?: SwanbotV2ClientLoopContext['userConstraints'];
@@ -2075,6 +2089,13 @@ async function executeClientToolCalls(
   if (calls.length === 0) return [];
   const bridge = await import('./desktopBridge');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
+  const sourceCallOrdinalByToolUseId = new Map<string, number>();
+  calls.forEach((call, index) => {
+    sourceCallOrdinalByToolUseId.set(
+      call.id,
+      sourceCallOrdinalByToolUseId.has(call.id) ? 0 : index + 1,
+    );
+  });
 
   // Catalog side-effect policy lookup for the replay-safety gate below.
   // Best-effort: a missing provider degrades to the core's conservative
@@ -2198,7 +2219,12 @@ async function executeClientToolCalls(
       const result = await dispatchOneClientTool(
         bridge,
         call,
-        context,
+        context
+          ? {
+              ...context,
+              sourceCallOrdinal: sourceCallOrdinalByToolUseId.get(call.id) || undefined,
+            }
+          : undefined,
         directMutationReceipt?.markDispatched,
       );
       if (
@@ -2656,10 +2682,13 @@ async function dispatchCodingClientTool(
         circleId: context?.circleId || '',
         userId: context?.userId || '',
         runId: context?.runId || undefined,
+        threadId: context?.threadId,
+        approvalResumeBinding: context?.approvalResumeBinding || null,
         surface: 'main_chat',
         toolName: call.name,
         toolUseId: call.id,
         iteration: context?.iteration,
+        sourceCallOrdinal: context?.sourceCallOrdinal,
         activePluginIds: context?.activePluginIds,
         // Keep both non-erasable turn policy inputs attached at the final
         // runtime chokepoint. `userConstraints` is enforced there today;
@@ -2748,6 +2777,8 @@ type SwanBotClientToolApprovalContext = {
   circleId: string;
   userId: string;
   runId: string;
+  threadId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   toolUseId: string;
   iteration: number;
 };
@@ -2883,6 +2914,19 @@ async function consumeSwanBotApprovalAuthority(input: {
 
   const exactDigest = await buildOpenSwanToolApprovalDigest(input.tool, input.args);
   if (!exactDigest || exactDigest !== input.authority.approvalDigest) return null;
+  if (
+    input.source === 'cross_run'
+    && input.context.approvalResumeBinding != null
+    && !findOpenSwanApprovalResumeItem(input.context.approvalResumeBinding, {
+      approvalId: input.authority.approvalId,
+      sourceRunId: approvalRunId,
+      toolName: input.tool,
+      digest: exactDigest,
+      userId: input.context.userId,
+      circleId: input.context.circleId,
+      threadId: String(input.context.threadId || ''),
+    })
+  ) return null;
   const approvalKey = buildOpenSwanToolApprovalKey(input.tool, input.args);
   const authorityBindingDigest = await buildOpenSwanApprovalAuthorityBindingDigest({
     approvalId: input.authority.approvalId,
@@ -2983,30 +3027,108 @@ async function findCrossRunApprovedToolPass(
   },
 ): Promise<SwanBotApprovalGateOutcome | { kind: 'none' }> {
   try {
-    const { data, error } = await supabase
+    const bindingWasProvided = input.context.approvalResumeBinding != null;
+    const resumeBinding = bindingWasProvided
+      ? normalizeOpenSwanApprovalResumeBindingV1(input.context.approvalResumeBinding)
+      : null;
+    if (bindingWasProvided && !resumeBinding) {
+      return { kind: 'blocked', reason: 'The bound approval continuation was malformed.' };
+    }
+    if (
+      resumeBinding
+      && (
+        resumeBinding.sourceRunId === input.context.runId
+        || resumeBinding.userId !== input.context.userId
+        || resumeBinding.circleId !== input.context.circleId
+        || resumeBinding.threadId !== input.context.threadId
+      )
+    ) {
+      return { kind: 'blocked', reason: 'The bound approval continuation scope did not match this run.' };
+    }
+    const matchingBoundItems = resumeBinding
+      ? resumeBinding.approvals.filter((item) => (
+          item.toolName === input.tool
+          && item.toolApprovalDigest === input.approvalDigest
+        ))
+      : [];
+    if (resumeBinding && matchingBoundItems.length === 0) {
+      return { kind: 'blocked', reason: 'The resumed call did not match an exact approval selected for this continuation.' };
+    }
+    const allowedApprovalIds = new Set(matchingBoundItems.map((item) => item.approvalId));
+
+    let approvalQuery = supabase
       .from('agent_run_approvals')
       .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
       .eq('circle_id', input.context.circleId)
-      .eq('requested_by', input.context.userId)
-      .eq('title', input.title)
-      .in('status', ['approved', 'auto_approved', 'expired'])
-      .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString())
+      .eq('requested_by', input.context.userId);
+    approvalQuery = resumeBinding
+      ? approvalQuery
+          .eq('run_id', resumeBinding.sourceRunId)
+          .in('id', matchingBoundItems.map((item) => item.approvalId))
+          .in('status', ['approved', 'auto_approved', 'pending', 'rejected', 'expired'])
+      : approvalQuery
+          .eq('title', input.title)
+          .in('status', ['approved', 'auto_approved', 'expired'])
+          .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString());
+    const { data, error } = await approvalQuery
       .order('requested_at', { ascending: false })
       .limit(8);
     if (error || !Array.isArray(data)) {
       return { kind: 'blocked', reason: 'Cross-run approval lookup failed closed.' };
     }
+    const decisionRows = resumeBinding
+      ? (data as OpenSwanRuntimeApprovalRow[]).filter((row) => (
+          typeof row.id === 'string'
+          && allowedApprovalIds.has(row.id)
+          && row.run_id === resumeBinding.sourceRunId
+          && row.circle_id === resumeBinding.circleId
+          && row.requested_by === resumeBinding.userId
+        ))
+      : data as OpenSwanRuntimeApprovalRow[];
+    if (resumeBinding && decisionRows.length === 0) {
+      return {
+        kind: 'blocked',
+        approvalId: matchingBoundItems[0]?.approvalId,
+        reason: 'The exact approval row selected for this continuation was unavailable.',
+      };
+    }
     const decision = resolveOpenSwanRuntimeApprovalDecision({
       tool: input.tool,
       approvalDigest: input.approvalDigest,
-      rows: data as OpenSwanRuntimeApprovalRow[],
+      rows: decisionRows,
     });
-    if (decision.kind === 'new') return { kind: 'none' };
+    if (decision.kind === 'new') {
+      return resumeBinding
+        ? {
+            kind: 'blocked',
+            approvalId: matchingBoundItems[0]?.approvalId,
+            reason: 'The exact bound approval row no longer matched its approved tool digest.',
+          }
+        : { kind: 'none' };
+    }
     if (decision.kind !== 'pass') {
       return {
         kind: 'blocked',
         approvalId: decision.approvalId,
         reason: decision.message,
+      };
+    }
+    if (
+      resumeBinding
+      && !findOpenSwanApprovalResumeItem(resumeBinding, {
+        approvalId: decision.authority.approvalId,
+        sourceRunId: String(decision.authority.row.run_id || ''),
+        toolName: input.tool,
+        digest: input.approvalDigest,
+        userId: input.context.userId,
+        circleId: input.context.circleId,
+        threadId: String(input.context.threadId || ''),
+      })
+    ) {
+      return {
+        kind: 'blocked',
+        approvalId: decision.authority.approvalId,
+        reason: 'Approval was not one of the exact rows selected for this continuation.',
       };
     }
     if (decision.authority.row.run_id === input.context.runId) {
@@ -3197,6 +3319,8 @@ async function withSwanBotClientWordPressApproval(
         circleId: context.circleId,
         userId: context.userId,
         runId: context.runId,
+        threadId: context.threadId,
+        approvalResumeBinding: context.approvalResumeBinding || null,
         toolUseId,
         iteration: Number(context.iteration),
       }
@@ -3241,8 +3365,11 @@ type SwanBotFloorApprovalContext = {
   circleId?: string;
   userId?: string;
   runId?: string;
+  threadId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   toolUseId?: string;
   iteration?: number;
+  sourceCallOrdinal?: number;
 };
 
 async function resolveSwanBotFloorApproval(input: {
@@ -3275,6 +3402,8 @@ async function resolveSwanBotFloorApproval(input: {
       circleId: context.circleId,
       userId: context.userId,
       runId: context.runId,
+      threadId: context.threadId,
+      approvalResumeBinding: context.approvalResumeBinding || null,
       toolUseId: context.toolUseId,
       iteration: Number(context.iteration),
     },
@@ -5504,7 +5633,7 @@ export async function getSwanBotTurnResult(
           executionSummary = summary;
           try { context.onTaskExecutionSummary?.(summary); } catch {}
         },
-      });
+      }, message);
       return {
         text,
         ...(executionSummary ? { executionSummary } : {}),
@@ -5523,6 +5652,7 @@ export async function getSwanBotResponse(
 async function getSwanBotResponseImpl(
   cleaned: string,
   context: SwanBotContext,
+  originalUserTaskText: string,
 ): Promise<string> {
   // Track in conversation history
   if (context.circleId) {
@@ -5745,9 +5875,12 @@ async function getSwanBotResponseImpl(
           const loop = await executeToolUseLoop({
             systemPrompt,
             userMessage: cleaned,
+            originalUserTaskText,
             model: loopModel,
             circleId: enrichedContext.circleId,
             userId: enrichedContext.userId,
+            threadId: enrichedContext.threadId,
+            approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
             surface: 'main_chat',
             mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
             executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
@@ -5807,9 +5940,12 @@ async function getSwanBotResponseImpl(
             },
             systemPrompt,
             userMessage: cleaned,
+            originalUserTaskText,
             model: enrichedContext.model!,
             circleId: enrichedContext.circleId,
             userId: enrichedContext.userId,
+            threadId: enrichedContext.threadId,
+            approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
             surface: 'main_chat',
             mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
             executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
@@ -5880,6 +6016,7 @@ async function getSwanBotResponseImpl(
       agentSubjectPayload,
       {
         threadId: enrichedContext.threadId,
+        approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
         activePluginIds: enrichedContext.activePluginIds,
         signal: enrichedContext.signal,
         toolApprovalGate: enrichedContext.toolApprovalGate,
@@ -5945,6 +6082,7 @@ async function getSwanBotResponseImpl(
             agentSubjectPayload,
             {
               threadId: enrichedContext.threadId,
+              approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
               activePluginIds: enrichedContext.activePluginIds,
               signal: enrichedContext.signal,
               toolApprovalGate: enrichedContext.toolApprovalGate,
@@ -6006,7 +6144,7 @@ async function getSwanBotResponseImpl(
       ];
       // Normalize the picked legacy id (e.g. `gemini-pro`, `gemini-1.5-flash`)
       // to a current google_ai model via the shared, tested alias resolver.
-      const geminiModel = findAliasKey(enrichedContext.model || '') || 'gemini-2.5-flash';
+      const geminiModel = findAliasKey(enrichedContext.model || '') || 'gemini-3.6-flash';
       const geminiResult = await callLlmProxy(
         'google_ai',
         geminiModel,
@@ -6159,6 +6297,21 @@ type ToolLoopEvent = {
   metadata?: Record<string, unknown>;
 };
 
+function transientToolEventResult(
+  toolName: string,
+  dispatched: { text: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> },
+): string {
+  if (toolName !== 'attachments.read_source') return dispatched.text;
+  const receipt = dispatched.metadata?.openSwanAttachmentSourceReceipt;
+  const attachmentId = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+    && typeof (receipt as Record<string, unknown>).attachmentId === 'string'
+      ? (receipt as Record<string, unknown>).attachmentId as string
+      : 'current-turn attachment';
+  return dispatched.status === 'passed'
+    ? `Exact attachment source observed for ${attachmentId}; private source content is omitted from event history.`
+    : 'Attachment source read failed; private source content is omitted from event history.';
+}
+
 /** A tool event is treated as an OBSERVATION for evidence-recovery purposes when
  *  it re-grounded state without mutating anything: the loop's deterministic
  *  auto_reobserve reads, plus any successful read/observe tool the model itself
@@ -6220,13 +6373,22 @@ function harvestToolLoopObservations(
 export async function executeToolUseLoop(opts: {
   systemPrompt: string;
   userMessage: string;
+  /** Exact user-authored task before prompt/context augmentation. Omit when a
+   * caller cannot prove that boundary; attachment egress then fails closed. */
+  originalUserTaskText?: string | null;
   model: string;
   circleId: string;
   userId: string;
   threadId?: string;
   runId?: string;
+  /** Runtime-private exact approval authority for a single retry turn. */
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
+  /** Exact persisted source user-message UUID for sealed approval lineage. */
+  approvalResumeSourceMessageId?: string | null;
   activeSoulKey?: string;
   activePluginIds?: string[];
+  /** Runtime-private attachment manifest and opaque source map for this turn. */
+  attachmentTurnSources?: OpenSwanAttachmentTurnSources | null;
   allowedToolNames?: string[];
   /** Hard per-turn catalog/dispatch ceiling from the task profile. */
   executionSurfaceGuard?: TaskExecutionSurfaceGuard;
@@ -6249,6 +6411,8 @@ export async function executeToolUseLoop(opts: {
   mode?: string | null;
   /** Optional tighter cap for cost-sensitive OpenSwan surfaces. */
   maxToolRounds?: number;
+  /** Preserve exact provider order for dependency-bearing A-ledgers. */
+  forceSequentialToolDispatch?: boolean;
   /** Optional compact subject metadata forwarded to swanbot-ai relay usage. */
   targetAgentName?: string | null;
   targetAgentSubjectKey?: string | null;
@@ -6267,7 +6431,7 @@ export async function executeToolUseLoop(opts: {
   toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
 }): Promise<{
   response: string;
-  toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }>;
+  toolEvents: Array<{ tool: string; toolUseId?: string; providerIteration?: number; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }>;
   routing?: SwanBotStructuredResponse['routing'];
   /** True when the loop hit its tool-round cap before the model produced a
    *  final answer — the response may be partial and can be continued. */
@@ -6286,7 +6450,14 @@ export async function executeToolUseLoop(opts: {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
   }
-  const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed, getToolParallelPolicy } = await import('./openswanTools/index');
+  const {
+    MAX_TOOL_ROUNDS,
+    bindOpenSwanToolCallContext,
+    buildOpenSwanAutoObservationToolUseId,
+    getToolDefinitions,
+    dispatchToolDetailed,
+    getToolParallelPolicy,
+  } = await import('./openswanTools/index');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
   const { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText } = await import('./toolLoopProgress');
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
@@ -6323,8 +6494,14 @@ export async function executeToolUseLoop(opts: {
     userId: opts.userId,
     threadId: opts.threadId,
     runId: opts.runId,
+    approvalResumeBinding: opts.approvalResumeBinding || null,
+    approvalResumeSourceMessageId: opts.approvalResumeSourceMessageId || null,
     activeSoulKey: opts.activeSoulKey,
     activePluginIds: opts.activePluginIds,
+    attachmentTurnSources: opts.attachmentTurnSources,
+    originalUserTaskText: typeof opts.originalUserTaskText === 'string'
+      ? opts.originalUserTaskText
+      : null,
     surface: opts.surface || 'main_chat',
   };
 
@@ -6421,7 +6598,7 @@ export async function executeToolUseLoop(opts: {
     { role: 'user', content: opts.userMessage },
   ];
 
-  const toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
+  const toolEvents: Array<{ tool: string; toolUseId?: string; providerIteration?: number; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
   // The edge function sets `provider_routed` / `routing_fallback` on every
   // round, but they only need to be captured once: the model id is fixed
   // for a turn, so the routing outcome is also fixed. We grab whatever
@@ -6612,6 +6789,7 @@ export async function executeToolUseLoop(opts: {
     // gate. `canParallelizeToolBatch` already bars mutating/side-effect tools;
     // this closes the gap where a read-only tool name matches a floor verb.
     const canPreDispatchBatch = allToolCallsInsideExecutionSurface
+      && !opts.forceSequentialToolDispatch
       && !enforceConstraints
       && canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate });
     // Live activity label for the parallel batch (mirrors the v2 pattern
@@ -6621,8 +6799,20 @@ export async function executeToolUseLoop(opts: {
         ? `Running ${toolUseBlocks.length} steps…`
         : toolActivityLabel(toolUseBlocks[0].name, toolUseBlocks[0].input));
     }
+    const dispatchRequestedTool = (block: any, sourceCallOrdinal: number) => dispatchToolDetailed(
+      block.name,
+      block.input || {},
+      bindOpenSwanToolCallContext(toolCtx, {
+        toolName: block.name,
+        toolUseId: block.id,
+        iteration: round + 1,
+        sourceCallOrdinal,
+      }),
+    );
     const preDispatched = canPreDispatchBatch
-      ? await Promise.all(toolUseBlocks.map((b: any) => dispatchToolDetailed(b.name, b.input || {}, toolCtx)))
+      ? await Promise.all(toolUseBlocks.map((block: any, index: number) => (
+          dispatchRequestedTool(block, index + 1)
+        )))
       : null;
     // Layer-8 auto-grounding (deterministic re-observe) is suppressed only in
     // per-STEP REVIEW mode, where the model can request the read as its next
@@ -6650,6 +6840,8 @@ export async function executeToolUseLoop(opts: {
         const blockedText = executionSurfaceVerdict.reason;
         toolEvents.push({
           tool: String(block.name || 'unknown'),
+          toolUseId: block.id,
+          providerIteration: round + 1,
           input: block.input,
           result: blockedText,
           status: 'blocked' as OpenSwanExecutionStatus,
@@ -6677,6 +6869,8 @@ export async function executeToolUseLoop(opts: {
           const rejectionText = 'User declined this tool call. Try a different approach or ask the user how to proceed.';
           toolEvents.push({
             tool: block.name,
+            toolUseId: block.id,
+            providerIteration: round + 1,
             input: block.input,
             result: rejectionText,
             status: 'blocked' as OpenSwanExecutionStatus,
@@ -6704,6 +6898,8 @@ export async function executeToolUseLoop(opts: {
             || `The user forbade "${verdict.category}" actions for this task. It was not performed. Stop and report instead.`;
           toolEvents.push({
             tool: block.name,
+            toolUseId: block.id,
+            providerIteration: round + 1,
             input: block.input,
             result: blockedText,
             status: 'blocked' as OpenSwanExecutionStatus,
@@ -6728,13 +6924,18 @@ export async function executeToolUseLoop(opts: {
               circleId: opts.circleId,
               userId: opts.userId,
               runId: opts.runId,
+              threadId: opts.threadId,
+              approvalResumeBinding: opts.approvalResumeBinding || null,
               toolUseId: block.id,
               iteration: round + 1,
+              sourceCallOrdinal: bi + 1,
             },
           });
           if (!floor.passed) {
             toolEvents.push({
               tool: block.name,
+              toolUseId: block.id,
+              providerIteration: round + 1,
               input: block.input,
               result: floor.message,
               status: 'blocked' as OpenSwanExecutionStatus,
@@ -6774,6 +6975,8 @@ export async function executeToolUseLoop(opts: {
             const gateText = `Fresh-evidence gate: "${block.name}" already failed this turn and nothing has re-observed current state since. Capture fresh ground truth first (re-read the a11y tree / DOM, re-check the target), then retry the mutating action once. It was not performed.`;
             toolEvents.push({
               tool: block.name,
+              toolUseId: block.id,
+              providerIteration: round + 1,
               input: block.input,
               result: gateText,
               status: 'blocked' as OpenSwanExecutionStatus,
@@ -6788,7 +6991,7 @@ export async function executeToolUseLoop(opts: {
       // approval/constraint/floor gates above so an approval wait is never
       // mislabeled as tool activity. Fail-soft sink; no loop behavior change.
       if (!preDispatched) emitSwanBotActivity(toolActivityLabel(block.name, block.input));
-      const dispatched = preDispatched ? preDispatched[bi] : await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
+      const dispatched = preDispatched ? preDispatched[bi] : await dispatchRequestedTool(block, bi + 1);
       // Enforce observe→act→VERIFY on multi-step app/desktop/browser tasks:
       // attach a re-observe/verify (or retry-ladder) reminder to mutating app
       // actions so the model can't silently assume a click/type worked.
@@ -6801,7 +7004,15 @@ export async function executeToolUseLoop(opts: {
       resultContent = appendStuckBreaker(resultContent, toolEvents, { tool: block.name, input: block.input, status: String(dispatched.status) });
       // Stamp capture time (QW4) so a harvested read/observe carries a real
       // freshness timestamp for the evidence-recovery readiness window.
-      toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: { ...(dispatched.metadata || {}), observed_at: Date.now() } });
+      toolEvents.push({
+        tool: block.name,
+        toolUseId: block.id,
+        providerIteration: round + 1,
+        input: block.input,
+        result: transientToolEventResult(block.name, dispatched),
+        status: dispatched.status,
+        metadata: { ...(dispatched.metadata || {}), observed_at: Date.now() },
+      });
       // P59: record into the progress-based stuck ring (real dispatches only —
       // gate/floor-blocked calls stay out, keeping detection conservative).
       {
@@ -6827,11 +7038,20 @@ export async function executeToolUseLoop(opts: {
         const reobserve = planDeterministicReobserve(block.name, String(dispatched.status));
         if (reobserve) {
           try {
-            const obs = await dispatchToolDetailed(reobserve.observationTool, {}, toolCtx);
+            const obs = await dispatchToolDetailed(
+              reobserve.observationTool,
+              {},
+              bindOpenSwanToolCallContext(toolCtx, {
+                toolName: reobserve.observationTool,
+                toolUseId: buildOpenSwanAutoObservationToolUseId(block.id, round + 1, bi + 1),
+                iteration: round + 1,
+                sourceCallOrdinal: bi + 1,
+              }),
+            );
             const note = summarizeObservationForRetry(obs?.text, String(obs?.status), { maxChars: 1400 });
             if (note) {
               resultContent = `${resultContent}${note}`;
-              toolEvents.push({ tool: reobserve.observationTool, input: {}, result: obs.text, status: obs.status, metadata: { auto_reobserve: true, observed_at: Date.now() } });
+              toolEvents.push({ tool: reobserve.observationTool, providerIteration: round + 1, input: {}, result: obs.text, status: obs.status, metadata: { auto_reobserve: true, observed_at: Date.now() } });
             }
           } catch { /* observation is best-effort; never break the loop */ }
         }
@@ -7073,11 +7293,15 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
   streamedTurn: { stopReason?: string | null; content?: unknown };
   systemPrompt: string;
   userMessage: string;
+  /** Exact unaugmented caller text. Omit rather than substituting model or
+   * prompt-ladder text when the caller did not retain it. */
+  originalUserTaskText?: string | null;
   model: string;
   circleId: string;
   userId: string;
   threadId?: string;
   runId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   activeSoulKey?: string;
   activePluginIds?: string[];
   surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
@@ -7114,11 +7338,13 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
   const loop = await executeToolUseLoop({
     systemPrompt: opts.systemPrompt,
     userMessage: opts.userMessage,
+    originalUserTaskText: opts.originalUserTaskText,
     model: opts.model,
     circleId: opts.circleId,
     userId: opts.userId,
     threadId: opts.threadId,
     runId: opts.runId,
+    approvalResumeBinding: opts.approvalResumeBinding || null,
     activeSoulKey: opts.activeSoulKey,
     activePluginIds: opts.activePluginIds,
     allowedToolNames,

@@ -19,6 +19,7 @@ import {
   formatGenericAppNavigatorPromptBlock,
   formatProfessionalAppAutonomyPromptBlock,
   inferGenericAppName,
+  parseDirectDesktopCommandEnvelope,
   parseStrictNamedAppLifecycleIntent,
   setStrictNamedAppLifecycleObservedNames,
   shouldUseProfessionalAppAutonomy,
@@ -43,11 +44,73 @@ assert.equal(
   'trusted parsed app identity may contain Desktop',
 );
 assert.equal(classifyGenericAppTaskFamily('Open Docker Desktop'), 'launch_or_read');
+
+const boundedEnvelope = parseDirectDesktopCommandEnvelope(
+  'Hey, can you just open Adobe Illustrator for me right now, please!',
+);
+assert.equal(boundedEnvelope?.command, 'open Adobe Illustrator');
+assert.deepEqual(
+  boundedEnvelope?.modifiers,
+  ['greeting', 'request_courtesy', 'scope_limiter', 'soft_urgency', 'recipient_courtesy'],
+  'the semantic envelope reports only the bounded non-operational language it removed',
+);
+assert(Object.isFrozen(boundedEnvelope));
+assert(Object.isFrozen(boundedEnvelope?.commandCandidates));
+assert(Object.isFrozen(boundedEnvelope?.modifiers));
+
+const semanticEnvelopePrefixes: Array<(command: string) => string> = [
+  (command) => command,
+  (command) => `Please ${command}`,
+  (command) => `Hey, ${command}`,
+  (command) => `Okay, ${command}`,
+  (command) => `Can you ${command}`,
+  (command) => `Could you please just ${command}`,
+  (command) => `Could you possibly ${command}`,
+  (command) => `Would you be able to ${command}`,
+  (command) => `Could you do me a favor and ${command}`,
+  (command) => `I need you to ${command}`,
+  (command) => `I’d like you to ${command}`,
+  (command) => `Go ahead and ${command}`,
+  (command) => `Would you mind ${command.replace(/^open\b/i, 'opening')}`,
+];
+const semanticEnvelopeSuffixes = [
+  '',
+  ' please!',
+  ' for me?',
+  ' now.',
+  ' already!',
+  ' right now.',
+  ' real quick!',
+  ' when you can.',
+  ' if possible, okay?',
+  ' no rush, thanks!',
+  ' on my Mac.',
+  ' as soon as you can, thanks!',
+  ' for us when you get a chance, please!',
+] as const;
+for (const withPrefix of semanticEnvelopePrefixes) {
+  for (const suffix of semanticEnvelopeSuffixes) {
+    const request = `${withPrefix('open Adobe Illustrator')}${suffix}`;
+    const envelope = parseDirectDesktopCommandEnvelope(request);
+    const intent = parseStrictNamedAppLifecycleIntent(request);
+    assert.equal(envelope?.command, 'open Adobe Illustrator', `harmless envelope normalizes without semantic drift: ${request}`);
+    assert.deepEqual(
+      intent,
+      { operation: 'open_or_launch', appName: 'Adobe Illustrator' },
+      `harmless envelope preserves exact lifecycle intent: ${request}`,
+    );
+    assert.equal(classifyGenericAppTaskFamily(request), 'launch_or_read', `preflight parity survives: ${request}`);
+  }
+}
+
 for (const request of [
   'Can you open Photoshop?',
   'Could you launch Photoshop?',
   'Would you open Photoshop?',
   'Can you please open Photoshop?',
+  'Can you open Adobe Illustrator for me?',
+  'Can you open Adobe Illustrator up for me?',
+  'Would you launch Adobe Illustrator for us please?',
   'Open Photoshop please',
   'Open up Photoshop',
   'Switch over to Slack',
@@ -76,6 +139,16 @@ for (const request of [
   'Should I open Photoshop?',
   'Can you open Photoshop and create a document?',
   'Could you launch Photoshop, then tell me which document is open?',
+  'Open Adobe Illustrator for my client',
+  'Open Adobe Illustrator For My Client',
+  'Open Adobe Illustrator tomorrow',
+  'Open Adobe Illustrator at 5 PM',
+  'Open Adobe Illustrator in the background',
+  'Open Adobe Illustrator if it is installed',
+  'Open Adobe Illustrator without asking',
+  'Open Adobe Illustrator with my credentials',
+  'Open Adobe Illustrator again',
+  'Maybe open Adobe Illustrator',
   'Open the door',
   'Open my file',
   'Open task manager',
@@ -87,7 +160,13 @@ assert.equal(
   null,
   'an unavailable lowercase long-tail noun is not trusted as an app',
 );
-setStrictNamedAppLifecycleObservedNames(['Houdini.app', 'Acme Studio']);
+setStrictNamedAppLifecycleObservedNames([
+  'Houdini.app',
+  'Acme Studio',
+  'Acme Now',
+  'Wake Up',
+  'Research and Development',
+]);
 assert.deepEqual(
   parseStrictNamedAppLifecycleIntent('open houdini'),
   { operation: 'open_or_launch', appName: 'houdini', observedAppName: 'Houdini' },
@@ -102,6 +181,30 @@ assert.equal(
   classifyGenericAppTaskFamily('open acme studio'),
   'launch_or_read',
   'installed lowercase app matching has lifecycle/preflight parity',
+);
+assert.deepEqual(
+  parseStrictNamedAppLifecycleIntent('Open Acme Now please'),
+  { operation: 'open_or_launch', appName: 'Acme Now', observedAppName: 'Acme Now' },
+  'an exact installed target wins before a modifier-looking word is stripped',
+);
+assert.deepEqual(
+  parseStrictNamedAppLifecycleIntent('Open Wake Up please'),
+  { operation: 'open_or_launch', appName: 'Wake Up', observedAppName: 'Wake Up' },
+  'an exact installed app ending in Up wins before the conversational open-up particle is normalized',
+);
+assert.deepEqual(
+  parseStrictNamedAppLifecycleIntent('Open Research and Development right now'),
+  {
+    operation: 'open_or_launch',
+    appName: 'Research and Development',
+    observedAppName: 'Research and Development',
+  },
+  'fresh exact identity permits connector words inside a real app name',
+);
+assert.equal(
+  parseStrictNamedAppLifecycleIntent('Open Research and Development and delete the file'),
+  null,
+  'an exact installed target does not swallow a material appended action',
 );
 assert.equal(
   parseStrictNamedAppLifecycleIntent('open task manager', { observedAppNames: ['Task Manager'] }),

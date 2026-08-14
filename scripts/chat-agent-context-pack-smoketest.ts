@@ -104,6 +104,49 @@ async function main() {
   }
 
   {
+    const task = 'Open Adobe Illustrator 2026, create a new document, add a blue circle, and export it as PNG';
+    const pack = packFor(task);
+    assertEqual(pack.executionKind, 'run_computer_task', 'multi-action computer task: execution kind');
+    assertEqual(
+      pack.acceptanceCriteria.filter((item) => /^A\d+ independently verified:/.test(item)).map((item) => item.slice(0, 2)),
+      ['A1', 'A2', 'A3', 'A4'],
+      'multi-action computer task: every requested action reaches agent acceptance criteria',
+    );
+    assert(
+      pack.guardrails.some((item) => /all 4 requested action IDs.*partial coverage/i.test(item)),
+      'multi-action computer task: partial coverage cannot become whole-task completion',
+    );
+    assert(
+      pack.compactPrompt.includes('A1 independently verified: Open Adobe Illustrator 2026')
+        && pack.compactPrompt.includes('A4 independently verified: export it as PNG'),
+      'multi-action computer task: bounded connected-agent prompt retains first and last action',
+    );
+
+    const plan = buildChatAutomationPlan({ message: task });
+    let handlerPack: ChatAgentContextPack | undefined;
+    const handlers = createChatTransportHandlers({
+      run_computer_task: async (_plan, handlerCtx) => {
+        handlerPack = handlerCtx.agentContextPack;
+        return { message: 'computer task accepted' };
+      },
+    });
+    await dispatchChatAutomationPlan(plan, {
+      handlers,
+      ctx: {
+        circleId: 'circle-multi',
+        userId: 'user-multi',
+        threadId: 'thread-multi',
+        model: 'claude-sonnet-4-6',
+        chatMode: 'act',
+      },
+    });
+    assert(
+      handlerPack?.acceptanceCriteria.some((item) => item.startsWith('A4 independently verified:')),
+      'multi-action computer task: the execution handler receives the final action acceptance criterion',
+    );
+  }
+
+  {
     const pack = packFor('Remember api_key=sk-12345678901234567890 for the deployment later');
     assert(!pack.goal.includes('sk-12345678901234567890'), 'redaction: goal strips secret-shaped value');
     assert(!pack.commandText?.includes('sk-12345678901234567890'), 'redaction: command text strips secret-shaped value');

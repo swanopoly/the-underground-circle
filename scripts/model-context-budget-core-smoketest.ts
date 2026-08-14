@@ -61,7 +61,9 @@ const win = (id: unknown): number | null => getModelContextWindow(id);
 
 function main(): void {
   // ─── (1) known exact windows ──────────────────────────────────────────────
-  assertEq(win('claude-opus-4-8'), 200_000, '(1) claude-opus-4-8 → 200k');
+  assertEq(win('claude-opus-5'), 1_000_000, '(1) claude-opus-5 → 1M');
+  assertEq(win('claude-sonnet-5'), 1_000_000, '(1) claude-sonnet-5 → 1M');
+  assertEq(win('claude-opus-4-8'), 1_000_000, '(1) claude-opus-4-8 → 1M');
   assertEq(win('claude-sonnet-4-6'), 200_000, '(1) claude-sonnet-4-6 → 200k');
   assertEq(win('gpt-4o'), 128_000, '(1) gpt-4o → 128k');
   assertEq(win('gpt-4.1'), 1_000_000, '(1) gpt-4.1 → 1M');
@@ -71,7 +73,9 @@ function main(): void {
   assertEq(win('llama-3-8b'), 8_000, '(1) llama-3-8b → 8k');
   assertEq(win('gpt-3.5-turbo'), 16_000, '(1) gpt-3.5-turbo → 16k');
   assertEq(win('mistral-small'), 32_000, '(1) mistral-small → 32k');
-  assertEq(win('gpt-5.5-pro'), 400_000, '(1) gpt-5.5-pro → 400k');
+  assertEq(win('gpt-5.6-sol'), 1_050_000, '(1) gpt-5.6-sol → 1.05M');
+  assertEq(win('gpt-5.5-pro'), 1_050_000, '(1) gpt-5.5-pro → 1.05M');
+  assertEq(win('gemini-3.6-flash'), 1_048_576, '(1) gemini-3.6-flash → 1,048,576');
   assertEq(win('cswan801/blackswan-v5'), 32_000, '(1) blackswan-v5 → 32k');
   // Every table value is a positive finite number (data-integrity guard).
   for (const [id, w] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
@@ -132,7 +136,7 @@ function main(): void {
   {
     const p = resolveChatPromptContextPolicy('moderate');
     assert(resolveModelContextBudget(p, { modelContextWindow: 150_000 }) === p, '(6) 150k mid-band → same object');
-    assert(resolveModelContextBudget(p, { modelContextWindow: win('claude-opus-4-8') }) === p, '(6) fed from lookup, mid-band → identity');
+    assert(resolveModelContextBudget(p, { modelContextWindow: win('claude-sonnet-4-6') }) === p, '(6) fed from 200k lookup, mid-band → identity');
   }
 
   // ─── (7) large window → strictly larger budget ────────────────────────────

@@ -1,7 +1,15 @@
 import { storage } from './storage';
 import { supabase } from './supabase';
 import { Platform } from 'react-native';
-import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
+import {
+  deleteLocalSecret,
+  deleteVerifiedLocalSecret,
+  readLocalSecret,
+  readVerifiedLocalSecret,
+  writeLocalSecret,
+  writeVerifiedLocalSecret,
+} from './localSecrets';
+import { getBridgeUrl } from './bridgeEnvironment';
 
 export type ProviderType =
   | 'openswan' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'opencode'
@@ -39,7 +47,7 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
   'copilot':        { icon: 'CP', label: 'Copilot',        color: '#1f6feb', defaultEndpoint: 'https://' },
   'continue':       { icon: 'CN', label: 'Continue',       color: '#22c55e', defaultEndpoint: 'https://' },
   'amp':            { icon: 'AM', label: 'Amp',            color: '#a78bfa', defaultEndpoint: 'https://' },
-  'blackswan-local':{ icon: '🦢', label: 'BlackSwan LLM',  color: '#22d3ee', defaultEndpoint: 'http://localhost:7779' },
+  'blackswan-local':{ icon: '🦢', label: 'BlackSwan LLM',  color: '#6366f1', defaultEndpoint: 'http://localhost:7779' },
   // ── BYO LLM API providers ──
   'openai':         { icon: '🟢', label: 'OpenAI',         color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1',      isLLM: true },
   'anthropic':      { icon: '🟠', label: 'Anthropic',      color: '#d97706', defaultEndpoint: 'https://api.anthropic.com/v1',   isLLM: true },
@@ -50,20 +58,271 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
   'gemini':         { icon: '♊', label: 'Google Gemini',   color: '#4285f4', defaultEndpoint: 'http://localhost:7780' },
   // ── Creative tools ──
   'replicate':      { icon: '🎨', label: 'Replicate',      color: '#ec4899', defaultEndpoint: 'https://api.replicate.com/v1',   isLLM: true },
-  'zai':            { icon: '🧩', label: 'z.ai',           color: '#22d3ee', defaultEndpoint: 'https://api.z.ai/api/paas/v4',   isLLM: true },
+  'zai':            { icon: '🧩', label: 'z.ai',           color: '#6366f1', defaultEndpoint: 'https://api.z.ai/api/paas/v4',   isLLM: true },
   'minimax':        { icon: '🧬', label: 'MiniMax',        color: '#fb7185', defaultEndpoint: 'https://api.minimax.io/v1',      isLLM: true },
   'figma':          { icon: '🎨', label: 'Figma',          color: '#a259ff', defaultEndpoint: 'https://api.figma.com' },
-  'github-models':  { icon: '🐙', label: 'GitHub Models',  color: '#6e40c9', defaultEndpoint: 'https://models.inference.ai.azure.com', isLLM: true },
+  'github-models':  { icon: '🐙', label: 'GitHub Models',  color: '#6e40c9', defaultEndpoint: 'https://models.github.ai/inference', isLLM: true },
   'huggingface':    { icon: '🤗', label: 'Hugging Face',   color: '#ffbd45', defaultEndpoint: 'https://router.huggingface.co/v1',    isLLM: true },
 };
 
 const STORAGE_KEY = '@office_connections';
+const EXACT_STORAGE_KEY_PREFIX = '@office_connections_v2';
+const EXACT_SECRET_NAMESPACE = 'office_connection_v2';
+const EXACT_STORAGE_SCHEMA_VERSION = 2;
 const LEGACY_PROVIDER = `open${'claw'}`;
 const SECRET_PLACEHOLDER = '__local_secret__';
+const MAX_EXACT_CONNECTIONS = 500;
+const MAX_EXACT_SCOPE_PART_LENGTH = 200;
+const MAX_EXACT_TOKEN_LENGTH = 16_384;
+const MAX_EXACT_METADATA_BYTES = 2 * 1024 * 1024;
+const exactSaveTails = new Map<string, Promise<void>>();
+
+export type OfficeConnectionExactAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+type NormalizedOfficeConnectionExactAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+export type OfficeConnectionAuthorityFence = (
+  authority: OfficeConnectionExactAuthority,
+) => boolean;
+
+export type OfficeConnectionExactError =
+  | 'invalid_authority'
+  | 'authority_mismatch'
+  | 'authority_retired'
+  | 'invalid_local_data'
+  | 'invalid_remote_data'
+  | 'invalid_connections'
+  | 'secret_unavailable'
+  | 'local_write_failed'
+  | 'remote_unavailable';
+
+export type OfficeConnectionSecretWriteFailure = Readonly<{
+  connectionId: string;
+  operation: 'write' | 'delete';
+  reason: OfficeConnectionExactError;
+}>;
+
+export type OfficeConnectionExactLoadResult = Readonly<{
+  ok: boolean;
+  connections: AgentConnection[];
+  userId: string | null;
+  circleId: string | null;
+  generation: number | null;
+  localLoaded: boolean;
+  remoteLoaded: boolean;
+  missingSecretCount: number;
+  error?: OfficeConnectionExactError;
+}>;
+
+export type OfficeConnectionExactSaveResult = Readonly<{
+  ok: boolean;
+  connections: AgentConnection[];
+  userId: string | null;
+  circleId: string | null;
+  generation: number | null;
+  localSaved: boolean;
+  remoteSaved: boolean;
+  secretFailures: OfficeConnectionSecretWriteFailure[];
+  error?: OfficeConnectionExactError;
+}>;
+
+type OfficeConnectionExactEnvelope = Readonly<{
+  schemaVersion: typeof EXACT_STORAGE_SCHEMA_VERSION;
+  userId: string;
+  circleId: string;
+  connections: AgentConnection[];
+}>;
 
 function normalizeProvider(provider: string | null | undefined): ProviderType {
   if (provider === LEGACY_PROVIDER) return 'openswan';
   return (provider as ProviderType) || 'generic-agent';
+}
+
+function normalizeExactScopePart(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > MAX_EXACT_SCOPE_PART_LENGTH) return null;
+  return normalized;
+}
+
+function normalizeOfficeConnectionExactAuthority(
+  input: OfficeConnectionExactAuthority | null | undefined,
+): NormalizedOfficeConnectionExactAuthority | null {
+  if (!input || typeof input !== 'object') return null;
+  const userId = normalizeExactScopePart(input.userId);
+  const circleId = normalizeExactScopePart(input.circleId);
+  const accessToken = typeof input.accessToken === 'string' ? input.accessToken.trim() : '';
+  const generation = input.generation;
+  if (
+    !userId
+    || !circleId
+    || !accessToken
+    || accessToken.length > MAX_EXACT_TOKEN_LENGTH
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId, accessToken, generation };
+}
+
+function isExactAuthorityCurrent(
+  authority: NormalizedOfficeConnectionExactAuthority,
+  fence: OfficeConnectionAuthorityFence,
+): boolean {
+  try {
+    return fence(authority);
+  } catch {
+    return false;
+  }
+}
+
+/** Exact user/circle metadata key. Bearer material and generation never enter storage keys. */
+export function officeConnectionExactStorageKey(
+  authority: OfficeConnectionExactAuthority | null | undefined,
+): string | null {
+  const normalized = normalizeOfficeConnectionExactAuthority(authority);
+  if (!normalized) return null;
+  return `${EXACT_STORAGE_KEY_PREFIX}:user:${encodeURIComponent(normalized.userId)}:circle:${encodeURIComponent(normalized.circleId)}`;
+}
+
+/** Exact protected-secret identifier for one connection in one user/circle lane. */
+export function officeConnectionExactSecretId(
+  authority: OfficeConnectionExactAuthority | null | undefined,
+  connectionId: string,
+): string | null {
+  const normalized = normalizeOfficeConnectionExactAuthority(authority);
+  const normalizedConnectionId = normalizeExactScopePart(connectionId);
+  if (!normalized || !normalizedConnectionId) return null;
+  return [normalized.userId, normalized.circleId, normalizedConnectionId]
+    .map(part => encodeURIComponent(part))
+    .join(':');
+}
+
+function sanitizeExactConnection(
+  value: unknown,
+  allowToken: boolean,
+): AgentConnection | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Partial<AgentConnection>;
+  const id = normalizeExactScopePart(raw.id);
+  const name = normalizeExactScopePart(raw.name);
+  const provider = typeof raw.provider === 'string' && Object.prototype.hasOwnProperty.call(PROVIDER_META, raw.provider)
+    ? raw.provider as ProviderType
+    : null;
+  const endpoint = typeof raw.endpoint === 'string' ? raw.endpoint.trim() : '';
+  const token = typeof raw.token === 'string' ? raw.token : '';
+  if (
+    !id
+    || !name
+    || !provider
+    || !endpoint
+    || endpoint.length > 2_048
+    || !isSafeExactConnectionEndpoint(endpoint)
+    || typeof raw.enabled !== 'boolean'
+    || (!allowToken && token !== '')
+    || token.length > MAX_EXACT_TOKEN_LENGTH
+  ) return null;
+  const remoteId = raw.remoteId === undefined
+    ? undefined
+    : normalizeExactScopePart(raw.remoteId);
+  if (raw.remoteId !== undefined && !remoteId) return null;
+  const color = typeof raw.color === 'string' && raw.color.trim() && raw.color.length <= 100
+    ? raw.color.trim()
+    : PROVIDER_META[provider].color;
+  const lastConnected = typeof raw.lastConnected === 'string' && Number.isFinite(Date.parse(raw.lastConnected))
+    ? raw.lastConnected
+    : undefined;
+  return {
+    id,
+    name,
+    provider,
+    endpoint,
+    token: allowToken ? token : '',
+    enabled: raw.enabled,
+    status: 'disconnected',
+    color,
+    ...(lastConnected ? { lastConnected } : {}),
+    ...(remoteId ? { remoteId } : {}),
+  };
+}
+
+function isSafeExactConnectionEndpoint(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint);
+    // Exact Office endpoints are durable configuration, not one-time signed
+    // URLs. Reject every query string so opaque presigned values, JWTs, sigs,
+    // and future credential parameter names can never enter storage or sync.
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:')
+      || url.username
+      || url.password
+      || url.hash
+      || url.search
+    ) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeExactConnections(
+  values: unknown,
+  allowToken: boolean,
+): AgentConnection[] | null {
+  if (!Array.isArray(values) || values.length > MAX_EXACT_CONNECTIONS) return null;
+  const connections: AgentConnection[] = [];
+  const ids = new Set<string>();
+  const remoteIds = new Set<string>();
+  for (const value of values) {
+    const connection = sanitizeExactConnection(value, allowToken);
+    if (!connection || ids.has(connection.id) || (connection.remoteId && remoteIds.has(connection.remoteId))) return null;
+    ids.add(connection.id);
+    if (connection.remoteId) remoteIds.add(connection.remoteId);
+    connections.push(connection);
+  }
+  return connections;
+}
+
+function parseExactEnvelope(
+  raw: string | null,
+  authority: NormalizedOfficeConnectionExactAuthority,
+): OfficeConnectionExactEnvelope | null {
+  if (raw === null) {
+    return {
+      schemaVersion: EXACT_STORAGE_SCHEMA_VERSION,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      connections: [],
+    };
+  }
+  if (raw.length > MAX_EXACT_METADATA_BYTES) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<OfficeConnectionExactEnvelope>;
+    if (
+      !parsed
+      || parsed.schemaVersion !== EXACT_STORAGE_SCHEMA_VERSION
+      || parsed.userId !== authority.userId
+      || parsed.circleId !== authority.circleId
+    ) return null;
+    const connections = sanitizeExactConnections(parsed.connections, false);
+    return connections ? {
+      schemaVersion: EXACT_STORAGE_SCHEMA_VERSION,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      connections,
+    } : null;
+  } catch {
+    return null;
+  }
 }
 
 export function generateId(): string {
@@ -163,6 +422,66 @@ function fromSupabaseRow(row: any): AgentConnection {
   };
 }
 
+function toSupabaseRowExact(
+  conn: AgentConnection,
+  authority: NormalizedOfficeConnectionExactAuthority,
+) {
+  return {
+    ...(conn.remoteId ? { id: conn.remoteId } : {}),
+    owner_id: authority.userId,
+    name: conn.name,
+    api_endpoint: conn.endpoint,
+    api_key_hash: SECRET_PLACEHOLDER,
+    type: ['openswan', 'claude-code', 'codex', 'gemini', 'cursor', 'blackswan-local'].includes(conn.provider)
+      ? 'assistant'
+      : 'custom',
+    is_active: conn.enabled,
+    metadata: {
+      officeScopeVersion: EXACT_STORAGE_SCHEMA_VERSION,
+      officeCircleId: authority.circleId,
+      provider: conn.provider,
+      color: conn.color,
+      localId: conn.id,
+      lastConnected: conn.lastConnected,
+      hasLocalToken: !!conn.token,
+      secretStorage: 'local_only_exact_scope',
+    },
+  };
+}
+
+function fromSupabaseRowExact(
+  value: unknown,
+  authority: NormalizedOfficeConnectionExactAuthority,
+): AgentConnection | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, any>;
+  const metadata = row.metadata;
+  if (
+    row.owner_id !== authority.userId
+    || typeof row.id !== 'string'
+    || !normalizeExactScopePart(row.id)
+    || row.api_key_hash !== SECRET_PLACEHOLDER
+    || !metadata
+    || typeof metadata !== 'object'
+    || Array.isArray(metadata)
+    || metadata.officeScopeVersion !== EXACT_STORAGE_SCHEMA_VERSION
+    || metadata.officeCircleId !== authority.circleId
+    || metadata.secretStorage !== 'local_only_exact_scope'
+  ) return null;
+  return sanitizeExactConnection({
+    id: metadata.localId,
+    name: row.name,
+    provider: metadata.provider,
+    endpoint: row.api_endpoint,
+    token: '',
+    enabled: row.is_active,
+    status: 'disconnected',
+    color: metadata.color,
+    lastConnected: metadata.lastConnected,
+    remoteId: row.id,
+  }, false);
+}
+
 // ─── Cloud sync ──────────────────────────────
 
 async function getUser(): Promise<string | null> {
@@ -215,6 +534,94 @@ async function deleteRemote(remoteId: string): Promise<void> {
   } catch {}
 }
 
+async function verifyOfficeConnectionExactAuthority(
+  input: OfficeConnectionExactAuthority,
+): Promise<NormalizedOfficeConnectionExactAuthority | null> {
+  const authority = normalizeOfficeConnectionExactAuthority(input);
+  if (!authority) return null;
+  try {
+    const { data, error } = await supabase.auth.getUser(authority.accessToken);
+    if (error || !data.user || data.user.id !== authority.userId) return null;
+    return authority;
+  } catch {
+    return null;
+  }
+}
+
+async function loadRemoteExact(
+  authority: NormalizedOfficeConnectionExactAuthority,
+): Promise<{ ok: boolean; connections: AgentConnection[]; invalid: boolean }> {
+  try {
+    const { data, error } = await supabase
+      .from('agents_bots')
+      .select('*')
+      .eq('owner_id', authority.userId)
+      .contains('metadata', {
+        officeScopeVersion: EXACT_STORAGE_SCHEMA_VERSION,
+        officeCircleId: authority.circleId,
+      })
+      .order('created_at', { ascending: true })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error || !Array.isArray(data)) return { ok: false, connections: [], invalid: false };
+    if (data.length > MAX_EXACT_CONNECTIONS) return { ok: false, connections: [], invalid: true };
+    const connections: AgentConnection[] = [];
+    const ids = new Set<string>();
+    const remoteIds = new Set<string>();
+    for (const row of data) {
+      const connection = fromSupabaseRowExact(row, authority);
+      if (!connection || ids.has(connection.id) || !connection.remoteId || remoteIds.has(connection.remoteId)) {
+        return { ok: false, connections: [], invalid: true };
+      }
+      ids.add(connection.id);
+      remoteIds.add(connection.remoteId);
+      connections.push(connection);
+    }
+    return { ok: true, connections, invalid: false };
+  } catch {
+    return { ok: false, connections: [], invalid: false };
+  }
+}
+
+async function upsertRemoteExact(
+  connection: AgentConnection,
+  authority: NormalizedOfficeConnectionExactAuthority,
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('agents_bots')
+      .upsert(toSupabaseRowExact(connection, authority), { onConflict: 'id' })
+      .select('id')
+      .single()
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    const remoteId = normalizeExactScopePart(data?.id);
+    if (error || !remoteId || (connection.remoteId && connection.remoteId !== remoteId)) return null;
+    return remoteId;
+  } catch {
+    return null;
+  }
+}
+
+async function deleteRemoteExact(
+  remoteId: string,
+  authority: NormalizedOfficeConnectionExactAuthority,
+): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('agents_bots')
+      .delete()
+      .eq('id', remoteId)
+      .eq('owner_id', authority.userId)
+      .contains('metadata', {
+        officeScopeVersion: EXACT_STORAGE_SCHEMA_VERSION,
+        officeCircleId: authority.circleId,
+      })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 // ─── Merge logic ──────────────────────────────
 
 function mergeConnections(local: AgentConnection[], remote: AgentConnection[]): AgentConnection[] {
@@ -255,6 +662,381 @@ function mergeConnections(local: AgentConnection[], remote: AgentConnection[]): 
   }
 
   return Array.from(merged.values());
+}
+
+function exactLoadFailure(
+  authority: NormalizedOfficeConnectionExactAuthority | null,
+  error: OfficeConnectionExactError,
+): OfficeConnectionExactLoadResult {
+  return {
+    ok: false,
+    connections: [],
+    userId: authority?.userId || null,
+    circleId: authority?.circleId || null,
+    generation: authority?.generation || null,
+    localLoaded: false,
+    remoteLoaded: false,
+    missingSecretCount: 0,
+    error,
+  };
+}
+
+function exactSaveFailure(
+  authority: NormalizedOfficeConnectionExactAuthority | null,
+  error: OfficeConnectionExactError,
+  connections: AgentConnection[] = [],
+  localSaved = false,
+  remoteSaved = false,
+): OfficeConnectionExactSaveResult {
+  return {
+    ok: false,
+    connections,
+    userId: authority?.userId || null,
+    circleId: authority?.circleId || null,
+    generation: authority?.generation || null,
+    localSaved,
+    remoteSaved,
+    secretFailures: [],
+    error,
+  };
+}
+
+async function readExactEnvelope(
+  authority: NormalizedOfficeConnectionExactAuthority,
+): Promise<{ ok: boolean; envelope: OfficeConnectionExactEnvelope | null }> {
+  const key = officeConnectionExactStorageKey(authority);
+  if (!key) return { ok: false, envelope: null };
+  try {
+    const raw = await storage.getItem(key);
+    const envelope = parseExactEnvelope(raw, authority);
+    return { ok: !!envelope, envelope };
+  } catch {
+    return { ok: false, envelope: null };
+  }
+}
+
+async function writeExactEnvelope(
+  authority: NormalizedOfficeConnectionExactAuthority,
+  connections: AgentConnection[],
+): Promise<boolean> {
+  const key = officeConnectionExactStorageKey(authority);
+  if (!key) return false;
+  const metadataConnections = connections.map(connection => ({
+    ...connection,
+    token: '',
+    status: 'disconnected' as const,
+    error: undefined,
+    sessionCount: undefined,
+    agentIds: undefined,
+  }));
+  const envelope: OfficeConnectionExactEnvelope = {
+    schemaVersion: EXACT_STORAGE_SCHEMA_VERSION,
+    userId: authority.userId,
+    circleId: authority.circleId,
+    connections: metadataConnections,
+  };
+  try {
+    const serialized = JSON.stringify(envelope);
+    if (serialized.length > MAX_EXACT_METADATA_BYTES || !parseExactEnvelope(serialized, authority)) return false;
+    await storage.setItem(key, serialized);
+    return await storage.getItem(key) === serialized;
+  } catch {
+    return false;
+  }
+}
+
+async function hydrateExactSecrets(
+  connections: AgentConnection[],
+  authority: NormalizedOfficeConnectionExactAuthority,
+  fence: OfficeConnectionAuthorityFence,
+): Promise<{
+  ok: boolean;
+  connections: AgentConnection[];
+  missingSecretCount: number;
+  unavailable: boolean;
+}> {
+  const hydrated: AgentConnection[] = [];
+  let missingSecretCount = 0;
+  let unavailable = false;
+  for (const connection of connections) {
+    if (!isExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, connections: [], missingSecretCount: 0, unavailable: false };
+    }
+    const secretId = officeConnectionExactSecretId(authority, connection.id);
+    if (!secretId) return { ok: false, connections: [], missingSecretCount: 0, unavailable: false };
+    const secret = await readVerifiedLocalSecret(EXACT_SECRET_NAMESPACE, secretId);
+    if (!isExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, connections: [], missingSecretCount: 0, unavailable: false };
+    }
+    if (secret.status === 'found') {
+      if (secret.value.length > MAX_EXACT_TOKEN_LENGTH) {
+        return { ok: false, connections: [], missingSecretCount: 0, unavailable: true };
+      }
+      hydrated.push({ ...connection, token: secret.value });
+    } else {
+      missingSecretCount += 1;
+      unavailable ||= secret.status === 'unavailable' || secret.status === 'invalid';
+      hydrated.push({ ...connection, token: '' });
+    }
+  }
+  return { ok: true, connections: hydrated, missingSecretCount, unavailable };
+}
+
+/**
+ * Load only the captured Office user/circle lane. This exact path never reads
+ * the ownerless legacy metadata key, legacy secret namespace, global session,
+ * or historical remote api_key_hash credential values.
+ */
+export async function loadOfficeConnectionsExact(
+  capturedAuthority: OfficeConnectionExactAuthority,
+  fence: OfficeConnectionAuthorityFence,
+): Promise<OfficeConnectionExactLoadResult> {
+  const syntacticAuthority = normalizeOfficeConnectionExactAuthority(capturedAuthority);
+  if (!syntacticAuthority || typeof fence !== 'function') {
+    return exactLoadFailure(syntacticAuthority, 'invalid_authority');
+  }
+  if (!isExactAuthorityCurrent(syntacticAuthority, fence)) {
+    return exactLoadFailure(syntacticAuthority, 'authority_retired');
+  }
+  const authority = await verifyOfficeConnectionExactAuthority(syntacticAuthority);
+  if (!authority) return exactLoadFailure(syntacticAuthority, 'authority_mismatch');
+  if (!isExactAuthorityCurrent(authority, fence)) return exactLoadFailure(authority, 'authority_retired');
+
+  const localResult = await readExactEnvelope(authority);
+  if (!isExactAuthorityCurrent(authority, fence)) return exactLoadFailure(authority, 'authority_retired');
+  if (!localResult.ok || !localResult.envelope) return exactLoadFailure(authority, 'invalid_local_data');
+
+  const remoteResult = await loadRemoteExact(authority);
+  if (!isExactAuthorityCurrent(authority, fence)) return exactLoadFailure(authority, 'authority_retired');
+  if (remoteResult.invalid) return exactLoadFailure(authority, 'invalid_remote_data');
+
+  const merged = remoteResult.ok
+    ? mergeConnections(localResult.envelope.connections, remoteResult.connections)
+    : localResult.envelope.connections;
+  const sanitizedMerged = sanitizeExactConnections(merged, false);
+  if (!sanitizedMerged) return exactLoadFailure(authority, 'invalid_remote_data');
+  const hydrated = await hydrateExactSecrets(sanitizedMerged, authority, fence);
+  if (!hydrated.ok || !isExactAuthorityCurrent(authority, fence)) {
+    return exactLoadFailure(authority, 'authority_retired');
+  }
+  if (hydrated.unavailable) return exactLoadFailure(authority, 'secret_unavailable');
+
+  // Cache remote metadata for offline use only while this exact authority is current.
+  if (!await writeExactEnvelope(authority, hydrated.connections)) {
+    return exactLoadFailure(authority, 'local_write_failed');
+  }
+  if (!isExactAuthorityCurrent(authority, fence)) return exactLoadFailure(authority, 'authority_retired');
+  return {
+    ok: true,
+    connections: hydrated.connections,
+    userId: authority.userId,
+    circleId: authority.circleId,
+    generation: authority.generation,
+    localLoaded: true,
+    remoteLoaded: remoteResult.ok,
+    missingSecretCount: hydrated.missingSecretCount,
+  };
+}
+
+/**
+ * Save one exact Office lane with verified protected-secret readback and
+ * captured-bearer server writes. Local success is retained when the remote is
+ * unavailable; the receipt exposes that state without replaying through a
+ * mutable global session.
+ */
+async function saveOfficeConnectionsExactImpl(
+  values: AgentConnection[],
+  capturedAuthority: OfficeConnectionExactAuthority,
+  fence: OfficeConnectionAuthorityFence,
+): Promise<OfficeConnectionExactSaveResult> {
+  const syntacticAuthority = normalizeOfficeConnectionExactAuthority(capturedAuthority);
+  if (!syntacticAuthority || typeof fence !== 'function') {
+    return exactSaveFailure(syntacticAuthority, 'invalid_authority');
+  }
+  const requestedConnections = sanitizeExactConnections(values, true);
+  if (!requestedConnections) return exactSaveFailure(syntacticAuthority, 'invalid_connections');
+  if (!isExactAuthorityCurrent(syntacticAuthority, fence)) {
+    return exactSaveFailure(syntacticAuthority, 'authority_retired');
+  }
+  const authority = await verifyOfficeConnectionExactAuthority(syntacticAuthority);
+  if (!authority) return exactSaveFailure(syntacticAuthority, 'authority_mismatch');
+  if (!isExactAuthorityCurrent(authority, fence)) return exactSaveFailure(authority, 'authority_retired');
+
+  const priorLocal = await readExactEnvelope(authority);
+  if (!isExactAuthorityCurrent(authority, fence)) return exactSaveFailure(authority, 'authority_retired');
+  if (!priorLocal.ok || !priorLocal.envelope) return exactSaveFailure(authority, 'invalid_local_data');
+
+  // A remote id is trusted only when it was already committed inside this
+  // exact user/circle envelope for the same local connection. This strips ids
+  // supplied by the legacy owner-global connection path instead of converting
+  // those rows into a circle-private row by accident.
+  const priorRemoteIdByLocalId = new Map(
+    priorLocal.envelope.connections
+      .filter(connection => !!connection.remoteId)
+      .map(connection => [connection.id, connection.remoteId!] as const),
+  );
+  const connections = requestedConnections.map(connection => {
+    const trustedRemoteId = priorRemoteIdByLocalId.get(connection.id);
+    return trustedRemoteId
+      ? { ...connection, remoteId: trustedRemoteId }
+      : { ...connection, remoteId: undefined };
+  });
+
+  const nextIds = new Set(connections.map(connection => connection.id));
+  const secretFailures: OfficeConnectionSecretWriteFailure[] = [];
+  for (const connection of connections) {
+    if (!isExactAuthorityCurrent(authority, fence)) return exactSaveFailure(authority, 'authority_retired');
+    const secretId = officeConnectionExactSecretId(authority, connection.id);
+    if (!secretId) return exactSaveFailure(authority, 'invalid_connections');
+    const saved = connection.token
+      ? await writeVerifiedLocalSecret(EXACT_SECRET_NAMESPACE, secretId, connection.token)
+      : await deleteVerifiedLocalSecret(EXACT_SECRET_NAMESPACE, secretId);
+    if (!saved) {
+      secretFailures.push({
+        connectionId: connection.id,
+        operation: connection.token ? 'write' : 'delete',
+        reason: 'secret_unavailable',
+      });
+      return {
+        ...exactSaveFailure(authority, 'secret_unavailable'),
+        secretFailures,
+      };
+    }
+    if (!isExactAuthorityCurrent(authority, fence)) return exactSaveFailure(authority, 'authority_retired');
+  }
+  for (const removed of priorLocal.envelope.connections) {
+    if (nextIds.has(removed.id)) continue;
+    if (!isExactAuthorityCurrent(authority, fence)) return exactSaveFailure(authority, 'authority_retired');
+    const secretId = officeConnectionExactSecretId(authority, removed.id);
+    if (!secretId || !await deleteVerifiedLocalSecret(EXACT_SECRET_NAMESPACE, secretId)) {
+      secretFailures.push({
+        connectionId: removed.id,
+        operation: 'delete',
+        reason: 'secret_unavailable',
+      });
+      return {
+        ...exactSaveFailure(authority, 'secret_unavailable'),
+        secretFailures,
+      };
+    }
+  }
+
+  if (!await writeExactEnvelope(authority, connections)) {
+    return exactSaveFailure(authority, 'local_write_failed');
+  }
+  if (!isExactAuthorityCurrent(authority, fence)) {
+    return exactSaveFailure(authority, 'authority_retired', [], true);
+  }
+
+  const remoteResult = await loadRemoteExact(authority);
+  if (!isExactAuthorityCurrent(authority, fence)) {
+    return exactSaveFailure(authority, 'authority_retired', [], true);
+  }
+  if (!remoteResult.ok) {
+    return {
+      ok: true,
+      connections,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      generation: authority.generation,
+      localSaved: true,
+      remoteSaved: false,
+      secretFailures,
+      error: remoteResult.invalid ? 'invalid_remote_data' : 'remote_unavailable',
+    };
+  }
+
+  const existingRemoteByLocalId = new Map(
+    remoteResult.connections
+      .filter(connection => !!connection.remoteId)
+      .map(connection => [connection.id, connection.remoteId!] as const),
+  );
+  const withRemoteIds = connections.map(connection => ({
+    ...connection,
+    remoteId: connection.remoteId || existingRemoteByLocalId.get(connection.id),
+  }));
+  let remoteSaved = true;
+  for (const connection of withRemoteIds) {
+    if (!isExactAuthorityCurrent(authority, fence)) {
+      return exactSaveFailure(authority, 'authority_retired', [], true);
+    }
+    const remoteId = await upsertRemoteExact(connection, authority);
+    if (!remoteId) {
+      remoteSaved = false;
+      break;
+    }
+    connection.remoteId = remoteId;
+  }
+
+  if (remoteSaved) {
+    const retainedRemoteIds = new Set(withRemoteIds.map(connection => connection.remoteId).filter(Boolean));
+    for (const remote of remoteResult.connections) {
+      if (!remote.remoteId || retainedRemoteIds.has(remote.remoteId)) continue;
+      if (!isExactAuthorityCurrent(authority, fence)) {
+        return exactSaveFailure(authority, 'authority_retired', [], true);
+      }
+      if (!await deleteRemoteExact(remote.remoteId, authority)) remoteSaved = false;
+    }
+  }
+  if (!isExactAuthorityCurrent(authority, fence)) {
+    return exactSaveFailure(authority, 'authority_retired', [], true, remoteSaved);
+  }
+  const finalLocalSaved = await writeExactEnvelope(authority, withRemoteIds);
+  if (!finalLocalSaved) {
+    return exactSaveFailure(authority, 'local_write_failed', withRemoteIds, false, remoteSaved);
+  }
+  return remoteSaved
+    ? {
+      ok: true,
+      connections: withRemoteIds,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      generation: authority.generation,
+      localSaved: true,
+      remoteSaved: true,
+      secretFailures,
+    }
+    : {
+      ok: true,
+      connections: withRemoteIds,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      generation: authority.generation,
+      localSaved: true,
+      remoteSaved: false,
+      secretFailures,
+      error: 'remote_unavailable',
+    };
+}
+
+/**
+ * Serialize exact saves per user/circle so an older async write cannot finish
+ * after and erase a newer snapshot. Other accounts and circles remain fully
+ * independent lanes.
+ */
+export async function saveOfficeConnectionsExact(
+  values: AgentConnection[],
+  capturedAuthority: OfficeConnectionExactAuthority,
+  fence: OfficeConnectionAuthorityFence,
+): Promise<OfficeConnectionExactSaveResult> {
+  const authority = normalizeOfficeConnectionExactAuthority(capturedAuthority);
+  if (!authority || typeof fence !== 'function') {
+    return exactSaveFailure(authority, 'invalid_authority');
+  }
+  const capturedConnections = sanitizeExactConnections(values, true);
+  if (!capturedConnections) return exactSaveFailure(authority, 'invalid_connections');
+  const laneKey = `${encodeURIComponent(authority.userId)}\u0000${encodeURIComponent(authority.circleId)}`;
+  const previous = exactSaveTails.get(laneKey) || Promise.resolve();
+  const run = previous
+    .catch(() => undefined)
+    .then(() => saveOfficeConnectionsExactImpl(capturedConnections, authority, fence));
+  const tail = run.then(() => undefined, () => undefined);
+  exactSaveTails.set(laneKey, tail);
+  try {
+    return await run;
+  } finally {
+    if (exactSaveTails.get(laneKey) === tail) exactSaveTails.delete(laneKey);
+  }
 }
 
 // ─── Public API ──────────────────────────────
@@ -340,9 +1122,21 @@ export async function saveConnections(connections: AgentConnection[]): Promise<v
 
 // ─── Auto-Discovery ──────────────────────────────
 
-const LOCAL_OPENCLAW_ENDPOINTS = [
-  'http://localhost:18789', // Direct gateway
-];
+/**
+ * Browser traffic must use the CORS/auth proxy. Native runtimes may reach the
+ * direct gateway first and retain the proxy as a fallback. Explicit bridge
+ * environment URLs are resolved by the shared bridge-environment owner.
+ */
+export function getLocalOpenSwanDiscoveryEndpoints(
+  platform: string = Platform.OS,
+): string[] {
+  const proxyEndpoint = getBridgeUrl(18790);
+  const directEndpoint = getBridgeUrl(18789);
+  const ordered = platform === 'web'
+    ? [proxyEndpoint]
+    : [directEndpoint, proxyEndpoint];
+  return Array.from(new Set(ordered.filter((value): value is string => !!value)));
+}
 
 /**
  * Probe localhost for a running OpenSwan gateway.
@@ -363,29 +1157,19 @@ export async function autoDiscoverLocalAgents(
     return { discovered: null, endpoint: conn?.endpoint };
   }
 
-  for (const endpoint of LOCAL_OPENCLAW_ENDPOINTS) {
-    try {
-      const res = await fetch(`${endpoint}/health`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        if (data?.ok || data?.status === 'live') {
-          const conn: AgentConnection = {
-            id: generateId(),
-            name: 'OpenSwan',
-            provider: 'openswan',
-            endpoint,
-            token: '', // Will be filled from saved data or user input
-            enabled: true,
-            status: 'disconnected',
-            color: PROVIDER_META.openswan.color,
-          };
-          return { discovered: conn, endpoint };
-        }
-      }
-    } catch {
-      // Endpoint not reachable — try next
+  for (const endpoint of getLocalOpenSwanDiscoveryEndpoints()) {
+    if (await probeEndpointHealth(endpoint)) {
+      const conn: AgentConnection = {
+        id: generateId(),
+        name: 'OpenSwan',
+        provider: 'openswan',
+        endpoint,
+        token: '', // Will be filled from saved data or user input
+        enabled: true,
+        status: 'disconnected',
+        color: PROVIDER_META.openswan.color,
+      };
+      return { discovered: conn, endpoint };
     }
   }
 

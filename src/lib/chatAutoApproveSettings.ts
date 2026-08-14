@@ -17,6 +17,7 @@
 
 import { supabase } from './supabase';
 import type { ChatAutomationPlan } from './chatAutomationPlanner';
+import { isApprovalCategoryAutoEligible } from './approvalEffectPolicyCore';
 
 export type AutoApproveDecision = 'ask' | 'auto' | 'never';
 
@@ -44,6 +45,21 @@ const DEFAULT_SETTINGS: AutoApproveSettings = {
   external_publish: 'ask',
   desktop_action: 'ask',   // default-ask — every desktop tool call hits the HITL banner first time
 };
+
+/**
+ * Category auto-approval is available only for a positively classified safe
+ * effect. Broad mutation categories intentionally return false; an exact tool
+ * or future workflow authority must handle those actions instead.
+ */
+export function canAutoApproveCategory(category: unknown): boolean {
+  return isApprovalCategoryAutoEligible(category);
+}
+
+function safeStoredDecision(category: AutoApproveCategory, value: unknown): AutoApproveDecision {
+  if (value === 'never') return 'never';
+  if (value === 'auto' && canAutoApproveCategory(category)) return 'auto';
+  return 'ask';
+}
 
 // ─── Category classifier ────────────────────────────────────────────────────
 
@@ -120,14 +136,14 @@ export async function resolveAutoApproveDecision(
 
   // Circle-scoped first (explicit circle policy wins over user default).
   const circleDecision = await readCircleAutoApprove(opts.circleId).catch(() => null);
-  const circleChoice = circleDecision?.[category];
+  const circleChoice = safeStoredDecision(category, circleDecision?.[category]);
   if (circleChoice && circleChoice !== 'ask') return { category, decision: circleChoice };
 
   const userDecision = await readUserAutoApprove(opts.userId).catch(() => null);
-  const userChoice = userDecision?.[category];
+  const userChoice = safeStoredDecision(category, userDecision?.[category]);
   if (userChoice && userChoice !== 'ask') return { category, decision: userChoice };
 
-  return { category, decision: DEFAULT_SETTINGS[category] || 'ask' };
+  return { category, decision: safeStoredDecision(category, DEFAULT_SETTINGS[category]) };
 }
 
 // ─── Circle-scoped read/write ──────────────────────────────────────────────
@@ -151,6 +167,9 @@ export async function writeCircleAutoApprove(
   decision: AutoApproveDecision,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!circleId) return { ok: false, error: 'missing circleId' };
+  if (decision === 'auto' && !canAutoApproveCategory(category)) {
+    return { ok: false, error: `${category} requires exact approval and cannot be category-auto-approved` };
+  }
   const existing = (await readCircleAutoApprove(circleId)) || {};
   const next: AutoApproveSettings = { ...existing, [category]: decision };
   const { data: current, error: readErr } = await supabase
@@ -197,6 +216,9 @@ export async function writeUserAutoApprove(
   decision: AutoApproveDecision,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!userId) return { ok: false, error: 'missing userId' };
+  if (decision === 'auto' && !canAutoApproveCategory(category)) {
+    return { ok: false, error: `${category} requires exact approval and cannot be category-auto-approved` };
+  }
   // Read-merge-update so we never clobber other office_preferences keys
   // (adaptiveWorkspace, onboarding flags, budget/idle config, …).
   const { data: current, error: readErr } = await supabase

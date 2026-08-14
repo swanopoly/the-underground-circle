@@ -19,10 +19,10 @@
  *      with handoff contract → simulated stage-2 failure → checkpoint
  *      recovery infers the failed stage + do-not-redo completed stages →
  *      consistency with the route's app decision and evidence recovery.
- *   4. Constraint + sticky-scope interplay: forbidden(submit) hard-block via
- *      constraintBlocksToolCall, sticky downgrade fires only with full
- *      non-floor coverage, floor categories never downgrade, notice copy
- *      stays consistent across route/notice/handoff.
+ *   4. Constraint + retired-sticky-scope interplay: forbidden(submit)
+ *      hard-block via constraintBlocksToolCall, exact mutation categories
+ *      reject standing grants, and forged legacy scopes cannot change route,
+ *      prompt, notice, or handoff authority.
  *   5. Recovery loop: failing evidence contract → recovery emits required
  *      tools + readiness (missing → stale → ready → blocked), and every
  *      recovery/recommended tool name is cross-checked against the REAL
@@ -101,7 +101,6 @@ import { buildDesignAppAdapterGapPlan } from '../src/lib/designAppAdapterGaps';
 import { buildChatComputerTaskAutonomy } from '../src/lib/chatComputerTaskAutonomy';
 import {
   createStickyScope,
-  formatStickyScopeAppliedNotice,
   setActiveStickyScopes,
   type StickyAllowScope,
 } from '../src/lib/computerGrantGate';
@@ -248,7 +247,9 @@ async function main() {
   const contract1 = route1.evidenceContract!;
   assert(contract1 && contract1.schemaVersion === 1 && contract1.kind === 'browser', 'J1 route carries a browser evidence contract', contract1?.kind);
   assert(contract1.approvalBefore.some((line) => line === route1.approvalReason), 'J1 contract approvalBefore folds in the route approval reason', contract1.approvalBefore);
-  assert(contract1.proofAfter.length > 0 && contract1.proofAfter.length <= 8, 'J1 contract proofAfter bounded (1..8)');
+  assert(contract1.proofAfter.length > 0 && contract1.proofAfter.length <= 16, 'J1 contract proofAfter bounded (1..16, including A-id proof)');
+  assert((route1.requestCompletionProof?.length || 0) > 0 && (route1.requestCompletionProof?.length || 0) <= 12,
+    'J1 route retains a bounded planner-owned proof seed for deterministic re-derivation');
   assert(contract1.proofAfter.every((line) => route1.completionProof.includes(line)) || contract1.proofAfter.some((line) => route1.completionProof.includes(line)),
     'J1 route completionProof absorbed contract proofAfter items', { proofAfter: contract1.proofAfter, completionProof: route1.completionProof });
   // Re-deriving the contract from the same route is deterministic.
@@ -496,18 +497,20 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════════════════
   // Journey 4 — Constraint + sticky-scope interplay
   // ═══════════════════════════════════════════════════════════════════════════
-  section('Journey 4: forbidden(submit) hard-block + sticky downgrade gating');
+  section('Journey 4: forbidden(submit) hard-block + retired sticky grants');
 
-  const created = createStickyScope({
+  // Upload/download are private-file effects. Like every currently persisted
+  // router mutation category, they require exact outcome authority and cannot
+  // be placed in a broad standing grant.
+  const exactScopeAttempt = createStickyScope({
     scopeKind: 'site',
     scopeKey: 'acme.com',
     allowedCategories: ['upload', 'download'],
     grantedByUserId: 'e2e-user',
   });
-  if (!created.ok) throw new Error(`sticky scope creation failed: ${created.error}`);
-  const scope = created.scope;
+  assert(exactScopeAttempt.ok === false, 'J4 exact upload/download categories are rejected at scope creation');
 
-  // A floor category can never be granted into a sticky scope.
+  // A destructive/payment floor category remains independently non-grantable.
   const floorScopeAttempt = createStickyScope({
     scopeKind: 'site',
     scopeKey: 'acme.com',
@@ -516,59 +519,74 @@ async function main() {
   });
   assert(floorScopeAttempt.ok === false, 'J4 floor category (pay) is rejected at scope creation');
 
+  // Simulate hostile or pre-policy persisted data. Hydration and route-time
+  // matching must sanitize the exact-only scope to zero authority.
+  const forgedLegacyScope: StickyAllowScope = {
+    id: 'legacy_sticky_site_acme.com',
+    scopeKind: 'site',
+    scopeKey: 'acme.com',
+    allowedCategories: [
+      'submit', 'send', 'publish', 'pay', 'delete',
+      'download', 'upload', 'save', 'login', 'grant',
+    ],
+    grantedByUserId: 'forged-user',
+    grantedAtIso: '2026-01-01T00:00:00.000Z',
+    expiresAtIso: '2099-01-01T00:00:00.000Z',
+    lastUsedAtIso: null,
+    useCount: 0,
+    revoked: null,
+  };
+
   // WI-2: a browser upload/side-effect route is now zero-tap at the route
   // level (external side effects defer to the mid-run payment floor), so the
-  // baseline no longer requires approval. A matching standing grant is still
-  // recorded (stamped) so the user can see/revoke it later even though it no
-  // longer flips an approval decision for browser routes.
+  // baseline does not require an up-front approval. A forged standing grant
+  // must neither cause that decision nor leave an authority stamp.
   const MSG_UPLOAD = 'go to acme.com and upload the report.pdf to the client portal';
   const baselineUpload = mustRoute(MSG_UPLOAD);
   assert(baselineUpload.approvalRequired === false && !baselineUpload.stickyScopeApplied,
     'J4 baseline browser upload is zero-tap (WI-2) with no sticky stamp when no scope is present', { approval: baselineUpload.approvalRequired, sticky: baselineUpload.stickyScopeApplied });
-  const stickyUpload = mustRoute(MSG_UPLOAD, { stickyScopes: [scope] });
-  assert(stickyUpload.approvalRequired === false && stickyUpload.stickyScopeApplied?.scopeKey === 'acme.com',
-    'J4 covered upload stays zero-tap and still records the standing grant', { approval: stickyUpload.approvalRequired, sticky: stickyUpload.stickyScopeApplied });
-  assert(stickyUpload.stickyScopeApplied?.categories.includes('upload'), 'J4 sticky stamp records the auto-approved category', stickyUpload.stickyScopeApplied);
-  const stickyNoticeLine = formatStickyScopeAppliedNotice({ scopeKey: 'acme.com' });
-  assert(stickyUpload.notes.some((note) => note.includes(stickyNoticeLine)), 'J4 route notes carry the standing-grant notice', stickyUpload.notes);
+  const forgedUpload = mustRoute(MSG_UPLOAD, { stickyScopes: [forgedLegacyScope] });
+  assert(forgedUpload.approvalRequired === baselineUpload.approvalRequired && !forgedUpload.stickyScopeApplied,
+    'J4 forged legacy scope cannot change upload approval or stamp the route', { approval: forgedUpload.approvalRequired, sticky: forgedUpload.stickyScopeApplied });
+  assert(!forgedUpload.notes.some((note) => /standing grant/i.test(note)),
+    'J4 forged legacy scope cannot add standing-grant route notes', forgedUpload.notes);
 
-  // Sticky-downgraded route runs quietly — and the handoff still carries the
-  // standing-grant stamp so the user can see/revoke it later.
-  const stickyAutonomy = buildChatComputerTaskAutonomy(stickyUpload);
-  assert(stickyAutonomy.userEffort === 'none' && stickyAutonomy.canRunQuietly, 'J4 sticky route needs no user step', stickyAutonomy.userEffort);
-  const stickyNotice = buildChatComputerRequestUserNotice(stickyUpload);
-  assert(stickyNotice.visibility === 'hidden' && formatChatComputerRequestUserNotice(stickyNotice) === '',
-    'J4 sticky route notice stays quiet', stickyNotice.visibility);
-  const stickyHandoff = buildChatComputerHandoffContext({
+  // The browser route remains quiet only because WI-2 defers the exact action
+  // to its handler-owned boundary. No standing-grant authority reaches UX or
+  // persisted handoff metadata.
+  const forgedAutonomy = buildChatComputerTaskAutonomy(forgedUpload);
+  assert(forgedAutonomy.userEffort === 'none' && forgedAutonomy.canRunQuietly,
+    'J4 upload route retains WI-2 autonomy without borrowing a standing grant', forgedAutonomy.userEffort);
+  const forgedNotice = buildChatComputerRequestUserNotice(forgedUpload);
+  assert(forgedNotice.visibility === 'hidden' && formatChatComputerRequestUserNotice(forgedNotice) === '',
+    'J4 upload route notice stays quiet without a standing-grant claim', forgedNotice.visibility);
+  const forgedHandoff = buildChatComputerHandoffContext({
     task: MSG_UPLOAD,
     entrypoint: 'browser_runtime',
-    requestNotice: stickyNotice,
-    evidenceContract: stickyUpload.evidenceContract,
-    stickyScopeApplied: stickyUpload.stickyScopeApplied,
+    requestNotice: forgedNotice,
+    evidenceContract: forgedUpload.evidenceContract,
+    stickyScopeApplied: forgedUpload.stickyScopeApplied,
   });
-  assert(stickyHandoff.metadata.standingGrant?.scopeKey === 'acme.com', 'J4 handoff metadata stamps the standing grant', stickyHandoff.metadata.standingGrant);
-  assert((stickyHandoff.metadata.standingGrant?.notice || '').includes(stickyNoticeLine.slice(0, 60)),
-    'J4 handoff standing-grant notice copy matches the route notice copy');
-  assert((stickyHandoff.metadata.standingGrant?.notice || '').length <= 240, 'J4 standing-grant notice stays bounded (≤240 chars)');
+  assert(forgedHandoff.metadata.standingGrant === null,
+    'J4 forged legacy scope cannot enter persisted handoff authority', forgedHandoff.metadata.standingGrant);
 
   // Prompt block via the hydrated default registry path (the live wiring).
-  setActiveStickyScopes([scope]);
+  setActiveStickyScopes([forgedLegacyScope]);
   try {
-    const stickyBlock = buildChatComputerRequestRoutePromptBlock(MSG_UPLOAD)!;
-    assert(stickyBlock.includes('Standing grant applied:'), 'J4 prompt block carries the standing-grant line via the default registry');
-    assert(stickyBlock.includes('The always-confirm floor (pay, delete, login, grant) still requires fresh confirmation.'),
-      'J4 prompt block reminds that the floor survives the grant');
-    assertNoLeaks(stickyBlock, 'J4 sticky prompt block');
+    const forgedBlock = buildChatComputerRequestRoutePromptBlock(MSG_UPLOAD)!;
+    assert(!forgedBlock.includes('Standing grant applied:'),
+      'J4 hydrated forged scope cannot add standing-grant prompt authority');
+    assertNoLeaks(forgedBlock, 'J4 forged-scope prompt block');
   } finally {
     setActiveStickyScopes([]);
   }
 
-  // Constraint interplay: "don't submit" adds a non-covered category, so the
-  // sticky downgrade must NOT fire even though upload itself is covered.
+  // Constraint interplay: "don't submit" remains a hard per-step block, and a
+  // forged scope cannot cover either the upload or the constraint category.
   const MSG_CONSTRAINED = "go to acme.com and upload the report.pdf to the client portal, but don't submit the publish form";
-  const constrainedRoute = mustRoute(MSG_CONSTRAINED, { stickyScopes: [scope] });
+  const constrainedRoute = mustRoute(MSG_CONSTRAINED, { stickyScopes: [forgedLegacyScope] });
   assert(constrainedRoute.userConstraints?.forbidden.includes('submit'), 'J4 constrained route parses forbidden(submit)', constrainedRoute.userConstraints);
-  assert(!constrainedRoute.stickyScopeApplied, 'J4 sticky downgrade does not fire when an uncovered constraint category is present', constrainedRoute.stickyScopeApplied);
+  assert(!constrainedRoute.stickyScopeApplied, 'J4 forged scope cannot stamp the constrained route', constrainedRoute.stickyScopeApplied);
   // WI-2: the route is zero-tap (browser external side effect deferred); the
   // forbidden(submit) constraint is still enforced as a HARD per-step block
   // below via constraintBlocksToolCall, not as a route-level approval.
@@ -581,10 +599,10 @@ async function main() {
   // Floor interplay (WI-2): a browser pay route stamps the pay floor for
   // per-step (mid-run) enforcement but is zero-tap at the route level — the
   // single pay confirmation fires mid-run at the payment floor, not up front.
-  // A sticky scope still never covers a floor category (the pay floor cannot be
-  // granted, verified at scope creation above).
+  // A forged scope still never covers a floor category (the pay floor cannot
+  // be granted, verified at scope creation above).
   const MSG_FLOOR = 'go to acme.com, download the receipt and pay the outstanding invoice';
-  const floorRoute = mustRoute(MSG_FLOOR, { stickyScopes: [scope] });
+  const floorRoute = mustRoute(MSG_FLOOR, { stickyScopes: [forgedLegacyScope] });
   assert(floorRoute.alwaysConfirmFloor?.includes('pay'), 'J4 floor route stamps pay for mid-run per-step enforcement', floorRoute.alwaysConfirmFloor);
   assert(floorRoute.approvalRequired === false && !floorRoute.stickyScopeApplied,
     'J4 browser pay route is zero-tap at route level; pay confirmed mid-run at the payment floor (WI-2)', { approval: floorRoute.approvalRequired, sticky: floorRoute.stickyScopeApplied });
@@ -605,7 +623,7 @@ async function main() {
   );
   assert(precedenceVerdict.blocked === true && precedenceVerdict.category === 'pay',
     'J4 a forbidden-constraint block takes precedence over the floor confirm', precedenceVerdict);
-  collectRecommended('J4 routes', MSG_UPLOAD, [...stickyUpload.recommendedTools, ...constrainedRoute.recommendedTools, ...floorRoute.recommendedTools]);
+  collectRecommended('J4 routes', MSG_UPLOAD, [...forgedUpload.recommendedTools, ...constrainedRoute.recommendedTools, ...floorRoute.recommendedTools]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Journey 5 — Recovery loop + tool-catalog cross-check

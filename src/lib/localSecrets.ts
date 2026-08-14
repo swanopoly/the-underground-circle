@@ -27,6 +27,11 @@ interface NativeSecureStore {
   deleteItemAsync(key: string): Promise<void>;
 }
 
+export type VerifiedLocalSecretReadResult =
+  | Readonly<{ status: 'found'; value: string }>
+  | Readonly<{ status: 'missing' }>
+  | Readonly<{ status: 'unavailable' | 'invalid' }>;
+
 function webStorageKey(namespace: string, id: string): string {
   return `${WEB_SECRET_PREFIX}${namespace}:${id}`;
 }
@@ -130,8 +135,66 @@ async function writeNativeLocalSecret(
   } catch {}
 }
 
+async function readVerifiedNativeLocalSecret(
+  secureStore: NativeSecureStore,
+  namespace: string,
+  id: string,
+): Promise<VerifiedLocalSecretReadResult> {
+  try {
+    const stored = await secureStore.getItemAsync(nativeLocalSecretStorageKey(namespace, id));
+    return stored === null
+      ? Object.freeze({ status: 'missing' as const })
+      : Object.freeze({ status: 'found' as const, value: stored });
+  } catch {
+    return Object.freeze({ status: 'unavailable' as const });
+  }
+}
+
+async function writeVerifiedNativeLocalSecret(
+  secureStore: NativeSecureStore,
+  namespace: string,
+  id: string,
+  value: string,
+): Promise<boolean> {
+  if (!value) return false;
+  try {
+    const key = nativeLocalSecretStorageKey(namespace, id);
+    await secureStore.setItemAsync(key, value);
+    let verified = false;
+    try { verified = await secureStore.getItemAsync(key) === value; } catch {}
+    if (verified) return true;
+    try { await secureStore.deleteItemAsync(key); } catch {}
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteVerifiedNativeLocalSecret(
+  secureStore: NativeSecureStore,
+  namespace: string,
+  id: string,
+): Promise<boolean> {
+  try {
+    const key = nativeLocalSecretStorageKey(namespace, id);
+    await secureStore.deleteItemAsync(key);
+    const legacyKey = readableLegacyNativeKey(namespace, id);
+    if (legacyKey && legacyKey !== key) await secureStore.deleteItemAsync(legacyKey);
+    const canonicalRemaining = await secureStore.getItemAsync(key);
+    const legacyRemaining = legacyKey && legacyKey !== key
+      ? await secureStore.getItemAsync(legacyKey)
+      : null;
+    return canonicalRemaining === null && legacyRemaining === null;
+  } catch {
+    return false;
+  }
+}
+
 export const __localSecretsTestables = {
+  deleteVerifiedNativeLocalSecret,
   readNativeLocalSecret,
+  readVerifiedNativeLocalSecret,
+  writeVerifiedNativeLocalSecret,
   writeNativeLocalSecret,
 };
 
@@ -193,4 +256,93 @@ export async function writeLocalSecret(namespace: string, id: string, value: str
 
 export async function deleteLocalSecret(namespace: string, id: string): Promise<void> {
   await writeLocalSecret(namespace, id, '');
+}
+
+/**
+ * Strict authority-storage read. On web, only an AES-GCM blob produced by
+ * `webCrypto` is accepted; historical plaintext compatibility is deliberately
+ * disabled. Native values are read only from the canonical OS SecureStore key.
+ */
+export async function readVerifiedLocalSecret(
+  namespace: string,
+  id: string,
+): Promise<VerifiedLocalSecretReadResult> {
+  if (Platform.OS === 'web') {
+    try {
+      if (typeof localStorage === 'undefined' || !isWebCryptoAvailable()) {
+        return Object.freeze({ status: 'unavailable' as const });
+      }
+      const raw = localStorage.getItem(webStorageKey(namespace, id));
+      if (raw === null) return Object.freeze({ status: 'missing' as const });
+      if (!isEncryptedBlob(raw)) return Object.freeze({ status: 'invalid' as const });
+      const value = await decryptString(raw);
+      return value === null
+        ? Object.freeze({ status: 'invalid' as const })
+        : Object.freeze({ status: 'found' as const, value });
+    } catch {
+      return Object.freeze({ status: 'unavailable' as const });
+    }
+  }
+
+  const secureStore = await getSecureStore();
+  if (!secureStore) return Object.freeze({ status: 'unavailable' as const });
+  return readVerifiedNativeLocalSecret(secureStore, namespace, id);
+}
+
+/**
+ * Write a non-empty authority value and acknowledge it only after an exact
+ * protected-store readback. Web requires AES-GCM and never falls back to a
+ * plaintext localStorage value. This is device-local protection at rest; it
+ * does not make browser-held authority safe from code already executing in the
+ * origin (for example, XSS).
+ */
+export async function writeVerifiedLocalSecret(
+  namespace: string,
+  id: string,
+  value: string,
+): Promise<boolean> {
+  if (!value) return false;
+  if (Platform.OS === 'web') {
+    const key = webStorageKey(namespace, id);
+    try {
+      if (typeof localStorage === 'undefined' || !isWebCryptoAvailable()) return false;
+      const blob = await encryptString(value);
+      if (!blob || !isEncryptedBlob(blob)) return false;
+      localStorage.setItem(key, blob);
+      const stored = localStorage.getItem(key);
+      if (stored === blob && isEncryptedBlob(stored) && await decryptString(stored) === value) {
+        return true;
+      }
+      localStorage.removeItem(key);
+      return false;
+    } catch {
+      try { localStorage.removeItem(key); } catch {}
+      return false;
+    }
+  }
+
+  const secureStore = await getSecureStore();
+  if (!secureStore) return false;
+  return writeVerifiedNativeLocalSecret(secureStore, namespace, id, value);
+}
+
+/** Delete and verify absence before one-shot authority is considered spent. */
+export async function deleteVerifiedLocalSecret(
+  namespace: string,
+  id: string,
+): Promise<boolean> {
+  if (Platform.OS === 'web') {
+    try {
+      if (typeof localStorage === 'undefined') return false;
+      const key = webStorageKey(namespace, id);
+      localStorage.removeItem(key);
+      return localStorage.getItem(key) === null;
+    } catch {
+      return false;
+    }
+  }
+
+  const secureStore = await getSecureStore();
+  if (!secureStore) return false;
+  return deleteVerifiedNativeLocalSecret(secureStore, namespace, id);
 }

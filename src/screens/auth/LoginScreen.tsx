@@ -468,6 +468,7 @@ export default function LoginScreen({ navigation, route, onPasswordRecoveryCompl
       <TextInput
         ref={inputRef}
         style={styles.input}
+        {...(Platform.OS === 'web' ? { dataSet: { ucAuthField: 'true' } } as any : {})}
         placeholder={placeholder}
         placeholderTextColor="#5f695f"
         value={value}

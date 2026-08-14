@@ -5,10 +5,11 @@ type PanelMode = 'center' | 'side';
 
 const POPUP_PADDING = 24;
 const CENTER_W_RATIO = 0.62;
-const CENTER_H_RATIO = 0.8;
+const CENTER_H_RATIO = 0.68;
 const CENTER_MIN_W = 560;
 const CENTER_MAX_W = 1000;
 const CENTER_MIN_H = 480;
+const CENTER_MAX_H = 720;
 const SIDE_MIN_W = 380;
 const SIDE_MAX_W = 720;
 const SIDE_DEFAULT_W = 480;
@@ -105,8 +106,10 @@ export function useAgentPanelLayout() {
   }, [panelMode, sideWidth]);
 
   const panelGeometry = useMemo(() => {
-    const maxCenteredWidth = Math.max(CENTER_MIN_W, viewport.w - (POPUP_PADDING * 2));
-    const maxCenteredHeight = Math.max(CENTER_MIN_H, viewport.h - (POPUP_PADDING * 2));
+    const maxCenteredWidth = Math.max(320, viewport.w - (POPUP_PADDING * 2));
+    const minCenteredWidth = Math.min(CENTER_MIN_W, maxCenteredWidth);
+    const maxCenteredHeight = Math.max(320, viewport.h - (POPUP_PADDING * 2));
+    const minCenteredHeight = Math.min(CENTER_MIN_H, maxCenteredHeight);
     const clampedSideWidth = Math.max(
       Math.min(sideWidth, Math.max(320, viewport.w - 24)),
       Math.min(SIDE_MIN_W, Math.max(280, viewport.w - 24)),
@@ -121,8 +124,8 @@ export function useAgentPanelLayout() {
       };
     }
 
-    const width = Math.min(CENTER_MAX_W, maxCenteredWidth, Math.max(CENTER_MIN_W, Math.round(viewport.w * CENTER_W_RATIO)));
-    const height = Math.min(maxCenteredHeight, Math.max(CENTER_MIN_H, Math.round(viewport.h * CENTER_H_RATIO)));
+    const width = Math.min(CENTER_MAX_W, maxCenteredWidth, Math.max(minCenteredWidth, Math.round(viewport.w * CENTER_W_RATIO)));
+    const height = Math.min(CENTER_MAX_H, maxCenteredHeight, Math.max(minCenteredHeight, Math.round(viewport.h * CENTER_H_RATIO)));
     return {
       width,
       height,

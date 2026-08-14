@@ -191,7 +191,14 @@ function suggestTargets(plan: ChatAutomationPlan): ChatAgentContextPackTarget[] 
 }
 
 function buildGuardrails(plan: ChatAutomationPlan): string[] {
+  const requestedActions = plan.computerRequestRoute?.requestedActionContract;
   return compactStringList([
+    requestedActions
+      ? `All ${requestedActions.actionCount} requested action IDs must be accounted for; partial coverage is never whole-task completion.`
+      : null,
+    requestedActions?.requiresDecompositionBeforeMutation
+      ? 'The requested-action detector capped the list; decompose the intact request before any mutation.'
+      : null,
     plan.approval.required ? `Wait for approval before acting: ${plan.approval.reason || 'approval required'}` : null,
     plan.risk === 'external_side_effect' ? 'Do not send, publish, purchase, submit, or mutate an external system until approval covers the exact action.' : null,
     plan.risk === 'destructive' ? 'Do not perform destructive actions without explicit human confirmation and rollback/proof steps.' : null,
@@ -213,15 +220,19 @@ function buildRecovery(plan: ChatAutomationPlan): string[] {
 }
 
 function buildAcceptanceCriteria(plan: ChatAutomationPlan): string[] {
+  const requestedActions = plan.computerRequestRoute?.requestedActionContract;
+  const routeCompletionProof = (plan.computerRequestRoute?.completionProof || [])
+    .filter((item) => !/^A\d+\s+independently verified\b/.test(item));
   return compactStringList([
+    ...(requestedActions?.actions || []).map((action) => `${action.id} independently verified: ${action.text}`),
     ...(plan.pipeline?.completionCriteria || []),
     ...(plan.pipelineDecision?.primary?.completionCriteria || []),
-    ...(plan.computerRequestRoute?.completionProof || []),
+    ...routeCompletionProof,
     plan.execution.kind === 'run_plain_chat' ? 'Return a clear final answer.' : null,
     plan.execution.kind === 'run_openswan' ? 'Return an agent run summary with proof or blockers.' : null,
     plan.execution.kind === 'run_build_discovery' ? 'Capture the build goal, missing details, and launch-ready next action.' : null,
     plan.execution.kind === 'ask_clarification' ? 'Ask only for the missing decision-relevant fields.' : null,
-  ], 7, 220);
+  ], 12, 220);
 }
 
 function buildProofRequirements(plan: ChatAutomationPlan): string[] {
@@ -278,12 +289,15 @@ function buildCompactPrompt(pack: Omit<ChatAgentContextPack, 'compactPrompt'>, m
     pack.lane.pipelineId ? `Pipeline: ${pack.lane.pipelineTitle || pack.lane.pipelineId} (${pack.lane.pipelineId})` : '',
     pack.lane.primarySurface ? `Primary surface: ${pack.lane.primarySurface}${pack.lane.surfaceStatus ? ` (${pack.lane.surfaceStatus})` : ''}` : '',
     `Suggested targets: ${pack.suggestedTargets.join(', ')}`,
-    ...formatList('Required inputs:', pack.requiredInputs),
-    ...formatList('Recommended tools:', pack.recommendedTools),
+    // Request coverage and fail-closed policy outrank optional tool hints in a
+    // bounded handoff. This ordering prevents prompt truncation from dropping
+    // A7/A8 while leaving a generic tool list intact.
     ...formatList('Acceptance criteria:', pack.acceptanceCriteria),
-    ...formatList('Proof required:', pack.proofRequirements),
     ...formatList('Guardrails:', pack.guardrails),
     ...formatList('Stop conditions:', pack.stopConditions),
+    ...formatList('Required inputs:', pack.requiredInputs),
+    ...formatList('Recommended tools:', pack.recommendedTools),
+    ...formatList('Proof required:', pack.proofRequirements),
     ...formatList('Recovery:', pack.recovery),
     'Report back with: status, changed systems/files, proof, blockers, and the next safe action.',
   ].filter(Boolean);

@@ -649,9 +649,17 @@ async function main(): Promise<void> {
     consolidatedSql.includes('-- Source: 20260806_universal_computer_task_roots.sql'),
     'consolidated SQL contains the section 34 source marker',
   );
+  const section34MarkerIndex = consolidatedSql.indexOf(
+    '-- Source: 20260806_universal_computer_task_roots.sql',
+  );
+  const section35MarkerIndex = consolidatedSql.indexOf('-- §35.', section34MarkerIndex);
+  const section34MigrationIndex = consolidatedSql.indexOf(migrationSource, section34MarkerIndex);
   assert(
-    consolidatedSql.endsWith(migrationSource),
-    'the executable section 34 tail is byte-identical to its source migration',
+    section34MarkerIndex >= 0
+      && section35MarkerIndex > section34MarkerIndex
+      && section34MigrationIndex > section34MarkerIndex
+      && section34MigrationIndex + migrationSource.length <= section35MarkerIndex,
+    'the bounded executable section 34 body contains its byte-identical source migration',
   );
   const gatewaySource = storeSource.slice(storeSource.indexOf('export function createComputerTaskRootActionGateway'));
   for (const rpcName of [

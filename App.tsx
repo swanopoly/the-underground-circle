@@ -3,7 +3,7 @@ import './src/lib/pixelDesign'; // Side effect: injects the global system font s
 import { installErrorReporter } from './src/lib/errorReporter';
 installErrorReporter(); // Register global unhandled-rejection / error handlers
 import React, { Suspense, useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { StatusBar, View, Text, StyleSheet, Animated, Platform } from 'react-native';
+import { StatusBar, View, Text, StyleSheet, Animated, Platform, TouchableOpacity } from 'react-native';
 import { NavigationContainer, useNavigation, LinkingOptions } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Session } from '@supabase/supabase-js';
@@ -14,14 +14,19 @@ import { acceptInvite } from './src/lib/invites';
 import { buildAppActions } from './src/components/command/commandActions';
 import { ToastProvider } from './src/components/Toast';
 import {
-  bootstrapValidatedAuthSession,
   clearInvalidLocalAuthSession,
-  validateAuthSessionCandidate,
+  inspectAuthSessionCandidate,
+  inspectBootstrapAuthSession,
 } from './src/lib/authBootstrap';
+import { AuthSessionProvider } from './src/hooks/useAuth';
 import { isPasswordRecoveryLocation } from './src/lib/authUiPolicy';
 import { safeGetUser } from './src/lib/authSession';
 import { OWNER_EMAIL } from './src/lib/officeConfig';
 import { clearLocalAuthResidualAuthority } from './src/lib/authLogout';
+import {
+  closeOpenSwanApprovalResumeOutboxAuthorityForLogout,
+  openOpenSwanApprovalResumeOutboxAuthorityForSession,
+} from './src/lib/openSwanApprovalResumeOutbox';
 
 const AuthNavigator = React.lazy(() => import('./src/navigation/AuthNavigator'));
 const MainNavigator = React.lazy(() => import('./src/navigation/MainNavigator'));
@@ -65,15 +70,28 @@ function deferAfterFirstPaint(work: () => void) {
   }
 }
 
-function startAgentAutoConnectDeferred() {
+let agentAutoConnectLifecycleGeneration = 0;
+
+function startAgentAutoConnectDeferred(session: Session) {
+  const generation = ++agentAutoConnectLifecycleGeneration;
+  const authority = {
+    userId: session.user.id,
+    accessToken: session.access_token,
+  };
   deferAfterFirstPaint(() => {
+    if (generation !== agentAutoConnectLifecycleGeneration) return;
     import('./src/lib/agentAutoConnect')
-      .then((mod) => mod.startAgentAutoConnect())
+      .then((mod) => {
+        if (generation === agentAutoConnectLifecycleGeneration) {
+          return mod.startAgentAutoConnect(authority);
+        }
+      })
       .catch(() => {});
   });
 }
 
 function stopAgentAutoConnectDeferred() {
+  agentAutoConnectLifecycleGeneration += 1;
   import('./src/lib/agentAutoConnect')
     .then((mod) => mod.stopAgentAutoConnect())
     .catch(() => {});
@@ -331,12 +349,18 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [hasCircles, setHasCircles] = useState(false);
   const [passwordRecovery, setPasswordRecovery] = useState(isPasswordRecoveryUrl);
+  const [authReconnecting, setAuthReconnecting] = useState(false);
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const retryAuthVerificationRef = useRef<() => void>(() => {});
+
+  const retryAuthVerification = useCallback(() => {
+    retryAuthVerificationRef.current();
+  }, []);
 
   const completePasswordRecovery = useCallback(() => {
     setSession(null);
     setPasswordRecovery(false);
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof document !== 'undefined') {
       window.history.replaceState({}, '', '/login');
     }
   }, []);
@@ -365,6 +389,13 @@ export default function App() {
     let disposed = false;
     let authRevision = 0;
     let activeUserId: string | null = null;
+    let activeSession: Session | null = null;
+    let authRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingAuthRetry: (() => Promise<void>) | null = null;
+    let authRetryInFlight = false;
+    let coldStartSettled = false;
+    let coldStartEventVerificationStarted = false;
+    let authBootstrapFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Setup notifications
     import('./src/lib/notifications').then(n => {
@@ -390,10 +421,11 @@ export default function App() {
       ])
     ).start();
 
-    // Hard timeout — never stay on splash for more than 5 seconds
+    // Navigation may become ready independently, but Auth remains
+    // authoritative. A slow Auth check must never reveal the signed-out
+    // navigator while a persisted session is still being verified.
     const timeout = setTimeout(() => {
       setNavReady(true);
-      setLoading(false);
     }, 5000);
 
     loadNavState().then((state) => {
@@ -423,25 +455,75 @@ export default function App() {
       });
     };
 
-    const applyValidatedSession = async (
-      candidate: Session,
-      event: string,
-      validate: (session: Session) => Promise<Session | null> = validateAuthSessionCandidate,
+    const cancelAuthRetry = (clearReconnectState = true) => {
+      if (authRetryTimer) clearTimeout(authRetryTimer);
+      authRetryTimer = null;
+      pendingAuthRetry = null;
+      if (clearReconnectState) setAuthReconnecting(false);
+    };
+
+    const executeAuthRetry = (retry: () => Promise<void>) => {
+      if (disposed || authRetryInFlight) return;
+      authRetryInFlight = true;
+      pendingAuthRetry = null;
+      void retry().finally(() => {
+        authRetryInFlight = false;
+      });
+    };
+
+    const scheduleAuthRetry = (
+      retry: () => Promise<void>,
+      attempt: number,
+      showReconnectState: boolean,
     ) => {
-      const revision = ++authRevision;
-      const validatedSession = await validate(candidate);
-      if (disposed || revision !== authRevision) return;
+      if (authRetryTimer) clearTimeout(authRetryTimer);
+      pendingAuthRetry = retry;
+      setAuthReconnecting(showReconnectState);
+      const delayMs = Math.min(15_000, 1_000 * (2 ** Math.min(attempt, 4)));
+      authRetryTimer = setTimeout(() => {
+        authRetryTimer = null;
+        executeAuthRetry(retry);
+      }, delayMs);
+    };
 
-      if (!validatedSession) {
-        setSession(null);
-        setLoading(false);
-        setHasCircles(false);
-        stopAgentAutoConnectDeferred();
-        void clearInvalidLocalAuthSession();
-        return;
+    retryAuthVerificationRef.current = () => {
+      const retry = pendingAuthRetry;
+      if (!retry || disposed) return;
+      if (authRetryTimer) clearTimeout(authRetryTimer);
+      authRetryTimer = null;
+      executeAuthRetry(retry);
+    };
+
+    // A browser can recover from an offline transition or release a stalled
+    // Auth Web Lock while this tab is hidden. Retry the existing bounded
+    // verification immediately on either signal; no new attempt is created
+    // when there is no pending retry or one is already in flight.
+    const retryAuthWhenOnline = () => retryAuthVerificationRef.current();
+    const retryAuthWhenVisible = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        retryAuthVerificationRef.current();
       }
+    };
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.addEventListener('online', retryAuthWhenOnline);
+      document.addEventListener('visibilitychange', retryAuthWhenVisible);
+    }
 
+    const commitValidatedSession = (validatedSession: Session, event: string) => {
+      cancelAuthRetry();
+      clearTimeout(timeout);
+      if (authBootstrapFallbackTimer) clearTimeout(authBootstrapFallbackTimer);
+      authBootstrapFallbackTimer = null;
+      coldStartSettled = true;
       const isRecovery = event === 'PASSWORD_RECOVERY' || isPasswordRecoveryUrl();
+      const opensNewApprovalAuthority = activeUserId !== validatedSession.user.id;
+      if (opensNewApprovalAuthority) {
+        // Re-open exact-call authority only for a newly validated account.
+        // Token refreshes for the same user must not rotate the epoch out from
+        // under an in-flight, Web-Locked persistence operation.
+        openOpenSwanApprovalResumeOutboxAuthorityForSession();
+      }
+      activeSession = validatedSession;
       activeUserId = validatedSession.user.id;
       setSession(validatedSession);
       setLoading(false);
@@ -454,10 +536,66 @@ export default function App() {
         return;
       }
 
-      startAgentAutoConnectDeferred();
+      startAgentAutoConnectDeferred(validatedSession);
       if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
         finishUserSetup(validatedSession);
       }
+    };
+
+    const rejectSession = (
+      reason: 'missing_candidate' | 'missing_user' | 'user_mismatch' | 'auth_rejected',
+    ) => {
+      cancelAuthRetry();
+      clearTimeout(timeout);
+      if (authBootstrapFallbackTimer) clearTimeout(authBootstrapFallbackTimer);
+      authBootstrapFallbackTimer = null;
+      coldStartSettled = true;
+      closeOpenSwanApprovalResumeOutboxAuthorityForLogout();
+      activeSession = null;
+      activeUserId = null;
+      setSession(null);
+      setLoading(false);
+      setHasCircles(false);
+      stopAgentAutoConnectDeferred();
+      // An empty cache is the normal signed-out state. A server-confirmed
+      // missing/mismatched user is the only validation result that should
+      // delete persisted Auth state and emit a real SIGNED_OUT event.
+      if (reason !== 'missing_candidate') void clearInvalidLocalAuthSession();
+    };
+
+    const applyValidatedSession = async (
+      candidate: Session,
+      event: string,
+      attempt = 0,
+    ) => {
+      const revision = ++authRevision;
+      const validation = await inspectAuthSessionCandidate(candidate);
+      if (disposed || revision !== authRevision) return;
+
+      if (validation.status === 'unavailable') {
+        const retainsVerifiedSession = activeSession?.user.id === candidate.user.id;
+        if (!retainsVerifiedSession) {
+          activeSession = null;
+          activeUserId = null;
+          setSession(null);
+          setHasCircles(false);
+          stopAgentAutoConnectDeferred();
+        }
+        setLoading(false);
+        scheduleAuthRetry(
+          () => applyValidatedSession(candidate, event, attempt + 1),
+          attempt,
+          !retainsVerifiedSession,
+        );
+        return;
+      }
+
+      if (validation.status === 'signed_out') {
+        rejectSession(validation.reason);
+        return;
+      }
+
+      commitValidatedSession(validation.session, event);
     };
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
@@ -467,6 +605,28 @@ export default function App() {
         setPasswordRecovery(true);
       }
 
+      // During storage recovery Supabase can emit SIGNED_IN immediately before
+      // INITIAL_SESSION. Treat the first session-bearing event as the one cold-
+      // start candidate and ignore the duplicate initial notification. Its
+      // exact access token is verified outside the session Web Lock. The
+      // delayed getSession bootstrap below exists only if no initial event is
+      // emitted at all; a late event safely supersedes it through authRevision.
+      if (!coldStartSettled && (event === 'INITIAL_SESSION' || !!nextSession)) {
+        if (!coldStartEventVerificationStarted) {
+          coldStartEventVerificationStarted = true;
+          if (authBootstrapFallbackTimer) clearTimeout(authBootstrapFallbackTimer);
+          authBootstrapFallbackTimer = null;
+          if (nextSession) {
+            setTimeout(() => {
+              if (!disposed) void applyValidatedSession(nextSession, event);
+            }, 0);
+          } else {
+            rejectSession('missing_candidate');
+          }
+        }
+        return;
+      }
+
       if (nextSession) {
         // Supabase recommends keeping auth callbacks synchronous. Defer any
         // getUser call until its internal auth lock has been released.
@@ -474,7 +634,14 @@ export default function App() {
           if (!disposed) void applyValidatedSession(nextSession, event);
         }, 0);
       } else if (event === 'SIGNED_OUT') {
+        cancelAuthRetry();
+        clearTimeout(timeout);
+        // Supabase delivers remote and cross-tab sign-outs through this path.
+        // Fence replay authority synchronously before asynchronous cleanup so
+        // an already-running tool gate cannot recreate an exact-call lease.
+        closeOpenSwanApprovalResumeOutboxAuthorityForLogout();
         const signedOutUserId = activeUserId;
+        activeSession = null;
         activeUserId = null;
         authRevision += 1;
         setSession(null);
@@ -491,45 +658,50 @@ export default function App() {
           localStorage.removeItem(NAV_STATE_KEY);
           localStorage.removeItem(ONBOARDING_KEY);
         } catch {}
-      } else if (event === 'INITIAL_SESSION') {
-        // A missing initial session is a valid signed-out state. Other auth
-        // events can transiently carry null while refresh is in flight, so
-        // those do not evict an already verified session. Leave the bounded
-        // bootstrap authoritative in case storage hydration finishes just
-        // after this initial notification.
-        setSession(null);
-        setLoading(false);
-        setHasCircles(false);
       }
     });
 
     // A persisted session is only a candidate. Verify it against Supabase
     // before it can select MainNavigator or start the desktop agent bridge.
-    const bootstrapRevision = ++authRevision;
-    bootstrapValidatedAuthSession().then((validatedSession) => {
+    const runBootstrap = async (attempt = 0) => {
+      const bootstrapRevision = ++authRevision;
+      const validation = await inspectBootstrapAuthSession();
       if (disposed || bootstrapRevision !== authRevision) return;
-      if (!validatedSession) {
-        setSession(null);
-        setHasCircles(false);
+      if (validation.status === 'unavailable') {
         setLoading(false);
-        void clearInvalidLocalAuthSession();
+        scheduleAuthRetry(
+          () => runBootstrap(attempt + 1),
+          attempt,
+          !activeSession,
+        );
         return;
       }
-      void applyValidatedSession(
-        validatedSession,
-        'INITIAL_SESSION',
-        async (sessionCandidate) => sessionCandidate,
-      );
-    }).catch(() => {
-      if (disposed || bootstrapRevision !== authRevision) return;
-      setSession(null);
-      setHasCircles(false);
-      setLoading(false);
-    });
+      if (validation.status === 'signed_out') {
+        rejectSession(validation.reason);
+        return;
+      }
+      commitValidatedSession(validation.session, 'INITIAL_SESSION');
+    };
+    // onAuthStateChange normally emits a recovered SIGNED_IN/INITIAL_SESSION
+    // immediately. Keep a fallback for a stalled/missing initial callback,
+    // but do not race getSession against the normal event path.
+    authBootstrapFallbackTimer = setTimeout(() => {
+      authBootstrapFallbackTimer = null;
+      if (disposed || coldStartSettled || coldStartEventVerificationStarted) return;
+      void runBootstrap();
+    }, 1_500);
 
     return () => {
       disposed = true;
       authRevision += 1;
+      cancelAuthRetry(false);
+      if (authBootstrapFallbackTimer) clearTimeout(authBootstrapFallbackTimer);
+      authBootstrapFallbackTimer = null;
+      retryAuthVerificationRef.current = () => {};
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof document !== 'undefined') {
+        window.removeEventListener('online', retryAuthWhenOnline);
+        document.removeEventListener('visibilitychange', retryAuthWhenVisible);
+      }
       subscription.unsubscribe();
       clearTimeout(timeout);
     };
@@ -546,6 +718,28 @@ export default function App() {
     );
   }
 
+  if (authReconnecting && !session) {
+    return (
+      <View style={styles.loading}>
+        <Animated.View style={[styles.logoCircle, { transform: [{ scale: pulseAnim }] }]}>
+          <Text style={styles.logoText}>UC</Text>
+        </Animated.View>
+        <Text style={styles.loadingTitle}>RECONNECTING SECURE SESSION</Text>
+        <Text style={styles.reconnectText}>
+          Your saved session has not been deleted. We are retrying the secure verification.
+        </Text>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Retry secure session verification"
+          style={styles.reconnectButton}
+          onPress={retryAuthVerification}
+        >
+          <Text style={styles.reconnectButtonText}>RETRY NOW</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   // Only use saved nav state if it looks valid (has routes array)
   const validNavState = initialNavState && typeof initialNavState === 'object' && 'routes' in initialNavState
     ? initialNavState as any : undefined;
@@ -558,8 +752,9 @@ export default function App() {
   );
 
   return (
-    <ErrorBoundary scope="app">
-      <ToastProvider>
+    <AuthSessionProvider session={session} loading={loading}>
+      <ErrorBoundary scope="app">
+        <ToastProvider>
         <NavigationContainer
           linking={linking}
           initialState={session && !passwordRecovery && restorePersistedNavigation
@@ -595,8 +790,9 @@ export default function App() {
             <XPOverlay />
           </Suspense>
         )}
-      </ToastProvider>
-    </ErrorBoundary>
+        </ToastProvider>
+      </ErrorBoundary>
+    </AuthSessionProvider>
   );
 }
 
@@ -628,5 +824,28 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '900',
     letterSpacing: 4,
+  },
+  reconnectText: {
+    color: '#9CA3AF',
+    fontSize: 14,
+    lineHeight: 20,
+    maxWidth: 420,
+    textAlign: 'center',
+    marginTop: 14,
+    paddingHorizontal: 24,
+  },
+  reconnectButton: {
+    marginTop: 20,
+    borderWidth: 1,
+    borderColor: '#4B5563',
+    borderRadius: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+  },
+  reconnectButtonText: {
+    color: '#F9FAFB',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.5,
   },
 });

@@ -694,7 +694,7 @@ const styles = StyleSheet.create({
     borderRadius: 6, borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)',
     backgroundColor: '#0e2030',
   },
-  actionBtnText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
+  actionBtnText: { color: '#6366f1', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   actionBtnGhost: {
     paddingHorizontal: 10, paddingVertical: 6,
     borderRadius: 6, borderWidth: 1, borderColor: '#1e293b',
@@ -757,5 +757,5 @@ const modalStyles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: '#1e293b',
   },
   candidateName: { color: '#e2e8f0', fontSize: 13 },
-  candidateAdd: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
+  candidateAdd: { color: '#6366f1', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
 });

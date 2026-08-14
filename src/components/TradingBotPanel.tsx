@@ -96,7 +96,7 @@ type Tab = 'featured' | 'pending' | 'positions' | 'signals' | 'portfolio' | 'pap
 const ALL_TABS: { key: Tab; label: string; icon: string; color: string }[] = [
   { key: 'trade',     label: 'Terminal',   icon: 'TV', color: '#3b82f6' },
   { key: 'paper',     label: 'Paper',      icon: 'PP', color: '#14b8a6' },
-  { key: 'signals',   label: 'Signals',    icon: '//', color: '#22d3ee' },
+  { key: 'signals',   label: 'Signals',    icon: '//', color: '#6366f1' },
   { key: 'backtest',  label: 'Lab',        icon: 'BT', color: '#f97316' },
   { key: 'bot',       label: 'Bot',        icon: 'AI', color: '#84cc16' },
   { key: 'featured',  label: 'Ideas',      icon: '*',  color: '#f59e0b' },
@@ -2394,7 +2394,7 @@ const NOTABLE_WALLETS: NotableWallet[] = [
 
 const CATEGORY_COLORS: Record<string, string> = {
   exchange: '#3b82f6',
-  market_maker: '#22d3ee',
+  market_maker: '#6366f1',
   whale: '#a855f7',
   trader: '#22c55e',
   political: '#ef4444',

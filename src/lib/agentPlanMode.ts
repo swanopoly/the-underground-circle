@@ -352,6 +352,8 @@ function buildPlanSteps(args: {
 
 export function buildAgentPlanDraft(input: {
   task: string;
+  /** Already-classified Chat plan for this exact turn (for example, a sealed attachment A1 contract). */
+  chatPlan?: ChatAutomationPlan | null;
   selectedMode?: string | null;
   selectedModel?: string | null;
   threadId?: string | null;
@@ -361,7 +363,7 @@ export function buildAgentPlanDraft(input: {
 }): AgentPlanDraft {
   const task = normalizeTask(input.task);
   const profile = detectAgenticCodingProfile(task, 'main_chat');
-  const chatPlan = buildChatAutomationPlan({
+  const chatPlan = input.chatPlan || buildChatAutomationPlan({
     message: task,
     selectedMode: input.selectedMode || 'plan',
   });

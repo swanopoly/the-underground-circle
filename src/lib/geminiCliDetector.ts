@@ -11,9 +11,14 @@
 
 import { OfficeAgent, AgentStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
-import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
-import { supabase } from './supabase';
+import {
+  publishAgentToCircle,
+  PROVIDER_DISPLAY,
+  type CircleOfficeAuthScope,
+} from './circleOffice';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
+import { isBenignAuthAbort } from './authSession';
 
 import {
   bridgeAuthHeaders,
@@ -220,7 +225,7 @@ export function geminiSessionsToAgents(sessions: GeminiCliSession[]): OfficeAgen
     newTokens: s.totalInputTokens || 0,
     turns: s.messageCount || 0,
     sessionKey: s.sessionId,
-    model: s.model || 'gemini-2.5-pro',
+    model: s.model || 'gemini-3.6-flash',
     connectionId: 'gemini-cli-auto',
     connectionName: 'Gemini CLI (Local)',
     providerType: 'gemini' as ProviderType,
@@ -235,11 +240,16 @@ export async function publishGeminiCliAgent(
   circleId: string,
   sessionCount: number,
   sessions?: GeminiCliSession[],
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ agentId?: string; error?: string }> {
   const display = PROVIDER_DISPLAY['gemini'];
+  const db = capturedScope
+    ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+    : supabase;
 
   if (sessions && sessions.length > 1) {
-    const { data: auth } = await supabase.auth.getUser();
+    const ownerId = capturedScope?.userId
+      || (await supabase.auth.getUser()).data.user?.id;
     for (let i = 0; i < sessions.length; i++) {
       const session = sessions[i];
       const name = geminiDisplayName(session, i, sessions.length);
@@ -251,8 +261,8 @@ export async function publishGeminiCliAgent(
         toolIcon: display?.icon || '♊',
         gatewayUrl: getGeminiBridgeUrl() || 'http://localhost:7780',
         isPublic: false,
-      });
-      let update = supabase.from('circle_office_agents')
+      }, capturedScope);
+      let update = db.from('circle_office_agents')
         .update({
           status: session.status === 'active' ? 'building' : 'idle',
           current_task: session.task || 'Gemini CLI terminal session',
@@ -261,7 +271,10 @@ export async function publishGeminiCliAgent(
         })
         .eq('circle_id', circleId)
         .eq('name', name);
-      if (auth.user?.id) update = update.eq('owner_id', auth.user.id);
+      if (ownerId) update = update.eq('owner_id', ownerId);
+      if (capturedScope) {
+        update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+      }
       await update;
     }
     return {};
@@ -275,15 +288,17 @@ export async function publishGeminiCliAgent(
     toolIcon: display?.icon || '♊',
     gatewayUrl: getGeminiBridgeUrl() || 'http://localhost:7780',
     isPublic: false,
-  });
+  }, capturedScope);
 
   if (result.error) {
-    console.error('[geminiCliDetector] Failed to publish agent:', result.error);
+    if (!isBenignAuthAbort(result.error)) {
+      console.error('[geminiCliDetector] Failed to publish agent:', result.error);
+    }
     return { error: result.error };
   }
 
   if (result.agent) {
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status: 'idle',
@@ -294,6 +309,10 @@ export async function publishGeminiCliAgent(
         updated_at: new Date().toISOString(),
       })
       .eq('id', result.agent.id);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   }
 
   return { agentId: result.agent?.id };
@@ -302,16 +321,21 @@ export async function publishGeminiCliAgent(
 export async function updateGeminiCliAgentStatus(
   circleId: string,
   sessions: GeminiCliSession[],
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<void> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
+    const db = capturedScope
+      ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+      : supabase;
+    const ownerId = capturedScope?.userId
+      || (await supabase.auth.getUser()).data.user?.id;
+    if (!ownerId) return;
 
     if (sessions.length > 1) {
       for (let i = 0; i < sessions.length; i++) {
         const session = sessions[i];
         const name = geminiDisplayName(session, i, sessions.length);
-        await supabase.from('circle_office_agents')
+        let update = db.from('circle_office_agents')
           .update({
             status: session.status === 'active' ? 'building' : 'idle',
             current_task: session.task || 'Gemini CLI terminal session',
@@ -319,8 +343,12 @@ export async function updateGeminiCliAgentStatus(
             updated_at: new Date().toISOString(),
           })
           .eq('circle_id', circleId)
-          .eq('owner_id', auth.user.id)
+          .eq('owner_id', ownerId)
           .eq('name', name);
+        if (capturedScope) {
+          update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+        }
+        await update;
       }
       return;
     }
@@ -334,7 +362,7 @@ export async function updateGeminiCliAgentStatus(
         : 'Bridge connected — no active sessions';
 
     // Token syncing is centralized in OfficeTab's 30s sync loop via syncAgentTokenSnapshot()
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status,
@@ -343,8 +371,12 @@ export async function updateGeminiCliAgentStatus(
         updated_at: new Date().toISOString(),
       })
       .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id)
+      .eq('owner_id', ownerId)
       .eq('name', GEMINI_CLI_AGENT_NAME);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   } catch {}
 }
 
@@ -367,6 +399,7 @@ export interface GeminiCliLaunchRequest {
 
 export interface GeminiCliLaunchResult {
   ok: boolean;
+  transportAccepted: boolean | null;
   launchId?: string;
   sessions: GeminiCliSession[];
   launched: number;
@@ -380,6 +413,7 @@ export async function launchGeminiCliSessions(input: GeminiCliLaunchRequest): Pr
   if (!bridgeUrl) {
     return {
       ok: false,
+      transportAccepted: false,
       sessions: [],
       launched: 0,
       failed: [{ error: 'Gemini CLI bridge URL is unavailable in this runtime.' }],
@@ -424,10 +458,15 @@ export async function launchGeminiCliSessions(input: GeminiCliLaunchRequest): Pr
     const data = await res.json().catch(() => null) as Partial<GeminiCliLaunchResult> | null;
     if (!res.ok || !data) {
       const error = data?.error || `Gemini CLI bridge launch failed with HTTP ${res.status}`;
-      return { ok: false, sessions: [], launched: 0, failed: [{ error }], error };
+      const transportAccepted = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409
+        ? false
+        : null;
+      return { ok: false, transportAccepted, sessions: [], launched: 0, failed: [{ error }], error };
     }
 
     const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const launched = typeof data.launched === 'number' ? data.launched : sessions.length;
+    const accepted = data.ok === true || launched > 0;
     if (input.circleId && sessions.length > 0) {
       await publishGeminiCliAgent(input.circleId, sessions.length, sessions);
       await updateGeminiCliAgentStatus(input.circleId, sessions);
@@ -438,10 +477,11 @@ export async function launchGeminiCliSessions(input: GeminiCliLaunchRequest): Pr
     }
 
     return {
-      ok: data.ok !== false,
+      ok: accepted,
+      transportAccepted: accepted ? true : data.ok === false ? false : null,
       launchId: data.launchId,
       sessions,
-      launched: typeof data.launched === 'number' ? data.launched : sessions.length,
+      launched,
       failed: Array.isArray(data.failed) ? data.failed : [],
       projectDir: data.projectDir,
       error: data.error,
@@ -450,7 +490,7 @@ export async function launchGeminiCliSessions(input: GeminiCliLaunchRequest): Pr
     const message = err instanceof Error && err.name === 'AbortError'
       ? 'Gemini CLI bridge launch timed out.'
       : err instanceof Error ? err.message : String(err);
-    return { ok: false, sessions: [], launched: 0, failed: [{ error: message }], error: message };
+    return { ok: false, transportAccepted: null, sessions: [], launched: 0, failed: [{ error: message }], error: message };
   }
 }
 

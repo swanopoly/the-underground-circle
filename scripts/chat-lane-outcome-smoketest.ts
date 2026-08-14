@@ -358,12 +358,13 @@ function main() {
     );
     const cloudErrorSection = cloudSection.slice(cloudSection.indexOf("} else if (status === 'error' && errorMessage)"));
     assert(countOccurrences(cloudCompletedSection, 'recordComputerTaskLaneTerminal({') === 1
-      && /status:\s*'completed'[\s\S]{0,180}executionKind:\s*'browser_computer_use'/.test(cloudCompletedSection),
-      'case4c: cloud browser completion records exactly one completed terminal');
+      && /outcomeStatus\s*===\s*'partial'[\s\S]{0,100}\?\s*'partial'[\s\S]{0,80}:\s*'completed'/.test(cloudCompletedSection)
+      && /status:\s*terminalStatus[\s\S]{0,180}executionKind:\s*'browser_computer_use'/.test(cloudCompletedSection),
+      'case4c: cloud browser completion records one typed terminal and keeps unverified compound coverage partial');
     assert(countOccurrences(cloudErrorSection, 'recordComputerTaskLaneTerminal({') === 1
-      && /outcomeStatus\s*===\s*'cancelled'[\s\S]{0,80}\?\s*'cancelled'[\s\S]{0,40}:\s*'failed'/.test(cloudErrorSection)
+      && /outcomeStatus\s*===\s*'cancelled'[\s\S]{0,80}\?\s*'cancelled'[\s\S]{0,100}outcomeStatus\s*===\s*'blocked'[\s\S]{0,80}\?\s*'blocked'[\s\S]{0,50}:\s*'failed'/.test(cloudErrorSection)
       && /status:\s*terminalStatus[\s\S]{0,180}executionKind:\s*'browser_computer_use'/.test(cloudErrorSection),
-      'case4c: cloud browser error uses the hook-owned typed failed-or-cancelled terminal');
+      'case4c: cloud browser error preserves hook-owned blocked, failed, or cancelled terminals');
     const cloudCancelSection = sourceSection(
       cloudErrorSection,
       "if (terminalStatus === 'cancelled')",

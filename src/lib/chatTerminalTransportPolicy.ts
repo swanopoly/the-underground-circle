@@ -41,6 +41,9 @@ export type ChatTerminalTransportPolicyInput = {
   isFigmaBuildRequest?: boolean;
   isCodingGenerationRequest?: boolean;
   looksLikeActionRequest?: boolean;
+  /** A typed completion contract (for example the bounded A1-A3 ledger)
+   * cannot be enforced by the streaming preflight lane. */
+  requiresAuthoritativeCompletion?: boolean;
   canStreamAnthropic?: boolean;
   /**
    * A greeting/thanks/check-in with no substantive request. These turns must
@@ -129,6 +132,9 @@ export function chooseChatTerminalTransport(
   }
 
   const chatMode = input.chatMode || 'none';
+  if (input.requiresAuthoritativeCompletion) {
+    return { path: 'batch_openswan', reason: 'planner_forced_openswan', canStream: false };
+  }
   if (chatMode !== 'none' && chatMode !== 'talk') {
     return { path: 'specialized_agent_run', reason: 'selected_mode', canStream: false };
   }

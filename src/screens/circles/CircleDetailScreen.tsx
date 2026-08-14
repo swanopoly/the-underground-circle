@@ -24,6 +24,7 @@ import { ROOM_WORKSPACE_OPEN_EVENT } from '../../lib/roomWorkspaceLauncher';
 import { rememberLastProfileCircle } from '../../lib/profileNavigation';
 import { safeGetUser } from '../../lib/authSession';
 import { OWNER_EMAIL } from '../../lib/officeConfig';
+import { decodeEntityHandle, encodeEntityHandle } from '../../lib/entityHandleCore';
 
 // ─── Inject CSS animation for tab dot pulse (web only) ───────────────────
 if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('uc-tab-dot-css')) {
@@ -71,7 +72,7 @@ const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: strin
   { key: 'INTEGRATIONS', label: 'Marketplace', icon: '🛍️', flatIcon: 'integrations', color: '#3b82f6' },
   { key: 'VAULT', label: 'Vault', icon: '🔐', flatIcon: 'vault', color: '#14b8a6' },
   { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members', color: '#14b8a6' },
-  { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics', color: '#22d3ee' },
+  { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics', color: '#6366f1' },
   { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet', color: '#f97316' },
   { key: 'PROFILE', label: 'Profile', icon: '👤', flatIcon: 'profile', color: '#8b5cf6' },
 ];
@@ -93,6 +94,10 @@ type MarketplaceFocus = {
   itemId?: string | null;
   groupKey?: CircleIntegrationGroupKey | null;
   ts: number;
+} | null;
+type OfficeRunFocusRequest = {
+  runId: string;
+  requestId: number;
 } | null;
 
 // Explicit URL tabs are navigation authority. A bare circle route means the
@@ -148,7 +153,7 @@ function cacheCircle(circleId: string, circle: Circle, memberCount: number) {
 }
 
 export default function CircleDetailScreen({ route, navigation }: any) {
-  const { circleId, circleName, tab: routeTab } = route.params;
+  const { circleId, circleName, tab: routeTab, focus: routeFocus } = route.params;
   useEffect(() => {
     rememberLastProfileCircle(circleId, circleName);
   }, [circleId, circleName]);
@@ -162,6 +167,28 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   // setActiveTab are declared below, after setActiveTab itself.
   const [searchOpen, setSearchOpen] = useState(false);
   const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
+  const [officeRunFocus, setOfficeRunFocus] = useState<OfficeRunFocusRequest>(null);
+  const officeRunFocusSequenceRef = useRef(0);
+  // This first adoption is deliberately narrow: only a validated
+  // `office:run:<id>` may open Office's existing run drawer. Malformed,
+  // mismatched, or future entity kinds still switch tabs but cannot focus UI.
+  const captureCrossSurfaceFocus = useCallback((rawFocus: unknown, target: Tab) => {
+    const handle = decodeEntityHandle(rawFocus);
+    if (
+      target !== 'OFFICE'
+      || handle?.kind !== 'run'
+      || handle.surface !== 'office'
+    ) return;
+    officeRunFocusSequenceRef.current += 1;
+    setOfficeRunFocus({
+      runId: handle.id,
+      requestId: officeRunFocusSequenceRef.current,
+    });
+  }, []);
+  useEffect(() => {
+    officeRunFocusSequenceRef.current = 0;
+    setOfficeRunFocus(null);
+  }, [circleId]);
   // Owner-only tab gate. null = auth read pending (tabs stay hidden), so a
   // non-owner never sees a Backpack flash while the session resolves.
   const [isOwnerAccount, setIsOwnerAccount] = useState<boolean | null>(null);
@@ -188,6 +215,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       } catch {}
     }
   }, [circleId, circleName]);
+  const openOfficeRun = useCallback((runId: string) => {
+    const focus = encodeEntityHandle({ kind: 'run', id: runId, surface: 'office' });
+    if (!focus) return;
+    captureCrossSurfaceFocus(focus, 'OFFICE');
+    setActiveTab('OFFICE');
+  }, [captureCrossSurfaceFocus, setActiveTab]);
 
   // If a non-owner lands on an owner-only tab, return them to the normal
   // circle landing surface once the auth read resolves.
@@ -240,6 +273,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       if (target === 'INTEGRATIONS' && marketplaceItemId) {
         setMarketplaceFocus({ itemId: marketplaceItemId, groupKey: null, ts: Date.now() });
       }
+      captureCrossSurfaceFocus(e?.detail?.focus, target);
       setActiveTab(target);
     };
     window.addEventListener('keydown', onKey);
@@ -250,16 +284,20 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       window.removeEventListener('uc:toggle-search', onToggle as any);
       window.removeEventListener('uc:switch-tab', onSwitchTab as any);
     };
-  }, [setActiveTab]);
+  }, [captureCrossSurfaceFocus, setActiveTab]);
 
   // When route params change (CMD+K, deep link), switch to the requested tab
   const tabTs = route.params?._tabTs;
+  const focusTs = route.params?._focusTs;
   useEffect(() => {
     if (routeTab) {
       const target = normalizeTabKey(routeTab);
-      if (target) setActiveTab(target);
+      if (target) {
+        captureCrossSurfaceFocus(routeFocus, target);
+        setActiveTab(target);
+      }
     }
-  }, [routeTab, tabTs, setActiveTab]);
+  }, [routeTab, routeFocus, tabTs, focusTs, captureCrossSurfaceFocus, setActiveTab]);
   const cached = loadCachedCircle(circleId);
   const [circle, setCircle] = useState<Circle | null>(cached.circle);
   const [memberCount, setMemberCount] = useState(cached.memberCount);
@@ -412,7 +450,13 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           user who opened ANY circle, even if they went straight to Chat.
           Now it only loads when the user actually visits the Office tab. */}
       <LazyTab tabKey="OFFICE" activeTab={activeTab}>
-        <OfficeTab circleId={circleId} accentColor={accentColor} onReady={handleOfficeReady} />
+        <OfficeTab
+          circleId={circleId}
+          accentColor={accentColor}
+          focusRunId={officeRunFocus?.runId || null}
+          focusRunRequestId={officeRunFocus?.requestId || 0}
+          onReady={handleOfficeReady}
+        />
       </LazyTab>
 
       {/* Other tabs — lazy mount on first visit, stay mounted after */}
@@ -431,7 +475,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
         </LazyTab>
       )}
       <LazyTab tabKey="FEED" activeTab={activeTab}>
-        <FeedTab circleId={circleId} accentColor={accentColor} onOpenMarketplace={openMarketplace} />
+        <FeedTab
+          circleId={circleId}
+          accentColor={accentColor}
+          onOpenMarketplace={openMarketplace}
+          onOpenOfficeRun={openOfficeRun}
+        />
       </LazyTab>
       <LazyTab tabKey="VAULT" activeTab={activeTab}>
         <SiteCredentialVaultPanel circleId={circleId} accentColor={accentColor} fullHeight />
@@ -704,7 +753,7 @@ const styles = StyleSheet.create({
     width: 7,
     height: 7,
     borderRadius: 4,
-    backgroundColor: '#22d3ee',
+    backgroundColor: '#6366f1',
     // RN-Web 0.19+ rejects both `animation` + `animationName` in
     // StyleSheet. The `uc-tab-dot` keyframe is applied at the app
     // level via the global CSS injector (see line ~50 of this file);

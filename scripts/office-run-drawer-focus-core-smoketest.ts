@@ -6,15 +6,22 @@
  *
  *   RESOLUTION: refId present + loaded → {refId, 'focused'}; refId present but
  *   not in the loaded first page (or the id list is missing/not an array) →
- *   {null, 'not_loaded'} so the drawer keeps its default selection; missing/
- *   empty/non-string refId → {null, 'no_ref'}.
+ *   {null, 'not_loaded'} so the drawer knows it must resolve the id directly;
+ *   missing/empty/non-string refId → {null, 'no_ref'}.
+ *
+ *   DRAWER FALLBACK: a first-page miss fetches the exact run, validates its
+ *   circle, prepends/selects it, or renders unavailable without selecting a
+ *   different run. No-ref callers retain the legacy first-run default.
  *
  *   And: total — degenerate/hostile/cyclic input never throws.
  *
  * Pure — loads under tsx (officeRunDrawerFocusCore has zero imports).
  */
 
+import { readFileSync } from 'node:fs';
 import { resolveRunDrawerFocus } from '../src/lib/officeRunDrawerFocusCore';
+
+const drawerSource = readFileSync('src/components/chat/RunHistoryDrawer.tsx', 'utf8');
 
 let passes = 0;
 let failures = 0;
@@ -51,7 +58,7 @@ function main(): void {
 
   // ── Group 2: not loaded in the first page ──────────────────────────────────
   assertResult(resolveRunDrawerFocus({ refId: 'run-99', availableRunIds: ids }), null, 'not_loaded',
-    '(2) unknown run → not_loaded (drawer keeps default selection)');
+    '(2) unknown run → not_loaded (drawer resolves exact id)');
   assertResult(resolveRunDrawerFocus({ refId: 'run-1', availableRunIds: [] }), null, 'not_loaded',
     '(2) empty page → not_loaded');
   assertResult(resolveRunDrawerFocus({ refId: 'run-1' }), null, 'not_loaded',
@@ -88,6 +95,42 @@ function main(): void {
   assert(!threw, '(4) degenerate/hostile/cyclic input never throws');
   assertResult(resolveRunDrawerFocus(), null, 'no_ref', '(4) no-arg call → no_ref');
   assertResult(resolveRunDrawerFocus(null as never), null, 'no_ref', '(4) null input → no_ref');
+
+  // ── Group 5: exact first-page miss handling in the React drawer ───────────
+  const exactFocusStart = drawerSource.indexOf('if (shouldApplyInitial) {');
+  const exactFocusEnd = drawerSource.indexOf('\n      setRuns(nextRuns);', exactFocusStart);
+  const exactFocusBlock = exactFocusStart >= 0 && exactFocusEnd > exactFocusStart
+    ? drawerSource.slice(exactFocusStart, exactFocusEnd)
+    : '';
+  assert(drawerSource.includes('getRun,'), '(5) drawer imports canonical getRun');
+  assert(
+    exactFocusBlock.includes('await getRun(requestedInitialRunId)'),
+    '(5) first-page miss fetches the exact requested id',
+  );
+  assert(
+    exactFocusBlock.includes('exactRun?.circle_id === circleId'),
+    '(5) exact result is accepted only inside the current circle',
+  );
+  assert(
+    exactFocusBlock.includes('[exactRun, ...nextRuns.filter((run) => run.id !== exactRun.id)]')
+      && exactFocusBlock.includes('.slice(0, RUN_DRAWER_PAGE_LIMIT)'),
+    '(5) exact result is prepended without breaking the history bound',
+  );
+  assert(
+    exactFocusBlock.includes('setUnavailableInitialRunId(requestedInitialRunId)')
+      && exactFocusBlock.includes('setSelectedRunId(null)')
+      && !exactFocusBlock.includes('nextRuns[0]'),
+    '(5) unavailable exact id never substitutes the newest run',
+  );
+  assert(
+    drawerSource.includes('RUN UNAVAILABLE')
+      && drawerSource.includes('is not available in this circle'),
+    '(5) unavailable exact id renders bounded user-facing copy',
+  );
+  assert(
+    drawerSource.includes('setSelectedRunId((current) => current || nextRuns[0]?.id || null);'),
+    '(5) no-ref callers preserve legacy first-run selection',
+  );
 
   console.log(`office-run-drawer-focus-core smoketest: ${passes} passed, ${failures} failed`);
   if (failures > 0) process.exit(1);

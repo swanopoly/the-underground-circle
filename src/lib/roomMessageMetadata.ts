@@ -3,6 +3,17 @@ import type { BrowserPlanCardData, BrowserPlanEvent } from './computerUse';
 import type { PromptMemoryReference } from './memoryService';
 import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import type { OpenSwanToolEvent } from './openswanSessionRuntime';
+import type {
+  OpenSwanMultiActionCompletionActionStatus,
+  OpenSwanMultiActionCompletionIssueCode,
+  OpenSwanMultiActionCompletionOutcome,
+  OpenSwanMultiActionId,
+} from './openSwanMultiActionCompletionCore';
+import type {
+  OpenSwanTerminalReason,
+  OpenSwanTerminalReceipt,
+  OpenSwanTerminalState,
+} from './openswanSessionRuntimeAdapters';
 import type { OpenSwanTaskPlan } from './openswanTaskPlanner';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 
@@ -23,6 +34,8 @@ type RoomAgentStructuredPayload = {
     blockers: string[];
   } | null;
   observedEval?: OpenSwanObservedEvalSummary | null;
+  terminal?: OpenSwanTerminalReceipt | null;
+  multiActionCompletion?: OpenSwanMultiActionCompletionOutcome | null;
   routing?: {
     provider_routed?: string;
     provider_model?: string;
@@ -62,6 +75,245 @@ const MEMORY_USED_MAX = 24;
 const DELEGATED_MAX = 12;
 const SUMMARY_MAX = 700;
 const LINE_MAX = 240;
+const MULTI_ACTION_MAX = 3;
+const MULTI_ACTION_ISSUE_MAX = 12;
+const MULTI_ACTION_EVIDENCE_COUNT_MAX = 8;
+
+const MULTI_ACTION_IDS = ['A1', 'A2', 'A3'] as const satisfies readonly OpenSwanMultiActionId[];
+const MULTI_ACTION_STATUSES = [
+  'completed',
+  'pending',
+  'missing',
+  'blocked',
+  'failed',
+  'invalid',
+] as const satisfies readonly OpenSwanMultiActionCompletionActionStatus[];
+const MULTI_ACTION_ISSUE_CODES = [
+  'invalid_input',
+  'invalid_ledger',
+  'invalid_evidence',
+  'duplicate_evidence_id',
+  'invalid_report',
+  'unknown_report_action',
+  'duplicate_report_action',
+  'duplicate_evidence_ref',
+  'unknown_evidence_ref',
+  'evidence_cross_owned',
+  'future_evidence_ref',
+  'status_evidence_mismatch',
+  'evidence_not_relevant',
+  'evidence_not_mutating',
+  'evidence_target_mismatch',
+  'artifact_content_missing',
+  'artifact_persistence_unverified',
+  'completion_evidence_unavailable',
+  'dependency_inversion',
+  'missing_action_report',
+  'pending_action',
+] as const satisfies readonly OpenSwanMultiActionCompletionIssueCode[];
+
+const TERMINAL_STATES: readonly OpenSwanTerminalState[] = [
+  'succeeded',
+  'partial',
+  'failed',
+  'cancelled',
+];
+const TERMINAL_REASONS: readonly OpenSwanTerminalReason[] = [
+  'clean_end_turn',
+  'step_cap',
+  'runtime_guard',
+  'edge_failure',
+  'verification_failed',
+  'verification_blocked',
+  'verification_unverified',
+  'delegation_incomplete',
+  'action_coverage_incomplete',
+  'action_coverage_failed',
+  'persistence_unverified',
+  'user_cancelled',
+];
+
+export type PersistedRoomTerminalReceipt = Readonly<{
+  state: OpenSwanTerminalState;
+  reason: OpenSwanTerminalReason;
+  completionVerified: boolean;
+  resumable: boolean;
+}>;
+
+export type PersistedRoomMultiActionCompletion = Readonly<{
+  schemaVersion: 1;
+  actions: ReadonlyArray<Readonly<{
+    actionId: OpenSwanMultiActionId;
+    status: OpenSwanMultiActionCompletionActionStatus;
+    evidenceCount: number;
+  }>>;
+  unresolvedActionIds: ReadonlyArray<OpenSwanMultiActionId>;
+  issueCodes: ReadonlyArray<OpenSwanMultiActionCompletionIssueCode>;
+}>;
+
+function isMultiActionId(value: unknown): value is OpenSwanMultiActionId {
+  return MULTI_ACTION_IDS.includes(value as OpenSwanMultiActionId);
+}
+
+function isMultiActionStatus(value: unknown): value is OpenSwanMultiActionCompletionActionStatus {
+  return MULTI_ACTION_STATUSES.includes(value as OpenSwanMultiActionCompletionActionStatus);
+}
+
+function isMultiActionIssueCode(value: unknown): value is OpenSwanMultiActionCompletionIssueCode {
+  return MULTI_ACTION_ISSUE_CODES.includes(value as OpenSwanMultiActionCompletionIssueCode);
+}
+
+/**
+ * Keep only a value-free A1-A3 coverage snapshot in the circle-readable row.
+ * Raw evidence ids, evidence values, action prompt text, and checkpoints stay
+ * in the canonical run/transcript owners rather than Room message metadata.
+ */
+export function compactRoomMultiActionCompletion(
+  outcome: OpenSwanMultiActionCompletionOutcome | null | undefined,
+): PersistedRoomMultiActionCompletion | null {
+  if (!outcome || typeof outcome !== 'object') return null;
+
+  const rawActions = Array.isArray(outcome.actions) ? outcome.actions : [];
+  const seenActionIds = new Set<OpenSwanMultiActionId>();
+  const actions: Array<PersistedRoomMultiActionCompletion['actions'][number]> = [];
+  for (const rawAction of rawActions) {
+    if (!rawAction || typeof rawAction !== 'object') continue;
+    const actionId = rawAction.actionId;
+    const status = rawAction.status;
+    if (!isMultiActionId(actionId) || !isMultiActionStatus(status) || seenActionIds.has(actionId)) continue;
+    seenActionIds.add(actionId);
+    actions.push({
+      actionId,
+      status,
+      evidenceCount: Math.min(
+        Array.isArray(rawAction.evidenceIds) ? rawAction.evidenceIds.length : 0,
+        MULTI_ACTION_EVIDENCE_COUNT_MAX,
+      ),
+    });
+    if (actions.length >= MULTI_ACTION_MAX) break;
+  }
+
+  const unresolvedActionIds = Array.isArray(outcome.unresolvedActionIds)
+    ? Array.from(new Set(outcome.unresolvedActionIds.filter(isMultiActionId))).slice(0, MULTI_ACTION_MAX)
+    : [];
+  const issueCodes = Array.isArray(outcome.issues)
+    ? Array.from(new Set(outcome.issues
+        .map((issue) => issue && typeof issue === 'object' ? issue.code : null)
+        .filter(isMultiActionIssueCode)))
+        .slice(0, MULTI_ACTION_ISSUE_MAX)
+    : [];
+
+  return {
+    schemaVersion: 1,
+    actions,
+    unresolvedActionIds,
+    issueCodes,
+  };
+}
+
+function isTerminalState(value: unknown): value is OpenSwanTerminalState {
+  return TERMINAL_STATES.includes(value as OpenSwanTerminalState);
+}
+
+function isTerminalReason(value: unknown): value is OpenSwanTerminalReason {
+  return TERMINAL_REASONS.includes(value as OpenSwanTerminalReason);
+}
+
+function terminalReasonMatchesState(
+  state: OpenSwanTerminalState,
+  reason: OpenSwanTerminalReason,
+): boolean {
+  if (state === 'succeeded') return reason === 'clean_end_turn';
+  if (state === 'partial') {
+    return reason === 'step_cap'
+      || reason === 'verification_blocked'
+      || reason === 'verification_unverified'
+      || reason === 'delegation_incomplete'
+      || reason === 'action_coverage_incomplete';
+  }
+  if (state === 'cancelled') return reason === 'user_cancelled';
+  return reason === 'runtime_guard'
+    || reason === 'edge_failure'
+    || reason === 'verification_failed'
+    || reason === 'action_coverage_failed'
+    || reason === 'persistence_unverified';
+}
+
+/**
+ * Persist only the bounded terminal scalars. The resumable checkpoint can carry
+ * provider/tool state and belongs in the canonical run record, never in a
+ * circle-readable room message row.
+ */
+export function compactRoomTerminalReceipt(
+  receipt: OpenSwanTerminalReceipt | null | undefined,
+): PersistedRoomTerminalReceipt | null {
+  if (!receipt) return null;
+
+  const rawState = isTerminalState(receipt.state) ? receipt.state : null;
+  const rawReason = isTerminalReason(receipt.reason) ? receipt.reason : null;
+  const pairIsValid = rawState != null
+    && rawReason != null
+    && terminalReasonMatchesState(rawState, rawReason);
+  const state = pairIsValid ? rawState : 'failed';
+  const reason = pairIsValid ? rawReason : 'edge_failure';
+  return {
+    state,
+    reason,
+    completionVerified: state === 'succeeded' && receipt.completionVerified === true,
+    resumable: pairIsValid && state !== 'succeeded' && receipt.resumable === true,
+  };
+}
+
+function terminalStatusLine(receipt: PersistedRoomTerminalReceipt): string | null {
+  if (receipt.state === 'succeeded' && receipt.completionVerified) return null;
+
+  const resume = receipt.resumable ? ' You can continue this run.' : '';
+  if (receipt.state === 'cancelled') {
+    return `Cancelled — OpenSwan stopped this run at your request.${resume}`;
+  }
+  if (receipt.state === 'partial') {
+    if (receipt.reason === 'step_cap') {
+      return `Needs follow-up — OpenSwan reached its step limit before completing the task.${resume}`;
+    }
+    if (receipt.reason === 'verification_blocked' || receipt.reason === 'verification_unverified') {
+      return `Needs follow-up — OpenSwan could not verify completion.${resume}`;
+    }
+    if (receipt.reason === 'delegation_incomplete') {
+      return `Needs follow-up — delegated work did not all complete.${resume}`;
+    }
+    if (receipt.reason === 'action_coverage_incomplete') {
+      return 'Needs follow-up — OpenSwan did not verify every requested action.';
+    }
+    return `Needs follow-up — OpenSwan stopped before the task was complete.${resume}`;
+  }
+  if (receipt.state === 'succeeded') {
+    return 'Could not verify completion — OpenSwan ended the run without verified completion.';
+  }
+  if (receipt.reason === 'verification_failed') {
+    return 'Could not finish — OpenSwan verification failed.';
+  }
+  if (receipt.reason === 'action_coverage_failed') {
+    return 'Could not finish — one or more requested actions failed.';
+  }
+  if (receipt.reason === 'runtime_guard') {
+    return 'Could not finish — OpenSwan stopped at a runtime safety guard.';
+  }
+  if (receipt.reason === 'persistence_unverified') {
+    return 'Could not confirm completion — OpenSwan could not verify that the run was saved.';
+  }
+  return `Could not finish — OpenSwan hit a runtime error before completing the task.${resume}`;
+}
+
+/** Put typed runtime truth ahead of untrusted provider prose in Room Chat. */
+export function prependRoomTerminalStatus(
+  response: string,
+  terminal: OpenSwanTerminalReceipt | null | undefined,
+): string {
+  if (!terminal) return response;
+  const status = terminalStatusLine(compactRoomTerminalReceipt(terminal)!);
+  if (!status) return response;
+  return response.trim() ? `${status}\n\n${response}` : status;
+}
 
 function scrubSecrets(value: string): string {
   return value.replace(SECRET_VALUE_RE, SECRET_REDACTION).replace(SECRET_KEYED_RE, SECRET_REDACTION);
@@ -198,6 +450,8 @@ export function buildRoomAgentMessageMetadata(
   const verificationResults = Array.isArray(structured.verificationResults)
     ? structured.verificationResults.slice(-VERIFICATION_MAX).map(compactVerificationResult)
     : [];
+  const terminal = compactRoomTerminalReceipt(structured.terminal);
+  const multiActionCompletion = compactRoomMultiActionCompletion(structured.multiActionCompletion);
 
   return {
     bot: true,
@@ -232,6 +486,8 @@ export function buildRoomAgentMessageMetadata(
         }
       : null,
     observedEval: structured.observedEval || null,
+    terminal,
+    multiActionCompletion,
     routing: structured.routing || null,
   };
 }

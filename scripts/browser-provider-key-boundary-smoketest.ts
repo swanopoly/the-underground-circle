@@ -72,8 +72,22 @@ check(capabilities.includes("OpenSwan's image-generation tool"), 'image capabili
 
 const trending = source('src/lib/trendingContent.ts');
 check(trending.includes("await import('./llmProviders')"), 'trend enrichment lazy-loads the canonical provider client');
+check(trending.includes('listApiKeys'), 'trend enrichment preflights OpenRouter key metadata before proxy use');
 check(trending.includes('webSearchViaOpenRouter'), 'trend enrichment uses server-side OpenRouter search');
 check(trending.includes('Connect or verify an OpenRouter key in Marketplace'), 'trend enrichment failure is actionable');
+const trendPreflightAt = trending.indexOf('hasActiveOpenRouterCredential()');
+const trendProxyAt = trending.indexOf('webSearchViaOpenRouter({');
+check(trendPreflightAt >= 0 && trendPreflightAt < trendProxyAt, 'trend key preflight is defined before the proxy request path');
+const trendBundleStart = trending.indexOf('async function fetchOpenRouterTrendSources');
+const trendBundleEnd = trending.indexOf('// ─── X/Twitter Trends', trendBundleStart);
+const trendBundle = trending.slice(trendBundleStart, trendBundleEnd);
+const xTrendAt = trendBundle.indexOf('await fetchXTrending()');
+const techmemeAt = trendBundle.indexOf('await fetchTechmeme()');
+const perplexityAt = trendBundle.indexOf('await fetchPerplexityTrending()');
+check(
+  xTrendAt >= 0 && xTrendAt < techmemeAt && techmemeAt < perplexityAt,
+  'OpenRouter trend sources run serially so one failure arms cooldown before later requests',
+);
 
 const wordpress = source('src/lib/wordpressChatCommands.ts');
 check(!wordpress.includes('responseModalities'), 'WordPress has no in-browser model image generation');

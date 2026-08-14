@@ -4,6 +4,16 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const {
+  attachBridgeSafeRefreshIpcController,
+  createBoundedSafeRefreshReplacementController,
+} = require('./scripts/dev-stack-keepalive');
+const {
+  cleanupImmutableBridgeSnapshot,
+  immutableBridgeSnapshotSpawnSpec,
+  readAndVerifyImmutableBridgeSnapshot,
+  scavengeStaleImmutableBridgeSnapshots,
+} = require('./scripts/desktop-bridge-immutable-snapshot');
 
 const RESTART_DELAY = 2000; // 2 seconds
 const MAX_RESTARTS = 10;
@@ -172,29 +182,110 @@ class ServiceManager {
     this.processGroup = options.processGroup === true;
     this.spawnImpl = options.spawnImpl || spawn;
     this.env = { ...(options.env || {}) };
+    this.shell = options.shell !== false;
+    this.bridgeSupervisorKind = options.bridgeSupervisorKind || null;
+    this.bridgeHealthHost = options.bridgeHealthHost || '127.0.0.1';
+    this.bridgeHealthPort = Number.isSafeInteger(options.bridgeHealthPort)
+      ? options.bridgeHealthPort
+      : null;
+    this.bridgeHealthVerify = options.bridgeHealthVerify;
+    this.bridgeManifestInspect = options.bridgeManifestInspect;
+    this.safeRefreshExitCode = Number.isInteger(options.safeRefreshExitCode)
+      ? options.safeRefreshExitCode
+      : null;
+    this.bridgeIpcGeneration = 0;
+    this.bridgeIpcController = null;
+    this.safeRefreshReplacement = null;
+    this.safeRefreshScheduleImpl = options.safeRefreshScheduleImpl || setTimeout;
+    this.safeRefreshClearScheduleImpl = options.safeRefreshClearScheduleImpl || clearTimeout;
+    this.safeRefreshNowImpl = options.safeRefreshNowImpl || (() => Date.now());
+    this.safeRefreshRetryDelayMs = options.safeRefreshRetryDelayMs;
+    this.safeRefreshRetryWindowMs = options.safeRefreshRetryWindowMs;
+    this.safeRefreshMaxSpawnAttempts = options.safeRefreshMaxSpawnAttempts;
+    this.safeRefreshExpectedManifestSha256 = null;
+    this.safeRefreshImmutableSnapshot = null;
+    this.safeRefreshSnapshotVerify = options.safeRefreshSnapshotVerify || readAndVerifyImmutableBridgeSnapshot;
+    this.safeRefreshSnapshotCleanup = options.safeRefreshSnapshotCleanup || cleanupImmutableBridgeSnapshot;
+    this.safeRefreshSnapshotSpawnSpec = options.safeRefreshSnapshotSpawnSpec || immutableBridgeSnapshotSpawnSpec;
   }
 
   start(args = this.args) {
-    if (this.stopping) return;
+    if (this.stopping) return false;
 
     const now = Date.now();
     const timeStr = new Date(now).toLocaleTimeString();
     console.log(`\n[${timeStr}] 🚀 Starting ${this.name}...`);
 
-    const child = this.spawnImpl(this.command, args, {
-      stdio: ['ignore', 'inherit', 'inherit'], // stdin ignored, stdout/stderr inherited
-      shell: true,
+    const childEnv = { ...process.env, ...this.env };
+    let bridgeIpcSecret = null;
+    let bridgeIpcGeneration = 0;
+    if (this.bridgeSupervisorKind) {
+      bridgeIpcSecret = crypto.randomBytes(32).toString('hex');
+      bridgeIpcGeneration = ++this.bridgeIpcGeneration;
+      childEnv.UC_BRIDGE_SUPERVISOR_KIND = this.bridgeSupervisorKind;
+      childEnv.UC_BRIDGE_SUPERVISOR_PID = String(process.pid);
+      childEnv.UC_BRIDGE_SUPERVISOR_GENERATION = String(bridgeIpcGeneration);
+      childEnv.UC_BRIDGE_SUPERVISOR_IPC_SECRET = bridgeIpcSecret;
+      childEnv.UC_BRIDGE_SUPERVISOR_IMMUTABLE_HANDOFF_V1 = '1';
+    }
+    delete childEnv.UC_BRIDGE_IMMUTABLE_STARTUP_MANIFEST_SHA256;
+    delete childEnv.UC_BRIDGE_IMMUTABLE_SOURCE_SNAPSHOT_ID;
+    delete childEnv.UC_BRIDGE_IMMUTABLE_SNAPSHOT_DESCRIPTOR;
+    let spawnCommand = this.command;
+    let spawnArgs = args;
+    if (this.safeRefreshImmutableSnapshot) {
+      const spawnSpec = this.safeRefreshSnapshotSpawnSpec(this.safeRefreshImmutableSnapshot);
+      spawnCommand = process.execPath;
+      spawnArgs = spawnSpec.args;
+      Object.assign(childEnv, spawnSpec.env);
+    }
+    const child = this.spawnImpl(spawnCommand, spawnArgs, {
+      stdio: this.bridgeSupervisorKind
+        ? ['ignore', 'inherit', 'inherit', 'ipc']
+        : ['ignore', 'inherit', 'inherit'], // stdin ignored, stdout/stderr inherited
+      shell: this.shell,
       cwd: __dirname,
-      env: { ...process.env, ...this.env },
+      env: childEnv,
       // A separate group lets a planned Expo restart stop npx and Metro
       // together. Other services retain their existing process behavior.
       detached: this.processGroup && process.platform !== 'win32',
     });
+    let childSpawned = false;
+    child.once('spawn', () => { childSpawned = true; });
     this.process = child;
+    const bridgeIpcController = this.bridgeSupervisorKind
+      ? attachBridgeSafeRefreshIpcController(child, {
+          kind: this.bridgeSupervisorKind,
+          secret: bridgeIpcSecret,
+          generation: bridgeIpcGeneration,
+          healthHost: this.bridgeHealthHost,
+          healthPort: this.bridgeHealthPort,
+          verifyHealth: this.bridgeHealthVerify,
+          expectedManifestSha256: this.safeRefreshExpectedManifestSha256,
+          expectedSnapshotId: this.safeRefreshImmutableSnapshot?.snapshotId,
+          sourcePath: path.resolve(__dirname, String(this.args[0] || '')),
+          onSnapshotFailure: (error) => {
+            console.error(`[supervisor] ${this.name} immutable source snapshot failed closed: ${error?.message || 'unknown error'}`);
+          },
+          onBridgeReady: ({ child: readyChild }) => {
+            this.markSafeRefreshReplacementReady(readyChild);
+          },
+        })
+      : null;
+    this.bridgeIpcController = bridgeIpcController;
 
     child.on('exit', (code, signal) => {
       const exitTime = new Date().toLocaleTimeString();
-      if (this.process === child) this.process = null;
+      const wasUnreadySafeRefreshCandidate = Boolean(
+        this.safeRefreshReplacement?.ownsCandidate?.(child),
+      );
+      const wasCurrent = this.process === child;
+      if (wasCurrent) {
+        this.process = null;
+        this.bridgeIpcController = null;
+      }
+      const committedSafeRefresh = bridgeIpcController?.consumeCommittedExit(code, signal, wasCurrent) || null;
+      bridgeIpcController?.dispose();
       if (this.forceStopTimer) {
         clearTimeout(this.forceStopTimer);
         this.forceStopTimer = null;
@@ -202,6 +293,11 @@ class ServiceManager {
 
       if (this.stopping) {
         console.log(`[${exitTime}] ✓ ${this.name} stopped gracefully`);
+        return;
+      }
+
+      if (wasUnreadySafeRefreshCandidate) {
+        console.warn(`[${exitTime}] ↻ ${this.name} replacement exited before readiness; retaining bounded safe-refresh custody`);
         return;
       }
 
@@ -216,30 +312,157 @@ class ServiceManager {
         return;
       }
 
-      console.log(`\n[${exitTime}] ⚠️  ${this.name} exited (code: ${code}, signal: ${signal})`);
-
-      // Check restart rate
-      const restartNow = Date.now();
-      this.restarts = this.restarts.filter(t => restartNow - t < RESTART_WINDOW);
-      this.restarts.push(restartNow);
-
-      if (this.restarts.length > MAX_RESTARTS) {
-        console.error(`\n❌ ${this.name} crashed ${MAX_RESTARTS} times in ${RESTART_WINDOW / 1000}s`);
-        console.error('   Giving up. Check for errors above.');
-        process.exit(1);
+      if (
+        this.safeRefreshExitCode !== null
+        && code === this.safeRefreshExitCode
+        && committedSafeRefresh
+      ) {
+        console.log(`[${exitTime}] ↻ ${this.name} completed an idle-safe source refresh`);
+        const scheduled = this.scheduleSafeRefreshReplacement(
+          committedSafeRefresh.manifestSha256,
+          committedSafeRefresh.immutableSnapshot,
+        );
+        if (!scheduled) this.safeRefreshSnapshotCleanup(committedSafeRefresh.immutableSnapshot);
+        return;
       }
 
-      console.log(`   Restarting in ${RESTART_DELAY / 1000}s... (attempt ${this.restarts.length}/${MAX_RESTARTS})`);
-      this.restartTimer = setTimeout(() => {
-        this.restartTimer = null;
-        this.start();
-      }, RESTART_DELAY);
+      console.log(`\n[${exitTime}] ⚠️  ${this.name} exited (code: ${code}, signal: ${signal})`);
+      this.scheduleOrdinaryRestart();
     });
 
     child.on('error', (err) => {
       const errTime = new Date().toLocaleTimeString();
       console.error(`\n[${errTime}] ❌ ${this.name} error:`, err.message);
+      const retainedSafeRefreshEntitlement = Boolean(this.safeRefreshReplacement?.isActive?.());
+      if (this.process === child && (!childSpawned || !retainedSafeRefreshEntitlement)) {
+        this.process = null;
+        this.bridgeIpcController = null;
+      }
+      bridgeIpcController?.dispose();
+      // The bounded controller owns pre-spawn safe-refresh failures. All other
+      // spawn errors re-enter the existing crash-rate budget instead of leaving
+      // this supervisor permanently down.
+      if (!retainedSafeRefreshEntitlement && !this.stopping) this.scheduleOrdinaryRestart();
     });
+    return child;
+  }
+
+  scheduleOrdinaryRestart() {
+    if (this.stopping || this.restartTimer) return false;
+    const restartNow = Date.now();
+    this.restarts = this.restarts.filter(t => restartNow - t < RESTART_WINDOW);
+    this.restarts.push(restartNow);
+
+    if (this.restarts.length > MAX_RESTARTS) {
+      console.error(`\n❌ ${this.name} crashed ${MAX_RESTARTS} times in ${RESTART_WINDOW / 1000}s`);
+      console.error('   Giving up. Check for errors above.');
+      process.exit(1);
+      return false;
+    }
+
+    console.log(`   Restarting in ${RESTART_DELAY / 1000}s... (attempt ${this.restarts.length}/${MAX_RESTARTS})`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      this.start();
+    }, RESTART_DELAY);
+    return true;
+  }
+
+  scheduleSafeRefreshReplacement(expectedManifestSha256 = null, immutableSnapshot = null) {
+    if (this.stopping || this.safeRefreshReplacement?.isActive?.()) return false;
+    if (expectedManifestSha256 === null && typeof this.bridgeHealthVerify === 'function') {
+      expectedManifestSha256 = '2'.repeat(64);
+    }
+    if (!/^[0-9a-f]{64}$/u.test(String(expectedManifestSha256 || ''))) return false;
+    let verifiedSnapshot;
+    try {
+      verifiedSnapshot = this.safeRefreshSnapshotVerify(immutableSnapshot);
+    } catch {
+      return false;
+    }
+    if (verifiedSnapshot?.manifestSha256 !== expectedManifestSha256) return false;
+    this.safeRefreshExpectedManifestSha256 = expectedManifestSha256;
+    this.safeRefreshImmutableSnapshot = immutableSnapshot;
+    let snapshotCleaned = false;
+    const releaseSnapshot = () => {
+      if (snapshotCleaned) return false;
+      snapshotCleaned = true;
+      const released = this.safeRefreshSnapshotCleanup(immutableSnapshot);
+      if (this.safeRefreshImmutableSnapshot === immutableSnapshot) {
+        this.safeRefreshImmutableSnapshot = null;
+      }
+      return released;
+    };
+    let replacement = null;
+    replacement = createBoundedSafeRefreshReplacementController({
+      now: this.safeRefreshNowImpl,
+      schedule: this.safeRefreshScheduleImpl,
+      clearSchedule: this.safeRefreshClearScheduleImpl,
+      maxAttempts: this.safeRefreshMaxSpawnAttempts,
+      retryWindowMs: this.safeRefreshRetryWindowMs,
+      retryDelayMs: this.safeRefreshRetryDelayMs,
+      isFatalStartError: (error) => error?.code === 'SAFE_REFRESH_MANIFEST_LINEAGE_CHANGED',
+      startAttempt: () => {
+        let currentSnapshot;
+        try {
+          currentSnapshot = this.safeRefreshSnapshotVerify(immutableSnapshot);
+        } catch {
+          currentSnapshot = null;
+        }
+        if (currentSnapshot?.manifestSha256 !== expectedManifestSha256) {
+          throw Object.assign(new Error('Committed immutable safe-refresh snapshot lineage changed before replacement spawn.'), {
+            code: 'SAFE_REFRESH_MANIFEST_LINEAGE_CHANGED',
+          });
+        }
+        return this.start();
+      },
+      onAttemptFailure: ({ error, attempts }) => {
+        console.error(`[supervisor] ${this.name} safe-refresh replacement spawn attempt ${attempts} failed: ${error?.message || 'unknown error'}`);
+      },
+      onReadinessTimeout: ({ child, attempts, reason }) => {
+        console.error(`[supervisor] ${this.name} safe-refresh replacement attempt ${attempts} lost readiness (${reason}); terminating it for bounded retry`);
+        this.terminateChild(child, 'SIGKILL');
+      },
+      onCandidateClosed: ({ child }) => {
+        if (this.process === child) {
+          this.process = null;
+          this.bridgeIpcController = null;
+        }
+      },
+      onReady: () => {
+        if (this.safeRefreshReplacement === replacement) {
+          this.safeRefreshReplacement = null;
+          this.safeRefreshExpectedManifestSha256 = null;
+        }
+        releaseSnapshot();
+      },
+      onOrdinaryRecovery: () => {
+        if (this.safeRefreshReplacement === replacement) {
+          this.safeRefreshReplacement = null;
+          this.safeRefreshExpectedManifestSha256 = null;
+        }
+        releaseSnapshot();
+        console.error(`[supervisor] ${this.name} exhausted its bounded safe-refresh spawn entitlement; returning to ordinary recovery`);
+        this.scheduleOrdinaryRestart();
+      },
+    });
+    this.safeRefreshReplacement = replacement;
+    if (!replacement.scheduleInitial(250)) {
+      this.safeRefreshReplacement = null;
+      releaseSnapshot();
+      return false;
+    }
+    const originalCancel = replacement.cancel.bind(replacement);
+    replacement.cancel = () => {
+      const cancelled = originalCancel();
+      releaseSnapshot();
+      return cancelled;
+    };
+    return true;
+  }
+
+  markSafeRefreshReplacementReady(child) {
+    return this.safeRefreshReplacement?.markReady?.(child) === true;
   }
 
   requestRestart({ reason, args = this.args, delayMs = 250 }) {
@@ -295,6 +518,12 @@ class ServiceManager {
   stop() {
     this.stopping = true;
     this.plannedRestart = null;
+    this.safeRefreshReplacement?.cancel?.();
+    this.safeRefreshReplacement = null;
+    if (this.safeRefreshImmutableSnapshot) {
+      this.safeRefreshSnapshotCleanup(this.safeRefreshImmutableSnapshot);
+      this.safeRefreshImmutableSnapshot = null;
+    }
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -326,7 +555,12 @@ function createDefaultServices() {
     },
   );
   const services = [
-    new ServiceManager('Claude Code Bridge', 'node', ['scripts/claude-bridge.js']),
+    new ServiceManager('Claude Code Bridge', 'node', ['scripts/claude-bridge.js'], {
+      shell: false,
+      bridgeSupervisorKind: 'start-dev',
+      bridgeHealthPort: 7778,
+      safeRefreshExitCode: 75,
+    }),
     new ServiceManager('Codex Bridge',       'node', ['scripts/codex-bridge.js']),
     new ServiceManager('Gemini CLI Bridge',  'node', ['scripts/gemini-bridge.js']),
     new ServiceManager('Cursor Bridge',      'node', ['scripts/cursor-bridge.js']),
@@ -361,6 +595,11 @@ function startSupervisor() {
 
   console.log('🦢 Underground Circle Dev Server');
   console.log('=================================\n');
+
+  const scavengedSnapshots = scavengeStaleImmutableBridgeSnapshots();
+  if (scavengedSnapshots.removed > 0) {
+    console.log(`[supervisor] Removed ${scavengedSnapshots.removed} stale immutable bridge snapshot(s).`);
+  }
 
   // Capture the dependency baseline before Expo starts. If an install begins
   // after this point, the stable changed fingerprint forces one clean restart.

@@ -1577,6 +1577,8 @@ export interface BrowserGuardedNonSecretFillArgs extends BrowserPageIdentityExpe
   /** Explicit safety signal; true is always refused by this canary. */
   credentialSemantics?: boolean;
   skipVerificationCheck?: boolean;
+  /** Runtime-private final-entry fence; never serialized to the bridge. */
+  shouldContinue?: () => boolean;
 }
 
 export interface BrowserGuardedToggleTargetArgs extends BrowserPageIdentityExpectation {
@@ -1604,6 +1606,8 @@ export interface BrowserGuardedToggleMutationArgs extends BrowserPageIdentityExp
   taskContext?: string;
   credentialSemantics?: boolean;
   skipVerificationCheck?: boolean;
+  /** Runtime-private final-entry fence; never serialized to the bridge. */
+  shouldContinue?: () => boolean;
 }
 
 export interface BrowserGuardedSelectTargetArgs extends BrowserPageIdentityExpectation {
@@ -1632,6 +1636,8 @@ export interface BrowserGuardedSelectMutationArgs extends BrowserPageIdentityExp
   taskContext?: string;
   credentialSemantics?: false;
   skipVerificationCheck?: boolean;
+  /** Runtime-private final-entry fence; never serialized to the bridge. */
+  shouldContinue?: () => boolean;
 }
 
 function hasCredentialFillSignals(args: {
@@ -1806,6 +1812,9 @@ export async function setGuardedBrowserToggleState(
   }
   const gate = await preMutationVerificationGate<BrowserToggleProof>(args.skipVerificationCheck);
   if (gate) return gate;
+  if (args.shouldContinue && args.shouldContinue() !== true) {
+    return browserFailureResult(describeBrowserBridgeFailure('browser toggle stopped before bridge mutation', 'approval_required'));
+  }
   const raw = await callBrowser<BrowserToggleProof>('POST', '/browser/set_toggle', {
     toggleMode: 'guarded_non_consequential',
     targetId: args.targetId,
@@ -1994,6 +2003,9 @@ export async function setGuardedBrowserSelectOption(
     args.skipVerificationCheck,
   );
   if (gate) return gate;
+  if (args.shouldContinue && args.shouldContinue() !== true) {
+    return browserFailureResult(describeBrowserBridgeFailure('browser option selection stopped before bridge mutation', 'approval_required'));
+  }
   const raw = await callBrowser<BrowserSelectProof>('POST', '/browser/select', {
     selectMode: 'guarded_native_single',
     targetId: args.targetId,
@@ -2140,6 +2152,10 @@ export async function fillGuardedNonSecretField(
 
   const gate = await preMutationVerificationGate<BrowserFillProof>(args.skipVerificationCheck);
   if (gate) return gate;
+
+  if (args.shouldContinue && args.shouldContinue() !== true) {
+    return browserFailureResult(describeBrowserBridgeFailure('browser fill stopped before bridge mutation', 'approval_required'));
+  }
 
   if (
     !isValidBrowserIdentityExpectation(args)

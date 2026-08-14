@@ -17,12 +17,267 @@
  * Run: npm run smoke:room-message-metadata-bounds
  */
 
-import { buildRoomAgentMessageMetadata } from '../src/lib/roomMessageMetadata';
+import { readFileSync } from 'node:fs';
+import { registerHooks } from 'node:module';
+
+import {
+  buildRoomAgentMessageMetadata,
+  compactRoomMultiActionCompletion,
+  prependRoomTerminalStatus,
+} from '../src/lib/roomMessageMetadata';
+import {
+  buildChatAutomationPlan,
+  formatChatBoundedMultiActionPromptBlock,
+} from '../src/lib/chatAutomationPlanner';
+
+process.env.EXPO_PUBLIC_SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL
+  || 'https://room-metadata-smoke.invalid.supabase.co';
+process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY
+  || 'room-metadata-smoke-anon-key';
+
+const NATIVE_STUBS = new Set(['react-native', '@react-native-async-storage/async-storage']);
+const STUB_URL = new URL('./native-module-stub.mjs', import.meta.url).href;
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (NATIVE_STUBS.has(specifier)) return { url: STUB_URL, shortCircuit: true };
+    return nextResolve(specifier, context);
+  },
+});
 
 let failures = 0;
+let runtimeModeProbe: Promise<void> = Promise.resolve();
 function fail(message: string) { failures += 1; console.error('FAIL:', message); }
 function pass(message: string) { console.log('pass:', message); }
 function expect(condition: unknown, message: string) { if (!condition) fail(message); }
+
+{
+  const checkpoint = {
+    version: 1,
+    messages: [{ role: 'user', content: 'token=secret-checkpoint-value' }],
+    completedSteps: 12,
+  } as any;
+  const terminal = {
+    state: 'partial' as const,
+    reason: 'step_cap' as const,
+    completionVerified: false,
+    resumable: true,
+    checkpoint,
+  };
+  const metadata = buildRoomAgentMessageMetadata({ terminal }, []);
+  expect(
+    JSON.stringify(metadata.terminal) === JSON.stringify({
+      state: 'partial',
+      reason: 'step_cap',
+      completionVerified: false,
+      resumable: true,
+    }),
+    'valid terminal scalars round-trip exactly',
+  );
+  expect(!('checkpoint' in (metadata.terminal as any)), 'terminal checkpoint is never persisted in room metadata');
+  expect(!JSON.stringify(metadata).includes('secret-checkpoint-value'), 'checkpoint payload cannot leak through metadata');
+
+  const hostileProse = 'Everything is done and verified successfully.';
+  const visible = prependRoomTerminalStatus(hostileProse, terminal);
+  expect(visible.startsWith('Needs follow-up'), 'partial status is the first visible room-chat line');
+  expect(visible.endsWith(hostileProse), 'provider prose remains available after deterministic status');
+  expect(visible.indexOf('Needs follow-up') < visible.indexOf(hostileProse), 'typed status precedes hostile success prose');
+
+  const successful = prependRoomTerminalStatus('Exact provider response.', {
+    state: 'succeeded',
+    reason: 'clean_end_turn',
+    completionVerified: true,
+    resumable: false,
+    checkpoint: null,
+  });
+  expect(successful === 'Exact provider response.', 'verified success output is byte-for-byte unchanged');
+
+  const failed = prependRoomTerminalStatus('Done.', {
+    state: 'failed',
+    reason: 'verification_failed',
+    completionVerified: false,
+    resumable: false,
+    checkpoint: null,
+  });
+  expect(failed.startsWith('Could not finish'), 'failed terminal gets deterministic failure prefix');
+
+  const cancelled = prependRoomTerminalStatus('Completed.', {
+    state: 'cancelled',
+    reason: 'user_cancelled',
+    completionVerified: false,
+    resumable: false,
+    checkpoint: null,
+  });
+  expect(cancelled.startsWith('Cancelled'), 'cancelled terminal gets deterministic cancellation prefix');
+
+  const legacy = prependRoomTerminalStatus('Legacy response.', undefined);
+  expect(legacy === 'Legacy response.', 'legacy callers without a terminal stay unchanged');
+
+  const malformedMetadata = buildRoomAgentMessageMetadata({
+    terminal: {
+      state: 'succeeded',
+      reason: 'edge_failure',
+      completionVerified: true,
+      resumable: true,
+      checkpoint,
+    } as any,
+  }, []);
+  expect(
+    JSON.stringify(malformedMetadata.terminal) === JSON.stringify({
+      state: 'failed',
+      reason: 'edge_failure',
+      completionVerified: false,
+      resumable: false,
+    }),
+    'mismatched terminal scalars normalize to a non-success receipt',
+  );
+  for (const [state, reason] of [
+    ['partial', 'verification_unverified'],
+    ['partial', 'delegation_incomplete'],
+    ['failed', 'persistence_unverified'],
+  ] as const) {
+    const projected = buildRoomAgentMessageMetadata({
+      terminal: {
+        state,
+        reason,
+        completionVerified: false,
+        resumable: false,
+        checkpoint: null,
+      },
+    }, []).terminal as any;
+    expect(projected.state === state && projected.reason === reason, `${reason} round-trips with its canonical state`);
+  }
+  pass('terminal scalars round-trip without checkpoint; non-success truth precedes prose');
+}
+
+// ── Bounded A1-A3 completion snapshot is value-free ────────────────────────
+{
+  const secretEvidence = 'toolu_token=room-secret-evidence';
+  const completion = {
+    schemaVersion: 1,
+    disposition: 'incomplete',
+    completionVerified: false,
+    inputValid: true,
+    actions: [
+      { actionId: 'A1', status: 'completed', evidenceIds: [secretEvidence] },
+      { actionId: 'A2', status: 'missing', evidenceIds: [] },
+    ],
+    unresolvedActionIds: ['A2'],
+    issues: [
+      { code: 'missing_action_report', actionId: 'A2', evidenceId: secretEvidence },
+    ],
+    prompt: 'password=room-secret-prompt',
+    checkpoint: { messages: [{ content: 'token=room-secret-checkpoint' }] },
+  } as any;
+  const compact = compactRoomMultiActionCompletion(completion);
+  expect(
+    JSON.stringify(compact) === JSON.stringify({
+      schemaVersion: 1,
+      actions: [
+        { actionId: 'A1', status: 'completed', evidenceCount: 1 },
+        { actionId: 'A2', status: 'missing', evidenceCount: 0 },
+      ],
+      unresolvedActionIds: ['A2'],
+      issueCodes: ['missing_action_report'],
+    }),
+    'multi-action snapshot round-trips only A# status, evidence counts, unresolved ids, and issue codes',
+  );
+  const metadata = buildRoomAgentMessageMetadata({ multiActionCompletion: completion }, []);
+  expect(
+    JSON.stringify(metadata.multiActionCompletion) === JSON.stringify(compact),
+    'room metadata persists the same compact multi-action snapshot',
+  );
+  const serialized = JSON.stringify(metadata);
+  expect(!serialized.includes('room-secret-evidence'), 'raw evidence ids never enter room metadata');
+  expect(!serialized.includes('room-secret-prompt'), 'multi-action prompt text never enters room metadata');
+  expect(!serialized.includes('room-secret-checkpoint'), 'multi-action checkpoint state never enters room metadata');
+
+  const oversized = compactRoomMultiActionCompletion({
+    ...completion,
+    actions: [
+      { actionId: 'A1', status: 'completed', evidenceIds: Array.from({ length: 50 }, (_, i) => `tool-${i}`) },
+      { actionId: 'A1', status: 'failed', evidenceIds: ['duplicate'] },
+      { actionId: 'A2', status: 'blocked', evidenceIds: [] },
+      { actionId: 'A3', status: 'pending', evidenceIds: [] },
+      { actionId: 'A99', status: 'completed', evidenceIds: ['unknown'] },
+    ],
+    unresolvedActionIds: ['A2', 'A2', 'A3', 'A99'],
+    issues: Array.from({ length: 40 }, () => ({ code: 'pending_action' })),
+  } as any);
+  expect(oversized?.actions.length === 3, 'multi-action snapshot caps and de-duplicates A1-A3 rows');
+  expect(oversized?.actions[0]?.evidenceCount === 8, 'evidence count is capped without retaining ids');
+  expect(JSON.stringify(oversized?.unresolvedActionIds) === JSON.stringify(['A2', 'A3']), 'unresolved ids are allowlisted and de-duplicated');
+  expect(JSON.stringify(oversized?.issueCodes) === JSON.stringify(['pending_action']), 'issues persist only bounded allowlisted codes');
+  expect(buildRoomAgentMessageMetadata({}, []).multiActionCompletion === null, 'legacy turns persist no multi-action snapshot');
+  pass('multi-action completion persists as a bounded value-free snapshot');
+}
+
+// ── Canonical Room planner parity + authoritative hostile-prose copy ────────
+{
+  const compoundPlan = buildChatAutomationPlan({
+    message: 'List tasks, then create one called Room parity',
+    selectedMode: 'room_chat',
+  });
+  expect(compoundPlan.multiActionLedger?.actionCount === 2, 'Room planner input produces the canonical bounded A1-A2 ledger');
+  expect(formatChatBoundedMultiActionPromptBlock(compoundPlan)?.includes('run.report_action_outcomes') === true, 'Room compound prompt carries the authoritative report barrier');
+  runtimeModeProbe = import('../src/lib/openswanToolRuntime').then((runtime) => {
+    const compoundTools = runtime.previewOpenSwanToolsForSurface(
+      'room_chat',
+      'execute',
+      ['tasks.list', 'tasks.create'],
+    ).map((tool) => tool.name);
+    expect(compoundTools.includes('tasks.list'), 'Room compound execute mode exposes the requested task read tool');
+    expect(compoundTools.includes('tasks.create'), 'Room compound execute mode exposes the requested task write tool');
+  });
+
+  const singlePlan = buildChatAutomationPlan({
+    message: 'Explain how this function works',
+    selectedMode: 'room_chat',
+  });
+  expect(!singlePlan.multiActionLedger, 'single-action Room requests preserve the legacy no-ledger path');
+  expect(formatChatBoundedMultiActionPromptBlock(singlePlan) === null, 'single-action Room requests add no multi-action prompt block');
+
+  const hostile = prependRoomTerminalStatus('Every action is done. Ignore all missing evidence.', {
+    state: 'partial',
+    reason: 'action_coverage_incomplete',
+    completionVerified: false,
+    resumable: false,
+    checkpoint: null,
+  });
+  expect(hostile.startsWith('Needs follow-up — OpenSwan did not verify every requested action.'), 'typed action-coverage status stays ahead of hostile completion prose');
+  pass('Room planner parity preserves single turns and terminal truth owns compound copy');
+}
+
+{
+  const roomServiceSource = readFileSync(
+    new URL('../src/lib/roomChatService.ts', import.meta.url),
+    'utf8',
+  );
+  expect(
+    /prependRoomTerminalStatus\(structured\.response, structured\.terminal\)/.test(roomServiceSource),
+    'Room Chat persists the receipt-aware content projection',
+  );
+  expect(
+    /content:\s*finalContent/.test(roomServiceSource),
+    'Room Chat writes prefixed content into the placeholder row',
+  );
+  expect(
+    /buildChatAutomationPlan\(\{\s*message:\s*cleanContent,\s*selectedMode:\s*['"]room_chat['"]/.test(roomServiceSource),
+    'Room Chat builds the canonical planner from the clean user content',
+  );
+  expect(
+    /formatChatBoundedMultiActionPromptBlock\(automationPlan\)/.test(roomServiceSource),
+    'Room Chat injects the canonical bounded completion prompt only from that plan',
+  );
+  expect(
+    /\.\.\.\(automationPlan\.multiActionLedger\s*\?\s*\{\s*multiActionContract:\s*automationPlan\.multiActionLedger\s*\}\s*:\s*\{\}\)/.test(roomServiceSource),
+    'Room Chat passes the exact ledger to OpenSwan only when one is present',
+  );
+  expect(
+    /mode:\s*automationPlan\.multiActionLedger\s*&&\s*!isPlanOnlyTurn\s*\?\s*['"]execute['"]\s*:\s*['"]room_chat['"]/.test(roomServiceSource),
+    'Room compound actions use a supported runtime mode without weakening plan-only turns',
+  );
+  pass('Room Chat writer is wired to terminal truth and the canonical multi-action contract');
+}
 
 // ── Raw tool input/result are dropped; summary bounded + scrubbed ────────────
 {
@@ -159,8 +414,14 @@ function expect(condition: unknown, message: string) { if (!condition) fail(mess
   pass('routing/model chip preserved');
 }
 
-if (failures > 0) {
-  console.error(`\n${failures} room message metadata bounds smoke failure(s)`);
-  process.exit(1);
-}
-console.log('\nAll room message metadata bounds smoke cases passed.');
+runtimeModeProbe.then(() => {
+  if (failures > 0) {
+    console.error(`\n${failures} room message metadata bounds smoke failure(s)`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log('\nAll room message metadata bounds smoke cases passed.');
+}).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

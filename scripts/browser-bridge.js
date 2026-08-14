@@ -54,6 +54,44 @@ let launchError = null;
 let launchPromise = null;
 
 /**
+ * Synchronous, value-free restart authority for the owning Claude bridge.
+ * A persistent context can outlive every HTTP request, so an idle request
+ * counter alone must never authorize a bridge restart.
+ */
+function inspectRestartSafetyState(runtime = {}) {
+  const snapshot = {
+    contextOpen: false,
+    launchInProgress: Boolean(runtime.launchPromise),
+    livePages: 0,
+    unknown: false,
+  };
+  try {
+    if (!runtime.context) return snapshot;
+    snapshot.contextOpen = true;
+    const pages = runtime.context.pages();
+    if (!Array.isArray(pages)) {
+      snapshot.unknown = true;
+      return snapshot;
+    }
+    for (const candidate of pages) {
+      if (!candidate || typeof candidate.isClosed !== 'function') {
+        snapshot.unknown = true;
+        continue;
+      }
+      if (!candidate.isClosed()) snapshot.livePages += 1;
+    }
+    return snapshot;
+  } catch {
+    snapshot.unknown = true;
+    return snapshot;
+  }
+}
+
+function inspectRestartSafety() {
+  return inspectRestartSafetyState({ context, launchPromise });
+}
+
+/**
  * Browser identities are capabilities issued by this bridge process, not
  * browser indices or OS process ids. The process nonce changes on every
  * bridge restart, and the monotonic suffix prevents reuse even if a test
@@ -6575,6 +6613,7 @@ process.on('SIGINT', async () => { await shutdownOnExit(); process.exit(0); });
 process.on('SIGTERM', async () => { await shutdownOnExit(); process.exit(0); });
 
 module.exports = {
+  inspectRestartSafety,
   handleHealth,
   handleOpenUrl,
   handleDomSnapshot,
@@ -6599,6 +6638,7 @@ module.exports = {
   handleScroll,
   handleClose,
   // Exposed for the smoke test.
+  _inspectRestartSafetyState: inspectRestartSafetyState,
   _prune: prune,
   _PROFILE_DIR: PROFILE_DIR,
   _DOWNLOADS_DIR: DOWNLOADS_DIR,

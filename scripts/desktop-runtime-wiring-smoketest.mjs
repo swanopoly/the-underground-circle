@@ -429,7 +429,16 @@ assert(
 );
 assert(files.chatTab.includes('startMainChatFailureRecovery') && files.chatTab.includes('startChatFailureRecovery') && files.chatTab.includes('Chat failure recovery'), 'ChatTab: chat/computer failures hand off to bounded connected-agent recovery');
 assert(files.chatTab.includes('addRecoverableChatErrorMessage') && files.chatTab.includes('terminal_agent_control_error') && files.chatTab.includes('memory_bank_command_error') && files.chatTab.includes('desktop_diag_error') && files.chatTab.includes('agent_plan_mode_error'), 'ChatTab: first-pass command errors use shared recovery handoff');
-assert(files.chatTab.includes('bridge_probe_command_error') && files.chatTab.includes('assign_agent_command_error') && files.chatTab.includes('schedule_command_error') && files.chatTab.includes('github_command_error') && files.chatTab.includes('web_search_failure') && files.chatTab.includes('pair_desktop_bridge_error'), 'ChatTab: command/bridge/provider exceptions use shared recovery handoff');
+assert(
+  files.chatTab.includes('bridge_probe_command_error')
+  && files.chatTab.includes('assign_agent_command_error')
+  && files.chatTab.includes('schedule_command_error')
+  && files.chatTab.includes('github_command_error')
+  && files.chatTab.includes('pair_desktop_bridge_error')
+  && files.chatTab.includes('runOptionalWebSearchLane')
+  && files.chatTab.includes('webSearchDegradationContext'),
+  'ChatTab: command/bridge exceptions use recovery while optional web search degrades without a false terminal failure',
+);
 assert(files.chatFailureRecovery.includes('buildChatFailureRecoveryFingerprint') && files.chatFailureRecovery.includes('shouldSuppressDuplicateChatFailureHandoff') && files.chatFailureRecovery.includes('lastSuccessfulHandoffAt') && files.chatTab.includes('CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS'), 'ChatTab: repeated chat failures are fingerprinted and duplicate handoffs are success-aware');
 assert(files.chatTab.includes('Resolved send model:') && files.chatTab.includes('Connected providers:') && files.chatTab.includes('Route intent:'), 'ChatTab: recovery prompt includes route, model, and provider context');
 assert(files.chatTab.includes('Recovery could not start automatically. Try again, or open the details for support.') && !files.chatTab.includes('Chat failure recovery: handoff failed: ${recoveryError'), 'ChatTab: recovery-handoff failures use customer-safe copy');
@@ -522,9 +531,11 @@ assert(
   && files.computerTaskRuntime.includes('isDirectLocalImageFormatConversionTask(args.task)')
   && files.computerTaskRuntime.includes("requiredCapabilities.includes('file_write')")
   && files.computerTaskRuntime.includes('shouldRunDeterministicReadOnlyFileAdapter')
+  && files.computerTaskRuntime.includes('isExplicitDesktopBridgeReadOnlyFileTask(args.task)')
+  && files.computerTaskRuntime.includes('isDesktopBridgeReadOnlyFileTaskResultVerified')
   && files.computerTaskRuntime.includes('result = await executeAgentRun({')
-  && (files.computerTaskRuntime.match(/await executeComputerFileTask\(/g) || []).length === 1,
-  'computer task runtime preserves deterministic reads while all file mutations enter authenticated agent execution',
+  && (files.computerTaskRuntime.match(/await executeDesktopBridgeFileTask\(args\.task\)/g) || []).length === 1,
+  'computer task runtime preserves exact desktop reads while all semantic/file mutation work enters authenticated agent execution',
 );
 assert(files.fileAdapter.includes('selectUnambiguousFileMatchForMutation') && files.fileAdapter.includes('Ambiguous local file mutation target'), 'file adapter: rename/copy/trash fail closed on ambiguous search matches');
 assert(files.client.includes("focusMode?: 'require' | 'best_effort' | 'skip'"), 'desktopBridge: paste supports focus modes');

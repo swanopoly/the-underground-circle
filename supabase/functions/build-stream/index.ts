@@ -39,18 +39,19 @@ function jsonError(status: number, error: string, code: string): Response {
   });
 }
 
-// Canonical short IDs (no date suffix). `claude-opus` points at 4.7 (the
-// latest), matching the rest of the app — build-stream had been left on
-// 4.6 during the earlier sweep because it wasn't deployed yet.
+// Canonical short IDs (no date suffix). Floating aliases point at the current
+// stable tier; exact older IDs remain available for persisted configurations.
 const CLAUDE_MODEL_MAP: Record<string, string> = {
   "auto": "claude-haiku-4-5",
   "claude-haiku": "claude-haiku-4-5",
   "claude-haiku-4-5": "claude-haiku-4-5",
-  "claude-sonnet": "claude-sonnet-4-6",
+  "claude-sonnet": "claude-sonnet-5",
   "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-sonnet-5": "claude-sonnet-5",
   "claude-fable": "claude-fable-5",
   "claude-fable-5": "claude-fable-5",
-  "claude-opus": "claude-opus-4-8",
+  "claude-opus": "claude-opus-5",
+  "claude-opus-5": "claude-opus-5",
   "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
   "claude-opus-4-6": "claude-opus-4-6",

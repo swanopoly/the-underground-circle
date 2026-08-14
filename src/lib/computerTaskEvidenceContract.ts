@@ -131,6 +131,18 @@ function desktopRouteHasFileWork(route: ChatComputerRequestRoute): boolean {
   return /(?:~\/|\/Users\/|\b(?:attachment|downloads?|documents?|file|folder|path|package|save|export|render|upload|import)\b|\.(?:avif|bmp|csv|docx?|gif|heic|jpe?g|json|md|mov|mp3|mp4|pdf|png|psd|svg|tiff?|txt|wav|xlsx?)\b)/i.test(request);
 }
 
+/**
+ * Return only the planner-owned proof seed. Current routes persist this field
+ * explicitly; the fallback keeps old rows readable while stripping obvious
+ * A-id proof that was derived by this module on a prior pass.
+ */
+function requestCompletionProof(route: ChatComputerRequestRoute): string[] {
+  const source = Array.isArray(route.requestCompletionProof)
+    ? route.requestCompletionProof
+    : (route.completionProof || []).filter((item) => !/^A\d+\s+independently verified\b/.test(item));
+  return uniqueCompact(source, 12);
+}
+
 function readOnlyDesktopContract(
   route: ChatComputerRequestRoute,
   options: { target: string; isPhotoshop: boolean; isInDesign: boolean },
@@ -215,7 +227,7 @@ function browserContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
       'URL/title/state change when relevant',
       'screenshot proof for visual changes',
       'file_stat for downloads/uploads or exported files',
-      ...route.completionProof,
+      ...requestCompletionProof(route),
     ], 8),
     failClosedRules: [
       'human verification, MFA, or auth prompt requires user action',
@@ -408,7 +420,7 @@ function localFileContract(route: ChatComputerRequestRoute): ComputerTaskEvidenc
     proofAfter: uniqueCompact([
       'bounded search/read result or explicit no-match result',
       'file_stat, hash, basename, or count summary after mutation',
-      ...route.completionProof,
+      ...requestCompletionProof(route),
     ], 8),
     failClosedRules: [
       'path is outside approved scope',
@@ -472,16 +484,46 @@ function buildoutContract(route: ChatComputerRequestRoute): ComputerTaskEvidence
   };
 }
 
+function withRequestedActionCoverage(
+  route: ChatComputerRequestRoute,
+  contract: ComputerTaskEvidenceContract,
+): ComputerTaskEvidenceContract {
+  const requested = route.requestedActionContract;
+  if (!requested) return contract;
+  const perActionProof = requested.actions.map((action) => (
+    `${action.id} independently verified against fresh target-bound state: ${action.text}`
+  ));
+  return {
+    ...contract,
+    proofAfter: uniqueCompact([
+      ...perActionProof,
+      ...contract.proofAfter,
+    ], 16),
+    failClosedRules: uniqueCompact([
+      requested.requiresDecompositionBeforeMutation
+        ? 'the bounded requested-action list overflowed; decompose the intact original request before mutation'
+        : null,
+      'any requested action without independent proof keeps the whole task non-complete; list completed, blocked, and pending action IDs',
+      ...contract.failClosedRules,
+    ], 12),
+    userSummary: `${contract.userSummary} Account for all ${requested.actionCount} requested actions independently; partial coverage is never whole-task completion.`,
+  };
+}
+
 export function buildComputerTaskEvidenceContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceContract {
   const exactContract = exactComputerSequenceContract(route);
+  // Closed-world exact programs already bind their complete immutable action
+  // and predicate set. Keep that evidence shape byte-for-byte narrow; the
+  // request-action contract remains visible in the route prompt/UI but cannot
+  // broaden exact-program authority or proof.
   if (exactContract) return exactContract;
-  if (route.kind === 'browser') return browserContract(route);
-  if (route.kind === 'local_file') return localFileContract(route);
-  if (route.kind === 'agent_buildout') return buildoutContract(route);
+  if (route.kind === 'browser') return withRequestedActionCoverage(route, browserContract(route));
+  if (route.kind === 'local_file') return withRequestedActionCoverage(route, localFileContract(route));
+  if (route.kind === 'agent_buildout') return withRequestedActionCoverage(route, buildoutContract(route));
   if (route.kind === 'hybrid') {
     const browser = browserContract(route);
     const desktop = desktopContract(route);
-    return {
+    return withRequestedActionCoverage(route, {
       ...desktop,
       kind: 'hybrid',
       taskFamily: 'hybrid browser/local/desktop workflow',
@@ -494,9 +536,9 @@ export function buildComputerTaskEvidenceContract(route: ChatComputerRequestRout
       freshEvidenceRequired: uniqueCompact([...browser.freshEvidenceRequired, ...desktop.freshEvidenceRequired], 8),
       sourceRefs: uniqueRefs([...browser.sourceRefs, ...desktop.sourceRefs]),
       userSummary: 'Resolve browser, local file, and app state first, then execute one verified step at a time with approval before side effects.',
-    };
+    });
   }
-  return desktopContract(route);
+  return withRequestedActionCoverage(route, desktopContract(route));
 }
 
 /**

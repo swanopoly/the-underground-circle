@@ -27,6 +27,60 @@ const STORAGE_KEY = 'uc_trending_content';
 const TTL_MS = 60 * 60 * 1000; // 1 hour — fresh content every hour
 let providerWarningLogged = false;
 
+// After a failed OpenRouter enrichment cycle (missing/broken key, provider
+// outage), stand down for 6h instead of re-firing three doomed llm-proxy
+// calls on every mount and hourly tick. HN needs no key and keeps flowing.
+const ENRICHMENT_COOLDOWN_KEY = 'uc_trending_enrichment_cooldown_until';
+const ENRICHMENT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+let enrichmentCooldownUntil = 0;
+let enrichmentCooldownHydrated = false;
+let providerKeySubscriptionInstalled = false;
+
+async function isEnrichmentCoolingDown(): Promise<boolean> {
+  if (!enrichmentCooldownHydrated) {
+    enrichmentCooldownHydrated = true;
+    try {
+      const raw = await storage.getItem(ENRICHMENT_COOLDOWN_KEY);
+      const parsed = Number(raw || 0);
+      if (Number.isFinite(parsed) && parsed > enrichmentCooldownUntil) enrichmentCooldownUntil = parsed;
+    } catch { /* storage miss — treat as no cooldown */ }
+  }
+  return Date.now() < enrichmentCooldownUntil;
+}
+
+function startEnrichmentCooldown(): void {
+  const until = Date.now() + ENRICHMENT_COOLDOWN_MS;
+  if (until <= enrichmentCooldownUntil) return;
+  enrichmentCooldownUntil = until;
+  storage.setItem(ENRICHMENT_COOLDOWN_KEY, String(until)).catch(() => {});
+}
+
+function clearEnrichmentCooldown(): void {
+  enrichmentCooldownUntil = 0;
+  providerWarningLogged = false;
+  storage.removeItem(ENRICHMENT_COOLDOWN_KEY).catch(() => {});
+}
+
+async function hasActiveOpenRouterCredential(): Promise<boolean> {
+  try {
+    const { listApiKeys, subscribeUserApiKeyChanges } = await import('./llmProviders');
+    if (!providerKeySubscriptionInstalled) {
+      providerKeySubscriptionInstalled = true;
+      subscribeUserApiKeyChanges(clearEnrichmentCooldown);
+    }
+    const keys = await listApiKeys();
+    return keys.some((key) => key.provider === 'openrouter' && key.isActive);
+  } catch {
+    return false;
+  }
+}
+
+function warnEnrichmentUnavailable(): void {
+  if (providerWarningLogged) return;
+  console.warn('[TrendingContent] Live trend enrichment is unavailable (retrying in ~6h). Connect or verify an OpenRouter key in Marketplace; Hacker News remains available.');
+  providerWarningLogged = true;
+}
+
 // Module-level cache — synchronous reads
 let cachedData: TrendingData = { hn: [], xTrending: [], techmeme: [], perplexity: [], fetchedAt: 0, hnItems: [], xItems: [], techmemeItems: [], perplexityItems: [] };
 let loadPromise: Promise<void> | null = null;
@@ -98,19 +152,19 @@ async function _doLoad(): Promise<void> {
     // Storage read failed, continue to fetch
   }
 
-  // 2. Fetch all sources in parallel
-  const [hn, xTrending, techmeme, perplexity] = await Promise.allSettled([
+  // 2. HN stays independent. OpenRouter-backed sources share one credential
+  // preflight and run serially so one bad/unreadable key produces at most one
+  // proxy failure before the persisted cooldown takes effect.
+  const [hn, enrichment] = await Promise.allSettled([
     fetchHackerNews(),
-    fetchXTrending(),
-    fetchTechmeme(),
-    fetchPerplexityTrending(),
+    fetchOpenRouterTrendSources(),
   ]);
 
   // Extract rich items from HN (which returns TrendingItem[])
   const hnResult = hn.status === 'fulfilled' ? hn.value : [];
-  const xResult = xTrending.status === 'fulfilled' ? xTrending.value : [];
-  const tmResult = techmeme.status === 'fulfilled' ? techmeme.value : [];
-  const pxResult = perplexity.status === 'fulfilled' ? perplexity.value : [];
+  const [xResult, tmResult, pxResult] = enrichment.status === 'fulfilled'
+    ? enrichment.value
+    : [[], [], []];
 
   const newData: TrendingData = {
     hn: hnResult.length > 0 ? hnResult.map((i: any) => typeof i === 'string' ? i : i.text) : cachedData.hn,
@@ -209,6 +263,7 @@ function parseTrendItems(text: string, limit: number): TrendingItem[] {
 }
 
 async function fetchServerSideTrendItems(prompt: string, limit: number): Promise<TrendingItem[]> {
+  if (await isEnrichmentCoolingDown()) return [];
   try {
     // Dynamic import keeps the background Office feed from eagerly loading
     // the Marketplace catalog. The request still crosses authenticated
@@ -217,12 +272,31 @@ async function fetchServerSideTrendItems(prompt: string, limit: number): Promise
     const result = await webSearchViaOpenRouter({ query: prompt, maxTokens: 1200 });
     return parseTrendItems(result.response, limit);
   } catch {
-    if (!providerWarningLogged) {
-      console.warn('[TrendingContent] Live trend enrichment is unavailable. Connect or verify an OpenRouter key in Marketplace; Hacker News remains available.');
-      providerWarningLogged = true;
-    }
+    startEnrichmentCooldown();
+    warnEnrichmentUnavailable();
     return [];
   }
+}
+
+async function fetchOpenRouterTrendSources(): Promise<[
+  TrendingItem[],
+  TrendingItem[],
+  TrendingItem[],
+]> {
+  if (await isEnrichmentCoolingDown()) return [[], [], []];
+  if (!(await hasActiveOpenRouterCredential())) {
+    startEnrichmentCooldown();
+    warnEnrichmentUnavailable();
+    return [[], [], []];
+  }
+
+  // Deliberately sequential. A credential_unreadable/provider error in the
+  // first call starts the cooldown; the remaining helpers then fail closed
+  // locally instead of fanning out duplicate llm-proxy requests.
+  const xTrending = await fetchXTrending();
+  const techmeme = await fetchTechmeme();
+  const perplexity = await fetchPerplexityTrending();
+  return [xTrending, techmeme, perplexity];
 }
 
 // ─── X/Twitter Trends (server-side web search) ─────────────

@@ -84,6 +84,16 @@ export interface FeedLaneRetryDecision {
   retryInMs: number | null;
 }
 
+export interface FeedTaskRunHandoffSnapshot {
+  status: 'accepted' | 'outcome_unknown';
+  providerAcknowledgement: string | null;
+  externalSessionId: string | null;
+  externalDispatchKind: 'sessions_send' | 'sessions_spawn' | null;
+  externalConnectionId: string | null;
+  externalProviderRunId: string | null;
+  canonicalAgentRunId: string | null;
+}
+
 // ─── Tunables ────────────────────────────────────────────────────────
 
 /** Default total-item bound for the merged timeline. */
@@ -114,6 +124,48 @@ function safeString(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
+function safeExternalIdentity(v: unknown, max = 160): string | null {
+  if (typeof v !== 'string' || v.length === 0 || v.length > max || v !== v.trim()) return null;
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(v) ? v : null;
+}
+
+/**
+ * Read only the exact task-run marker written by the connected-agent handoff
+ * path. Generic `running` / `blocked` rows are deliberately not promoted to
+ * accepted/unknown handoffs, and provider prose is presentation-only.
+ */
+export function readFeedTaskRunHandoffSnapshot(value: unknown): FeedTaskRunHandoffSnapshot | null {
+  try {
+    if (!isRecord(value)) return null;
+    const payload = isRecord(value.output_payload) ? value.output_payload : null;
+    if (!payload || payload.completion_verified !== false) return null;
+    const handoffStatus = payload.handoff_status;
+    if (
+      (handoffStatus !== 'accepted' || value.status !== 'running')
+      && (handoffStatus !== 'outcome_unknown' || value.status !== 'blocked')
+    ) return null;
+
+    const summary = typeof value.summary === 'string'
+      ? value.summary.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 240)
+      : '';
+    const dispatchKind = payload.external_dispatch_kind === 'sessions_send'
+      || payload.external_dispatch_kind === 'sessions_spawn'
+      ? payload.external_dispatch_kind
+      : null;
+    return {
+      status: handoffStatus,
+      providerAcknowledgement: summary || null,
+      externalSessionId: safeExternalIdentity(payload.external_session_id),
+      externalDispatchKind: dispatchKind,
+      externalConnectionId: safeExternalIdentity(payload.external_connection_id),
+      externalProviderRunId: safeExternalIdentity(payload.external_provider_run_id),
+      canonicalAgentRunId: safeExternalIdentity(payload.canonical_agent_run_id, 64),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Epoch ms from an ISO-ish string / number; 0 for anything unparseable. */
 function toEpochMs(v: unknown): number {
   try {
@@ -133,6 +185,9 @@ interface NormalizedItem<T> {
   kind: FeedTimelineKind;
   runId: string | null;
   taskId: string | null;
+  /** Nonterminal task runs must remain visible even when an older proof or
+   *  activity row happens to reference the same task. */
+  allowWeakTaskDedupe: boolean;
   rowId: string;
   dedupeKey: string;
   row: T;
@@ -146,6 +201,7 @@ function normalizeRow<T>(kind: FeedTimelineKind, row: T, index: number): Normali
   let runId: string | null = null;
   let taskId: string | null = null;
   let ts = 0;
+  let allowWeakTaskDedupe = true;
 
   try {
     switch (kind) {
@@ -153,6 +209,7 @@ function normalizeRow<T>(kind: FeedTimelineKind, row: T, index: number): Normali
         runId = safeString(r.openswan_run_id);
         taskId = safeString(r.task_id);
         ts = toEpochMs(r.started_at);
+        allowWeakTaskDedupe = r.status !== 'running' && r.status !== 'blocked';
         break;
       case 'automation_run':
         // Separate system — deliberately no cross-lane identity.
@@ -185,7 +242,7 @@ function normalizeRow<T>(kind: FeedTimelineKind, row: T, index: number): Normali
       ? `task:${taskId}`
       : `${kind}:${rowId}`;
 
-  return { ts, kind, runId, taskId, rowId, dedupeKey, row };
+  return { ts, kind, runId, taskId, allowWeakTaskDedupe, rowId, dedupeKey, row };
 }
 
 // ─── Merge ───────────────────────────────────────────────────────────
@@ -236,6 +293,7 @@ export function buildFeedTimeline<A, R, T, P>(
       ts: number;
       kind: FeedTimelineKind;
       runId: string | null;
+      allowWeakTaskDedupe: boolean;
     }> = [];
     const kept: Array<NormalizedItem<A | R | T | P>> = [];
     let dedupedCount = 0;
@@ -247,7 +305,7 @@ export function buildFeedTimeline<A, R, T, P>(
         const claimer = claimedRuns.get(item.runId);
         if (claimer !== undefined && claimer !== item.kind) superseded = true;
       }
-      if (!superseded && item.taskId) {
+      if (!superseded && item.taskId && item.allowWeakTaskDedupe) {
         for (const claim of claimedTasks) {
           // Provably-different runs (both sides carry a run id and they
           // differ) must NOT weak-merge — keep both rather than over-merge.
@@ -256,6 +314,7 @@ export function buildFeedTimeline<A, R, T, P>(
           if (
             claim.taskId === item.taskId &&
             claim.kind !== item.kind &&
+            claim.allowWeakTaskDedupe &&
             !provablyDifferentRun &&
             Math.abs(claim.ts - item.ts) <= proximityMs
           ) {
@@ -271,7 +330,13 @@ export function buildFeedTimeline<A, R, T, P>(
       }
       if (item.runId && !claimedRuns.has(item.runId)) claimedRuns.set(item.runId, item.kind);
       if (item.taskId) {
-        claimedTasks.push({ taskId: item.taskId, ts: item.ts, kind: item.kind, runId: item.runId });
+        claimedTasks.push({
+          taskId: item.taskId,
+          ts: item.ts,
+          kind: item.kind,
+          runId: item.runId,
+          allowWeakTaskDedupe: item.allowWeakTaskDedupe,
+        });
       }
       kept.push(item);
     }

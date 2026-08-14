@@ -644,16 +644,12 @@ export const styles = StyleSheet.create({
   editScrollArrowText: {
     fontSize: 22, fontWeight: '700' as const,
   },
-  floorChipWrap: { position: 'relative', flexDirection: 'row', alignItems: 'center', marginRight: 6 },
-  floorChipWithDelete: { paddingRight: 18 },
+  floorChipWrap: { position: 'relative', flexDirection: 'row', alignItems: 'center', gap: 2, marginRight: 6 },
+  floorChipWithDelete: { paddingRight: 28 },
   floorDeleteBtn: {
-    position: 'absolute',
-    right: 2,
-    top: '50%',
-    marginTop: -8,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     backgroundColor: '#160b0b',
     borderWidth: 1,
     borderColor: '#ef444455',
@@ -662,7 +658,7 @@ export const styles = StyleSheet.create({
     zIndex: 5,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  floorDeleteBtnText: { fontSize: 8, color: '#ef4444', fontWeight: '800', lineHeight: 16 },
+  floorDeleteBtnText: { fontSize: 10, color: '#ef4444', fontWeight: '800', lineHeight: 20 },
   clearBtn: {
     marginTop: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 4,
     backgroundColor: '#ffffff10', alignSelf: 'flex-start',
@@ -706,7 +702,7 @@ export const styles = StyleSheet.create({
   mobileCardRole: { fontSize: 13, color: '#888', fontFamily: 'monospace' },
   mobileCardModel: { fontSize: 12, color: '#666', fontFamily: 'monospace' },
   mobileCardRight: { alignItems: 'flex-end', gap: 2 },
-  mobileCardCost: { fontSize: 16, fontWeight: '900', color: '#22d3ee', fontFamily: 'monospace' },
+  mobileCardCost: { fontSize: 16, fontWeight: '900', color: '#6366f1', fontFamily: 'monospace' },
   mobileCardCostLabel: { fontSize: 11, color: '#666', fontFamily: 'monospace' },
   mobileCardActivity: { fontSize: 13, color: '#777', fontFamily: 'monospace', paddingLeft: 62 },
   officeScroll: { flex: 1 },
@@ -738,7 +734,10 @@ export const styles = StyleSheet.create({
   desktopWidgetPlaceholderTitle: {
     fontSize: 10, color: '#7a7a8a', fontFamily: 'monospace', fontWeight: '700',
   },
-  agentPosition: { position: 'absolute', zIndex: 10 },
+  // User-placed furniture starts at zIndex 8. Keep agents above the built-in
+  // floor art but below placed objects so visible tools never become blocked
+  // by a sprite at the same coordinates.
+  agentPosition: { position: 'absolute', zIndex: 7 },
   quickBar: {
     borderTopWidth: 1, borderTopColor: '#2a2a2a', paddingVertical: 6, paddingHorizontal: 8,
   },

@@ -68,7 +68,7 @@ const TOOLS = [
   { id: 'other',       label: 'Other AI',    icon: '🤖', color: '#9e9e9e' },
   { id: 'codex',       label: 'Codex',       icon: '🧠', color: '#22c55e' },
   { id: 'gemini',      label: 'Gemini',      icon: '♊', color: '#3b82f6' },
-  { id: 'cursor',      label: 'Cursor',      icon: '🎯', color: '#22d3ee' },
+  { id: 'cursor',      label: 'Cursor',      icon: '🎯', color: '#6366f1' },
 ] as const;
 
 const RETURN_TIMES = ['30 min', '1 hour', '2 hours', '4 hours', 'Back tonight', 'Tomorrow'];
@@ -194,7 +194,7 @@ export default function StepAwayCard({ circleId, userId, userName, onPost, activ
     <>
       {!autoOpen && triggerBtn}
 
-      <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
+      <Modal visible={visible} animationType="fade" presentationStyle="pageSheet" onRequestClose={handleClose}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
           <ScrollView style={styles.modal} contentContainerStyle={{ paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
 
@@ -416,7 +416,7 @@ const styles = StyleSheet.create({
   },
 
   hint: { color: '#6f6f6f', fontSize: 12, marginTop: 6, lineHeight: 18 },
-  code: { color: '#22d3ee', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  code: { color: '#6366f1', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
 
   sessionLink: { marginTop: 6 },
   sessionLinkText: { color: '#3b82f6', fontSize: 13 },

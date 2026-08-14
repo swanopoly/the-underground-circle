@@ -31,6 +31,7 @@ function isClaudeCodeBillingAllowed(): boolean {
 function claudeBillingDisabledResult(action: string): BridgeTaskResult {
   return {
     ok: false,
+    transportAccepted: false,
     error: `${action} is disabled to prevent Anthropic charges. Set EXPO_PUBLIC_ALLOW_CLAUDE_CODE_BILLING=true and restart the app if you intentionally want the app to launch/message Claude Code.`,
     dispatchedVia: 'none',
     provider: 'claude-code',
@@ -39,15 +40,81 @@ function claudeBillingDisabledResult(action: string): BridgeTaskResult {
 
 export interface BridgeTaskResult {
   ok: boolean;
+  /** true=accepted; false=proved no mutation crossed; null/undefined=do not replay. */
+  transportAccepted: boolean | null;
   response?: string;
   error?: string;
   dispatchedVia: 'bridge' | 'edge-function' | 'none';
   provider: string;
-}
-
-export interface TerminalSessionSendResult extends BridgeTaskResult {
+  /** Exact bridge-owned session identity, present only after one-session launch/send proof. */
   sessionId?: string;
   displayName?: string;
+}
+
+export interface TerminalSessionSendResult extends BridgeTaskResult {}
+
+type BridgeLaunchSessionIdentity = {
+  sessionId: string;
+  displayName?: string;
+};
+
+function readExactBridgeLaunchSession(data: unknown): BridgeLaunchSessionIdentity | null {
+  if (!data || typeof data !== 'object') return null;
+  const payload = data as Record<string, unknown>;
+  if (payload.ok === false || payload.launched !== 1 || !Array.isArray(payload.sessions)) return null;
+  const failedIds = new Set(
+    (Array.isArray(payload.failed) ? payload.failed : [])
+      .map((entry) => entry && typeof entry === 'object' ? String((entry as Record<string, unknown>).sessionId || '') : '')
+      .filter(Boolean),
+  );
+  const candidates = payload.sessions.filter((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const session = entry as Record<string, unknown>;
+    const sessionId = typeof session.sessionId === 'string' ? session.sessionId : '';
+    return sessionId.length <= 160
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(sessionId)
+      && !session.launchError
+      && !failedIds.has(sessionId);
+  });
+  if (candidates.length !== 1) return null;
+  const session = candidates[0] as Record<string, unknown>;
+  const displayName = typeof session.displayName === 'string'
+    && session.displayName.trim()
+    && session.displayName.trim().length <= 160
+      ? session.displayName.trim()
+      : undefined;
+  return {
+    sessionId: session.sessionId as string,
+    displayName,
+  };
+}
+
+function missingExactLaunchIdentity(provider: string): BridgeTaskResult {
+  return {
+    ok: false,
+    transportAccepted: null,
+    error: `The ${provider} bridge reported a launch but did not return one exact session identity. The task was not replayed.`,
+    dispatchedVia: 'bridge',
+    provider,
+  };
+}
+
+function rejectedMutationTransport(res: Response, data?: unknown): false | null {
+  const body = data && typeof data === 'object' ? data as Record<string, unknown> : null;
+  const status = typeof body?.status === 'string' ? body.status.trim().toLowerCase() : '';
+  const explicitStructuredRejection = res.ok && (
+    body?.ok === false
+    || body?.accepted === false
+    || body?.success === false
+    || ['failed', 'error', 'rejected', 'cancelled', 'canceled'].includes(status)
+  );
+  if (explicitStructuredRejection) return false;
+  return res.status >= 400
+    && res.status < 500
+    && res.status !== 408
+    && res.status !== 409
+      ? false
+      : null;
 }
 
 export interface TerminalSpawnOptions {
@@ -87,7 +154,7 @@ async function dispatchToClaudeCode(prompt: string, fileName?: string | null): P
   }
   const port = BRIDGE_PORTS['claude-code'];
   const online = await probeBridge(port);
-  if (!online) return { ok: false, error: 'Claude Code bridge not reachable', dispatchedVia: 'none', provider: 'claude-code' };
+  if (!online) return { ok: false, transportAccepted: false, error: 'Claude Code bridge not reachable', dispatchedVia: 'none', provider: 'claude-code' };
   try {
     const fileCtx = fileName ? `\n\nFile context: ${fileName}` : '';
     const fullPrompt = prompt + fileCtx;
@@ -104,10 +171,11 @@ async function dispatchToClaudeCode(prompt: string, fileName?: string | null): P
     clearTimeout(timeout);
 
     const data = await res.json();
-    if (data.ok) {
+    if (res.ok && data?.ok === true) {
       const spawned = Array.isArray(data.results) ? data.results.find((item: any) => item?.ok) : null;
       return {
         ok: true,
+        transportAccepted: true,
         response: spawned?.spawnId
           ? `Claude Code task started (handle ${spawned.spawnId}).`
           : (data.message || 'Claude Code task started.'),
@@ -115,9 +183,9 @@ async function dispatchToClaudeCode(prompt: string, fileName?: string | null): P
         provider: 'claude-code',
       };
     }
-    return { ok: false, error: data.error || data.message || 'Spawn failed', dispatchedVia: 'bridge', provider: 'claude-code' };
+    return { ok: false, transportAccepted: rejectedMutationTransport(res, data), error: data.error || data.message || 'Spawn failed', dispatchedVia: 'bridge', provider: 'claude-code' };
   } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'claude-code' };
+    return { ok: false, transportAccepted: null, error: e.message, dispatchedVia: 'none', provider: 'claude-code' };
   }
 }
 
@@ -140,17 +208,18 @@ async function dispatchToGemini(prompt: string, fileName?: string | null): Promi
     clearTimeout(timeout);
 
     const data = await res.json();
-    if (data.ok) {
+    if (res.ok && data?.ok === true) {
       return {
         ok: true,
-        response: data.response || 'Task completed',
+        transportAccepted: true,
+        response: data.response || 'Gemini CLI accepted the task.',
         dispatchedVia: 'bridge',
         provider: 'gemini',
       };
     }
-    return { ok: false, error: data.error || 'Send failed', dispatchedVia: 'bridge', provider: 'gemini' };
+    return { ok: false, transportAccepted: rejectedMutationTransport(res, data), error: data.error || 'Send failed', dispatchedVia: 'bridge', provider: 'gemini' };
   } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'gemini' };
+    return { ok: false, transportAccepted: null, error: e.message, dispatchedVia: 'none', provider: 'gemini' };
   }
 }
 
@@ -172,12 +241,12 @@ export async function sendTerminalAgentSessionMessage(
       : normalized;
   const port = BRIDGE_PORTS[bridgeProvider];
   if (!port || !['claude-code', 'codex', 'gemini', 'cursor'].includes(bridgeProvider)) {
-    return { ok: false, error: `Terminal session send is not supported for ${provider}`, dispatchedVia: 'none', provider: normalized };
+    return { ok: false, transportAccepted: false, error: `Terminal session send is not supported for ${provider}`, dispatchedVia: 'none', provider: normalized };
   }
 
   const online = await probeBridge(port);
   if (!online) {
-    return { ok: false, error: `Bridge on port ${port} is not reachable`, dispatchedVia: 'none', provider: normalized };
+    return { ok: false, transportAccepted: false, error: `Bridge on port ${port} is not reachable`, dispatchedVia: 'none', provider: normalized };
   }
 
   const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
@@ -195,18 +264,31 @@ export async function sendTerminalAgentSessionMessage(
     });
     clearTimeout(timeout);
     const data = await res.json().catch(() => null);
-    if (res.ok && data?.ok) {
+    if (res.ok && data?.ok === true) {
+      if (typeof data.sessionId !== 'string' || data.sessionId !== sessionId) {
+        return {
+          ok: false,
+          transportAccepted: null,
+          error: 'The bridge accepted a terminal send but returned mismatched session identity. The task was not replayed; verify the requested session before retrying.',
+          dispatchedVia: 'bridge',
+          provider: normalized,
+          sessionId,
+          displayName: data?.displayName,
+        };
+      }
       return {
         ok: true,
+        transportAccepted: true,
         response: data.message || `Sent to ${data.displayName || sessionId}.`,
         dispatchedVia: 'bridge',
         provider: normalized,
-        sessionId: data.sessionId || sessionId,
+        sessionId,
         displayName: data.displayName,
       };
     }
     return {
       ok: false,
+      transportAccepted: rejectedMutationTransport(res, data),
       error: data?.error || `Terminal send failed with HTTP ${res.status}`,
       dispatchedVia: 'bridge',
       provider: normalized,
@@ -214,8 +296,8 @@ export async function sendTerminalAgentSessionMessage(
       displayName: data?.displayName,
     };
   } catch (e: any) {
-    if (e.name === 'AbortError') return { ok: false, error: 'Terminal send timed out', dispatchedVia: 'none', provider: normalized, sessionId };
-    return { ok: false, error: e.message || 'Bridge not reachable', dispatchedVia: 'none', provider: normalized, sessionId };
+    if (e.name === 'AbortError') return { ok: false, transportAccepted: null, error: 'Terminal send timed out; the task was not replayed', dispatchedVia: 'none', provider: normalized, sessionId };
+    return { ok: false, transportAccepted: null, error: `${e.message || 'Bridge response unavailable'}; the task was not replayed`, dispatchedVia: 'none', provider: normalized, sessionId };
   }
 }
 
@@ -246,7 +328,7 @@ export async function dispatchBridgeTask(
   if (port && bridgeProvider !== 'codex' && bridgeProvider !== 'cursor') {
     const online = await probeBridge(port);
     if (!online) {
-      return { ok: false, error: `Bridge on port ${port} is not reachable`, dispatchedVia: 'none', provider: bridgeProvider };
+      return { ok: false, transportAccepted: false, error: `Bridge on port ${port} is not reachable`, dispatchedVia: 'none', provider: bridgeProvider };
     }
   }
 
@@ -261,7 +343,7 @@ export async function dispatchBridgeTask(
     case 'cursor':
       return dispatchToCursor(profiledPrompt, fileName);
     default:
-      return { ok: false, error: `Unknown provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
+      return { ok: false, transportAccepted: false, error: `Unknown provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
   }
 }
 
@@ -293,7 +375,7 @@ export async function spawnNewClaudeSession(
   try {
     const online = await probeBridge(port);
     if (!online) {
-      return { ok: false, error: 'Claude bridge not reachable', dispatchedVia: 'none', provider: 'claude-code' };
+      return { ok: false, transportAccepted: false, error: 'Claude bridge not reachable', dispatchedVia: 'none', provider: 'claude-code' };
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -321,11 +403,20 @@ export async function spawnNewClaudeSession(
     clearTimeout(timeout);
     const data = await res.json().catch(() => null);
     if (res.ok && data?.launched > 0) {
-      return { ok: true, response: data.message || 'Claude Code terminal session launched.', dispatchedVia: 'bridge', provider: 'claude-code' };
+      const session = readExactBridgeLaunchSession(data);
+      if (!session) return missingExactLaunchIdentity('claude-code');
+      return {
+        ok: true,
+        transportAccepted: true,
+        response: data.message || 'Claude Code terminal session launched.',
+        dispatchedVia: 'bridge',
+        provider: 'claude-code',
+        ...session,
+      };
     }
-    return { ok: false, error: data?.error || data?.failed?.[0]?.error || 'Launch failed', dispatchedVia: 'bridge', provider: 'claude-code' };
+    return { ok: false, transportAccepted: rejectedMutationTransport(res, data), error: data?.error || data?.failed?.[0]?.error || 'Launch failed', dispatchedVia: 'bridge', provider: 'claude-code' };
   } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'claude-code' };
+    return { ok: false, transportAccepted: null, error: e.message, dispatchedVia: 'none', provider: 'claude-code' };
   }
 }
 
@@ -340,7 +431,7 @@ export async function spawnNewCodexSession(
   const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
   try {
     const online = await probeBridge(port);
-    if (!online) return { ok: false, error: 'Codex bridge not reachable', dispatchedVia: 'none', provider: 'codex' };
+    if (!online) return { ok: false, transportAccepted: false, error: 'Codex bridge not reachable', dispatchedVia: 'none', provider: 'codex' };
     const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
       label: 'The launched terminal agent must follow these repo standards for this delegated task.',
     });
@@ -359,22 +450,26 @@ export async function spawnNewCodexSession(
     });
     const data = await res.json().catch(() => null);
     if (res.ok && data?.launched > 0) {
-      const session = Array.isArray(data.sessions) ? data.sessions[0] : null;
+      const session = readExactBridgeLaunchSession(data);
+      if (!session) return missingExactLaunchIdentity('codex');
       return {
         ok: true,
+        transportAccepted: true,
         response: `Codex terminal session launched${session?.displayName ? ` as ${session.displayName}` : ''}.`,
         dispatchedVia: 'bridge',
         provider: 'codex',
+        ...session,
       };
     }
     return {
       ok: false,
+      transportAccepted: rejectedMutationTransport(res, data),
       error: data?.error || data?.failed?.[0]?.error || `Codex bridge launch failed with HTTP ${res.status}`,
       dispatchedVia: 'bridge',
       provider: 'codex',
     };
   } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'codex' };
+    return { ok: false, transportAccepted: null, error: e.message, dispatchedVia: 'none', provider: 'codex' };
   }
 }
 
@@ -386,7 +481,7 @@ export async function spawnNewGeminiCliSession(
   const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
   try {
     const online = await probeBridge(port);
-    if (!online) return { ok: false, error: 'Gemini CLI bridge not reachable', dispatchedVia: 'none', provider: 'gemini' };
+    if (!online) return { ok: false, transportAccepted: false, error: 'Gemini CLI bridge not reachable', dispatchedVia: 'none', provider: 'gemini' };
     const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
       label: 'The launched terminal agent must follow these repo standards for this delegated task.',
     });
@@ -405,16 +500,26 @@ export async function spawnNewGeminiCliSession(
     });
     const data = await res.json().catch(() => null);
     if (res.ok && data?.launched > 0) {
-      return { ok: true, response: 'Gemini CLI terminal session launched.', dispatchedVia: 'bridge', provider: 'gemini' };
+      const session = readExactBridgeLaunchSession(data);
+      if (!session) return missingExactLaunchIdentity('gemini');
+      return {
+        ok: true,
+        transportAccepted: true,
+        response: 'Gemini CLI terminal session launched.',
+        dispatchedVia: 'bridge',
+        provider: 'gemini',
+        ...session,
+      };
     }
     return {
       ok: false,
+      transportAccepted: rejectedMutationTransport(res, data),
       error: data?.error || data?.failed?.[0]?.error || `Gemini CLI bridge launch failed with HTTP ${res.status}`,
       dispatchedVia: 'bridge',
       provider: 'gemini',
     };
   } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'gemini' };
+    return { ok: false, transportAccepted: null, error: e.message, dispatchedVia: 'none', provider: 'gemini' };
   }
 }
 
@@ -426,7 +531,7 @@ export async function spawnNewCursorComposerSession(
   const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
   try {
     const online = await probeBridge(port);
-    if (!online) return { ok: false, error: 'Cursor bridge not reachable', dispatchedVia: 'none', provider: 'cursor' };
+    if (!online) return { ok: false, transportAccepted: false, error: 'Cursor bridge not reachable', dispatchedVia: 'none', provider: 'cursor' };
     const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
       label: 'The launched terminal agent must follow these repo standards for this delegated task.',
     });
@@ -443,22 +548,26 @@ export async function spawnNewCursorComposerSession(
     });
     const data = await res.json().catch(() => null);
     if (res.ok && data?.launched > 0) {
-      const session = Array.isArray(data.sessions) ? data.sessions[0] : null;
+      const session = readExactBridgeLaunchSession(data);
+      if (!session) return missingExactLaunchIdentity('cursor');
       return {
         ok: true,
+        transportAccepted: true,
         response: `Cursor Composer task sent${session?.displayName ? ` as ${session.displayName}` : ''}.`,
         dispatchedVia: 'bridge',
         provider: 'cursor',
+        ...session,
       };
     }
     return {
       ok: false,
+      transportAccepted: rejectedMutationTransport(res, data),
       error: data?.error || data?.failed?.[0]?.error || `Cursor bridge launch failed with HTTP ${res.status}`,
       dispatchedVia: 'bridge',
       provider: 'cursor',
     };
   } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'cursor' };
+    return { ok: false, transportAccepted: null, error: e.message, dispatchedVia: 'none', provider: 'cursor' };
   }
 }
 
@@ -512,20 +621,20 @@ export async function spawnNewSession(
     case 'cursor':
       return spawnNewCursorComposerSession(task, options);
     default:
-      return { ok: false, error: `Cannot spawn sessions for provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
+      return { ok: false, transportAccepted: false, error: `Cannot spawn sessions for provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
   }
 }
 
 /**
  * Wake an idle agent and assign it a task.
  * If the agent's bridge is online, spawns a new terminal session with the task.
- * If the bridge is offline, falls back to dispatchBridgeTask (which may fall through to AI).
+ * If the bridge is offline, makes one direct bridge-dispatch attempt.
  *
  * Flow:
  * 1. Probe the bridge for the agent's provider
  * 2. If online → spawn a new session with the task (wakes up a real terminal)
- * 3. If offline → try dispatch (exec on existing session) → fall back to AI
- * 4. Update agent status in the DB to 'building'
+ * 3. If offline → try a direct bridge dispatch
+ * 4. Update a linked roster row only after bridge acceptance
  */
 export async function wakeAndAssignTask(
   provider: string,
@@ -541,8 +650,11 @@ export async function wakeAndAssignTask(
 
   console.log(`[wakeAndAssign] Agent "${agentName}" (${normalized}), bridge ${bridgeOnline ? 'ONLINE' : 'OFFLINE'}`);
 
-  // Update agent status to building immediately
-  if (agentDbId) {
+  // Roster presence is not dispatch authority. Update it only after a real
+  // bridge accepted the task; failures and synchronous AI drafts must not
+  // strand an Office agent in `building`.
+  const markAcceptedBuilding = async () => {
+    if (!agentDbId) return;
     try {
       const { supabase } = await import('./supabase');
       await supabase.from('circle_office_agents')
@@ -554,26 +666,32 @@ export async function wakeAndAssignTask(
         })
         .eq('id', agentDbId);
     } catch {}
-  }
+  };
 
   if (bridgeOnline) {
     // Try spawning a new terminal session first — this WAKES the agent
     const spawnResult = await spawnNewSession(normalized, task, options);
     if (spawnResult.ok) {
+      await markAcceptedBuilding();
       console.log(`[wakeAndAssign] Spawned new ${normalized} session for "${agentName}"`);
-      return spawnResult;
+      return { ...spawnResult, transportAccepted: true };
     }
 
-    // Spawn failed — try dispatching to an existing session
-    console.log(`[wakeAndAssign] Spawn failed (${spawnResult.error}), trying dispatch...`);
-    const dispatchResult = await dispatchBridgeTask(normalized, task, options?.fileName);
-    if (dispatchResult.ok) return dispatchResult;
-
-    // Both failed
-    return { ok: false, error: `Wake failed: spawn (${spawnResult.error}), dispatch (${dispatchResult.error})`, dispatchedVia: 'none', provider: normalized };
+    // A launch request may have crossed the bridge before its response was
+    // lost. Never turn one user action into a second mutation automatically.
+    console.log(`[wakeAndAssign] Spawn acknowledgement unavailable (${spawnResult.error}); not replaying through dispatch.`);
+    return {
+      ...spawnResult,
+      ok: false,
+      transportAccepted: spawnResult.transportAccepted ?? null,
+      error: `${spawnResult.error || 'The bridge did not confirm the launch.'} The task was not replayed.`,
+    };
   }
 
   // Bridge offline — try dispatch anyway (might work if bridge comes back)
   const dispatchResult = await dispatchBridgeTask(normalized, task, options?.fileName);
-  return dispatchResult;
+  if (dispatchResult.ok && dispatchResult.dispatchedVia === 'bridge') await markAcceptedBuilding();
+  return dispatchResult.ok
+    ? { ...dispatchResult, transportAccepted: true }
+    : { ...dispatchResult, transportAccepted: dispatchResult.transportAccepted ?? null };
 }

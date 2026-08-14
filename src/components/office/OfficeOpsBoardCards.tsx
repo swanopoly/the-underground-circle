@@ -78,7 +78,7 @@ function RunRow({
   indent: number;
   onWaitingApprovalPress?: () => void;
 }) {
-  const tint = statusTint(node.status);
+  const tint = node.awaitingExternalResult ? '#38bdf8' : statusTint(node.status);
   const waiting = node.status === 'waiting_approval';
   const marker = indent > 0 ? '└ ' : '';
   // Read-only per-row telemetry + stall verdict (no reap writes from the board).
@@ -88,7 +88,9 @@ function RunRow({
   const body = (
     <View style={[s.runRowWrap, waiting && s.runRowWaiting, indent > 0 && { paddingLeft: 12 * Math.min(indent, 3) }]}>
       <View style={s.runRow}>
-        <Text style={[s.runGlyph, { color: tint }]}>{marker}{statusGlyph(node.status)}</Text>
+        <Text style={[s.runGlyph, { color: tint }]}>
+          {marker}{node.awaitingExternalResult ? '↗' : statusGlyph(node.status)}
+        </Text>
         <Text style={s.runAgent} numberOfLines={1}>{node.agentName}</Text>
         <Text style={s.runTitle} numberOfLines={1}>{node.title}</Text>
         {stall.stalled ? (
@@ -96,9 +98,15 @@ function RunRow({
             <Text style={s.stallBadgeText}>{OFFICE_BOARD_STALL_LABEL}</Text>
           </View>
         ) : null}
-        <Text style={s.runTime}>{formatRelativeTime(node.durationMs)}{telemetrySuffix}</Text>
+        <Text style={s.runTime}>
+          {node.awaitingExternalResult ? 'accepted ' : ''}{formatRelativeTime(node.durationMs)}{telemetrySuffix}
+        </Text>
       </View>
-      {node.stepHint ? (
+      {node.awaitingExternalResult ? (
+        <Text style={s.runAwaitingHint} numberOfLines={1}>
+          ACCEPTED · AWAITING CONNECTED-AGENT UPDATE · COMPLETION UNVERIFIED
+        </Text>
+      ) : node.stepHint ? (
         <Text style={s.runStepHint} numberOfLines={1}>{node.stepHint}</Text>
       ) : null}
     </View>
@@ -155,15 +163,43 @@ export function OfficeBuildingNowCard({
   if (!officeBoardHasContent(board) || !board) return null;
   const { counts } = board;
   const nowMs = Date.now();
+  // These accepted totals are computed over the full building set before the
+  // model applies its display bounds. Hidden accepted rows therefore cannot be
+  // mislabeled here as ordinary roots/subagents/queued work.
+  const awaitingExternalCount = counts.awaitingExternalResults;
+  const ordinaryActiveRoots = Math.max(0, counts.activeRoots - counts.awaitingExternalRoots);
+  const ordinaryActiveSubagents = Math.max(0, counts.activeSubagents - counts.awaitingExternalSubagents);
+  const ordinaryQueued = Math.max(0, counts.queued - counts.awaitingExternalQueued);
+  const hasOrdinaryBuilding = ordinaryActiveRoots > 0
+    || ordinaryActiveSubagents > 0
+    || counts.waitingApproval > 0
+    || ordinaryQueued > 0;
 
-  const countsLine = [
-    `${counts.activeRoots} agent${counts.activeRoots === 1 ? '' : 's'} building`,
-    counts.activeSubagents > 0
-      ? `${counts.activeSubagents} subagent${counts.activeSubagents === 1 ? '' : 's'}`
-      : null,
-    counts.waitingApproval > 0 ? `${counts.waitingApproval} waiting approval` : null,
-    counts.queued > 0 ? `${counts.queued} queued` : null,
-  ].filter(Boolean).join(' · ');
+  const countsLine = (awaitingExternalCount > 0
+    ? [
+        ordinaryActiveRoots > 0
+          ? `${ordinaryActiveRoots} agent${ordinaryActiveRoots === 1 ? '' : 's'} building`
+          : null,
+        `${awaitingExternalCount} accepted handoff${awaitingExternalCount === 1 ? '' : 's'} awaiting update`,
+        ordinaryActiveSubagents > 0
+          ? `${ordinaryActiveSubagents} subagent${ordinaryActiveSubagents === 1 ? '' : 's'}`
+          : null,
+        counts.waitingApproval > 0 ? `${counts.waitingApproval} waiting approval` : null,
+        ordinaryQueued > 0 ? `${ordinaryQueued} queued` : null,
+      ]
+    : [
+        `${counts.activeRoots} agent${counts.activeRoots === 1 ? '' : 's'} building`,
+        counts.activeSubagents > 0
+          ? `${counts.activeSubagents} subagent${counts.activeSubagents === 1 ? '' : 's'}`
+          : null,
+        counts.waitingApproval > 0 ? `${counts.waitingApproval} waiting approval` : null,
+        counts.queued > 0 ? `${counts.queued} queued` : null,
+      ]).filter(Boolean).join(' · ');
+  const cardHeader = awaitingExternalCount > 0
+    ? hasOrdinaryBuilding
+      ? '🔨 BUILDING NOW + ACCEPTED HANDOFFS'
+      : '↗ ACCEPTED HANDOFFS'
+    : '🔨 BUILDING NOW';
 
   const handleWaitingPress = () => {
     if (onWaitingApprovalPress) onWaitingApprovalPress();
@@ -172,7 +208,7 @@ export function OfficeBuildingNowCard({
 
   return (
     <View style={[s.card, style]}>
-      <Text style={s.cardHeader}>🔨 BUILDING NOW</Text>
+      <Text style={s.cardHeader}>{cardHeader}</Text>
       <Text style={s.countsLine} numberOfLines={1}>{countsLine}</Text>
       {board.building.map((node) => (
         <RunRow key={node.runId} node={node} indent={0} onWaitingApprovalPress={handleWaitingPress} />
@@ -217,7 +253,7 @@ export function OfficeTokensCard({
   if (!officeTrackerHasContent(tracker) || !tracker) return null;
 
   const spendLine = [
-    tracker.spendTodayUsd != null ? `Today ${formatUsd(tracker.spendTodayUsd)}` : null,
+    tracker.spendTodayUsd != null ? `24h ${formatUsd(tracker.spendTodayUsd)}` : null,
     tracker.spendWeekUsd != null ? `7d ${formatUsd(tracker.spendWeekUsd)}` : null,
   ].filter(Boolean).join(' · ');
 
@@ -395,6 +431,13 @@ const s = StyleSheet.create({
     fontFamily: 'monospace',
     paddingLeft: 18,
   },
+  runAwaitingHint: {
+    color: '#38bdf8',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    fontWeight: '700',
+    paddingLeft: 18,
+  },
   dimLine: {
     color: '#555',
     fontSize: 11,
@@ -430,7 +473,7 @@ const s = StyleSheet.create({
     fontFamily: 'monospace',
   },
   spendLine: {
-    color: '#22d3ee',
+    color: '#6366f1',
     fontSize: 13,
     fontFamily: 'monospace',
     fontWeight: '800',

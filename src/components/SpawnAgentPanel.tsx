@@ -46,7 +46,6 @@ const AGENT_COLORS = [
   { color: '#f97316', label: 'Orange' },
   { color: '#f59e0b', label: 'Amber' },
   { color: '#22c55e', label: 'Green' },
-  { color: '#22d3ee', label: 'Cyan' },
   { color: '#3b82f6', label: 'Blue' },
   { color: '#e8e8e8', label: 'White' },
 ];
@@ -57,9 +56,9 @@ const MODEL_PREFERENCES_BASE = [
   { key: 'claude-haiku',  label: 'Claude Haiku',          desc: 'Fast, cost-efficient' },
   { key: 'claude-sonnet', label: 'Claude Sonnet',         desc: 'Balanced intelligence' },
   { key: 'claude-opus',   label: 'Claude Opus',           desc: 'Maximum capability' },
-  { key: 'gemini-flash',  label: 'Gemini 2.5 Flash',      desc: 'Google, fast reasoning' },
-  { key: 'gpt-4.1',       label: 'GPT-4.1',               desc: 'OpenAI flagship' },
-  { key: 'o4-mini',       label: 'O4 Mini',               desc: 'OpenAI reasoning' },
+  { key: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash',   desc: 'Google, fast multimodal work' },
+  { key: 'gpt-5.6-terra', label: 'GPT-5.6 Terra',         desc: 'OpenAI balanced agent tier' },
+  { key: 'gpt-5.6-sol',   label: 'GPT-5.6 Sol',           desc: 'OpenAI deep reasoning' },
 ];
 // Custom HF models are loaded at runtime and appended
 let MODEL_PREFERENCES = [...MODEL_PREFERENCES_BASE];

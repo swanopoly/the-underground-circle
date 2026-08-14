@@ -20,7 +20,6 @@ import { secureSignOut } from '../../lib/authLogout';
 const THEME_COLORS = [
   '#6366f1', // Indigo
   '#a855f7', // Purple
-  '#22d3ee', // Cyan
   '#22c55e', // Green
   '#f43f5e', // Rose
   '#f59e0b', // Amber

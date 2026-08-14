@@ -1,7 +1,7 @@
 /**
  * LlmProviderMarketplace — Marketplace section for connecting LLM API
- * keys (business OpenAI-compatible endpoints, OpenAI, Anthropic,
- * OpenRouter, Groq, HuggingFace, Replicate, Ollama, Z.AI, MiniMax).
+ * keys for every provider supported by the authenticated model proxy, plus
+ * guarded local/custom and non-chat inference providers.
  * Sits at the top of the Marketplace tab so
  * users can wire up the providers their agents will run on without
  * hunting through Settings.
@@ -24,14 +24,12 @@
  *   spinner) and only exposes the connection state upward via the
  *   onChange callback if a parent wants to react.
  *
- * Google Gemini coverage: native Google AI Studio API support requires
- * a small llm-proxy edge function update (the proxy doesn't yet have a
- * Google handler — Gemini today routes via OpenRouter's google/* model
- * IDs). The Google Gemini card therefore points users at OpenRouter
- * with a clear note. Native Google is a small follow-up commit.
+ * Model inventories are discovered after connection by the shared provider
+ * registry, so this component describes provider families instead of freezing
+ * one permanent model list in the connection UI.
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
@@ -45,12 +43,18 @@ import {
 import {
   PROVIDER_HELP,
   PROVIDER_MODELS,
+  loadProviderModelCatalogSnapshot,
   storeApiKey,
   deleteApiKey,
   testApiKey,
   useUserApiKeys,
   type LLMProvider,
 } from '../../lib/llmProviders';
+import {
+  buildModelCatalogReadinessProfile,
+  projectProviderCatalogModels,
+  type ModelCatalogReadinessState,
+} from '../../lib/modelCatalogReadinessCore';
 import {
   buildBillingPreview,
   getProviderRoutingMode,
@@ -89,24 +93,23 @@ const PROVIDER_CARDS: ProviderCardSpec[] = [
   {
     id: 'openai_compatible',
     label: 'Business Models',
-    blurb: 'Connect a private OpenAI-compatible endpoint for company-tuned task agents.',
+    blurb: 'Private compatible endpoints for guarded OpenSwan and local-agent tools.',
     accent: '#14b8a6',
     glyph: 'B',
   },
   {
     id: 'openai',
     label: 'OpenAI',
-    blurb: 'GPT-4.1, 4o, o3 / o4 reasoning models.',
+    blurb: 'Current GPT-5.6, GPT-5.5/5.4, GPT-4.1, and o3 models.',
     accent: '#10a37f',
     glyph: 'O',
   },
   {
-    id: null,
+    id: 'google_ai',
     label: 'Google Gemini',
-    blurb: 'Gemini 2.5 Pro & Flash. Routed via OpenRouter today.',
+    blurb: 'Current Gemini 3.x long-context and multimodal models.',
     accent: '#4285f4',
     glyph: 'G',
-    redirectHint: { providerLabel: 'OpenRouter', routeId: 'openrouter' },
   },
   {
     id: 'openrouter',
@@ -118,7 +121,7 @@ const PROVIDER_CARDS: ProviderCardSpec[] = [
   {
     id: 'groq',
     label: 'Groq',
-    blurb: 'Ultra-fast inference for Llama and Mixtral.',
+    blurb: 'Low-latency GPT-OSS, Compound, and Llama inference.',
     accent: '#f97316',
     glyph: 'Q',
   },
@@ -146,16 +149,65 @@ const PROVIDER_CARDS: ProviderCardSpec[] = [
   {
     id: 'zai',
     label: 'Z.AI / GLM',
-    blurb: 'GLM-4 and other Z.ai hosted models.',
+    blurb: 'Current GLM-5.1 multilingual reasoning and tool-use models.',
     accent: '#0ea5e9',
     glyph: 'Z',
   },
   {
     id: 'minimax',
     label: 'MiniMax',
-    blurb: 'MiniMax-Text and Speech models.',
+    blurb: 'MiniMax M2.7 and high-speed long-context agent models.',
     accent: '#ec4899',
     glyph: 'M',
+  },
+  {
+    id: 'github-models',
+    label: 'GitHub Models',
+    blurb: 'Publisher-qualified models through GitHub\'s inference API.',
+    accent: '#64748b',
+    glyph: 'GH',
+  },
+  {
+    id: 'mistral_ai',
+    label: 'Mistral AI',
+    blurb: 'Mistral Medium, Large, Small, Codestral, and Ministral.',
+    accent: '#fa520f',
+    glyph: 'MS',
+  },
+  {
+    id: 'cohere',
+    label: 'Cohere',
+    blurb: 'Command A chat and reasoning for enterprise retrieval agents.',
+    accent: '#39594d',
+    glyph: 'CH',
+  },
+  {
+    id: 'perplexity',
+    label: 'Perplexity',
+    blurb: 'Sonar search-grounded chat, reasoning, and deep research.',
+    accent: '#1fb8cd',
+    glyph: 'PX',
+  },
+  {
+    id: 'together_ai',
+    label: 'Together AI',
+    blurb: 'Managed Qwen, Kimi, DeepSeek, Llama, and other OSS models.',
+    accent: '#0f6fff',
+    glyph: 'TG',
+  },
+  {
+    id: 'fireworks_ai',
+    label: 'Fireworks AI',
+    blurb: 'Low-latency GPT-OSS, DeepSeek, Kimi, and tool-use inference.',
+    accent: '#5b36bd',
+    glyph: 'FW',
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    blurb: 'DeepSeek V4 Flash and Pro for long-context reasoning and code.',
+    accent: '#1a6fe0',
+    glyph: 'DS',
   },
 ];
 
@@ -177,6 +229,56 @@ export default function LlmProviderMarketplace(_props: Props) {
   const [busy, setBusy] = useState<LLMProvider | null>(null);
   const [errorById, setErrorById] = useState<Partial<Record<LLMProvider, string>>>({});
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'pass' | 'fail'>('idle');
+  const [catalogReadinessById, setCatalogReadinessById] = useState<Partial<Record<LLMProvider, {
+    state: ModelCatalogReadinessState;
+    label: string;
+    hint: string;
+    modelCount: number;
+  }>>>({});
+
+  // A green credential chip proves the key was saved, not that every curated
+  // model is listed to the account. Resolve the same typed provider snapshot
+  // used by Chat/Rooms and keep all failure copy bounded and secret-free.
+  useEffect(() => {
+    let cancelled = false;
+    const activeProviders = Array.from(new Set(
+      keys.filter((key) => key.isActive).map((key) => key.provider),
+    ));
+    if (activeProviders.length === 0) {
+      setCatalogReadinessById({});
+      return () => { cancelled = true; };
+    }
+    void Promise.all(activeProviders.map(async (provider) => {
+      const snapshot = await loadProviderModelCatalogSnapshot(provider, _props.circleId ?? null);
+      const models = projectProviderCatalogModels(
+        provider,
+        PROVIDER_MODELS[provider] || [],
+        snapshot,
+      );
+      const profile = buildModelCatalogReadinessProfile({
+        connected: true,
+        snapshotStatus: snapshot.status,
+        selectableModelCount: models.length,
+      });
+      return [provider, {
+        state: profile.state,
+        label: profile.label,
+        hint: profile.hint,
+        modelCount: models.length,
+      }] as const;
+    })).then((entries) => {
+      if (cancelled) return;
+      setCatalogReadinessById(Object.fromEntries(entries) as Partial<Record<LLMProvider, {
+        state: ModelCatalogReadinessState;
+        label: string;
+        hint: string;
+        modelCount: number;
+      }>>);
+    }).catch(() => {
+      if (!cancelled) setCatalogReadinessById({});
+    });
+    return () => { cancelled = true; };
+  }, [keys, _props.circleId]);
 
   const connectedCount = useMemo(
     () => PROVIDER_CARDS.filter((c) => c.id && hasProvider(c.id)).length,
@@ -355,7 +457,10 @@ export default function LlmProviderMarketplace(_props: Props) {
           const isExpanded = card.id !== null && expandedId === card.id;
           const isBusy = card.id !== null && busy === card.id;
           const error = card.id ? errorById[card.id] : undefined;
-          const modelCount = card.id ? (PROVIDER_MODELS[card.id]?.length || 0) : 0;
+          const catalogReadiness = card.id ? catalogReadinessById[card.id] : undefined;
+          const modelCount = connected && catalogReadiness
+            ? catalogReadiness.modelCount
+            : card.id ? (PROVIDER_MODELS[card.id]?.length || 0) : 0;
           const keyHint = card.id ? PROVIDER_HELP[card.id]?.hint : null;
 
           return (
@@ -382,9 +487,18 @@ export default function LlmProviderMarketplace(_props: Props) {
                 )}
               </View>
 
-              {modelCount > 0 && !isExpanded && (
-                <Text style={styles.modelLine}>{modelCount} model{modelCount === 1 ? '' : 's'} available</Text>
+              {card.id && !isExpanded && (
+                <Text style={styles.modelLine} numberOfLines={2}>
+                  {connected
+                    ? catalogReadiness
+                      ? `${modelCount} model${modelCount === 1 ? '' : 's'} · ${catalogReadiness.label}`
+                      : 'Checking account model catalog…'
+                    : `${modelCount} curated model${modelCount === 1 ? '' : 's'} · connect to check this account`}
+                </Text>
               )}
+              {connected && catalogReadiness && !isExpanded && catalogReadiness.state !== 'account_verified' ? (
+                <Text style={styles.catalogHint} numberOfLines={2}>{catalogReadiness.hint}</Text>
+              ) : null}
 
               {/* Action row — varies by state. */}
               {!isExpanded && (
@@ -680,6 +794,7 @@ const styles = StyleSheet.create({
   },
   connectedChipText: { color: '#86efac', fontSize: 10, fontWeight: '800' },
   modelLine: { color: '#64748b', fontSize: 11 },
+  catalogHint: { color: '#475569', fontSize: 10, lineHeight: 14 },
   actionsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',

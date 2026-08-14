@@ -1,3 +1,16 @@
+import {
+  APPROVAL_EFFECTS,
+  classifyAlwaysExactApprovalEffect,
+  type ApprovalEffect,
+  type AlwaysExactApprovalEffect,
+} from './approvalEffectPolicyCore.ts';
+import {
+  isIssuedChatPlanApprovalAuthorityObject,
+  type ChatPlanApprovalAuthorityCore,
+} from './chatPlanApprovalAuthorityCore.ts';
+
+type ChatPlanApprovalAuthority = ChatPlanApprovalAuthorityCore<string, string>;
+
 export type OpenSwanRuntimeApprovalStatus =
   | 'pending'
   | 'approved'
@@ -12,13 +25,18 @@ export type OpenSwanRuntimeApprovalRow = {
   circle_id?: string | null;
   requested_by?: string | null;
   requested_at?: string | null;
+  resolved_at?: string | null;
   timeout_seconds?: number | null;
   status?: OpenSwanRuntimeApprovalStatus | null;
   payload?: Record<string, unknown> | null;
 };
 
 export type OpenSwanRuntimeApprovalReceiptStatus = 'approved' | 'auto_approved';
-export type OpenSwanRuntimeApprovalReceiptSource = 'run_scoped' | 'cross_run' | 'category_auto';
+export type OpenSwanRuntimeApprovalReceiptSource =
+  | 'run_scoped'
+  | 'cross_run'
+  | 'category_auto'
+  | 'workflow_review';
 
 export type OpenSwanRuntimeApprovalCallIdentity = {
   userId: string;
@@ -74,11 +92,242 @@ export type OpenSwanRuntimeApprovalDecision =
   | { kind: 'block'; approvalId: string; message: string }
   | { kind: 'new' };
 
+/**
+ * Runtime-private authority narrowing for one user-approved Chat continuation.
+ *
+ * This value is deliberately structural and value-free: it may identify the
+ * exact durable approval rows and their SHA-256 tool bindings, but it must
+ * never carry canonical approval keys, raw tool arguments, commands, paths,
+ * credentials, or other mutation values. It is transient turn context, not
+ * persisted approval metadata and not model-visible prompt content.
+ */
+export type OpenSwanApprovalResumeItemV1 = Readonly<{
+  approvalId: string;
+  toolName: string;
+  toolApprovalDigest: string;
+}>;
+
+export type OpenSwanApprovalResumeBindingV1 = Readonly<{
+  schemaVersion: 1;
+  sourceRunId: string;
+  userId: string;
+  circleId: string;
+  threadId: string;
+  approvals: readonly OpenSwanApprovalResumeItemV1[];
+}>;
+
+export type BuildOpenSwanApprovalResumeBindingV1Input = Readonly<{
+  sourceRunId: string;
+  userId: string;
+  circleId: string;
+  threadId: string;
+  approvals: readonly Readonly<{
+    approvalId: string;
+    toolName: string;
+    toolApprovalDigest: string;
+  }>[];
+}>;
+
+export type FindOpenSwanApprovalResumeItemInput = Readonly<{
+  /** Omit only when tool + digest identify exactly one item in the binding. */
+  approvalId?: string | null;
+  sourceRunId: string;
+  toolName: string;
+  digest: string;
+  userId: string;
+  circleId: string;
+  threadId: string;
+}>;
+
+export type ProjectOpenSwanApprovalResumeItemV1Scope = Readonly<{
+  /** Optional caller-held id; when present it must equal the row id exactly. */
+  approvalId?: string | null;
+  sourceRunId: string;
+  userId: string;
+  circleId: string;
+}>;
+
+export const OPEN_SWAN_APPROVAL_RESUME_MAX_ITEMS = 8;
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CALL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const APPROVAL_DIGEST_RE = /^approval-v2:sha256:[0-9a-f]{64}$/;
 const AUTHORITY_DIGEST_RE = /^authority-v2:sha256:[0-9a-f]{64}$/;
+
+const APPROVAL_RESUME_BINDING_KEYS = new Set([
+  'schemaVersion',
+  'sourceRunId',
+  'userId',
+  'circleId',
+  'threadId',
+  'approvals',
+]);
+const APPROVAL_RESUME_ITEM_KEYS = new Set([
+  'approvalId',
+  'toolName',
+  'toolApprovalDigest',
+]);
+
+/** Read an exact data-only record without invoking accessor properties. */
+function readExactApprovalResumeRecord(
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> | null {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== allowedKeys.size
+      || keys.some((key) => typeof key !== 'string' || !allowedKeys.has(key))
+    ) return null;
+    const out: Record<string, unknown> = {};
+    for (const key of allowedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return null;
+      out[key] = descriptor.value;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function readExactApprovalResumeItems(value: unknown): unknown[] | null {
+  try {
+    if (!Array.isArray(value)) return null;
+    if (value.length < 1 || value.length > OPEN_SWAN_APPROVAL_RESUME_MAX_ITEMS) return null;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.some((key) => {
+      if (key === 'length') return false;
+      if (typeof key !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(key)) return true;
+      const index = Number(key);
+      return !Number.isSafeInteger(index) || index < 0 || index >= value.length;
+    })) return null;
+    const out: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) return null;
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return null;
+      out.push(descriptor.value);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strictly project an unknown value into the only accepted resume-binding
+ * schema. Extra/accessor/symbol fields, sparse arrays, duplicate approval ids,
+ * non-canonical identities, and raw-argument lookalikes are rejected. The
+ * returned clone is deeply frozen so later callers cannot widen its scope.
+ */
+export function normalizeOpenSwanApprovalResumeBindingV1(
+  value: unknown,
+): OpenSwanApprovalResumeBindingV1 | null {
+  const record = readExactApprovalResumeRecord(value, APPROVAL_RESUME_BINDING_KEYS);
+  if (!record || record.schemaVersion !== 1) return null;
+  const sourceRunId = typeof record.sourceRunId === 'string' ? record.sourceRunId : '';
+  const userId = typeof record.userId === 'string' ? record.userId : '';
+  const circleId = typeof record.circleId === 'string' ? record.circleId : '';
+  const threadId = typeof record.threadId === 'string' ? record.threadId : '';
+  if (
+    !UUID_RE.test(sourceRunId)
+    || !UUID_RE.test(userId)
+    || !UUID_RE.test(circleId)
+    || !UUID_RE.test(threadId)
+  ) return null;
+
+  const rawItems = readExactApprovalResumeItems(record.approvals);
+  if (!rawItems) return null;
+  const seenApprovalIds = new Set<string>();
+  const approvals: OpenSwanApprovalResumeItemV1[] = [];
+  for (const rawItem of rawItems) {
+    const item = readExactApprovalResumeRecord(rawItem, APPROVAL_RESUME_ITEM_KEYS);
+    if (!item) return null;
+    const approvalId = typeof item.approvalId === 'string' ? item.approvalId : '';
+    const toolName = typeof item.toolName === 'string' ? item.toolName : '';
+    const toolApprovalDigest = typeof item.toolApprovalDigest === 'string'
+      ? item.toolApprovalDigest
+      : '';
+    if (
+      !UUID_RE.test(approvalId)
+      || seenApprovalIds.has(approvalId)
+      || !CALL_ID_RE.test(toolName)
+      || !APPROVAL_DIGEST_RE.test(toolApprovalDigest)
+    ) return null;
+    seenApprovalIds.add(approvalId);
+    approvals.push(Object.freeze({ approvalId, toolName, toolApprovalDigest }));
+  }
+
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    sourceRunId,
+    userId,
+    circleId,
+    threadId,
+    approvals: Object.freeze(approvals),
+  });
+}
+
+export function buildOpenSwanApprovalResumeBindingV1(
+  input: BuildOpenSwanApprovalResumeBindingV1Input,
+): OpenSwanApprovalResumeBindingV1 | null {
+  try {
+    return normalizeOpenSwanApprovalResumeBindingV1({
+      schemaVersion: 1,
+      sourceRunId: input?.sourceRunId,
+      userId: input?.userId,
+      circleId: input?.circleId,
+      threadId: input?.threadId,
+      approvals: input?.approvals,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Match one runtime call against an immutable Chat resume binding. When no
+ * approval id is supplied, ambiguity fails closed: tool + digest must identify
+ * exactly one bound row. Supplying an id always requires that exact listed row.
+ */
+export function findOpenSwanApprovalResumeItem(
+  bindingValue: unknown,
+  input: FindOpenSwanApprovalResumeItemInput,
+): OpenSwanApprovalResumeItemV1 | null {
+  try {
+    const binding = normalizeOpenSwanApprovalResumeBindingV1(bindingValue);
+    if (!binding) return null;
+    const approvalId = input?.approvalId == null ? null : input.approvalId;
+    if (
+      (approvalId !== null && (typeof approvalId !== 'string' || !UUID_RE.test(approvalId)))
+      || typeof input?.sourceRunId !== 'string'
+      || typeof input?.toolName !== 'string'
+      || typeof input?.digest !== 'string'
+      || typeof input?.userId !== 'string'
+      || typeof input?.circleId !== 'string'
+      || typeof input?.threadId !== 'string'
+      || binding.sourceRunId !== input.sourceRunId
+      || binding.userId !== input.userId
+      || binding.circleId !== input.circleId
+      || binding.threadId !== input.threadId
+      || !CALL_ID_RE.test(input.toolName)
+      || !APPROVAL_DIGEST_RE.test(input.digest)
+    ) return null;
+    const matches = binding.approvals.filter((item) => (
+      (approvalId === null || item.approvalId === approvalId)
+      && item.toolName === input.toolName
+      && item.toolApprovalDigest === input.digest
+    ));
+    return matches.length === 1 ? matches[0] : null;
+  } catch {
+    return null;
+  }
+}
 
 function stableValue(value: unknown, seen = new WeakSet<object>()): unknown {
   if (value === undefined) return null;
@@ -233,6 +482,7 @@ export function createOpenSwanRuntimeApprovalReceipt(input: {
   const source = input.source === 'run_scoped'
     || input.source === 'cross_run'
     || input.source === 'category_auto'
+    || input.source === 'workflow_review'
     ? input.source
     : null;
   const consumedAt = typeof input.consumedAt === 'string' ? input.consumedAt : '';
@@ -387,6 +637,87 @@ export function isOpenSwanApprovalAuditPayload(
   );
 }
 
+/**
+ * Project one resolved `agent_run_approvals`-like row into the value-free item
+ * accepted by an approval resume binding. The row remains durable authority;
+ * this helper proves only exact identity/scope plus the canonical schema-v2
+ * safe audit envelope. Status, liveness, and one-shot consumption are still
+ * revalidated by the runtime immediately before dispatch.
+ */
+export function projectOpenSwanApprovalResumeItemV1(
+  rowValue: unknown,
+  expected: ProjectOpenSwanApprovalResumeItemV1Scope,
+): OpenSwanApprovalResumeItemV1 | null {
+  try {
+    if (!rowValue || typeof rowValue !== 'object' || Array.isArray(rowValue)) return null;
+    const proto = Object.getPrototypeOf(rowValue);
+    if (proto !== Object.prototype && proto !== null) return null;
+    const read = (key: string): unknown => {
+      const descriptor = Object.getOwnPropertyDescriptor(rowValue, key);
+      return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+    };
+    const approvalId = read('id');
+    const sourceRunId = read('run_id');
+    const circleId = read('circle_id');
+    const requestedBy = read('requested_by');
+    const payload = read('payload');
+    const expectedApprovalId = expected?.approvalId == null ? null : expected.approvalId;
+    if (
+      typeof approvalId !== 'string'
+      || !UUID_RE.test(approvalId)
+      || (expectedApprovalId !== null && approvalId !== expectedApprovalId)
+      || typeof expected?.sourceRunId !== 'string'
+      || !UUID_RE.test(expected.sourceRunId)
+      || sourceRunId !== expected.sourceRunId
+      || typeof expected?.circleId !== 'string'
+      || !UUID_RE.test(expected.circleId)
+      || circleId !== expected.circleId
+      || typeof expected?.userId !== 'string'
+      || !UUID_RE.test(expected.userId)
+      || requestedBy !== expected.userId
+      || !payload
+      || typeof payload !== 'object'
+      || Array.isArray(payload)
+    ) return null;
+    const payloadProto = Object.getPrototypeOf(payload);
+    if (payloadProto !== Object.prototype && payloadProto !== null) return null;
+    const safePayload: Record<string, unknown> = {};
+    for (const key of Reflect.ownKeys(payload)) {
+      if (typeof key !== 'string') return null;
+      const descriptor = Object.getOwnPropertyDescriptor(payload, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return null;
+      safePayload[key] = descriptor.value;
+    }
+    if (!isOpenSwanApprovalAuditPayload(safePayload)) return null;
+    const toolName = safePayload.toolName;
+    const toolApprovalDigest = safePayload.toolApprovalDigest;
+    if (
+      typeof toolName !== 'string'
+      || !CALL_ID_RE.test(toolName)
+      || typeof toolApprovalDigest !== 'string'
+      || !APPROVAL_DIGEST_RE.test(toolApprovalDigest)
+    ) return null;
+    return Object.freeze({ approvalId, toolName, toolApprovalDigest });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the tool identity from a durable approval payload without trusting an
+ * arbitrary lookalike envelope. Schema-v2 rows use `toolName`; the bounded
+ * `tool` fallback exists only for legacy approval producers.
+ */
+export function readOpenSwanApprovalAuditToolName(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (isOpenSwanApprovalAuditPayload(record)) {
+    return typeof record.toolName === 'string' ? record.toolName : null;
+  }
+  const legacy = typeof record.tool === 'string' ? record.tool.trim() : '';
+  return CALL_ID_RE.test(legacy) ? legacy : null;
+}
+
 function approvalExpired(
   row: OpenSwanRuntimeApprovalRow,
   nowMs: number,
@@ -516,6 +847,7 @@ export function resolveOpenSwanRuntimeApprovalDecision(input: {
 export type OpenSwanPlanManifestCoverage = 'plan_covered' | 'final_confirmation';
 
 export type OpenSwanPlanManifestHardFloor =
+  | 'persistent_write'
   | 'credential'
   | 'login'
   | 'payment'
@@ -531,6 +863,8 @@ export type OpenSwanPlanManifestHardFloor =
   | 'destructive'
   | 'permission'
   | 'security'
+  | 'private_file'
+  | 'ambiguous'
   | 'unknown';
 
 export type ChatPlanToolPolicySensitivityInputV1 = {
@@ -587,6 +921,7 @@ const CHAT_PLAN_REQUEST_FINGERPRINT_RE = /^args-v2:sha256:[0-9a-f]{64}$/;
 const CHAT_PLAN_POLICY_BINDING_RE = /^policy-v1:sha256:[0-9a-f]{64}$/;
 const CHAT_PLAN_MANIFEST_FINGERPRINT_RE = /^chat-plan-tools-v1:sha256:[0-9a-f]{64}$/;
 const CHAT_PLAN_HARD_FLOORS = new Set<OpenSwanPlanManifestHardFloor>([
+  'persistent_write',
   'credential',
   'login',
   'payment',
@@ -602,6 +937,8 @@ const CHAT_PLAN_HARD_FLOORS = new Set<OpenSwanPlanManifestHardFloor>([
   'destructive',
   'permission',
   'security',
+  'private_file',
+  'ambiguous',
   'unknown',
 ]);
 const CHAT_PLAN_ENTRY_KEYS = new Set([
@@ -683,7 +1020,7 @@ function strictCanonicalJson(value: unknown, seen = new WeakSet<object>(), depth
 }
 
 async function digestStrictCanonicalJson(
-  prefix: 'policy-v1:sha256:' | 'chat-plan-tools-v1:sha256:',
+  prefix: 'policy-v1:sha256:' | 'chat-plan-tools-v1:sha256:' | 'target-v1:sha256:',
   value: unknown,
 ): Promise<string> {
   let canonical = '';
@@ -694,6 +1031,19 @@ async function digestStrictCanonicalJson(
   }
   const hex = await sha256Hex(canonical);
   return hex ? `${prefix}${hex}` : '';
+}
+
+/** Domain-separated digest for one already-observed semantic target. */
+export async function buildOpenSwanWorkflowTargetBindingDigestV1(
+  toolName: string,
+  targetBinding: unknown,
+): Promise<string> {
+  if (!CALL_ID_RE.test(toolName)) return '';
+  return digestStrictCanonicalJson('target-v1:sha256:', {
+    schemaVersion: 1,
+    toolName,
+    targetBinding,
+  });
 }
 
 /**
@@ -739,7 +1089,7 @@ export function resolveOpenSwanPlanManifestCoverage(
     : 'final_confirmation';
 }
 
-async function buildChatPlanPolicyBindingDigestV1(
+export async function buildChatPlanPolicyBindingDigestV1(
   toolName: string,
   policySensitivity: unknown,
 ): Promise<string> {
@@ -944,4 +1294,490 @@ export async function validateChatPlanToolActionManifestV1(
     ...envelope,
     manifestFingerprint: expectedFingerprint,
   });
+}
+
+/**
+ * Runtime-only capability minted after an existing branded Chat plan approval
+ * has already won its one-shot durable claim. The public value is deliberately
+ * value-free; the exact manifest, target digests, effect classes, ordering,
+ * expiry, and consume cursor live only in the module-private WeakMap below.
+ *
+ * This is the first narrow workflow-review lane. It does not serialize or
+ * survive a process restart. Losing it is a safe stop, never permission to
+ * reconstruct consent from persisted manifest metadata.
+ */
+export type OpenSwanWorkflowReviewAuthorityV1 = Readonly<{
+  schemaVersion: 1;
+  kind: 'openswan_workflow_review';
+  surface: 'main_chat';
+  reviewApprovalId: string;
+  sourceRunId: string;
+  sourceMessageId: string;
+  userId: string;
+  circleId: string;
+  threadId: string;
+  requestIdentityFingerprint: string;
+  multiActionLedgerBindingDigest: string | null;
+  manifestFingerprint: string;
+  actionCount: number;
+  expiresAt: string;
+}>;
+
+export type OpenSwanWorkflowReviewActionIdentityV1 = Readonly<{
+  sourceRunId: string;
+  sourceMessageId: string;
+  userId: string;
+  circleId: string;
+  threadId: string;
+  toolName: string;
+  toolUseId: string;
+  iteration: number;
+  sourceCallOrdinal: number;
+  /** Exact process-private A-ledger object; object identity is authoritative. */
+  multiActionLedgerReference?: unknown;
+}>;
+
+export type OpenSwanWorkflowReviewActionInspectionV1 = Readonly<{
+  actionIndex: number;
+  actionId: string;
+  effectClass: ApprovalEffect;
+  coverage: OpenSwanPlanManifestCoverage;
+}>;
+
+export type IssueOpenSwanWorkflowReviewAuthorityV1Input = Readonly<{
+  /** Branded output of runChatAutomationPlan after the approval-row CAS. */
+  planApprovalAuthority: ChatPlanApprovalAuthority;
+  planApprovalExpected: Readonly<{
+    executionKind: string;
+    approvalIntentFingerprint: string;
+    programId: string;
+    programFingerprint: string;
+  }>;
+  sourceRunId: string;
+  sourceMessageId: string;
+  userId: string;
+  circleId: string;
+  threadId: string;
+  manifest: unknown;
+  /** Optional exact A-ledger reference from the originating Chat turn. */
+  multiActionLedgerReference?: unknown;
+  orderedActionBindings: readonly Readonly<{
+    actionIndex: number;
+    sourceToolUseId: string;
+    sourceIteration: number;
+    sourceCallOrdinal: number;
+    effectClass: ApprovalEffect;
+    /** Transient values used only to verify the persisted-safe digests. */
+    args: Record<string, unknown>;
+    policySensitivity: ChatPlanToolPolicySensitivityInputV1;
+    targetBinding: unknown;
+  }>[];
+  expiresAtMs: number;
+}>;
+
+type OpenSwanWorkflowReviewActionBindingV1 = Readonly<{
+  actionIndex: number;
+  sourceToolUseId: string;
+  sourceIteration: number;
+  sourceCallOrdinal: number;
+  effectClass: ApprovalEffect;
+  targetBindingDigest: string;
+}>;
+
+type OpenSwanWorkflowReviewAuthorityStateV1 = {
+  manifest: ChatPlanToolActionManifestV1;
+  bindings: readonly OpenSwanWorkflowReviewActionBindingV1[];
+  nextActionIndex: number;
+  expiresAtMs: number;
+  revoked: boolean;
+  multiActionLedgerReference: object | null;
+};
+
+const WORKFLOW_TARGET_BINDING_RE = /^target-v1:sha256:[0-9a-f]{64}$/;
+const WORKFLOW_REVIEW_MAX_LIFETIME_MS = 15 * 60_000;
+const APPROVAL_EFFECT_SET = new Set<string>(APPROVAL_EFFECTS);
+const workflowReviewAuthorityStates = new WeakMap<object, OpenSwanWorkflowReviewAuthorityStateV1>();
+const workflowReviewSourceAuthorities = new WeakSet<object>();
+
+function workflowReviewIdentityMatches(
+  authority: OpenSwanWorkflowReviewAuthorityV1,
+  binding: OpenSwanWorkflowReviewActionBindingV1,
+  entry: ChatPlanToolActionManifestEntryV1,
+  identity: OpenSwanWorkflowReviewActionIdentityV1,
+): boolean {
+  return authority.sourceRunId === identity.sourceRunId
+    && authority.sourceMessageId === identity.sourceMessageId
+    && authority.userId === identity.userId
+    && authority.circleId === identity.circleId
+    && authority.threadId === identity.threadId
+    && entry.toolName === identity.toolName
+    && binding.sourceToolUseId === identity.toolUseId
+    && binding.sourceIteration === identity.iteration
+    && binding.sourceCallOrdinal === identity.sourceCallOrdinal;
+}
+
+/**
+ * Mint one non-serializable workflow capability. A persisted manifest alone,
+ * a copied plan-authority shape, or a policy auto-waiver can never enter this
+ * lane. Every transient raw value is discarded after its digest is checked.
+ */
+export async function issueOpenSwanWorkflowReviewAuthorityV1(
+  input: IssueOpenSwanWorkflowReviewAuthorityV1Input,
+): Promise<OpenSwanWorkflowReviewAuthorityV1 | null> {
+  try {
+    const issuedAtMs = Date.now();
+    if (
+      !Number.isSafeInteger(input.expiresAtMs)
+      || input.expiresAtMs <= issuedAtMs
+      || input.expiresAtMs > issuedAtMs + WORKFLOW_REVIEW_MAX_LIFETIME_MS
+      || !UUID_RE.test(input.sourceRunId)
+      || !UUID_RE.test(input.sourceMessageId)
+      || !UUID_RE.test(input.userId)
+      || !UUID_RE.test(input.circleId)
+      || !UUID_RE.test(input.threadId)
+      || !input.planApprovalAuthority
+      || input.planApprovalAuthority.authorizationSource !== 'claimed_approval_row'
+      || typeof input.planApprovalAuthority.approvalId !== 'string'
+      || !UUID_RE.test(input.planApprovalAuthority.approvalId)
+      || workflowReviewSourceAuthorities.has(input.planApprovalAuthority as object)
+    ) return null;
+
+    const manifest = await validateChatPlanToolActionManifestV1(input.manifest);
+    const multiActionLedgerReference = input.multiActionLedgerReference == null
+      ? null
+      : input.multiActionLedgerReference;
+    if (
+      !manifest
+      || manifest.rootRunId !== input.sourceRunId
+      || !Array.isArray(input.orderedActionBindings)
+      || input.orderedActionBindings.length !== manifest.orderedActions.length
+      || (
+        multiActionLedgerReference !== null
+        && (
+          typeof multiActionLedgerReference !== 'object'
+          || Array.isArray(multiActionLedgerReference)
+        )
+      )
+      || !isIssuedChatPlanApprovalAuthorityObject(input.planApprovalAuthority, {
+        circleId: input.circleId,
+        userId: input.userId,
+        threadId: input.threadId,
+        executionKind: input.planApprovalExpected.executionKind,
+        approvalIntentFingerprint: input.planApprovalExpected.approvalIntentFingerprint,
+        requestIdentityFingerprint: manifest.requestIdentityFingerprint,
+        programId: input.planApprovalExpected.programId,
+        programFingerprint: input.planApprovalExpected.programFingerprint,
+      })
+    ) return null;
+
+    const multiActionLedgerBindingDigest = multiActionLedgerReference === null
+      ? null
+      : await buildOpenSwanWorkflowTargetBindingDigestV1(
+          'run.multi_action_ledger',
+          multiActionLedgerReference,
+        );
+    if (
+      multiActionLedgerReference !== null
+      && !WORKFLOW_TARGET_BINDING_RE.test(String(multiActionLedgerBindingDigest || ''))
+    ) return null;
+
+    const bindings: OpenSwanWorkflowReviewActionBindingV1[] = [];
+    let previousIteration = 0;
+    let previousOrdinal = 0;
+    for (let index = 0; index < manifest.orderedActions.length; index += 1) {
+      const entry = manifest.orderedActions[index]!;
+      const binding = input.orderedActionBindings[index];
+      if (
+        !binding
+        || binding.actionIndex !== index
+        || !CALL_ID_RE.test(binding.sourceToolUseId)
+        || !Number.isInteger(binding.sourceIteration)
+        || binding.sourceIteration < 1
+        || binding.sourceIteration > 1_000
+        || !Number.isInteger(binding.sourceCallOrdinal)
+        || binding.sourceCallOrdinal < 1
+        || binding.sourceCallOrdinal > 1_000
+        || !APPROVAL_EFFECT_SET.has(binding.effectClass)
+        || binding.policySensitivity.effectClass !== binding.effectClass
+        || (
+          binding.sourceIteration < previousIteration
+          || (
+            binding.sourceIteration === previousIteration
+            && binding.sourceCallOrdinal <= previousOrdinal
+          )
+        )
+      ) return null;
+
+      const [toolApprovalDigest, policyBindingDigest, targetBindingDigest] = await Promise.all([
+        buildOpenSwanToolApprovalDigest(entry.toolName, binding.args),
+        buildChatPlanPolicyBindingDigestV1(entry.toolName, binding.policySensitivity),
+        buildOpenSwanWorkflowTargetBindingDigestV1(entry.toolName, binding.targetBinding),
+      ]);
+      if (
+        toolApprovalDigest !== entry.toolApprovalDigest
+        || policyBindingDigest !== entry.policyBindingDigest
+        || !WORKFLOW_TARGET_BINDING_RE.test(targetBindingDigest)
+        || (
+          entry.coverage === 'plan_covered'
+          && classifyAlwaysExactApprovalEffect({
+            effect: binding.effectClass,
+            tool: entry.toolName,
+          }) !== null
+        )
+      ) return null;
+
+      bindings.push(Object.freeze({
+        actionIndex: index,
+        sourceToolUseId: binding.sourceToolUseId,
+        sourceIteration: binding.sourceIteration,
+        sourceCallOrdinal: binding.sourceCallOrdinal,
+        effectClass: binding.effectClass,
+        targetBindingDigest,
+      }));
+      previousIteration = binding.sourceIteration;
+      previousOrdinal = binding.sourceCallOrdinal;
+    }
+
+    const reviewApprovalId = input.planApprovalAuthority.approvalId;
+    const authority = Object.freeze({
+      schemaVersion: 1 as const,
+      kind: 'openswan_workflow_review' as const,
+      surface: 'main_chat' as const,
+      reviewApprovalId,
+      sourceRunId: input.sourceRunId,
+      sourceMessageId: input.sourceMessageId,
+      userId: input.userId,
+      circleId: input.circleId,
+      threadId: input.threadId,
+      requestIdentityFingerprint: manifest.requestIdentityFingerprint,
+      multiActionLedgerBindingDigest,
+      manifestFingerprint: manifest.manifestFingerprint,
+      actionCount: manifest.orderedActions.length,
+      expiresAt: new Date(input.expiresAtMs).toISOString(),
+    });
+    workflowReviewAuthorityStates.set(authority, {
+      manifest,
+      bindings: Object.freeze(bindings),
+      nextActionIndex: 0,
+      expiresAtMs: input.expiresAtMs,
+      revoked: false,
+      multiActionLedgerReference: multiActionLedgerReference as object | null,
+    });
+    workflowReviewSourceAuthorities.add(input.planApprovalAuthority as object);
+    return authority;
+  } catch {
+    return null;
+  }
+}
+
+/** Read only the value-free next-action classification after exact scope/order checks. */
+export function inspectOpenSwanWorkflowReviewActionV1(
+  authority: OpenSwanWorkflowReviewAuthorityV1,
+  identity: OpenSwanWorkflowReviewActionIdentityV1,
+  nowMs = Date.now(),
+): OpenSwanWorkflowReviewActionInspectionV1 | null {
+  try {
+    const state = authority && typeof authority === 'object'
+      ? workflowReviewAuthorityStates.get(authority as object)
+      : undefined;
+    if (
+      !state
+      || state.revoked
+      || !Number.isFinite(nowMs)
+      || nowMs >= state.expiresAtMs
+      || state.nextActionIndex < 0
+      || state.nextActionIndex >= state.bindings.length
+      || (identity.multiActionLedgerReference ?? null) !== state.multiActionLedgerReference
+    ) return null;
+    const binding = state.bindings[state.nextActionIndex]!;
+    const entry = state.manifest.orderedActions[state.nextActionIndex]!;
+    if (!workflowReviewIdentityMatches(authority, binding, entry, identity)) return null;
+    return Object.freeze({
+      actionIndex: entry.actionIndex,
+      actionId: entry.actionId,
+      effectClass: binding.effectClass,
+      coverage: entry.coverage,
+    });
+  } catch {
+    return null;
+  }
+}
+
+export type OpenSwanWorkflowReviewConsumeDecisionV1 =
+  | Readonly<{
+      kind: 'allowed';
+      actionIndex: number;
+      actionId: string;
+      receipt: OpenSwanRuntimeApprovalReceipt;
+    }>
+  | Readonly<{
+      kind: 'exact_approval_required';
+      actionIndex: number;
+      actionId: string;
+      floorCategory: AlwaysExactApprovalEffect | 'policy_floor';
+    }>
+  | Readonly<{
+      kind: 'blocked';
+      code: 'authority_unavailable' | 'call_drift' | 'binding_drift';
+      message: string;
+    }>;
+
+async function buildOpenSwanWorkflowReviewActionAuthorityDigestV1(input: Readonly<{
+  authority: OpenSwanWorkflowReviewAuthorityV1;
+  entry: ChatPlanToolActionManifestEntryV1;
+  binding: OpenSwanWorkflowReviewActionBindingV1;
+  identity: OpenSwanWorkflowReviewActionIdentityV1;
+  toolApprovalDigest: string;
+}>): Promise<string> {
+  const hex = await sha256Hex(stableApprovalJson({
+    schemaVersion: 1,
+    kind: 'openswan_workflow_review_action',
+    reviewApprovalId: input.authority.reviewApprovalId,
+    sourceRunId: input.authority.sourceRunId,
+    sourceMessageId: input.authority.sourceMessageId,
+    userId: input.authority.userId,
+    circleId: input.authority.circleId,
+    threadId: input.authority.threadId,
+    requestIdentityFingerprint: input.authority.requestIdentityFingerprint,
+    multiActionLedgerBindingDigest: input.authority.multiActionLedgerBindingDigest,
+    manifestFingerprint: input.authority.manifestFingerprint,
+    actionIndex: input.entry.actionIndex,
+    actionId: input.entry.actionId,
+    toolName: input.entry.toolName,
+    toolUseId: input.identity.toolUseId,
+    iteration: input.identity.iteration,
+    sourceCallOrdinal: input.identity.sourceCallOrdinal,
+    toolApprovalDigest: input.toolApprovalDigest,
+    policyBindingDigest: input.entry.policyBindingDigest,
+    targetBindingDigest: input.binding.targetBindingDigest,
+  }));
+  return hex ? `authority-v2:sha256:${hex}` : '';
+}
+
+/**
+ * Consume the next reviewed action exactly once. Digests are recomputed from
+ * the handler-entry values; no mismatch advances the cursor. Hard-floor
+ * entries deliberately return `exact_approval_required` and mint no receipt.
+ */
+export async function consumeOpenSwanWorkflowReviewActionV1(
+  authority: OpenSwanWorkflowReviewAuthorityV1,
+  input: OpenSwanWorkflowReviewActionIdentityV1 & Readonly<{
+    args: Record<string, unknown>;
+    policySensitivity: ChatPlanToolPolicySensitivityInputV1;
+    targetBinding: unknown;
+  }>,
+): Promise<OpenSwanWorkflowReviewConsumeDecisionV1> {
+  const nowMs = Date.now();
+  const inspection = inspectOpenSwanWorkflowReviewActionV1(authority, input, nowMs);
+  if (!inspection) {
+    return Object.freeze({
+      kind: 'blocked' as const,
+      code: 'call_drift' as const,
+      message: 'The proposed call was not the next exact action in the reviewed workflow. Nothing was run.',
+    });
+  }
+  const state = workflowReviewAuthorityStates.get(authority as object);
+  if (!state || state.revoked) {
+    return Object.freeze({
+      kind: 'blocked' as const,
+      code: 'authority_unavailable' as const,
+      message: 'The workflow review authority is no longer available. Nothing was run.',
+    });
+  }
+  const entry = state.manifest.orderedActions[inspection.actionIndex]!;
+  const binding = state.bindings[inspection.actionIndex]!;
+  const floor = classifyAlwaysExactApprovalEffect({
+    effect: binding.effectClass,
+    tool: entry.toolName,
+  });
+  if (entry.coverage === 'final_confirmation' || floor !== null) {
+    return Object.freeze({
+      kind: 'exact_approval_required' as const,
+      actionIndex: entry.actionIndex,
+      actionId: entry.actionId,
+      floorCategory: floor || 'policy_floor',
+    });
+  }
+
+  const [toolApprovalDigest, policyBindingDigest, targetBindingDigest] = await Promise.all([
+    buildOpenSwanToolApprovalDigest(entry.toolName, input.args),
+    buildChatPlanPolicyBindingDigestV1(entry.toolName, input.policySensitivity),
+    buildOpenSwanWorkflowTargetBindingDigestV1(entry.toolName, input.targetBinding),
+  ]);
+  if (
+    toolApprovalDigest !== entry.toolApprovalDigest
+    || policyBindingDigest !== entry.policyBindingDigest
+    || targetBindingDigest !== binding.targetBindingDigest
+  ) {
+    return Object.freeze({
+      kind: 'blocked' as const,
+      code: 'binding_drift' as const,
+      message: 'The reviewed tool, arguments, policy, or target changed before dispatch. Nothing was run.',
+    });
+  }
+  const authorityBindingDigest = await buildOpenSwanWorkflowReviewActionAuthorityDigestV1({
+    authority,
+    entry,
+    binding,
+    identity: input,
+    toolApprovalDigest,
+  });
+  const receipt = createOpenSwanRuntimeApprovalReceipt({
+    approvalId: authority.reviewApprovalId,
+    approvalRunId: authority.sourceRunId,
+    approvalKey: buildOpenSwanToolApprovalKey(entry.toolName, input.args),
+    approvalDigest: toolApprovalDigest,
+    authorityBindingDigest,
+    status: 'approved',
+    source: 'workflow_review',
+    consumedAt: new Date(nowMs).toISOString(),
+    identity: {
+      userId: authority.userId,
+      circleId: authority.circleId,
+      runId: authority.sourceRunId,
+      toolName: entry.toolName,
+      toolUseId: input.toolUseId,
+      iteration: input.iteration,
+    },
+  });
+  // Recheck after every digest await. A competing call, expiry, STOP/revoke,
+  // or cursor movement must lose without minting a second receipt.
+  if (
+    !receipt
+    || state.revoked
+    || nowMs >= state.expiresAtMs
+    || state.nextActionIndex !== inspection.actionIndex
+    || (input.multiActionLedgerReference ?? null) !== state.multiActionLedgerReference
+    || !workflowReviewIdentityMatches(authority, binding, entry, input)
+  ) {
+    return Object.freeze({
+      kind: 'blocked' as const,
+      code: 'authority_unavailable' as const,
+      message: 'The reviewed action authority changed or was consumed before handler entry. Nothing was run.',
+    });
+  }
+  state.nextActionIndex += 1;
+  return Object.freeze({
+    kind: 'allowed' as const,
+    actionIndex: entry.actionIndex,
+    actionId: entry.actionId,
+    receipt,
+  });
+}
+
+/** Irreversibly retire one process-private workflow capability. */
+export function revokeOpenSwanWorkflowReviewAuthorityV1(
+  authority: OpenSwanWorkflowReviewAuthorityV1,
+): boolean {
+  try {
+    const state = authority && typeof authority === 'object'
+      ? workflowReviewAuthorityStates.get(authority as object)
+      : undefined;
+    if (!state || state.revoked) return false;
+    state.revoked = true;
+    workflowReviewAuthorityStates.delete(authority as object);
+    return true;
+  } catch {
+    return false;
+  }
 }

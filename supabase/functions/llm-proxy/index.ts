@@ -178,9 +178,10 @@ type Provider =
   | "openai-embed";
 
 interface LLMProxyRequest {
+  action?: "chat" | "list_models";
   provider: Provider;
-  model: string;
-  messages: Array<{ role: string; content: string }>;
+  model?: string;
+  messages?: Array<{ role: string; content: string }>;
   temperature?: number;
   max_tokens?: number;
   circleId?: string;
@@ -237,7 +238,7 @@ const PROVIDER_ENDPOINTS: Record<string, string> = {
   openai: "https://api.openai.com/v1/chat/completions",
   openrouter: "https://openrouter.ai/api/v1/chat/completions",
   groq: "https://api.groq.com/openai/v1/chat/completions",
-  "github-models": "https://models.inference.ai.azure.com/chat/completions",
+  "github-models": "https://models.github.ai/inference/chat/completions",
   huggingface: "https://router.huggingface.co/v1/chat/completions",
   zai: "https://api.z.ai/api/paas/v4/chat/completions",
   minimax: "https://api.minimax.io/v1/chat/completions",
@@ -255,7 +256,7 @@ const PROVIDER_HOSTNAMES: Record<string, string> = {
   openai: "api.openai.com",
   openrouter: "openrouter.ai",
   groq: "api.groq.com",
-  "github-models": "models.inference.ai.azure.com",
+  "github-models": "models.github.ai",
   huggingface: "router.huggingface.co",
   zai: "api.z.ai",
   minimax: "api.minimax.io",
@@ -286,6 +287,252 @@ const OPENAI_COMPATIBLE: Provider[] = [
   "fireworks_ai",
   "deepseek",
 ];
+
+const MODEL_LIST_ENDPOINTS: Partial<Record<Provider, string>> = {
+  openai: "https://api.openai.com/v1/models",
+  anthropic: "https://api.anthropic.com/v1/models?limit=1000",
+  openrouter: "https://openrouter.ai/api/v1/models",
+  groq: "https://api.groq.com/openai/v1/models",
+  "github-models": "https://models.github.ai/catalog/models",
+  huggingface: "https://router.huggingface.co/v1/models",
+  zai: "https://api.z.ai/api/paas/v4/models",
+  minimax: "https://api.minimax.io/v1/models",
+  google_ai: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+  mistral_ai: "https://api.mistral.ai/v1/models",
+  cohere: "https://api.cohere.com/v1/models?page_size=1000&endpoint=chat",
+  together_ai: "https://api.together.xyz/v1/models",
+  fireworks_ai: "https://api.fireworks.ai/inference/v1/models",
+  deepseek: "https://api.deepseek.com/models",
+};
+
+const MODEL_LIST_HOSTNAMES: Partial<Record<Provider, string>> = {
+  ...PROVIDER_HOSTNAMES,
+  anthropic: "api.anthropic.com",
+  cohere: "api.cohere.com",
+};
+
+interface ProviderCatalogModel {
+  id: string;
+  label: string;
+  contextWindow: number;
+  maxOutputTokens?: number;
+  costTier: "free" | "cheap" | "mid" | "expensive";
+  source: "provider";
+}
+
+function getTrustedModelListEndpoint(provider: Provider): string {
+  const endpoint = MODEL_LIST_ENDPOINTS[provider];
+  const expectedHostname = MODEL_LIST_HOSTNAMES[provider];
+  if (!endpoint || !expectedHostname) {
+    throw new Error("Provider model catalog is not configured.");
+  }
+  const parsed = new URL(endpoint);
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.hash !== "" ||
+    (parsed.port !== "" && parsed.port !== "443") ||
+    parsed.hostname.toLowerCase() !== expectedHostname
+  ) {
+    throw new Error("Provider model catalog configuration is invalid.");
+  }
+  return parsed.toString();
+}
+
+function modelListHeaders(provider: Provider, apiKey: string): Record<string, string> {
+  if (provider === "anthropic") {
+    return {
+      Accept: "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    };
+  }
+  if (provider === "google_ai") {
+    return { Accept: "application/json", "x-goog-api-key": apiKey };
+  }
+  if (provider === "github-models") {
+    return {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${apiKey}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    };
+  }
+  return { Accept: "application/json", Authorization: `Bearer ${apiKey}` };
+}
+
+function finiteCatalogLimit(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const number = typeof value === "number" ? value : Number(value);
+    if (Number.isFinite(number) && number > 0) {
+      return Math.min(10_000_000, Math.floor(number));
+    }
+  }
+  return undefined;
+}
+
+function modelCatalogRows(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  const record = payload as Record<string, unknown>;
+  if (Array.isArray(record.data)) return record.data;
+  if (Array.isArray(record.models)) return record.models;
+  return [];
+}
+
+const NON_CHAT_MODEL_PATTERN = /(?:^|[-_/.])(audio|embed(?:ding)?|moderation|rerank|reranker|whisper|tts|speech|transcri(?:be|ption)|prompt-guard|safeguard|dall-e|image|imagen|flux|stable-diffusion|video|music|realtime|computer-use|codex)(?:$|[-_/.\d])/i;
+
+const RETIRED_DIRECT_MODELS: Partial<Record<Provider, ReadonlySet<string>>> = {
+  openai: new Set(["gpt-4o", "gpt-4o-mini", "gpt-4.1-nano", "o3-mini", "o4-mini"]),
+  google_ai: new Set(["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-pro-preview"]),
+  deepseek: new Set(["deepseek-chat", "deepseek-reasoner"]),
+};
+
+const MAX_MODEL_CATALOG_RESPONSE_BYTES = 5_000_000;
+
+async function readBoundedModelCatalogJson(
+  response: Response,
+  provider: Provider,
+): Promise<unknown> {
+  if (!response.ok) {
+    try { await response.body?.cancel(); } catch { /* best effort */ }
+    throw new UpstreamFailure(provider, "http", response.status);
+  }
+  const declaredLength = Number(response.headers.get("content-length") || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_MODEL_CATALOG_RESPONSE_BYTES) {
+    try { await response.body?.cancel(); } catch { /* best effort */ }
+    throw new UpstreamFailure(provider, "invalid_response", response.status);
+  }
+  if (!response.body) {
+    throw new UpstreamFailure(provider, "invalid_response", response.status);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let decoded = "";
+  let byteLength = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      byteLength += value.byteLength;
+      if (byteLength > MAX_MODEL_CATALOG_RESPONSE_BYTES) {
+        try { await reader.cancel(); } catch { /* best effort */ }
+        throw new UpstreamFailure(provider, "invalid_response", response.status);
+      }
+      decoded += decoder.decode(value, { stream: true });
+    }
+    decoded += decoder.decode();
+    return JSON.parse(decoded);
+  } catch (error) {
+    if (error instanceof UpstreamFailure) throw error;
+    throw new UpstreamFailure(provider, "invalid_response", response.status);
+  }
+}
+
+function normalizeCatalogModel(provider: Provider, value: unknown): ProviderCatalogModel | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const rawId = typeof row.id === "string"
+    ? row.id
+    : typeof row.model_id === "string"
+    ? row.model_id
+    : typeof row.name === "string"
+    ? row.name
+    : typeof row.baseModelId === "string"
+    ? row.baseModelId
+    : "";
+  const id = rawId.replace(/^models\//, "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(id)) return null;
+  if (NON_CHAT_MODEL_PATTERN.test(id)) return null;
+  if (RETIRED_DIRECT_MODELS[provider]?.has(id.toLowerCase())) return null;
+  if (row.is_deprecated === true || row.deprecated === true) return null;
+
+  const methods = Array.isArray(row.supportedGenerationMethods)
+    ? row.supportedGenerationMethods.filter((item): item is string => typeof item === "string")
+    : [];
+  if (provider === "google_ai" && methods.length > 0 && !methods.includes("generateContent")) {
+    return null;
+  }
+  const endpoints = Array.isArray(row.endpoints)
+    ? row.endpoints.filter((item): item is string => typeof item === "string")
+    : [];
+  const features = Array.isArray(row.features)
+    ? row.features.filter((item): item is string => typeof item === "string")
+    : [];
+  if (
+    provider === "cohere" &&
+    endpoints.length > 0 &&
+    !endpoints.some((endpoint) => endpoint.includes("chat")) &&
+    !features.some((feature) => feature.includes("chat"))
+  ) {
+    return null;
+  }
+  const task = typeof row.task === "string" ? row.task.toLowerCase() : "";
+  if (provider === "github-models" && task && !task.includes("chat")) return null;
+
+  const limits = row.limits && typeof row.limits === "object" && !Array.isArray(row.limits)
+    ? row.limits as Record<string, unknown>
+    : {};
+  const contextWindow = finiteCatalogLimit(
+    row.context_window,
+    row.context_length,
+    row.inputTokenLimit,
+    row.max_input_tokens,
+    limits.max_input_tokens,
+  ) || 128_000;
+  const maxOutputTokens = finiteCatalogLimit(
+    row.max_completion_tokens,
+    row.outputTokenLimit,
+    row.max_tokens,
+    limits.max_output_tokens,
+  );
+  const rawLabel = [row.display_name, row.displayName, row.label]
+    .find((item) => typeof item === "string" && item.trim()) as string | undefined;
+  const nameLabel = typeof row.name === "string" && !row.name.startsWith("models/")
+    ? row.name
+    : undefined;
+  const label = (rawLabel || nameLabel || id).trim().slice(0, 160);
+  if (!label) return null;
+  const lower = id.toLowerCase();
+  const costTier: ProviderCatalogModel["costTier"] = provider === "github-models"
+    ? "free"
+    : /(?:mini|nano|lite|flash|small|instant|8b|7b|3b|20b|highspeed|compound-mini)/.test(lower)
+    ? "cheap"
+    : /(?:opus|fable|pro|large|120b|397b|405b)/.test(lower)
+    ? "expensive"
+    : "mid";
+  return {
+    id,
+    label,
+    contextWindow,
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    costTier,
+    source: "provider",
+  };
+}
+
+async function listProviderModels(
+  provider: Provider,
+  apiKey: string,
+): Promise<ProviderCatalogModel[]> {
+  const endpoint = getTrustedModelListEndpoint(provider);
+  const response = await fetchUpstream(provider, endpoint, {
+    method: "GET",
+    headers: modelListHeaders(provider, apiKey),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const payload = await readBoundedModelCatalogJson(response, provider);
+  const models: ProviderCatalogModel[] = [];
+  const seen = new Set<string>();
+  for (const value of modelCatalogRows(payload).slice(0, 1000)) {
+    const model = normalizeCatalogModel(provider, value);
+    if (!model || seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push(model);
+  }
+  return models;
+}
 
 /**
  * Return a code-owned provider endpoint only when every authority component
@@ -339,6 +586,9 @@ function normalizeProviderModel(provider: Provider, model: string): string {
 
 const MODEL_COSTS: Record<string, [number, number]> = {
   // OpenAI
+  "gpt-5.6-sol": [5.00, 30.00],
+  "gpt-5.6-terra": [2.50, 15.00],
+  "gpt-5.6-luna": [1.00, 6.00],
   "gpt-5.5-pro": [30.00, 180.00],
   "gpt-5.5": [5.00, 30.00],
   "gpt-5.4": [2.50, 15.00],
@@ -350,10 +600,13 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "gpt-4o": [2.50, 10.00],
   "gpt-4o-mini": [0.15, 0.60],
   "o3": [10.00, 40.00],
+  "o3-pro": [20.00, 80.00],
   "o4-mini": [1.10, 4.40],
   "o1": [15.00, 60.00],
   "o3-mini": [1.10, 4.40],
   // Google
+  "gemini-3.6-flash": [1.50, 7.50],
+  "gemini-3.5-flash-lite": [0.30, 2.50],
   "gemini-3.5-flash": [1.50, 9.00],
   "gemini-3.1-pro-preview": [2.00, 12.00],
   "gemini-3.1-flash-lite": [0.04, 0.15],
@@ -362,6 +615,8 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "gemini-2.5-flash-lite": [0.04, 0.15],
   // Anthropic
   "claude-fable-5": [10.00, 50.00],
+  "claude-opus-5": [5.00, 25.00],
+  "claude-sonnet-5": [3.00, 15.00],
   "claude-opus-4-8": [5.00, 25.00],
   "claude-opus-4-7": [5.00, 25.00],
   "claude-opus-4-6": [5.00, 25.00],
@@ -370,6 +625,7 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "claude-haiku-4-5-20251001": [1.00, 5.00],
   // Groq (free tier / very cheap)
   "llama-3.3-70b-versatile": [0.59, 0.79],
+  "llama-3.1-8b-instant": [0.05, 0.08],
   "mixtral-8x7b-32768": [0.24, 0.24],
   // OpenRouter (pass-through — use underlying model costs)
   // GitHub Models (free tier — zero cost)
@@ -387,13 +643,18 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "meta-llama/Llama-3.1-8B-Instruct": [0, 0],
   "mistralai/Mistral-7B-Instruct-v0.3": [0, 0],
   // z.ai
+  "glm-5.1": [0.50, 1.50],
   "glm-5": [0.50, 1.50],
   "glm-4-plus": [0.50, 1.50],
   "glm-4-air": [0.10, 0.30],
   "glm-4-flash": [0, 0],
-  // MiniMax
-  "MiniMax-M1": [0.40, 2.20],
-  "MiniMax-Text-01": [0.20, 1.10],
+  // Current direct-provider models with published stable prices.
+  "mistral-medium-3-5": [1.50, 7.50],
+  "mistral-small-2603": [0.15, 0.60],
+  "mistral-large-2512": [0.50, 1.50],
+  "codestral-2508": [0.30, 0.90],
+  "deepseek-v4-flash": [0.14, 0.28],
+  "deepseek-v4-pro": [0.435, 0.87],
 };
 
 function estimateCost(
@@ -557,6 +818,7 @@ async function callOpenAICompatible(
   temperature: number,
   maxTokens: number,
   provider: Provider,
+  thinkingLevel?: "fast" | "balanced" | "deep",
   // Phase 0: forward server-tool requests (e.g. OpenRouter web_search)
   // and plugin specs through to OpenRouter unchanged. Other OpenAI-
   // compatible providers (OpenAI, Groq, etc.) accept `tools` natively
@@ -587,9 +849,21 @@ async function callOpenAICompatible(
   const requestBody: Record<string, unknown> = {
     model,
     messages,
-    temperature,
     max_tokens: maxTokens,
   };
+  const isDirectGpt56 = provider === "openai" && /^gpt-5\.6(?:-|$)/.test(model);
+  if (isDirectGpt56) {
+    requestBody.reasoning_effort = thinkingLevel === "fast"
+      ? "low"
+      : thinkingLevel === "deep"
+      ? "high"
+      : "medium";
+  } else if (provider !== "google_ai") {
+    // Current Gemini models reject or ignore several legacy sampling knobs.
+    // Let Google apply the exact defaults advertised by Models.list instead
+    // of forcing a cross-provider temperature value.
+    requestBody.temperature = temperature;
+  }
   if (extra?.tools && Array.isArray(extra.tools) && extra.tools.length > 0) {
     requestBody.tools = extra.tools;
     if (extra.tool_choice !== undefined && extra.tool_choice !== null) {
@@ -650,18 +924,21 @@ async function callAnthropic(
   const systemPrompt = systemMessages.map((m) => m.content).join("\n\n");
 
   // Map model shortcuts to full IDs. Canonical short form (no date suffixes)
-  // per Anthropic. `claude-opus` follows the latest opus — currently 4.7.
+  // per Anthropic. Floating family aliases point at the current stable tiers;
+  // exact older IDs remain valid for persisted selections.
   const MODEL_MAP: Record<string, string> = {
     "claude-fable": "claude-fable-5",
     "claude-fable-5": "claude-fable-5",
+    "claude-opus-5": "claude-opus-5",
+    "claude-sonnet-5": "claude-sonnet-5",
     "claude-opus-4-8": "claude-opus-4-8",
     "claude-opus-4-7": "claude-opus-4-7",
     "claude-opus-4-6": "claude-opus-4-6",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-haiku-4-5": "claude-haiku-4-5",
     "claude-haiku": "claude-haiku-4-5",
-    "claude-sonnet": "claude-sonnet-4-6",
-    "claude-opus": "claude-opus-4-8",
+    "claude-sonnet": "claude-sonnet-5",
+    "claude-opus": "claude-opus-5",
   };
   const resolvedModel = MODEL_MAP[model] || model;
 
@@ -782,7 +1059,11 @@ Deno.serve(async (req: Request) => {
   }
 
   if (req.method === "GET") {
-    return jsonResponse({ status: "ok", service: "llm-proxy" });
+    return jsonResponse({
+      status: "ok",
+      service: "llm-proxy",
+      capabilities: ["chat", "list_models", "openai-embed"],
+    });
   }
 
   if (req.method !== "POST") {
@@ -819,6 +1100,10 @@ Deno.serve(async (req: Request) => {
     const rawModel = typeof body.model === "string" ? body.model.trim() : "";
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const thinkingLevel = body.thinkingLevel;
+    const action = body.action || "chat";
+    if (action !== "chat" && action !== "list_models") {
+      return errResponse(400, "validation", "Unsupported llm-proxy action.");
+    }
     if (!provider) {
       return errResponse(400, "validation", "provider must be a string.");
     }
@@ -842,7 +1127,8 @@ Deno.serve(async (req: Request) => {
     // Embedding requests use a completely different request shape — validate
     // and dispatch early so the chat-path guards don't reject `!messages`.
     const isEmbed = provider === "openai-embed";
-    if (!isEmbed && (!model || messages.length === 0)) {
+    const isModelCatalog = action === "list_models";
+    if (!isEmbed && !isModelCatalog && (!model || messages.length === 0)) {
       return errResponse(
         400,
         "validation",
@@ -901,6 +1187,44 @@ Deno.serve(async (req: Request) => {
       !OPENAI_COMPATIBLE.includes(provider)
     ) {
       return errResponse(400, "unsupported_provider", "Unsupported provider.");
+    }
+
+    // ── Account-scoped provider model catalog ──────────────────────────────
+    // This is intentionally inside the authenticated, exact-membership and
+    // stored-key boundary. It calls only fixed first-party endpoints and
+    // returns a bounded, sanitized model inventory — never credentials or raw
+    // provider response bodies.
+    if (isModelCatalog) {
+      if (provider === "openai-embed" || !MODEL_LIST_ENDPOINTS[provider]) {
+        return errResponse(
+          400,
+          "unsupported_provider",
+          "This provider does not expose a hosted model catalog.",
+        );
+      }
+      const catalogKey = await resolveUserModelApiKey({
+        supabase,
+        userId,
+        provider,
+        requestApiKey: body.api_key,
+        label: null,
+        credentialPolicy: "user_required",
+      });
+      if (!catalogKey) {
+        return errResponse(400, "key_missing", byokMissingMessage(provider));
+      }
+      try {
+        const models = await listProviderModels(provider, catalogKey.apiKey);
+        return jsonResponse({
+          provider,
+          models,
+          count: models.length,
+          fetchedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        logProxyError(error);
+        return mapUpstreamError(error);
+      }
     }
 
     // ── Embedding fast-path ────────────────────────────────────────────────
@@ -1042,6 +1366,9 @@ Deno.serve(async (req: Request) => {
         temperature,
         maxTokens,
         provider,
+        requestedLevel === "fast" || requestedLevel === "deep"
+          ? requestedLevel
+          : "balanced",
         {
           tools: body.tools,
           plugins: body.plugins,

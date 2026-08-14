@@ -353,13 +353,9 @@ async function launchCodexSessions(data) {
 }
 
 function findManagedSession(sessionId) {
-  const key = String(sessionId || '').trim().toLowerCase();
-  if (!key) return null;
-  return cachedSessions.find((s) =>
-    String(s.sessionId || '').toLowerCase() === key
-    || String(s.displayName || '').toLowerCase() === key
-    || String(s.sessionId || '').toLowerCase().startsWith(key)
-  ) || null;
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  const matches = cachedSessions.filter((session) => session.sessionId === sessionId);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function buildCodexFollowupPrompt(message) {
@@ -371,8 +367,8 @@ function buildCodexFollowupPrompt(message) {
 }
 
 async function sendToManagedCodexSession(data) {
-  const session = findManagedSession(data.sessionId || data.target || data.displayName);
-  if (!session) return { ok: false, error: 'Codex session not found.' };
+  const session = findManagedSession(data.sessionId);
+  if (!session) return { ok: false, error: 'An exact Codex session id is required.' };
   if (!session.terminalTitle) {
     return {
       ok: false,

@@ -296,30 +296,30 @@ const chatTabSource = readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8
 const terminalPolicySource = readFileSync('src/lib/chatTerminalTransportPolicy.ts', 'utf8');
 const llmProvidersSource = readFileSync('src/lib/llmProviders.ts', 'utf8');
 assert(
-  chatTabSource.includes('const conversationOnlyTurn = !hasPendingAttachments && isConversationOnlyTurn(content);')
+  chatTabSource.includes('const conversationOnlyTurn = !boundOpenSwanResume\n      && !boundOpenSwanApprovalResume\n      && !boundDesktopAttachmentResume\n      && !hasPendingAttachments\n      && isConversationOnlyTurn(content);')
     && chatTabSource.includes('conversationOnly: conversationOnlyTurn,'),
   'ChatTab classifies attachment-free greetings and passes the result into terminal transport',
 );
 assert(
-  chatTabSource.indexOf('const conversationOnlyTurn = !hasPendingAttachments')
+  chatTabSource.indexOf('const conversationOnlyTurn = !boundOpenSwanResume')
     < chatTabSource.indexOf('// ── Resume a pending clarification'),
   'ChatTab classifies greetings before pending clarification can reconstruct an older task',
 );
 assert(
-  chatTabSource.includes('!conversationOnlyTurn\n      && !overrideText?.startsWith')
+  chatTabSource.includes('&& !conversationOnlyTurn\n      && !overrideText?.startsWith')
     && chatTabSource.includes('if (!conversationOnlyTurn && shouldCreateAgentPlanForMessage')
-    && chatTabSource.includes('if (!conversationOnlyTurn && effectiveChatMode !=='),
+    && chatTabSource.includes('&& !conversationOnlyTurn\n          && effectiveChatMode !=='),
   'ChatTab keeps greetings out of clarification, booking, plan, and specialized-agent task lanes',
 );
 assert(
   chatTabSource.includes('const recoverySelectionForDisplay = conversationOnlyTurn || options?.displayText')
-    && chatTabSource.includes('const recoveryFollowup = !conversationOnlyTurn && latestRecoveryOptionsMessage')
+    && chatTabSource.includes('&& !conversationOnlyTurn\n        && latestRecoveryOptionsMessage')
     && chatTabSource.includes('const selectedRecoveryOption = conversationOnlyTurn'),
   'ChatTab keeps greetings from selecting or resuming a prior recovery action',
 );
 assert(
   chatTabSource.includes('!conversationOnlyTurn\n      && !content.startsWith')
-    && chatTabSource.includes('if (!conversationOnlyTurn) {\n      try {\n        const { routeByCapability }'),
+    && chatTabSource.includes('&& !boundOpenSwanResume\n      && !hasAuthoritativeMultiActionContract'),
   'ChatTab keeps greetings on the selected model instead of connected-agent or capability dispatch',
 );
 assert(

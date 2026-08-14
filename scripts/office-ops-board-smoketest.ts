@@ -35,6 +35,7 @@ import {
   formatAccountabilityCounts,
   formatTokenCount,
   formatRelativeTime,
+  isAwaitingConnectedAgentResultMetadata,
   HUGGINGSWAN_RUN_NAME_KEYS,
   OPENSWAN_RUN_NAME_KEYS,
   OFFICE_ACCOUNTABILITY_WINDOW_MS,
@@ -139,6 +140,109 @@ console.log('\n[1] building board — nesting, orphans, ordering');
   check('overflowRoots zero', board.overflowRoots === 0);
 }
 
+// ─── 1b. Accepted connected-agent ledger projection ─────────────────────────
+
+console.log('\n[1b] accepted connected-agent ledger projection');
+{
+  const acceptedMetadata = {
+    externalLifecycle: 'awaiting_typed_result',
+    handoffStatus: 'accepted',
+    completionVerified: false,
+    agentSubjectKey: 'office::codex',
+    agentDisplayName: 'Codex',
+  };
+  check(
+    'exact accepted external marker recognized',
+    isAwaitingConnectedAgentResultMetadata(acceptedMetadata),
+  );
+  check(
+    'ordinary queued metadata is not an accepted external marker',
+    !isAwaitingConnectedAgentResultMetadata({ handoffStatus: 'accepted' }),
+  );
+  check(
+    'verified completion disables the awaiting marker',
+    !isAwaitingConnectedAgentResultMetadata({ ...acceptedMetadata, completionVerified: true }),
+  );
+  check(
+    'wrong lifecycle disables the awaiting marker',
+    !isAwaitingConnectedAgentResultMetadata({ ...acceptedMetadata, externalLifecycle: 'completed' }),
+  );
+
+  const acceptedBoard = buildOfficeBuildingBoard([
+    run({
+      id: 'accepted-handoff',
+      status: 'queued',
+      delegated_to: 'codex',
+      started_at: undefined,
+      created_at: iso(-20_000),
+      metadata: acceptedMetadata,
+    }),
+  ], { nowMs: NOW });
+  const acceptedNode = acceptedBoard.building[0];
+  check('accepted ledger projects awaitingExternalResult', acceptedNode?.awaitingExternalResult === true);
+  check('accepted ledger remains a top-level run', acceptedNode?.isSubagent === false && acceptedNode?.depth === 0);
+  check(
+    'accepted ledger counts as one root and no subagent',
+    acceptedBoard.counts.activeRoots === 1
+      && acceptedBoard.counts.activeSubagents === 0
+      && acceptedBoard.counts.awaitingExternalResults === 1
+      && acceptedBoard.counts.awaitingExternalRoots === 1
+      && acceptedBoard.counts.awaitingExternalSubagents === 0
+      && acceptedBoard.counts.awaitingExternalQueued === 1,
+    JSON.stringify(acceptedBoard.counts),
+  );
+  check('accepted ledger retains queued status', acceptedNode?.status === 'queued' && acceptedBoard.counts.queued === 1);
+  const acceptedSyntheticStatus = deriveSyntheticAgentStatusFromRuns(
+    ['codex'],
+    acceptedBoard.building,
+    NOW,
+  );
+  check(
+    'accepted ledger gives synthetic agent an awaiting-update activity',
+    acceptedSyntheticStatus?.status === 'building'
+      && acceptedSyntheticStatus.activity.startsWith('Accepted · awaiting update:'),
+  );
+
+  const legacyDelegated = buildOfficeBuildingBoard([
+    run({ id: 'legacy-delegated', status: 'queued', delegated_to: 'codex' }),
+  ], { nowMs: NOW }).building[0];
+  check('legacy delegated row remains a subagent', legacyDelegated?.isSubagent === true);
+  check('ordinary queued row does not project awaiting state', legacyDelegated?.awaitingExternalResult === false);
+
+  const markedChildBoard = buildOfficeBuildingBoard([
+    run({ id: 'accepted-parent', status: 'running' }),
+    run({
+      id: 'accepted-child',
+      status: 'queued',
+      parent_run_id: 'accepted-parent',
+      delegated_to: 'codex',
+      metadata: acceptedMetadata,
+    }),
+  ], { nowMs: NOW });
+  const markedChild = markedChildBoard.building[0]?.children[0];
+  check('explicit parent still makes a marked row a subagent', markedChild?.isSubagent === true);
+  check(
+    'accepted child totals remain separate from ordinary subagents',
+    markedChildBoard.counts.awaitingExternalResults === 1
+      && markedChildBoard.counts.awaitingExternalRoots === 0
+      && markedChildBoard.counts.awaitingExternalSubagents === 1,
+    JSON.stringify(markedChildBoard.counts),
+  );
+
+  const inconsistentRunningMarker = buildOfficeBuildingBoard([
+    run({
+      id: 'accepted-but-running',
+      status: 'running',
+      delegated_to: 'codex',
+      metadata: acceptedMetadata,
+    }),
+  ], { nowMs: NOW });
+  check(
+    'acceptance-only marker never promotes synthetic agent to active',
+    deriveSyntheticAgentStatusFromRuns(['codex'], inconsistentRunningMarker.building, NOW)?.status === 'building',
+  );
+}
+
 // ─── 2. Bounds + overflow counts ────────────────────────────────────────────
 
 console.log('\n[2] bounds + overflow');
@@ -164,6 +268,34 @@ console.log('\n[2] bounds + overflow');
 
   const oversized = buildOfficeBuildingBoard(runs, { nowMs: NOW, maxRoots: 99, maxChildrenPerRoot: 99 });
   check('oversized opts clamped to hard caps', oversized.building.length === OFFICE_BOARD_MAX_ROOTS);
+
+  const acceptedOverflowRuns = Array.from({ length: OFFICE_BOARD_MAX_ROOTS + 1 }, (_, index) => run({
+    id: `accepted-overflow-${index}`,
+    status: 'queued',
+    delegated_to: `agent-${index}`,
+    started_at: undefined,
+    created_at: iso(-index * 1000),
+    metadata: {
+      externalLifecycle: 'awaiting_typed_result',
+      handoffStatus: 'accepted',
+      completionVerified: false,
+    },
+  }));
+  const acceptedOverflowBoard = buildOfficeBuildingBoard(acceptedOverflowRuns, { nowMs: NOW });
+  check(
+    'accepted totals are computed before root truncation',
+    acceptedOverflowBoard.building.length === OFFICE_BOARD_MAX_ROOTS
+      && acceptedOverflowBoard.overflowRoots === 1
+      && acceptedOverflowBoard.counts.awaitingExternalResults === OFFICE_BOARD_MAX_ROOTS + 1
+      && acceptedOverflowBoard.counts.awaitingExternalRoots === OFFICE_BOARD_MAX_ROOTS + 1
+      && acceptedOverflowBoard.counts.awaitingExternalQueued === OFFICE_BOARD_MAX_ROOTS + 1,
+    JSON.stringify(acceptedOverflowBoard),
+  );
+  check(
+    'accepted overflow never becomes fake ordinary queued work',
+    acceptedOverflowBoard.counts.queued - acceptedOverflowBoard.counts.awaitingExternalQueued === 0,
+    JSON.stringify(acceptedOverflowBoard.counts),
+  );
 }
 
 // ─── 3. building vs recentlyFinished cutoffs + duration ─────────────────────
@@ -403,8 +535,8 @@ console.log('\n[A] accountability index — outcomes, window, keying, cost');
   ];
   const index = buildOfficeAgentAccountabilityIndex(runs, { nowMs: NOW });
 
-  const research = index.get('research agent');
-  check('delegated_to keys by prettified lowercased name', !!research);
+  const research = index.get('office::researcher');
+  check('canonical identity does not populate the shared display-name bucket', !index.has('research agent'));
   check('subject key also indexes accountability', index.get('office::researcher')?.failed24h === 1);
   check('legacy alias also indexes accountability', index.get('legacy::research')?.completed24h === 1);
   check('newest finished run wins the line (failure)', !!research && research.lastLine.startsWith('❌ Fetch external corpus'));
@@ -425,7 +557,7 @@ console.log('\n[A] accountability index — outcomes, window, keying, cost');
 
   // Window override + determinism + degenerates
   const narrow = buildOfficeAgentAccountabilityIndex(runs, { nowMs: NOW, windowMs: 10 * 60_000 });
-  check('custom window excludes older finishes', !narrow.get('research agent') || narrow.get('research agent')!.completed24h === 0);
+  check('custom window excludes older finishes', !narrow.get('office::researcher') || narrow.get('office::researcher')!.completed24h === 0);
   const again = buildOfficeAgentAccountabilityIndex(runs, { nowMs: NOW });
   check('deterministic for same nowMs', JSON.stringify([...again.entries()]) === JSON.stringify([...index.entries()]));
   check('null runs → empty map', buildOfficeAgentAccountabilityIndex(null, { nowMs: NOW }).size === 0);

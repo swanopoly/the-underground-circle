@@ -51,6 +51,36 @@ export interface LLMProxyErrorDetails {
   provider?: LLMProxyProviderId;
 }
 
+/**
+ * Whether one bounded client retry can plausibly recover the request.
+ *
+ * Setup, authorization, and validation failures require user or operator
+ * action, so retrying them only creates duplicate 4xx traffic. An error with
+ * no HTTP status/code is treated as a transport failure and may be retried
+ * once by callers that already bound their retry count.
+ */
+export function shouldRetryLLMProxyFailure(
+  details: Pick<LLMProxyErrorDetails, 'code' | 'status'>,
+): boolean {
+  if (
+    details.code === 'validation'
+    || details.code === 'unauthenticated'
+    || details.code === 'forbidden'
+    || details.code === 'key_missing'
+    || details.code === 'credential_unreadable'
+    || details.code === 'unsupported_provider'
+  ) {
+    return false;
+  }
+  if (details.status === 429 || (typeof details.status === 'number' && details.status >= 500)) {
+    return true;
+  }
+  if (details.code === 'upstream_error' || details.code === 'internal') {
+    return true;
+  }
+  return details.status === undefined && details.code === undefined;
+}
+
 export interface LLMProxyCredentialRecoveryPresentation {
   message: string;
   actionLabel: string;

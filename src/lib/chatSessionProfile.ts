@@ -15,7 +15,7 @@ export const SESSION_PROFILE_OPTIONS: Array<{
   color: string;
   description: string;
 }> = [
-  { id: 'auto',      label: 'Auto',      shortLabel: 'AUTO',   color: '#22d3ee', description: 'OpenSwan decides whether this is build, review, debug, or architecture work from the request.' },
+  { id: 'auto',      label: 'Auto',      shortLabel: 'AUTO',   color: '#6366f1', description: 'OpenSwan decides whether this is build, review, debug, or architecture work from the request.' },
   { id: 'senior',    label: 'Build',     shortLabel: 'BUILD',  color: '#22c55e', description: 'OpenSwan ships working code — implements features, scaffolds endpoints, wires UI.' },
   { id: 'review',    label: 'Review',    shortLabel: 'REVIEW', color: '#f59e0b', description: 'OpenSwan audits a diff or file — findings, risks, style, security.' },
   { id: 'debug',     label: 'Debug',     shortLabel: 'DEBUG',  color: '#ef4444', description: 'OpenSwan roots out a bug — reproduce, bisect, explain, propose a fix.' },
@@ -36,7 +36,7 @@ export const SESSION_DELEGATION_MODE_OPTIONS: Array<{
   color: string;
   description: string;
 }> = [
-  { id: 'auto',     label: 'Auto',     shortLabel: 'AUTO',  color: '#22d3ee', description: 'OpenSwan decides when to fan out to specialist sub-agents.' },
+  { id: 'auto',     label: 'Auto',     shortLabel: 'AUTO',  color: '#6366f1', description: 'OpenSwan decides when to fan out to specialist sub-agents.' },
   { id: 'parallel', label: 'Parallel', shortLabel: 'PAR',   color: '#f59e0b', description: 'Prefer a multi-agent specialist crew for substantial tasks.' },
   { id: 'focused',  label: 'Solo',     shortLabel: 'FOCUS', color: '#94a3b8', description: 'Single OpenSwan context, no delegation — fastest and cheapest.' },
 ];

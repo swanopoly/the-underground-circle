@@ -1,6 +1,6 @@
 // email-calendar-oauth — Supabase Edge Function
 //
-// Unified OAuth2 handler for Google, Microsoft, and Yahoo.
+// Unified OAuth2 handler for Google and Microsoft Calendar + Email.
 // Supports Calendar + Email integration for Office furniture items.
 //
 // Routes:
@@ -84,6 +84,7 @@ function getProviderConfig(provider: string): ProviderConfig | null {
         extraAuthParams: {
           access_type: "offline",
           prompt: "consent",
+          include_granted_scopes: "true",
         },
       };
     case "microsoft":
@@ -100,137 +101,230 @@ function getProviderConfig(provider: string): ProviderConfig | null {
           base: "User.Read offline_access",
         },
       };
-    case "yahoo":
-      return {
-        authUrl: "https://api.login.yahoo.com/oauth2/request_auth",
-        tokenUrl: "https://api.login.yahoo.com/oauth2/get_token",
-        clientId: Deno.env.get("YAHOO_CLIENT_ID") || "",
-        clientSecret: Deno.env.get("YAHOO_CLIENT_SECRET") || "",
-        scopes: {
-          calendar: "",
-          email: "mail-r",
-          base: "openid",
-        },
-      };
     default:
       return null;
   }
 }
 
-// ─── Token helpers ────────────────────────────────────────────────────────────
+type OAuthServiceScope = "calendar" | "email";
 
-async function storeTokens(
-  supabase: any,
-  provider: string,
-  accessToken: string,
-  refreshToken: string | null,
-  expiresIn: number,
-  email?: string,
-  scopesGranted?: string
-): Promise<void> {
-  const { error } = await supabase.rpc("store_user_api_key", {
-    p_provider: provider,
-    p_api_key: accessToken,
-    p_label: "oauth",
-    p_endpoint: JSON.stringify({
-      refresh_token: refreshToken || "",
-      expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      email: email || "",
-      scopes: scopesGranted || "",
-    }),
-  });
-  if (error) throw new Error("Token persistence failed");
+const OAUTH_SERVICE_SCOPE_ORDER: readonly OAuthServiceScope[] = ["calendar", "email"];
+
+function normalizeOAuthServiceScopes(raw: unknown): OAuthServiceScope[] {
+  if (typeof raw !== "string") return [];
+  const requested = new Set(
+    raw
+      .split(",")
+      .map((scope) => scope.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return OAUTH_SERVICE_SCOPE_ORDER.filter((scope) => requested.has(scope));
 }
 
-async function getStoredTokens(
-  userId: string,
-  provider: string
-): Promise<{ accessToken: string; refreshToken: string; expiresAt: string; email: string } | null> {
-  const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-  const { data } = await serviceClient.rpc("get_user_api_key", {
-    p_user_id: userId,
-    p_provider: provider,
-    p_label: "oauth",
-  });
+function hasRecordedOAuthServiceScope(
+  tokens: { scopes: string },
+  service: OAuthServiceScope,
+): boolean {
+  return normalizeOAuthServiceScopes(tokens.scopes).includes(service);
+}
 
-  if (!data || data.length === 0) return null;
-  const row = data[0];
-  let meta: any = {};
-  try {
-    meta = JSON.parse(row.endpoint || "{}");
-  } catch {
-    /* ignore */
+function grantedOAuthServiceScopes(
+  config: ProviderConfig,
+  rawProviderScopes: unknown,
+): OAuthServiceScope[] {
+  if (typeof rawProviderScopes !== "string" || !rawProviderScopes.trim()) return [];
+  let decoded = rawProviderScopes;
+  try { decoded = decodeURIComponent(rawProviderScopes); } catch { /* use raw */ }
+  const granted = new Set(
+    decoded.split(/\s+/).map((scope) => scope.trim().toLowerCase()).filter(Boolean),
+  );
+  return OAUTH_SERVICE_SCOPE_ORDER.filter((service) => {
+    const required = config.scopes[service]
+      .split(/\s+/)
+      .map((scope) => scope.trim().toLowerCase())
+      .filter(Boolean);
+    return required.length > 0 && required.every((scope) => granted.has(scope));
+  });
+}
+
+function includesEveryOAuthServiceScope(
+  granted: readonly OAuthServiceScope[],
+  required: readonly OAuthServiceScope[],
+): boolean {
+  return required.every((scope) => granted.includes(scope));
+}
+
+function grantedOAuthServiceScopesFromTokenResponse(
+  provider: string,
+  config: ProviderConfig,
+  rawProviderScopes: unknown,
+  requestedScopes: readonly OAuthServiceScope[],
+): OAuthServiceScope[] {
+  // Microsoft documents `scope` as optional on the authorization-code token
+  // response; when omitted, the access token is for the scopes requested on
+  // the initial authorization leg. That leg is held in our one-time server
+  // state, so it is the only safe fallback. Google returns the granted scope
+  // set and must continue to prove it explicitly.
+  if (provider === "microsoft" && rawProviderScopes === undefined) {
+    return normalizeOAuthServiceScopes(requestedScopes);
   }
-  return {
-    accessToken: row.api_key,
-    refreshToken: meta.refresh_token || "",
-    expiresAt: meta.expires_at || "",
-    email: meta.email || "",
-  };
+  return grantedOAuthServiceScopes(config, rawProviderScopes);
+}
+
+// ─── Token helpers ────────────────────────────────────────────────────────────
+
+type ActiveOAuthCredential = {
+  accessToken: string;
+  expiresAt: string;
+  email: string;
+  scopes: string;
+  providerSubject: string;
+};
+
+class OAuthRefreshBusyError extends Error {
+  constructor() {
+    super("OAuth refresh is already in progress");
+    this.name = "OAuthRefreshBusyError";
+  }
+}
+
+class OAuthCredentialUnavailableError extends Error {
+  constructor(message = "OAuth credential service is unavailable") {
+    super(message);
+    this.name = "OAuthCredentialUnavailableError";
+  }
+}
+
+class OAuthReconnectRequiredError extends Error {
+  constructor(message = "OAuth reconnection is required") {
+    super(message);
+    this.name = "OAuthReconnectRequiredError";
+  }
+}
+
+function firstRpcRow(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) {
+    const row = value[0];
+    return row && typeof row === "object" ? row as Record<string, unknown> : null;
+  }
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
 }
 
 async function refreshTokenIfNeeded(
   userId: string,
   provider: string,
-  tokens: { accessToken: string; refreshToken: string; expiresAt: string; email: string }
-): Promise<string> {
-  // Check if token is expired (with 5 min buffer)
-  const expiresAt = new Date(tokens.expiresAt).getTime();
-  if (Date.now() < expiresAt - 5 * 60 * 1000) {
-    return tokens.accessToken;
-  }
-
-  if (!tokens.refreshToken) {
-    throw new Error("Token expired and no refresh token available");
-  }
-
+): Promise<ActiveOAuthCredential | null> {
   const config = getProviderConfig(provider);
-  if (!config) throw new Error("Unknown provider");
-
-  const body: Record<string, string> = {
-    client_id: config.clientId,
-    client_secret: config.clientSecret,
-    refresh_token: tokens.refreshToken,
-    grant_type: "refresh_token",
-  };
-
-  const resp = await fetch(config.tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(body),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`Token refresh failed: ${await resp.text()}`);
+  if (!config || !config.clientId || !config.clientSecret) {
+    throw new OAuthCredentialUnavailableError("Provider refresh is unavailable");
   }
 
-  const data = await resp.json();
-  const newAccessToken = data.access_token;
-  const newRefreshToken = data.refresh_token || tokens.refreshToken;
-  const expiresIn = data.expires_in || 3600;
-
-  // Update stored tokens using service role
   const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-  // Store the replacement atomically through the service RPC. Deleting the
-  // old row first could strand the user without a credential if persistence
-  // failed after a successful provider refresh.
-  const { error: storeError } = await serviceClient.rpc("store_user_api_key_service", {
+  const claimId = crypto.randomUUID();
+  const claimResult = await serviceClient.rpc("claim_office_oauth_refresh_v1", {
     p_user_id: userId,
     p_provider: provider,
-    p_api_key: newAccessToken,
-    p_label: "oauth",
-    p_endpoint: JSON.stringify({
-      refresh_token: newRefreshToken,
-      expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      email: tokens.email,
-    }),
+    p_claim_id: claimId,
+    p_lease_seconds: 45,
   });
-  if (storeError) {
-    console.error("[email-calendar-oauth] token refresh store failed:", storeError.message);
-    throw new Error("Token refresh persistence failed");
+  if (claimResult.error) throw new OAuthCredentialUnavailableError("Credential lookup failed");
+  const claim = firstRpcRow(claimResult.data);
+  const outcome = typeof claim?.outcome === "string" ? claim.outcome : "";
+  if (outcome === "missing") return null;
+  if (outcome === "busy") throw new OAuthRefreshBusyError();
+  if (outcome !== "fresh" && outcome !== "claimed") {
+    throw new OAuthCredentialUnavailableError("Credential lookup returned an invalid response");
   }
 
-  return newAccessToken;
+  const accessToken = typeof claim?.access_token === "string" ? claim.access_token : "";
+  const expiresAt = typeof claim?.expires_at === "string" ? claim.expires_at : "";
+  const email = typeof claim?.account_email === "string" ? claim.account_email.slice(0, 320) : "";
+  const scopes = typeof claim?.granted_scopes === "string" ? claim.granted_scopes : "";
+  const providerSubject = typeof claim?.provider_subject === "string" ? claim.provider_subject : "";
+  const revision = Number(claim?.credential_revision);
+  const intentEpoch = Number(claim?.intent_epoch);
+  if (!accessToken || !Number.isSafeInteger(revision) || !Number.isSafeInteger(intentEpoch)) {
+    throw new OAuthCredentialUnavailableError("Credential lookup returned an invalid response");
+  }
+  if (outcome === "fresh") {
+    return { accessToken, expiresAt, email, scopes, providerSubject };
+  }
+
+  const refreshToken = typeof claim?.refresh_token === "string" ? claim.refresh_token : "";
+  if (!refreshToken) throw new OAuthReconnectRequiredError("Token expired and no refresh token available");
+
+  let claimCommitted = false;
+  try {
+    const body: Record<string, string> = {
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    };
+
+    const resp = await fetch(config.tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(body),
+    });
+
+    if (!resp.ok) throw new OAuthReconnectRequiredError("Token refresh failed");
+    const data = await resp.json().catch(() => null);
+    if (!data || typeof data.access_token !== "string" || !data.access_token) {
+      throw new OAuthReconnectRequiredError("Token refresh returned an invalid response");
+    }
+
+    const recordedScopes = normalizeOAuthServiceScopes(scopes);
+    const refreshedScopes = data.scope === undefined
+      ? recordedScopes
+      : grantedOAuthServiceScopes(config, data.scope);
+    if (!includesEveryOAuthServiceScope(refreshedScopes, recordedScopes)) {
+      throw new OAuthReconnectRequiredError("Token refresh narrowed existing permissions");
+    }
+    const expiresIn = Number.isFinite(Number(data.expires_in))
+      ? Math.max(60, Math.min(Number(data.expires_in), 604_800))
+      : 3600;
+    const nextExpiry = new Date(Date.now() + expiresIn * 1000).toISOString();
+    const commitResult = await serviceClient.rpc("commit_office_oauth_refresh_v1", {
+      p_user_id: userId,
+      p_provider: provider,
+      p_expected_intent_epoch: intentEpoch,
+      p_expected_revision: revision,
+      p_claim_id: claimId,
+      p_operation_id: crypto.randomUUID(),
+      p_access_token: data.access_token,
+      p_refresh_token: typeof data.refresh_token === "string" ? data.refresh_token : "",
+      p_expires_at: nextExpiry,
+      p_provider_subject: providerSubject,
+      p_granted_scopes: refreshedScopes.join(","),
+    });
+    if (commitResult.error) {
+      console.error(`[email-calendar-oauth] fenced token refresh commit failed for ${provider}`);
+      throw new OAuthCredentialUnavailableError("Token refresh persistence failed");
+    }
+    claimCommitted = true;
+    return {
+      accessToken: data.access_token,
+      expiresAt: nextExpiry,
+      email,
+      scopes: refreshedScopes.join(","),
+      providerSubject,
+    };
+  } finally {
+    if (!claimCommitted) {
+      try {
+        await serviceClient.rpc("release_office_oauth_refresh_v1", {
+          p_user_id: userId,
+          p_provider: provider,
+          p_expected_intent_epoch: intentEpoch,
+          p_expected_revision: revision,
+          p_claim_id: claimId,
+        });
+      } catch {
+        // The bounded lease expires even if this best-effort release is lost.
+      }
+    }
+  }
 }
 
 // ─── Google API helpers ───────────────────────────────────────────────────────
@@ -254,8 +348,8 @@ async function fetchGoogleCalendarEvents(accessToken: string): Promise<any[]> {
   );
 
   if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Google Calendar API error: ${err}`);
+    if (resp.status === 401) throw new OAuthReconnectRequiredError();
+    throw new Error("Calendar provider request failed");
   }
 
   const data = await resp.json();
@@ -277,7 +371,8 @@ async function fetchGmailMessages(accessToken: string): Promise<any[]> {
   );
 
   if (!listResp.ok) {
-    throw new Error(`Gmail API error: ${await listResp.text()}`);
+    if (listResp.status === 401) throw new OAuthReconnectRequiredError();
+    throw new Error("Email provider request failed");
   }
 
   const listData = await listResp.json();
@@ -333,7 +428,8 @@ async function fetchMicrosoftCalendarEvents(
   );
 
   if (!resp.ok) {
-    throw new Error(`Microsoft Calendar API error: ${await resp.text()}`);
+    if (resp.status === 401) throw new OAuthReconnectRequiredError();
+    throw new Error("Calendar provider request failed");
   }
 
   const data = await resp.json();
@@ -354,7 +450,8 @@ async function fetchMicrosoftEmails(accessToken: string): Promise<any[]> {
   );
 
   if (!resp.ok) {
-    throw new Error(`Microsoft Mail API error: ${await resp.text()}`);
+    if (resp.status === 401) throw new OAuthReconnectRequiredError();
+    throw new Error("Email provider request failed");
   }
 
   const data = await resp.json();
@@ -369,35 +466,6 @@ async function fetchMicrosoftEmails(accessToken: string): Promise<any[]> {
     snippet: msg.bodyPreview || "",
     unread: !msg.isRead,
   }));
-}
-
-// ─── Yahoo API helpers ────────────────────────────────────────────────────────
-
-async function fetchYahooEmails(accessToken: string): Promise<any[]> {
-  // Yahoo Mail API via Yahoo Social API
-  // Note: Yahoo's mail REST API is limited. We try the endpoint:
-  const resp = await fetch(
-    "https://api.login.yahoo.com/openid/v1/userinfo",
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-
-  // Yahoo's mail REST API is deprecated — return user info at minimum
-  // so the widget shows the connected account
-  if (resp.ok) {
-    const userInfo = await resp.json();
-    return [
-      {
-        id: "yahoo-connected",
-        sender: userInfo.name || userInfo.email || "Yahoo Mail",
-        subject: "Connected — open Yahoo Mail to view inbox",
-        date: new Date().toISOString(),
-        snippet: "Yahoo Mail connected successfully",
-        unread: false,
-      },
-    ];
-  }
-
-  return [];
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -470,7 +538,9 @@ Deno.serve(async (req: Request) => {
     let body: { provider?: unknown; scopes?: unknown; client_nonce?: unknown } = {};
     try { body = await req.json(); } catch { /* empty body */ }
     const provider = typeof body.provider === "string" && body.provider ? body.provider : "google";
-    const scopes = typeof body.scopes === "string" && body.scopes ? body.scopes : "calendar,email";
+    const requestedScopes = body.scopes === undefined
+      ? [...OAUTH_SERVICE_SCOPE_ORDER]
+      : normalizeOAuthServiceScopes(body.scopes);
     const clientNonce = typeof body.client_nonce === "string" ? body.client_nonce : "";
     if (!OAUTH_NONCE_PATTERN.test(clientNonce)) {
       return new Response(
@@ -487,12 +557,54 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    if (requestedScopes.length === 0) {
+      return new Response(
+        JSON.stringify({ error: "Select calendar or email access" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const unsupportedRequestedScopes = requestedScopes.filter((scope) => !config.scopes[scope]);
+    if (unsupportedRequestedScopes.length > 0) {
+      return new Response(
+        JSON.stringify({ error: "This provider does not support the requested Office service" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Reserve one provider intent before leaving for the identity provider.
+    // The database returns the canonical union with any current service grant
+    // plus the exact revision/epoch the callback must match. A disconnect or a
+    // newer authorization invalidates this callback without relying on timing.
+    const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const operationId = crypto.randomUUID();
+    const reservationResult = await serviceClient.rpc("reserve_office_oauth_authorization_v1", {
+      p_user_id: user.id,
+      p_provider: provider,
+      p_requested_scopes: requestedScopes.join(","),
+      p_operation_id: operationId,
+    });
+    const reservation = firstRpcRow(reservationResult.data);
+    const reservationIntentEpoch = Number(reservation?.intent_epoch);
+    const reservationRevision = Number(reservation?.credential_revision);
+    const serviceScopes = normalizeOAuthServiceScopes(reservation?.required_scopes);
+    if (reservationResult.error
+      || !Number.isSafeInteger(reservationIntentEpoch)
+      || !Number.isSafeInteger(reservationRevision)
+      || serviceScopes.length === 0) {
+      console.error(`[email-calendar-oauth] authorization reservation failed for ${provider}`);
+      return new Response(
+        JSON.stringify({ error: "Could not verify existing connection permissions" }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const scopes = serviceScopes.join(",");
+
     // Build scope string
     const scopeParts = [config.scopes.base];
-    if (scopes.includes("calendar") && config.scopes.calendar) {
+    if (serviceScopes.includes("calendar") && config.scopes.calendar) {
       scopeParts.push(config.scopes.calendar);
     }
-    if (scopes.includes("email") && config.scopes.email) {
+    if (serviceScopes.includes("email") && config.scopes.email) {
       scopeParts.push(config.scopes.email);
     }
 
@@ -500,12 +612,14 @@ Deno.serve(async (req: Request) => {
     const nonceBytes = new Uint8Array(24);
     crypto.getRandomValues(nonceBytes);
     const nonce = Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
-    const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const { error: stateErr } = await serviceClient.from("email_calendar_oauth_states").insert({
       state: nonce,
       user_id: user.id,
       provider,
       scopes,
+      credential_revision: reservationRevision,
+      intent_epoch: reservationIntentEpoch,
+      operation_id: operationId,
       expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     });
     if (stateErr) {
@@ -554,7 +668,7 @@ Deno.serve(async (req: Request) => {
     const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const { data: stateRow, error: stateLookupError } = await serviceClient
       .from("email_calendar_oauth_states")
-      .select("id, user_id, provider, scopes, expires_at")
+      .select("id, user_id, provider, scopes, expires_at, credential_revision, intent_epoch, operation_id")
       .eq("state", parsedState.serverNonce)
       .maybeSingle();
     if (stateLookupError || !stateRow) {
@@ -590,7 +704,9 @@ Deno.serve(async (req: Request) => {
       return oauthResultResponse({
         ...resultContext,
         success: false,
-        error: providerError.slice(0, 200),
+        error: providerError === "access_denied"
+          ? "Authorization was cancelled"
+          : "Provider authorization failed",
       });
     }
 
@@ -603,8 +719,17 @@ Deno.serve(async (req: Request) => {
     }
 
     const provider = resultContext.provider;
-    const scopes = (stateRow.scopes as string) || "calendar,email";
+    const stateServiceScopes = normalizeOAuthServiceScopes(stateRow.scopes);
     const userId = stateRow.user_id as string;
+    const expectedRevision = Number(stateRow.credential_revision);
+    const expectedIntentEpoch = Number(stateRow.intent_epoch);
+    const operationId = typeof stateRow.operation_id === "string" ? stateRow.operation_id : "";
+    if (!Number.isSafeInteger(expectedRevision)
+      || !Number.isSafeInteger(expectedIntentEpoch)
+      || !operationId
+      || stateServiceScopes.length === 0) {
+      return oauthResultResponse({ ...resultContext, success: false, error: "Invalid or expired state" });
+    }
 
     const config = getProviderConfig(provider);
     if (!config) {
@@ -653,9 +778,26 @@ Deno.serve(async (req: Request) => {
         error: "Provider returned an invalid token response",
       });
     }
+    const grantedServiceScopes = grantedOAuthServiceScopesFromTokenResponse(
+      provider,
+      config,
+      tokens.scope,
+      stateServiceScopes,
+    );
+    if (!includesEveryOAuthServiceScope(grantedServiceScopes, stateServiceScopes)) {
+      console.warn(`[email-calendar-oauth] provider did not grant every requested Office service for ${provider}`);
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: "The requested Calendar or Email permission was not granted",
+      });
+    }
 
-    // Get user email for display
+    // Bind the credential to the provider's stable account id. Email is only
+    // display metadata and must never decide whether an older rotating refresh
+    // token can be preserved.
     let userEmail = "";
+    let providerSubject = "";
     try {
       if (provider === "google") {
         const infoResp = await fetch(
@@ -665,6 +807,7 @@ Deno.serve(async (req: Request) => {
         if (infoResp.ok) {
           const info = await infoResp.json();
           userEmail = typeof info.email === "string" ? info.email : "";
+          providerSubject = typeof info.id === "string" ? info.id : "";
         }
       } else if (provider === "microsoft") {
         const infoResp = await fetch(
@@ -673,44 +816,47 @@ Deno.serve(async (req: Request) => {
         );
         if (infoResp.ok) {
           const info = await infoResp.json();
+          providerSubject = typeof info.id === "string" ? info.id : "";
           userEmail = typeof info.mail === "string"
             ? info.mail
             : typeof info.userPrincipalName === "string"
               ? info.userPrincipalName
               : "";
         }
-      } else if (provider === "yahoo") {
-        const infoResp = await fetch(
-          "https://api.login.yahoo.com/openid/v1/userinfo",
-          { headers: { Authorization: `Bearer ${tokens.access_token}` } }
-        );
-        if (infoResp.ok) {
-          const info = await infoResp.json();
-          userEmail = typeof info.email === "string" ? info.email : "";
-        }
       }
     } catch {
-      // non-critical
+      // The bounded public error below handles provider identity lookup loss.
+    }
+    if (!providerSubject) {
+      console.error(`[email-calendar-oauth] provider account identity lookup failed for ${provider}`);
+      return oauthResultResponse({
+        ...resultContext,
+        success: false,
+        error: "Could not verify the connected account",
+      });
     }
 
-    // Store tokens for the verified user via the service role — no JWT needed
-    // now that the flow is bound to a server-stored nonce (advisory #6).
+    // Commit only if the provider intent and credential revision still match
+    // the one-time state. A disconnect or newer authorization wins and this
+    // provider result is discarded rather than resurrecting stale access.
     const expiresIn = Number.isFinite(Number(tokens.expires_in))
       ? Math.max(60, Math.min(Number(tokens.expires_in), 604_800))
       : 3600;
     let storeError: unknown = null;
     try {
-      const storeResult = await serviceClient.rpc("store_user_api_key_service", {
+      const storeResult = await serviceClient.rpc("commit_office_oauth_authorization_v1", {
         p_user_id: userId,
         p_provider: provider,
-        p_api_key: tokens.access_token,
-        p_label: "oauth",
-        p_endpoint: JSON.stringify({
-          refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : "",
-          expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
-          email: userEmail.slice(0, 320),
-          scopes,
-        }),
+        p_expected_intent_epoch: expectedIntentEpoch,
+        p_expected_revision: expectedRevision,
+        p_operation_id: operationId,
+        p_access_token: tokens.access_token,
+        p_refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : "",
+        p_expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
+        p_account_email: userEmail.slice(0, 320),
+        p_provider_subject: providerSubject,
+        p_granted_scopes: grantedServiceScopes.join(","),
+        p_required_scopes: stateServiceScopes.join(","),
       });
       storeError = storeResult.error;
     } catch {
@@ -756,15 +902,73 @@ Deno.serve(async (req: Request) => {
     /* empty body ok for some routes */
   }
 
-  const provider = body.provider || "google";
+  const provider = typeof body.provider === "string" && body.provider
+    ? body.provider
+    : "google";
 
   // ── POST /status — Check connection ──────────────────────────────────────
   if (action === "status") {
-    const tokens = await getStoredTokens(user.id, provider);
+    const config = getProviderConfig(provider);
+    if (!config) {
+      return new Response(
+        JSON.stringify({ connected: false, provider, error: "Unsupported provider" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    let credential: ActiveOAuthCredential | null;
+    try {
+      credential = await refreshTokenIfNeeded(user.id, provider);
+    } catch (error) {
+      console.error(`[email-calendar-oauth] credential status lookup failed for ${provider}`);
+      if (error instanceof OAuthReconnectRequiredError) {
+        return new Response(
+          JSON.stringify({ connected: false, email: "", provider, reconnectRequired: true }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ connected: false, provider, error: "Connection status is unavailable" }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!credential) {
+      return new Response(
+        JSON.stringify({ connected: false, email: "", provider }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const requestedService = typeof body.service === "string"
+      ? normalizeOAuthServiceScopes(body.service)[0]
+      : undefined;
+    if (body.service !== undefined && !requestedService) {
+      return new Response(
+        JSON.stringify({ connected: false, email: "", provider, error: "Unsupported service" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    if (requestedService && !config.scopes[requestedService]) {
+      return new Response(
+        JSON.stringify({ connected: false, email: "", provider, reconnectRequired: true }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    // Legacy rows without recorded service labels predate scope tracking. Do
+    // not claim a specific Office integration is authorized; require a fresh
+    // consent that records the canonical service union.
+    if (requestedService && !hasRecordedOAuthServiceScope(credential, requestedService)) {
+      return new Response(
+        JSON.stringify({ connected: false, email: "", provider, reconnectRequired: true }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     return new Response(
       JSON.stringify({
-        connected: !!tokens,
-        email: tokens?.email || "",
+        connected: true,
+        email: credential.email || "",
         provider,
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -773,15 +977,20 @@ Deno.serve(async (req: Request) => {
 
   // ── POST /disconnect — Remove tokens ─────────────────────────────────────
   if (action === "disconnect") {
+    if (!getProviderConfig(provider)) {
+      return new Response(
+        JSON.stringify({ error: "Unsupported provider", disconnected: false }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
     const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     let disconnectError: unknown = null;
     try {
-      const disconnectResult = await serviceClient
-        .from("user_api_keys")
-        .delete()
-        .eq("user_id", user.id)
-        .eq("provider", provider)
-        .eq("label", "oauth");
+      const disconnectResult = await serviceClient.rpc("disconnect_office_oauth_provider_v1", {
+        p_user_id: user.id,
+        p_provider: provider,
+        p_operation_id: crypto.randomUUID(),
+      });
       disconnectError = disconnectResult.error;
     } catch {
       disconnectError = true;
@@ -803,22 +1012,48 @@ Deno.serve(async (req: Request) => {
 
   // ── POST /fetch-calendar — Get real calendar events ──────────────────────
   if (action === "fetch-calendar") {
-    const tokens = await getStoredTokens(user.id, provider);
-    if (!tokens) {
+    if (provider !== "google" && provider !== "microsoft") {
+      return new Response(
+        JSON.stringify({ error: "Calendar provider is unsupported", events: [] }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    let credential: ActiveOAuthCredential | null;
+    try {
+      credential = await refreshTokenIfNeeded(user.id, provider);
+    } catch (error) {
+      if (error instanceof OAuthReconnectRequiredError) {
+        return new Response(
+          JSON.stringify({ error: "Calendar permission must be reconnected", events: [], reconnectRequired: true }),
+          { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ error: "Calendar connection is unavailable", events: [] }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    if (!credential) {
       return new Response(
         JSON.stringify({ error: "Not connected", events: [] }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+    if (!hasRecordedOAuthServiceScope(credential, "calendar")) {
+      return new Response(
+        JSON.stringify({ error: "Calendar permission is required", events: [], reconnectRequired: true }),
+        { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     try {
-      const accessToken = tokens.accessToken; // TODO: refresh if needed
       let events: any[] = [];
 
       if (provider === "google") {
-        events = await fetchGoogleCalendarEvents(accessToken);
+        events = await fetchGoogleCalendarEvents(credential.accessToken);
       } else if (provider === "microsoft") {
-        events = await fetchMicrosoftCalendarEvents(accessToken);
+        events = await fetchMicrosoftCalendarEvents(credential.accessToken);
       }
 
       // Format for the calendar widget
@@ -833,38 +1068,68 @@ Deno.serve(async (req: Request) => {
           count: formatted.length,
           nextEvent: formatted[0] || null,
           provider,
-          email: tokens.email,
+          email: credential.email,
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
-    } catch (err: any) {
+    } catch (error) {
+      if (error instanceof OAuthReconnectRequiredError) {
+        return new Response(
+          JSON.stringify({ error: "Calendar permission must be reconnected", events: [], reconnectRequired: true }),
+          { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
       return new Response(
-        JSON.stringify({ error: err.message, events: [] }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "Calendar connection is unavailable", events: [] }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
   }
 
   // ── POST /fetch-emails — Get real emails ─────────────────────────────────
   if (action === "fetch-emails") {
-    const tokens = await getStoredTokens(user.id, provider);
-    if (!tokens) {
+    if (provider !== "google" && provider !== "microsoft") {
+      return new Response(
+        JSON.stringify({ error: "Email provider is unsupported", emails: [] }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    let credential: ActiveOAuthCredential | null;
+    try {
+      credential = await refreshTokenIfNeeded(user.id, provider);
+    } catch (error) {
+      if (error instanceof OAuthReconnectRequiredError) {
+        return new Response(
+          JSON.stringify({ error: "Email permission must be reconnected", emails: [], reconnectRequired: true }),
+          { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ error: "Email connection is unavailable", emails: [] }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    if (!credential) {
       return new Response(
         JSON.stringify({ error: "Not connected", emails: [] }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+    if (!hasRecordedOAuthServiceScope(credential, "email")) {
+      return new Response(
+        JSON.stringify({ error: "Email permission is required", emails: [], reconnectRequired: true }),
+        { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     try {
-      const accessToken = tokens.accessToken;
       let emails: any[] = [];
 
       if (provider === "google") {
-        emails = await fetchGmailMessages(accessToken);
+        emails = await fetchGmailMessages(credential.accessToken);
       } else if (provider === "microsoft") {
-        emails = await fetchMicrosoftEmails(accessToken);
-      } else if (provider === "yahoo") {
-        emails = await fetchYahooEmails(accessToken);
+        emails = await fetchMicrosoftEmails(credential.accessToken);
       }
 
       // Format dates
@@ -881,14 +1146,20 @@ Deno.serve(async (req: Request) => {
           unread: unreadCount,
           total: formatted.length,
           provider,
-          email: tokens.email,
+          email: credential.email,
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
-    } catch (err: any) {
+    } catch (error) {
+      if (error instanceof OAuthReconnectRequiredError) {
+        return new Response(
+          JSON.stringify({ error: "Email permission must be reconnected", emails: [], reconnectRequired: true }),
+          { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
       return new Response(
-        JSON.stringify({ error: err.message, emails: [] }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "Email connection is unavailable", emails: [] }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
   }

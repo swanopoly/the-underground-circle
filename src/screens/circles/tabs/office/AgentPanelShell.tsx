@@ -50,20 +50,22 @@ class TabErrorBoundary extends React.Component<TabErrorBoundaryProps, TabErrorBo
       const msg = this.state.error.message || 'Unknown error';
       return (
         <View style={styles.errorFallback}>
-          <Text style={styles.errorFallbackTitle}>TAB CRASHED</Text>
+          <Text style={styles.errorFallbackTitle}>This section could not load</Text>
           <Text style={styles.errorFallbackMessage} numberOfLines={4}>{msg}</Text>
           <Text style={styles.errorFallbackHint}>
-            Switch tabs to reset, or close the panel and reopen it.
+            Try again, switch sections, or reopen the agent panel.
           </Text>
           <Pressable
             onPress={() => this.setState({ error: null })}
+            accessibilityRole="button"
+            accessibilityLabel="Try loading this agent section again"
             style={[
               styles.errorFallbackBtn,
               { borderColor: this.props.accentColor + '55', backgroundColor: this.props.accentColor + '14' },
               Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
             ]}
           >
-            <Text style={[styles.errorFallbackBtnText, { color: this.props.accentColor }]}>TRY AGAIN</Text>
+            <Text style={[styles.errorFallbackBtnText, { color: this.props.accentColor }]}>Try again</Text>
           </Pressable>
         </View>
       );
@@ -92,6 +94,7 @@ interface Props {
   onStartRename: () => void;
   onSubmitRename: () => void;
   onCancelRename: () => void;
+  canRenameAgent: boolean;
   onClose: () => void;
   onToggleMode: () => void;
   onStartSideResize: (pageX: number) => void;
@@ -103,9 +106,6 @@ interface Props {
   setPanelTab: (tabKey: AgentPanelTabKey) => void;
   children: React.ReactNode;
 }
-
-// Same color palette as the loading indicator dots
-const TAB_DOT_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#22d3ee'];
 
 // ── Open animation ──────────────────────────────────────────────────────────
 // One-shot CSS keyframe fade. GPU-accelerated, no React re-renders during the
@@ -131,29 +131,6 @@ function ensureOpenAnimStyle() {
   document.head.appendChild(style);
 }
 
-function TabNavigationDots({ count, activeIndex, accentColor }: { count: number; activeIndex: number; accentColor: string }) {
-  return (
-    <View style={styles.tabDotsRow}>
-      {Array.from({ length: count }).map((_, i) => {
-        const isActive = i === activeIndex;
-        const color = isActive ? accentColor : TAB_DOT_COLORS[i % TAB_DOT_COLORS.length];
-        return (
-          <View
-            key={i}
-            style={{
-              width: isActive ? 10 : 7,
-              height: isActive ? 10 : 7,
-              borderRadius: 99,
-              backgroundColor: color,
-              opacity: isActive ? 1 : 0.5,
-            }}
-          />
-        );
-      })}
-    </View>
-  );
-}
-
 export default function AgentPanelShell({
   agent,
   isDesktop,
@@ -172,6 +149,7 @@ export default function AgentPanelShell({
   onStartRename,
   onSubmitRename,
   onCancelRename,
+  canRenameAgent,
   onClose,
   onToggleMode,
   onStartSideResize,
@@ -183,21 +161,15 @@ export default function AgentPanelShell({
   setPanelTab,
   children,
 }: Props) {
+  // AgentPanel owns the single Escape/focus-trap listener. Keeping a second
+  // listener here used to close twice and could dismiss the panel while the
+  // user was editing a field. Style injection is also an effect, never a DOM
+  // mutation during render.
   React.useEffect(() => {
-    if (!isDesktop || Platform.OS !== 'web') return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isDesktop, onClose]);
-
-  // Inject the open-animation keyframes once. ensureOpenAnimStyle is a no-op
-  // on native and idempotent on web (checks document.getElementById first).
-  ensureOpenAnimStyle();
+    ensureOpenAnimStyle();
+  }, []);
 
   const currentTabIndex = tabs.findIndex(tab => tab.key === panelTab);
-  const activeTab = currentTabIndex >= 0 ? tabs[currentTabIndex] : null;
   const prevTab = currentTabIndex > 0 ? tabs[currentTabIndex - 1] : null;
   const nextTab = currentTabIndex >= 0 && currentTabIndex < tabs.length - 1 ? tabs[currentTabIndex + 1] : null;
   const providerMeta = PROVIDER_META[agent.providerType];
@@ -206,10 +178,19 @@ export default function AgentPanelShell({
     <View style={desktop ? styles.desktopActionRow : styles.mobileActionRow}>
       <Pressable
         onPress={onRemoveAgent}
-        style={[styles.removeButton, removingAgent && { opacity: 0.65 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        disabled={removingAgent}
+        accessibilityRole="button"
+        accessibilityLabel={`Remove ${agent.name} from this Office`}
+        accessibilityHint="Removes the published Office agent after confirmation. It does not stop the local runtime."
+        accessibilityState={{ disabled: removingAgent, busy: removingAgent }}
+        style={[
+          styles.removeButton,
+          removingAgent && { opacity: 0.65 },
+          Platform.OS === 'web' && { cursor: removingAgent ? 'wait' : 'pointer' } as any,
+        ]}
       >
         <Text style={styles.removeButtonText}>
-          {removingAgent ? 'REMOVING...' : 'REMOVE AGENT'}
+          {removingAgent ? 'Removing…' : 'Remove agent'}
         </Text>
       </Pressable>
     </View>
@@ -225,9 +206,9 @@ export default function AgentPanelShell({
           onPress={() => prevTab && setPanelTab(prevTab.key)}
           disabled={!prevTab}
           accessibilityRole="button"
-          accessibilityLabel={prevTab ? `Go to ${prevTab.label} tab` : 'No previous tab'}
+          accessibilityLabel={prevTab ? `Previous tab: ${prevTab.label}` : 'Previous tab unavailable'}
+          accessibilityState={{ disabled: !prevTab }}
           style={[styles.tabNavArrow, { opacity: prevTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: prevTab ? 'pointer' : 'default' } as any]}
-          hitSlop={8}
         >
           <Text style={styles.tabNavArrowText}>{'<'}</Text>
         </Pressable>
@@ -240,6 +221,7 @@ export default function AgentPanelShell({
             onPress={() => setPanelTab(tab.key)}
             accessibilityRole="tab"
             accessibilityLabel={`${tab.label} tab`}
+            accessibilityHint={tab.description}
             accessibilityState={{ selected: panelTab === tab.key }}
             style={[
               styles.tabNavItem,
@@ -257,9 +239,9 @@ export default function AgentPanelShell({
           onPress={() => nextTab && setPanelTab(nextTab.key)}
           disabled={!nextTab}
           accessibilityRole="button"
-          accessibilityLabel={nextTab ? `Go to ${nextTab.label} tab` : 'No next tab'}
+          accessibilityLabel={nextTab ? `Next tab: ${nextTab.label}` : 'Next tab unavailable'}
+          accessibilityState={{ disabled: !nextTab }}
           style={[styles.tabNavArrow, { opacity: nextTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: nextTab ? 'pointer' : 'default' } as any]}
-          hitSlop={8}
         >
           <Text style={styles.tabNavArrowText}>{'>'}</Text>
         </Pressable>
@@ -267,52 +249,101 @@ export default function AgentPanelShell({
     </View>
   );
 
-  const renderDesktopControls = () => (
-    <View style={styles.desktopControlStrip}>
-      <View style={styles.desktopControlGroup}>
-        <Text style={styles.desktopControlLabel}>Layout</Text>
-        <Pressable
-          onPress={() => panelMode === 'side' && onToggleMode()}
-          accessibilityRole="button"
-          accessibilityLabel="Switch to popup layout"
-          accessibilityState={{ selected: panelMode === 'center' }}
-          style={[
-            styles.desktopControlBtn,
-            panelMode === 'center' && styles.desktopControlBtnActive,
-            Platform.OS === 'web' && ({ cursor: panelMode === 'center' ? 'default' : 'pointer' } as any),
-          ]}
-        >
-          <Text style={[styles.desktopControlBtnText, panelMode === 'center' && styles.desktopControlBtnTextActive]}>POPUP</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => panelMode === 'center' && onToggleMode()}
-          accessibilityRole="button"
-          accessibilityLabel="Dock panel to side"
-          accessibilityState={{ selected: panelMode === 'side' }}
-          style={[
-            styles.desktopControlBtn,
-            panelMode === 'side' && styles.desktopControlBtnActive,
-            Platform.OS === 'web' && ({ cursor: panelMode === 'side' ? 'default' : 'pointer' } as any),
-          ]}
-        >
-          <Text style={[styles.desktopControlBtnText, panelMode === 'side' && styles.desktopControlBtnTextActive]}>DOCKED</Text>
-        </Pressable>
-      </View>
+  const headerMeta = [
+    agent.role || null,
+    providerMeta?.label || agent.providerType || null,
+    agent.model && agent.model !== 'unknown' ? agent.model : null,
+  ].filter((value): value is string => !!value).join(' · ');
 
-      <View style={styles.desktopControlGroupRight}>
-        {panelMode === 'side' ? (
-          <Text style={styles.desktopControlHint}>Press `Esc` to close</Text>
+  const renderHeader = () => (
+    <View style={styles.desktopHeader} accessibilityRole="header">
+      <View style={styles.desktopHeaderLeft}>
+        <View style={[styles.desktopHeaderAvatar, { backgroundColor: agent.color + '20', borderColor: agent.color + '70' }]}>
+          <Text style={[styles.desktopHeaderAvatarText, { color: agent.color }]}>{agent.name.charAt(0).toUpperCase()}</Text>
+        </View>
+        <View style={styles.desktopHeaderIdentity}>
+          {editing ? (
+            <View style={styles.desktopHeaderEditingRow}>
+              <TextInput
+                style={styles.desktopHeaderNameInput}
+                value={editName}
+                onChangeText={setEditName}
+                autoFocus
+                onSubmitEditing={onSubmitRename}
+                placeholder={agent.name}
+                placeholderTextColor="#484f58"
+                accessibilityLabel="Agent name"
+              />
+              <Pressable
+                onPress={onSubmitRename}
+                style={[styles.desktopRenameAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
+                accessibilityRole="button"
+                accessibilityLabel="Save agent name"
+              >
+                <Text style={styles.desktopRenameActionText}>Save</Text>
+              </Pressable>
+              <Pressable
+                onPress={onCancelRename}
+                style={[styles.desktopRenameAction, styles.desktopRenameCancelAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel rename"
+              >
+                <Text style={[styles.desktopRenameActionText, styles.desktopRenameCancelActionText]}>Cancel</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.desktopHeaderNameWrap}>
+              <Text nativeID="uc-agent-panel-title" style={styles.desktopHeaderName} numberOfLines={1}>{agent.name}</Text>
+              {canRenameAgent ? (
+                <Pressable
+                  onPress={onStartRename}
+                  style={[styles.desktopRenameChip, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Rename ${agent.name}`}
+                >
+                  <Text style={styles.desktopRenameChipText}>Rename</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          )}
+          <View style={styles.desktopHeaderMeta}>
+            <View
+              style={[styles.desktopHeaderStatus, { borderColor: statusColor + '38', backgroundColor: statusColor + '12' }]}
+              accessibilityLiveRegion="polite"
+            >
+              <View style={[styles.desktopHeaderStatusDot, { backgroundColor: statusColor }]} />
+              <Text style={[styles.desktopHeaderStatusText, { color: statusColor }]}>{statusLabel}</Text>
+            </View>
+            {headerMeta ? <Text style={styles.desktopHeaderMetaText} numberOfLines={1}>{headerMeta}</Text> : null}
+          </View>
+        </View>
+      </View>
+      <View style={styles.desktopHeaderRight}>
+        {isDesktop ? (
+          <Pressable
+            onPress={onToggleMode}
+            style={({ hovered }: any) => [
+              styles.desktopIconBtn,
+              hovered && styles.desktopIconBtnHover,
+              Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={panelMode === 'center' ? 'Dock agent panel to the right' : 'Open agent panel as a centered pop-up'}
+          >
+            <Text style={styles.desktopIconBtnText}>{panelMode === 'center' ? 'Dock' : 'Pop out'}</Text>
+          </Pressable>
         ) : null}
         <Pressable
           onPress={onClose}
-          accessibilityRole="button"
-          accessibilityLabel="Close panel"
-          style={[
-            styles.desktopCloseBtn,
+          style={({ hovered }: any) => [
+            styles.desktopCloseIconBtn,
+            hovered && styles.desktopIconBtnHover,
             Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
           ]}
+          accessibilityRole="button"
+          accessibilityLabel="Close agent panel"
         >
-          <Text style={styles.desktopCloseBtnText}>CLOSE</Text>
+          <Text style={styles.desktopCloseIconText}>×</Text>
         </Pressable>
       </View>
     </View>
@@ -339,28 +370,34 @@ export default function AgentPanelShell({
 
       <Animated.View
         nativeID="uc-agent-panel-root"
+        accessibilityViewIsModal={panelMode === 'center'}
         // The CSS keyframe (uc-agent-panel-open) drives the open fade on web.
         // scaleAnim/opacityAnim values are pinned to 1/1 by AgentPanel during
         // open, so they're no-ops here unless the close animation runs them
         // back down to 0. className is a web-only RN Web extension so we
         // spread it via `as any` to avoid TypeScript noise.
-        {...(isDesktop && Platform.OS === 'web' ? ({ className: 'uc-agent-panel-open' } as any) : {})}
+        {...(Platform.OS === 'web' ? ({
+          className: isDesktop ? 'uc-agent-panel-open' : undefined,
+          role: 'dialog',
+          'aria-modal': panelMode === 'center' ? true : undefined,
+          'aria-labelledby': 'uc-agent-panel-title',
+        } as any) : {})}
         style={[
-        styles.panel,
-        isDesktop
-          ? {
-              transform: [{ scale: scaleAnim }],
-              opacity: opacityAnim,
-              width: panelGeometry.width,
-              height: panelGeometry.height,
-              left: panelGeometry.left,
-              top: panelGeometry.top,
-            }
-          : { transform: [{ translateY: slideAnim }] },
-        isDesktop && styles.panelDesktop,
-        isDesktop && panelMode === 'side' && styles.panelSide,
-        isDesktop && Platform.OS === 'web' ? ({ transition: panelTransition } as any) : null,
-      ]}>
+          styles.panel,
+          isDesktop
+            ? {
+                transform: [{ scale: scaleAnim }],
+                opacity: opacityAnim,
+                width: panelGeometry.width,
+                height: panelGeometry.height,
+                left: panelGeometry.left,
+                top: panelGeometry.top,
+              }
+            : { transform: [{ translateY: slideAnim }] },
+          isDesktop && styles.panelDesktop,
+          isDesktop && panelMode === 'side' && styles.panelSide,
+          isDesktop && Platform.OS === 'web' ? ({ transition: panelTransition } as any) : null,
+        ]}>
         {isDesktop && Platform.OS === 'web' && panelMode === 'side' && (
           <View
             onPointerDown={(e: any) => onStartSideResize(e.nativeEvent?.pageX || e.pageX || 0)}
@@ -370,216 +407,25 @@ export default function AgentPanelShell({
           </View>
         )}
 
-        {isDesktop ? (
-          <View style={styles.desktopHeader}>
-            <View style={styles.desktopHeaderLeft}>
-              <View style={[styles.desktopHeaderAvatar, { backgroundColor: agent.color + '22', borderColor: agent.color }]}>
-                <Text style={[styles.desktopHeaderAvatarText, { color: agent.color }]}>{agent.name.charAt(0).toUpperCase()}</Text>
-              </View>
-              {editing ? (
-                <View style={styles.desktopHeaderEditingRow}>
-                  <TextInput
-                    style={styles.desktopHeaderNameInput}
-                    value={editName}
-                    onChangeText={setEditName}
-                    autoFocus
-                    onBlur={() => {
-                      const trimmed = editName.trim();
-                      if (trimmed && trimmed !== agent.name) onSubmitRename();
-                      else onCancelRename();
-                    }}
-                    onSubmitEditing={onSubmitRename}
-                    placeholder={agent.name}
-                    placeholderTextColor="#555"
-                  />
-                  <Pressable
-                    onPress={onSubmitRename}
-                    style={[styles.desktopRenameAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
-                    accessibilityLabel="Save agent name"
-                  >
-                    <Text style={styles.desktopRenameActionText}>Save</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={onCancelRename}
-                    style={[styles.desktopRenameAction, styles.desktopRenameCancelAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
-                    accessibilityLabel="Cancel rename"
-                  >
-                    <Text style={[styles.desktopRenameActionText, styles.desktopRenameCancelActionText]}>Cancel</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <View style={styles.desktopHeaderNameWrap}>
-                  <Pressable
-                    onPress={onStartRename}
-                    style={[
-                      { flexShrink: 1, minWidth: 0 },
-                      Platform.OS === 'web' ? ({ cursor: 'text' } as any) : null,
-                    ]}
-                    accessibilityLabel="Rename agent"
-                  >
-                    <Text style={styles.desktopHeaderName} numberOfLines={1}>{agent.name}</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={onStartRename}
-                    style={[styles.desktopRenameChip, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
-                    accessibilityLabel="Rename agent"
-                  >
-                    <Text style={styles.desktopRenameChipText}>Rename</Text>
-                  </Pressable>
-                </View>
-              )}
-              <View style={[styles.desktopHeaderStatus, { borderColor: statusColor + '55', backgroundColor: statusColor + '14' }]}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: statusColor, marginRight: 6 }} />
-                <Text style={[styles.desktopHeaderStatusText, { color: statusColor }]}>{statusLabel}</Text>
-              </View>
-            </View>
-            <View style={styles.desktopHeaderRight}>
-              <Pressable
-                onPress={onToggleMode}
-                style={({ hovered }: any) => [
-                  styles.desktopIconBtn,
-                  hovered && styles.desktopIconBtnHover,
-                  Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
-                ]}
-                accessibilityLabel={panelMode === 'center' ? 'Dock to right side' : 'Center panel'}
-                hitSlop={8}
-              >
-                <Text style={styles.desktopIconBtnText}>{panelMode === 'center' ? '⇥' : '⇤'}</Text>
-              </Pressable>
-              <Pressable
-                onPress={onClose}
-                style={({ hovered }: any) => [
-                  styles.desktopIconBtn,
-                  hovered && styles.desktopIconBtnHover,
-                  Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
-                ]}
-                accessibilityLabel="Close panel"
-                hitSlop={8}
-              >
-                <Text style={styles.desktopIconBtnText}>✕</Text>
-              </Pressable>
-            </View>
-          </View>
-        ) : (
-          <Pressable onPress={onClose} style={styles.handleArea}>
+        {!isDesktop ? (
+          <View style={styles.handleArea} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
             <View style={styles.handle} />
-          </Pressable>
-        )}
+          </View>
+        ) : null}
 
-        {isDesktop && (
-          <>
-            <View style={styles.desktopSubtitle}>
-              {agent.role ? (
-                <View style={styles.desktopMetaChip}>
-                  <Text style={styles.desktopMetaChipLabel}>ROLE</Text>
-                  <Text style={styles.desktopMetaChipValue} numberOfLines={1}>{agent.role}</Text>
-                </View>
-              ) : null}
-              {agent.model ? (
-                <View style={styles.desktopMetaChip}>
-                  <Text style={styles.desktopMetaChipLabel}>MODEL</Text>
-                  <Text style={styles.desktopMetaChipValue} numberOfLines={1}>{agent.model}</Text>
-                </View>
-              ) : null}
-              <View style={styles.desktopMetaChip}>
-                <Text style={styles.desktopMetaChipLabel}>PROVIDER</Text>
-                <View style={styles.desktopMetaChipInline}>
-                  <Text style={styles.desktopSubtitleIcon}>{providerMeta?.icon || '📡'}</Text>
-                  <Text style={[styles.desktopMetaChipValue, { color: providerMeta?.color || '#888' }]} numberOfLines={1}>
-                    {agent.connectionName}
-                  </Text>
-                </View>
-              </View>
-              {activeTab ? (
-                <View style={styles.desktopMetaChip}>
-                  <Text style={styles.desktopMetaChipLabel}>TAB</Text>
-                  <Text style={styles.desktopMetaChipValue}>{activeTab.label}</Text>
-                </View>
-              ) : null}
-              <View style={[styles.desktopMetaChip, styles.desktopMetaChipMode]}>
-                <Text style={styles.desktopMetaChipLabel}>LAYOUT</Text>
-                <Text style={styles.desktopMetaChipValue}>{panelMode === 'center' ? 'Centered' : 'Docked'}</Text>
-              </View>
-            </View>
-            {renderDesktopControls()}
-            {renderRemoveButton(true)}
-            {renderTabNavigation(true)}
-            {activeTab ? (
-              <View style={styles.activeTabDescription}>
-                <Text style={styles.activeTabDescriptionLabel}>CURRENT TAB</Text>
-                <Text style={styles.activeTabDescriptionText}>{activeTab.description}</Text>
-              </View>
-            ) : null}
-            <TabNavigationDots count={tabs.length} activeIndex={Math.max(currentTabIndex, 0)} accentColor={agent.color || '#6366f1'} />
-          </>
-        )}
+        {renderHeader()}
+        {renderTabNavigation(isDesktop)}
 
         <ScrollView
           style={styles.scrollContent}
-          contentContainerStyle={isDesktop ? styles.desktopScrollContent : undefined}
+          contentContainerStyle={isDesktop ? styles.desktopScrollContent : styles.mobileScrollContent}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
         >
-          {!isDesktop && (
-            <>
-              <View style={styles.header}>
-                <View style={styles.headerLeft}>
-                  <View style={[styles.avatar, { backgroundColor: agent.color + '20', borderColor: agent.color }]}>
-                    <Text style={[styles.avatarText, { color: agent.color }]}>{agent.name.charAt(0)}</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    {editing ? (
-                      <View style={styles.renameRow}>
-                        <TextInput
-                          style={styles.renameInput}
-                          value={editName}
-                          onChangeText={setEditName}
-                          autoFocus
-                          onSubmitEditing={onSubmitRename}
-                        />
-                        <Pressable onPress={onSubmitRename} style={[styles.renameSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                          <Text style={styles.renameSaveText}>✓</Text>
-                        </Pressable>
-                        <Pressable onPress={onCancelRename} style={[styles.renameCancelBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                          <Text style={styles.renameCancelText}>✕</Text>
-                        </Pressable>
-                      </View>
-                    ) : (
-                      <Pressable onPress={onStartRename} style={[Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <View style={styles.nameRow}>
-                          <Text style={styles.name}>{agent.name}</Text>
-                          <Text style={styles.renameHint}>✏️</Text>
-                        </View>
-                      </Pressable>
-                    )}
-                    <View style={styles.roleRow}>
-                      <Text style={styles.role}>{agent.role}</Text>
-                      <View style={styles.modelBadge}>
-                        <Text style={styles.modelText}>{agent.model}</Text>
-                      </View>
-                    </View>
-                  </View>
-                </View>
-                <View style={[styles.statusBadge, { backgroundColor: statusColor + '20', borderColor: statusColor + '40' }]}>
-                  <View style={[styles.statusDotSmall, { backgroundColor: statusColor }]} />
-                  <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
-                </View>
-              </View>
-
-              <View style={styles.connectionRow}>
-                <Text style={styles.connectionIcon}>{PROVIDER_META[agent.providerType]?.icon || '📡'}</Text>
-                <Text style={[styles.connectionName, { color: PROVIDER_META[agent.providerType]?.color || '#888' }]}>{agent.connectionName}</Text>
-                <Text style={styles.connectionType}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
-              </View>
-
-              {renderRemoveButton(false)}
-              {renderTabNavigation(false)}
-              <TabNavigationDots count={tabs.length} activeIndex={Math.max(currentTabIndex, 0)} accentColor={agent.color || '#6366f1'} />
-            </>
-          )}
-
           <TabErrorBoundary tabKey={panelTab} accentColor={agent.color || '#6366f1'}>
             {children}
           </TabErrorBoundary>
+          {panelTab === 'overview' ? renderRemoveButton(isDesktop) : null}
         </ScrollView>
       </Animated.View>
     </>
@@ -589,17 +435,19 @@ export default function AgentPanelShell({
 const styles = StyleSheet.create({
   panel: {
     position: 'absolute',
+    zIndex: 100,
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#161b22',
     borderTopWidth: 1,
-    borderTopColor: '#1e1e3a',
+    borderTopColor: '#30363d',
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-    maxHeight: '70%' as any,
+    paddingHorizontal: 0,
+    paddingBottom: 0,
+    maxHeight: '88%' as any,
+    overflow: 'hidden' as any,
   },
   panelDesktop: {
     bottom: 'auto' as any,
@@ -607,20 +455,20 @@ const styles = StyleSheet.create({
     maxHeight: 'none' as any,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#2a2a3e',
+    borderColor: '#30363d',
     paddingHorizontal: 0,
     paddingBottom: 0,
     overflow: 'hidden' as any,
     ...(Platform.OS === 'web' ? {
       position: 'fixed',
       zIndex: 100,
-      boxShadow: '0 24px 60px rgba(0,0,0,0.6), 0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04) inset',
+      boxShadow: '0 12px 40px rgba(0,0,0,0.45)',
     } as any : {
       shadowColor: '#000',
-      shadowOffset: { width: 0, height: 16 },
-      shadowOpacity: 0.5,
-      shadowRadius: 30,
-      elevation: 24,
+      shadowOffset: { width: 0, height: 12 },
+      shadowOpacity: 0.4,
+      shadowRadius: 24,
+      elevation: 18,
     }),
   },
   panelSide: {
@@ -630,7 +478,7 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 0,
     borderRightWidth: 0,
     ...(Platform.OS === 'web' ? {
-      boxShadow: '-16px 0 48px rgba(0,0,0,0.55), -4px 0 16px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04) inset',
+      boxShadow: '-8px 0 28px rgba(0,0,0,0.38)',
     } as any : {}),
   },
   sideResizeHandle: {
@@ -648,53 +496,56 @@ const styles = StyleSheet.create({
     width: 2,
     height: 48,
     borderRadius: 1,
-    backgroundColor: '#2a2a3e',
+    backgroundColor: '#484f58',
   },
   desktopHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#1e1e3a',
-    backgroundColor: '#08080c',
-    gap: 10,
+    borderBottomColor: '#21262d',
+    backgroundColor: '#161b22',
+    gap: 12,
+    minHeight: 68,
   },
   desktopHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 12,
     flex: 1,
     minWidth: 0,
   },
   desktopHeaderAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 6,
-    borderWidth: 1.5,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
   desktopHeaderAvatarText: {
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: MONO,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  desktopHeaderIdentity: {
+    flex: 1,
+    minWidth: 0,
+    gap: 5,
   },
   desktopHeaderName: {
-    color: '#e8e8ef',
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: MONO,
-    letterSpacing: 0.3,
+    color: '#e6edf3',
+    fontSize: 16,
+    fontWeight: '600',
     flexShrink: 1,
   },
   desktopHeaderNameWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
     minWidth: 0,
-    flexShrink: 1,
+    flex: 1,
   },
   desktopHeaderEditingRow: {
     flexDirection: 'row',
@@ -704,555 +555,274 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   desktopHeaderNameInput: {
-    color: '#fff',
+    color: '#e6edf3',
     fontSize: 14,
-    fontWeight: '700',
-    fontFamily: MONO,
-    letterSpacing: 0.3,
-    backgroundColor: '#0f0f18',
+    fontWeight: '600',
+    backgroundColor: '#0d1117',
     borderWidth: 1,
     borderColor: '#6366f1',
-    borderRadius: 5,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    flexShrink: 1,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    flex: 1,
     minWidth: 0,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' as any } : {}),
   },
   desktopRenameAction: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 5,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#2c3f2f',
-    backgroundColor: '#102016',
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   desktopRenameActionText: {
-    color: '#9ae6b4',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    fontFamily: MONO,
+    color: '#e6edf3',
+    fontSize: 12,
+    fontWeight: '600',
   },
   desktopRenameCancelAction: {
-    borderColor: '#2a2a36',
-    backgroundColor: '#111118',
+    borderColor: '#30363d',
+    backgroundColor: 'transparent',
   },
   desktopRenameCancelActionText: {
-    color: '#a0a0b0',
+    color: '#8b949e',
+  },
+  desktopHeaderMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    minWidth: 0,
   },
   desktopHeaderStatus: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 20,
     borderWidth: 1,
+    flexShrink: 0,
+  },
+  desktopHeaderStatusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 5,
   },
   desktopHeaderStatusText: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1,
-    fontFamily: MONO,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  desktopHeaderMetaText: {
+    color: '#8b949e',
+    fontSize: 12,
+    flex: 1,
+    minWidth: 0,
   },
   desktopRenameChip: {
-    paddingHorizontal: 8,
+    minWidth: 44,
+    minHeight: 44,
+    paddingHorizontal: 6,
     paddingVertical: 4,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#272733',
-    backgroundColor: '#12121a',
+    borderColor: 'transparent',
+    backgroundColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   desktopRenameChipText: {
-    color: '#9fa0ad',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.7,
-    fontFamily: MONO,
+    color: '#8b949e',
+    fontSize: 11,
+    fontWeight: '500',
   },
   desktopHeaderRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
   },
   desktopIconBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 7,
-    backgroundColor: 'transparent',
+    minWidth: 44,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: '#21262d',
     borderWidth: 1,
-    borderColor: '#ffffff12',
+    borderColor: '#30363d',
     alignItems: 'center',
     justifyContent: 'center',
     ...(Platform.OS === 'web' ? { transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease' } as any : {}),
   },
   desktopIconBtnHover: {
-    backgroundColor: '#ffffff0c',
-    borderColor: '#ffffff1f',
+    backgroundColor: '#30363d',
+    borderColor: '#8b949e',
   },
   desktopIconBtnText: {
-    color: '#9a9aa8',
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: MONO,
-  },
-  desktopSubtitle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#14141c',
-    backgroundColor: '#070709',
-  },
-  desktopMetaChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#20202a',
-    backgroundColor: '#101016',
-  },
-  desktopMetaChipMode: {
-    marginLeft: 'auto',
-  },
-  desktopMetaChipInline: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    minWidth: 0,
-    flexShrink: 1,
-  },
-  desktopMetaChipLabel: {
-    color: '#5f5f6b',
-    fontSize: 10,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  desktopMetaChipValue: {
-    color: '#b3b3bf',
-    fontSize: 11,
-    fontFamily: MONO,
-    fontWeight: '700',
-    flexShrink: 1,
-  },
-  desktopSubtitleIcon: {
+    color: '#e6edf3',
     fontSize: 12,
+    fontWeight: '600',
+  },
+  desktopCloseIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 6,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  desktopCloseIconText: {
+    color: '#8b949e',
+    fontSize: 24,
+    fontWeight: '400',
+    lineHeight: 26,
   },
   desktopActionRow: {
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 4,
-    backgroundColor: '#070709',
-    borderBottomWidth: 1,
-    borderBottomColor: '#14141c',
-  },
-  desktopControlStrip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    paddingHorizontal: 14,
-    paddingTop: 10,
-    paddingBottom: 8,
-    backgroundColor: '#070709',
-    borderBottomWidth: 1,
-    borderBottomColor: '#14141c',
-  },
-  desktopControlGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  desktopControlGroupRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginLeft: 'auto',
-  },
-  desktopControlLabel: {
-    color: '#6d6d78',
-    fontSize: 10,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 1.1,
-    textTransform: 'uppercase',
-  },
-  desktopControlBtn: {
-    minWidth: 78,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#242432',
-    backgroundColor: '#101016',
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...(Platform.OS === 'web' ? { transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease' } as any : {}),
-  },
-  desktopControlBtnActive: {
-    borderColor: '#6366f155',
-    backgroundColor: '#6366f118',
-  },
-  desktopControlBtnText: {
-    color: '#9b9baa',
-    fontSize: 11,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  desktopControlBtnTextActive: {
-    color: '#ececf3',
-  },
-  desktopControlHint: {
-    color: '#6d6d78',
-    fontSize: 11,
-    fontFamily: MONO,
-  },
-  desktopCloseBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#ef444438',
-    backgroundColor: '#ef444410',
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...(Platform.OS === 'web' ? { transition: 'background-color 140ms ease, border-color 140ms ease' } as any : {}),
-  },
-  desktopCloseBtnText: {
-    color: '#f87171',
-    fontSize: 11,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 0.9,
+    marginTop: 24,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
   },
   mobileActionRow: {
-    paddingHorizontal: 8,
-    marginBottom: 8,
+    marginTop: 20,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
   },
   removeButton: {
     alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 3,
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#ef444455',
-    backgroundColor: '#ef444414',
+    borderColor: '#f8514948',
+    backgroundColor: '#f8514910',
+    justifyContent: 'center',
   },
   removeButtonText: {
-    color: '#ef4444',
-    fontSize: 12,
-    fontWeight: '800',
-    fontFamily: MONO,
+    color: '#f85149',
+    fontSize: 13,
+    fontWeight: '600',
   },
   handleArea: {
     alignItems: 'center',
-    paddingVertical: 10,
+    paddingTop: 8,
+    paddingBottom: 4,
+    backgroundColor: '#161b22',
   },
   handle: {
-    width: 40,
+    width: 36,
     height: 4,
-    backgroundColor: '#333',
+    backgroundColor: '#484f58',
     borderRadius: 2,
   },
   scrollContent: {
     flex: 1,
   },
   desktopScrollContent: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 32,
+    paddingBottom: 24,
   },
-  activeTabDescription: {
-    marginHorizontal: 16,
-    marginTop: 10,
-    marginBottom: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#232338',
-    backgroundColor: '#0c0c14',
-  },
-  activeTabDescriptionLabel: {
-    color: '#71718a',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    fontFamily: MONO,
-    marginBottom: 4,
-  },
-  activeTabDescriptionText: {
-    color: '#b8b8c7',
-    fontSize: 12,
-    lineHeight: 18,
+  mobileScrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 24,
   },
   tabNavShell: {
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a28',
-    marginBottom: 8,
+    borderBottomColor: '#21262d',
+    marginBottom: 0,
+    backgroundColor: '#161b22',
   },
   tabNavShellDesktop: {
     marginBottom: 0,
-    paddingHorizontal: 10,
-    paddingTop: 8,
-    paddingBottom: 6,
-    backgroundColor: '#08080b',
-    borderBottomColor: '#14141c',
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    paddingBottom: 4,
+    backgroundColor: '#161b22',
+    borderBottomColor: '#21262d',
   },
   tabNavArrow: {
-    paddingHorizontal: 8,
-    paddingVertical: 8,
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   tabNavArrowText: {
-    color: '#909098',
+    color: '#8b949e',
     fontSize: 16,
-    fontWeight: '700',
-    fontFamily: MONO,
+    fontWeight: '600',
   },
   tabNavScroller: {
     flex: 1,
     maxHeight: 44,
   },
   tabNavContent: {
-    gap: 4,
+    gap: 2,
   },
   tabNavItem: {
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    borderBottomWidth: 3,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 2,
     borderBottomColor: 'transparent',
     backgroundColor: 'transparent',
     borderRadius: 6,
-    minHeight: 40,
+    minHeight: 44,
     justifyContent: 'center',
   },
   tabNavItemText: {
-    color: '#a2a2ae',
+    color: '#8b949e',
     fontSize: 13,
-    fontWeight: '600',
-    fontFamily: MONO,
-    letterSpacing: 0.2,
+    fontWeight: '500',
   },
   tabNavItemTextActive: {
-    color: '#f7f7fb',
-    fontWeight: '800',
-  },
-  tabDotsRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 10,
-    marginTop: 6,
-    minHeight: 12,
+    color: '#e6edf3',
+    fontWeight: '600',
   },
   errorFallback: {
-    margin: 12,
+    margin: 0,
     padding: 16,
-    borderRadius: 4,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#ef444455',
-    backgroundColor: '#18080a',
+    borderColor: '#f8514948',
+    backgroundColor: '#f8514910',
     gap: 8,
     alignItems: 'flex-start',
   },
   errorFallbackTitle: {
-    color: '#ef4444',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 2,
-    fontFamily: MONO,
+    color: '#f85149',
+    fontSize: 14,
+    fontWeight: '600',
   },
   errorFallbackMessage: {
-    color: '#e0d0d0',
+    color: '#e6edf3',
     fontSize: 12,
     fontFamily: MONO,
     lineHeight: 18,
   },
   errorFallbackHint: {
-    color: '#808090',
-    fontSize: 11,
-    fontFamily: MONO,
-    lineHeight: 16,
+    color: '#8b949e',
+    fontSize: 12,
+    lineHeight: 18,
   },
   errorFallbackBtn: {
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 4,
+    minHeight: 44,
+    paddingVertical: 8,
+    borderRadius: 6,
     borderWidth: 1,
     marginTop: 4,
   },
   errorFallbackBtnText: {
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1,
-    fontFamily: MONO,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    flex: 1,
-  },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    borderWidth: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarText: {
-    fontSize: 20,
-    fontWeight: '900',
-    fontFamily: MONO,
-  },
-  name: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#fff',
-    fontFamily: MONO,
-  },
-  nameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  renameHint: {
-    fontSize: 13,
-    opacity: 0.4,
-  },
-  renameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  renameInput: {
-    flex: 1,
-    backgroundColor: '#000000',
-    borderWidth: 1,
-    borderColor: '#6366f1',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    color: '#eee',
-    fontFamily: MONO,
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  renameSaveBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    backgroundColor: '#22c55e15',
-    borderWidth: 1,
-    borderColor: '#22c55e30',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  renameSaveText: {
-    color: '#22c55e',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  renameCancelBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    backgroundColor: '#ef444420',
-    borderWidth: 1,
-    borderColor: '#ef444440',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  renameCancelText: {
-    color: '#ef4444',
     fontSize: 12,
-    fontWeight: '800',
-  },
-  roleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 4,
-  },
-  role: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#a1a1aa',
-    fontFamily: MONO,
-    textTransform: 'uppercase',
-  },
-  modelBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: '#111118',
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-  },
-  modelText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#ddd',
-    fontFamily: MONO,
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  statusDotSmall: {
-    width: 8,
-    height: 8,
-    borderRadius: 999,
-    marginRight: 6,
-  },
-  statusText: {
-    fontSize: 12,
-    fontWeight: '800',
-    fontFamily: MONO,
-  },
-  connectionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 2,
-    marginBottom: 8,
-  },
-  connectionIcon: {
-    fontSize: 14,
-  },
-  connectionName: {
-    fontSize: 12,
-    fontWeight: '700',
-    fontFamily: MONO,
-    flexShrink: 1,
-  },
-  connectionType: {
-    fontSize: 11,
-    color: '#666',
-    fontFamily: MONO,
-    marginLeft: 'auto',
+    fontWeight: '600',
   },
 });

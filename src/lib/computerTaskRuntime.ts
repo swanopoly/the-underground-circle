@@ -10,8 +10,13 @@ import {
   type ComputerTaskExecutionEnvelope,
 } from './computerTaskExecution';
 import {
-  executeComputerFileTask,
+  compileDesktopBridgeReadOnlyFileSequence,
+  executeDesktopBridgeFileTask,
+  isDesktopBridgeReadOnlyFileTaskResultVerified,
+  isDesktopBridgeReadOnlyFileSequenceCompletionVerified,
+  isExplicitDesktopBridgeReadOnlyFileTask,
   planDesktopBridgeFileTask,
+  runDesktopBridgeReadOnlyFileSequencePlan,
 } from './computerFileAdapter';
 import { isDirectLocalImageFormatConversionTask } from './computerTaskPlanner';
 import {
@@ -68,12 +73,14 @@ import {
   type AppLearnedFacts,
 } from './appLearnedFacts';
 import {
+  buildDeterministicReadOnlyFileRequestedActionProgress,
   deriveComputerTaskAdapterOutcomeStatus,
   deriveComputerTaskAgentOutcomeStatus,
   deriveComputerTaskTurnReplayGuard,
   isComputerTaskOutcomeComplete,
   type ComputerTaskOutcomeStatus,
   type ComputerTaskReplayPolicy,
+  type ComputerTaskRequestedActionProgress,
 } from './computerTaskOutcome';
 import type { ChatAgentContextPack } from './chatAgentContextPack';
 import { sanitizeUntrustedForModel } from './untrustedContent';
@@ -100,7 +107,10 @@ import {
   isIssuedChatPlanApprovalAuthority,
   type ChatPlanApprovalAuthority,
 } from './runChatAutomationPlan';
-import type { ChatComputerDeterministicLifecycleReadProgram } from './chatComputerRequestRouter';
+import {
+  buildChatComputerRequestedActionContract,
+  type ChatComputerDeterministicLifecycleReadProgram,
+} from './chatComputerRequestRouter';
 import {
   consumeComputerTaskRootActionHandlerAuthority,
   createComputerTaskRootActionGateway,
@@ -269,6 +279,10 @@ export type ComputerTaskRuntimeAdapterId =
 export interface ComputerTaskRuntimeResult {
   /** Authoritative terminal outcome. Never infer completion from response text. */
   status: ComputerTaskOutcomeStatus;
+  /** Runtime-owned outer task proof; absent/false can never verify A1…An. */
+  taskCompletionVerified?: boolean;
+  /** Value-free A-id progress for the closed-world read-only file sequence. */
+  requestedActionProgress?: ComputerTaskRequestedActionProgress | null;
   adapterId: ComputerTaskRuntimeAdapterId;
   execution: ComputerTaskExecutionEnvelope;
   response: string;
@@ -376,6 +390,59 @@ function compilerChildExecutionResult(
     writable: false,
   });
   return Object.freeze(childResult);
+}
+
+type ExactComputerTaskCompletionAuthoritySource =
+  | 'atomic_root_action_completed'
+  | 'durable_exact_action_verified'
+  | 'durable_lifecycle_action_verified'
+  | 'deterministic_read_only_file_verified'
+  | 'deterministic_read_only_file_sequence_verified'
+  | 'authenticated_completed_root';
+
+type ExactComputerTaskCompletionAuthority = Readonly<{
+  schemaVersion: 1;
+  kind: 'exact_computer_task_completion';
+  source: ExactComputerTaskCompletionAuthoritySource;
+}>;
+
+// `taskCompletionVerified` is an outer-request claim, not a synonym for a
+// successful bridge call. Exact deterministic paths mint this ephemeral
+// capability only after their own target-bound proof has reached a durable
+// verified/completed state. WeakSet provenance makes JSON copies and
+// caller-shaped lookalikes inert, and single-use consumption prevents one
+// exact proof from promoting a second result.
+const issuedExactComputerTaskCompletionAuthorities = new WeakSet<object>();
+const consumedExactComputerTaskCompletionAuthorities = new WeakSet<object>();
+
+function issueExactComputerTaskCompletionAuthority(
+  source: ExactComputerTaskCompletionAuthoritySource,
+): ExactComputerTaskCompletionAuthority {
+  const authority = Object.freeze({
+    schemaVersion: 1 as const,
+    kind: 'exact_computer_task_completion' as const,
+    source,
+  });
+  issuedExactComputerTaskCompletionAuthorities.add(authority);
+  return authority;
+}
+
+function applyExactComputerTaskCompletionAuthority(
+  authority: ExactComputerTaskCompletionAuthority,
+  result: ComputerTaskRuntimeResult,
+): ComputerTaskRuntimeResult {
+  if (
+    !issuedExactComputerTaskCompletionAuthorities.has(authority as object)
+    || consumedExactComputerTaskCompletionAuthorities.has(authority as object)
+    || !Object.isFrozen(authority)
+    || authority.schemaVersion !== 1
+    || authority.kind !== 'exact_computer_task_completion'
+    || result.status !== 'completed'
+  ) {
+    return { ...result, taskCompletionVerified: false };
+  }
+  consumedExactComputerTaskCompletionAuthorities.add(authority);
+  return Object.freeze({ ...result, taskCompletionVerified: true });
 }
 
 function exactSequenceManualVerificationResult(
@@ -1392,13 +1459,17 @@ function exactPhotoshopDurablePriorResult(input: {
     && Number(prior.metadata.evidenceCount || 0) > 0
     && Number(prior.metadata.blockerCount || 0) === 0
   ) {
-    return {
-      status: 'completed',
-      adapterId: 'app_adapter',
-      execution,
-      response: `The exact ${widthPx} × ${heightPx}px Photoshop document action was already durably verified. It was not executed again.`,
-      warnings: [],
-    };
+    return applyExactComputerTaskCompletionAuthority(
+      issueExactComputerTaskCompletionAuthority('durable_exact_action_verified'),
+      {
+        status: 'completed',
+        adapterId: 'app_adapter',
+        execution,
+        response: `The exact ${widthPx} × ${heightPx}px Photoshop document action was already durably verified. It was not executed again.`,
+        mutationDispatched: true,
+        warnings: [],
+      },
+    );
   }
   if (prior.state === 'dispatched' || prior.state === 'outcome_unknown' || prior.state === 'verified') {
     return exactSequenceManualVerificationResult(
@@ -1550,13 +1621,16 @@ function lifecycleDurablePriorResult(input: {
     && Number(prior.metadata.evidenceCount || 0) > 0
     && Number(prior.metadata.blockerCount || 0) === 0
   ) {
-    return {
-      status: 'completed',
-      adapterId: 'app_adapter',
-      execution,
-      response: `The original request to ${program.operation === 'focus' ? 'focus' : 'open'} **${program.targetAppName}** was already durably verified. I did not activate any app again.`,
-      warnings: [],
-    };
+    return applyExactComputerTaskCompletionAuthority(
+      issueExactComputerTaskCompletionAuthority('durable_lifecycle_action_verified'),
+      {
+        status: 'completed',
+        adapterId: 'app_adapter',
+        execution,
+        response: `The original request to ${program.operation === 'focus' ? 'focus' : 'open'} **${program.targetAppName}** was already durably verified. I did not activate any app again.`,
+        warnings: [],
+      },
+    );
   }
   if (prior.state === 'dispatched' || prior.state === 'outcome_unknown' || prior.state === 'verified') {
     return exactSequenceManualVerificationResult(
@@ -2395,15 +2469,19 @@ async function executeFrontmostPhotoshopRootActionCanary(input: {
   return exactPhotoshopCanaryResultWithRun(
     'action_claimed_or_later',
     runId,
-    {
-      status: 'completed',
-      adapterId: 'app_adapter',
-      execution,
-      response: finalTargetMatched
-        ? `Created **${expectedName}** in Photoshop at **${widthPx} × ${heightPx}px**. The exact pre-mutation app/PID/window target, document ID, count increase, and final dimensions were verified.`
-        : `Created **${expectedName}** in Photoshop at **${widthPx} × ${heightPx}px**. The exact pre-mutation target, document ID, count increase, and final dimensions were verified; your current foreground app was left alone.`,
-      warnings: foregroundChangedWarning,
-    },
+    applyExactComputerTaskCompletionAuthority(
+      issueExactComputerTaskCompletionAuthority('atomic_root_action_completed'),
+      {
+        status: 'completed',
+        adapterId: 'app_adapter',
+        execution,
+        response: finalTargetMatched
+          ? `Created **${expectedName}** in Photoshop at **${widthPx} × ${heightPx}px**. The exact pre-mutation app/PID/window target, document ID, count increase, and final dimensions were verified.`
+          : `Created **${expectedName}** in Photoshop at **${widthPx} × ${heightPx}px**. The exact pre-mutation target, document ID, count increase, and final dimensions were verified; your current foreground app was left alone.`,
+        mutationDispatched: true,
+        warnings: foregroundChangedWarning,
+      },
+    ),
   );
 }
 
@@ -2828,13 +2906,17 @@ async function executeAuthorizedExactSequenceProgram(input: {
 
     return compilerChildExecutionResult(
       'action_claimed_or_later',
-      {
-        status: 'completed',
-        adapterId: 'app_adapter',
-        execution,
-        response: `Opened Photoshop and created **${actualName || expectedName || 'a new document'}** at **${widthPx} × ${heightPx}px**. Photoshop's final document status verified the active document dimensions.`,
-        warnings: [],
-      },
+      applyExactComputerTaskCompletionAuthority(
+        issueExactComputerTaskCompletionAuthority('durable_exact_action_verified'),
+        {
+          status: 'completed',
+          adapterId: 'app_adapter',
+          execution,
+          response: `Opened Photoshop and created **${actualName || expectedName || 'a new document'}** at **${widthPx} × ${heightPx}px**. Photoshop's final document status verified the active document dimensions.`,
+          mutationDispatched: true,
+          warnings: [],
+        },
+      ),
     );
   } catch {
     return manualAfterDurableStart(
@@ -3252,14 +3334,17 @@ async function executeAuthorizedDeterministicLifecycleReadProgram(input: {
   const completionMessage = `${program.operation === 'focus' ? 'Focused' : 'Opened'} **${program.targetAppName}**${dispatchIdentity}. Fresh local process and foreground observations verified completion.`;
   return compilerChildExecutionResult(
     'action_claimed_or_later',
-    {
-      status: 'completed',
-      adapterId: 'app_adapter',
-      execution,
-      response: completionMessage,
-      ...(mutationDispatched ? { mutationDispatched: true } : {}),
-      warnings: [],
-    },
+    applyExactComputerTaskCompletionAuthority(
+      issueExactComputerTaskCompletionAuthority('durable_lifecycle_action_verified'),
+      {
+        status: 'completed',
+        adapterId: 'app_adapter',
+        execution,
+        response: completionMessage,
+        ...(mutationDispatched ? { mutationDispatched: true } : {}),
+        warnings: [],
+      },
+    ),
   );
 }
 
@@ -4334,13 +4419,17 @@ export async function executeComputerTaskWithAgent(args: {
       return exactPhotoshopCanaryResultWithRun(
         'action_claimed_or_later',
         runId,
-        {
-          status: 'completed',
-          adapterId: 'app_adapter',
-          execution: executionForResult,
-          response: 'This exact computer task is already durably completed. OpenSwan did not replay it through the generic tool loop.',
-          warnings: [],
-        },
+        applyExactComputerTaskCompletionAuthority(
+          issueExactComputerTaskCompletionAuthority('authenticated_completed_root'),
+          {
+            status: 'completed',
+            adapterId: 'app_adapter',
+            execution: executionForResult,
+            response: 'This exact computer task is already durably completed. OpenSwan did not replay it through the generic tool loop.',
+            ...(persistedRootAction.mutatesState ? { mutationDispatched: true } : {}),
+            warnings: [],
+          },
+        ),
       );
     }
     return exactPhotoshopCanaryResultWithRun(
@@ -4511,13 +4600,17 @@ export async function executeComputerTaskWithAgent(args: {
       return exactPhotoshopCanaryResultWithRun(
         'action_claimed_or_later',
         universalTaskRoot.durableRecord?.runId || '',
-        {
-          status: 'completed',
-          adapterId: 'app_adapter',
-          execution: executionForResult,
-          response: 'This exact Photoshop request is already durably completed. OpenSwan did not replay any app action on refresh.',
-          warnings: [],
-        },
+        applyExactComputerTaskCompletionAuthority(
+          issueExactComputerTaskCompletionAuthority('authenticated_completed_root'),
+          {
+            status: 'completed',
+            adapterId: 'app_adapter',
+            execution: executionForResult,
+            response: 'This exact Photoshop request is already durably completed. OpenSwan did not replay any app action on refresh.',
+            mutationDispatched: true,
+            warnings: [],
+          },
+        ),
       );
     }
     if (
@@ -4814,6 +4907,10 @@ export async function executeComputerTaskWithAgent(args: {
 
   const deterministicFilePlan = planDesktopBridgeFileTask(args.task);
   const directLocalFilePlan = planDirectLocalFileRequest(args.task);
+  const requestedActionContract = buildChatComputerRequestedActionContract(args.task);
+  const deterministicReadOnlyFileSequencePlan = compileDesktopBridgeReadOnlyFileSequence(
+    requestedActionContract,
+  );
   const isTypedFileMutation =
     isDirectLocalFileMode(directLocalFilePlan.mode)
     || isDirectLocalImageFormatConversionTask(args.task)
@@ -4824,7 +4921,19 @@ export async function executeComputerTaskWithAgent(args: {
   const shouldRunDeterministicReadOnlyFileAdapter =
     execution.preview.kind === 'file_task'
     && !isAttachedDesktopFileTask
-    && !isTypedFileMutation;
+    && !isTypedFileMutation
+    && isExplicitDesktopBridgeReadOnlyFileTask(args.task)
+    // This adapter executes exactly one list/read/search/stat operation. A
+    // compound A1…An request must stay in the full typed agent loop so later
+    // actions cannot be dropped or inherit the first operation's proof.
+    && !requestedActionContract;
+  const shouldRunDeterministicReadOnlyFileSequence =
+    execution.preview.kind === 'file_task'
+    && !isAttachedDesktopFileTask
+    // The strict compiler validates every original A-id independently. Do not
+    // let the older whole-message parser misread a read-only clause such as
+    // "show the size of …" as `open_path` and veto this safer sequence.
+    && Boolean(deterministicReadOnlyFileSequencePlan);
   // An exact program begins with an app-native read-only status call and ends
   // with the same status call as proof. That is the freshest and most
   // relevant observation boundary; do not prepend the generic screen/window
@@ -4838,25 +4947,63 @@ export async function executeComputerTaskWithAgent(args: {
         opensAppSurface: directLocalFilePlan.mode === 'open_path',
       });
 
+  if (shouldRunDeterministicReadOnlyFileSequence && deterministicReadOnlyFileSequencePlan) {
+    const sequenceResult = await runDesktopBridgeReadOnlyFileSequencePlan(
+      deterministicReadOnlyFileSequencePlan,
+    );
+    if (sequenceResult) {
+      const completionVerified = isDesktopBridgeReadOnlyFileSequenceCompletionVerified(sequenceResult);
+      const requestedActionProgress = buildDeterministicReadOnlyFileRequestedActionProgress({
+        actionResults: sequenceResult.actionResults,
+        outcomeStatus: sequenceResult.status,
+      });
+      const runtimeResult: ComputerTaskRuntimeResult = {
+        status: completionVerified ? 'completed' : sequenceResult.status,
+        taskCompletionVerified: false,
+        requestedActionProgress,
+        adapterId: 'file_adapter',
+        execution: executionForResult,
+        response: sequenceResult.message,
+        modelResolution,
+        warnings: [...warnings, ...sequenceResult.warnings],
+      };
+      return completionVerified
+        ? applyExactComputerTaskCompletionAuthority(
+            issueExactComputerTaskCompletionAuthority('deterministic_read_only_file_sequence_verified'),
+            runtimeResult,
+          )
+        : runtimeResult;
+    }
+  }
+
   if (shouldRunDeterministicReadOnlyFileAdapter) {
-    const fileResult = await executeComputerFileTask({
-      circleId: args.circleId,
-      task: args.task,
-    });
-    return {
-      // File adapters return structured read/stat or completed filesystem
-      // operation results from the bridge/MCP handler, which are the
-      // authoritative terminal result for this deterministic lane.
-      status: deriveComputerTaskAdapterOutcomeStatus({
-        ok: fileResult.ok,
-        proofVerified: fileResult.ok,
-      }),
-      adapterId: 'file_adapter',
-      execution: executionForResult,
-      response: fileResult.message,
-      modelResolution,
-      warnings: [...warnings, ...fileResult.warnings],
-    };
+    // Keep this named-local-file shortcut on the authenticated desktop bridge.
+    // A generic MCP success does not prove it touched the requested local path.
+    const fileResult = await executeDesktopBridgeFileTask(args.task);
+    if (fileResult) {
+      const completionVerified = isDesktopBridgeReadOnlyFileTaskResultVerified(
+        args.task,
+        fileResult,
+      );
+      const runtimeResult: ComputerTaskRuntimeResult = {
+        status: deriveComputerTaskAdapterOutcomeStatus({
+          ok: fileResult.ok,
+          proofVerified: completionVerified,
+        }),
+        taskCompletionVerified: false,
+        adapterId: 'file_adapter',
+        execution: executionForResult,
+        response: fileResult.message,
+        modelResolution,
+        warnings: [...warnings, ...fileResult.warnings],
+      };
+      return completionVerified
+        ? applyExactComputerTaskCompletionAuthority(
+            issueExactComputerTaskCompletionAuthority('deterministic_read_only_file_verified'),
+            runtimeResult,
+          )
+        : runtimeResult;
+    }
   }
 
   // App, hybrid, open-path, conversion, and file-mutation tasks never execute
@@ -5259,6 +5406,8 @@ export async function executeComputerTaskWithAgent(args: {
 
   return {
     status: finalStatus,
+    taskCompletionVerified: result.taskTurnEvidence?.taskCompletionVerified === true
+      && result.taskTurnEvidence.status === 'completed',
     adapterId: adapterIdForKind(execution.preview.kind),
     execution: executionForResult,
     response: [attachmentStagingMessage, combinedResponse, visibleCapabilityBuildoutMessage(capabilityBuildout)].filter(Boolean).join('\n\n'),

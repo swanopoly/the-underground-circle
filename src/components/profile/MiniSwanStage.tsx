@@ -47,7 +47,7 @@ function SwanModel() {
 
       <mesh ref={ringRef} position={[0, -0.34, 0]} rotation={[Math.PI / 2.8, 0, 0]}>
         <torusGeometry args={[1.02, 0.035, 16, 64]} />
-        <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={0.55} transparent opacity={0.75} />
+        <meshStandardMaterial color="#6366f1" emissive="#6366f1" emissiveIntensity={0.55} transparent opacity={0.75} />
       </mesh>
 
       <mesh position={[0, 0.05, 0]} material={bodyMaterial}>
@@ -98,12 +98,12 @@ export default function MiniSwanStage() {
         style={{
           width: '100%',
           height: '100%',
-          background: 'radial-gradient(circle at 30% 20%, rgba(34,211,238,0.18), transparent 38%), linear-gradient(180deg, rgba(15,23,42,0.88), rgba(2,6,23,0.96))',
+          background: 'radial-gradient(circle at 30% 20%, rgba(99,102,241,0.18), transparent 38%), linear-gradient(180deg, rgba(15,23,42,0.88), rgba(2,6,23,0.96))',
         } as any}
       >
         <ambientLight intensity={0.85} color={0xe2e8f0} />
         <directionalLight position={[3, 5, 4]} intensity={1.1} color={0xffffff} />
-        <pointLight position={[-3, 2, 3]} intensity={1.2} color={0x22d3ee} />
+        <pointLight position={[-3, 2, 3]} intensity={1.2} color={0x6366f1} />
         <pointLight position={[2, 1, -2]} intensity={0.75} color={0x6366f1} />
         <SwanModel />
       </Canvas>

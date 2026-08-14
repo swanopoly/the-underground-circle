@@ -69,6 +69,96 @@ export interface SendCommandParams {
   model?: string | null;
 }
 
+/**
+ * Immutable account/circle authority captured before a terminal operation
+ * yields. `generation` is owned by the mounting surface and retires every
+ * in-flight operation when its authenticated subject or token changes.
+ */
+export interface TerminalExactAuthority {
+  readonly userId: string;
+  readonly circleId: string;
+  readonly accessToken: string;
+  readonly generation: number;
+}
+
+export type TerminalAuthorityCurrentGuard = (
+  authority: TerminalExactAuthority,
+) => boolean;
+
+export interface TerminalCommandTargetReceipt {
+  readonly targetAgentId: string | null;
+  readonly targetAgentIds: readonly string[] | null;
+  readonly targetAgentName: string;
+  readonly fingerprint: string;
+}
+
+/**
+ * Proof handed from persistence to the local dispatcher. A direct invocation
+ * may proceed only while this exact authority is still current and its target
+ * fingerprint still matches the pre-await selection.
+ */
+export interface TerminalCommandDispatchReceipt {
+  readonly messageId: string;
+  readonly authority: TerminalExactAuthority;
+  readonly target: TerminalCommandTargetReceipt;
+}
+
+/**
+ * Exact proof returned only after Postgres deleted the sender-owned durable
+ * message. Responses are removed by the message FK's ON DELETE CASCADE in the
+ * same database statement, so there is no client-side child-delete gap.
+ */
+export interface TerminalMessageDeleteReceipt {
+  readonly messageId: string;
+  readonly circleId: string;
+  readonly senderId: string;
+  readonly authority: TerminalExactAuthority;
+}
+
+export interface DeleteTerminalMessageResult {
+  readonly receipt?: TerminalMessageDeleteReceipt;
+  readonly error?: string;
+}
+
+export interface SendTerminalCommandResult {
+  messageId?: string;
+  error?: string;
+  /** Present only when exact persistence completed under still-current authority. */
+  receipt?: TerminalCommandDispatchReceipt;
+}
+
+export interface AuthorizedTerminalCommand {
+  readonly command: BroadcastCommandPayload;
+  readonly receipt: TerminalCommandDispatchReceipt;
+}
+
+export interface TerminalNativeCommandTarget {
+  id: string;
+  name: string;
+  provider: string;
+  connectionId: string | null;
+  terminalTargetName: string;
+}
+
+export interface BuildTerminalNativeCommandTargetsInput {
+  currentUserId: string;
+  connections: ReadonlyArray<{
+    id: string;
+    name: string;
+    provider: string;
+    enabled: boolean;
+    status: string;
+  }>;
+  officeAgents: ReadonlyArray<{
+    id: string;
+    ownerId: string;
+    name: string;
+    provider: string;
+  }>;
+  openSwanReadyAgentIds?: ReadonlySet<string>;
+  virtualDisplayName?: string;
+}
+
 export interface BroadcastCommandPayload {
   messageId: string;
   circleId: string;
@@ -107,6 +197,298 @@ export interface BroadcastResponsePayload {
 
 function isTerminalUuid(value: unknown): value is string {
   return typeof value === 'string' && TERMINAL_UUID_RE.test(value);
+}
+
+/** Normalize and freeze an exact authority snapshot; malformed input fails closed. */
+export function normalizeTerminalExactAuthority(
+  value: TerminalExactAuthority | null | undefined,
+): TerminalExactAuthority | null {
+  const userId = String(value?.userId || '').trim();
+  const circleId = String(value?.circleId || '').trim();
+  const accessToken = String(value?.accessToken || '').trim();
+  const generation = Number(value?.generation);
+  if (
+    !isTerminalUuid(userId)
+    || !isTerminalUuid(circleId)
+    || !accessToken
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return Object.freeze({ userId, circleId, accessToken, generation });
+}
+
+export function terminalExactAuthorityMatches(
+  expected: TerminalExactAuthority | null | undefined,
+  current: TerminalExactAuthority | null | undefined,
+): boolean {
+  const normalizedExpected = normalizeTerminalExactAuthority(expected);
+  const normalizedCurrent = normalizeTerminalExactAuthority(current);
+  return Boolean(
+    normalizedExpected
+    && normalizedCurrent
+    && normalizedExpected.userId === normalizedCurrent.userId
+    && normalizedExpected.circleId === normalizedCurrent.circleId
+    && normalizedExpected.accessToken === normalizedCurrent.accessToken
+    && normalizedExpected.generation === normalizedCurrent.generation,
+  );
+}
+
+function terminalAuthorityGuardPasses(
+  authority: TerminalExactAuthority,
+  isCurrent: TerminalAuthorityCurrentGuard,
+): boolean {
+  try {
+    return isCurrent(authority) === true;
+  } catch {
+    return false;
+  }
+}
+
+export interface TerminalAuthorityOperationFence {
+  readonly authority: TerminalExactAuthority;
+  readonly signal: AbortSignal;
+  readonly isCurrent: () => boolean;
+  readonly stop: () => void;
+}
+
+/**
+ * Abort an abort-aware request as soon as its captured Office generation is
+ * retired. Callers must still fence the result after await: an upstream side
+ * effect may win the race with a client abort, but its late result must never
+ * enter the replacement account's UI.
+ */
+export function createTerminalAuthorityOperationFence(
+  capturedAuthority: TerminalExactAuthority | null | undefined,
+  isCurrent: TerminalAuthorityCurrentGuard,
+  pollIntervalMs = 25,
+): TerminalAuthorityOperationFence | null {
+  const authority = normalizeTerminalExactAuthority(capturedAuthority);
+  if (!authority || !terminalAuthorityGuardPasses(authority, isCurrent)) return null;
+
+  const controller = new AbortController();
+  let stopped = false;
+  const requestIsCurrent = () => (
+    !stopped
+    && !controller.signal.aborted
+    && terminalAuthorityGuardPasses(authority, isCurrent)
+  );
+  const retireIfStale = () => {
+    if (!stopped && !terminalAuthorityGuardPasses(authority, isCurrent)) {
+      controller.abort();
+    }
+  };
+  const timer = setInterval(retireIfStale, Math.max(10, pollIntervalMs));
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+  };
+
+  return Object.freeze({ authority, signal: controller.signal, isCurrent: requestIsCurrent, stop });
+}
+
+export function buildTerminalCommandTargetReceipt(input: {
+  targetAgentId: string | null;
+  targetAgentIds: readonly string[] | null;
+  targetAgentName: string;
+}): TerminalCommandTargetReceipt {
+  const safeTargets = sanitizeTerminalTargetIds(input.targetAgentId, input.targetAgentIds);
+  const targetAgentName = persistableTerminalTargetName(
+    input.targetAgentName,
+    safeTargets.includesBlackSwan,
+  );
+  const targetAgentIds = safeTargets.targetAgentIds
+    ? Object.freeze([...safeTargets.targetAgentIds])
+    : null;
+  const fingerprint = `terminal-target-v1:${JSON.stringify([
+    safeTargets.targetAgentId,
+    targetAgentIds,
+    targetAgentName,
+  ])}`;
+  return Object.freeze({
+    targetAgentId: safeTargets.targetAgentId,
+    targetAgentIds,
+    targetAgentName,
+    fingerprint,
+  });
+}
+
+function buildTerminalCommandDispatchReceipt(input: {
+  messageId: string;
+  authority: TerminalExactAuthority;
+  target: TerminalCommandTargetReceipt;
+}): TerminalCommandDispatchReceipt | null {
+  const authority = normalizeTerminalExactAuthority(input.authority);
+  if (!isTerminalUuid(input.messageId) || !authority) return null;
+  const target = buildTerminalCommandTargetReceipt(input.target);
+  if (target.fingerprint !== input.target.fingerprint) return null;
+  return Object.freeze({ messageId: input.messageId, authority, target });
+}
+
+/** Final synchronous gate for a local direct dispatcher. */
+export function isTerminalCommandDispatchReceiptCurrent(input: {
+  receipt: TerminalCommandDispatchReceipt | null | undefined;
+  expectedAuthority: TerminalExactAuthority | null | undefined;
+  expectedTargetFingerprint: string;
+  isCurrent: TerminalAuthorityCurrentGuard;
+}): boolean {
+  const receiptAuthority = normalizeTerminalExactAuthority(input.receipt?.authority);
+  const expectedAuthority = normalizeTerminalExactAuthority(input.expectedAuthority);
+  if (
+    !input.receipt
+    || !isTerminalUuid(input.receipt.messageId)
+    || !receiptAuthority
+    || !expectedAuthority
+    || !terminalExactAuthorityMatches(receiptAuthority, expectedAuthority)
+    || input.receipt.target.fingerprint !== input.expectedTargetFingerprint
+  ) return false;
+  const rebuiltTarget = buildTerminalCommandTargetReceipt(input.receipt.target);
+  return rebuiltTarget.fingerprint === input.receipt.target.fingerprint
+    && terminalAuthorityGuardPasses(receiptAuthority, input.isCurrent);
+}
+
+/** Final synchronous gate before a verified durable delete changes local UI. */
+export function isTerminalMessageDeleteReceiptCurrent(input: {
+  receipt: TerminalMessageDeleteReceipt | null | undefined;
+  expectedAuthority: TerminalExactAuthority | null | undefined;
+  expectedMessageId: string;
+  isCurrent: TerminalAuthorityCurrentGuard;
+}): boolean {
+  const receiptAuthority = normalizeTerminalExactAuthority(input.receipt?.authority);
+  const expectedAuthority = normalizeTerminalExactAuthority(input.expectedAuthority);
+  return Boolean(
+    input.receipt
+    && isTerminalUuid(input.expectedMessageId)
+    && input.receipt.messageId === input.expectedMessageId
+    && receiptAuthority
+    && expectedAuthority
+    && terminalExactAuthorityMatches(receiptAuthority, expectedAuthority)
+    && input.receipt.circleId === expectedAuthority.circleId
+    && input.receipt.senderId === expectedAuthority.userId
+    && terminalAuthorityGuardPasses(receiptAuthority, input.isCurrent)
+  );
+}
+
+/**
+ * Convert presentation/runtime connection data into identities the durable
+ * Office terminal can actually persist and claim. Name/provider matching is
+ * exact and only selects one owner row; ambiguity always omits the target.
+ */
+export function buildTerminalNativeCommandTargets(
+  input: BuildTerminalNativeCommandTargetsInput,
+): TerminalNativeCommandTarget[] {
+  const targets: TerminalNativeCommandTarget[] = [{
+    id: BLACKSWAN_VIRTUAL_AGENT_ID,
+    name: input.virtualDisplayName?.trim() || 'OpenSwan',
+    provider: 'blackswan',
+    connectionId: null,
+    terminalTargetName: '@BlackSwan',
+  }];
+  if (!input.currentUserId) return targets;
+
+  const activeConnections = input.connections.filter(connection => (
+    connection.enabled && connection.status === 'connected'
+  ));
+  const connectionCountsByPublishIdentity = new Map<string, number>();
+  const connectionCountsById = new Map<string, number>();
+  for (const connection of activeConnections) {
+    const key = JSON.stringify([connection.name, connection.provider]);
+    connectionCountsByPublishIdentity.set(
+      key,
+      (connectionCountsByPublishIdentity.get(key) || 0) + 1,
+    );
+    connectionCountsById.set(
+      connection.id,
+      (connectionCountsById.get(connection.id) || 0) + 1,
+    );
+  }
+  const seenTargetIds = new Set<string>([BLACKSWAN_VIRTUAL_AGENT_ID]);
+  for (const connection of activeConnections) {
+    const connectionIdentity = JSON.stringify([connection.name, connection.provider]);
+    // A publish identity must bind in both directions: one live connection to
+    // one durable row. Choosing the first duplicate would make the picker and
+    // dispatcher disagree about which endpoint owns the command.
+    if (
+      connectionCountsByPublishIdentity.get(connectionIdentity) !== 1
+      || connectionCountsById.get(connection.id) !== 1
+    ) continue;
+    const matches = input.officeAgents.filter(agent => (
+      agent.ownerId === input.currentUserId
+      && isTerminalUuid(agent.id)
+      && agent.name === connection.name
+      && agent.provider === connection.provider
+    ));
+    if (matches.length !== 1) continue;
+    const agent = matches[0];
+    if (
+      seenTargetIds.has(agent.id)
+      || (agent.provider === 'openswan' && !input.openSwanReadyAgentIds?.has(agent.id))
+    ) continue;
+    seenTargetIds.add(agent.id);
+    targets.push({
+      id: agent.id,
+      name: agent.name,
+      provider: agent.provider,
+      connectionId: connection.id,
+      terminalTargetName: `@${agent.name}`,
+    });
+  }
+  return targets;
+}
+
+export type TerminalTargetSelection = {
+  ok: true;
+  targetAgentId: string | null;
+  targetAgentIds: string[] | null;
+  targetAgentName: string;
+} | {
+  ok: false;
+  error: string;
+};
+
+/**
+ * Resolve the terminal's one canonical selected-id state into the legacy DB
+ * columns at the final persistence boundary. Unknown/stale ids fail closed;
+ * they are never silently removed or replaced with @all.
+ */
+export function resolveTerminalTargetSelection(
+  selectedIds: readonly string[] | null,
+  availableTargets: ReadonlyArray<{ id: string; name: string }>,
+): TerminalTargetSelection {
+  if (!selectedIds || selectedIds.length === 0) {
+    return {
+      ok: true,
+      targetAgentId: null,
+      targetAgentIds: null,
+      targetAgentName: '@all',
+    };
+  }
+  const uniqueIds = Array.from(new Set(selectedIds));
+  const byId = new Map(availableTargets.map(target => [target.id, target]));
+  const resolved = uniqueIds.map(id => byId.get(id));
+  if (resolved.some(target => !target)) {
+    return {
+      ok: false,
+      error: 'A selected agent is no longer connected. Choose an available target and try again.',
+    };
+  }
+  if (uniqueIds.length === 1) {
+    const target = resolved[0]!;
+    return {
+      ok: true,
+      targetAgentId: target.id,
+      targetAgentIds: [target.id],
+      targetAgentName: target.id === BLACKSWAN_VIRTUAL_AGENT_ID
+        ? '@BlackSwan'
+        : `@${target.name}`,
+    };
+  }
+  return {
+    ok: true,
+    targetAgentId: null,
+    targetAgentIds: uniqueIds,
+    targetAgentName: `${uniqueIds.length} agents`,
+  };
 }
 
 function asTerminalRow(value: unknown): Record<string, unknown> | null {
@@ -267,6 +649,72 @@ export async function loadAuthorizedTerminalCommandFromWakeup(
   }
 }
 
+/**
+ * Exact-authority variant used by authenticated Office runtimes. It never
+ * reacquires the mutable browser session: both token verification and the row
+ * read are bound to the captured bearer, with current-generation checks around
+ * every await.
+ */
+export async function loadAuthorizedTerminalCommandFromWakeupExact(
+  expectedCircleId: string,
+  payload: unknown,
+  capturedAuthority: TerminalExactAuthority,
+  isCurrent: TerminalAuthorityCurrentGuard,
+  client: TerminalAuthorityClient = supabase,
+): Promise<AuthorizedTerminalCommand | null> {
+  const authority = normalizeTerminalExactAuthority(capturedAuthority);
+  const expected = parseTerminalCommandWakeup(expectedCircleId, payload);
+  if (
+    !authority
+    || !expected
+    || authority.circleId !== expected.circleId
+    || !terminalAuthorityGuardPasses(authority, isCurrent)
+  ) return null;
+
+  try {
+    const { data: authData, error: authError } = await client.auth.getUser(authority.accessToken);
+    if (
+      authError
+      || authData.user?.id !== authority.userId
+      || !terminalAuthorityGuardPasses(authority, isCurrent)
+    ) return null;
+
+    const { data, error } = await client
+      .from('office_terminal_messages')
+      .select(
+        'id,circle_id,sender_id,sender_name,target_agent_id,target_agent_name,target_agent_ids,model,command_text,status,created_at',
+      )
+      .eq('id', expected.messageId)
+      .eq('circle_id', authority.circleId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+      .maybeSingle();
+    if (error || !data || !terminalAuthorityGuardPasses(authority, isCurrent)) return null;
+
+    const reconstructed = reconstructExecutableTerminalCommand(expected, data);
+    if (!reconstructed) return null;
+    const target = buildTerminalCommandTargetReceipt({
+      targetAgentId: reconstructed.targetAgentId,
+      targetAgentIds: reconstructed.targetAgentIds,
+      targetAgentName: reconstructed.targetAgentName,
+    });
+    const receipt = buildTerminalCommandDispatchReceipt({
+      messageId: reconstructed.messageId,
+      authority,
+      target,
+    });
+    if (!receipt || !terminalAuthorityGuardPasses(authority, isCurrent)) return null;
+    const command = Object.freeze({
+      ...reconstructed,
+      targetAgentIds: reconstructed.targetAgentIds
+        ? Object.freeze([...reconstructed.targetAgentIds])
+        : null,
+    }) as BroadcastCommandPayload;
+    return Object.freeze({ command, receipt });
+  } catch {
+    return null;
+  }
+}
+
 function isTerminalCommandForListener(
   payload: BroadcastCommandPayload,
   myAgentIds: ReadonlySet<string>,
@@ -324,7 +772,7 @@ const terminalResponsesInflight = new Map<string, Promise<TerminalResponse[]>>()
 
 export async function sendTerminalCommand(
   params: SendCommandParams
-): Promise<{ messageId?: string; error?: string }> {
+): Promise<SendTerminalCommandResult> {
   const {
     circleId, senderId, senderName,
     commandText, targetAgentId = null, targetAgentName = '@all',
@@ -365,20 +813,188 @@ export async function sendTerminalCommand(
 
   // 2. Broadcast an advisory wake-up only. Receivers must fetch the exact
   // authenticated durable row before any invocation.
-  const channel = await getOrCreateCommandChannel(circleId);
-  await channel.send({
-    type: 'broadcast',
-    event: 'command',
-    payload: {
+  try {
+    const channel = await getOrCreateCommandChannel(circleId);
+    const wakeupStatus = await channel.send({
+      type: 'broadcast',
+      event: 'command',
+      payload: {
+        messageId,
+        circleId,
+        targetAgentId: safeTargets.targetAgentId,
+        targetAgentIds: safeTargets.targetAgentIds,
+        timestamp: new Date().toISOString(),
+      } satisfies BroadcastCommandWakeupPayload,
+    });
+    if (wakeupStatus !== 'ok') {
+      return {
+        messageId,
+        error: 'Command saved, but the real-time delivery wake-up could not be confirmed.',
+      };
+    }
+  } catch {
+    // Persistence is authoritative. Return its id so the local sender can use
+    // the direct invocation seam without replaying and duplicating the row.
+    return {
       messageId,
-      circleId,
-      targetAgentId: safeTargets.targetAgentId,
-      targetAgentIds: safeTargets.targetAgentIds,
-      timestamp: new Date().toISOString(),
-    } satisfies BroadcastCommandWakeupPayload,
-  });
+      error: 'Command saved, but the real-time delivery wake-up could not be confirmed.',
+    };
+  }
 
   return { messageId };
+}
+
+function terminalTargetIdsMatch(
+  left: unknown,
+  right: readonly string[] | null,
+): boolean {
+  if (left === null || left === undefined) return right === null;
+  if (!Array.isArray(left) || right === null || left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function exactPersistenceReceiptMatches(input: {
+  row: unknown;
+  authority: TerminalExactAuthority;
+  target: TerminalCommandTargetReceipt;
+}): boolean {
+  const row = asTerminalRow(input.row);
+  return Boolean(
+    row
+    && isTerminalUuid(row.id)
+    && row.circle_id === input.authority.circleId
+    && row.sender_id === input.authority.userId
+    && row.status === 'pending'
+    && (row.target_agent_id ?? null) === input.target.targetAgentId
+    && row.target_agent_name === input.target.targetAgentName
+    && terminalTargetIdsMatch(row.target_agent_ids, input.target.targetAgentIds),
+  );
+}
+
+type TerminalCommandWakeupChannel = Pick<RealtimeChannel, 'send'>;
+
+/**
+ * Persist one Office command under an immutable bearer snapshot. Unlike the
+ * compatibility sender above, this path verifies that the bearer subject is
+ * the declared sender, applies that bearer directly to the insert, validates
+ * the returned row, and withholds dispatch authority after any generation
+ * change.
+ */
+export async function sendTerminalCommandExact(
+  params: SendCommandParams,
+  capturedAuthority: TerminalExactAuthority,
+  isCurrent: TerminalAuthorityCurrentGuard,
+  client: TerminalAuthorityClient = supabase,
+  getCommandChannel: (circleId: string) => Promise<TerminalCommandWakeupChannel> = getOrCreateCommandChannel,
+): Promise<SendTerminalCommandResult> {
+  const authority = normalizeTerminalExactAuthority(capturedAuthority);
+  if (
+    !authority
+    || params.circleId !== authority.circleId
+    || params.senderId !== authority.userId
+    || !String(params.commandText || '').trim()
+    || !terminalAuthorityGuardPasses(authority, isCurrent)
+  ) {
+    return { error: 'The terminal session changed before this command could be authorized.' };
+  }
+
+  const target = buildTerminalCommandTargetReceipt({
+    targetAgentId: params.targetAgentId ?? null,
+    targetAgentIds: params.targetAgentIds ?? null,
+    targetAgentName: params.targetAgentName || '@all',
+  });
+
+  try {
+    const { data: authData, error: authError } = await client.auth.getUser(authority.accessToken);
+    if (
+      authError
+      || authData.user?.id !== authority.userId
+      || !terminalAuthorityGuardPasses(authority, isCurrent)
+    ) {
+      return { error: 'The terminal session could not verify the command sender.' };
+    }
+
+    const { data, error } = await client
+      .from('office_terminal_messages')
+      .insert({
+        circle_id: authority.circleId,
+        sender_id: authority.userId,
+        sender_name: params.senderName,
+        target_agent_id: target.targetAgentId,
+        target_agent_name: target.targetAgentName,
+        target_agent_ids: target.targetAgentIds ? [...target.targetAgentIds] : null,
+        model: params.model ?? null,
+        command_text: params.commandText,
+        status: 'pending',
+      })
+      .select('id,circle_id,sender_id,target_agent_id,target_agent_name,target_agent_ids,status')
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+      .single();
+
+    const row = asTerminalRow(data);
+    const messageId = isTerminalUuid(row?.id) ? row.id : undefined;
+    if (error) return { error: error.message };
+    if (!messageId || !exactPersistenceReceiptMatches({ row, authority, target })) {
+      return {
+        messageId,
+        error: 'Terminal command persistence did not return the exact sender and target receipt.',
+      };
+    }
+    if (!terminalAuthorityGuardPasses(authority, isCurrent)) {
+      return {
+        messageId,
+        error: 'Command saved, but local dispatch was cancelled because the terminal session changed.',
+      };
+    }
+
+    const receipt = buildTerminalCommandDispatchReceipt({
+      messageId,
+      authority,
+      target,
+    });
+    if (!receipt) {
+      return { messageId, error: 'Terminal command receipt could not be verified.' };
+    }
+
+    let wakeupError: string | undefined;
+    try {
+      const channel = await getCommandChannel(authority.circleId);
+      if (!terminalAuthorityGuardPasses(authority, isCurrent)) {
+        return {
+          messageId,
+          error: 'Command saved, but local dispatch was cancelled because the terminal session changed.',
+        };
+      }
+      const wakeupStatus = await channel.send({
+        type: 'broadcast',
+        event: 'command',
+        payload: {
+          messageId,
+          circleId: authority.circleId,
+          targetAgentId: target.targetAgentId,
+          targetAgentIds: target.targetAgentIds ? [...target.targetAgentIds] : null,
+          timestamp: new Date().toISOString(),
+        } satisfies BroadcastCommandWakeupPayload,
+      });
+      if (wakeupStatus !== 'ok') {
+        wakeupError = 'Command saved, but the real-time delivery wake-up could not be confirmed.';
+      }
+    } catch {
+      wakeupError = 'Command saved, but the real-time delivery wake-up could not be confirmed.';
+    }
+
+    if (!terminalAuthorityGuardPasses(authority, isCurrent)) {
+      return {
+        messageId,
+        error: 'Command saved, but local dispatch was cancelled because the terminal session changed.',
+      };
+    }
+    return Object.freeze({ messageId, receipt, ...(wakeupError ? { error: wakeupError } : {}) });
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : 'Terminal command could not be saved.',
+    };
+  }
 }
 
 // ─── Subscribe to incoming commands (for agent gateways) ─────────────────────
@@ -440,6 +1056,78 @@ export function subscribeToTerminalCommands(
 
   return () => {
     commandChannels.delete(circleId);
+    handle.unsubscribe();
+  };
+}
+
+/**
+ * Account-bound command listener for Office. Its durable row reload uses the
+ * captured bearer and every async continuation checks the caller's generation
+ * guard before the command or receipt reaches an agent dispatcher.
+ */
+export function subscribeToTerminalCommandsExact(
+  capturedAuthority: TerminalExactAuthority,
+  myAgentIds: string[],
+  isCurrent: TerminalAuthorityCurrentGuard,
+  onCommand: (authorized: AuthorizedTerminalCommand) => void | Promise<void>,
+  loadAuthorized: typeof loadAuthorizedTerminalCommandFromWakeupExact = loadAuthorizedTerminalCommandFromWakeupExact,
+): () => void {
+  const authority = normalizeTerminalExactAuthority(capturedAuthority);
+  const listenerIds = new Set(
+    myAgentIds.filter((id) => isTerminalUuid(id) || id === BLACKSWAN_VIRTUAL_AGENT_ID),
+  );
+  if (!authority || listenerIds.size === 0 || !terminalAuthorityGuardPasses(authority, isCurrent)) {
+    return () => {};
+  }
+
+  let retired = false;
+  const requestIsCurrent = () => (
+    !retired && terminalAuthorityGuardPasses(authority, isCurrent)
+  );
+  const channelName = `office-terminal-cmd-${authority.circleId}`;
+  const authorizedMessageIds = new Set<string>();
+  const authorityReadsInFlight = new Set<string>();
+  const existing = commandChannels.get(authority.circleId);
+  if (existing) existing.unsubscribe();
+
+  const handle = subscribeWithReconnect({
+    channelName,
+    channelConfig: { config: { broadcast: { self: true } } },
+    setup: (channel) => channel
+      .on('broadcast', { event: 'command' }, ({ payload }) => {
+        if (!requestIsCurrent()) return;
+        const expected = parseTerminalCommandWakeup(authority.circleId, payload);
+        if (
+          !expected
+          || authorizedMessageIds.has(expected.messageId)
+          || authorityReadsInFlight.has(expected.messageId)
+        ) return;
+
+        authorityReadsInFlight.add(expected.messageId);
+        void loadAuthorized(authority.circleId, payload, authority, requestIsCurrent)
+          .then(async (authorized) => {
+            if (!authorized || !requestIsCurrent()) return;
+            if (!isTerminalCommandForListener(authorized.command, listenerIds)) return;
+            authorizedMessageIds.add(authorized.command.messageId);
+            await onCommand(authorized);
+          })
+          .catch(() => {
+            // Fail closed. Broadcast data and retired authority never dispatch.
+          })
+          .finally(() => {
+            authorityReadsInFlight.delete(expected.messageId);
+          });
+      }),
+  });
+
+  commandChannels.set(authority.circleId, handle);
+  return () => {
+    retired = true;
+    authorityReadsInFlight.clear();
+    authorizedMessageIds.clear();
+    if (commandChannels.get(authority.circleId) === handle) {
+      commandChannels.delete(authority.circleId);
+    }
     handle.unsubscribe();
   };
 }
@@ -609,6 +1297,104 @@ export function subscribeToTerminalMessages(
 
 // ─── Delete a terminal message (hard delete — removes row + responses) ───────
 
+/**
+ * Delete one sender-owned Office message under a captured bearer. The parent
+ * delete is the only mutation: `office_terminal_responses.message_id` already
+ * has `ON DELETE CASCADE`, which keeps child removal atomic and avoids the old
+ * client-side two-statement partial-delete failure.
+ */
+export async function deleteTerminalMessageExact(
+  messageId: string,
+  capturedAuthority: TerminalExactAuthority,
+  isCurrent: TerminalAuthorityCurrentGuard,
+  client: TerminalAuthorityClient = supabase,
+): Promise<DeleteTerminalMessageResult> {
+  const authority = normalizeTerminalExactAuthority(capturedAuthority);
+  if (
+    !isTerminalUuid(messageId)
+    || !authority
+    || !terminalAuthorityGuardPasses(authority, isCurrent)
+  ) {
+    return { error: 'The terminal session changed before this message could be deleted.' };
+  }
+
+  const fence = createTerminalAuthorityOperationFence(authority, isCurrent);
+  if (!fence) {
+    return { error: 'The terminal session changed before this message could be deleted.' };
+  }
+
+  try {
+    const { data: authData, error: authError } = await client.auth.getUser(authority.accessToken);
+    if (
+      authError
+      || authData.user?.id !== authority.userId
+      || !fence.isCurrent()
+    ) {
+      return { error: 'The terminal session could not verify the message sender.' };
+    }
+
+    const { data, error } = await client
+      .from('office_terminal_messages')
+      .delete()
+      .eq('id', messageId)
+      .eq('circle_id', authority.circleId)
+      .eq('sender_id', authority.userId)
+      .select('id,circle_id,sender_id')
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+      .abortSignal(fence.signal)
+      .maybeSingle();
+
+    if (error) return { error: error.message };
+    const row = asTerminalRow(data);
+    if (
+      !row
+      || row.id !== messageId
+      || row.circle_id !== authority.circleId
+      || row.sender_id !== authority.userId
+      || !fence.isCurrent()
+    ) {
+      return {
+        error: fence.isCurrent()
+          ? 'No sender-owned terminal message matched this delete request.'
+          : 'The message delete completed after the terminal session changed; refresh to reconcile its status.',
+      };
+    }
+
+    // Prevent a short-lived cached transcript from resurrecting the row after
+    // the verified deletion. Component state still changes only after receipt.
+    for (const [cacheKey, cached] of terminalHistoryCache) {
+      if (!cacheKey.startsWith(`${authority.circleId}:`)) continue;
+      terminalHistoryCache.set(cacheKey, {
+        at: cached.at,
+        messages: cached.messages.filter(message => message.id !== messageId),
+      });
+    }
+    for (const [cacheKey, cached] of terminalResponsesCache) {
+      if (!cached.responses.some(response => response.messageId === messageId)) continue;
+      terminalResponsesCache.set(cacheKey, {
+        at: cached.at,
+        responses: cached.responses.filter(response => response.messageId !== messageId),
+      });
+    }
+
+    const receipt = Object.freeze({
+      messageId,
+      circleId: authority.circleId,
+      senderId: authority.userId,
+      authority,
+    });
+    return { receipt };
+  } catch (error) {
+    return {
+      error: error instanceof Error
+        ? error.message
+        : 'The sender-owned terminal message could not be deleted.',
+    };
+  } finally {
+    fence.stop();
+  }
+}
+
 export async function deleteTerminalMessage(messageId: string): Promise<{ error?: string }> {
   try {
     // Delete responses first (child rows)
@@ -678,6 +1464,131 @@ export async function updateAgentAnalytics(
 
 let _tokenSnapshotSyncDisabled = false;
 let _tokenSnapshotSyncWarningShown = false;
+const _overflowDisabledTokenSnapshotIds = new Set<string>();
+const _invalidTokenSnapshotWarnings = new Set<string>();
+
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+// circle_office_agent_usage_snapshots.estimated_cost and the Office aggregate
+// columns are numeric(12,6). Values above this cannot be represented without
+// rounding into a 13th digit.
+const OFFICE_TOKEN_SNAPSHOT_COST_MAX = 999_999.999_999;
+const TOKEN_SNAPSHOT_DIAGNOSTIC_VALUE_MAX = 64;
+
+type TokenSnapshotUsageValidation = {
+  valid: true;
+} | {
+  valid: false;
+  field: 'inputTokens' | 'outputTokens' | 'cachedTokens' | 'messageCount' | 'estimatedCost';
+  reason: string;
+};
+
+export function normalizeTokenSnapshotKey(agentName: string, snapshotKey?: string): string {
+  const explicitKey = snapshotKey?.trim();
+  return explicitKey || agentName.toLowerCase();
+}
+
+export function validateTokenSnapshotUsage(
+  inputTokens: number,
+  outputTokens: number,
+  cachedTokens: number,
+  messageCount: number,
+  estimatedCost: number,
+): TokenSnapshotUsageValidation {
+  const tokenFields = [
+    ['inputTokens', inputTokens],
+    ['outputTokens', outputTokens],
+    ['cachedTokens', cachedTokens],
+  ] as const;
+  for (const [field, value] of tokenFields) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      return {
+        valid: false,
+        field,
+        reason: 'must be a finite, nonnegative safe integer',
+      };
+    }
+  }
+  if (inputTokens > Number.MAX_SAFE_INTEGER - outputTokens) {
+    return {
+      valid: false,
+      field: 'outputTokens',
+      reason: 'would make the combined token count exceed the safe integer range',
+    };
+  }
+  if (!Number.isSafeInteger(messageCount) || messageCount < 0 || messageCount > POSTGRES_INTEGER_MAX) {
+    return {
+      valid: false,
+      field: 'messageCount',
+      reason: `must be a nonnegative PostgreSQL integer no greater than ${POSTGRES_INTEGER_MAX}`,
+    };
+  }
+  if (!Number.isFinite(estimatedCost) || estimatedCost < 0 || estimatedCost > OFFICE_TOKEN_SNAPSHOT_COST_MAX) {
+    return {
+      valid: false,
+      field: 'estimatedCost',
+      reason: `must fit PostgreSQL numeric(12,6), from 0 through ${OFFICE_TOKEN_SNAPSHOT_COST_MAX}`,
+    };
+  }
+  return { valid: true };
+}
+
+function tokenSnapshotIdentity(
+  circleId: string,
+  agentName: string,
+  normalizedSnapshotKey: string,
+): string {
+  // The server uniqueness boundary also includes circle and agent. Including
+  // both here prevents a bad snapshot key on one agent from muting a healthy
+  // agent that happens to reuse the same bridge/session key.
+  return JSON.stringify([circleId, agentName.toLowerCase(), normalizedSnapshotKey]);
+}
+
+function boundedTokenSnapshotDiagnosticValue(value: string): string {
+  const normalized = value.replace(/[\r\n\t]/g, ' ').trim();
+  if (normalized.length <= TOKEN_SNAPSHOT_DIAGNOSTIC_VALUE_MAX) return normalized;
+  return `${normalized.slice(0, TOKEN_SNAPSHOT_DIAGNOSTIC_VALUE_MAX - 1)}…`;
+}
+
+function tokenSnapshotErrorText(error: any): string {
+  return [error?.message, error?.details, error?.hint]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+}
+
+function isTokenSnapshotNumericOverflow(error: any): boolean {
+  return String(error?.code || '') === '22003'
+    || tokenSnapshotErrorText(error).includes('numeric field overflow');
+}
+
+function disableOverflowingTokenSnapshotForSession(
+  snapshotId: string,
+  agentName: string,
+  normalizedSnapshotKey: string,
+) {
+  if (_overflowDisabledTokenSnapshotIds.has(snapshotId)) return;
+  _overflowDisabledTokenSnapshotIds.add(snapshotId);
+  console.warn(
+    '[syncAgentTokenSnapshot] Snapshot disabled for this page session after a database numeric overflow; ' +
+    `other agent snapshots will continue. agent="${boundedTokenSnapshotDiagnosticValue(agentName)}" ` +
+    `key="${boundedTokenSnapshotDiagnosticValue(normalizedSnapshotKey)}". ` +
+    'No usage values were clamped or written.',
+  );
+}
+
+function warnInvalidTokenSnapshotOnce(
+  snapshotId: string,
+  agentName: string,
+  validation: Exclude<TokenSnapshotUsageValidation, { valid: true }>,
+) {
+  if (_invalidTokenSnapshotWarnings.has(snapshotId)) return;
+  _invalidTokenSnapshotWarnings.add(snapshotId);
+  console.warn(
+    '[syncAgentTokenSnapshot] Rejected an invalid local snapshot before database sync; ' +
+    `agent="${boundedTokenSnapshotDiagnosticValue(agentName)}" ` +
+    `field=${validation.field} (${validation.reason}). No usage values were clamped or written.`,
+  );
+}
 
 function shouldDisableTokenSnapshotSync(error: any): boolean {
   const code = String(error?.code || '');
@@ -718,6 +1629,22 @@ export async function syncAgentTokenSnapshot(
   snapshotKey?: string,
 ): Promise<void> {
   if (_tokenSnapshotSyncDisabled) return;
+  const normalizedSnapshotKey = normalizeTokenSnapshotKey(agentName, snapshotKey);
+  const snapshotId = tokenSnapshotIdentity(circleId, agentName, normalizedSnapshotKey);
+  if (_overflowDisabledTokenSnapshotIds.has(snapshotId)) return;
+
+  const validation = validateTokenSnapshotUsage(
+    inputTokens,
+    outputTokens,
+    cachedTokens,
+    messageCount,
+    estimatedCost,
+  );
+  if (validation.valid === false) {
+    warnInvalidTokenSnapshotOnce(snapshotId, agentName, validation);
+    return;
+  }
+
   try {
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) return;
@@ -732,10 +1659,18 @@ export async function syncAgentTokenSnapshot(
       p_message_count:  messageCount,
       p_estimated_cost: estimatedCost,
       p_model:          model || null,
-      p_snapshot_key:   snapshotKey || null,
+      p_snapshot_key:   normalizedSnapshotKey,
     });
 
     if (error) {
+      if (isTokenSnapshotNumericOverflow(error)) {
+        disableOverflowingTokenSnapshotForSession(
+          snapshotId,
+          agentName,
+          normalizedSnapshotKey,
+        );
+        return;
+      }
       if (snapshotKey && /p_snapshot_key|sync_agent_token_snapshot|function/i.test(error.message || '')) {
         const { error: legacyError } = await supabase.rpc('sync_agent_token_snapshot', {
           p_circle_id:      circleId,
@@ -749,6 +1684,14 @@ export async function syncAgentTokenSnapshot(
           p_model:          model || null,
         });
         if (!legacyError) return;
+        if (isTokenSnapshotNumericOverflow(legacyError)) {
+          disableOverflowingTokenSnapshotForSession(
+            snapshotId,
+            agentName,
+            normalizedSnapshotKey,
+          );
+          return;
+        }
         if (shouldDisableTokenSnapshotSync(legacyError)) {
           disableTokenSnapshotSyncForSession(legacyError);
           return;
@@ -761,6 +1704,14 @@ export async function syncAgentTokenSnapshot(
       console.warn('[syncAgentTokenSnapshot] RPC failed:', error.message);
     }
   } catch (err) {
+    if (isTokenSnapshotNumericOverflow(err)) {
+      disableOverflowingTokenSnapshotForSession(
+        snapshotId,
+        agentName,
+        normalizedSnapshotKey,
+      );
+      return;
+    }
     console.warn('[syncAgentTokenSnapshot] Error:', err);
   }
 }

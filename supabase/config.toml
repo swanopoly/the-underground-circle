@@ -453,6 +453,13 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/email-calendar-oauth/index.ts"
 
+[functions.figma-oauth]
+# Figma redirects to /callback without an app JWT. The function authenticates
+# every POST action itself and binds the callback to one-time PKCE state.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/figma-oauth/index.ts"
+
 [functions.github-webhook]
 # GitHub webhook POSTs never carry a JWT — the integrity check uses the shared
 # HMAC secret on the X-Hub-Signature-256 header instead.

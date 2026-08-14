@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
+  getRun,
   getRunArtifacts,
   getRunSteps,
   listChatSessionRuns,
   listChildRuns,
   listRuns,
+  reapRun,
+  updateRunStatus,
   projectPersistedRunStepForDisplay,
   subscribeToRun,
   subscribeToRunSteps,
@@ -23,11 +26,18 @@ import {
   readRunExecutionStream,
 } from '../../lib/runMetadataSummary';
 import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard } from '../../lib/openswanObservedEvals';
-import { filterAndStatRuns, type RunStatusFilter } from '../../lib/runHistoryFilterCore';
+import {
+  describeRunHistoryStatus,
+  filterAndStatRuns,
+  type RunStatusFilter,
+} from '../../lib/runHistoryFilterCore';
+import { planRunReap } from '../../lib/runStallPolicyCore';
+import { showConfirm } from '../../lib/alert';
 import RunHistoryFilterBar from './RunHistoryFilterBar';
 import OpenSwanQualityAggregate from './OpenSwanQualityAggregate';
 import OpenSwanQualityDashboard from './OpenSwanQualityDashboard';
 import RunMetadataSummary from './RunMetadataSummary';
+import { isAwaitingConnectedAgentResultMetadata } from '../../lib/officeOpsBoard';
 
 type Props = {
   visible: boolean;
@@ -37,14 +47,16 @@ type Props = {
   chatSessionId?: string | null;
   roomId?: string | null;
   /**
-   * Deep-link focus: when provided and the run is present in the loaded first
-   * page, select it once on load. Never fights later user selection (applied
-   * at most once per distinct id), and when the run is NOT in the first page
-   * the drawer keeps its existing default (first run) selection.
+   * Deep-link focus: select the exact same-circle run once on load, fetching it
+   * directly when it falls outside the first history page. A missing,
+   * inaccessible, or cross-circle id renders an unavailable state and never
+   * silently selects another run.
    */
   initialRunId?: string | null;
   onClose: () => void;
 };
+
+const RUN_DRAWER_PAGE_LIMIT = 40;
 
 function getChildQualityTone(outcome?: string | null): { border: string; bg: string; text: string } {
   switch (outcome) {
@@ -130,36 +142,99 @@ export default function RunHistoryDrawer({
   const [qualityWindow, setQualityWindow] = useState<'all' | 'recent'>('all');
   const [runs, setRuns] = useState<AgentRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [unavailableInitialRunId, setUnavailableInitialRunId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<RunStatusFilter>('all');
   // Deep-link focus is applied at most once per distinct initialRunId so a
   // later user selection is never overridden by a reload.
   const appliedInitialRunIdRef = useRef<string | null>(null);
+  const reapedRunIdsRef = useRef<Set<string>>(new Set());
   const [steps, setSteps] = useState<RunStep[]>([]);
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
   const [childRuns, setChildRuns] = useState<AgentRun[]>([]);
   const [memoryActionTick, setMemoryActionTick] = useState(0);
+  const [closingStaleRunId, setClosingStaleRunId] = useState<string | null>(null);
+  const [freshnessTick, setFreshnessTick] = useState(0);
+
+  useEffect(() => {
+    if (!visible) return;
+    const timer = setInterval(() => setFreshnessTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, [visible]);
 
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
     const load = async () => {
-      const nextRuns = chatSessionId
-        ? await listChatSessionRuns(circleId, chatSessionId, 40)
-        : await listRuns(circleId, { roomId: roomId || undefined, limit: 40 });
+      let nextRuns = chatSessionId
+        ? await listChatSessionRuns(circleId, chatSessionId, RUN_DRAWER_PAGE_LIMIT)
+        : await listRuns(circleId, { roomId: roomId || undefined, limit: RUN_DRAWER_PAGE_LIMIT });
       if (cancelled) return;
-      setRuns(nextRuns);
-      // Deep-link focus: honored only when the run is present in this first
-      // page; otherwise fall back to the existing default-selection behavior.
-      const wantInitial = !!initialRunId
-        && appliedInitialRunIdRef.current !== initialRunId
-        && nextRuns.some((run) => run.id === initialRunId);
-      if (wantInitial) {
-        appliedInitialRunIdRef.current = initialRunId;
-        setSelectedRunId(initialRunId);
-      } else {
-        setSelectedRunId((current) => current || nextRuns[0]?.id || null);
+      // Heartbeat-enabled producers opt into the canonical zombie reaper. A
+      // dead heartbeat is proof the process stopped, so project it failed and
+      // claim the DB row once. Legacy/non-heartbeat rows are never fabricated
+      // terminal; the freshness-aware filter below presents them as STALE.
+      const reapPlan = planRunReap(
+        nextRuns.map((run) => ({ id: run.id, status: run.status, updated_at: run.updated_at })),
+        Date.now(),
+      );
+      const reapEligibleIds = new Set(nextRuns
+        .filter((run) => run.metadata?.heartbeat === true
+          && !['client_pending', 'client_dispatching', 'client_resuming'].includes(String(run.final_stop_reason || '')))
+        .map((run) => run.id));
+      const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
+      if (reapIds.size > 0) {
+        nextRuns = nextRuns.map((run) => reapIds.has(run.id)
+          ? { ...run, status: 'failed' as const, completed_at: new Date().toISOString() }
+          : run);
+        for (const runId of reapIds) {
+          if (reapedRunIdsRef.current.has(runId)) continue;
+          reapedRunIdsRef.current.add(runId);
+          void reapRun(runId, 'heartbeat_stale');
+        }
       }
+      const requestedInitialRunId = typeof initialRunId === 'string' ? initialRunId.trim() : '';
+      const shouldApplyInitial = !!requestedInitialRunId
+        && appliedInitialRunIdRef.current !== requestedInitialRunId;
+
+      if (shouldApplyInitial) {
+        let focusedRun = nextRuns.find((run) => run.id === requestedInitialRunId) || null;
+        let resolvedRuns = nextRuns;
+
+        // Exact focus cannot degrade to “open the newest run.” If the target is
+        // outside the bounded first page, fetch it by id and accept it only
+        // after validating the circle boundary locally.
+        if (!focusedRun) {
+          try {
+            const exactRun = await getRun(requestedInitialRunId);
+            if (cancelled) return;
+            if (exactRun?.circle_id === circleId) {
+              focusedRun = exactRun;
+              resolvedRuns = [exactRun, ...nextRuns.filter((run) => run.id !== exactRun.id)]
+                .slice(0, RUN_DRAWER_PAGE_LIMIT);
+            }
+          } catch {
+            // A read failure is indistinguishable from unavailable here; never
+            // substitute another run for an exact deep-link request.
+          }
+        }
+        if (cancelled) return;
+
+        setRuns(resolvedRuns);
+        if (focusedRun) {
+          appliedInitialRunIdRef.current = requestedInitialRunId;
+          setUnavailableInitialRunId(null);
+          setSelectedRunId(focusedRun.id);
+        } else {
+          setUnavailableInitialRunId(requestedInitialRunId);
+          setSelectedRunId(null);
+        }
+        return;
+      }
+
+      setRuns(nextRuns);
+      setUnavailableInitialRunId(null);
+      setSelectedRunId((current) => current || nextRuns[0]?.id || null);
     };
     void load();
     return () => { cancelled = true; };
@@ -261,9 +336,38 @@ export default function RunHistoryDrawer({
   // no-props render is unchanged apart from the new bar itself.
   const runFilterResult = useMemo(
     () => filterAndStatRuns(runs, { query: filterQuery, statusFilter, nowMs: Date.now() }),
-    [runs, filterQuery, statusFilter],
+    [runs, filterQuery, statusFilter, freshnessTick],
   );
   const visibleRuns = runFilterResult.visible as unknown as AgentRun[];
+  const selectedRunPresentation = useMemo(
+    () => describeRunHistoryStatus(selectedRun, Date.now()),
+    [selectedRun, freshnessTick],
+  );
+
+  const handleCloseStaleRun = async () => {
+    if (!selectedRun || !selectedRunPresentation.stale || closingStaleRunId) return;
+    const confirmed = await showConfirm({
+      title: 'Close stale run?',
+      message: 'This run has no fresh activity. It will be marked Cancelled, not Completed, because no completion proof was received.',
+      confirmLabel: 'Close as cancelled',
+      destructive: true,
+    });
+    if (!confirmed) return;
+    setClosingStaleRunId(selectedRun.id);
+    const metadata = {
+      ...(selectedRun.metadata || {}),
+      manuallyClosedAsStale: true,
+      manuallyClosedAt: new Date().toISOString(),
+      manuallyClosedReason: 'no_fresh_activity',
+    };
+    const ok = await updateRunStatus(selectedRun.id, 'cancelled', { metadata });
+    if (ok) {
+      setRuns((current) => current.map((run) => run.id === selectedRun.id
+        ? { ...run, status: 'cancelled', completed_at: new Date().toISOString(), metadata }
+        : run));
+    }
+    setClosingStaleRunId(null);
+  };
 
   const handlePromote = async (ref: PromptMemoryReference) => {
     const ok = await promoteMemory(ref.id);
@@ -353,14 +457,22 @@ export default function RunHistoryDrawer({
                   <Text style={styles.empty}>No runs match the filter.</Text>
                 ) : visibleRuns.map((run) => {
                   const active = run.id === selectedRunId;
+                  const awaitingExternalResult = isAwaitingConnectedAgentResultMetadata(run.metadata);
+                  const presentation = describeRunHistoryStatus(run, Date.now());
+                  const statusLabel = presentation.stale
+                    ? (awaitingExternalResult ? 'STALE · ACCEPTED UPDATE MISSING' : presentation.label)
+                    : (awaitingExternalResult ? 'ACCEPTED · AWAITING UPDATE' : presentation.label);
                   return (
                     <Pressable
                       key={run.id}
-                      onPress={() => setSelectedRunId(run.id)}
+                      onPress={() => {
+                        setUnavailableInitialRunId(null);
+                        setSelectedRunId(run.id);
+                      }}
                       style={[styles.runItem, active && styles.runItemActive]}
                     >
                       <Text style={styles.runTitle} numberOfLines={1}>{run.title || run.mode}</Text>
-                      <Text style={styles.runMeta}>{run.status.toUpperCase()} · {new Date(run.created_at).toLocaleString()}</Text>
+                      <Text style={[styles.runMeta, presentation.stale && styles.runMetaStale]}>{statusLabel} · {new Date(run.created_at).toLocaleString()}</Text>
                     </Pressable>
                   );
                 })}
@@ -368,7 +480,14 @@ export default function RunHistoryDrawer({
             </View>
 
             <View style={styles.detail}>
-              {selectedRun ? (
+              {unavailableInitialRunId ? (
+                <View style={styles.unavailableCard}>
+                  <Text style={styles.unavailableTitle}>RUN UNAVAILABLE</Text>
+                  <Text style={styles.empty}>
+                    Run {unavailableInitialRunId.slice(0, 12)} is not available in this circle. It may have been removed or you may not have access.
+                  </Text>
+                </View>
+              ) : selectedRun ? (
                 <ScrollView>
                   <View style={styles.qualityHeaderRow}>
                     <Text style={styles.sectionTitle}>QUALITY VIEW</Text>
@@ -405,7 +524,29 @@ export default function RunHistoryDrawer({
                   <Text style={styles.sectionTitle}>SUMMARY</Text>
                   <View style={styles.summaryCard}>
                     <Text style={styles.summaryTitle}>{selectedRun.title}</Text>
-                    <Text style={styles.summaryMeta}>{selectedRun.status.toUpperCase()} · {selectedRun.mode}</Text>
+                    <Text style={styles.summaryMeta}>
+                      {selectedRunPresentation.stale
+                        ? `STALE · NOT ACTIVE · ${selectedRun.mode} · COMPLETION UNVERIFIED`
+                        : isAwaitingConnectedAgentResultMetadata(selectedRun.metadata)
+                          ? 'ACCEPTED · AWAITING CONNECTED-AGENT UPDATE · COMPLETION UNVERIFIED'
+                          : `${selectedRunPresentation.label} · ${selectedRun.mode}`}
+                    </Text>
+                    {selectedRunPresentation.stale ? (
+                      <View style={styles.staleRunNotice}>
+                        <Text style={styles.staleRunNoticeText}>
+                          No fresh activity has been recorded for this run. It is excluded from Active and has not been marked completed.
+                        </Text>
+                        <Pressable
+                          onPress={() => { void handleCloseStaleRun(); }}
+                          disabled={closingStaleRunId === selectedRun.id}
+                          style={[styles.closeStaleRunBtn, closingStaleRunId === selectedRun.id && { opacity: 0.55 }]}
+                        >
+                          <Text style={styles.closeStaleRunBtnText}>
+                            {closingStaleRunId === selectedRun.id ? 'CLOSING…' : 'CLOSE AS CANCELLED'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
                     {parentRun ? (
                       <Pressable onPress={() => setSelectedRunId(parentRun.id)} style={styles.parentRunLink}>
                         <Text style={styles.parentRunLinkText}>↑ BACK TO PARENT RUN</Text>
@@ -771,6 +912,7 @@ const styles = StyleSheet.create({
   },
   runTitle: { color: '#e2e8f0', fontSize: 12, fontWeight: '700' },
   runMeta: { color: '#64748b', fontSize: 10, marginTop: 4 },
+  runMetaStale: { color: '#f59e0b' },
   summaryCard: {
     padding: 12,
     borderRadius: 12,
@@ -780,7 +922,27 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   summaryTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
-  summaryMeta: { color: '#22d3ee', fontSize: 10, fontWeight: '900', marginTop: 4 },
+  summaryMeta: { color: '#6366f1', fontSize: 10, fontWeight: '900', marginTop: 4 },
+  staleRunNotice: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    backgroundColor: '#2a1b054d',
+    gap: 8,
+  },
+  staleRunNoticeText: { color: '#fbbf24', fontSize: 11, lineHeight: 16 },
+  closeStaleRunBtn: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#f59e0b88',
+    backgroundColor: '#451a03',
+  },
+  closeStaleRunBtnText: { color: '#fde68a', fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
   parentRunLink: {
     alignSelf: 'flex-start',
     marginTop: 8,
@@ -970,6 +1132,20 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 10,
     marginTop: 3,
+    fontFamily: 'monospace',
+  },
+  unavailableCard: {
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    backgroundColor: '#1f1605',
+  },
+  unavailableTitle: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
     fontFamily: 'monospace',
   },
   empty: { color: '#64748b', fontSize: 12, paddingVertical: 8 },

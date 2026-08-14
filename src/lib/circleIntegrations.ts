@@ -887,7 +887,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'anthropic/claude-sonnet-4', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'anthropic/claude-sonnet-5', required: false },
     ],
     validationHints: ['Set a default_model so the agent has a safe fallback when route resolution is ambiguous.'],
   },
@@ -1009,19 +1009,19 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'claude-sonnet-4-6', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'claude-sonnet-5', required: false },
     ],
     validationHints: ['Get the key from https://console.anthropic.com/settings/keys. Scope: full account.'],
   },
   openai: {
     provider: 'openai',
     label: 'OpenAI',
-    description: 'GPT-5 / GPT-4o / o-series reasoning models direct from OpenAI. BYOK so requests bill against your OpenAI account.',
+    description: 'Current GPT-5.6, GPT-5.5, GPT-5.4, GPT-4.1, and o3 reasoning models direct from OpenAI. BYOK requests bill against your account.',
     capabilityFlags: ['gpt_chat', 'function_calling', 'vision', 'reasoning_models'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: ['organization_id'],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5.6-terra', required: false },
     ],
     validationHints: ['Get the key from https://platform.openai.com/api-keys. Set organization_id if you belong to multiple orgs.'],
   },
@@ -1041,48 +1041,48 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
   google_ai: {
     provider: 'google_ai',
     label: 'Google AI',
-    description: 'Gemini 2.5 Pro / Flash via Google AI Studio. Long-context and multimodal directly from Google.',
+    description: 'Current Gemini 3.x models via Google AI Studio, with long-context and multimodal support directly from Google.',
     capabilityFlags: ['gemini_chat', 'multimodal', 'long_context', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'gemini-2.5-pro', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gemini-3.6-flash', required: false },
     ],
     validationHints: ['Generate an API key at https://aistudio.google.com/apikey. No project setup needed.'],
   },
   groq: {
     provider: 'groq',
     label: 'Groq',
-    description: 'Ultra-fast Llama / Mixtral inference on LPU hardware. Sub-second latency for chat-heavy workloads.',
-    capabilityFlags: ['llama_chat', 'mixtral_chat', 'fast_inference', 'function_calling'],
+    description: 'Ultra-fast GPT-OSS, Compound, and Llama inference on LPU hardware for latency-sensitive agent workloads.',
+    capabilityFlags: ['llama_chat', 'gpt_oss_chat', 'compound_agents', 'fast_inference', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama-3.3-70b-versatile', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'openai/gpt-oss-120b', required: false },
     ],
     validationHints: ['Create a key at https://console.groq.com/keys. Free tier covers light usage.'],
   },
   mistral_ai: {
     provider: 'mistral_ai',
     label: 'Mistral AI',
-    description: 'Mistral Large / Codestral / Pixtral direct from Mistral. Strong Europe-hosted alternative for code + chat.',
+    description: 'Current Mistral Medium, Large, Small, Codestral, and Ministral models direct from Mistral.',
     capabilityFlags: ['mistral_chat', 'codestral', 'pixtral_vision', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'mistral-large-latest', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'mistral-medium-3-5', required: false },
     ],
     validationHints: ['Get a key at https://console.mistral.ai/api-keys. Pay-as-you-go billing.'],
   },
   cohere: {
     provider: 'cohere',
     label: 'Cohere',
-    description: 'Command R+ chat + Embed v3 + Rerank. Strong for retrieval-augmented agents and enterprise use cases.',
+    description: 'Current Command A chat and reasoning models, plus Cohere Embed and Rerank for enterprise retrieval agents.',
     capabilityFlags: ['command_chat', 'embeddings', 'rerank', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'command-r-plus', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'command-a-plus-05-2026', required: false },
     ],
     validationHints: ['Generate a key at https://dashboard.cohere.com/api-keys. Production keys are separate from trial keys.'],
   },
@@ -1125,36 +1125,36 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
   deepseek: {
     provider: 'deepseek',
     label: 'DeepSeek',
-    description: 'DeepSeek R1 reasoning + V3 chat. Strong reasoning at OSS prices, ideal for code review and planning.',
+    description: 'DeepSeek V4 Flash and Pro for current long-context reasoning, coding, review, and planning.',
     capabilityFlags: ['deepseek_chat', 'deepseek_reasoner', 'function_calling', 'long_context'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'deepseek-chat', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'deepseek-v4-flash', required: false },
     ],
     validationHints: ['Get a key at https://platform.deepseek.com/api_keys.'],
   },
   z_ai: {
     provider: 'z_ai',
     label: 'Z.AI / GLM',
-    description: 'GLM-4 / GLM-4.5 chat from Zhipu / Z.AI. Multilingual coverage and strong on reasoning benchmarks.',
+    description: 'GLM-5.1 chat and reasoning from Z.AI, with multilingual coverage and long-context tool use.',
     capabilityFlags: ['glm_chat', 'multilingual', 'function_calling', 'long_context'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'glm-4-plus', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'glm-5.1', required: false },
     ],
     validationHints: ['Generate a key at https://open.bigmodel.cn/usercenter/apikeys.'],
   },
   minimax: {
     provider: 'minimax',
     label: 'MiniMax',
-    description: 'MiniMax-Text + Speech 2.5. Long-context chat with strong Chinese / multilingual coverage.',
+    description: 'MiniMax M2.7 and high-speed variants for long-context multilingual chat and agent work.',
     capabilityFlags: ['minimax_chat', 'speech', 'multilingual', 'long_context'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'MiniMax-Text-01', required: false },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'MiniMax-M2.7', required: false },
     ],
     validationHints: ['Get a key at https://www.minimaxi.com/platform/account/keys.'],
   },
@@ -1185,9 +1185,10 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       // Paste it once and every member of the circle can chat with
       // BlackSwan; they don't each need to set up their own HF integration.
       { key: 'endpoint_url', label: 'Inference Endpoint URL', placeholder: 'https://abc123.us-east-1.aws.endpoints.huggingface.cloud' },
-      // Lets us swap the served model later without changing client
-      // code — defaults to cswan801/BlackSwan-v5.
-      { key: 'model_id', label: 'Model ID', placeholder: 'cswan801/BlackSwan-v5' },
+      // Lets us swap the served model later without changing client code.
+      // Optional because the registry already defaults to the one canonical
+      // BlackSwan model when older integrations do not store this metadata.
+      { key: 'model_id', label: 'Model ID', placeholder: 'cswan801/BlackSwan-v5', required: false },
     ],
     validationHints: [
       'Endpoint URL is the host HF assigns when you create the Endpoint — it\'s on the detail page in ui.endpoints.huggingface.co.',

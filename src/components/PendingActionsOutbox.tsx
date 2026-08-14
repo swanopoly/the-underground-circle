@@ -70,7 +70,7 @@ export default function PendingActionsOutbox({ circleId, maxHeight = 320 }: Prop
             </Section>
           )}
           {buckets.running.length > 0 && (
-            <Section title="RUNNING NOW" tone="#22d3ee">
+            <Section title="RUNNING NOW" tone="#6366f1">
               {buckets.running.map(a => <ActionRow key={a.id} action={a} />)}
             </Section>
           )}
@@ -104,7 +104,7 @@ function ActionRow({ action }: { action: ScheduledAction }) {
       : null;
   const badgeColor = action.status === 'outcome_unknown' ? '#f59e0b'
     : action.status === 'failed' ? '#ef4444'
-    : action.status === 'running' ? '#22d3ee'
+    : action.status === 'running' ? '#6366f1'
     : '#a3a3a3';
 
   const canCancel = action.status === 'pending';
@@ -239,7 +239,7 @@ const styles = StyleSheet.create({
     borderColor: '#262626',
     backgroundColor: '#0a0a10',
   },
-  rowBtnPrimary: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee18' },
+  rowBtnPrimary: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f118' },
   rowBtnText: {
     color: '#a3a3a3',
     fontSize: 10,
@@ -247,5 +247,5 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     fontFamily: 'monospace',
   },
-  rowBtnTextPrimary: { color: '#22d3ee' },
+  rowBtnTextPrimary: { color: '#6366f1' },
 });

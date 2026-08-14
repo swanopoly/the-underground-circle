@@ -330,17 +330,23 @@ export async function deleteFile(fileId: string): Promise<boolean> {
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
-/** Load messages for a room, ordered by created_at ascending. */
+/** Load the newest bounded message page, returned in chronological UI order. */
 export async function loadMessages(roomId: string, limit = 200): Promise<RoomMessage[]> {
   try {
+    const pageSize = Number.isFinite(limit)
+      ? Math.min(200, Math.max(1, Math.trunc(limit)))
+      : 200;
     const { data, error } = await supabase
       .from('room_messages')
       .select('*')
       .eq('room_id', roomId)
-      .order('created_at', { ascending: true })
-      .limit(limit);
+      // Fetch newest-first so LIMIT cannot pin a long room to its oldest rows.
+      // `id` is the stable tie-break for messages created in the same instant.
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(pageSize);
     if (error) throw error;
-    return (data ?? []).map(toRoomMessage);
+    return (data ?? []).map(toRoomMessage).reverse();
   } catch (err) {
     console.error('[roomRepository] loadMessages failed:', err);
     return [];

@@ -904,6 +904,9 @@ const rootProjectionDraftChecks = (async () => {
     ['I need you to open Photoshop and start a new project 1024 x 768', 1024, 768],
     ['Can you open Photoshop and create a 600 x 600 document?', 600, 600],
     ['I need you to open Photoshop and create a 600 by 600 document', 600, 600],
+    ['Would you mind opening Photoshop and creating a 600 x 600 document for me?', 600, 600],
+    ['Would you mind opening Photoshop and starting a new project 600 x 600 when you can?', 600, 600],
+    ['Hey, can you just open Photoshop and create a 600 x 600 document right now, please!', 600, 600],
   ] as const) {
     const program = compileComputerSequenceProgram(task);
     const create = program?.steps.find((step) => step.tool === 'desktop.photoshop_create_document');
@@ -931,6 +934,9 @@ const rootProjectionDraftChecks = (async () => {
     'open photoshop and create a new document 600x600 then place an asset',
     'open photoshop and create a new document 600x600 then rotate it',
     'open photoshop and create a new document 600x600 then frobnicate it',
+    'open photoshop and create a new document 600x600 tomorrow',
+    'open photoshop and create a new document 600x600 for my client',
+    'open photoshop and create a new document 600x600 without asking',
     '',                                                      // empty
   ]) {
     assert(compileComputerSequenceProgram(task) === null, `does not compile: "${task || '(empty)'}"`);

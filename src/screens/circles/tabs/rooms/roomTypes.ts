@@ -99,7 +99,7 @@ export const ROOM_CHAT_PRESETS: ChatPreset[] = [
   { id: 'security', label: 'Security Audit', icon: '!', color: '#ef4444', prompt: '[SECURITY AUDIT MODE] Analyze all files for security vulnerabilities.' },
   { id: 'performance', label: 'Performance', icon: '#', color: '#f59e0b', prompt: '[PERFORMANCE REVIEW MODE] Analyze all files for performance issues.' },
   { id: 'tests', label: 'Generate Tests', icon: 'T', color: '#22c55e', prompt: '[TEST GENERATION MODE] Generate comprehensive tests for the code.' },
-  { id: 'research', label: 'Research', icon: 'R', color: '#22d3ee', prompt: '[DEEP RESEARCH MODE] Provide thorough analysis.' },
+  { id: 'research', label: 'Research', icon: 'R', color: '#6366f1', prompt: '[DEEP RESEARCH MODE] Provide thorough analysis.' },
   { id: 'debug', label: 'Debug', icon: 'D', color: '#a855f7', prompt: '[DEBUG MODE] Help diagnose and fix issues.' },
   { id: 'refactor', label: 'Refactor', icon: '{', color: '#ec4899', prompt: '[REFACTOR MODE] Suggest refactoring improvements.' },
   { id: 'docs', label: 'Docs', icon: 'D', color: '#3b82f6', prompt: '[DOCUMENTATION MODE] Generate documentation.' },

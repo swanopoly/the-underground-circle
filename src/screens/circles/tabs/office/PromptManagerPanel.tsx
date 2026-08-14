@@ -25,9 +25,10 @@ type DetailTab = 'edit' | 'versions' | 'labels' | 'test';
 
 // ─── Known models for config dropdown ───────────────────────────────────────
 const MODEL_OPTIONS = [
-  'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5',
-  'gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o4-mini',
-  'gemini-2.5-flash', 'gemini-2.5-pro',
+  'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5',
+  'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-4.1', 'gpt-4.1-mini',
+  'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
+  'deepseek-v4-pro', 'glm-5.1', 'MiniMax-M2.7',
 ];
 
 // ─── Label colors ───────────────────────────────────────────────────────────
@@ -445,7 +446,7 @@ function EditTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: {
             style={s.configInput}
             value={model}
             onChangeText={setModel}
-            placeholder="e.g. claude-sonnet-4-6"
+            placeholder="e.g. claude-sonnet-5"
             placeholderTextColor="#444"
             editable={isOwn}
           />

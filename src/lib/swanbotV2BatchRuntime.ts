@@ -65,6 +65,7 @@ import {
   type OpenSwanRuntimeToolContext,
   type OpenSwanRuntimeToolName,
 } from './openswanToolRuntime';
+import type { OpenSwanApprovalResumeBindingV1 } from './openswanToolApprovals';
 import {
   evaluateTaskExecutionSurfaceToolCall,
   taskExecutionSurfaceAllowsTool,
@@ -160,6 +161,8 @@ export type SwanbotV2BatchContext = {
   threadId?: string;
   /** Optional active plugin ids (tool ctx). */
   activePluginIds?: string[];
+  /** Runtime-private exact Chat approval continuation narrowing. */
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   /** Optional parsed "never do X" constraints for the dispatch backstop (QW1). */
   userConstraints?: OpenSwanRuntimeToolContext['userConstraints'];
   /**
@@ -355,6 +358,7 @@ export async function runSwanbotV2Batch(
       runId: handle?.run.id,
       threadId: authenticatedThreadId,
       activePluginIds: extra.activePluginIds,
+      approvalResumeBinding: extra.approvalResumeBinding,
       userConstraints,
     };
     const catalog = getOpenSwanToolsForSurface(V2_BATCH_RUN_SURFACE, toolCtx, { mode })

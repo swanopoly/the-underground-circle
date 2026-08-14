@@ -16,6 +16,7 @@
  */
 
 import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import type { OpenSwanTerminalReceipt } from './openswanSessionRuntimeAdapters';
 import { matchStopResolution } from './chatStopMessageCore';
 
 /**
@@ -97,6 +98,31 @@ export function deriveComputerTaskChatOutcomeSignal(
       return { verdict: 'blocked', approvalPending: false, canRetry: false };
     case 'cancelled':
       return { verdict: 'blocked', approvalPending: false, canRetry: true };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Preserve the OpenSwan runtime's prose-independent terminal receipt when it
+ * enters Chat's smaller flywheel vocabulary. A useful partial response, a
+ * stopped turn, or failure prose can never be promoted to completion here.
+ */
+export function deriveOpenSwanTerminalChatOutcomeSignal(
+  terminal: OpenSwanTerminalReceipt | null | undefined,
+): AuthoritativeChatOutcomeSignal | null {
+  if (!terminal) return null;
+  switch (terminal.state) {
+    case 'succeeded':
+      return terminal.completionVerified
+        ? { verdict: 'completed', approvalPending: false, canRetry: false }
+        : { verdict: 'unknown', approvalPending: false, canRetry: false };
+    case 'partial':
+      return { verdict: 'partial', approvalPending: false, canRetry: terminal.resumable };
+    case 'failed':
+      return { verdict: 'failed', approvalPending: false, canRetry: terminal.resumable };
+    case 'cancelled':
+      return { verdict: 'blocked', approvalPending: false, canRetry: terminal.resumable };
     default:
       return null;
   }

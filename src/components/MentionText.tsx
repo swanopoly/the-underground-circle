@@ -72,7 +72,7 @@ function kindPrefix(kind: MentionKind): string {
 }
 
 function kindTint(kind: MentionKind) {
-  if (kind === "user") return { color: "#22d3ee", backgroundColor: "#22d3ee15" };
+  if (kind === "user") return { color: "#6366f1", backgroundColor: "#6366f115" };
   if (kind === "mission") return { color: "#f59e0b", backgroundColor: "#f59e0b15" };
   return { color: "#a855f7", backgroundColor: "#a855f715" };
 }

@@ -1,19 +1,25 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import AgentControlCard from '../../../../components/AgentControlCard';
-import { getAgentIdentityKey } from '../../../../lib/agentIdentity';
+import {
+  getAgentIdentityKey,
+  loadAgentIdentitiesExact,
+  renameAgentExact,
+  setMainAgentForProviderExact,
+  type AgentIdentityExactAuthority,
+} from '../../../../lib/agentIdentity';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { OfficeAgent } from '../../../../lib/officeAgents';
-import { useAgentControl } from '../../../../services/hitlService';
+import { upsertAgentControl, useAgentControl } from '../../../../services/hitlService';
 import { supabase } from '../../../../lib/supabase';
-import { formatRelativeTime, getAgentHealth, MONO, shortPath } from './AgentPanelShared';
+import { formatRelativeTime, MONO, shortPath } from './AgentPanelShared';
 
 // ─── Quick Actions strip ────────────────────────────────────────────────────
-// Top-of-console action row. Send Task opens an inline composer that hits the
-// onRunCommand prop (typically wired to the agent's bridge). Pause/Resume
-// toggles agent_controls.is_paused, which every downstream invocation path
-// honors. Copy Session pulls the session key into the clipboard so you can
-// jump to it from a terminal or another tool.
+// Top-of-console action row. The Overview surface exposes only the bridge's
+// read-only diagnostic allowlist; real task handoffs belong to Chat, the
+// OpenSwan tab, or the Terminal tab where identity and receipt semantics are
+// explicit. Pause/Resume toggles agent_controls.is_paused. Copy Session pulls
+// the exact key into the clipboard for terminal/runtime inspection.
 
 function QuickActionsStrip({
   agent, circleId, sessionKey, isPaused, onRunCommand,
@@ -27,122 +33,49 @@ function QuickActionsStrip({
   const [composerOpen, setComposerOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Computer-use gate. When on and the agent is a claude-code session with a
-  // live bridge, Send Task routes through execBridgeCommand (shell on the
-  // user's machine) instead of the normal onRunCommand path. We persist a
-  // 1-hour expiry so the flag can't be left on indefinitely by accident.
-  const COMPUTER_USE_TTL_MS = 60 * 60_000;
-  const computerUseKey = `uc_computer_use_${sessionKey}`;
-  const canUseShell = agent.providerType === 'claude-code';
-  const [computerUseOn, setComputerUseOn] = useState<boolean>(() => {
-    if (!canUseShell || typeof window === 'undefined' || !window.localStorage) return false;
-    const raw = window.localStorage.getItem(computerUseKey);
-    if (!raw) return false;
-    const parsed = parseInt(raw, 10);
-    if (!Number.isFinite(parsed)) return false;
-    return Date.now() - parsed < COMPUTER_USE_TTL_MS;
-  });
-
-  useEffect(() => {
-    if (!computerUseOn) return;
-    const raw = window.localStorage?.getItem(computerUseKey);
-    const enabledAt = raw ? parseInt(raw, 10) : Date.now();
-    const remaining = COMPUTER_USE_TTL_MS - (Date.now() - enabledAt);
-    if (remaining <= 0) {
-      setComputerUseOn(false);
-      window.localStorage?.removeItem(computerUseKey);
-      return;
-    }
-    const id = setTimeout(() => {
-      setComputerUseOn(false);
-      window.localStorage?.removeItem(computerUseKey);
-    }, remaining);
-    return () => clearTimeout(id);
-  }, [computerUseOn, computerUseKey]);
-
-  const { upsertAgentControl } = require('../../../../services/hitlService') as typeof import('../../../../services/hitlService');
+  const canRunDiagnostics = agent.providerType === 'claude-code' && !!onRunCommand;
 
   const showToast = (msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast(msg);
-    setTimeout(() => setToast(null), 2400);
+    toastTimerRef.current = setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, 2400);
   };
 
-  const handleToggleComputerUse = () => {
-    if (!canUseShell) {
-      showToast('Computer use only works for Claude Code sessions');
-      return;
-    }
-    const next = !computerUseOn;
-    setComputerUseOn(next);
-    try {
-      if (next) window.localStorage?.setItem(computerUseKey, String(Date.now()));
-      else window.localStorage?.removeItem(computerUseKey);
-    } catch {}
-    showToast(next ? 'Computer use ENABLED · 1 hour' : 'Computer use disabled');
-  };
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  }, []);
 
   const handleSend = async () => {
     const text = draft.trim();
     if (!text || sending) return;
     setSending(true);
     try {
-      // Computer-use path: hit the Claude Code bridge's shell endpoint.
-      // This runs the literal string as a shell command on the user's
-      // machine. We only allow this for claude-code agents where the
-      // bridge at localhost:7778 is the trust boundary the user already
-      // opted into by running `npm run dev`.
-      if (computerUseOn && canUseShell) {
-        try {
-          const { execBridgeCommand } = await import('../../../../lib/claudeCodeDetector');
-          const res = await execBridgeCommand(text);
-          const out = (res.stdout || '').trim();
-          const err = (res.stderr || '').trim();
-          if (res.ok) {
-            showToast(out ? `✓ ${out.slice(0, 80)}` : '✓ Shell ran (no output)');
-          } else {
-            showToast(err ? `✗ ${err.slice(0, 80)}` : (res.error || 'Shell failed'));
-          }
-          // Always log shell invocations to the activity feed for audit.
-          if (circleId) {
-            await supabase.from('agent_activity').insert({
-              circle_id: circleId,
-              agent_name: agent.name,
-              action: 'shell_exec',
-              detail: `$ ${text}\n${out.slice(0, 500)}${err ? `\n[stderr] ${err.slice(0, 500)}` : ''}`,
-            });
-          }
-        } catch (shellErr: any) {
-          showToast(shellErr?.message || 'Bridge unreachable');
-        }
-      } else if (onRunCommand) {
+      if (canRunDiagnostics && onRunCommand) {
         const res = await onRunCommand(text);
-        showToast(res.ok ? 'Task dispatched' : (res.stderr || 'Dispatch failed'));
-      } else if (!circleId) {
-        showToast('No circle context available');
+        const output = String(res.stdout || res.stderr || '').trim().slice(0, 100);
+        showToast(res.ok ? (output || 'Diagnostic completed') : (output || 'Diagnostic failed'));
       } else {
-        // Fall back to writing the prompt to agent_activity so it shows up
-        // in the circle's activity feed; downstream auto-runners can pick
-        // it up. This keeps Send Task useful even for bridge-less agents.
-        await supabase.from('agent_activity').insert({
-          circle_id: circleId,
-          agent_name: agent.name,
-          action: 'task_queued',
-          detail: text,
-        });
-        showToast('Queued to activity feed');
+        showToast('Use Chat, OpenSwan, or Terminal to send this agent a task');
       }
       setDraft('');
       setComposerOpen(false);
-    } catch (err: any) {
-      showToast(err?.message || 'Send failed');
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : 'Diagnostic failed');
     } finally {
       setSending(false);
     }
   };
 
   const handleTogglePause = async () => {
+    if (controlBusy) return;
+    setControlBusy(true);
     try {
       if (!circleId) {
         showToast('No circle context available');
@@ -150,8 +83,10 @@ function QuickActionsStrip({
       }
       await upsertAgentControl(circleId, sessionKey, agent.name, { is_paused: !isPaused });
       showToast(isPaused ? 'Resumed' : 'Paused');
-    } catch (err: any) {
-      showToast(err?.message || 'Toggle failed');
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : 'Status update failed');
+    } finally {
+      setControlBusy(false);
     }
   };
 
@@ -168,97 +103,81 @@ function QuickActionsStrip({
     }
   };
 
-  const btnStyle = (kind: 'primary' | 'ghost' | 'warn') => ({
-    flex: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: kind === 'primary' ? (agent.color || '#6366f1') : kind === 'warn' ? '#ef4444' : '#262626',
-    backgroundColor: kind === 'primary' ? (agent.color || '#6366f1') + '18' : '#0a0a10',
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  });
-  const btnText = (kind: 'primary' | 'ghost' | 'warn') => ({
-    color: kind === 'primary' ? (agent.color || '#6366f1') : kind === 'warn' ? '#ef4444' : '#d6d6e1',
-    fontSize: 10,
-    fontWeight: '900' as const,
-    letterSpacing: 0.8,
-    fontFamily: MONO,
-  });
+  const accentColor = agent.color || '#6366f1';
 
   return (
-    <View style={{ gap: 8 }}>
-      {computerUseOn && canUseShell && (
-        <View style={{ backgroundColor: '#2a0a0a', borderWidth: 1, borderColor: '#ef4444', borderRadius: 4, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <Text style={{ color: '#ef4444', fontSize: 14 }}>⚠</Text>
-          <Text style={{ color: '#fecaca', fontSize: 11, fontWeight: '700', fontFamily: MONO, flex: 1 }}>
-            COMPUTER USE ACTIVE · Send Task runs shell on your machine · auto-disables in 1h
-          </Text>
-          <Pressable onPress={handleToggleComputerUse} style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 3, borderWidth: 1, borderColor: '#ef4444' }}>
-            <Text style={{ color: '#ef4444', fontSize: 10, fontWeight: '900', fontFamily: MONO }}>DISABLE</Text>
+    <View style={overviewStyles.actionsBlock}>
+      <View style={overviewStyles.actionsRow}>
+        {canRunDiagnostics ? (
+          <Pressable
+            onPress={() => setComposerOpen(value => !value)}
+            accessibilityRole="button"
+            accessibilityLabel={composerOpen ? 'Close diagnostics' : 'Open read-only diagnostics'}
+            accessibilityState={{ expanded: composerOpen }}
+            style={[overviewStyles.actionButton, { borderColor: accentColor + '55', backgroundColor: accentColor + '14' }]}
+          >
+            <Text style={[overviewStyles.actionButtonText, { color: accentColor }]}>{composerOpen ? 'Close diagnostics' : 'Diagnostics'}</Text>
           </Pressable>
-        </View>
-      )}
-      <View style={{ flexDirection: 'row', gap: 6 }}>
-        <Pressable onPress={() => setComposerOpen(v => !v)} style={btnStyle(computerUseOn ? 'warn' : 'primary')}>
-          <Text style={btnText(computerUseOn ? 'warn' : 'primary')}>
-            {composerOpen ? '× CLOSE' : computerUseOn ? '⏵ RUN SHELL' : '⏵ SEND TASK'}
-          </Text>
+        ) : null}
+        <Pressable
+          onPress={handleTogglePause}
+          disabled={controlBusy}
+          accessibilityRole="button"
+          accessibilityLabel={isPaused ? `Resume ${agent.name}` : `Pause ${agent.name}`}
+          accessibilityState={{ disabled: controlBusy, busy: controlBusy }}
+          style={[overviewStyles.actionButton, controlBusy && overviewStyles.actionButtonDisabled]}
+        >
+          <Text style={overviewStyles.actionButtonText}>{controlBusy ? 'Updating…' : isPaused ? 'Resume' : 'Pause'}</Text>
         </Pressable>
-        <Pressable onPress={handleTogglePause} style={btnStyle(isPaused ? 'primary' : 'ghost')}>
-          <Text style={btnText(isPaused ? 'primary' : 'ghost')}>{isPaused ? '▶ RESUME' : '‖ PAUSE'}</Text>
-        </Pressable>
-        {canUseShell && (
-          <Pressable onPress={handleToggleComputerUse} style={btnStyle(computerUseOn ? 'warn' : 'ghost')}>
-            <Text style={btnText(computerUseOn ? 'warn' : 'ghost')}>{computerUseOn ? '⚠ SHELL ON' : '⚠ SHELL'}</Text>
-          </Pressable>
-        )}
-        <Pressable onPress={handleCopySession} style={btnStyle('ghost')}>
-          <Text style={btnText('ghost')}>⎘ SESSION</Text>
+        <Pressable
+          onPress={handleCopySession}
+          accessibilityRole="button"
+          accessibilityLabel="Copy session key"
+          accessibilityHint="Copies the exact runtime session identifier."
+          style={overviewStyles.actionButton}
+        >
+          <Text style={overviewStyles.actionButtonText}>Copy session</Text>
         </Pressable>
       </View>
 
       {composerOpen && (
-        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#262626', borderRadius: 4, padding: 10, gap: 8 }}>
+        <View style={overviewStyles.diagnosticComposer}>
           <TextInput
             value={draft}
             onChangeText={setDraft}
-            placeholder={computerUseOn && canUseShell ? 'Shell command · runs on your machine' : `Tell ${agent.name} what to do…`}
+            placeholder="Read-only command · e.g. git status"
             placeholderTextColor="#606075"
             multiline
             autoFocus
-            style={{
-              color: '#f3f3f8',
-              fontSize: 13,
-              fontFamily: MONO,
-              minHeight: 56,
-              padding: 8,
-              backgroundColor: '#000',
-              borderRadius: 3,
-              borderWidth: 1,
-              borderColor: '#1a1a28',
-              ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
-            }}
+            accessibilityLabel="Read-only diagnostic command"
+            style={overviewStyles.diagnosticInput}
             onSubmitEditing={handleSend}
           />
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Text style={{ color: computerUseOn && canUseShell ? '#ef4444' : '#606075', fontSize: 10, fontFamily: MONO }}>
-              {computerUseOn && canUseShell
-                ? 'Shell on your machine · logged to activity'
-                : onRunCommand ? 'Routes through the bridge' : 'Queues to activity feed'}
+          <View style={overviewStyles.diagnosticFooter}>
+            <Text style={overviewStyles.diagnosticHint}>
+              Claude bridge read-only diagnostic allowlist
             </Text>
-            <Pressable onPress={handleSend} disabled={sending || !draft.trim()} style={[btnStyle('primary'), { flex: 0, paddingHorizontal: 14, opacity: sending || !draft.trim() ? 0.5 : 1 }]}>
-              <Text style={btnText('primary')}>{sending ? 'SENDING…' : 'DISPATCH ⏎'}</Text>
+            <Pressable
+              onPress={handleSend}
+              disabled={sending || !draft.trim()}
+              accessibilityRole="button"
+              accessibilityLabel="Run read-only diagnostic"
+              accessibilityState={{ disabled: sending || !draft.trim(), busy: sending }}
+              style={[
+                overviewStyles.runDiagnosticButton,
+                { backgroundColor: accentColor },
+                (sending || !draft.trim()) && overviewStyles.actionButtonDisabled,
+              ]}
+            >
+              <Text style={overviewStyles.runDiagnosticButtonText}>{sending ? 'Running…' : 'Run'}</Text>
             </Pressable>
           </View>
         </View>
       )}
 
       {toast && (
-        <View style={{ backgroundColor: '#141418', borderWidth: 1, borderColor: '#262626', borderRadius: 3, paddingHorizontal: 10, paddingVertical: 6 }}>
-          <Text style={{ color: '#d6d6e1', fontSize: 11, fontFamily: MONO }}>{toast}</Text>
+        <View style={overviewStyles.notice} accessibilityRole="alert" accessibilityLiveRegion="polite">
+          <Text style={overviewStyles.noticeText}>{toast}</Text>
         </View>
       )}
     </View>
@@ -274,10 +193,10 @@ function QuickActionsStrip({
 
 function NowDoingPanel({ agent, currentObjective }: { agent: OfficeAgent; currentObjective: string }) {
   const [burnSamples, setBurnSamples] = useState<Array<{ t: number; tokens: number }>>(() => [{ t: Date.now(), tokens: agent.tokensUsed || 0 }]);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
-  // Sample tokens-used every 10s so we can draw a 30-minute rolling sparkline
-  // without hitting the DB. The state pairs (ts, cumulative tokens) and the
-  // per-sample delta becomes the burn rate for that slot.
+  // Record a sample when the bridge counter advances so we can draw a
+  // 30-minute rolling sparkline without introducing another timer or DB read.
   useEffect(() => {
     setBurnSamples(prev => {
       const next = [...prev, { t: Date.now(), tokens: agent.tokensUsed || 0 }];
@@ -289,71 +208,77 @@ function NowDoingPanel({ agent, currentObjective }: { agent: OfficeAgent; curren
   const recentCalls = (agent.recentToolCalls || []).slice(-5).reverse();
   const activeFiles = agent.activeFiles || [];
   const isWorking = agent.status === 'active' || agent.status === 'building' || !!agent.currentToolName;
-  const dotColor = isWorking ? '#22c55e' : '#606075';
+  const dotColor = isWorking ? '#3fb950' : '#484f58';
   const burnRate = computeBurnRate(burnSamples);
+  const hasEvidence = recentCalls.length > 0 || activeFiles.length > 0 || burnRate > 0;
 
   return (
-    <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: isWorking ? '#22c55e40' : '#1a1a28', borderRadius: 3, padding: 12, gap: 10 }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: dotColor }} />
-        <Text style={{ color: isWorking ? '#22c55e' : '#909098', fontSize: 11, fontWeight: '800', letterSpacing: 1.2, fontFamily: MONO }}>
-          NOW DOING
-        </Text>
-        {burnRate > 0 && (
-          <Text style={{ color: '#d6d6e1', fontSize: 10, fontWeight: '700', fontFamily: MONO, marginLeft: 'auto' }}>
-            {burnRate >= 1000 ? `${(burnRate / 1000).toFixed(1)}k` : burnRate} tok/min
-          </Text>
-        )}
+    <View style={[overviewStyles.currentWork, isWorking && overviewStyles.currentWorkActive]}>
+      <View style={overviewStyles.currentWorkHeader}>
+        <View style={[overviewStyles.currentWorkDot, { backgroundColor: dotColor }]} />
+        <Text style={overviewStyles.currentWorkTitle}>Current work</Text>
+        <Text style={overviewStyles.currentWorkState}>{isWorking ? 'Working' : 'Standing by'}</Text>
       </View>
 
       {agent.currentToolName || agent.currentToolFile ? (
-        <View style={{ borderRadius: 3, padding: 10, backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28' }}>
-          <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>
-            ⏵ {agent.currentToolName || 'Running'}
+        <View style={overviewStyles.currentTool}>
+          <Text style={overviewStyles.currentToolName}>
+            {agent.currentToolName || 'Running'}
           </Text>
           {agent.currentToolFile && (
-            <Text style={{ color: '#d6d6e1', fontSize: 11, fontFamily: MONO, marginTop: 4 }} numberOfLines={1}>
+            <Text style={overviewStyles.currentToolFile} numberOfLines={1}>
               {shortPath(agent.currentToolFile)}
             </Text>
           )}
         </View>
       ) : (
-        <Text style={{ color: '#808090', fontSize: 13, lineHeight: 18 }}>{currentObjective}</Text>
+        <Text style={overviewStyles.currentObjective}>{currentObjective}</Text>
       )}
 
-      {recentCalls.length > 0 && (
-        <View style={{ gap: 4 }}>
-          <Text style={{ color: '#606075', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>RECENT TOOL CALLS</Text>
-          {recentCalls.map((call, i) => (
-            <View key={`${call.ts}-${i}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 3 }}>
-              <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO, width: 44 }} numberOfLines={1}>
-                {formatRelativeTime(call.ts)}
-              </Text>
-              <Text style={{ color: '#a8a8b8', fontSize: 11, fontWeight: '700', fontFamily: MONO, width: 80 }} numberOfLines={1}>
-                {call.tool}
-              </Text>
-              <Text style={{ color: '#606075', fontSize: 11, fontFamily: MONO, flex: 1 }} numberOfLines={1}>
-                {call.file ? shortPath(call.file) : '—'}
-              </Text>
+      {hasEvidence ? (
+        <>
+          <Pressable
+            onPress={() => setDetailsOpen(value => !value)}
+            accessibilityRole="button"
+            accessibilityLabel={detailsOpen ? 'Hide current work evidence' : 'Show current work evidence'}
+            accessibilityState={{ expanded: detailsOpen }}
+            style={overviewStyles.inlineDisclosure}
+          >
+            <Text style={overviewStyles.inlineDisclosureText}>{detailsOpen ? 'Hide evidence' : 'Show evidence'}</Text>
+            {burnRate > 0 ? (
+              <Text style={overviewStyles.burnRate}>{burnRate >= 1000 ? `${(burnRate / 1000).toFixed(1)}k` : burnRate} tokens/min</Text>
+            ) : null}
+          </Pressable>
+          {detailsOpen ? (
+            <View style={overviewStyles.workEvidence}>
+              {recentCalls.length > 0 ? (
+                <View style={overviewStyles.evidenceGroup}>
+                  <Text style={overviewStyles.evidenceLabel}>Recent tools</Text>
+                  {recentCalls.map((call, index) => (
+                    <View key={`${call.ts}-${index}`} style={overviewStyles.toolCallRow}>
+                      <Text style={overviewStyles.toolCallTime} numberOfLines={1}>{formatRelativeTime(call.ts)}</Text>
+                      <Text style={overviewStyles.toolCallName} numberOfLines={1}>{call.tool}</Text>
+                      <Text style={overviewStyles.toolCallFile} numberOfLines={1}>{call.file ? shortPath(call.file) : 'No file'}</Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+              {activeFiles.length > 0 ? (
+                <View style={overviewStyles.evidenceGroup}>
+                  <Text style={overviewStyles.evidenceLabel}>Active files · {activeFiles.length}</Text>
+                  <View style={overviewStyles.fileList}>
+                    {activeFiles.slice(0, 6).map(file => (
+                      <View key={file} style={overviewStyles.fileChip}>
+                        <Text style={overviewStyles.fileChipText} numberOfLines={1}>{file.split('/').pop() || file}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              ) : null}
             </View>
-          ))}
-        </View>
-      )}
-
-      {activeFiles.length > 0 && (
-        <View style={{ gap: 4 }}>
-          <Text style={{ color: '#606075', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
-            ACTIVE FILES · {activeFiles.length}
-          </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
-            {activeFiles.slice(0, 6).map(f => (
-              <View key={f} style={{ paddingHorizontal: 6, paddingVertical: 3, borderRadius: 3, borderWidth: 1, borderColor: '#1a1a28', backgroundColor: '#0f0f18' }}>
-                <Text style={{ color: '#d6d6e1', fontSize: 10, fontFamily: MONO }} numberOfLines={1}>{f.split('/').pop() || f}</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-      )}
+          ) : null}
+        </>
+      ) : null}
     </View>
   );
 }
@@ -382,19 +307,39 @@ interface MemorySyncStatus {
  * the Overview tab can show whether memory sync is actually happening vs. just
  * claiming "every 30s" regardless of backend health.
  *
- * Polls every 15s. Buckets:
+ * Reads immediately, then refreshes every two minutes while Overview is
+ * mounted. Memory freshness changes on minute-scale buckets, so a tighter
+ * background query adds load without changing the operator decision.
+ * Buckets:
  *   < 2 min   → fresh (green)
  *   < 15 min  → stale (yellow)
  *   older     → cold  (gray)
  *   no rows   → empty
  *   query err → error (red) — surfaces RLS / network problems
  */
-function useMemorySyncStatus(circleId: string | undefined, userId: string | null): MemorySyncStatus {
+function normalizeIdentityAuthority(
+  circleId: string | undefined,
+  authority: AgentIdentityExactAuthority | null | undefined,
+): AgentIdentityExactAuthority | null {
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  if (!circleId || !userId || authorityCircleId !== circleId || !accessToken) return null;
+  return { userId, circleId: authorityCircleId, accessToken };
+}
+
+function useMemorySyncStatus(
+  circleId: string | undefined,
+  identityAuthority: AgentIdentityExactAuthority | null,
+): MemorySyncStatus {
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [state, setState] = useState<SyncState>('loading');
+  const userId = identityAuthority?.userId || null;
+  const accessToken = identityAuthority?.accessToken || null;
 
   useEffect(() => {
-    if (!circleId || !userId) {
+    if (!circleId || !userId || !accessToken) {
+      setLastSavedAt(null);
       setState('loading');
       return;
     }
@@ -409,7 +354,8 @@ function useMemorySyncStatus(circleId: string | undefined, userId: string | null
           .eq('is_active', true)
           .order('updated_at', { ascending: false })
           .limit(1)
-          .maybeSingle();
+          .maybeSingle()
+          .setHeader('Authorization', `Bearer ${accessToken}`);
         if (cancelled) return;
         if (error) {
           setState('error');
@@ -432,14 +378,12 @@ function useMemorySyncStatus(circleId: string | undefined, userId: string | null
       }
     };
     void tick();
-    // 30s — memory sync state changes slowly; tighter polling just hammers
-    // memory_entries for no UX benefit.
-    const id = setInterval(tick, 30000);
+    const id = setInterval(tick, 120_000);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [circleId, userId]);
+  }, [accessToken, circleId, userId]);
 
   if (state === 'fresh') return { state, lastSavedAt, color: '#22c55e', label: 'SYNCED', detail: lastSavedAt ? formatRelativeTime(lastSavedAt) : 'just now' };
   if (state === 'stale') return { state, lastSavedAt, color: '#f59e0b', label: 'STALE', detail: `last sync ${formatRelativeTime(lastSavedAt || undefined)}` };
@@ -452,9 +396,7 @@ function useMemorySyncStatus(circleId: string | undefined, userId: string | null
 export default function AgentOverviewPanel({
   agent,
   circleId,
-  userId,
-  statusColor,
-  statusLabel,
+  identityAuthority,
   onClose,
   onRenameAgent,
   onAgentIdentityChange,
@@ -462,15 +404,18 @@ export default function AgentOverviewPanel({
 }: {
   agent: OfficeAgent;
   circleId?: string;
-  userId?: string | null;
-  statusColor: string;
-  statusLabel: string;
+  identityAuthority?: AgentIdentityExactAuthority | null;
   onClose: () => void;
   onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<void> | void;
   onAgentIdentityChange?: () => void;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
 }) {
-  const memorySync = useMemorySyncStatus(circleId, userId || null);
+  const exactIdentityAuthority = useMemo(
+    () => normalizeIdentityAuthority(circleId, identityAuthority),
+    [circleId, identityAuthority?.accessToken, identityAuthority?.circleId, identityAuthority?.userId],
+  );
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const memorySync = useMemorySyncStatus(circleId, detailsOpen ? exactIdentityAuthority : null);
   const [renamingAgent, setRenamingAgent] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [isMainAgent, setIsMainAgent] = useState(false);
@@ -479,42 +424,59 @@ export default function AgentOverviewPanel({
     () => getAgentIdentityKey(agent),
     [agent],
   );
+  const identityRequestKey = exactIdentityAuthority
+    ? `${exactIdentityAuthority.userId}\u0000${exactIdentityAuthority.circleId}\u0000${agent.id}\u0000${sessionKey}`
+    : '';
+  const latestIdentityRequestKeyRef = useRef(identityRequestKey);
+  const latestIdentityAccessTokenRef = useRef(exactIdentityAuthority?.accessToken || '');
+  latestIdentityRequestKeyRef.current = identityRequestKey;
+  latestIdentityAccessTokenRef.current = exactIdentityAuthority?.accessToken || '';
   const control = useAgentControl(circleId, sessionKey);
   const providerMeta = PROVIDER_META[agent.providerType];
-  const health = getAgentHealth(agent);
 
   useEffect(() => {
+    setDetailsOpen(false);
     setRenamingAgent(false);
     setAgentNameDraft('');
     setIsMainAgent(false);
-  }, [agent.id]);
+  }, [agent.id, identityRequestKey]);
 
   useEffect(() => {
+    setIsMainAgent(false);
+    if (!detailsOpen || !exactIdentityAuthority || !identityRequestKey) return;
     let cancelled = false;
-    import('../../../../lib/agentIdentity')
-      .then(({ loadAgentIdentities }) => loadAgentIdentities())
+    const capturedRequestKey = identityRequestKey;
+    loadAgentIdentitiesExact(exactIdentityAuthority)
       .then(ids => {
-        if (cancelled) return;
+        if (
+          cancelled
+          || latestIdentityRequestKeyRef.current !== capturedRequestKey
+          || latestIdentityAccessTokenRef.current !== exactIdentityAuthority.accessToken
+        ) return;
         const identity = ids.get(sessionKey);
         setIsMainAgent(identity?.isPrimary === true);
       })
       .catch(err => console.warn('[AgentOverviewPanel] Failed to load identities:', err));
     return () => { cancelled = true; };
-  }, [sessionKey]);
+  }, [detailsOpen, exactIdentityAuthority, identityRequestKey, sessionKey]);
 
   const currentObjective = agent.lastUserMessage || agent.activity || 'No current task captured yet.';
-  const activeFileCount = agent.activeFiles?.length || 0;
   const projectLabel = agent.projectDir ? shortPath(agent.projectDir) : 'No active project detected';
 
   const readinessCards = [
-    { label: 'Role', value: agent.role || 'Unassigned', color: '#d4d4de' },
-    { label: 'Provider', value: providerMeta?.label || agent.providerType, color: providerMeta?.color || '#9ca3af' },
-    { label: 'Model', value: agent.model !== 'unknown' ? agent.model : 'Unknown', color: '#818cf8' },
-    { label: 'Project', value: projectLabel, color: '#22c55e' },
+    { label: 'Role', value: agent.role || 'Unassigned' },
+    { label: 'Provider', value: providerMeta?.label || agent.providerType },
+    { label: 'Model', value: agent.model !== 'unknown' ? agent.model : 'Unknown' },
+    { label: 'Project', value: projectLabel },
   ];
+  const detailsSummary = [
+    providerMeta?.label || agent.providerType,
+    agent.model !== 'unknown' ? agent.model : null,
+    formatRelativeTime(agent.lastActive),
+  ].filter((value): value is string => !!value).join(' · ');
 
   return (
-    <View nativeID="section-agent-overview" style={{ paddingHorizontal: 12, gap: 20, paddingBottom: 20 }}>
+    <View nativeID="section-agent-overview" style={overviewStyles.container}>
       <QuickActionsStrip
         agent={agent}
         circleId={circleId}
@@ -522,125 +484,10 @@ export default function AgentOverviewPanel({
         isPaused={!!control?.is_paused}
         onRunCommand={onRunCommand}
       />
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 2, borderColor: statusColor + '45', borderRadius: 3, padding: 14 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-          <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: statusColor }} />
-          <Text style={{ color: statusColor, fontSize: 16, fontWeight: '800', fontFamily: MONO, letterSpacing: 1 }}>{statusLabel}</Text>
-          <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, marginLeft: 'auto' }}>{formatRelativeTime(agent.lastActive)}</Text>
-        </View>
-
-        <Text style={{ color: '#f3f3f8', fontSize: 18, fontWeight: '700', marginBottom: 4 }}>{health.label}</Text>
-        <Text style={{ color: '#a3a3b6', fontSize: 13, lineHeight: 19 }}>{health.detail}</Text>
-
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
-          <View style={{ backgroundColor: '#12121b', borderWidth: 1, borderColor: '#232334', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 }}>
-            <Text style={{ color: '#d6d6e1', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>SESSION {sessionKey}</Text>
-          </View>
-          <View style={{ backgroundColor: '#12121b', borderWidth: 1, borderColor: '#232334', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 }}>
-            <Text style={{ color: '#d6d6e1', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{activeFileCount} ACTIVE FILES</Text>
-          </View>
-          {agent.subagentCount ? (
-            <View style={{ backgroundColor: '#12121b', borderWidth: 1, borderColor: '#232334', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 }}>
-              <Text style={{ color: '#d6d6e1', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{agent.subagentCount} SUB-AGENTS</Text>
-            </View>
-          ) : null}
-        </View>
-      </View>
-
       <NowDoingPanel agent={agent} currentObjective={currentObjective} />
 
-
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-        <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
-        <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 2, fontFamily: MONO }}>IDENTITY</Text>
-        <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
-      </View>
-
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-        {readinessCards.map(card => (
-          <View key={card.label} style={{ width: '48%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
-            <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>{card.label.toUpperCase()}</Text>
-            <Text style={{ color: card.color, fontSize: 14, fontWeight: '700', fontFamily: MONO, marginTop: 4 }} numberOfLines={2}>{card.value}</Text>
-          </View>
-        ))}
-      </View>
-
-      {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) && (
-        <View style={{ gap: 8 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-            <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
-            <Text style={{ color: '#606075', fontSize: 10, fontWeight: '700', letterSpacing: 2, fontFamily: MONO }}>AGENT SETTINGS</Text>
-            <View style={{ height: 1, flex: 1, backgroundColor: '#1a1a28' }} />
-          </View>
-
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#0a0a10', borderWidth: 1, borderColor: memorySync.color + '30', borderRadius: 3, padding: 10 }}>
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: memorySync.color }} />
-            <Text style={{ color: memorySync.color, fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
-              MEMORY SYNC {memorySync.label}
-            </Text>
-            <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, marginLeft: 'auto' }}>{memorySync.detail}</Text>
-          </View>
-
-          <View style={{ gap: 8 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-              <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>AGENT NAME</Text>
-              {renamingAgent ? (
-                <View style={{ flexDirection: 'row', flex: 1, gap: 4 }}>
-                  <TextInput
-                    value={agentNameDraft}
-                    onChangeText={setAgentNameDraft}
-                    placeholder={agent.name}
-                    placeholderTextColor="#606075"
-                    autoFocus
-                    style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
-                    onSubmitEditing={async () => {
-                      if (agentNameDraft.trim()) {
-                        if (onRenameAgent) await onRenameAgent(agent, agentNameDraft.trim());
-                        else {
-                          const { renameAgent } = await import('../../../../lib/agentIdentity');
-                          await renameAgent(sessionKey, agentNameDraft.trim());
-                        }
-                        onAgentIdentityChange?.();
-                      }
-                      setRenamingAgent(false);
-                    }}
-                  />
-                  <Pressable onPress={() => setRenamingAgent(false)} style={{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
-                    <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Cancel</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <Pressable onPress={() => { setAgentNameDraft(agent.name); setRenamingAgent(true); }} style={[{ paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                  <Text style={{ color: '#a0a0b0', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Rename</Text>
-                </Pressable>
-              )}
-            </View>
-
-            <Pressable
-              onPress={async () => {
-                const { setMainAgentForProvider } = await import('../../../../lib/agentIdentity');
-                await setMainAgentForProvider(sessionKey, agent.providerType);
-                setIsMainAgent(true);
-                onAgentIdentityChange?.();
-              }}
-              style={[{
-                flexDirection: 'row', alignItems: 'center', gap: 6,
-                backgroundColor: isMainAgent ? agent.color + '20' : '#0a0a10',
-                borderWidth: 1, borderColor: isMainAgent ? agent.color + '60' : '#1a1a28',
-                borderRadius: 3, padding: 10,
-              }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              <Text style={{ fontSize: 13 }}>{isMainAgent ? '\u2605' : '\u2606'}</Text>
-              <Text style={{ color: isMainAgent ? agent.color : '#606075', fontSize: 11, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>
-                {isMainAgent ? 'MAIN PIXEL AGENT' : 'SET AS MAIN PIXEL AGENT'}
-              </Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-
       {circleId && sessionKey && (
-        <View nativeID="section-agent-controls">
+        <View nativeID="section-agent-controls" style={overviewStyles.connectionSummary}>
           <AgentControlCard
             agent={agent}
             circleId={circleId}
@@ -653,6 +500,559 @@ export default function AgentOverviewPanel({
           />
         </View>
       )}
+
+      <Pressable
+        onPress={() => setDetailsOpen(value => !value)}
+        accessibilityRole="button"
+        accessibilityLabel={detailsOpen ? 'Hide agent details' : 'Show agent details'}
+        accessibilityState={{ expanded: detailsOpen }}
+        style={overviewStyles.detailsDisclosure}
+      >
+        <View style={overviewStyles.detailsDisclosureCopy}>
+          <Text style={overviewStyles.detailsDisclosureTitle}>Agent details</Text>
+          <Text style={overviewStyles.detailsDisclosureSummary} numberOfLines={1}>{detailsSummary}</Text>
+        </View>
+        <Text style={overviewStyles.detailsDisclosureAction}>{detailsOpen ? 'Hide' : 'Show'}</Text>
+      </Pressable>
+
+      {detailsOpen ? (
+        <View style={overviewStyles.detailsPanel}>
+          <View style={overviewStyles.detailsList}>
+            {readinessCards.map(item => (
+              <View key={item.label} style={overviewStyles.detailRow}>
+                <Text style={overviewStyles.detailLabel}>{item.label}</Text>
+                <Text style={overviewStyles.detailValue} numberOfLines={2}>{item.value}</Text>
+              </View>
+            ))}
+            <View style={overviewStyles.detailRow}>
+              <Text style={overviewStyles.detailLabel}>Session</Text>
+              <Text style={[overviewStyles.detailValue, overviewStyles.sessionValue]} numberOfLines={1} selectable>{sessionKey}</Text>
+            </View>
+          </View>
+
+          {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) ? (
+            <View style={overviewStyles.settingsSection}>
+              <Text style={overviewStyles.settingsTitle}>Preferences</Text>
+              <View style={[overviewStyles.memoryStatus, { borderColor: memorySync.color + '38' }]}>
+                <View style={[overviewStyles.memoryStatusDot, { backgroundColor: memorySync.color }]} />
+                <View style={overviewStyles.memoryStatusCopy}>
+                  <Text style={overviewStyles.memoryStatusTitle}>Memory {memorySync.label.toLowerCase()}</Text>
+                  <Text style={overviewStyles.memoryStatusDetail}>{memorySync.detail}</Text>
+                </View>
+              </View>
+
+              <View style={overviewStyles.settingRow}>
+                <View style={overviewStyles.settingCopy}>
+                  <Text style={overviewStyles.settingLabel}>Agent name</Text>
+                  <Text style={overviewStyles.settingDescription}>Used across your private Office identity.</Text>
+                </View>
+                {renamingAgent ? (
+                  <View style={overviewStyles.renameEditor}>
+                    <TextInput
+                      value={agentNameDraft}
+                      onChangeText={setAgentNameDraft}
+                      placeholder={agent.name}
+                      placeholderTextColor="#484f58"
+                      autoFocus
+                      accessibilityLabel="Agent name"
+                      style={overviewStyles.renameInput}
+                      onSubmitEditing={async () => {
+                        const cleanName = agentNameDraft.trim();
+                        const capturedAuthority = exactIdentityAuthority;
+                        const capturedRequestKey = identityRequestKey;
+                        if (cleanName && capturedAuthority && capturedRequestKey) {
+                          if (onRenameAgent) {
+                            await onRenameAgent(agent, cleanName);
+                          } else {
+                            const receipt = await renameAgentExact(sessionKey, cleanName, capturedAuthority);
+                            if (!receipt.localSaved) return;
+                          }
+                          if (
+                            latestIdentityRequestKeyRef.current !== capturedRequestKey
+                            || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+                          ) return;
+                          onAgentIdentityChange?.();
+                        }
+                        if (
+                          latestIdentityRequestKeyRef.current === capturedRequestKey
+                          && latestIdentityAccessTokenRef.current === capturedAuthority?.accessToken
+                        ) setRenamingAgent(false);
+                      }}
+                    />
+                    <Pressable
+                      onPress={() => setRenamingAgent(false)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel rename"
+                      style={overviewStyles.smallButton}
+                    >
+                      <Text style={overviewStyles.smallButtonText}>Cancel</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Pressable
+                    disabled={!exactIdentityAuthority}
+                    onPress={() => {
+                      if (!exactIdentityAuthority) return;
+                      setAgentNameDraft(agent.name);
+                      setRenamingAgent(true);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Rename ${agent.name}`}
+                    accessibilityState={{ disabled: !exactIdentityAuthority }}
+                    style={[overviewStyles.smallButton, !exactIdentityAuthority && overviewStyles.actionButtonDisabled]}
+                  >
+                    <Text style={overviewStyles.smallButtonText}>Rename</Text>
+                  </Pressable>
+                )}
+              </View>
+
+              <Pressable
+                onPress={async () => {
+                  const capturedAuthority = exactIdentityAuthority;
+                  const capturedRequestKey = identityRequestKey;
+                  if (!capturedAuthority || !capturedRequestKey) return;
+                  const receipt = await setMainAgentForProviderExact(sessionKey, agent.providerType, capturedAuthority);
+                  if (
+                    !receipt.localSaved
+                    || latestIdentityRequestKeyRef.current !== capturedRequestKey
+                    || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+                  ) return;
+                  setIsMainAgent(true);
+                  onAgentIdentityChange?.();
+                }}
+                disabled={!exactIdentityAuthority || isMainAgent}
+                accessibilityRole="button"
+                accessibilityLabel={isMainAgent ? `${agent.name} is the main Office agent` : `Set ${agent.name} as the main Office agent`}
+                accessibilityState={{ disabled: !exactIdentityAuthority || isMainAgent, selected: isMainAgent }}
+                style={[
+                  overviewStyles.primaryAgentButton,
+                  isMainAgent && { borderColor: agent.color + '55', backgroundColor: agent.color + '12' },
+                  (!exactIdentityAuthority || isMainAgent) && overviewStyles.actionButtonDisabled,
+                ]}
+              >
+                <View style={[overviewStyles.primaryAgentMarker, { backgroundColor: isMainAgent ? agent.color : '#484f58' }]} />
+                <Text style={overviewStyles.primaryAgentText}>{isMainAgent ? 'Main Office agent' : 'Set as main Office agent'}</Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
     </View>
   );
 }
+
+const overviewStyles = StyleSheet.create({
+  container: {
+    gap: 12,
+    paddingBottom: 8,
+  },
+  actionsBlock: {
+    gap: 8,
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  actionButton: {
+    flexGrow: 1,
+    minWidth: 108,
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  actionButtonText: {
+    color: '#e6edf3',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  actionButtonDisabled: {
+    opacity: 0.5,
+  },
+  diagnosticComposer: {
+    gap: 10,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#0d1117',
+  },
+  diagnosticInput: {
+    minHeight: 64,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#010409',
+    color: '#e6edf3',
+    fontSize: 13,
+    fontFamily: MONO,
+    textAlignVertical: 'top',
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' as any } : {}),
+  } as any,
+  diagnosticFooter: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  diagnosticHint: {
+    color: '#8b949e',
+    fontSize: 11,
+    flex: 1,
+    minWidth: 180,
+  },
+  runDiagnosticButton: {
+    minHeight: 44,
+    minWidth: 76,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  runDiagnosticButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  notice: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+  },
+  noticeText: {
+    color: '#e6edf3',
+    fontSize: 12,
+  },
+  currentWork: {
+    gap: 10,
+    padding: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#161b22',
+  },
+  currentWorkActive: {
+    borderColor: '#3fb95045',
+  },
+  currentWorkHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  currentWorkDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  currentWorkTitle: {
+    color: '#e6edf3',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  currentWorkState: {
+    marginLeft: 'auto',
+    color: '#8b949e',
+    fontSize: 12,
+  },
+  currentTool: {
+    gap: 4,
+    padding: 10,
+    borderRadius: 6,
+    backgroundColor: '#0d1117',
+  },
+  currentToolName: {
+    color: '#e6edf3',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  currentToolFile: {
+    color: '#8b949e',
+    fontSize: 11,
+    fontFamily: MONO,
+  },
+  currentObjective: {
+    color: '#8b949e',
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  inlineDisclosure: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    alignSelf: 'stretch',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  inlineDisclosureText: {
+    color: '#6366f1',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  burnRate: {
+    marginLeft: 'auto',
+    color: '#8b949e',
+    fontSize: 11,
+  },
+  workEvidence: {
+    gap: 12,
+    paddingTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
+  },
+  evidenceGroup: {
+    gap: 6,
+  },
+  evidenceLabel: {
+    color: '#8b949e',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  toolCallRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    minHeight: 24,
+  },
+  toolCallTime: {
+    width: 52,
+    color: '#8b949e',
+    fontSize: 10,
+    fontFamily: MONO,
+  },
+  toolCallName: {
+    width: 96,
+    color: '#e6edf3',
+    fontSize: 11,
+    fontFamily: MONO,
+  },
+  toolCallFile: {
+    flex: 1,
+    color: '#8b949e',
+    fontSize: 11,
+    fontFamily: MONO,
+  },
+  fileList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  fileChip: {
+    maxWidth: '100%',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+  },
+  fileChipText: {
+    color: '#e6edf3',
+    fontSize: 10,
+    fontFamily: MONO,
+  },
+  connectionSummary: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#21262d',
+    backgroundColor: '#0d1117',
+    padding: 4,
+  },
+  detailsDisclosure: {
+    minHeight: 62,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#161b22',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  detailsDisclosureCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 3,
+  },
+  detailsDisclosureTitle: {
+    color: '#e6edf3',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  detailsDisclosureSummary: {
+    color: '#8b949e',
+    fontSize: 12,
+  },
+  detailsDisclosureAction: {
+    color: '#6366f1',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  detailsPanel: {
+    gap: 18,
+    padding: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#0d1117',
+  },
+  detailsList: {
+    gap: 0,
+  },
+  detailRow: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+  },
+  detailLabel: {
+    width: 78,
+    color: '#8b949e',
+    fontSize: 12,
+  },
+  detailValue: {
+    flex: 1,
+    color: '#e6edf3',
+    fontSize: 13,
+    textAlign: 'right',
+  },
+  sessionValue: {
+    fontFamily: MONO,
+    fontSize: 11,
+  },
+  settingsSection: {
+    gap: 12,
+  },
+  settingsTitle: {
+    color: '#e6edf3',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  memoryStatus: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    backgroundColor: '#161b22',
+  },
+  memoryStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  memoryStatusCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  memoryStatusTitle: {
+    color: '#e6edf3',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  memoryStatusDetail: {
+    color: '#8b949e',
+    fontSize: 11,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 12,
+  },
+  settingCopy: {
+    flex: 1,
+    minWidth: 170,
+    gap: 2,
+  },
+  settingLabel: {
+    color: '#e6edf3',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  settingDescription: {
+    color: '#8b949e',
+    fontSize: 11,
+  },
+  renameEditor: {
+    flex: 1,
+    minWidth: 220,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  renameInput: {
+    flex: 1,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#6366f1',
+    backgroundColor: '#010409',
+    color: '#e6edf3',
+    fontSize: 13,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' as any } : {}),
+  } as any,
+  smallButton: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  smallButtonText: {
+    color: '#e6edf3',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  primaryAgentButton: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  primaryAgentMarker: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  primaryAgentText: {
+    color: '#e6edf3',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+});

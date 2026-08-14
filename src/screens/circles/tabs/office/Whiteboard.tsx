@@ -44,6 +44,9 @@ interface Props {
   pendingApprovals?: AgentApproval[];
   budgetAlerts?: BudgetAlert[];
   periodCosts?: { today: number; week: number; month: number };
+  /** Trip-meter spend from OfficeTab: durable ledger since the user's last
+   *  explicit reset (all-time when never reset). Null until first fetch. */
+  runningCost?: { total: number; sinceIso: string | null } | null;
 }
 
 // ── COLORS ─────────────────────────────────────────────────────────────────
@@ -209,11 +212,21 @@ function fmtTok(n: number): string {
   return String(n);
 }
 
+// Same precision ladder as OfficeRunningCostStrip so the two readouts of the
+// trip meter can never disagree in the same viewport.
+function fmtUsd(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '$0.00';
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  if (n < 1) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
 export default function Whiteboard({
   editable, notes = [], onNotesChange,
   agents = [], statusHistory = [], cronJobs = [], circleId,
   connectedCount = 0, totalConnections = 0,
   connections = [], pendingApprovals = [], budgetAlerts = [], periodCosts,
+  runningCost = null,
 }: Props) {
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [editing, setEditing] = useState(false);
@@ -229,15 +242,18 @@ export default function Whiteboard({
   // ── BlackSwan status ──
   const [bsStatus, setBsStatus] = useState<'local' | 'offline' | 'checking'>('checking');
   useEffect(() => {
+    // The collapsed header still renders the BlackSwan pill, so keep one
+    // lightweight health signal. Refresh it slowly while collapsed and more
+    // often only while the diagnostics board is open.
     let alive = true;
     const check = async () => {
       const ok = await isBlackSwanAvailable();
       if (alive) setBsStatus(ok ? 'local' : 'offline');
     };
     check();
-    const t = setInterval(check, 30_000);
+    const t = setInterval(check, expanded ? 30_000 : 120_000);
     return () => { alive = false; clearInterval(t); };
-  }, []);
+  }, [expanded]);
 
   // Animated values
   const expandAnim = useRef(new Animated.Value(0)).current; // 0 = collapsed, 1 = expanded
@@ -339,13 +355,20 @@ export default function Whiteboard({
   }, []);
 
   useEffect(() => {
+    // Full bridge diagnostics import and probe multiple local runtimes. The
+    // collapsed strip already has Office connection counts, so keep this work
+    // dormant until the operator expands the board.
+    if (!expanded) {
+      setBridgeLoading(false);
+      return;
+    }
     let alive = true;
     const run = async () => {
       if (!alive) return;
       await refreshBridgeReadiness();
     };
     run();
-    const timer = setInterval(run, expanded ? 45_000 : 120_000);
+    const timer = setInterval(run, 45_000);
     return () => {
       alive = false;
       clearInterval(timer);
@@ -730,6 +753,23 @@ export default function Whiteboard({
               <Text style={s.statLabel}>COST</Text>
             </View>
 
+            {/* Running-cost trip meter cell — durable spend since the user's
+                last reset ('all time' when never reset). Hidden until the
+                first fetch lands so it can't paint a convincing $0. */}
+            {runningCost ? (
+              <View style={[s.statCell, { backgroundColor: runningCost.total > 0 ? '#f59e0b10' : '#ffffff04', borderColor: runningCost.total > 0 ? '#f59e0b20' : '#ffffff10' }]}>
+                <Text style={[s.statValue, { color: runningCost.total > 0 ? '#f59e0b' : '#444' }]}>
+                  {fmtUsd(runningCost.total)}
+                </Text>
+                <Text style={s.statLabel}>RUNNING COST</Text>
+                <Text style={s.statSubLabel}>
+                  {runningCost.sinceIso
+                    ? `since ${new Date(runningCost.sinceIso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+                    : 'all time'}
+                </Text>
+              </View>
+            ) : null}
+
             {/* Output cell */}
             <View style={[s.statCell, { backgroundColor: totalMsgs > 0 ? '#3b82f610' : '#ffffff04', borderColor: totalMsgs > 0 ? '#3b82f620' : '#ffffff10' }]}>
               <Text style={[s.statValue, { color: totalMsgs > 0 ? '#3b82f6' : '#444' }]}>
@@ -739,8 +779,8 @@ export default function Whiteboard({
             </View>
 
             {/* Connections cell */}
-            <View style={[s.statCell, { backgroundColor: '#22d3ee10', borderColor: '#6366f120' }]}>
-              <Text style={[s.statValue, { color: connectedCount > 0 ? '#22d3ee' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
+            <View style={[s.statCell, { backgroundColor: '#6366f110', borderColor: '#6366f120' }]}>
+              <Text style={[s.statValue, { color: connectedCount > 0 ? '#6366f1' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
               <Text style={s.statLabel}>LINKS</Text>
             </View>
           </View>
@@ -1908,11 +1948,11 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
       </View>
 
       <View style={s.sec}>
-        <Text style={s.secTitle}>SPEND LEDGER</Text>
+        <Text style={s.secTitle}>TRACKED SPEND</Text>
         <View style={s.ledgerRow}>
-          <MetricCell label="TODAY" value={`$${(periodCosts?.today ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'daily' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.active} />
-          <MetricCell label="WEEK" value={`$${(periodCosts?.week ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'weekly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.amber} />
-          <MetricCell label="MONTH" value={`$${(periodCosts?.month ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'monthly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.accent} />
+          <MetricCell label="24H" value={`$${(periodCosts?.today ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'daily' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.active} />
+          <MetricCell label="7D" value={`$${(periodCosts?.week ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'weekly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.amber} />
+          <MetricCell label="30D" value={`$${(periodCosts?.month ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'monthly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.accent} />
         </View>
         {budgetAlerts.length > 0 ? (
           budgetAlerts.slice(0, 3).map(alert => (
@@ -2182,6 +2222,13 @@ const s = StyleSheet.create({
     color: '#6f6f6f',
     letterSpacing: 0.8,
     marginTop: 1,
+  } as any,
+  statSubLabel: {
+    fontSize: 4,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    color: '#484f58',
+    letterSpacing: 0.4,
   } as any,
   statsTrailing: {
     flexDirection: 'row',

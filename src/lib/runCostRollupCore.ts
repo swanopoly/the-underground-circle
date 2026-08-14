@@ -39,24 +39,41 @@ export interface ModelPrice {
 /**
  * Small per-family price map (USD per 1M tokens). Keys are already in the
  * normalized form model ids take after lowercasing + `.`→`-` + provider-prefix
- * strip, so longest-substring match resolves real ids like `claude-opus-4-8`,
- * `gpt-4o`, and `google_ai/gemini-2.5-pro`. Values sit at/above published rates
+ * strip, so longest-substring match resolves real ids like `claude-opus-5`,
+ * `gpt-5-6-terra`, and `google_ai/gemini-3.6-flash`. Values sit at/above published rates
  * — this is a spend GUARD, so erring high is the safe direction. Self-hosted
  * (blackswan / ollama) is free. `default` is the conservative unknown fallback.
  */
 export const MODEL_PRICES: Record<string, ModelPrice> = {
   // ── Anthropic Claude ──
-  'claude-opus':   { inPer1M: 15,   outPer1M: 75,   cachedInPer1M: 1.5 },
+  'claude-fable-5': { inPer1M: 10,  outPer1M: 50,   cachedInPer1M: 1 },
+  'claude-opus-5': { inPer1M: 5,    outPer1M: 25,   cachedInPer1M: 0.5 },
+  'claude-sonnet-5': { inPer1M: 3,  outPer1M: 15,   cachedInPer1M: 0.3 },
+  'claude-haiku-4-5': { inPer1M: 1, outPer1M: 5,    cachedInPer1M: 0.1 },
+  'claude-opus':   { inPer1M: 5,    outPer1M: 25,   cachedInPer1M: 0.5 },
   'claude-sonnet': { inPer1M: 3,    outPer1M: 15,   cachedInPer1M: 0.3 },
-  'claude-haiku':  { inPer1M: 0.8,  outPer1M: 4,    cachedInPer1M: 0.08 },
+  'claude-haiku':  { inPer1M: 1,    outPer1M: 5,    cachedInPer1M: 0.1 },
   'claude':        { inPer1M: 3,    outPer1M: 15,   cachedInPer1M: 0.3 },
   // ── OpenAI GPT ──
+  'gpt-5-6-sol':   { inPer1M: 5,    outPer1M: 30,   cachedInPer1M: 0.5 },
+  'gpt-5-6-terra': { inPer1M: 2.5,  outPer1M: 15,   cachedInPer1M: 0.25 },
+  'gpt-5-6-luna':  { inPer1M: 1,    outPer1M: 6,    cachedInPer1M: 0.1 },
+  'gpt-5-5-pro':   { inPer1M: 30,   outPer1M: 180,  cachedInPer1M: 3 },
+  'gpt-5-5':       { inPer1M: 5,    outPer1M: 30,   cachedInPer1M: 0.5 },
+  'gpt-5-4-mini':  { inPer1M: 0.75, outPer1M: 4.5,  cachedInPer1M: 0.075 },
+  'gpt-5-4-nano':  { inPer1M: 0.2,  outPer1M: 1.2,  cachedInPer1M: 0.02 },
+  'gpt-5-4':       { inPer1M: 2.5,  outPer1M: 15,   cachedInPer1M: 0.25 },
+  'o3-pro':        { inPer1M: 20,   outPer1M: 80,   cachedInPer1M: 5 },
+  'o3':            { inPer1M: 10,   outPer1M: 40,   cachedInPer1M: 2.5 },
   'gpt-4o-mini':   { inPer1M: 0.15, outPer1M: 0.6,  cachedInPer1M: 0.075 },
   'gpt-4o':        { inPer1M: 2.5,  outPer1M: 10,   cachedInPer1M: 1.25 },
   'gpt-4':         { inPer1M: 3,    outPer1M: 12,   cachedInPer1M: 0.3 },
   'gpt-5':         { inPer1M: 5,    outPer1M: 30,   cachedInPer1M: 0.5 },
   'gpt':           { inPer1M: 2.5,  outPer1M: 10,   cachedInPer1M: 0.25 },
   // ── Google Gemini ──
+  'gemini-3-6-flash': { inPer1M: 1.5, outPer1M: 7.5, cachedInPer1M: 0.15 },
+  'gemini-3-5-flash-lite': { inPer1M: 0.3, outPer1M: 2.5, cachedInPer1M: 0.03 },
+  'gemini-3-5-flash': { inPer1M: 1.5, outPer1M: 9, cachedInPer1M: 0.15 },
   'gemini-flash':  { inPer1M: 0.1,  outPer1M: 0.4,  cachedInPer1M: 0.01 },
   'gemini-pro':    { inPer1M: 1.25, outPer1M: 10,   cachedInPer1M: 0.31 },
   'gemini':        { inPer1M: 1.25, outPer1M: 10,   cachedInPer1M: 0.31 },

@@ -30,7 +30,9 @@ import {
   spawnAgents,
 } from '../../../../lib/agentSpawner';
 import { PROVIDER_MODELS } from '../../../../lib/llmProviders';
-import { loadModelGroups } from '../../../../lib/integrations/modelProviderRegistry';
+import { loadModelGroups, type ModelGroup } from '../../../../lib/integrations/modelProviderRegistry';
+import { resolvePlainChatModelRoute } from '../../../../lib/crossProviderRouter';
+import { resolveModelSelectionReadiness } from '../../../../lib/modelCatalogReadinessCore';
 import {
   MAX_AGENTS_PER_DEPLOY,
   capDeployCount,
@@ -62,7 +64,7 @@ interface ModelChoice { key: string; label: string }
 // Always-available default set: the three current Claude tiers (sourced from
 // the provider catalog so the ids stay correct) plus 'auto'. Connected
 // providers extend this at runtime via loadModelGroups.
-const DEFAULT_MODEL_IDS = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] as const;
+const DEFAULT_MODEL_IDS = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'] as const;
 
 const shortModelLabel = (id: string, fallback?: string): string => {
   // Compact, uppercase chip labels in keeping with the existing aesthetic.
@@ -105,6 +107,8 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
   const [result, setResult] = useState<SpawnResult | null>(null);
   const [modelChoices, setModelChoices] = useState<ModelChoice[]>(buildDefaultModelChoices);
   const [connectedProviders, setConnectedProviders] = useState<string[]>([]);
+  const [accountModelGroups, setAccountModelGroups] = useState<ModelGroup[]>([]);
+  const [modelCatalogNotice, setModelCatalogNotice] = useState<string | null>(null);
   // Explicit human approval for over-cap / large fan-out deploys.
   const [approved, setApproved] = useState(false);
 
@@ -139,11 +143,28 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
       try {
         const groups = await loadModelGroups(circleId ?? null);
         if (cancelled) return;
+        setAccountModelGroups(groups);
+        const emptyAccountCatalogs = groups
+          .filter((group) => group.connected && group.catalogStatus === 'account_verified_empty')
+          .map((group) => group.label);
+        const fallbackCatalogs = groups
+          .filter((group) => group.connected && ['curated_fallback', 'catalog_unsupported'].includes(group.catalogStatus))
+          .map((group) => group.label);
+        setModelCatalogNotice(
+          emptyAccountCatalogs.length > 0
+            ? `${emptyAccountCatalogs.join(', ')} returned no supported chat models for this key.`
+            : fallbackCatalogs.length > 0
+              ? `${fallbackCatalogs.join(', ')} ${fallbackCatalogs.length === 1 ? 'is' : 'are'} using a curated fallback. Exact access is checked when deployment starts.`
+              : null,
+        );
         const providers = new Set<string>();
         const extra: ModelChoice[] = [];
-        const seen = new Set<string>(['auto', ...DEFAULT_MODEL_IDS]);
+        const baseChoices = webChannel
+          ? [{ key: 'auto', label: 'AUTO' }]
+          : buildDefaultModelChoices();
+        const seen = new Set<string>(baseChoices.map((choice) => choice.key));
         for (const group of groups) {
-          if (group.connected) providers.add(group.provider);
+          if (group.connected && group.models.some((model) => model.ready)) providers.add(group.provider);
           for (const model of group.models) {
             if (!model.ready || seen.has(model.id)) continue;
             seen.add(model.id);
@@ -152,16 +173,18 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
         }
         setConnectedProviders(Array.from(providers));
         // Keep the default Claude tiers first, then any connected extras.
-        setModelChoices([...buildDefaultModelChoices(), ...extra]);
+        setModelChoices([...baseChoices, ...extra]);
       } catch {
         if (!cancelled) {
           setConnectedProviders([]);
-          setModelChoices(buildDefaultModelChoices());
+          setAccountModelGroups([]);
+          setModelChoices(webChannel ? [{ key: 'auto', label: 'AUTO' }] : buildDefaultModelChoices());
+          setModelCatalogNotice('Account model catalogs could not be checked. Exact access is checked when deployment starts.');
         }
       }
     })();
     return () => { cancelled = true; };
-  }, [visible, circleId]);
+  }, [visible, circleId, webChannel]);
 
   const addSlot = () => {
     if (slots.length >= MAX_AGENTS_PER_DEPLOY) return;
@@ -188,7 +211,7 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
   // Live cost estimate + approval gate. 'auto' is priced via the deploy
   // default (sonnet) so the user sees a realistic figure before resolution.
   const estimateUsd = useMemo(
-    () => estimateDeployCostUsd(activeModels.map(m => (m === 'auto' ? 'claude-sonnet-4-6' : m))),
+    () => estimateDeployCostUsd(activeModels.map(m => (m === 'auto' ? 'claude-sonnet-5' : m))),
     [activeModels],
   );
   const approval = useMemo(
@@ -254,6 +277,31 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
         });
         setSpawning(false);
         return;
+      }
+
+      if (webChannel && accountModelGroups.length > 0) {
+        const unavailable = resolved.find((item) => {
+          const readiness = resolveModelSelectionReadiness({
+            route: resolvePlainChatModelRoute(item.resolution.model),
+            groups: accountModelGroups,
+          });
+          return !readiness.ready;
+        });
+        if (unavailable) {
+          const readiness = resolveModelSelectionReadiness({
+            route: resolvePlainChatModelRoute(unavailable.resolution.model),
+            groups: accountModelGroups,
+          });
+          setResult({
+            ok: false,
+            spawned: 0,
+            total: tasks.length,
+            results: [],
+            message: `Cannot deploy: ${readiness.message} Pick a ready account model or update the provider in Marketplace. Nothing launched.`,
+          });
+          setSpawning(false);
+          return;
+        }
       }
 
       if (webChannel) {
@@ -521,6 +569,12 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
                 </View>
               )}
 
+              {modelCatalogNotice ? (
+                <View style={st.catalogNotice}>
+                  <Text style={st.catalogNoticeText}>{modelCatalogNotice}</Text>
+                </View>
+              ) : null}
+
               <View style={st.divider} />
 
               {/* Live cost estimate + approval badge */}
@@ -702,6 +756,8 @@ const st = StyleSheet.create({
   codeText: { color: '#f59e0b', fontSize: 12, fontFamily: 'monospace' },
   loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 16 },
   loadingText: { color: '#94a3b8', fontSize: 12, fontFamily: 'monospace' },
+  catalogNotice: { padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#38bdf840', backgroundColor: '#38bdf80a' },
+  catalogNoticeText: { color: '#94a3b8', fontSize: 10, lineHeight: 14, fontFamily: 'monospace' },
   modeRow: { flexDirection: 'row', gap: 8 },
   modeBtn: { flex: 1, padding: 12, borderRadius: R, borderWidth: 1, borderColor: '#1e293b', backgroundColor: '#0f172a', alignItems: 'center', gap: 3 },
   modeBtnActive: {

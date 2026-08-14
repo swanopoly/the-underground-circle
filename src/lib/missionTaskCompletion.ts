@@ -11,10 +11,9 @@
  * reply). That let three "proof-less done" cases through:
  *   1. An EMPTY / blank agent reply — the run produced nothing, so it proved
  *      nothing, yet read as complete.
- *   2. A PARTIAL run that hit the tool-step cap — the session runtime records
- *      "partial and resumable" but drops the machine-readable `incomplete` flag
- *      before the dispatcher sees it, so the only surviving signal is the
- *      "partial / resumable / step cap / continue" language in the reply text.
+ *   2. A PARTIAL run that hit the tool-step cap — the dispatcher historically
+ *      ignored the machine-readable terminal outcome, so optimistic reply text
+ *      could still promote the task to done.
  *   3. A reply that itself says it did NOT finish ("I wasn't able to…",
  *      "couldn't complete…") without hitting the older blocker-phrase list.
  *
@@ -26,6 +25,8 @@
  * (`npm run smoke:mission-task-completion`) — the dispatcher that calls it pulls
  * in Supabase/React and can't be loaded in a plain Node smoke.
  */
+
+import type { OpenSwanTerminalReceipt } from './openswanSessionRuntimeAdapters';
 
 /** Minimal shape of a tool event the gate reads (status only). Structurally
  *  compatible with OpenSwanToolEvent / SwanBot tool actions. */
@@ -50,6 +51,12 @@ export interface MissionCompletionInput {
   artifacts?: MissionCompletionArtifact[] | null;
   verificationResults?: MissionCompletionVerification[] | null;
   toolEvents?: MissionCompletionToolEvent[] | null;
+  /**
+   * Authoritative OpenSwan runtime truth. Optional for legacy/non-OpenSwan
+   * callers; when supplied, only succeeded + completionVerified may proceed to
+   * the legacy evidence checks below.
+   */
+  terminal?: OpenSwanTerminalReceipt | null;
 }
 
 export interface MissionCompletionAssessment {
@@ -61,6 +68,10 @@ export interface MissionCompletionAssessment {
   reason?:
     | 'failed_tool'
     | 'failed_verification'
+    | 'terminal_partial'
+    | 'terminal_failed'
+    | 'terminal_cancelled'
+    | 'terminal_unverified'
     | 'blocker_phrase'
     | 'incomplete_partial'
     | 'empty_response';
@@ -76,11 +87,10 @@ const FAILED_STATUS_RE = /\b(error|fail|failed|failure|blocked|denied|timeout|ma
 const BLOCKER_PHRASE_RE =
   /\b(need more information|need more info|need access|need approval|waiting on|blocked|cannot complete|can'?t complete|could not complete|couldn'?t complete|unable to complete|was ?n'?t able to|were ?n'?t able to|missing context|please provide)\b/i;
 
-// The run hit the per-turn step cap (partial, resumable). The session runtime
-// drops the typed `incomplete` flag before the dispatcher, but the distinctive
-// step-cap language it writes ("partial and resumable", "hit the per-turn step
-// cap", "step limit") survives in the reply text — this is the last defense
-// against a truncated run reading as complete. Deliberately anchored to the
+// Legacy/non-OpenSwan callers do not supply a terminal receipt. For those, the
+// distinctive step-cap language ("partial and resumable", "hit the per-turn
+// step cap", "step limit") remains a final defense against a truncated run
+// reading as complete. Deliberately anchored to the
 // truncation SENSE (step/iteration cap/limit, "resumable", explicit continue-
 // later) rather than the bare word "partial"/"continue", which appear in plenty
 // of genuine completion summaries and must not over-block.
@@ -104,6 +114,24 @@ export function assessMissionTaskCompletion(
     ? input!.verificationResults
     : [];
   const response = String(input?.response || '');
+
+  // 0. Typed runtime truth outranks provider-authored prose. This guard is
+  // intentionally first: a partial/failed/cancelled run that says "Done" is
+  // still not complete. Missing terminal preserves the legacy caller contract.
+  if (input?.terminal != null) {
+    if (input.terminal.state === 'partial') {
+      return { completed: false, reason: 'terminal_partial' };
+    }
+    if (input.terminal.state === 'cancelled') {
+      return { completed: false, reason: 'terminal_cancelled' };
+    }
+    if (input.terminal.state !== 'succeeded') {
+      return { completed: false, reason: 'terminal_failed' };
+    }
+    if (input.terminal.completionVerified !== true) {
+      return { completed: false, reason: 'terminal_unverified' };
+    }
+  }
 
   // 1. Any tool that failed / was blocked / needs manual action ⇒ not done.
   if (toolEvents.some((event) => statusFailed(event?.status))) {

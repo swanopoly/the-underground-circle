@@ -174,6 +174,20 @@ const mockRequire = (specifier: string): unknown => {
       memoryWriteScopePolicy: () => ({ strategy: 'none', identityKeys: [], candidateLimit: 0, why: 'stub' }),
     };
   }
+  if (specifier === './agentRuntimeSubject') {
+    return {
+      buildAgentRuntimeSubjectPayload: () => {
+        throw new Error('agent subject projection is outside the replay-summary smoke scope');
+      },
+    };
+  }
+  if (specifier === './connectedAgentHandoffCore') {
+    return {
+      buildConnectedAgentAcceptedRunProjection: () => {
+        throw new Error('connected-agent handoff projection is outside the replay-summary smoke scope');
+      },
+    };
+  }
   if (specifier === './v2SaveMemoryCore') {
     // saveMemory reuses the v2 writer's `source_run_id` shape guard. That module
     // is import-free by design (the Deno edge imports it), so loading the REAL

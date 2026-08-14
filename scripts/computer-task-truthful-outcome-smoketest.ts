@@ -1601,8 +1601,13 @@ assert.match(
 );
 assert.match(
   runtimeSource,
-  /proofVerified: fileResult\.ok/,
-  'the remaining deterministic read-only file lane passes explicit proof state into outcome derivation',
+  /proofVerified: completionVerified/,
+  'the remaining deterministic read-only file lane passes exact request-bound proof into outcome derivation',
+);
+assert(
+  runtimeSource.includes('const requestedActionContract = buildChatComputerRequestedActionContract(args.task);')
+    && /shouldRunDeterministicReadOnlyFileAdapter\s*=\s*[\s\S]{0,700}&& !requestedActionContract;/.test(runtimeSource),
+  'the one-operation deterministic file adapter cannot consume a compound requested-action ledger',
 );
 assert.match(
   runtimeSource,
@@ -1678,8 +1683,13 @@ for (const match of chatSource.matchAll(/persistComputerTaskState\(\{/g)) {
 }
 assert.match(
   chatSource,
-  /phase: 'completed',\s*outcomeStatus: 'completed'/,
-  'browser completion writes a completed terminal outcome',
+  /phase:\s*terminalStatus\s*===\s*'completed'\s*\?\s*'completed'\s*:\s*'blocked',\s*outcomeStatus:\s*terminalStatus/,
+  'browser terminal writes completed only when coverage is verified and otherwise retains a blocked/partial task state',
+);
+assert.match(
+  chatSource,
+  /const terminalStatus:\s*ComputerTaskOutcomeStatus\s*=\s*outcomeStatus\s*===\s*'partial'[\s\S]{0,100}\?\s*'partial'[\s\S]{0,80}:\s*'completed'/,
+  'compound cloud results cannot be promoted from end-turn to completed without outer task proof',
 );
 assert.match(
   chatSource,
@@ -1690,6 +1700,11 @@ assert.match(
   nativeHandlerSource,
   /computerTaskStatus: result\.status/,
   'Chat preserves the full authoritative status in outcome metadata',
+);
+assert.match(
+  nativeHandlerSource,
+  /taskCompletionVerified: result\.taskCompletionVerified === true/,
+  'Chat preserves the separate runtime-owned outer task proof bit',
 );
 assert.doesNotMatch(
   nativeHandlerSource,

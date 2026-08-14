@@ -87,6 +87,28 @@ if (exactBlankDocumentRoute) {
   pass('Exact Photoshop blank-document request uses a compact four-phase notice');
 }
 
+const illustratorMultiActionRoute = routeOrFail(
+  'Open Adobe Illustrator 2026, create a new document, add a blue circle, and export it as PNG',
+);
+if (illustratorMultiActionRoute) {
+  const preview = buildChatComputerTaskPlanPreview(illustratorMultiActionRoute);
+  expect(
+    JSON.stringify(preview.steps) === JSON.stringify([
+      'A1. Open Adobe Illustrator 2026',
+      'A2. create a new document',
+      'A3. add a blue circle',
+      'A4. export it as PNG',
+    ]),
+    `multi-action preview must show every requested action, got ${JSON.stringify(preview.steps)}`,
+  );
+  expect(
+    preview.proof.some((item) => /^A1 independently verified/.test(item))
+      && preview.proof.some((item) => /^A2 independently verified/.test(item)),
+    'multi-action preview starts proof with requested-action coverage',
+  );
+  pass('Multi-action computer preview shows the complete user-requested checklist');
+}
+
 // Rename-free export is the bounded low-risk shape (computerTaskPlanner
 // isLowRiskLocalImageExportTask); a rename makes it a named-output write and
 // must require approval.

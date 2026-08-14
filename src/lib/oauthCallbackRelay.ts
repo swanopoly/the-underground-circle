@@ -1,6 +1,6 @@
 const OAUTH_CALLBACK_PATH = '/oauth/email-calendar/callback';
 const OAUTH_NONCE_PATTERN = /^[a-f0-9]{48}$/;
-const OAUTH_PROVIDERS = new Set(['google', 'microsoft', 'yahoo']);
+const OAUTH_PROVIDERS = new Set(['google', 'microsoft', 'figma']);
 
 /**
  * Relay a provider callback from the trusted app origin to the exact opener.

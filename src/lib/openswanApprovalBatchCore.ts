@@ -14,14 +14,13 @@
  *     (status `pending`) and groups the compatible ones so the UI can render
  *     fewer cards. It never *grants* anything and never lowers a gate.
  *
- * The one hard rule (mirrors `computerGrantGate.STICKY_FLOOR_CATEGORIES` and
- * `unifiedApprovalPolicyCore.ALWAYS_ASK_FLOOR_MARKERS`): always-confirm FLOOR
- * actions — pay / delete / login / grant — each stay on their OWN card and can
- * never be swept under a single "yes". Only non-floor low/medium-risk actions
- * batch, and only with others of the same risk level.
+ * The hard rule comes from `approvalEffectPolicyCore`: persistent, external,
+ * destructive, credential/payment/private-file/permission, ambiguous, and
+ * unknown effects each stay on their OWN card. Only positively classified
+ * observe/lifecycle/reversible-non-secret low/medium actions can batch.
  *
- * PURITY (load-bearing): zero runtime imports (real type names referenced in
- * prose only), no Date.now()/Math.random() at module scope. Every export is
+ * PURITY (load-bearing): the only runtime import is the dependency-free pure
+ * effect core; no Date.now()/Math.random() at module scope. Every export is
  * TOTAL — any input (null / undefined / wrong type / huge / hostile / cyclic /
  * throwing getters) yields a safe, bounded plan and never throws. Fail-closed:
  * anything we cannot prove batch-safe becomes its own separate card, never a
@@ -29,6 +28,11 @@
  * risk-tier label and array indices are echoed back — never tool args or
  * values. Smoke: scripts/openswan-approval-batch-core-smoketest.ts.
  */
+
+import {
+  ALWAYS_EXACT_APPROVAL_EFFECTS,
+  requiresExactApproval,
+} from './approvalEffectPolicyCore';
 
 /**
  * Canonical risk buckets this batcher reasons over. Folds three real
@@ -68,17 +72,10 @@ export interface ApprovalBatchPlan {
 }
 
 /**
- * The always-confirm floor: purchases, permanent deletions, credential entry,
- * and account/authorization grants. Each such action keeps its own approval
- * card — never batched under a single yes, in any autonomy mode. Canonical
- * value mirrors `computerGrantGate.STICKY_FLOOR_CATEGORIES` (and its re-export
- * `chatComputerRequestRouter.ALWAYS_CONFIRM_FLOOR`) plus
- * `unifiedApprovalPolicyCore.ALWAYS_ASK_FLOOR_MARKERS`. Kept as a plain literal
- * so this core needs no import; update all in lockstep if the floor changes.
+ * Backward-compatible marker export. The canonical source is the shared effect
+ * core, so batch/card/request policy cannot drift independently.
  */
-export const ALWAYS_SEPARATE_FLOOR_MARKERS = ['pay', 'delete', 'login', 'grant'] as const;
-
-const FLOOR_MARKER_SET: ReadonlySet<string> = new Set<string>(ALWAYS_SEPARATE_FLOOR_MARKERS);
+export const ALWAYS_SEPARATE_FLOOR_MARKERS = ALWAYS_EXACT_APPROVAL_EFFECTS;
 
 // Bounds so pathological inputs can never blow up time/space.
 const MAX_ITEMS = 500; // pending queues are tiny; extras are omitted (→ handled individually)
@@ -138,25 +135,16 @@ export function normalizeApprovalBatchRisk(value: unknown): ApprovalBatchRiskLab
 }
 
 /**
- * Is this a floor (pay/delete/login/grant) action that must keep its own card?
+ * Is this an exact-floor action that must keep its own card?
  * Detected generously (safe over-ask direction):
  *   - an explicit truthy `floor` flag, OR
- *   - a `category` that IS a floor marker, OR
- *   - a `category` / `tool` string that CONTAINS a floor marker (e.g.
- *     'payment', 'deletion', 'grant_access', 'auto_login', 'desktop.delete_file').
- * High/critical risk is handled separately by the batchability test, so a floor
- * signal here is purely the pay/delete/login/grant axis.
+ *   - canonical classification of the category + tool signals.
+ * High/critical risk is handled separately by the batchability test; this
+ * classifier additionally closes low/medium exact and unknown-effect gaps.
  */
 function isFloorItem(tool: unknown, category: unknown, floorFlag: unknown): boolean {
   if (truthyFloorFlag(floorFlag)) return true;
-  const cat = norm(category);
-  if (cat && FLOOR_MARKER_SET.has(cat)) return true;
-  const tl = norm(tool);
-  if (!cat && !tl) return false;
-  for (const marker of ALWAYS_SEPARATE_FLOOR_MARKERS) {
-    if (cat.includes(marker) || tl.includes(marker)) return true;
-  }
-  return false;
+  return requiresExactApproval([category, tool]);
 }
 
 /** Minimum original index a batch covers (its display position). */
@@ -168,7 +156,7 @@ function firstIndex(group: ApprovalBatchGroup): number {
  * Plan how a set of *pending* approvals should be rendered as cards.
  *
  * Rules (fail-closed throughout):
- *   1. FLOOR (pay/delete/login/grant) → its own card, `requiresSeparate: true`.
+ *   1. canonical exact-floor effect  → its own card, `requiresSeparate: true`.
  *   2. high / critical / unknown risk → its own card, `requiresSeparate: true`.
  *   3. non-floor low-risk items       → one shared card (`combinedRisk: 'low'`).
  *   4. non-floor medium-risk items    → one shared card (`combinedRisk: 'medium'`).

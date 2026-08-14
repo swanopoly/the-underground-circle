@@ -2,7 +2,7 @@
  * Circle Missions — CRUD, realtime, and React hooks
  * See docs/NEXT_LEVEL_PLAN.md Phase 1.1
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from './supabase';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -69,20 +69,69 @@ export interface ProofOfWork {
 
 // ─── Mission CRUD ────────────────────────────────────────────────────────────
 
-export async function getMissions(circleId: string): Promise<Mission[]> {
+export interface MissionListOptions {
+  /** Archived missions stay out of agent/context lists unless a UI explicitly asks for them. */
+  includeArchived?: boolean;
+  /** Batch task rows once for list progress instead of opening one detail hook per card. */
+  includeTasks?: boolean;
+}
+
+const MISSION_TASK_BATCH_SIZE = 100;
+
+async function getTasksForMissionList(missionIds: string[]): Promise<Map<string, MissionTask[]>> {
+  const tasksByMission = new Map<string, MissionTask[]>();
+  if (missionIds.length === 0) return tasksByMission;
+
+  const chunks: string[][] = [];
+  for (let index = 0; index < missionIds.length; index += MISSION_TASK_BATCH_SIZE) {
+    chunks.push(missionIds.slice(index, index + MISSION_TASK_BATCH_SIZE));
+  }
+  const results = await Promise.all(chunks.map((ids) => (
+    supabase
+      .from('mission_tasks')
+      .select('*')
+      .in('mission_id', ids)
+      .order('sort_order', { ascending: true })
+  )));
+  for (const { data, error } of results) {
+    if (error) {
+      console.warn('getMissionTaskSummaries error:', error.message);
+      continue;
+    }
+    for (const task of (data || []) as MissionTask[]) {
+      const current = tasksByMission.get(task.mission_id) || [];
+      current.push(task);
+      tasksByMission.set(task.mission_id, current);
+    }
+  }
+  return tasksByMission;
+}
+
+export async function getMissions(
+  circleId: string,
+  options: MissionListOptions = {},
+): Promise<Mission[]> {
   // Simple query without profile join — avoids FK naming issues
-  const { data, error } = await supabase
+  let query = supabase
     .from('circle_missions')
     .select('*')
     .eq('circle_id', circleId)
-    .neq('status', 'archived')
     .order('created_at', { ascending: false });
+  if (!options.includeArchived) query = query.neq('status', 'archived');
+  const { data, error } = await query;
 
   if (error) {
     console.warn('getMissions error:', error.message);
     return [];
   }
-  return (data || []) as Mission[];
+  const missions = (data || []) as Mission[];
+  if (!options.includeTasks || missions.length === 0) return missions;
+
+  const tasksByMission = await getTasksForMissionList(missions.map((mission) => mission.id));
+  return missions.map((mission) => ({
+    ...mission,
+    tasks: tasksByMission.get(mission.id) || [],
+  }));
 }
 
 export async function getMission(missionId: string): Promise<Mission | null> {
@@ -385,21 +434,44 @@ export function subscribeToProofOfWork(circleId: string, onChange: () => void) {
 
 // ─── React Hooks ─────────────────────────────────────────────────────────────
 
-export function useMissions(circleId: string) {
+export function useMissions(circleId: string, options: MissionListOptions = {}) {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [loading, setLoading] = useState(true);
+  const missionIdsRef = useRef<Set<string>>(new Set());
+  const includeArchived = options.includeArchived === true;
+  const includeTasks = options.includeTasks === true;
 
   const refresh = useCallback(async () => {
-    const data = await getMissions(circleId);
+    const data = await getMissions(circleId, { includeArchived, includeTasks });
+    missionIdsRef.current = new Set(data.map((mission) => mission.id));
     setMissions(data);
     setLoading(false);
-  }, [circleId]);
+  }, [circleId, includeArchived, includeTasks]);
 
   useEffect(() => {
     refresh();
     const unsub = subscribeToMissions(circleId, refresh);
     return unsub;
   }, [circleId, refresh]);
+
+  useEffect(() => {
+    if (!includeTasks) return;
+    // One list-level subscription replaces one query + one realtime channel
+    // per mission card. RLS still scopes delivered rows; the local ID set
+    // prevents task changes from another accessible circle refreshing this one.
+    const channel = supabase
+      .channel(`mission-list-tasks:${circleId}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'mission_tasks',
+      }, (payload: any) => {
+        const missionId = payload?.new?.mission_id || payload?.old?.mission_id;
+        if (missionId && missionIdsRef.current.has(missionId)) void refresh();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [circleId, includeTasks, refresh]);
 
   return { missions, loading, refresh };
 }
@@ -492,19 +564,15 @@ export async function getMissionAnalytics(circleId: string): Promise<{
   completionRate: number;
   avgTasksPerMission: number;
 }> {
-  const missions = await getMissions(circleId);
+  const missions = await getMissions(circleId, { includeTasks: true });
   const allMissions = [...missions]; // getMissions excludes archived
   const active = allMissions.filter(m => m.status === 'active');
   const completed = allMissions.filter(m => m.status === 'completed');
   const overdue = active.filter(m => isOverdue(m));
 
-  let totalTasks = 0;
-  let completedTasks = 0;
-  for (const m of allMissions.slice(0, 20)) {
-    const tasks = await getMissionTasks(m.id);
-    totalTasks += tasks.length;
-    completedTasks += tasks.filter(t => t.status === 'done').length;
-  }
+  const sampledTasks = allMissions.slice(0, 20).flatMap((mission) => mission.tasks || []);
+  const totalTasks = sampledTasks.length;
+  const completedTasks = sampledTasks.filter((task) => task.status === 'done').length;
 
   return {
     totalMissions: allMissions.length,

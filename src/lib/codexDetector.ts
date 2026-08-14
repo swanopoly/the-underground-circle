@@ -6,9 +6,14 @@
 
 import { OfficeAgent, AgentStatus, deriveSessionStatus, clampToDbStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
-import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
-import { supabase } from './supabase';
+import {
+  publishAgentToCircle,
+  PROVIDER_DISPLAY,
+  type CircleOfficeAuthScope,
+} from './circleOffice';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
+import { isBenignAuthAbort } from './authSession';
 
 import {
   bridgeAuthHeaders,
@@ -232,12 +237,17 @@ export async function publishCodexAgent(
   circleId: string,
   sessionCount: number,
   sessions?: CodexSession[],
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ agentId?: string; error?: string }> {
   const display = PROVIDER_DISPLAY['codex'];
+  const db = capturedScope
+    ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+    : supabase;
 
   // Multiple sessions — publish each with unique name
   if (sessions && sessions.length > 1) {
-    const { data: auth } = await supabase.auth.getUser();
+    const ownerId = capturedScope?.userId
+      || (await supabase.auth.getUser()).data.user?.id;
     for (let i = 0; i < sessions.length; i++) {
       const session = sessions[i];
       const name = codexDisplayName(session, i, sessions.length);
@@ -247,8 +257,8 @@ export async function publishCodexAgent(
         color: CODEX_COLORS[i % CODEX_COLORS.length],
         toolIcon: display?.icon || '🧠',
         gatewayUrl: getCodexBridgeUrl() || 'http://localhost:7779', isPublic: false,
-      });
-      let update = supabase.from('circle_office_agents')
+      }, capturedScope);
+      let update = db.from('circle_office_agents')
         .update({
           status: clampToDbStatus(status),
           current_task: codexTaskLabel(status, session),
@@ -257,7 +267,10 @@ export async function publishCodexAgent(
         })
         .eq('circle_id', circleId)
         .eq('name', name);
-      if (auth.user?.id) update = update.eq('owner_id', auth.user.id);
+      if (ownerId) update = update.eq('owner_id', ownerId);
+      if (capturedScope) {
+        update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+      }
       await update;
     }
     return {};
@@ -270,15 +283,17 @@ export async function publishCodexAgent(
     color: display?.color || '#10a37f',
     toolIcon: display?.icon || '🧠',
     gatewayUrl: getCodexBridgeUrl() || 'http://localhost:7779', isPublic: false,
-  });
+  }, capturedScope);
 
   if (result.error) {
-    console.error('[codexDetector] Failed to publish agent:', result.error);
+    if (!isBenignAuthAbort(result.error)) {
+      console.error('[codexDetector] Failed to publish agent:', result.error);
+    }
     return { error: result.error };
   }
 
   if (result.agent) {
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status: 'idle',
@@ -289,6 +304,10 @@ export async function publishCodexAgent(
         updated_at: new Date().toISOString(),
       })
       .eq('id', result.agent.id);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   }
 
   return { agentId: result.agent?.id };
@@ -297,10 +316,15 @@ export async function publishCodexAgent(
 export async function updateCodexAgentStatus(
   circleId: string,
   sessions: CodexSession[],
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<void> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
+    const db = capturedScope
+      ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+      : supabase;
+    const ownerId = capturedScope?.userId
+      || (await supabase.auth.getUser()).data.user?.id;
+    if (!ownerId) return;
 
     if (sessions.length > 1) {
       // Multiple sessions — update each named agent
@@ -308,7 +332,7 @@ export async function updateCodexAgentStatus(
         const session = sessions[i];
         const name = codexDisplayName(session, i, sessions.length);
         const status = deriveSessionStatus({ lastActivityIso: session.lastActivity });
-        await supabase.from('circle_office_agents')
+        let update = db.from('circle_office_agents')
           .update({
             status: clampToDbStatus(status),
             current_task: codexTaskLabel(status, session),
@@ -316,8 +340,12 @@ export async function updateCodexAgentStatus(
             updated_at: new Date().toISOString(),
           })
           .eq('circle_id', circleId)
-          .eq('owner_id', auth.user.id)
+          .eq('owner_id', ownerId)
           .eq('name', name);
+        if (capturedScope) {
+          update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+        }
+        await update;
       }
       return;
     }
@@ -335,7 +363,7 @@ export async function updateCodexAgentStatus(
       ? codexTaskLabel(status, newest)
       : 'Bridge connected';
 
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status: clampToDbStatus(status),
@@ -344,8 +372,12 @@ export async function updateCodexAgentStatus(
         updated_at: new Date().toISOString(),
       })
       .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id)
+      .eq('owner_id', ownerId)
       .eq('name', CODEX_AGENT_NAME);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   } catch {}
 }
 
@@ -369,6 +401,7 @@ export interface CodexLaunchRequest {
 
 export interface CodexLaunchResult {
   ok: boolean;
+  transportAccepted: boolean | null;
   launchId?: string;
   sessions: CodexSession[];
   launched: number;
@@ -382,6 +415,7 @@ export async function launchCodexSessions(input: CodexLaunchRequest): Promise<Co
   if (!bridgeUrl) {
     return {
       ok: false,
+      transportAccepted: false,
       sessions: [],
       launched: 0,
       failed: [{ error: 'Codex bridge URL is unavailable in this runtime.' }],
@@ -427,10 +461,15 @@ export async function launchCodexSessions(input: CodexLaunchRequest): Promise<Co
     const data = await res.json().catch(() => null) as Partial<CodexLaunchResult> | null;
     if (!res.ok || !data) {
       const error = data?.error || `Codex bridge launch failed with HTTP ${res.status}`;
-      return { ok: false, sessions: [], launched: 0, failed: [{ error }], error };
+      const transportAccepted = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409
+        ? false
+        : null;
+      return { ok: false, transportAccepted, sessions: [], launched: 0, failed: [{ error }], error };
     }
 
     const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const launched = typeof data.launched === 'number' ? data.launched : sessions.length;
+    const accepted = data.ok === true || launched > 0;
     if (input.circleId && sessions.length > 0) {
       await publishCodexAgent(input.circleId, sessions.length, sessions);
       await updateCodexAgentStatus(input.circleId, sessions);
@@ -441,10 +480,11 @@ export async function launchCodexSessions(input: CodexLaunchRequest): Promise<Co
     }
 
     return {
-      ok: data.ok !== false,
+      ok: accepted,
+      transportAccepted: accepted ? true : data.ok === false ? false : null,
       launchId: data.launchId,
       sessions,
-      launched: typeof data.launched === 'number' ? data.launched : sessions.length,
+      launched,
       failed: Array.isArray(data.failed) ? data.failed : [],
       projectDir: data.projectDir,
       error: data.error,
@@ -453,7 +493,7 @@ export async function launchCodexSessions(input: CodexLaunchRequest): Promise<Co
     const message = err instanceof Error && err.name === 'AbortError'
       ? 'Codex bridge launch timed out.'
       : err instanceof Error ? err.message : String(err);
-    return { ok: false, sessions: [], launched: 0, failed: [{ error: message }], error: message };
+    return { ok: false, transportAccepted: null, sessions: [], launched: 0, failed: [{ error: message }], error: message };
   }
 }
 

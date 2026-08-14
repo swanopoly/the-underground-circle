@@ -109,6 +109,30 @@ export interface SecondBrainGraph {
   clusters: Array<{ tag: string; count: number; noteIds: string[] }>;
 }
 
+// Keep routine reads lightweight and avoid asking PostgREST to serialize the
+// pgvector payload. Semantic search still retrieves through the dedicated RPC.
+const SECOND_BRAIN_NOTE_READ_COLUMNS = [
+  'id',
+  'circle_id',
+  'created_by',
+  'source_memory_id',
+  'parent_note_id',
+  'status',
+  'note_kind',
+  'visibility',
+  'title',
+  'content',
+  'summary',
+  'tags',
+  'aliases',
+  'importance',
+  'metadata',
+  'embedding_model',
+  'embedded_at',
+  'created_at',
+  'updated_at',
+].join(',');
+
 const SECOND_BRAIN_UNAVAILABLE_CACHE_KEY = 'openswan:second_brain_unavailable_until';
 const SECOND_BRAIN_UNAVAILABLE_REASON_KEY = 'openswan:second_brain_unavailable_reason';
 const SECOND_BRAIN_UNAVAILABLE_COOLDOWN_MS = 60_000;
@@ -240,7 +264,7 @@ export async function loadSecondBrainNotes(
   try {
     let query = supabase
       .from('circle_second_brain_notes')
-      .select('*')
+      .select(SECOND_BRAIN_NOTE_READ_COLUMNS)
       .eq('circle_id', circleId)
       .order('updated_at', { ascending: false })
       .limit(opts.limit || 80);
@@ -539,7 +563,7 @@ async function keywordSearchNotes(circleId: string, queryText: string, limit: nu
   if (!escaped) return [];
   const { data, error } = await supabase
     .from('circle_second_brain_notes')
-    .select('*')
+    .select(SECOND_BRAIN_NOTE_READ_COLUMNS)
     .eq('circle_id', circleId)
     .neq('status', 'archived')
     .or(`title.ilike.%${escaped}%,content.ilike.%${escaped}%,summary.ilike.%${escaped}%`)

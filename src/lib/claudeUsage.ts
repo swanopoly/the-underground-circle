@@ -42,7 +42,27 @@ function toNum(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-export async function getClaudeUsageSummary(
+function parseUsageSummary(data: unknown): ClaudeUsageSummary {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row !== 'object') return { ...EMPTY_SUMMARY };
+  const record = row as Record<string, unknown>;
+  return {
+    total_cost:           toNum(record.total_cost),
+    total_input:          toNum(record.total_input),
+    total_output:         toNum(record.total_output),
+    total_cache_creation: toNum(record.total_cache_creation),
+    total_cache_read:     toNum(record.total_cache_read),
+    request_count:        toNum(record.request_count),
+    cache_hit_rate:       toNum(record.cache_hit_rate),
+  };
+}
+
+/**
+ * Strict reader for persistent dashboards. Transient auth/network failures
+ * throw so a caller can retain its last known server snapshot instead of
+ * replacing it with a convincing-looking $0 value.
+ */
+export async function getClaudeUsageSummaryStrict(
   circleId: string | null,
   days: number = 7,
 ): Promise<ClaudeUsageSummary> {
@@ -50,32 +70,28 @@ export async function getClaudeUsageSummary(
     p_circle_id: circleId,
     p_days: days,
   });
-  if (error || !data || (Array.isArray(data) && data.length === 0)) {
-    return { ...EMPTY_SUMMARY };
+  if (error) throw error;
+  if (!data || (Array.isArray(data) && data.length === 0)) {
+    throw new Error('Claude usage summary returned no aggregate row.');
   }
-  const row = Array.isArray(data) ? data[0] : data;
-  return {
-    total_cost:           toNum(row.total_cost),
-    total_input:          toNum(row.total_input),
-    total_output:         toNum(row.total_output),
-    total_cache_creation: toNum(row.total_cache_creation),
-    total_cache_read:     toNum(row.total_cache_read),
-    request_count:        toNum(row.request_count),
-    cache_hit_rate:       toNum(row.cache_hit_rate),
-  };
+  return parseUsageSummary(data);
 }
 
-export async function getClaudeUsageByModel(
+export async function getClaudeUsageSummary(
   circleId: string | null,
   days: number = 7,
-): Promise<ClaudeUsageByModel[]> {
-  const { data, error } = await supabase.rpc("get_claude_usage_by_model", {
-    p_circle_id: circleId,
-    p_days: days,
-  });
-  if (error || !data) return [];
-  return (data as any[]).map((r) => ({
-    model:          r.model ?? "unknown",
+): Promise<ClaudeUsageSummary> {
+  try {
+    return await getClaudeUsageSummaryStrict(circleId, days);
+  } catch {
+    return { ...EMPTY_SUMMARY };
+  }
+}
+
+function parseUsageByModel(data: unknown): ClaudeUsageByModel[] {
+  if (!Array.isArray(data)) return [];
+  return data.map((r: Record<string, unknown>) => ({
+    model:          typeof r.model === 'string' ? r.model : "unknown",
     request_count:  toNum(r.request_count),
     total_cost:     toNum(r.total_cost),
     cache_read:     toNum(r.cache_read),
@@ -83,6 +99,30 @@ export async function getClaudeUsageByModel(
     input_tokens:   toNum(r.input_tokens),
     output_tokens:  toNum(r.output_tokens),
   }));
+}
+
+export async function getClaudeUsageByModelStrict(
+  circleId: string | null,
+  days: number = 7,
+): Promise<ClaudeUsageByModel[]> {
+  const { data, error } = await supabase.rpc("get_claude_usage_by_model", {
+    p_circle_id: circleId,
+    p_days: days,
+  });
+  if (error) throw error;
+  if (!data) throw new Error('Claude usage model breakdown returned no rows.');
+  return parseUsageByModel(data);
+}
+
+export async function getClaudeUsageByModel(
+  circleId: string | null,
+  days: number = 7,
+): Promise<ClaudeUsageByModel[]> {
+  try {
+    return await getClaudeUsageByModelStrict(circleId, days);
+  } catch {
+    return [];
+  }
 }
 
 export function formatTokens(n: number): string {
@@ -96,6 +136,7 @@ export function formatCost(n: number): string {
   if (n < 1) return `$${n.toFixed(3)}`;
   return `$${n.toFixed(2)}`;
 }
+
 
 // ─── Running-cost counter (Office trip meter) ────────────────────────────────
 

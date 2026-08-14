@@ -17,7 +17,7 @@ import { Platform, View } from 'react-native';
 // Keep these in lock-step with the Quick Actions header
 // (src/screens/circles/tabs/ChatTab.tsx). If you change them here,
 // change them there — or better, extract shared tokens.
-const QA_DOT_COLORS = ['#22d3ee', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
+const QA_DOT_COLORS = ['#6366f1', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
 const S = 26;
 const C = S / 2;
 const QA_CIRCLE_POINTS = [

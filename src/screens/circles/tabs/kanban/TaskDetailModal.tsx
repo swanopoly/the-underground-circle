@@ -36,6 +36,7 @@ import {
   buildRunMetadataSummaryProps,
   fetchTaskRunMetadataByOpenSwanRunId,
 } from '../../../../lib/taskRunMetadata';
+import { readFeedTaskRunHandoffSnapshot } from '../../../../lib/feedTimelineMergeCore';
 
 // ─── Automation Report Section Parser ────────────────────────────────────────
 
@@ -128,7 +129,7 @@ function AutomationReportView({ description }: { description: string }) {
     members: '#a855f7',
     checkins: '#22c55e',
     tasks: '#f59e0b',
-    ai: '#22d3ee',
+    ai: '#6366f1',
     log: '#6f6f6f',
     prompt: '#6f6f6f',
     other: '#6f6f6f',
@@ -329,6 +330,7 @@ interface Props {
   goals?: GoalWithCount[];
   circleId: string;
   onOpenMarketplace?: (focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => void;
+  onOpenOfficeRun?: (runId: string) => void;
   onClose: () => void;
 }
 
@@ -349,7 +351,7 @@ function sortAgentsForAssignment(agents: CircleOfficeAgent[]): CircleOfficeAgent
   });
 }
 
-export default function TaskDetailModal({ task: initialTask, kanban, agents, goals, circleId, onOpenMarketplace, onClose }: Props) {
+export default function TaskDetailModal({ task: initialTask, kanban, agents, goals, circleId, onOpenMarketplace, onOpenOfficeRun, onClose }: Props) {
   const task = kanban.tasks.find(t => t.id === initialTask.id) || initialTask;
 
   const [editing, setEditing] = useState(false);
@@ -950,7 +952,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 </Pressable>
                 {rooms.map(room => {
                   const active = selectedRoomId === room.id;
-                  const color = room.color || '#22d3ee';
+                  const color = room.color || '#6366f1';
                   return (
                     <Pressable
                       key={room.id}
@@ -1097,7 +1099,7 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 <View style={s.thinkingRow}>
                   {([
                     { key: 'auto' as AgentModel, label: 'AUTO', color: '#6366f1' },
-                    { key: 'blackswan' as AgentModel, label: 'BSwan', color: '#22d3ee' },
+                    { key: 'blackswan' as AgentModel, label: 'BSwan', color: '#6366f1' },
                     { key: 'claude-haiku' as AgentModel, label: 'Haiku', color: '#22c55e' },
                     { key: 'claude-sonnet' as AgentModel, label: 'Sonnet', color: '#f59e0b' },
                     { key: 'claude-opus' as AgentModel, label: 'Opus', color: '#a855f7' },
@@ -1273,10 +1275,10 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 </Pressable>
                 <Pressable
                   onPress={() => selectedRoomId && setAssignmentMode('room_team')}
-                  style={[s.chip, assignmentMode === 'room_team' && { backgroundColor: '#22d3ee15', borderColor: '#6366f130' }, !selectedRoomId && { opacity: 0.4 }]}
+                  style={[s.chip, assignmentMode === 'room_team' && { backgroundColor: '#6366f115', borderColor: '#6366f130' }, !selectedRoomId && { opacity: 0.4 }]}
                   disabled={!selectedRoomId}
                 >
-                  <Text style={[s.chipText, assignmentMode === 'room_team' && { color: '#22d3ee' }]}>Use room team</Text>
+                  <Text style={[s.chipText, assignmentMode === 'room_team' && { color: '#6366f1' }]}>Use room team</Text>
                 </Pressable>
               </View>
             ) : (
@@ -1596,6 +1598,17 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                     const runAgent = kanban.agents.find(a => a.id === run.agent_id);
                     const runColor = run.status === 'completed' ? '#22c55e' : run.status === 'failed' ? '#ef4444' : '#f59e0b';
                     const runMetadata = run.openswan_run_id ? taskRunMetadataByRunId[run.openswan_run_id] : null;
+                    const handoff = readFeedTaskRunHandoffSnapshot(run);
+                    const handoffBanner = handoff?.status === 'accepted'
+                      ? 'Handoff accepted · awaiting verified result'
+                      : handoff?.status === 'outcome_unknown'
+                        ? 'Dispatch outcome unknown · verify before retrying'
+                        : null;
+                    const genericRunSummary = run.status === 'running'
+                      ? 'Task run in progress'
+                      : run.status === 'blocked'
+                        ? 'Task run blocked'
+                        : null;
                     return (
                       <View key={run.id} style={{ borderWidth: 1, borderColor: '#1f1f1f', borderRadius: 10, padding: 10, backgroundColor: '#0a0a0a' }}>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -1603,8 +1616,32 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                           <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{timeSince(run.started_at)}</Text>
                         </View>
                         <Text style={{ color: '#e8e8e8', fontSize: 13, marginBottom: 4 }}>{runAgent?.name || run.agent_id}</Text>
-                        {run.summary ? (
-                          <Text style={{ color: '#b5b5b5', fontSize: 12, lineHeight: 18 }}>{run.summary}</Text>
+                        {handoffBanner ? (
+                          <Text style={{ color: runColor, fontSize: 12, lineHeight: 18, fontWeight: '700' }}>{handoffBanner}</Text>
+                        ) : null}
+                        {handoff?.providerAcknowledgement ? (
+                          <Text style={{ color: '#b5b5b5', fontSize: 12, lineHeight: 18 }}>
+                            Provider acknowledgement: {handoff.providerAcknowledgement}
+                          </Text>
+                        ) : !handoff && (run.summary || genericRunSummary) ? (
+                          <Text style={{ color: '#b5b5b5', fontSize: 12, lineHeight: 18 }}>{run.summary || genericRunSummary}</Text>
+                        ) : null}
+                        {handoff ? (
+                          <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                            {handoff.externalConnectionId ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>connection {handoff.externalConnectionId}</Text> : null}
+                            {handoff.externalSessionId ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>session {handoff.externalSessionId}</Text> : null}
+                            {handoff.externalProviderRunId ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>turn {handoff.externalProviderRunId}</Text> : null}
+                          </View>
+                        ) : null}
+                        {handoff?.canonicalAgentRunId && onOpenOfficeRun ? (
+                          <Pressable
+                            onPress={() => onOpenOfficeRun(handoff.canonicalAgentRunId!)}
+                            accessibilityRole="button"
+                            accessibilityLabel="Open this agent run in Office"
+                            style={{ alignSelf: 'flex-start', marginTop: 8, borderWidth: 1, borderColor: '#60a5fa55', borderRadius: 7, paddingHorizontal: 9, paddingVertical: 5 }}
+                          >
+                            <Text style={{ color: '#60a5fa', fontSize: 11, fontWeight: '700' }}>OPEN RUN IN OFFICE</Text>
+                          </Pressable>
                         ) : null}
                         <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                           {run.model_used ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.model_used}</Text> : null}
@@ -2446,7 +2483,7 @@ const s = StyleSheet.create({
     gap: 6,
   },
   agentResultLabel: {
-    color: '#22d3ee',
+    color: '#6366f1',
     fontSize: 10,
     fontWeight: '700',
     textTransform: 'uppercase' as any,

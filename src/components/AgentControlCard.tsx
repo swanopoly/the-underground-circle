@@ -5,11 +5,11 @@
  *  - Agent name + status (ONLINE/PAUSED/OFFLINE) + close button
  *  - Connection status message (bridge connected, active sessions, etc.)
  *  - Provider info
- *  - Power buttons: KILL/RESUME, DISCONNECT, FULL PANEL
+ *  - Standalone-only power buttons: MARK OFFLINE/RESUME, REMOVE, FULL PANEL
  *  - Remote shell: quick command chips + free-form input + output
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, Pressable, ScrollView, StyleSheet, Platform,
   ActivityIndicator,
@@ -17,6 +17,11 @@ import {
 import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../lib/officeAgents';
 import { AgentControl, upsertAgentControl } from '../services/hitlService';
 import { supabase } from '../lib/supabase';
+import { safeGetUser } from '../lib/authSession';
+import { showConfirm } from '../lib/alert';
+import { getBridgeUrl } from '../lib/bridgeEnvironment';
+import { isUuidLike } from '../lib/agentRuntimeSubject';
+import { getLocalOpenSwanDiscoveryEndpoints } from '../lib/connectionManager';
 
 const MONO = Platform.OS === 'web' ? 'monospace' : undefined;
 
@@ -61,26 +66,50 @@ export default function AgentControlCard({
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [bridgeOk, setBridgeOk] = useState<boolean | null>(null);
+  const bridgeCheckGenerationRef = useRef(0);
+  const bridgeAbortRef = useRef<AbortController | null>(null);
 
   const isPaused = control?.is_paused ?? false;
   const isOnline = agent.status === 'active' || agent.status === 'building' || agent.status === 'idle';
   const provider = agent.providerType || 'claude-code';
 
-  // Check bridge health on mount + every 15s
+  // Check once when this exact provider summary mounts. Office's canonical
+  // auto-connect loop already owns live connection status; this compact card
+  // keeps a manual refresh instead of starting a duplicate poller.
   const hasBridge = !!BRIDGE_PORTS[provider];
 
   const checkBridge = useCallback(() => {
+    const generation = bridgeCheckGenerationRef.current + 1;
+    bridgeCheckGenerationRef.current = generation;
+    bridgeAbortRef.current?.abort();
+    bridgeAbortRef.current = null;
     if (!hasBridge) {
       setBridgeOk(null);
       setStatusMsg('No local bridge for this agent type');
       return;
     }
     const port = BRIDGE_PORTS[provider];
+    // Browser OpenSwan traffic must go through the CORS/auth proxy (18790),
+    // while native runtimes may use the direct gateway (18789). The shared
+    // discovery owner keeps environment overrides and platform order aligned.
+    const baseUrl = provider === 'openswan'
+      ? getLocalOpenSwanDiscoveryEndpoints()[0]
+      : getBridgeUrl(port);
+    if (!baseUrl) {
+      setBridgeOk(false);
+      setStatusMsg('Local bridge is unavailable in this environment');
+      return;
+    }
     const controller = new AbortController();
+    bridgeAbortRef.current = controller;
     const timeout = setTimeout(() => controller.abort(), 5000);
-    fetch(`http://localhost:${port}/health`, { signal: controller.signal })
-      .then(r => { clearTimeout(timeout); return r.json(); })
+    void fetch(`${baseUrl}/health`, { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error(`Bridge health returned ${response.status}`);
+        return response.json();
+      })
       .then(d => {
+        if (generation !== bridgeCheckGenerationRef.current) return;
         setBridgeOk(true);
         const sessions = d.sessions ?? 0;
         setStatusMsg(sessions > 0
@@ -88,20 +117,24 @@ export default function AgentControlCard({
           : 'Bridge connected — no active sessions');
       })
       .catch(() => {
-        clearTimeout(timeout);
+        if (generation !== bridgeCheckGenerationRef.current) return;
         setBridgeOk(false);
         setStatusMsg('Bridge offline — cannot reach local agent');
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        if (generation === bridgeCheckGenerationRef.current) bridgeAbortRef.current = null;
       });
   }, [provider, hasBridge]);
 
   useEffect(() => {
     checkBridge();
-    if (!hasBridge) return; // Don't poll for non-bridge providers
-    // 30s cadence — bridge transitions are rare and user sees immediate
-    // feedback if a command fails against a dead bridge.
-    const interval = setInterval(checkBridge, 30000);
-    return () => clearInterval(interval);
-  }, [checkBridge, hasBridge]);
+    return () => {
+      bridgeCheckGenerationRef.current += 1;
+      bridgeAbortRef.current?.abort();
+      bridgeAbortRef.current = null;
+    };
+  }, [checkBridge]);
 
   // ── Status ─────────────────────────────────────────────────────────────────
 
@@ -109,63 +142,84 @@ export default function AgentControlCard({
 
   const statusColor = isPaused ? '#f59e0b' : getOfficeStatusColor(agent.status);
 
+  const scopeOwnedAgentRow = useCallback((query: any, ownerId: string) => {
+    const scoped = query.eq('circle_id', circleId).eq('owner_id', ownerId);
+    return agent.connectionId === 'db-agent' && isUuidLike(agent.sessionKey)
+      ? scoped.eq('id', agent.sessionKey)
+      : scoped.eq('name', agent.name);
+  }, [agent.connectionId, agent.name, agent.sessionKey, circleId]);
+
   // ── Power controls ─────────────────────────────────────────────────────────
 
   const handleKill = useCallback(async () => {
+    const confirmed = await showConfirm({
+      title: `Mark ${agent.name} offline?`,
+      message: 'This pauses the Underground Circle agent record. It does not terminate a local CLI process.',
+      confirmLabel: 'Mark offline',
+      destructive: true,
+    });
+    if (!confirmed) return;
     setSaving(true);
     setCmdOutput('');
     try {
+      const { value: user, error: authError } = await safeGetUser();
+      if (!user) throw new Error(authError ? 'Secure session verification is temporarily unavailable.' : 'Sign in required.');
       // Local process termination is intentionally not exposed through the
       // diagnostics bridge. This control pauses the UC agent record only.
       await upsertAgentControl(circleId, agent.sessionKey, agent.name, { is_paused: true });
-      const { data: auth } = await supabase.auth.getUser();
-      if (auth.user) {
-        await supabase.from('circle_office_agents').update({
-          status: 'offline', current_task: 'Killed by user', updated_at: new Date().toISOString(),
-        }).eq('circle_id', circleId).eq('owner_id', auth.user.id).eq('name', agent.name);
-      }
+      const { error } = await scopeOwnedAgentRow(supabase.from('circle_office_agents').update({
+        status: 'offline', current_task: 'Marked offline by user', updated_at: new Date().toISOString(),
+      }), user.id);
+      if (error) throw error;
       setStatusMsg('Agent marked offline — local CLI process was not terminated');
     } catch (e: any) {
       setCmdOutput(`Error: ${e.message}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-  }, [circleId, agent]);
+  }, [agent, circleId, scopeOwnedAgentRow]);
 
   const handleResume = useCallback(async () => {
     setSaving(true);
     setCmdOutput('');
     try {
+      const { value: user, error: authError } = await safeGetUser();
+      if (!user) throw new Error(authError ? 'Secure session verification is temporarily unavailable.' : 'Sign in required.');
       await upsertAgentControl(circleId, agent.sessionKey, agent.name, { is_paused: false });
-      const { data: auth } = await supabase.auth.getUser();
-      if (auth.user) {
-        await supabase.from('circle_office_agents').update({
-          status: 'idle', current_task: 'Resumed — awaiting session', updated_at: new Date().toISOString(),
-        }).eq('circle_id', circleId).eq('owner_id', auth.user.id).eq('name', agent.name);
-      }
+      const { error } = await scopeOwnedAgentRow(supabase.from('circle_office_agents').update({
+        status: 'idle', current_task: 'Resumed — awaiting session', updated_at: new Date().toISOString(),
+      }), user.id);
+      if (error) throw error;
       setStatusMsg('Agent resumed — start a new CLI session to reconnect');
       setCmdOutput('✓ Agent unpaused');
     } catch (e: any) {
       setCmdOutput(`Error: ${e.message}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-  }, [circleId, agent]);
+  }, [agent, circleId, scopeOwnedAgentRow]);
 
   const handleDisconnect = useCallback(async () => {
+    const confirmed = await showConfirm({
+      title: `Remove ${agent.name} from this Office?`,
+      message: 'This removes the published Office row. It does not terminate a local runtime session.',
+      confirmLabel: 'Remove agent',
+      destructive: true,
+    });
+    if (!confirmed) return;
     setSaving(true);
     try {
-      // Always DELETE the agent from the circle (not just mark offline — removes the pixel agent)
-      const { data: auth } = await supabase.auth.getUser();
-      if (auth.user) {
-        await supabase.from('circle_office_agents')
-          .delete()
-          .eq('circle_id', circleId)
-          .eq('owner_id', auth.user.id)
-          .eq('name', agent.name);
-      }
-    } catch {}
-    setSaving(false);
-    onDisconnect();
-  }, [circleId, agent, onDisconnect]);
+      const { value: user, error: authError } = await safeGetUser();
+      if (!user) throw new Error(authError ? 'Secure session verification is temporarily unavailable.' : 'Sign in required.');
+      const { error } = await scopeOwnedAgentRow(supabase.from('circle_office_agents').delete(), user.id);
+      if (error) throw error;
+      onDisconnect();
+    } catch (error: any) {
+      setCmdOutput(`Error: ${error?.message || 'Agent could not be removed'}`);
+    } finally {
+      setSaving(false);
+    }
+  }, [agent.name, onDisconnect, scopeOwnedAgentRow]);
 
   // ── Remote shell ───────────────────────────────────────────────────────────
 
@@ -199,43 +253,56 @@ export default function AgentControlCard({
           color: bridgeOk ? '#22c55e' : bridgeOk === false ? '#ef4444' : '#6b7280',
           fontWeight: '600',
         }]}>{statusMsg || 'Checking bridge...'}</Text>
-        <Pressable onPress={checkBridge} style={{ padding: 4, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}>
-          <Text style={{ color: '#6b7280', fontSize: 10, fontFamily: MONO }}>refresh</Text>
+        <Pressable
+          onPress={checkBridge}
+          accessibilityRole="button"
+          accessibilityLabel="Refresh bridge status"
+          style={{ minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+        >
+          <Text style={{ color: '#8b949e', fontSize: 11, fontWeight: '600' }}>Refresh</Text>
         </Pressable>
       </View>
 
-      {/* ── Provider + Model info ───────────────────────────────────────────── */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <View style={{
-          backgroundColor: (agent.color || '#6366f1') + '18',
-          paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
-          borderWidth: 1, borderColor: (agent.color || '#6366f1') + '30',
-        }}>
-          <Text style={{ color: agent.color || '#6366f1', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
-            {agent.model !== 'unknown' ? agent.model : provider}
-          </Text>
-        </View>
-        {agent.connectionName && (
-          <Text style={{ color: '#4b5563', fontSize: 10, fontFamily: MONO }}>
-            via {agent.connectionName}
-          </Text>
-        )}
-      </View>
+      {/* Overview already owns identity and current-work context. Standalone
+          cards keep those details; the embedded summary shows connection truth
+          only so the pop-up does not repeat itself. */}
+      {!embedded ? (
+        <>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <View style={{
+              backgroundColor: (agent.color || '#6366f1') + '18',
+              paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
+              borderWidth: 1, borderColor: (agent.color || '#6366f1') + '30',
+            }}>
+              <Text style={{ color: agent.color || '#6366f1', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
+                {agent.model !== 'unknown' ? agent.model : provider}
+              </Text>
+            </View>
+            {agent.connectionName && (
+              <Text style={{ color: '#4b5563', fontSize: 10, fontFamily: MONO }}>
+                via {agent.connectionName}
+              </Text>
+            )}
+          </View>
 
-      {/* ── Current Activity — highlighted when active ─────────────────────── */}
-      {agent.activity && agent.activity !== 'Idling' ? (
-        <View style={{
-          backgroundColor: '#f59e0b0c', borderLeftWidth: 3, borderLeftColor: '#f59e0b60',
-          paddingVertical: 6, paddingHorizontal: 10, borderRadius: 4, marginBottom: 8,
-        }}>
-          <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5, marginBottom: 2 }}>
-            CURRENT TASK
-          </Text>
-          <Text style={[c.activityText, { color: '#e8e8f0', marginBottom: 0 }]} numberOfLines={2}>{agent.activity}</Text>
-        </View>
+          {agent.activity && agent.activity !== 'Idling' ? (
+            <View style={{
+              backgroundColor: '#f59e0b0c', borderLeftWidth: 3, borderLeftColor: '#f59e0b60',
+              paddingVertical: 6, paddingHorizontal: 10, borderRadius: 4, marginBottom: 8,
+            }}>
+              <Text style={{ color: '#f59e0b', fontSize: 9, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5, marginBottom: 2 }}>
+                CURRENT TASK
+              </Text>
+              <Text style={[c.activityText, { color: '#e8e8f0', marginBottom: 0 }]} numberOfLines={2}>{agent.activity}</Text>
+            </View>
+          ) : null}
+        </>
       ) : null}
 
-      {/* ── SECTION: agent-power-buttons — Kill/Resume/Disconnect ─────── */}
+      {/* The embedded Overview already owns Pause/Resume and the parent panel
+          owns exact removal. Keep destructive controls out of the compact
+          summary so one action has one authoritative home. */}
+      {!embedded ? (
       <View style={[c.powerRow, { gap: 6 }]} nativeID="section-agent-power-buttons">
         {isPaused ? (
           <Pressable style={[c.powerBtn, c.btnResume, { flex: 1 }]} onPress={handleResume} disabled={saving}>
@@ -243,11 +310,11 @@ export default function AgentControlCard({
           </Pressable>
         ) : (
           <Pressable style={[c.powerBtn, c.btnKill, { flex: 1 }]} onPress={handleKill} disabled={saving}>
-            <Text style={[c.btnText, { color: '#ef4444' }]}>{saving ? '...' : '|| KILL'}</Text>
+            <Text style={[c.btnText, { color: '#ef4444' }]}>{saving ? '...' : 'MARK OFFLINE'}</Text>
           </Pressable>
         )}
         <Pressable style={[c.powerBtn, c.btnDisconnect, { flex: 1 }]} onPress={handleDisconnect} disabled={saving}>
-          <Text style={[c.btnText, { color: '#f59e0b' }]}>x DISCONNECT</Text>
+          <Text style={[c.btnText, { color: '#f59e0b' }]}>REMOVE</Text>
         </Pressable>
         {!embedded && (
           <Pressable style={[c.powerBtn, c.btnPanel, { flex: 1 }]} onPress={onOpenPanel}>
@@ -255,6 +322,7 @@ export default function AgentControlCard({
           </Pressable>
         )}
       </View>
+      ) : null}
 
       {/* ── Remote shell — only in standalone mode, Terminal tab handles it when embedded ── */}
       {!embedded && onRunCommand && bridgeOk && (
@@ -308,7 +376,7 @@ export default function AgentControlCard({
             }}
             style={[c.startBridgeBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
-            <Text style={c.startBridgeBtnText}>{cmdRunning ? '...' : '▶ START BRIDGE'}</Text>
+            <Text style={c.startBridgeBtnText}>{cmdRunning ? '...' : 'START HELP'}</Text>
           </Pressable>
         </View>
       )}
@@ -373,7 +441,7 @@ const c = StyleSheet.create({
   // Connection
   connRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
   connDot: { width: 5, height: 5, borderRadius: 3 },
-  connText: { color: '#6b7280', fontSize: 10, fontFamily: MONO, flex: 1 },
+  connText: { color: '#8b949e', fontSize: 12, flex: 1 },
 
   // Provider
   providerText: { color: '#4b5563', fontSize: 10, fontFamily: MONO, marginBottom: 4 },

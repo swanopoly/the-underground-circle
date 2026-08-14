@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, Platform,
+  View, Text, ScrollView, StyleSheet,
 } from 'react-native';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -24,9 +24,15 @@ interface Props {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getLocalTime(timezone: string): { hours: number; minutes: number; ampm: string; timeStr: string } {
+interface LocalTime {
+  hours: number;
+  minutes: number;
+  ampm: string;
+  timeStr: string;
+}
+
+function getLocalTime(timezone: string, now: Date): LocalTime | null {
   try {
-    const now = new Date();
     const formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,
       hour: 'numeric',
@@ -38,22 +44,25 @@ function getLocalTime(timezone: string): { hours: number; minutes: number; ampm:
     const minutePart = parts.find(p => p.type === 'minute');
     const dayPeriod = parts.find(p => p.type === 'dayPeriod');
 
-    const h = parseInt(hourPart?.value || '12', 10);
-    const m = parseInt(minutePart?.value || '0', 10);
+    const h = Number.parseInt(hourPart?.value || '', 10);
+    const m = Number.parseInt(minutePart?.value || '', 10);
     const ampm = dayPeriod?.value || 'AM';
 
     // Get 24h format for day/night check
     const formatter24 = new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,
-      hour: 'numeric',
-      hour12: false,
+      hour: '2-digit',
+      hourCycle: 'h23',
     });
-    const h24 = parseInt(formatter24.format(now), 10);
+    const hour24Part = formatter24.formatToParts(now).find(part => part.type === 'hour');
+    const h24 = Number.parseInt(hour24Part?.value || '', 10);
+
+    if (![h, m, h24].every(Number.isFinite)) return null;
 
     const timeStr = `${h}:${minutePart?.value || '00'}`;
-    return { hours: h24, minutes: m, ampm: ampm.toUpperCase(), timeStr };
+    return { hours: h24 % 24, minutes: m, ampm: ampm.toUpperCase(), timeStr };
   } catch {
-    return { hours: 12, minutes: 0, ampm: 'PM', timeStr: '12:00' };
+    return null;
   }
 }
 
@@ -72,7 +81,7 @@ function getInitial(name: string): string {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function WorldClockBar({ members, accentColor }: Props) {
-  const [, setTick] = useState(0);
+  const [tick, setTick] = useState(0);
 
   // Update every 30 seconds
   useEffect(() => {
@@ -82,11 +91,15 @@ export default function WorldClockBar({ members, accentColor }: Props) {
 
   // Calculate time data for each member
   const memberTimes = useMemo(() => {
+    const now = new Date();
     return members.map(m => {
       if (!m.timezone) {
         return { ...m, time: null, isDay: false, isWorking: false };
       }
-      const t = getLocalTime(m.timezone);
+      const t = getLocalTime(m.timezone, now);
+      if (!t) {
+        return { ...m, time: null, isDay: false, isWorking: false };
+      }
       return {
         ...m,
         time: t,
@@ -94,7 +107,7 @@ export default function WorldClockBar({ members, accentColor }: Props) {
         isWorking: isWorkingHours(t.hours),
       };
     });
-  }, [members, /* tick forces re-render */]);
+  }, [members, tick]);
 
   // Find overlap groups (2+ members in working hours)
   const workingMemberIds = useMemo(() => {
@@ -117,6 +130,10 @@ export default function WorldClockBar({ members, accentColor }: Props) {
           return (
             <View
               key={member.id}
+              accessible
+              accessibilityLabel={member.time
+                ? `${member.name}, ${member.time.timeStr} ${member.time.ampm} in ${member.timezone}${hasOverlap ? ', within shared working hours' : ''}`
+                : `${member.name}, timezone unavailable`}
               style={[
                 styles.card,
                 hasOverlap && { borderColor: '#22c55e40' },
@@ -165,7 +182,7 @@ export default function WorldClockBar({ members, accentColor }: Props) {
 
               {/* Sun/Moon indicator */}
               <Text style={styles.dayNightIcon}>
-                {!member.time ? '--' : member.isDay ? '//' : '..'}
+                {!member.time ? 'TZ?' : member.isDay ? 'DAY' : 'NIGHT'}
               </Text>
 
               {/* Overlap connector */}

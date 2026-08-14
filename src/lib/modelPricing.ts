@@ -7,7 +7,7 @@
  * Pricing per 1M tokens (input / output / cached-input).
  * Cached input tokens are billed at 10% of full input rate.
  *
- * Published Anthropic rates (as of 2026-04):
+ * Published Anthropic rates (verified 2026-08):
  *   Fable 5:        $10 / $50
  *   Opus 4.8-4.6:   $5 / $25
  *   Sonnet 4.6:     $3 / $15
@@ -29,6 +29,7 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   // Published: $5 / $25 for 4.6+; older Opus generations were pricier.
   // Values below = published + 25% buffer.
   'claude-fable-5':   { inPer1M: 12.50, outPer1M: 62.50, cachedInPer1M: 1.250, label: 'Claude Fable 5'  },
+  'claude-opus-5':    { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 5'   },
   'claude-opus-4-8':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.8'  },
   'claude-opus-4-7':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.7'  },
   'claude-opus-4-6':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.6'  },
@@ -36,24 +37,27 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'claude-opus-4':    { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 4'    },
   'claude-opus-3-7':  { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 3.7'  },
   'claude-opus-3-5':  { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 3.5'  },
-  'claude-opus':      { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus'      },
+  'claude-opus':      { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus'      },
   // ── Claude Sonnet ─────────────────────────────────────────────────────────
   // Published: $3 / $15 for 4.x. Below = published + 25% buffer.
+  'claude-sonnet-5':  { inPer1M: 3.75,  outPer1M: 18.75, cachedInPer1M: 0.375, label: 'Claude Sonnet 5' },
   'claude-sonnet-4-6':{ inPer1M: 3.75,  outPer1M: 18.75, cachedInPer1M: 0.375, label: 'Claude Sonnet 4.6'},
   'claude-sonnet-4-5':{ inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 4.5'},
   'claude-sonnet-4':  { inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 4'  },
   'claude-sonnet-3-7':{ inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 3.7'},
   'claude-sonnet-3-5':{ inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet 3.5'},
-  'claude-sonnet':    { inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Claude Sonnet'    },
+  'claude-sonnet':    { inPer1M: 3.75,  outPer1M: 18.75, cachedInPer1M: 0.375, label: 'Claude Sonnet'    },
   // ── Claude Haiku ──────────────────────────────────────────────────────────
   'claude-haiku-4-5': { inPer1M: 1.25,  outPer1M: 6.25,  cachedInPer1M: 0.125, label: 'Claude Haiku 4.5' },
   'claude-haiku-3-5': { inPer1M: 1.00,  outPer1M: 5.00,  cachedInPer1M: 0.10,  label: 'Claude Haiku 3.5' },
-  'claude-haiku':     { inPer1M: 0.30,  outPer1M: 1.50,  cachedInPer1M: 0.03,  label: 'Claude Haiku'     },
+  'claude-haiku':     { inPer1M: 1.25,  outPer1M: 6.25,  cachedInPer1M: 0.125, label: 'Claude Haiku'     },
   // ── Gemini ────────────────────────────────────────────────────────────────
+  'gemini-3-6-flash': { inPer1M: 1.875, outPer1M: 9.375, cachedInPer1M: 0.1875, label: 'Gemini 3.6 Flash' },
+  'gemini-3-5-flash-lite': { inPer1M: 0.375, outPer1M: 3.125, cachedInPer1M: 0.0375, label: 'Gemini 3.5 Flash-Lite' },
   'gemini-2-5-pro':   { inPer1M: 1.25,  outPer1M: 10.0,  cachedInPer1M: 0.31,  label: 'Gemini 2.5 Pro'   },
   'gemini-2-5-flash': { inPer1M: 0.15,  outPer1M: 0.60,  cachedInPer1M: 0.02,  label: 'Gemini 2.5 Flash' },
   'gemini-2-5-flash-lite': { inPer1M: 0.04, outPer1M: 0.15, cachedInPer1M: 0.01, label: 'Gemini 2.5 Flash Lite' },
-  'gemini-3-5-flash': { inPer1M: 1.50,  outPer1M: 9.00,  cachedInPer1M: 0.15,  label: 'Gemini 3.5 Flash' },
+  'gemini-3-5-flash': { inPer1M: 1.875, outPer1M: 11.25, cachedInPer1M: 0.1875,label: 'Gemini 3.5 Flash' },
   'gemini-3-1-pro-preview': { inPer1M: 2.00, outPer1M: 12.0, cachedInPer1M: 0.50, label: 'Gemini 3.1 Pro' },
   'gemini-3-1-flash-lite': { inPer1M: 0.04, outPer1M: 0.15, cachedInPer1M: 0.01, label: 'Gemini 3.1 Flash Lite' },
   'gemini-2-flash':   { inPer1M: 0.10,  outPer1M: 0.40,  cachedInPer1M: 0.01,  label: 'Gemini 2 Flash'   },
@@ -61,6 +65,9 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'gemini-pro':       { inPer1M: 1.25,  outPer1M: 10.0,  cachedInPer1M: 0.31,  label: 'Gemini Pro'       },
   'gemini':           { inPer1M: 1.25,  outPer1M: 10.0,  cachedInPer1M: 0.31,  label: 'Gemini'           },
   // ── OpenAI ────────────────────────────────────────────────────────────────
+  'gpt-5-6-sol':      { inPer1M: 6.25,  outPer1M: 37.50, cachedInPer1M: 0.625, label: 'GPT-5.6 Sol'      },
+  'gpt-5-6-terra':    { inPer1M: 3.125, outPer1M: 18.75, cachedInPer1M: 0.3125,label: 'GPT-5.6 Terra'    },
+  'gpt-5-6-luna':     { inPer1M: 1.25,  outPer1M: 7.50,  cachedInPer1M: 0.125, label: 'GPT-5.6 Luna'     },
   'gpt-4-1':          { inPer1M: 2.00,  outPer1M: 8.00,  cachedInPer1M: 0.50,  label: 'GPT-4.1'          },
   'gpt-5-5-pro':      { inPer1M: 37.50, outPer1M: 225.0, cachedInPer1M: 3.75,  label: 'GPT-5.5 Pro'      },
   'gpt-5-5':          { inPer1M: 6.25,  outPer1M: 37.50, cachedInPer1M: 0.625, label: 'GPT-5.5'          },
@@ -73,9 +80,18 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'gpt-4o':           { inPer1M: 2.50,  outPer1M: 10.0,  cachedInPer1M: 1.25,  label: 'GPT-4o'           },
   'gpt-4':            { inPer1M: 3.00,  outPer1M: 12.0,  cachedInPer1M: 0.30,  label: 'GPT-4'            },
   'o3':               { inPer1M: 10.0,  outPer1M: 40.0,  cachedInPer1M: 2.50,  label: 'OpenAI o3'        },
+  'o3-pro':           { inPer1M: 25.0,  outPer1M: 100.0, cachedInPer1M: 6.25,  label: 'OpenAI o3 Pro'    },
   'o4-mini':          { inPer1M: 1.10,  outPer1M: 4.40,  cachedInPer1M: 0.28,  label: 'O4 Mini'          },
   'o1':               { inPer1M: 15.0,  outPer1M: 60.0,  cachedInPer1M: 7.50,  label: 'OpenAI o1'        },
   'o3-mini':          { inPer1M: 1.10,  outPer1M: 4.40,  cachedInPer1M: 0.55,  label: 'o3 Mini'          },
+  // ── Current direct-provider text models ──────────────────────────────────
+  // Published rates + 25% planning buffer, matching the rest of this table.
+  'deepseek-v4-flash': { inPer1M: 0.175, outPer1M: 0.35, cachedInPer1M: 0.0175, label: 'DeepSeek V4 Flash' },
+  'deepseek-v4-pro':   { inPer1M: 0.54375, outPer1M: 1.0875, cachedInPer1M: 0.054375, label: 'DeepSeek V4 Pro' },
+  'mistral-medium-3-5':{ inPer1M: 1.875, outPer1M: 9.375, cachedInPer1M: 0.1875, label: 'Mistral Medium 3.5' },
+  'mistral-small-2603':{ inPer1M: 0.1875, outPer1M: 0.75, cachedInPer1M: 0.01875, label: 'Mistral Small 4' },
+  'mistral-large-2512':{ inPer1M: 0.625, outPer1M: 1.875, cachedInPer1M: 0.0625, label: 'Mistral Large 3' },
+  'codestral-2508':    { inPer1M: 0.375, outPer1M: 1.125, cachedInPer1M: 0.0375, label: 'Codestral 2508' },
   // ── Groq ─────────────────────────────────────────────────────────────────
   'llama-3.3-70b':    { inPer1M: 0.59,  outPer1M: 0.79,  cachedInPer1M: 0.06,  label: 'Llama 3.3 70B'    },
   'mixtral-8x7b':     { inPer1M: 0.24,  outPer1M: 0.24,  cachedInPer1M: 0.02,  label: 'Mixtral 8x7B'     },

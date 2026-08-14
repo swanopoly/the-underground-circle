@@ -32,7 +32,11 @@ import {
   type ComputerTaskModelResolution,
 } from './chatComputerHandoffContext';
 import { translateComputerUseErrorMessage } from './chatUserFacingOutcomes';
-import { buildChatComputerUsePolicyInputs } from './chatComputerRequestRouter';
+import {
+  buildChatComputerRequestedActionExecutionGate,
+  buildChatComputerUsePolicyInputs,
+  type ChatComputerRequestedActionContract,
+} from './chatComputerRequestRouter';
 import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
 
 export type TaskStatus = 'idle' | 'starting' | 'running' | 'done' | 'error';
@@ -64,6 +68,8 @@ export interface ComputerUseTaskState {
   status: TaskStatus;
   /** Authoritative task outcome. `status` remains the live-card render state. */
   outcomeStatus?: ComputerTaskOutcomeStatus | null;
+  /** Inert A1…An request ledger; never tool or approval authority. */
+  requestedActionContract?: ChatComputerRequestedActionContract | null;
   task: string;
   /** Row id in `computer_use_runs` — used to link to history or run a
    *  follow-up referencing this task. */
@@ -109,6 +115,7 @@ export interface ComputerUseTaskState {
 const EMPTY_STATE: ComputerUseTaskState = {
   status: 'idle',
   outcomeStatus: null,
+  requestedActionContract: null,
   task: '',
   runId: null,
   sessionId: null,
@@ -128,7 +135,7 @@ export interface ComputerUseTaskStartResult {
   started: boolean;
   reason?: string;
   /** Present when this hook already owns the terminal state for the attempt. */
-  outcomeStatus?: Extract<ComputerTaskOutcomeStatus, 'failed' | 'cancelled'> | null;
+  outcomeStatus?: Extract<ComputerTaskOutcomeStatus, 'blocked' | 'failed' | 'cancelled'> | null;
 }
 
 export type ComputerUseTaskTerminalStatus = Extract<
@@ -257,6 +264,24 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
     },
   ): Promise<ComputerUseTaskStartResult> => {
     if (!task.trim()) return { started: false, reason: 'Empty task.' };
+    if (handleRef.current || startReservationRef.current) {
+      return { started: false, reason: 'Another task is already running.' };
+    }
+    const requestedActionExecutionGate = buildChatComputerRequestedActionExecutionGate(task);
+    const requestedActionContract = requestedActionExecutionGate.contract;
+    if (requestedActionExecutionGate.blocked) {
+      const reason = requestedActionExecutionGate.blocker
+        || 'The request must be decomposed before any computer action runs.';
+      setState({
+        ...EMPTY_STATE,
+        status: 'error',
+        outcomeStatus: 'blocked',
+        requestedActionContract,
+        task,
+        errorMessage: reason,
+      });
+      return { started: false, reason, outcomeStatus: 'blocked' };
+    }
     const rootPointerWasSupplied = options?.computerTaskRootPointer !== undefined
       && options?.computerTaskRootPointer !== null;
     const computerTaskRootPointer = sanitizeComputerTaskRootPointer(
@@ -268,13 +293,11 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
         ...EMPTY_STATE,
         status: 'error',
         outcomeStatus: 'failed',
+        requestedActionContract,
         task,
         errorMessage: reason,
       });
       return { started: false, reason, outcomeStatus: 'failed' };
-    }
-    if (handleRef.current || startReservationRef.current) {
-      return { started: false, reason: 'Another task is already running.' };
     }
     const startReservation = {};
     const terminalGate = createComputerUseTaskTerminalGate();
@@ -283,7 +306,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
     terminalGateRef.current = terminalGate;
     sessionIdRef.current = null;
     runIdRef.current = null;
-    setState({ ...EMPTY_STATE, status: 'starting', task });
+    setState({ ...EMPTY_STATE, status: 'starting', requestedActionContract, task });
     const isCurrentAttempt = () => runAttemptRef.current === startReservation;
     const releaseStartReservation = () => {
       if (startReservationRef.current === startReservation) startReservationRef.current = null;
@@ -304,7 +327,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       }
       runAttemptRef.current = null;
       terminalGateRef.current = null;
-      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', task, errorMessage: reason });
+      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', requestedActionContract, task, errorMessage: reason });
       return { started: false, reason, outcomeStatus: 'failed' };
     }
     if (startReservationRef.current !== startReservation) {
@@ -316,7 +339,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       terminalGate.claim('failed');
       runAttemptRef.current = null;
       terminalGateRef.current = null;
-      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', task, errorMessage: reason });
+      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', requestedActionContract, task, errorMessage: reason });
       return { started: false, reason, outcomeStatus: 'failed' };
     }
 
@@ -333,6 +356,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       ...EMPTY_STATE,
       status: 'starting',
       outcomeStatus: null,
+      requestedActionContract,
       task,
       modelResolution: modelResolution.substituted ? modelResolution : null,
     });
@@ -434,6 +458,13 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
         },
         onResult: ({ summary, iterations, tokens, findings, extractedData, runId }) => {
           if (!isCurrentAttempt() || !terminalGate.claim('completed')) return;
+          // The legacy Browserbase result event proves that the remote loop
+          // ended, not that every A1…An acceptance clause was independently
+          // verified. Keep compound requests partial until a runtime-owned
+          // outer task receipt is added to this transport.
+          const taskOutcomeStatus: ComputerTaskOutcomeStatus = requestedActionContract
+            ? 'partial'
+            : 'completed';
           persistQuestionResolved(null); // task finished — expire any open question
           // D6 progressive enhancement: page hidden + permission already
           // granted → native web notification. Silent no-op otherwise.
@@ -445,7 +476,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
           setState((prev) => ({
             ...prev,
             status: 'done',
-            outcomeStatus: 'completed',
+            outcomeStatus: taskOutcomeStatus,
             runId: runId || prev.runId,
             result: { summary, iterations, tokens, findings: findings ?? null, extractedData: extractedData ?? null },
           }));
@@ -485,7 +516,7 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       terminalGate.claim('failed');
       runAttemptRef.current = null;
       if (terminalGateRef.current === terminalGate) terminalGateRef.current = null;
-      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', task, errorMessage: reason });
+      setState({ ...EMPTY_STATE, status: 'error', outcomeStatus: 'failed', requestedActionContract, task, errorMessage: reason });
       return { started: false, reason, outcomeStatus: 'failed' };
     }
     if (startReservationRef.current !== startReservation) {

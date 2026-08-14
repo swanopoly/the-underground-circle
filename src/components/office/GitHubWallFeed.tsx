@@ -46,7 +46,7 @@ const EVENT_CONFIG: Record<string, { icon: string; color: string }> = {
   pull_request_merged: { icon: '<>', color: '#a855f7' },
   issues:         { icon: '!', color: '#f59e0b' },
   issue_comment:  { icon: '!', color: '#f59e0b' },
-  release:        { icon: 'R', color: '#22d3ee' },
+  release:        { icon: 'R', color: '#6366f1' },
   workflow_run:   { icon: 'CI', color: '#ef4444' },
   workflow_run_success: { icon: 'CI', color: '#22c55e' },
   create:         { icon: '+', color: '#22c55e' },

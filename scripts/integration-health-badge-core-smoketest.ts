@@ -293,6 +293,12 @@ function main() {
       stillRequired.length === 0,
       `every defaultModel field is optional (${stillRequired.length} still implicitly required)`,
     );
+    const blackSwanModelLine = src.split('\n').find(l => l.includes("key: 'model_id'") && l.includes('cswan801/BlackSwan-v5'));
+    assert(!!blackSwanModelLine, 'BlackSwan definition still declares its canonical model ID');
+    assert(
+      !!blackSwanModelLine?.includes('required: false'),
+      'BlackSwan canonical model ID stays optional because the runtime supplies the same default',
+    );
     // The badge core half of the same loop: setup-incomplete alone is enough to
     // read degraded even when the stored row is perfectly healthy.
     const badge = buildIntegrationHealthBadge({

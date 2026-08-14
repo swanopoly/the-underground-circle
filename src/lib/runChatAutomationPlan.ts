@@ -36,6 +36,11 @@ import {
   compileComputerSequenceProgram,
 } from './computerSequenceProgramCore';
 import type { AutoApproveCategory } from './chatAutoApproveSettings';
+import {
+  issueChatPlanApprovalAuthorityObject,
+  isIssuedChatPlanApprovalAuthorityObject,
+  type ChatPlanApprovalAuthorityCore,
+} from './chatPlanApprovalAuthorityCore';
 
 /**
  * Outcome each transport reports back. Normalised so the caller can log
@@ -64,22 +69,10 @@ export type ChatAutomationOutcome = {
   approvalId?: string | null;
 };
 
-export type ChatPlanApprovalAuthority = Readonly<{
-  schemaVersion: 2;
-  kind: 'chat_plan_approval';
-  authorizationSource: 'claimed_approval_row' | 'policy_auto_waiver';
-  approvalId: string | null;
-  approvalIntentFingerprint: string;
-  requestIdentityFingerprint: string;
-  programId: string;
-  programFingerprint: string;
-  circleId: string;
-  userId: string;
-  threadId: string | null;
-  executionKind: ChatAutomationExecutionKind;
-  routeId: string | null;
-  policyCategory: AutoApproveCategory | null;
-}>;
+export type ChatPlanApprovalAuthority = ChatPlanApprovalAuthorityCore<
+  ChatAutomationExecutionKind,
+  AutoApproveCategory
+>;
 
 export type ApprovalGatePassAuthority = Readonly<
   | {
@@ -173,8 +166,6 @@ export async function buildChatPlanApprovalIntentFingerprint(
   });
 }
 
-const issuedChatPlanApprovalAuthorities = new WeakSet<object>();
-
 async function issueChatPlanApprovalAuthority(
   plan: ChatAutomationPlan,
   ctx: ChatTransportContext,
@@ -211,7 +202,7 @@ async function issueChatPlanApprovalAuthority(
     buildComputerSequenceProgramManifest(program),
   );
   if (!CHAT_APPROVAL_FINGERPRINT_RE.test(programFingerprint)) return null;
-  const authority: ChatPlanApprovalAuthority = Object.freeze({
+  return issueChatPlanApprovalAuthorityObject<ChatAutomationExecutionKind, AutoApproveCategory>({
     schemaVersion: 2,
     kind: 'chat_plan_approval',
     authorizationSource: gateAuthority.kind,
@@ -231,8 +222,6 @@ async function issueChatPlanApprovalAuthority(
       ? gateAuthority.policyCategory
       : null,
   });
-  issuedChatPlanApprovalAuthorities.add(authority);
-  return authority;
 }
 
 /** Runtime-only object-capability check. Plain objects and stale serialized
@@ -250,30 +239,10 @@ export function isIssuedChatPlanApprovalAuthority(
     programFingerprint: string;
   },
 ): value is ChatPlanApprovalAuthority {
-  if (!value || typeof value !== 'object' || !issuedChatPlanApprovalAuthorities.has(value as object)) {
-    return false;
-  }
-  const authority = value as ChatPlanApprovalAuthority;
-  return authority.schemaVersion === 2
-    && authority.kind === 'chat_plan_approval'
-    && authority.circleId === expected.circleId
-    && authority.userId === expected.userId
-    && authority.threadId === (expected.threadId || null)
-    && authority.executionKind === expected.executionKind
-    && authority.approvalIntentFingerprint === expected.approvalIntentFingerprint
-    && authority.requestIdentityFingerprint === expected.requestIdentityFingerprint
-    && authority.programId === expected.programId
-    && authority.programFingerprint === expected.programFingerprint
-    && (
-      (authority.authorizationSource === 'claimed_approval_row'
-        && typeof authority.approvalId === 'string'
-        && authority.approvalId.length > 0
-        && authority.policyCategory === null)
-      || (authority.authorizationSource === 'policy_auto_waiver'
-        && authority.approvalId === null
-        && typeof authority.policyCategory === 'string'
-        && authority.policyCategory.length > 0)
-    );
+  return isIssuedChatPlanApprovalAuthorityObject<ChatAutomationExecutionKind, AutoApproveCategory>(
+    value,
+    expected,
+  );
 }
 
 /**

@@ -1,6 +1,7 @@
 import type { AuthError } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import { removeStorageKeysByPrefix } from './storage';
+import { closeOpenSwanApprovalResumeOutboxAuthorityForLogout } from './openSwanApprovalResumeOutbox';
 
 export type AuthSignOutScope = 'global' | 'local' | 'others';
 
@@ -23,8 +24,25 @@ const AUTH_SESSION_STORAGE_PREFIXES = [
   'uc_circles_cache_v1:',
   '@office_conversation_log',
   '@office_session_cache',
+  '@office_session_cache_v2:',
+  '@office_daily_costs',
+  '@office_daily_costs_v2:',
+  '@office_session_tags',
+  '@office_session_tags_v2:',
+  '@office_tag_suggestions',
+  '@office_tag_suggestions_v2:',
+  '@session_tags_backup',
+  '@session_tags_backup_v2:',
   '@office_terminal_history',
   '@local_secret:office_connection:',
+  '@local_secret:office_telegram_bot_token_v1:',
+  '@office_layout_cache_v2:',
+  '@office_private_v2:',
+  '@office_telegram_config',
+  '@office_addon_catalog_preferences_v1:',
+  '@office_floors',
+  '@office_floors_updated_at',
+  '@office_current_floor',
 ] as const;
 
 async function resolveCurrentUserId(timeoutMs = 500): Promise<string | null> {
@@ -98,6 +116,12 @@ export async function clearLocalAuthResidualAuthority(
       const { clearDesktopBridgeTokenForLogout } = await import('./desktopBridge');
       await clearDesktopBridgeTokenForLogout();
     }),
+    attempt('openswan-approval-resume-outbox', async () => {
+      const { clearOpenSwanApprovalResumeOutboxForLogout } = await import('./openSwanApprovalResumeOutbox');
+      if (!await clearOpenSwanApprovalResumeOutboxForLogout()) {
+        throw new Error('OpenSwan approval-resume device custody could not be verified cleared.');
+      }
+    }),
   ]);
 
   return { completed, failed };
@@ -112,6 +136,10 @@ export async function secureSignOut(options: {
   scope?: AuthSignOutScope;
   userId?: string | null;
 } = {}): Promise<{ error: AuthError | null; cleanup: AuthLogoutCleanupResult }> {
+  // Close synchronously before either local cleanup or GoTrue revocation can
+  // yield. A pending tool gate that reaches encrypted persistence afterward
+  // observes the changed epoch and cannot resurrect approval authority.
+  closeOpenSwanApprovalResumeOutboxAuthorityForLogout();
   const userId = options.userId ?? await resolveCurrentUserId();
   const cleanupPromise = clearLocalAuthResidualAuthority(userId);
   let signOutResult: Awaited<ReturnType<typeof supabase.auth.signOut>>;

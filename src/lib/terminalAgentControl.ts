@@ -2,6 +2,7 @@ import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 import { sendTerminalAgentSessionMessage, wakeAndAssignTask } from './bridgeTaskDispatcher';
 import { loadAgentIdentities, type TerminalAgentOfficeConfig } from './agentIdentity';
+import { buildAgentRuntimeSubject, type AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import {
   formatVisualBriefsForConnectedAgent,
   type ChatVisualBriefArtifact,
@@ -23,6 +24,34 @@ export type TerminalAgentControlSession = {
   recentActions: string[];
   terminalConfig?: TerminalAgentOfficeConfig | null;
 };
+
+export type TerminalAgentControlResult = {
+  kind: 'status_query' | 'handoff';
+  ok: boolean;
+  transportAccepted?: boolean | null;
+  /** Present only when natural name/provider targeting matched more than one session. */
+  targetStatus?: 'ambiguous';
+  message: string;
+  provider?: TerminalAgentControlProvider;
+  actor?: string;
+  sessionId?: string;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
+};
+
+export type TerminalAgentSessionTargetResolution =
+  | {
+      status: 'matched';
+      matchKind: 'session_id' | 'natural';
+      session: TerminalAgentControlSession;
+    }
+  | {
+      status: 'not_found';
+    }
+  | {
+      status: 'ambiguous';
+      score: number;
+      candidates: TerminalAgentControlSession[];
+    };
 
 const PROVIDERS: Array<{ provider: TerminalAgentControlProvider; label: string; port: number }> = [
   { provider: 'claude-code', label: 'Claude Code', port: 7778 },
@@ -140,22 +169,54 @@ function sessionAliases(session: TerminalAgentControlSession): string[] {
   ].filter(Boolean);
 }
 
-export function findTerminalAgentSessionTarget(
-  sessions: TerminalAgentControlSession[],
+export function resolveTerminalAgentSessionTarget(
+  sessions: readonly TerminalAgentControlSession[],
   target: string,
-): TerminalAgentControlSession | null {
+): TerminalAgentSessionTargetResolution {
+  const exactSessionId = String(target || '').trim();
+  if (!exactSessionId) return { status: 'not_found' };
+
+  // An exact provider-owned session id is immutable targeting, so preserve it
+  // ahead of display-name/provider aliases. Duplicate ids still fail closed.
+  const exactMatches = sessions.filter((session) => session.sessionId === exactSessionId);
+  if (exactMatches.length === 1) {
+    return { status: 'matched', matchKind: 'session_id', session: exactMatches[0] };
+  }
+  if (exactMatches.length > 1) {
+    return { status: 'ambiguous', score: 100, candidates: exactMatches };
+  }
+
   const key = normalize(target);
-  if (!key) return null;
-  let best: { session: TerminalAgentControlSession; score: number } | null = null;
+  if (!key) return { status: 'not_found' };
+  let bestScore = 0;
+  let bestMatches: TerminalAgentControlSession[] = [];
   for (const session of sessions) {
     const aliases = sessionAliases(session).map(normalize);
     let score = 0;
     if (aliases.some((alias) => alias === key)) score = 100;
     else if (aliases.some((alias) => alias && alias.startsWith(key))) score = 80;
     else if (aliases.some((alias) => alias && (alias.includes(key) || key.includes(alias)))) score = 60;
-    if (score > 0 && (!best || score > best.score)) best = { session, score };
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatches = score > 0 ? [session] : [];
+    } else if (score > 0 && score === bestScore) {
+      bestMatches.push(session);
+    }
   }
-  return best?.session || null;
+  if (bestMatches.length === 0) return { status: 'not_found' };
+  if (bestMatches.length > 1) {
+    return { status: 'ambiguous', score: bestScore, candidates: bestMatches };
+  }
+  return { status: 'matched', matchKind: 'natural', session: bestMatches[0] };
+}
+
+/** Compatibility helper: ambiguous natural targets deliberately resolve to null. */
+export function findTerminalAgentSessionTarget(
+  sessions: TerminalAgentControlSession[],
+  target: string,
+): TerminalAgentControlSession | null {
+  const resolution = resolveTerminalAgentSessionTarget(sessions, target);
+  return resolution.status === 'matched' ? resolution.session : null;
 }
 
 function parseSendIntent(message: string): { target: string; body: string } | null {
@@ -229,10 +290,10 @@ export async function executeTerminalAgentControlFromChat(
     circleId?: string;
     launchIfMissing?: boolean;
   } = {},
-): Promise<{ message: string } | null> {
+): Promise<TerminalAgentControlResult | null> {
   if (isStatusIntent(message)) {
     const sessions = await listTerminalAgentControlSessions();
-    return { message: formatTerminalAgentStatus(sessions) };
+    return { kind: 'status_query', ok: true, message: formatTerminalAgentStatus(sessions) };
   }
 
   const sendIntent = parseSendIntent(message);
@@ -242,7 +303,7 @@ export async function executeTerminalAgentControlFromChat(
   const bodyWithVisualContext = visualContext
     ? `${sendIntent.body}\n\n${visualContext}`
     : sendIntent.body;
-  const launchExplicitProvider = async (): Promise<{ message: string } | null> => {
+  const launchExplicitProvider = async (): Promise<TerminalAgentControlResult | null> => {
     const explicitProvider = providerFromExplicitTarget(sendIntent.target);
     if (!explicitProvider || !options.launchIfMissing || !options.circleId) return null;
     const label = providerLabel(explicitProvider);
@@ -255,43 +316,131 @@ export async function executeTerminalAgentControlFromChat(
       { sessionName: label },
     );
     if (launched.ok) {
+      if (!launched.sessionId) {
+        return {
+          kind: 'handoff',
+          ok: false,
+          transportAccepted: null,
+          message: `The **${label}** bridge reported a launch without one exact session identity. The task was not replayed; check the provider before retrying.`,
+          provider: explicitProvider,
+          actor: label,
+        };
+      }
+      const actor = launched.displayName || label;
+      const launchedSubject = buildAgentRuntimeSubject({
+        id: launched.sessionId,
+        name: actor,
+        sessionKey: launched.sessionId,
+        providerType: explicitProvider,
+      });
       return {
-        message: `Started a managed **${label}** session and sent the task.\n\n${sendIntent.body}`,
+        kind: 'handoff',
+        ok: true,
+        transportAccepted: true,
+        message: `Started managed session **${actor}** and sent the task.\n\n${sendIntent.body}`,
+        provider: explicitProvider,
+        actor,
+        sessionId: launched.sessionId,
+        agentSubjectMetadata: launchedSubject.metadata,
       };
     }
     return {
-      message: `I found the **${label}** target, but its local bridge could not start a managed session: ${launched.error || 'unknown bridge error'}`,
+      kind: 'handoff',
+      ok: false,
+      transportAccepted: launched.transportAccepted ?? null,
+      message: launched.transportAccepted === false
+        ? `I found the **${label}** target, but its local bridge rejected the launch before dispatch: ${launched.error || 'unknown bridge error'}`
+        : `I found the **${label}** target, but the bridge could not prove whether the launch began. The task was not replayed: ${launched.error || 'unknown bridge error'}`,
+      provider: explicitProvider,
+      actor: label,
     };
   };
 
   const sessions = await listTerminalAgentControlSessions();
-  const target = findTerminalAgentSessionTarget(sessions, sendIntent.target);
-  if (!target) {
+  const targetResolution = resolveTerminalAgentSessionTarget(sessions, sendIntent.target);
+  if (targetResolution.status === 'ambiguous') {
+    const candidates = targetResolution.candidates.slice(0, 8).map((candidate) =>
+      `- **${candidate.displayName}** · ${candidate.providerLabel} · id: \`${candidate.sessionId}\``
+    );
+    return {
+      kind: 'handoff',
+      ok: false,
+      transportAccepted: false,
+      targetStatus: 'ambiguous',
+      message: [
+        `More than one terminal agent matches "${sendIntent.target}". Nothing was dispatched.`,
+        '',
+        'Choose one exact session id:',
+        ...candidates,
+      ].join('\n'),
+      provider: providerFromExplicitTarget(sendIntent.target) || undefined,
+      actor: sendIntent.target,
+    };
+  }
+  if (targetResolution.status === 'not_found') {
     const launchResult = await launchExplicitProvider();
     if (launchResult) return launchResult;
     return {
+      kind: 'handoff',
+      ok: false,
+      transportAccepted: false,
       message: [
         `I could not find a terminal agent matching "${sendIntent.target}".`,
         '',
         formatTerminalAgentStatus(sessions),
       ].join('\n'),
+      provider: providerFromExplicitTarget(sendIntent.target) || undefined,
+      actor: sendIntent.target,
     };
   }
+  const target = targetResolution.session;
+
+  const targetSubject = buildAgentRuntimeSubject({
+    id: target.sessionId,
+    name: target.displayName,
+    sessionKey: target.sessionId,
+    providerType: target.provider,
+  });
 
   if (!target.manageable) {
     const launchResult = await launchExplicitProvider();
     if (launchResult) return launchResult;
     return {
+      kind: 'handoff',
+      ok: false,
+      transportAccepted: false,
       message: `I can see **${target.displayName}**, but it was not launched as a managed terminal session, so I cannot safely send input to it. Start a new managed session from chat, then use \`/agent ${target.displayName} <message>\`.`,
+      provider: target.provider,
+      actor: target.displayName,
+      sessionId: target.sessionId,
+      agentSubjectMetadata: targetSubject.metadata,
     };
   }
 
   const body = applyTerminalProfile(bodyWithVisualContext, target.terminalConfig);
   const result = await sendTerminalAgentSessionMessage(target.provider, target.sessionId, body);
   if (!result.ok) {
-    return { message: `Could not send to **${target.displayName}**: ${result.error || 'unknown error'}` };
+    return {
+      kind: 'handoff',
+      ok: false,
+      transportAccepted: result.transportAccepted,
+      message: result.transportAccepted === false
+        ? `Could not send to **${target.displayName}**; the bridge rejected the request before dispatch: ${result.error || 'unknown error'}`
+        : `The bridge could not prove whether **${target.displayName}** received the task. It was not replayed. Check the exact session before retrying: ${result.error || 'unknown error'}`,
+      provider: target.provider,
+      actor: target.displayName,
+      sessionId: target.sessionId,
+      agentSubjectMetadata: targetSubject.metadata,
+    };
   }
   return {
+    kind: 'handoff',
+    ok: true,
+    transportAccepted: true,
     message: `Sent to **${result.displayName || target.displayName}**.\n\n${sendIntent.body}`,
+    provider: target.provider,
+    actor: result.displayName || target.displayName,
+    sessionId: result.sessionId || target.sessionId,
+    agentSubjectMetadata: targetSubject.metadata,
   };
 }

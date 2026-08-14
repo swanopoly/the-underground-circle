@@ -47,6 +47,8 @@ const compiled = ts.transpileModule(
 ${helpersSource}
 ;(globalThis as any).__officeTerminalAuthority = {
   sanitizeTerminalTargetIds,
+  buildTerminalNativeCommandTargets,
+  resolveTerminalTargetSelection,
   persistableTerminalTargetName,
   parseTerminalCommandWakeup,
   reconstructExecutableTerminalCommand,
@@ -72,6 +74,16 @@ const core = sandbox.__officeTerminalAuthority as {
     targetAgentIds: string[] | null;
     includesBlackSwan: boolean;
   };
+  buildTerminalNativeCommandTargets: (input: Record<string, unknown>) => Array<{
+    id: string;
+    name: string;
+    connectionId: string | null;
+    terminalTargetName: string;
+  }>;
+  resolveTerminalTargetSelection: (
+    selectedIds: readonly string[] | null,
+    targets: Array<{ id: string; name: string }>,
+  ) => Record<string, unknown>;
   persistableTerminalTargetName: (
     value: unknown,
     includesBlackSwan: boolean,
@@ -209,6 +221,129 @@ assert(sanitized.includesBlackSwan, 'virtual BlackSwan selection survives as a n
 assert(
   core.persistableTerminalTargetName('2 agents', true).includes('@BlackSwan'),
   'mixed BlackSwan selection remains reconstructible from a durable column',
+);
+
+console.log('Terminal-native target resolution');
+const currentUserId = '88888888-8888-4888-8888-888888888888';
+const claudeAgentId = '99999999-9999-4999-8999-999999999999';
+const openSwanAgentId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const baseConnections = [
+  { id: 'claude-live', name: 'Claude Code', provider: 'claude-code', enabled: true, status: 'connected' },
+  { id: 'openswan-live', name: 'My Swan', provider: 'openswan', enabled: true, status: 'connected' },
+];
+const baseAgents = [
+  { id: claudeAgentId, ownerId: currentUserId, name: 'Claude Code', provider: 'claude-code' },
+  { id: openSwanAgentId, ownerId: currentUserId, name: 'My Swan', provider: 'openswan' },
+  { id: 'provider-main::codex', ownerId: currentUserId, name: 'Codex', provider: 'codex' },
+];
+const nativeTargets = core.buildTerminalNativeCommandTargets({
+  currentUserId,
+  connections: baseConnections,
+  officeAgents: baseAgents,
+  openSwanReadyAgentIds: new Set([openSwanAgentId]),
+  virtualDisplayName: 'OpenSwan',
+});
+assert(
+  nativeTargets[0]?.id === 'blackswan-default'
+    && nativeTargets[0]?.terminalTargetName === '@BlackSwan',
+  'the canonical virtual target is present once with its durable name marker',
+);
+assert(
+  nativeTargets.some((target) => target.id === claudeAgentId && target.connectionId === 'claude-live'),
+  'one exact connected owner row becomes a terminal-native UUID target',
+);
+assert(
+  nativeTargets.some((target) => target.id === openSwanAgentId && target.connectionId === 'openswan-live'),
+  'an exact bound live OpenSwan row becomes dispatchable',
+);
+assert(
+  !nativeTargets.some((target) => target.id.startsWith('provider-main::')),
+  'synthetic presentation ids never enter the terminal target domain',
+);
+assert(
+  !core.buildTerminalNativeCommandTargets({
+    currentUserId,
+    connections: baseConnections,
+    officeAgents: baseAgents,
+    openSwanReadyAgentIds: new Set(),
+  }).some((target) => target.id === openSwanAgentId),
+  'an unbound or stale OpenSwan session fails closed',
+);
+assert(
+  !core.buildTerminalNativeCommandTargets({
+    currentUserId,
+    connections: baseConnections,
+    officeAgents: [...baseAgents, { ...baseAgents[0], id: otherAgentId }],
+    openSwanReadyAgentIds: new Set([openSwanAgentId]),
+  }).some((target) => target.id === claudeAgentId || target.id === otherAgentId),
+  'ambiguous exact publish identities fail closed instead of choosing by order',
+);
+assert(
+  !core.buildTerminalNativeCommandTargets({
+    currentUserId,
+    connections: [baseConnections[0], { ...baseConnections[0], id: 'claude-live-duplicate' }],
+    officeAgents: baseAgents,
+  }).some((target) => target.id === claudeAgentId),
+  'duplicate live connections for one publish identity fail closed instead of choosing the first endpoint',
+);
+assert(
+  !core.buildTerminalNativeCommandTargets({
+    currentUserId,
+    connections: [
+      baseConnections[0],
+      { id: baseConnections[0].id, name: 'Codex', provider: 'codex', enabled: true, status: 'connected' },
+    ],
+    officeAgents: [
+      baseAgents[0],
+      { id: otherAgentId, ownerId: currentUserId, name: 'Codex', provider: 'codex' },
+    ],
+  }).some((target) => target.id === claudeAgentId || target.id === otherAgentId),
+  'a duplicated connection id fails closed even when the rows advertise different publish identities',
+);
+assert(
+  !core.buildTerminalNativeCommandTargets({
+    currentUserId,
+    connections: [{ ...baseConnections[0], status: 'disconnected' }],
+    officeAgents: baseAgents,
+  }).some((target) => target.id === claudeAgentId),
+  'disabled or disconnected bridges cannot become command targets',
+);
+assert(
+  !core.buildTerminalNativeCommandTargets({
+    currentUserId,
+    connections: baseConnections,
+    officeAgents: [{ ...baseAgents[0], name: 'Renamed presentation agent' }],
+  }).some((target) => target.id === claudeAgentId),
+  'mutable display-name coincidence cannot infer a durable target',
+);
+const availableTerminalTargets = nativeTargets.map(({ id, name }) => ({ id, name }));
+assert(
+  JSON.stringify(core.resolveTerminalTargetSelection(['blackswan-default'], availableTerminalTargets))
+    === JSON.stringify({
+      ok: true,
+      targetAgentId: 'blackswan-default',
+      targetAgentIds: ['blackswan-default'],
+      targetAgentName: '@BlackSwan',
+    }),
+  'one canonical selection resolves visible BlackSwan without contradictory legacy state',
+);
+assert(
+  JSON.stringify(core.resolveTerminalTargetSelection([claudeAgentId], availableTerminalTargets))
+    === JSON.stringify({
+      ok: true,
+      targetAgentId: claudeAgentId,
+      targetAgentIds: [claudeAgentId],
+      targetAgentName: '@Claude Code',
+    }),
+  'one canonical UUID selection drives both single and multi-target persistence fields',
+);
+assert(
+  core.resolveTerminalTargetSelection(['stale-presentation-id'], availableTerminalTargets).ok === false,
+  'a stale or presentation-only selection fails before persistence instead of widening to @all',
+);
+assert(
+  core.resolveTerminalTargetSelection(null, availableTerminalTargets).targetAgentName === '@all',
+  'an explicit empty selection alone resolves to @all',
 );
 
 console.log('Authenticated exact durable lookup');
@@ -361,7 +496,7 @@ async function main(): Promise<void> {
   );
   const broadcastPayload = sourceSection(
     sendSection,
-    'payload: {\n      messageId',
+    'payload: {\n        messageId',
     '} satisfies BroadcastCommandWakeupPayload',
   );
   assert(
@@ -375,6 +510,12 @@ async function main(): Promise<void> {
       && !broadcastPayload.includes('model')
       && !broadcastPayload.includes('targetAgentSubject'),
     'broadcast contains no executable command, sender, model, or subject authority',
+  );
+  assert(
+    sendSection.includes("if (wakeupStatus !== 'ok')")
+      && sendSection.includes('return {\n        messageId,')
+      && sendSection.includes('real-time delivery wake-up could not be confirmed'),
+    'a failed advisory wake-up preserves the durable message id and prevents duplicate replay',
   );
 
   const loaderSection = sourceSection(

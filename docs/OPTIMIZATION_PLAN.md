@@ -323,7 +323,7 @@ Continuation. Typecheck clean after every change.
 
 ### Global unhandled-rejection logger
 
-- `src/lib/errorReporter.ts` — installs `window.unhandledrejection` + `window.error` listeners on web; tags AbortErrors from Supabase's no-op auth lock as benign; keeps a 25-entry ring buffer plus `window.__uc_last_global_error` for DevTools inspection. No-op on native runtimes.
+- `src/lib/errorReporter.ts` — installs `window.unhandledrejection` + `window.error` listeners on web; tags transient AbortErrors from bounded Supabase Web Lock waits as benign; keeps a 25-entry ring buffer plus `window.__uc_last_global_error` for DevTools inspection. No-op on native runtimes.
 - Wired from `App.tsx:2` so it's active before any app code runs. `reportError(err, tag)` available for manual capture.
 
 ### P2-7 — Confirmation dialogs on destructive actions
@@ -390,4 +390,3 @@ Continuation. Typecheck clean after every change.
 
 - `npx tsc --noEmit --skipLibCheck` clean after each batch.
 - Pre-existing Metro bundle error on `src/lib/profileNavigation.ts` still unresolved; dev-server restart required.
-

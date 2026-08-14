@@ -32,6 +32,7 @@ const TOKEN_REGISTRY: Record<string, { mint: string; decimals: number; coingecko
 };
 
 const VALID_SYMBOLS = Object.keys(TOKEN_REGISTRY);
+const GEMINI_RESEARCH_MODEL = "gemini-3.6-flash";
 
 // ─── Trader Spirit Knowledge (condensed for prompt) ─────────────────────────
 
@@ -140,7 +141,7 @@ Deno.serve(async (req) => {
         const hourStr = now.getHours().toString().padStart(2, "0");
 
         const geminiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_RESEARCH_MODEL}:generateContent?key=${geminiKey}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -252,7 +253,7 @@ Return ONLY a JSON array of trade objects. No markdown, no explanation outside t
     if (trades.length === 0 && geminiKey) {
       try {
         const fallbackRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_RESEARCH_MODEL}:generateContent?key=${geminiKey}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

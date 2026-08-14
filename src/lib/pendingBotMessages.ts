@@ -17,9 +17,11 @@ export type PendingBotMessageRecord = {
   runId?: string | null;
   requestId?: string | null;
   requestAuthorId?: string | null;
+  requestSourceMessageId?: string | null;
   persistedMetadataSnapshot?: unknown;
   delegatedTo?: string;
   delegatedSubagents?: string[];
+  connectedAgentHandoff?: unknown;
   artifacts?: unknown[];
   wikiRefs?: unknown[];
   researchRefs?: unknown[];

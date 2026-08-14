@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import type { MemoryEntry } from '../lib/agentRunSystem';
@@ -138,7 +139,7 @@ interface SystemSimNode extends DigitalBrainSystemNode {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const NODE_COLORS = [
-  '#22d3ee', '#22c55e', '#a855f7', '#f59e0b',
+  '#6366f1', '#22c55e', '#a855f7', '#f59e0b',
   '#38bdf8', '#f43f5e', '#84cc16', '#fb923c',
 ] as const;
 
@@ -324,7 +325,7 @@ function drawFrame(s: CanvasState): void {
 
   // Nebula glow
   const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.65);
-  grd.addColorStop(0, 'rgba(34,211,238,0.055)');
+  grd.addColorStop(0, 'rgba(99,102,241,0.055)');
   grd.addColorStop(0.45, 'rgba(168,85,247,0.025)');
   grd.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = grd;
@@ -527,7 +528,7 @@ function drawFrame(s: CanvasState): void {
   ctx.globalAlpha = 0.68;
   ctx.fillStyle = 'rgba(2,9,20,0.9)';
   ctx.fillRect(MM_X, MM_Y, MM_W, MM_H);
-  ctx.strokeStyle = 'rgba(34,211,238,0.18)';
+  ctx.strokeStyle = 'rgba(99,102,241,0.18)';
   ctx.lineWidth = 1;
   ctx.strokeRect(MM_X, MM_Y, MM_W, MM_H);
   ctx.globalAlpha = 0.38;
@@ -870,6 +871,7 @@ function DigitalBrainSystemFlowCanvas({
     canvas.style.height = `${height}px`;
     canvas.style.display = 'block';
     canvas.style.cursor = 'grab';
+    canvas.style.touchAction = 'pan-y';
     container.innerHTML = '';
     container.appendChild(canvas);
     const ctx = canvas.getContext('2d');
@@ -887,6 +889,8 @@ function DigitalBrainSystemFlowCanvas({
     let rotX = -0.34;
     let rotY = 0.58;
     let zoom = 1;
+    let baseZoom = 1;
+    let hasUserZoomed = false;
     let isDragging = false;
     let moved = false;
     let lastX = 0;
@@ -953,6 +957,8 @@ function DigitalBrainSystemFlowCanvas({
     const resize = () => {
       const rect = container.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
+      baseZoom = Math.max(0.52, Math.min(1, rect.width / 760));
+      if (!hasUserZoomed) zoom = baseZoom;
       canvas.width = Math.max(1, Math.floor(rect.width * dpr));
       canvas.height = Math.max(1, Math.floor(height * dpr));
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -994,19 +1000,25 @@ function DigitalBrainSystemFlowCanvas({
       const W = canvas.clientWidth || 1;
       const H = height;
       ctx.clearRect(0, 0, W, H);
-      const bg = ctx.createLinearGradient(0, 0, W, H);
-      bg.addColorStop(0, '#020711');
-      bg.addColorStop(0.5, '#061322');
-      bg.addColorStop(1, '#020711');
-      ctx.fillStyle = bg;
+      ctx.fillStyle = '#080b12';
+      ctx.fillRect(0, 0, W, H);
+
+      const ambient = ctx.createRadialGradient(W * 0.5, H * 0.42, 0, W * 0.5, H * 0.42, Math.max(W, H) * 0.7);
+      ambient.addColorStop(0, 'rgba(99,102,241,0.055)');
+      ambient.addColorStop(0.52, 'rgba(30,41,59,0.025)');
+      ambient.addColorStop(1, 'rgba(8,11,18,0)');
+      ctx.fillStyle = ambient;
       ctx.fillRect(0, 0, W, H);
 
       ctx.save();
-      ctx.globalAlpha = 0.16;
-      ctx.strokeStyle = accentColor;
-      ctx.lineWidth = 1;
-      for (let x = 0; x < W; x += 48) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
-      for (let y = 0; y < H; y += 48) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+      ctx.fillStyle = 'rgba(148,163,184,0.10)';
+      for (let x = 20; x < W; x += 32) {
+        for (let y = 20; y < H; y += 32) {
+          ctx.beginPath();
+          ctx.arc(x, y, 0.7, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
       ctx.restore();
 
       for (const cluster of map.clusters) {
@@ -1016,20 +1028,20 @@ function DigitalBrainSystemFlowCanvas({
         const count = byCluster.get(cluster.id)?.length || 0;
         const radius = Math.max(42, Math.min(130, 36 + Math.sqrt(count) * 16)) * p.scale;
         ctx.save();
-        ctx.globalAlpha = 0.10 + Math.max(0.04, p.scale * 0.08);
+        ctx.globalAlpha = 0.035 + Math.max(0.018, p.scale * 0.025);
         ctx.fillStyle = cluster.color;
         ctx.beginPath();
-        ctx.ellipse(p.sx, p.sy, radius * 1.35, radius * 0.72, rotY * 0.3, 0, Math.PI * 2);
+        ctx.ellipse(p.sx, p.sy, radius * 1.24, radius * 0.68, rotY * 0.22, 0, Math.PI * 2);
         ctx.fill();
-        ctx.globalAlpha = 0.34;
+        ctx.globalAlpha = 0.16;
         ctx.strokeStyle = cluster.color;
-        ctx.setLineDash([5, 8]);
+        ctx.lineWidth = 1;
         ctx.stroke();
         ctx.restore();
-        ctx.fillStyle = '#cbd5e1';
-        ctx.font = '800 9px monospace';
+        ctx.fillStyle = '#8792a6';
+        ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(cluster.label.toUpperCase(), p.sx, p.sy - radius - 8);
+        ctx.fillText(cluster.label, p.sx, p.sy - radius - 9);
       }
 
       const nodes = layoutRef.current;
@@ -1048,23 +1060,22 @@ function DigitalBrainSystemFlowCanvas({
         if (!a || !b || a.sx == null || b.sx == null || a.sy == null || b.sy == null) continue;
         const color = flowColor(edge.kind);
         const activeSelectedId = selectedRef.current;
-        const selected = activeSelectedId && (edge.from === activeSelectedId || edge.to === activeSelectedId);
+        const selected = Boolean(activeSelectedId && (edge.from === activeSelectedId || edge.to === activeSelectedId));
         const avgScale = ((a.scale || 1) + (b.scale || 1)) / 2;
         const mx = ((a.sx || 0) + (b.sx || 0)) / 2;
-        const my = ((a.sy || 0) + (b.sy || 0)) / 2 - (32 * avgScale) * Math.sin(i);
+        const my = ((a.sy || 0) + (b.sy || 0)) / 2 - (18 * avgScale) * Math.sin(i);
         ctx.save();
-        ctx.globalAlpha = selected ? 0.72 : 0.20 + edge.strength * 0.18;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = selected ? 2.4 : Math.max(0.7, edge.strength * 1.8 * avgScale);
+        ctx.globalAlpha = selected ? 0.78 : 0.08 + edge.strength * 0.08;
+        ctx.strokeStyle = selected ? color : '#94a3b8';
+        ctx.lineWidth = selected ? 1.8 : Math.max(0.55, edge.strength * 1.05 * avgScale);
         ctx.beginPath();
         ctx.moveTo(a.sx || 0, a.sy || 0);
         ctx.quadraticCurveTo(mx, my, b.sx || 0, b.sy || 0);
         ctx.stroke();
         ctx.restore();
 
-        const particles = selected ? 3 : 1;
-        for (let p = 0; p < particles; p++) {
-          const phase = (time * (0.00008 + edge.strength * 0.00006) + i * 0.031 + p / particles) % 1;
+        if (selected) {
+          const phase = (time * (0.000075 + edge.strength * 0.00004) + i * 0.031) % 1;
           const x1 = (a.sx || 0) + (mx - (a.sx || 0)) * phase;
           const y1 = (a.sy || 0) + (my - (a.sy || 0)) * phase;
           const x2 = mx + ((b.sx || 0) - mx) * phase;
@@ -1072,12 +1083,12 @@ function DigitalBrainSystemFlowCanvas({
           const px = x1 + (x2 - x1) * phase;
           const py = y1 + (y2 - y1) * phase;
           ctx.save();
-          ctx.globalAlpha = selected ? 0.95 : 0.68;
+          ctx.globalAlpha = 0.92;
           ctx.fillStyle = color;
           ctx.shadowColor = color;
-          ctx.shadowBlur = selected ? 18 : 10;
+          ctx.shadowBlur = 10;
           ctx.beginPath();
-          ctx.arc(px, py, selected ? 3.5 : 2.3, 0, Math.PI * 2);
+          ctx.arc(px, py, 2.4, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
         }
@@ -1320,64 +1331,48 @@ function DigitalBrainSystemFlowCanvas({
       for (const node of sortedNodes) {
         if (node.sx == null || node.sy == null) continue;
         const color = nodeColor(node);
+        const [cr, cg, cb] = hexToRgb(color);
         const activeSelectedId = selectedRef.current;
         const selected = node.id === activeSelectedId;
         const hovered = node.id === hoverId;
         const scale = node.scale || 1;
-        const r = (selected ? node.radius + 5 : hovered ? node.radius + 3 : node.radius) * scale;
+        const baseRadius = node.type === 'memory' ? node.radius * 0.62 : node.radius * 0.74;
+        const r = Math.max(3.2, (baseRadius + (selected ? 3 : hovered ? 1.5 : 0)) * scale);
         ctx.save();
-        ctx.globalAlpha = node.type === 'memory' && !selected ? 0.62 + Math.min(0.26, scale * 0.18) : 1;
+        ctx.globalAlpha = node.type === 'memory' && !selected ? 0.72 : 1;
+
+        if (selected || hovered) {
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},${selected ? 0.34 : 0.18})`;
+          ctx.lineWidth = selected ? 5 : 3;
+          ctx.beginPath();
+          ctx.arc(node.sx, node.sy, r + (selected ? 8 : 5), 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${selected ? 0.30 : hovered ? 0.23 : 0.13})`;
+        ctx.strokeStyle = selected ? '#f8fafc' : hovered ? color : `rgba(${cr},${cg},${cb},0.70)`;
+        ctx.lineWidth = selected ? 1.8 : 1;
         ctx.shadowColor = color;
-        ctx.shadowBlur = selected ? 38 : hovered ? 26 : node.type === 'memory' ? 9 : 16;
-        // base fill
-        ctx.fillStyle = color;
+        ctx.shadowBlur = selected ? 13 : hovered ? 7 : 0;
         traceNodeShape(node.type, node.sx, node.sy, r);
         ctx.fill();
-        ctx.shadowBlur = 0;
-        // sphere highlight overlay — white radial at top-left
-        const hl = ctx.createRadialGradient(
-          node.sx - r * 0.32, node.sy - r * 0.34, r * 0.04,
-          node.sx - r * 0.22, node.sy - r * 0.22, r * 0.92,
-        );
-        hl.addColorStop(0, 'rgba(255,255,255,0.58)');
-        hl.addColorStop(0.42, 'rgba(255,255,255,0.12)');
-        hl.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = hl;
-        traceNodeShape(node.type, node.sx, node.sy, r);
-        ctx.fill();
-        // dark rim at bottom-right
-        const rim = ctx.createRadialGradient(
-          node.sx + r * 0.26, node.sy + r * 0.28, r * 0.05,
-          node.sx, node.sy, r * 1.08,
-        );
-        rim.addColorStop(0, 'rgba(0,0,0,0)');
-        rim.addColorStop(0.55, 'rgba(0,0,0,0)');
-        rim.addColorStop(1, 'rgba(0,0,0,0.52)');
-        ctx.fillStyle = rim;
-        traceNodeShape(node.type, node.sx, node.sy, r);
-        ctx.fill();
-        // inner icon details on top of shading
-        if (r >= 6) drawNodeIcon(node.type, node.sx, node.sy, r, selected);
-        // outline
-        ctx.strokeStyle = selected ? '#ffffff' : hovered ? color : '#020711';
-        ctx.lineWidth = selected ? 2.2 : hovered ? 1.4 : 0.9;
-        traceNodeShape(node.type, node.sx, node.sy, r);
         ctx.stroke();
-        // label
-        if (selected || hovered || node.type !== 'memory' || map.stats.memories <= 18) {
-          ctx.fillStyle = selected ? '#ffffff' : '#dbeafe';
-          ctx.font = `${selected ? '900' : '800'} ${selected ? 12 : 10}px monospace`;
+
+        if ((selected || hovered) && r >= 6) {
+          ctx.shadowBlur = 0;
+          drawNodeIcon(node.type, node.sx, node.sy, r, selected);
+        }
+
+        const showLabel = selected || hovered || (W >= 700 && node.type !== 'memory' && node.weight >= 0.99);
+        if (showLabel) {
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = selected ? '#f8fafc' : '#b6c0cf';
+          ctx.font = `${selected ? '600' : '500'} ${selected ? 12 : 10}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
           ctx.textAlign = 'center';
-          ctx.fillText(node.label.slice(0, selected ? 34 : 22), node.sx, node.sy + r + 15);
+          ctx.fillText(node.label.slice(0, selected ? 34 : 24), node.sx, node.sy + r + 15);
         }
         ctx.restore();
       }
-
-      ctx.save();
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '10px monospace';
-      ctx.fillText('3D SYSTEM FLOW · drag to orbit · scroll to zoom · click nodes', 12, H - 14);
-      ctx.restore();
 
       requestId = requestAnimationFrame(draw);
     };
@@ -1397,22 +1392,26 @@ function DigitalBrainSystemFlowCanvas({
       return best;
     };
 
-    const getXY = (e: MouseEvent) => {
+    const getXY = (e: MouseEvent | PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
       return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     };
 
-    const handleMouseDown = (e: MouseEvent) => {
+    const handlePointerDown = (e: PointerEvent) => {
       const p = getXY(e);
-      isDragging = true;
+      isDragging = e.pointerType === 'mouse';
       moved = false;
       lastX = p.x;
       lastY = p.y;
-      canvas.style.cursor = 'grabbing';
+      if (isDragging) canvas.style.cursor = 'grabbing';
     };
 
-    const handleMouseMove = (e: MouseEvent) => {
+    const handlePointerMove = (e: PointerEvent) => {
       const p = getXY(e);
+      if (e.pointerType !== 'mouse') {
+        if (Math.abs(p.x - lastX) + Math.abs(p.y - lastY) > 6) moved = true;
+        return;
+      }
       if (isDragging) {
         const dx = p.x - lastX;
         const dy = p.y - lastY;
@@ -1429,7 +1428,7 @@ function DigitalBrainSystemFlowCanvas({
       }
     };
 
-    const handleMouseUp = (e: MouseEvent) => {
+    const handlePointerUp = (e: PointerEvent) => {
       const p = getXY(e);
       if (!moved) {
         const hit = hitTest(p.x, p.y);
@@ -1439,16 +1438,24 @@ function DigitalBrainSystemFlowCanvas({
       canvas.style.cursor = hoverId ? 'pointer' : 'grab';
     };
 
+    const handlePointerCancel = () => {
+      isDragging = false;
+      moved = true;
+      canvas.style.cursor = 'grab';
+    };
+
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
+      hasUserZoomed = true;
       zoom *= e.deltaY > 0 ? 0.92 : 1.08;
-      zoom = Math.max(0.45, Math.min(2.8, zoom));
+      zoom = Math.max(0.36, Math.min(2.8, zoom));
     };
 
     const handleDoubleClick = () => {
       rotX = -0.34;
       rotY = 0.58;
-      zoom = 1;
+      hasUserZoomed = false;
+      zoom = baseZoom;
     };
 
     const handleMouseLeave = () => {
@@ -1460,19 +1467,21 @@ function DigitalBrainSystemFlowCanvas({
     resize();
     requestId = requestAnimationFrame(draw);
     window.addEventListener('resize', resize);
-    canvas.addEventListener('mousedown', handleMouseDown);
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseup', handleMouseUp);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
+    canvas.addEventListener('pointerdown', handlePointerDown);
+    canvas.addEventListener('pointermove', handlePointerMove);
+    canvas.addEventListener('pointerup', handlePointerUp);
+    canvas.addEventListener('pointercancel', handlePointerCancel);
+    canvas.addEventListener('pointerleave', handleMouseLeave);
     canvas.addEventListener('wheel', handleWheel, { passive: false });
     canvas.addEventListener('dblclick', handleDoubleClick);
     return () => {
       cancelAnimationFrame(requestId);
       window.removeEventListener('resize', resize);
-      canvas.removeEventListener('mousedown', handleMouseDown);
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      canvas.removeEventListener('mouseup', handleMouseUp);
-      canvas.removeEventListener('mouseleave', handleMouseLeave);
+      canvas.removeEventListener('pointerdown', handlePointerDown);
+      canvas.removeEventListener('pointermove', handlePointerMove);
+      canvas.removeEventListener('pointerup', handlePointerUp);
+      canvas.removeEventListener('pointercancel', handlePointerCancel);
+      canvas.removeEventListener('pointerleave', handleMouseLeave);
       canvas.removeEventListener('wheel', handleWheel);
       canvas.removeEventListener('dblclick', handleDoubleClick);
       canvas.remove();
@@ -1490,7 +1499,7 @@ function DigitalBrainSystemFlowCanvas({
 // ─── Main component ────────────────────────────────────────────────────────────
 
 export default function SecondBrainDashboard({
-  circleId, userId, accentColor = '#22d3ee', onOpenCompartment,
+  circleId, userId, accentColor = '#6366f1', onOpenCompartment,
 }: Props) {
   const [brainMode, setBrainMode] = useState<'mine' | 'circle'>('mine');
   const [mapping, setMapping] = useState(false);
@@ -1518,8 +1527,11 @@ export default function SecondBrainDashboard({
   const [dbStats, setDbStats] = useState<Record<string, DigitalBrainDbStat>>({});
   const [systemNodeId, setSystemNodeId] = useState<string | null>(null);
   const [knowledgeSeeding, setKnowledgeSeeding] = useState(false);
+  const [showSystemDetails, setShowSystemDetails] = useState(false);
   const memorySyncRef = useRef('');
   const autoMapFiredRef = useRef(false);
+  const { width } = useWindowDimensions();
+  const compactLayout = width < 720;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1810,11 +1822,7 @@ export default function SecondBrainDashboard({
     return graphLinks.filter(l => l.from === selectedNote.id || l.to === selectedNote.id).slice(0, 8);
   }, [graphLinks, selectedNote]);
 
-  const inboxCount = notes.filter(n => n.status === 'inbox').length;
-  const evergreenCount = notes.filter(n => n.status === 'evergreen').length;
-  const webCount = notes.filter(n => n.note_kind === 'web_clip').length;
   const linkedMemoryCount = notes.filter(n => Boolean(n.source_memory_id)).length;
-  const privateCount = notes.filter(n => n.visibility === 'private').length;
   const reviewDueCount = reviewQueue.length;
   const allGraphLinkCount = graph?.links.length || graphLinks.length;
 
@@ -2067,16 +2075,14 @@ export default function SecondBrainDashboard({
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <View style={[styles.dotWebMark, { borderColor: accentColor }]}>
-            <Text style={[styles.dotWebText, { color: accentColor }]}>.web</Text>
-          </View>
-          <View>
-            <Text style={styles.heroEyebrow}>
-              {brainMode === 'mine' ? 'MY DIGITAL BRAIN' : 'CIRCLE SHARED BRAIN'}
-            </Text>
-            <Text style={styles.heroTitle}>Digital Brain Graph</Text>
-          </View>
+        <View style={styles.brainHeaderCopy}>
+          <Text style={styles.heroEyebrow}>DIGITAL BRAIN</Text>
+          <Text style={styles.heroTitle}>
+            {brainMode === 'mine' ? 'Your knowledge system' : 'Circle knowledge'}
+          </Text>
+          <Text style={styles.heroSubtitle}>
+            Map how context, memory, data, and agents move through your workspace.
+          </Text>
           <View style={styles.brainModeToggle}>
             <Pressable
               onPress={() => setBrainMode('mine')}
@@ -2086,7 +2092,7 @@ export default function SecondBrainDashboard({
               ]}
             >
               <Text style={[styles.modeBtnText, brainMode === 'mine' ? { color: accentColor } : null]}>
-                MY BRAIN
+                Personal
               </Text>
             </Pressable>
             <Pressable
@@ -2097,7 +2103,7 @@ export default function SecondBrainDashboard({
               ]}
             >
               <Text style={[styles.modeBtnText, brainMode === 'circle' ? { color: '#a855f7' } : null]}>
-                CIRCLE
+                Circle
               </Text>
             </Pressable>
           </View>
@@ -2107,65 +2113,38 @@ export default function SecondBrainDashboard({
             onPress={load}
             style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
           >
-            <Text style={styles.ghostBtnText}>REFRESH</Text>
+            <Text style={styles.ghostBtnText}>Refresh</Text>
           </Pressable>
-          {brainMode === 'mine' && (
-            <Pressable
-              onPress={handleMapSite}
-              disabled={mapping}
-              style={({ hovered, pressed }: any) => [
-                styles.ghostBtn,
-                { borderColor: '#6366f155', backgroundColor: mapping ? '#22d3ee08' : undefined },
-                hovered && !mapping && webLift,
-                pressed && webPressed,
-              ]}
-            >
-              <Text style={[styles.ghostBtnText, { color: '#22d3ee' }]}>
-                {mapping ? 'MAPPING…' : 'MAP SITE'}
-              </Text>
-            </Pressable>
-          )}
-          {onOpenCompartment && (
-            <Pressable
-              onPress={() => onOpenCompartment('projects')}
-              style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
-            >
-              <Text style={styles.ghostBtnText}>PROJECTS</Text>
-            </Pressable>
-          )}
           {Platform.OS === 'web' && (
             <Pressable
               onPress={handleFileUpload}
               style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
             >
-              <Text style={styles.ghostBtnText}>+ UPLOAD</Text>
+              <Text style={styles.ghostBtnText}>Add file</Text>
             </Pressable>
           )}
         </View>
       </View>
 
       {/* ── Stat strip ─────────────────────────────────────────────────── */}
-      <View style={styles.statStrip}>
-        <BrainStat label="Nodes" value={String(notes.length)} color={accentColor} />
-        <BrainStat label="Private" value={String(privateCount)} color="#f59e0b" />
-        <BrainStat label="Clusters" value={String(graph?.clusters.length || 0)} color="#22c55e" />
-        <BrainStat label="Edges" value={String(allGraphLinkCount)} color="#a855f7" />
-        <BrainStat label="Review" value={String(reviewDueCount)} color="#f59e0b" />
-        <BrainStat label=".web" value={String(webCount)} color="#38bdf8" />
-        <BrainStat label="Memory" value={String(linkedMemoryCount)} color="#a855f7" />
-        <BrainStat label="Inbox" value={String(inboxCount)} color="#f59e0b" />
-        <BrainStat label="Evergreen" value={String(evergreenCount)} color="#22c55e" />
-      </View>
+      {viewMode !== 'system' ? (
+        <View style={styles.statStrip}>
+          <BrainStat label="Nodes" value={String(notes.length)} color={accentColor} />
+          <BrainStat label="Connections" value={String(allGraphLinkCount)} color="#a855f7" />
+          <BrainStat label="Memory links" value={String(linkedMemoryCount)} color="#22c55e" />
+          <BrainStat label="Review" value={String(reviewDueCount)} color="#f59e0b" />
+        </View>
+      ) : null}
 
       {/* ── Tab bar ────────────────────────────────────────────────────── */}
       <View style={styles.tabBar}>
         {([
-          { key: 'system', label: 'SYSTEM FLOW' },
-          { key: 'graph', label: 'GRAPH' },
-          { key: 'nodes', label: 'BASES' },
-          { key: 'review', label: 'REVIEW' },
-          ...(Platform.OS === 'web' ? [{ key: 'upload', label: 'UPLOAD' }] : []),
-          { key: 'other', label: 'OTHER BRAINS' },
+          { key: 'system', label: 'Flow map' },
+          { key: 'graph', label: 'Knowledge' },
+          { key: 'nodes', label: 'Bases' },
+          { key: 'review', label: 'Review' },
+          ...(Platform.OS === 'web' ? [{ key: 'upload', label: 'Add' }] : []),
+          { key: 'other', label: 'Circles' },
         ] as { key: ViewMode; label: string }[]).map(tab => (
           <Pressable
             key={tab.key}
@@ -2189,8 +2168,8 @@ export default function SecondBrainDashboard({
 
       {/* ── Status ─────────────────────────────────────────────────────── */}
       {(mapStatus || status || uploadStatus) ? (
-        <View style={[styles.statusBar, mapStatus ? { borderColor: '#6366f133', backgroundColor: '#22d3ee0a' } : null]}>
-          <Text style={[styles.statusText, mapStatus ? { color: '#22d3ee' } : null]}>
+        <View style={[styles.statusBar, mapStatus ? { borderColor: '#6366f133', backgroundColor: '#6366f10a' } : null]}>
+          <Text style={[styles.statusText, mapStatus ? { color: '#6366f1' } : null]}>
             {mapStatus || uploadStatus || status}
           </Text>
         </View>
@@ -2200,74 +2179,80 @@ export default function SecondBrainDashboard({
       {viewMode === 'system' && (
         <View style={styles.systemFlowPanel}>
           <View style={styles.panelHeader}>
-            <View>
-              <Text style={styles.panelLabel}>MY PRIVATE SYSTEM FLOW MAP</Text>
+            <View style={styles.panelHeaderCopy}>
+              <Text style={styles.panelLabel}>System flow</Text>
               <Text style={styles.panelHint}>
-                3D map of site surfaces, database tables, memories, credentials, model routing, agent runs, and information movement.
+                A live view of how surfaces, models, memory, data, and agents connect.
               </Text>
             </View>
-            <View style={styles.heroActions}>
+            <View style={styles.mapActions}>
               <Pressable
                 onPress={handleMapSite}
                 disabled={mapping}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && !mapping && webLift, pressed && webPressed]}
+                style={({ hovered, pressed }: any) => [styles.mapActionBtn, hovered && !mapping && styles.mapActionBtnHover, pressed && webPressed]}
               >
-                <Text style={[styles.ghostBtnText, { color: '#22d3ee' }]}>{mapping ? 'MAPPING' : 'MAP SITE'}</Text>
+                <Text style={[styles.mapActionText, { color: '#8b8df8' }]}>{mapping ? 'Mapping…' : 'Map site'}</Text>
               </Pressable>
               <Pressable
                 onPress={() => handleSyncAllMemories(false)}
                 disabled={saving || !missingMemories.length}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && !saving && webLift, pressed && webPressed]}
+                style={({ hovered, pressed }: any) => [styles.mapActionBtn, hovered && !saving && styles.mapActionBtnHover, pressed && webPressed]}
               >
-                <Text style={[styles.ghostBtnText, { color: missingMemories.length ? '#a855f7' : PIXEL_COLORS.text3 }]}>
-                  {missingMemories.length ? `SYNC ${missingMemories.length} MEMORIES` : 'MEMORIES SYNCED'}
+                <Text style={[styles.mapActionText, { color: missingMemories.length ? '#bd8cff' : '#687388' }]}>
+                  {missingMemories.length ? `Sync ${missingMemories.length}` : 'Synced'}
                 </Text>
-              </Pressable>
-              <Pressable
-                onPress={loadDbStats}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
-              >
-                <Text style={styles.ghostBtnText}>DB COUNTS</Text>
               </Pressable>
               <Pressable
                 onPress={handleSeedKnowledge}
                 disabled={knowledgeSeeding}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && !knowledgeSeeding && webLift, pressed && webPressed]}
+                style={({ hovered, pressed }: any) => [styles.mapActionBtn, hovered && !knowledgeSeeding && styles.mapActionBtnHover, pressed && webPressed]}
               >
-                <Text style={[styles.ghostBtnText, { color: '#22c55e' }]}>
-                  {knowledgeSeeding ? 'LEARNING...' : 'LEARN'}
+                <Text style={[styles.mapActionText, { color: '#61d48b' }]}>
+                  {knowledgeSeeding ? 'Learning…' : 'Learn'}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  const next = !showSystemDetails;
+                  setShowSystemDetails(next);
+                  if (next) loadDbStats();
+                }}
+                style={({ hovered, pressed }: any) => [
+                  styles.mapActionBtn,
+                  showSystemDetails && styles.mapActionBtnActive,
+                  hovered && styles.mapActionBtnHover,
+                  pressed && webPressed,
+                ]}
+              >
+                <Text style={[styles.mapActionText, showSystemDetails && { color: '#f1f4f8' }]}>
+                  {showSystemDetails ? 'Hide details' : 'Details'}
                 </Text>
               </Pressable>
             </View>
           </View>
 
-          <View style={styles.knowledgeIntakeRail}>
-            {SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS.map(profile => (
-              <View key={profile.key} style={[styles.knowledgeProfileCard, { borderColor: `${profile.color}44`, backgroundColor: `${profile.color}10` }]}>
-                <Text style={[styles.cardTitle, { color: profile.color }]}>{profile.label}</Text>
-                <Text style={styles.cardMeta}>{profile.cadence.toUpperCase()} INTAKE</Text>
-                <Text style={styles.cardBody}>{profile.description}</Text>
-              </View>
-            ))}
-          </View>
-
           <View style={styles.systemStatStrip}>
-            <BrainStat label="Surfaces" value={String(systemMap.stats.appSurfaces)} color="#22d3ee" />
-            <BrainStat label="DB tables" value={String(systemMap.stats.databaseTables)} color="#64748b" />
+            <BrainStat label="Surfaces" value={String(systemMap.stats.appSurfaces)} color="#6366f1" />
+            <BrainStat label="Data" value={String(systemMap.stats.databaseTables)} color="#94a3b8" />
             <BrainStat label="Memories" value={String(systemMap.stats.memories)} color="#a855f7" />
-            <BrainStat label="Synced" value={String(systemMap.stats.syncedMemories)} color="#22c55e" />
-            <BrainStat label="Flows" value={String(systemMap.edges.length)} color="#f59e0b" />
-            <BrainStat label="Clusters" value={String(systemMap.clusters.length)} color="#38bdf8" />
+            <BrainStat label="Connections" value={String(systemMap.edges.length)} color="#f59e0b" />
           </View>
 
           <View style={styles.systemCanvasShell}>
+            <View style={styles.mapCanvasTopbar}>
+              <View style={styles.liveMapLabel}>
+                <View style={styles.liveMapDot} />
+                <Text style={styles.liveMapText}>Live system</Text>
+              </View>
+              <Text style={styles.mapCanvasHelp}>{compactLayout ? 'Tap nodes to inspect' : 'Drag to orbit  ·  Scroll to zoom  ·  Select a node'}</Text>
+            </View>
             {Platform.OS === 'web' ? (
               <DigitalBrainSystemFlowCanvas
                 map={systemMap}
                 selectedNodeId={selectedSystemNode?.id || null}
                 accentColor={accentColor}
                 onSelectNode={setSystemNodeId}
-                height={640}
+                height={compactLayout ? 430 : 560}
               />
             ) : (
               <View style={[styles.graphArea, { minHeight: 260, alignItems: 'center', justifyContent: 'center' }]}>
@@ -2277,8 +2262,8 @@ export default function SecondBrainDashboard({
           </View>
 
           <View style={styles.systemDetailGrid}>
-            <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>SELECTED NODE</Text>
+            <View style={[styles.systemDetailCard, styles.systemSelectionCard]}>
+              <Text style={styles.columnTitle}>Selected node</Text>
               {selectedSystemNode ? (
                 <>
                   <View style={styles.nodeDetailHeader}>
@@ -2307,8 +2292,9 @@ export default function SecondBrainDashboard({
               )}
             </View>
 
+            {showSystemDetails ? <>
             <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>CLUSTERS</Text>
+              <Text style={styles.columnTitle}>Clusters</Text>
               <ScrollView style={styles.systemList} nestedScrollEnabled>
                 {systemMap.clusters.map(cluster => (
                   <Pressable
@@ -2328,7 +2314,7 @@ export default function SecondBrainDashboard({
             </View>
 
             <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>DATABASE COVERAGE</Text>
+              <Text style={styles.columnTitle}>Database coverage</Text>
               <ScrollView style={styles.systemList} nestedScrollEnabled>
                 {DIGITAL_BRAIN_DB_TABLES.map(cfg => {
                   const stat = dbStats[cfg.table];
@@ -2349,7 +2335,7 @@ export default function SecondBrainDashboard({
             </View>
 
             <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>MEMORY COVERAGE</Text>
+              <Text style={styles.columnTitle}>Memory coverage</Text>
               <Text style={styles.panelHint}>
                 {systemMap.stats.syncedMemories}/{systemMap.stats.memories} loaded memories are linked as Digital Brain notes.
               </Text>
@@ -2374,10 +2360,11 @@ export default function SecondBrainDashboard({
                 {!memories.length ? <Text style={styles.emptyText}>No memories loaded yet.</Text> : null}
               </ScrollView>
             </View>
+            </> : null}
           </View>
 
           {/* ── Agent memories breakdown ──────────────────────────────── */}
-          {memoriesByAgent.length > 0 && (
+          {showSystemDetails && memoriesByAgent.length > 0 && (
             <View style={styles.agentMemoriesPanel}>
               <Text style={styles.columnTitle}>AGENT MEMORIES</Text>
               <Text style={styles.panelHint}>
@@ -2788,7 +2775,7 @@ export default function SecondBrainDashboard({
               <Text style={styles.panelLabel}>LONG-TERM DIGITAL BRAIN PLAN</Text>
               <Text style={styles.panelHint}>Build toward a private, circle-aware second brain that actively feeds every agent workflow.</Text>
               <View style={styles.planMiniGrid}>
-                <PlanStep label="Now" body="Graph, bases, capture, search, memory import, and review queue for the Backpack dashboard." color="#22d3ee" />
+                <PlanStep label="Now" body="Graph, bases, capture, search, memory import, and review queue for the Backpack dashboard." color="#6366f1" />
                 <PlanStep label="Next" body="Pipe agent briefs into chat model selection, OpenSwan task planning, and terminal session launches." color="#22c55e" />
                 <PlanStep label="Scale" body="Add per-project knowledge packs, permissions, provenance, conflict detection, and local model indexing." color="#a855f7" />
                 <PlanStep label="Enterprise" body="Support customer-owned models, local-only vaults, compliance exports, and business-specific automations." color="#f59e0b" />
@@ -3030,8 +3017,8 @@ const webPressed = Platform.OS === 'web' ? ({ transform: [{ scale: 0.99 }] } as 
 const styles = StyleSheet.create({
   shell: {
     marginHorizontal: GRID.lg,
-    marginBottom: GRID.xl,
-    gap: GRID.md,
+    marginBottom: 28,
+    gap: 12,
   },
 
   // Header
@@ -3041,30 +3028,25 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     flexWrap: 'wrap',
     gap: GRID.md,
-    paddingVertical: GRID.sm,
+    paddingVertical: 4,
   },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: GRID.sm,
-  },
+  brainHeaderCopy: { flex: 1, minWidth: 260, gap: 3 },
   heroEyebrow: {
-    color: PIXEL_COLORS.text3,
-    fontSize: 9,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 2.5,
+    color: '#748096',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.4,
     textTransform: 'uppercase',
   },
   heroTitle: {
-    color: PIXEL_COLORS.text0,
-    fontSize: 20,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginTop: 2,
+    color: '#f1f4f8',
+    fontSize: 22,
+    lineHeight: 28,
+    fontWeight: '700',
+    letterSpacing: -0.45,
+    marginTop: 1,
   },
+  heroSubtitle: { color: '#818da1', fontSize: 12, lineHeight: 18, maxWidth: 580 },
   dotWebMark: {
     borderWidth: 2,
     borderRadius: 2,
@@ -3081,62 +3063,61 @@ const styles = StyleSheet.create({
   heroActions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.sm,
+    gap: 7,
   },
 
   // Stat strip
   statStrip: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.sm,
+    gap: 7,
   },
   brainStat: {
-    flexGrow: 1,
-    minWidth: 80,
+    flex: 1,
+    minWidth: 105,
     borderWidth: 1,
-    borderRadius: 3,
-    backgroundColor: '#0a0f1c',
-    paddingHorizontal: GRID.md,
-    paddingVertical: GRID.sm,
+    borderRadius: 10,
+    backgroundColor: '#0b0f16',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     gap: 2,
   },
   brainStatValue: {
-    fontSize: 22,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    lineHeight: 26,
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 22,
   },
   brainStatLabel: {
-    color: PIXEL_COLORS.text3,
-    fontSize: 8,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
+    color: '#737f93',
+    fontSize: 9,
+    fontWeight: '600',
   },
 
   // Tab bar
   tabBar: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 3,
+    alignSelf: 'flex-start',
+    padding: 3,
+    borderWidth: 1,
+    borderColor: '#1b2230',
+    borderRadius: 12,
+    backgroundColor: '#0b0f16',
   },
   tabBtn: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border1,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingHorizontal: GRID.md,
-    paddingVertical: 9,
+    borderColor: 'transparent',
+    borderRadius: 9,
+    backgroundColor: 'transparent',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
   },
   tabBtnText: {
-    color: PIXEL_COLORS.text2,
-    fontSize: 9,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
+    color: '#8994a7',
+    fontSize: 10,
+    fontWeight: '600',
   },
 
   // Graph stage
@@ -3150,7 +3131,7 @@ const styles = StyleSheet.create({
     ...Platform.select({
       web: {
         backgroundImage: [
-          'radial-gradient(circle at 20% 20%, rgba(34,211,238,0.16), transparent 30%)',
+          'radial-gradient(circle at 20% 20%, rgba(99,102,241,0.16), transparent 30%)',
           'radial-gradient(circle at 75% 18%, rgba(168,85,247,0.14), transparent 28%)',
           'radial-gradient(circle at 50% 82%, rgba(34,197,94,0.1), transparent 28%)',
         ].join(', '),
@@ -3274,62 +3255,73 @@ const styles = StyleSheet.create({
   // System flow
   systemFlowPanel: {
     borderWidth: 1,
-    borderColor: '#6366f128',
-    borderRadius: 4,
-    backgroundColor: '#030711',
-    padding: GRID.md,
-    gap: GRID.md,
-    ...Platform.select({
-      web: {
-        backgroundImage: [
-          'radial-gradient(circle at 22% 18%, rgba(34,211,238,0.16), transparent 28%)',
-          'radial-gradient(circle at 78% 18%, rgba(245,158,11,0.14), transparent 28%)',
-          'radial-gradient(circle at 50% 88%, rgba(168,85,247,0.14), transparent 30%)',
-        ].join(', '),
-      } as any,
-      default: {},
-    }),
+    borderColor: '#1b2230',
+    borderRadius: 16,
+    backgroundColor: '#0b0f16',
+    padding: 12,
+    gap: 12,
   },
+  panelHeaderCopy: { flex: 1, minWidth: 240, gap: 4 },
+  mapActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  mapActionBtn: {
+    minHeight: 34,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#242c3a',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  },
+  mapActionBtnHover: { backgroundColor: '#171d28', borderColor: '#343e50' },
+  mapActionBtnActive: { backgroundColor: '#1a2030', borderColor: '#3d475a' },
+  mapActionText: { color: '#98a3b5', fontSize: 10, fontWeight: '600' },
   systemStatStrip: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.sm,
-  },
-  knowledgeIntakeRail: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: GRID.md,
-  },
-  knowledgeProfileCard: {
-    flex: 1,
-    minWidth: 220,
-    borderWidth: 1,
-    borderRadius: 3,
-    padding: GRID.md,
-    gap: 4,
+    gap: 7,
   },
   systemCanvasShell: {
     borderWidth: 1,
-    borderColor: '#ffffff12',
-    borderRadius: 4,
-    backgroundColor: '#020711',
+    borderColor: '#202837',
+    borderRadius: 14,
+    backgroundColor: '#080b12',
     overflow: 'hidden',
   },
+  mapCanvasTopbar: {
+    minHeight: 42,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#171d28',
+    backgroundColor: '#0c1017',
+  },
+  liveMapLabel: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  liveMapDot: { width: 6, height: 6, borderRadius: 999, backgroundColor: '#22c55e' },
+  liveMapText: { color: '#b8c1ce', fontSize: 10, fontWeight: '600' },
+  mapCanvasHelp: { color: '#687388', fontSize: 9 },
   systemDetailGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.md,
+    gap: 10,
   },
   systemDetailCard: {
     flex: 1,
     minWidth: 280,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: '#07101d',
-    padding: GRID.md,
-    gap: GRID.sm,
+    borderColor: '#1d2533',
+    borderRadius: 12,
+    backgroundColor: '#0d121a',
+    padding: 13,
+    gap: 8,
   },
+  systemSelectionCard: { flexBasis: '100%', minHeight: 88 },
   systemList: {
     maxHeight: 340,
   },
@@ -3338,9 +3330,9 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: GRID.sm,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
+    borderColor: '#202837',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
     padding: GRID.sm,
     marginBottom: GRID.sm,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
@@ -3353,9 +3345,9 @@ const styles = StyleSheet.create({
   },
   dbRow: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
+    borderColor: '#202837',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
     padding: GRID.sm,
     marginBottom: GRID.sm,
     gap: 4,
@@ -3370,9 +3362,9 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: GRID.sm,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
+    borderColor: '#202837',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
     padding: GRID.sm,
     marginBottom: GRID.sm,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
@@ -3512,8 +3504,8 @@ const styles = StyleSheet.create({
   panelHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: GRID.sm,
+    alignItems: 'center',
+    gap: GRID.md,
     flexWrap: 'wrap',
   },
   filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5 },
@@ -3539,23 +3531,22 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
   noteTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: GRID.sm, flexWrap: 'wrap' },
-  kindBadge: { borderWidth: 1, borderRadius: 2, paddingHorizontal: 6, paddingVertical: 3, backgroundColor: '#00000030' },
-  kindBadgeText: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.6, textTransform: 'uppercase' },
-  cardTitle: { color: PIXEL_COLORS.text0, fontSize: 13, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.3 },
-  cardMeta: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace' },
-  cardBody: { color: PIXEL_COLORS.text1, fontSize: 11, fontFamily: 'monospace', lineHeight: 17 },
-  sourceUrl: { color: '#38bdf8', fontSize: 10, fontFamily: 'monospace' },
+  kindBadge: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 7, paddingVertical: 3, backgroundColor: '#00000030' },
+  kindBadgeText: { fontSize: 8, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase' },
+  cardTitle: { color: '#e7ebf1', fontSize: 12, fontWeight: '600', letterSpacing: 0.1 },
+  cardMeta: { color: '#748096', fontSize: 9 },
+  cardBody: { color: '#aab4c3', fontSize: 11, lineHeight: 17 },
+  sourceUrl: { color: '#7aa2f7', fontSize: 10 },
   tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
   tag: {
     color: '#94a3b8',
     backgroundColor: '#ffffff09',
     borderWidth: 1,
     borderColor: '#ffffff14',
-    borderRadius: 2,
+    borderRadius: 999,
     paddingHorizontal: 5,
     paddingVertical: 2,
     fontSize: 9,
-    fontFamily: 'monospace',
   },
   actionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5 },
   miniBtn: {
@@ -3695,29 +3686,29 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: '#040c14', fontSize: 10, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
   ghostBtn: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border1,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingHorizontal: GRID.md,
-    paddingVertical: 10,
+    borderColor: '#242c3a',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
-  ghostBtnText: { color: PIXEL_COLORS.text1, fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.8 },
+  ghostBtnText: { color: '#b8c1ce', fontSize: 10, fontWeight: '600' },
 
   // Status
   statusBar: {
     borderWidth: 1,
     borderColor: '#f59e0b33',
     backgroundColor: '#f59e0b0d',
-    borderRadius: 3,
-    padding: GRID.md,
+    borderRadius: 10,
+    padding: 11,
   },
-  statusText: { color: PIXEL_COLORS.text1, fontSize: 11, fontFamily: 'monospace' },
+  statusText: { color: '#b8c1ce', fontSize: 11 },
 
   // Common
-  panelLabel: { color: PIXEL_COLORS.text2, fontSize: 9, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 2.5, textTransform: 'uppercase' },
-  panelHint: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace', marginTop: 1 },
-  columnTitle: { color: PIXEL_COLORS.text2, fontSize: 9, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1.8, textTransform: 'uppercase' },
+  panelLabel: { color: '#e7ebf1', fontSize: 15, fontWeight: '600', letterSpacing: -0.2 },
+  panelHint: { color: '#7d899d', fontSize: 11, lineHeight: 17 },
+  columnTitle: { color: '#aab4c3', fontSize: 10, fontWeight: '700', letterSpacing: 0.35 },
   emptyCard: { borderWidth: 1, borderColor: PIXEL_COLORS.border0, borderRadius: 3, backgroundColor: PIXEL_COLORS.bg2, padding: GRID.lg, gap: GRID.sm },
   emptyTitle: { color: PIXEL_COLORS.text1, fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1.2, textTransform: 'uppercase' },
   emptyText: { color: PIXEL_COLORS.text3, fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
@@ -3727,24 +3718,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 5,
     alignItems: 'center',
-    marginLeft: GRID.sm,
+    marginTop: 8,
   },
   modeBtn: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border1,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    borderColor: '#252d3a',
+    borderRadius: 999,
+    backgroundColor: '#0f141d',
+    paddingHorizontal: 11,
+    paddingVertical: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
   modeBtnText: {
-    color: PIXEL_COLORS.text2,
-    fontSize: 8,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
+    color: '#8792a5',
+    fontSize: 9,
+    fontWeight: '600',
   },
 
   // Visibility badge

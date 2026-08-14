@@ -7,12 +7,19 @@
  * Drop-in for ProfileTab, a chat header drawer, or a standalone screen.
  */
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { listCircleComputerUseRuns, type ComputerUseRunRow } from '../lib/computerUseHistory';
+import {
+  listCircleComputerUseRunsExact,
+  type ComputerUseHistoryAuthorityFence,
+  type ComputerUseHistoryExactAuthority,
+  type ComputerUseRunRow,
+} from '../lib/computerUseHistory';
 
 interface Props {
   circleId: string;
+  exactAuthority: ComputerUseHistoryExactAuthority | null;
+  isExactAuthorityCurrent: ComputerUseHistoryAuthorityFence;
   accentColor?: string;
   /** Optional — lets the parent kick off a re-run / follow-up via the
    *  existing Computer Use flow. If omitted, the re-run button is hidden. */
@@ -27,25 +34,74 @@ interface Props {
 const CACHE = new Map<string, { at: number; rows: ComputerUseRunRow[] }>();
 const CACHE_TTL_MS = 30_000;
 
-export default function ComputerUseHistoryPanel({ circleId, accentColor = '#22d3ee', onRerun, compact, limit = 20 }: Props) {
+export default function ComputerUseHistoryPanel({
+  circleId,
+  exactAuthority,
+  isExactAuthorityCurrent,
+  accentColor = '#6366f1',
+  onRerun,
+  compact,
+  limit = 20,
+}: Props) {
   const [rows, setRows] = useState<ComputerUseRunRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadedScopeKey, setLoadedScopeKey] = useState<string | null>(null);
+  const requestGenerationRef = useRef(0);
+  const scopeKey = exactAuthority && isExactAuthorityCurrent(exactAuthority)
+    ? `${exactAuthority.userId}:${exactAuthority.circleId}:${exactAuthority.generation}`
+    : null;
+  const visibleRows = loadedScopeKey === scopeKey ? rows : [];
 
   const refresh = useCallback(async (force = false) => {
-    const cached = CACHE.get(circleId);
+    const requestedAuthority = exactAuthority;
+    const requestedScopeKey = scopeKey;
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
+    const requestIsCurrent = (candidate: ComputerUseHistoryExactAuthority) => (
+      requestGenerationRef.current === requestGeneration
+      && requestedScopeKey !== null
+      && candidate.userId === requestedAuthority?.userId
+      && candidate.circleId === requestedAuthority?.circleId
+      && candidate.accessToken === requestedAuthority?.accessToken
+      && candidate.generation === requestedAuthority?.generation
+      && isExactAuthorityCurrent(candidate)
+    );
+    if (!requestedAuthority || !requestedScopeKey || !requestIsCurrent(requestedAuthority)) {
+      setRows([]);
+      setLoadedScopeKey(null);
+      setLoading(false);
+      return;
+    }
+    const cached = CACHE.get(requestedScopeKey);
     if (!force && cached && Date.now() - cached.at < CACHE_TTL_MS) {
       setRows(cached.rows);
+      setLoadedScopeKey(requestedScopeKey);
       setLoading(false);
       return;
     }
     setLoading(true);
-    const fresh = await listCircleComputerUseRuns(circleId, limit);
-    CACHE.set(circleId, { at: Date.now(), rows: fresh });
+    const result = await listCircleComputerUseRunsExact(
+      circleId,
+      limit,
+      requestedAuthority,
+      requestIsCurrent,
+    );
+    if (!requestIsCurrent(requestedAuthority)) return;
+    const fresh = result.ok ? result.rows : [];
+    if (result.ok) CACHE.set(requestedScopeKey, { at: Date.now(), rows: fresh });
     setRows(fresh);
+    setLoadedScopeKey(requestedScopeKey);
     setLoading(false);
-  }, [circleId, limit]);
+  }, [circleId, exactAuthority, isExactAuthorityCurrent, limit, scopeKey]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    requestGenerationRef.current += 1;
+    setRows([]);
+    setLoadedScopeKey(null);
+    setLoading(Boolean(scopeKey));
+    void refresh();
+    return () => { requestGenerationRef.current += 1; };
+  }, [refresh, scopeKey]);
 
   return (
     <View style={[s.card, compact && { marginHorizontal: 0, marginTop: 0 }]}>
@@ -56,7 +112,7 @@ export default function ComputerUseHistoryPanel({ circleId, accentColor = '#22d3
           </View>
           <Text style={s.title}>BROWSER HISTORY</Text>
           <View style={s.countPill}>
-            <Text style={s.countText}>{rows.length}</Text>
+            <Text style={s.countText}>{visibleRows.length}</Text>
           </View>
           <Pressable onPress={() => refresh(true)} style={s.refreshBtn} accessibilityRole="button">
             <Text style={s.refreshText}>↻</Text>
@@ -64,9 +120,9 @@ export default function ComputerUseHistoryPanel({ circleId, accentColor = '#22d3
         </View>
       ) : null}
 
-      {loading && rows.length === 0 ? (
+      {loading && visibleRows.length === 0 ? (
         <Text style={s.hint}>LOADING…</Text>
-      ) : rows.length === 0 ? (
+      ) : visibleRows.length === 0 ? (
         <View style={s.emptyBox}>
           <Text style={s.emptyTitle}>No computer tasks yet</Text>
           <Text style={s.emptyHint}>Ask the chat to "research X" or "find top 5 Y" and your runs show up here.</Text>
@@ -74,7 +130,7 @@ export default function ComputerUseHistoryPanel({ circleId, accentColor = '#22d3
       ) : (
         <ScrollView style={{ maxHeight: 520 }} showsVerticalScrollIndicator={false}>
           <View style={{ gap: 8 }}>
-            {rows.map((r) => (
+            {visibleRows.map((r) => (
               <RunRow key={r.id} row={r} accentColor={accentColor} onRerun={onRerun} />
             ))}
           </View>

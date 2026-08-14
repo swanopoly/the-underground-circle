@@ -59,7 +59,7 @@ async function main(): Promise<void> {
       .map((definition) => [definition.name, definition]),
   ).values());
 
-  assert.equal(definitions.length, 215, 'all current catalog definitions are covered');
+  assert.equal(definitions.length, 219, 'all current catalog definitions are covered');
 
   const counts = {
     read_only: 0,
@@ -116,8 +116,8 @@ async function main(): Promise<void> {
   assert.deepEqual(
     counts,
     {
-      read_only: 89,
-      action_ledger: 20,
+      read_only: 92,
+      action_ledger: 21,
       provider_idempotency: 0,
       proposal_only: 3,
       unsupported: 103,

@@ -23,7 +23,6 @@ import { awardXP, getXPForAction } from '../../lib/gamification';
 // as defaults the user can edit from circle settings.
 const ACCENT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '#6366f1', label: 'INDIGO' },
-  { value: '#22d3ee', label: 'CYAN' },
   { value: '#22c55e', label: 'EMERALD' },
   { value: '#fbbf24', label: 'AMBER' },
   { value: '#f43f5e', label: 'ROSE' },

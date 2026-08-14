@@ -170,7 +170,8 @@ function freshness(f: RunFreshnessResult['freshness']): RunFreshnessResult {
     subjectDbId: 'DB-1',
     subjectAliases: ['Alias-A', 'alias-a', 'Alias-B'],
   }));
-  check('node keys: every source contributes', ['blackswan', 'subject-key', 'black swan', 'db-1', 'alias-a', 'alias-b'].every(k => nodeKeys.includes(k)));
+  check('node keys: canonical identity excludes display-name fallbacks',
+    JSON.stringify(nodeKeys) === JSON.stringify(['subject-key', 'db-1', 'alias-a', 'alias-b']));
   check('node keys: deduped', new Set(nodeKeys).size === nodeKeys.length);
   check('node keys: null node → empty', buildOpsRunNodeLookupKeys(null).length === 0);
   check('node keys: bare node never throws', buildOpsRunNodeLookupKeys({ runId: 'x' } as OfficeRunNodeLike).length >= 0);
@@ -216,8 +217,8 @@ function freshness(f: RunFreshnessResult['freshness']): RunFreshnessResult {
     ['blackswan', { tag: 'by-name' }],
   ]);
   const entry = getOpsAccountabilityForAgent(a, index);
-  // buildOfficeAgentRunLookupKeys puts `name` first, so the name entry wins.
-  check('accountability: first matching key in precedence order wins', entry?.tag === 'by-name');
+  // Exact session/subject identity precedes the legacy display-name fallback.
+  check('accountability: exact identity wins before name fallback', entry?.tag === 'by-session');
   check('accountability: no match → undefined', getOpsAccountabilityForAgent(agent({ id: 'q', name: 'Ghost', sessionKey: 'g' }), index) === undefined);
   check('accountability: null index → undefined', getOpsAccountabilityForAgent(a, null) === undefined);
 }

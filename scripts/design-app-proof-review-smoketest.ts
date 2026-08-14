@@ -53,8 +53,11 @@ const stagedPhotoshopTask = buildDesktopAttachmentComputerTask(photoshopTask, [{
   sha256: 'd'.repeat(64),
   appName: 'Adobe Photoshop',
 }]);
+assert(!stagedPhotoshopTask.includes('/Users/chris'), 'legacy compatibility projection hides local paths');
+assert(!stagedPhotoshopTask.includes('hero.psd'), 'legacy compatibility projection hides filenames');
+assert(!stagedPhotoshopTask.includes(photoshopTask), 'legacy compatibility projection hides the original request');
 const handoff = buildChatComputerHandoffContext({
-  task: stagedPhotoshopTask,
+  task: photoshopTask,
   entrypoint: 'agent_runtime',
   adapterId: 'hybrid_adapter',
   taskKind: 'hybrid_task',

@@ -6,6 +6,7 @@ import {
   normalizeLLMProxyErrorPayload,
   normalizeLLMProxyErrorResponseText,
   readLLMProxyInvokeError,
+  shouldRetryLLMProxyFailure,
 } from '../src/lib/llmProxyErrorCore';
 
 let assertions = 0;
@@ -53,6 +54,12 @@ async function main(): Promise<void> {
   check(unreadableRecovery?.message === 'Your saved Anthropic credential can no longer be read. Reconnect it in Marketplace → AI Models & APIs, then retry.', 'unreadable recovery explains that reconnection is required');
   check(unreadableRecovery?.actionLabel === 'Reconnect Anthropic', 'unreadable recovery labels the repair action');
   check(unreadableRecovery?.providerId === 'anthropic' && unreadableRecovery.itemId === 'anthropic', 'unreadable recovery targets the Anthropic Marketplace item');
+  check(!shouldRetryLLMProxyFailure(details), 'missing credentials are not retried');
+  check(!shouldRetryLLMProxyFailure(unreadable), 'unreadable credentials are not retried');
+  check(!shouldRetryLLMProxyFailure({ code: 'validation', status: 400 }), 'validation failures are not retried');
+  check(shouldRetryLLMProxyFailure({ status: 429 }), 'rate limits permit one bounded retry');
+  check(shouldRetryLLMProxyFailure({ code: 'upstream_error', status: 502 }), 'upstream failures permit one bounded retry');
+  check(shouldRetryLLMProxyFailure({}), 'statusless transport failures permit one bounded retry');
 
   const streamed = normalizeLLMProxyErrorResponseText(JSON.stringify({
     code: 'credential_unreadable',

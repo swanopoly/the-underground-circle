@@ -44,7 +44,7 @@ import { Circle, CheckInFormat } from '../../types';
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const ACCENT_COLORS = [
-  '#6366f1', '#a855f7', '#22d3ee', '#22c55e', '#f43f5e', '#f59e0b',
+  '#6366f1', '#a855f7', '#22c55e', '#f43f5e', '#f59e0b',
   '#3b82f6', '#fbbf24', '#ec4899', '#14b8a6', '#8b5cf6', '#ef4444',
 ];
 

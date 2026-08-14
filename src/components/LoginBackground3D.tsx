@@ -3405,7 +3405,7 @@ function AlienSaucer() {
   const RIVET      = useMemo(() => new THREE.Color('#94a3b0'), []);
   const DOME_GLASS = useMemo(() => new THREE.Color('#7dd3fc'), []);
   const DOME_HI    = useMemo(() => new THREE.Color('#bae6fd'), []);
-  const DOME_DK    = useMemo(() => new THREE.Color('#22d3ee'), []);
+  const DOME_DK    = useMemo(() => new THREE.Color('#6366f1'), []);
   const ALIEN_SKIN = useMemo(() => new THREE.Color('#9ad9a3'), []);
   const ALIEN_DK   = useMemo(() => new THREE.Color('#5e8a66'), []);
   const ALIEN_HI   = useMemo(() => new THREE.Color('#cdf0d2'), []);

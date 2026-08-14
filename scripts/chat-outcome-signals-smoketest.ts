@@ -778,10 +778,13 @@ assert(
   'an already-open Chat removes legacy persisted routing notices after hot reload without hiding current-session ephemeral guidance',
 );
 
+// Anchor after the conversation-only early-return branch: it legitimately has
+// its own setBotTyping(false), so a generic first-occurrence end marker can
+// truncate the outer recovery block before its durable finalizer.
 const outerSendFailureSource = sourceSection(
-  sourceSection(chatTabSource, '} catch (batchErr)', 'setBotTyping(false)'),
-  '} catch (err)',
-  'setBotTyping(false)',
+  chatTabSource,
+  "source: 'main_chat_outer_catch'",
+  'stopCodingWorkbenchAfter(',
 );
 assert(
   /finalizeFailedBotMessage\s*\(\{\s*pendingMessage,/.test(outerSendFailureSource),

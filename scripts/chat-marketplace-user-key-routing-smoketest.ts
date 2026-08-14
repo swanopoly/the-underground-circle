@@ -33,8 +33,8 @@ check(anthropicBranchStart >= 0, 'Marketplace has a dedicated personal Anthropic
 check(genericConnectStart > anthropicBranchStart, 'personal Anthropic handling precedes the circle integration path');
 const anthropicBranch = marketplace.slice(anthropicBranchStart, genericConnectStart);
 check(
-  anthropicBranch.includes("testApiKey(") && anthropicBranch.includes("'claude-sonnet-4-6'"),
-  'Anthropic is preflighted against Claude Sonnet 4.6 before storage',
+  anthropicBranch.includes("testApiKey(") && anthropicBranch.includes("'claude-sonnet-5'"),
+  'Anthropic is preflighted against the current Claude Sonnet 5 before storage',
 );
 check(
   anthropicBranch.includes("storeApiKey('anthropic', apiKey, 'default', undefined, { notify: false })"),

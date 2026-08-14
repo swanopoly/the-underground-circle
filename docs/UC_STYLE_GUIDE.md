@@ -22,6 +22,7 @@ with this token guide.
 6. **Hover is a background shift,** not a dramatic lift. `backgroundColor` changes, border may brighten, no `translateY`.
 7. **Indigo is the accent.** `#6366f1` for primary buttons, active states, progress bars, links. Used sparingly — most of the UI is neutral.
 8. **Do not default to all-black with white 2px borders.** That older modal language is now legacy. Use tinted dark surfaces, low-contrast borders, and colored active states.
+9. **Modal motion is fade-only.** Product popups and React Native `Modal` surfaces fade in without directional movement. Do not slide dialogs from the side or bottom; reserve spatial movement for true navigation surfaces that remain visibly anchored to the app shell.
 
 ---
 

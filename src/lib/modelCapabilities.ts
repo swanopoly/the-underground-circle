@@ -18,6 +18,13 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
 
   // Multimodal (text + image understanding + generation)
   'gpt-4o':                     ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
+  'gpt-5.6-sol':                ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gpt-5.6-terra':              ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gpt-5.6-luna':               ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gpt-4.1':                    ['text', 'code', 'image_understand', 'webpage_gen'],
+  'gpt-4.1-mini':               ['text', 'code', 'image_understand', 'webpage_gen'],
+  'gemini-3.6-flash':           ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gemini-3.5-flash-lite':      ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-2.5-flash-preview':   ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
   'gemini-3.5-flash':           ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-3.1-pro-preview':     ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
@@ -28,6 +35,8 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
 
   // Coding models
   'claude-fable-5':      ['text', 'code', 'reasoning', 'webpage_gen'],
+  'claude-opus-5':       ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'claude-sonnet-5':     ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'claude-opus-4-8':     ['text', 'code', 'reasoning', 'webpage_gen'],
   'claude-opus-4-7':     ['text', 'code', 'reasoning', 'webpage_gen'],
   'claude-opus-4-6':     ['text', 'code', 'reasoning', 'webpage_gen'],
@@ -39,8 +48,23 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gpt-5.4':             ['text', 'code', 'reasoning', 'webpage_gen'],
   'gpt-5.4-mini':        ['text', 'code', 'reasoning', 'webpage_gen'],
   'gpt-5.4-nano':        ['text', 'code'],
+  'o3-pro':              ['text', 'code', 'reasoning'],
+  'o3':                  ['text', 'code', 'reasoning'],
   'codex-mini':          ['text', 'code'],
   'deepseek-v3.2':       ['text', 'code'],
+  'deepseek-v4-pro':     ['text', 'code', 'reasoning', 'webpage_gen'],
+  'deepseek-v4-flash':   ['text', 'code', 'reasoning', 'webpage_gen'],
+  'mistral-medium-3-5':  ['text', 'code', 'reasoning', 'webpage_gen'],
+  'mistral-large-2512':  ['text', 'code', 'reasoning', 'webpage_gen'],
+  'mistral-small-2603':  ['text', 'code', 'webpage_gen'],
+  'codestral-2508':      ['text', 'code'],
+  'glm-5.1':             ['text', 'code', 'reasoning', 'webpage_gen'],
+  'glm-5':               ['text', 'code', 'reasoning', 'webpage_gen'],
+  'minimax-m2.7':        ['text', 'code', 'reasoning', 'webpage_gen'],
+  'command-a-plus-05-2026': ['text', 'code', 'reasoning'],
+  'command-a-reasoning-08-2025': ['text', 'reasoning'],
+  'gpt-oss-120b':        ['text', 'code', 'reasoning'],
+  'gpt-oss-20b':         ['text', 'code', 'reasoning'],
   'qwen-3.5-coder':      ['text', 'code'],
 
   // Reasoning
@@ -96,7 +120,9 @@ const PROVIDER_PREFIX_HEADS = new Set<string>([
   'openswan',
   // Vendor/org heads seen inside OpenRouter/HF-style ids.
   'meta-llama', 'deepseek-ai', 'qwen', 'black-forest-labs', 'stabilityai',
-  'moonshotai', 'x-ai',
+  'moonshotai', 'x-ai', 'meta', 'mistral-ai', 'zai-org', 'minimaxai',
+  // Fireworks canonical account-scoped model ids.
+  'accounts', 'fireworks', 'models',
 ]);
 
 /**
@@ -209,6 +235,12 @@ const SONAR_FLAGS = flagSet({});
 /** Strong coder over the plain tool-chat base (OpenAI/DeepSeek/Qwen coders). */
 const STRONG_CODER_TOOL_FLAGS = flagSet({ toolUse: true, codingTier: 'strong' });
 const STRONG_CODER_VISION_FLAGS = flagSet({ toolUse: true, vision: true, codingTier: 'strong' });
+const GPT_56_STRONG_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 128000, codingTier: 'strong' });
+const GPT_56_FAST_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 128000, codingTier: 'basic' });
+const CLAUDE_5_SONNET_FLAGS = flagSet({ toolUse: true, vision: true, computerUse: true, maxOutputTokens: 128000, codingTier: 'strong' });
+const CLAUDE_5_CHAT_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 128000, codingTier: 'strong' });
+const GEMINI_36_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 65536, codingTier: 'strong' });
+const GEMINI_35_LITE_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 65536, codingTier: 'basic' });
 
 /** Explicit per-model flags, keyed by normalizeModelId() output. */
 const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
@@ -227,6 +259,8 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'cswan801/blackswan-v5': flagSet({ streaming: false }),
 
   // Anthropic
+  'claude-sonnet-5':     CLAUDE_5_SONNET_FLAGS,
+  'claude-opus-5':       CLAUDE_5_CHAT_FLAGS,
   'claude-sonnet-4-6':   CLAUDE_SONNET_FLAGS,
   'claude-fable-5':      CLAUDE_CHAT_FLAGS,
   'claude-opus-4-8':     CLAUDE_CHAT_FLAGS,
@@ -236,16 +270,25 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'claude-haiku-4-5-20251001': CLAUDE_FAST_FLAGS,
 
   // OpenAI
+  'gpt-5.6-sol':   GPT_56_STRONG_FLAGS,
+  'gpt-5.6-terra': GPT_56_STRONG_FLAGS,
+  'gpt-5.6-luna':  GPT_56_FAST_FLAGS,
   'gpt-4o':        TOOL_VISION_FLAGS,
   'gpt-5.5-pro':   STRONG_CODER_VISION_FLAGS,
   'gpt-5.5':       STRONG_CODER_VISION_FLAGS,
   'gpt-5.4':       STRONG_CODER_VISION_FLAGS,
   'gpt-5.4-mini':  TOOL_VISION_FLAGS,
   'gpt-5.4-nano':  TOOL_CHAT_FLAGS,
+  'o3-pro':        STRONG_CODER_TOOL_FLAGS,
+  'o3':            STRONG_CODER_TOOL_FLAGS,
+  'gpt-4.1':       TOOL_VISION_FLAGS,
+  'gpt-4.1-mini':  TOOL_VISION_FLAGS,
   'gpt-4.1-nano':  TOOL_VISION_FLAGS,
   'codex-mini':    STRONG_CODER_TOOL_FLAGS,
 
   // Google
+  'gemini-3.6-flash':         GEMINI_36_FLAGS,
+  'gemini-3.5-flash-lite':    GEMINI_35_LITE_FLAGS,
   'gemini-3.5-flash':         GEMINI_FLAGS,
   'gemini-3.1-pro-preview':   GEMINI_PRO_FLAGS,
   'gemini-3.1-flash-lite':    GEMINI_FLAGS,
@@ -259,10 +302,23 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   // frontier-class coders (r1 = strong PLANNER, no tools → never executor).
   'deepseek-v3':   STRONG_CODER_TOOL_FLAGS,
   'deepseek-v3.2': STRONG_CODER_TOOL_FLAGS,
+  'deepseek-v4-pro': STRONG_CODER_TOOL_FLAGS,
+  'deepseek-v4-flash': STRONG_CODER_TOOL_FLAGS,
   'deepseek-r1':   flagSet({ codingTier: 'strong' }),
 
   // Mistral / Qwen / Llama (Groq-hosted etc.)
   'mistral-large-3':  TOOL_CHAT_FLAGS,
+  'mistral-medium-3-5': STRONG_CODER_TOOL_FLAGS,
+  'mistral-large-2512': STRONG_CODER_TOOL_FLAGS,
+  'mistral-small-2603': TOOL_CHAT_FLAGS,
+  'codestral-2508': STRONG_CODER_TOOL_FLAGS,
+  'glm-5.1': STRONG_CODER_TOOL_FLAGS,
+  'glm-5': STRONG_CODER_TOOL_FLAGS,
+  'minimax-m2.7': STRONG_CODER_TOOL_FLAGS,
+  'command-a-plus-05-2026': TOOL_CHAT_FLAGS,
+  'command-a-reasoning-08-2025': flagSet({ codingTier: 'strong' }),
+  'gpt-oss-120b': STRONG_CODER_TOOL_FLAGS,
+  'gpt-oss-20b': TOOL_CHAT_FLAGS,
   'qwen-3.5-coder':   STRONG_CODER_TOOL_FLAGS,
   'qwen-3.5-flash':   TOOL_CHAT_FLAGS,
   'qwen-3.5-plus':    TOOL_CHAT_FLAGS,
@@ -284,9 +340,17 @@ const FAMILY_FLAG_PATTERNS: Array<{ pattern: RegExp; flags: ModelCapabilityFlags
   { pattern: /^claude-(opus|fable)\b/,           flags: CLAUDE_CHAT_FLAGS },
   { pattern: /^claude-haiku\b/,                  flags: CLAUDE_FAST_FLAGS },
   { pattern: /^(gpt-4o|gpt-4\.1|gpt-5)/,         flags: TOOL_VISION_FLAGS },
+  { pattern: /^o3(?:-|$)/,                        flags: STRONG_CODER_TOOL_FLAGS },
   { pattern: /^gemini-/,                         flags: GEMINI_FLAGS },
   { pattern: /^(deepseek-v|deepseek-chat)/,      flags: TOOL_CHAT_FLAGS },
   { pattern: /^(mistral|ministral|magistral)-/,  flags: TOOL_CHAT_FLAGS },
+  { pattern: /^codestral-/,                      flags: STRONG_CODER_TOOL_FLAGS },
+  { pattern: /^gpt-oss-/,                        flags: TOOL_CHAT_FLAGS },
+  { pattern: /^(?:groq\/)?compound/,             flags: TOOL_CHAT_FLAGS },
+  { pattern: /^glm-/,                            flags: TOOL_CHAT_FLAGS },
+  { pattern: /^minimax-/,                        flags: TOOL_CHAT_FLAGS },
+  { pattern: /^command-/,                        flags: TOOL_CHAT_FLAGS },
+  { pattern: /^(kimi-|moonshot)/,                flags: TOOL_CHAT_FLAGS },
   { pattern: /^llama-4/,                         flags: TOOL_VISION_FLAGS },
   { pattern: /^llama-3/,                         flags: TOOL_CHAT_FLAGS },
   { pattern: /^qwen/,                            flags: TOOL_CHAT_FLAGS },
@@ -386,7 +450,7 @@ export function detectIntent(message: string, modelId: string): UserIntent {
 export function pickBestModel(intent: UserIntent): string {
   switch (intent) {
     case 'image_gen': return 'flux-schnell';
-    case 'webpage_gen': return 'gemini-2.5-flash';
+    case 'webpage_gen': return 'gemini-3.6-flash';
     case 'code_gen': return 'auto'; // keep default AI path
     case 'video_gen': return 'auto';
     case 'audio_gen': return 'auto';
@@ -488,7 +552,7 @@ async function generateWebpage(prompt: string): Promise<string | null> {
     const { data, error } = await supabase.functions.invoke('llm-proxy', {
       body: {
         provider: 'google_ai',
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         messages: [{
           role: 'user',
           content: `You are a web developer. Generate a complete, self-contained HTML page with inline CSS and JavaScript based on this request: "${prompt}"\n\nRequirements:\n- Single HTML file, all CSS/JS inline\n- Modern, dark theme design\n- Responsive layout\n- Use modern CSS (flexbox/grid)\n- Make it visually impressive\n- Return ONLY the HTML code, no markdown fences, no explanation before or after`,
@@ -568,7 +632,7 @@ export async function routeByCapability(
           kind: 'webpage',
           title: message.slice(0, 60),
           html,
-          metadata: { model: 'gemini-2.5-flash', prompt: message },
+          metadata: { model: 'gemini-3.6-flash', prompt: message },
         }],
       };
     }

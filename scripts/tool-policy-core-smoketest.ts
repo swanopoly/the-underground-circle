@@ -39,20 +39,22 @@ const DAY = 86_400_000;
 // ---------------------------------------------------------------------------
 // FLOOR_ACTION_CATEGORIES + isFloorAction
 // ---------------------------------------------------------------------------
-eq(FLOOR_ACTION_CATEGORIES.length, 4, 'floor has 4 categories');
-assert(FLOOR_ACTION_CATEGORIES.includes('pay' as never), 'floor includes pay');
+eq(FLOOR_ACTION_CATEGORIES.length, 19, 'floor has canonical exact effects');
+assert(FLOOR_ACTION_CATEGORIES.includes('payment' as never), 'floor includes payment');
 assert(FLOOR_ACTION_CATEGORIES.includes('delete' as never), 'floor includes delete');
 assert(FLOOR_ACTION_CATEGORIES.includes('login' as never), 'floor includes login');
-assert(FLOOR_ACTION_CATEGORIES.includes('grant' as never), 'floor includes grant');
+assert(FLOOR_ACTION_CATEGORIES.includes('permission' as never), 'floor includes permission');
+assert(FLOOR_ACTION_CATEGORIES.includes('private_file' as never), 'floor includes private file');
 
 eq(isFloorAction(['pay']), true, 'isFloorAction: pay is floor');
 eq(isFloorAction(['read', 'delete']), true, 'isFloorAction: delete among tags is floor');
 eq(isFloorAction(['PAY']), true, 'isFloorAction: case-insensitive');
 eq(isFloorAction(['  grant  ']), true, 'isFloorAction: trims whitespace');
-eq(isFloorAction(['read', 'write']), false, 'isFloorAction: non-floor tags');
-eq(isFloorAction([]), false, 'isFloorAction: empty array is not floor');
-eq(isFloorAction(undefined), false, 'isFloorAction: undefined is not floor');
-eq(isFloorAction('pay' as never), false, 'isFloorAction: non-array is not floor (guarded)');
+eq(isFloorAction(['read', 'write']), true, 'isFloorAction: persistent write is floor');
+eq(isFloorAction(['read']), false, 'isFloorAction: explicit read is safe');
+eq(isFloorAction([]), true, 'isFloorAction: empty array is unknown exact');
+eq(isFloorAction(undefined), true, 'isFloorAction: undefined is unknown exact');
+eq(isFloorAction('pay' as never), true, 'isFloorAction: hostile non-array pay still floors');
 eq(isFloorAction([123 as never, 'pay']), true, 'isFloorAction: skips non-strings, finds floor');
 
 // ---------------------------------------------------------------------------
@@ -156,7 +158,7 @@ const reviewPolicies: ToolPolicy[] = [{ toolId: 'deploy.ship', scope: 'prod', mo
 const reviewForced = checkToolPolicy({
   toolId: 'deploy.ship',
   scope: 'prod',
-  actionTags: ['deploy'],
+  actionTags: ['read'],
   policies: reviewPolicies,
   now: NOW,
 });
@@ -170,12 +172,12 @@ assert(reviewForced.reason.toLowerCase().includes('review'), 'requireReview: rea
 const unknown = checkToolPolicy({ toolId: 'mystery.tool', scope: 'x', policies, now: NOW });
 eq(unknown.decision, 'ask', 'unknown: fails closed to ask');
 eq(unknown.rateRemaining, null, 'unknown: no cap -> rateRemaining null');
-eq(unknown.floorEnforced, false, 'unknown: not a floor');
+eq(unknown.floorEnforced, true, 'unknown: missing effect is an exact floor');
 
 // input guarding — never throws even on garbage
 const garbage = checkToolPolicy({} as never);
 eq(garbage.decision, 'ask', 'guard: empty args -> ask (never throws)');
-eq(garbage.floorEnforced, false, 'guard: empty args floorEnforced false');
+eq(garbage.floorEnforced, true, 'guard: empty args floorEnforced exact');
 
 // ---------------------------------------------------------------------------
 // checkToolPolicy — RATE LIMITING
@@ -183,32 +185,32 @@ eq(garbage.floorEnforced, false, 'guard: empty args floorEnforced false');
 const ratePolicies: ToolPolicy[] = [{ toolId: 'api.call', scope: 'svc', mode: 'auto', maxPerDay: 3 }];
 
 // zero uses -> auto, remaining = cap
-const rate0 = checkToolPolicy({ toolId: 'api.call', scope: 'svc', policies: ratePolicies, usage: {}, now: NOW });
+const rate0 = checkToolPolicy({ toolId: 'api.call', scope: 'svc', actionTags: ['read'], policies: ratePolicies, usage: {}, now: NOW });
 eq(rate0.decision, 'auto', 'rate: under cap -> auto');
 eq(rate0.rateRemaining, 3, 'rate: remaining = cap when unused');
 
 // two uses within window -> auto, remaining = 1
 const twoUses: ToolUsageWindow = { 'api.call::svc': [NOW - 1000, NOW - 2000] };
-const rate2 = checkToolPolicy({ toolId: 'api.call', scope: 'svc', policies: ratePolicies, usage: twoUses, now: NOW });
+const rate2 = checkToolPolicy({ toolId: 'api.call', scope: 'svc', actionTags: ['read'], policies: ratePolicies, usage: twoUses, now: NOW });
 eq(rate2.decision, 'auto', 'rate: 2 of 3 -> still auto');
 eq(rate2.rateRemaining, 1, 'rate: remaining reflects count in window');
 
 // at the cap -> ask, remaining 0, reason 'rate limit'
 const threeUses: ToolUsageWindow = { 'api.call::svc': [NOW - 1000, NOW - 2000, NOW - 3000] };
-const rateAtCap = checkToolPolicy({ toolId: 'api.call', scope: 'svc', policies: ratePolicies, usage: threeUses, now: NOW });
+const rateAtCap = checkToolPolicy({ toolId: 'api.call', scope: 'svc', actionTags: ['read'], policies: ratePolicies, usage: threeUses, now: NOW });
 eq(rateAtCap.decision, 'ask', 'rate: at cap -> ask');
 eq(rateAtCap.rateRemaining, 0, 'rate: at cap -> remaining 0');
 eq(rateAtCap.reason, 'rate limit', "rate: reason is 'rate limit'");
 
 // over the cap -> still ask, remaining stays 0 (clamped)
 const fourUses: ToolUsageWindow = { 'api.call::svc': [NOW - 1000, NOW - 2000, NOW - 3000, NOW - 4000] };
-const rateOver = checkToolPolicy({ toolId: 'api.call', scope: 'svc', policies: ratePolicies, usage: fourUses, now: NOW });
+const rateOver = checkToolPolicy({ toolId: 'api.call', scope: 'svc', actionTags: ['read'], policies: ratePolicies, usage: fourUses, now: NOW });
 eq(rateOver.decision, 'ask', 'rate: over cap -> ask');
 eq(rateOver.rateRemaining, 0, 'rate: over cap -> remaining clamped to 0');
 
 // stale uses OUTSIDE the window do not count -> resets to auto
 const staleUses: ToolUsageWindow = { 'api.call::svc': [NOW - DAY - 1000, NOW - DAY - 2000, NOW - DAY - 3000] };
-const rateStale = checkToolPolicy({ toolId: 'api.call', scope: 'svc', policies: ratePolicies, usage: staleUses, now: NOW });
+const rateStale = checkToolPolicy({ toolId: 'api.call', scope: 'svc', actionTags: ['read'], policies: ratePolicies, usage: staleUses, now: NOW });
 eq(rateStale.decision, 'auto', 'rate: stale uses pruned from window -> auto again');
 eq(rateStale.rateRemaining, 3, 'rate: stale uses do not decrement remaining');
 
@@ -216,6 +218,7 @@ eq(rateStale.rateRemaining, 3, 'rate: stale uses do not decrement remaining');
 const customWin = checkToolPolicy({
   toolId: 'api.call',
   scope: 'svc',
+  actionTags: ['read'],
   policies: ratePolicies,
   usage: { 'api.call::svc': [NOW - 5000, NOW - 6000, NOW - 7000] },
   now: NOW,
@@ -225,7 +228,7 @@ eq(customWin.decision, 'auto', 'rate: custom windowMs prunes entries outside it'
 
 // rate cap keyed per (toolId,scope) — usage under a DIFFERENT scope doesn't count
 const otherScopeUsage: ToolUsageWindow = { 'api.call::other': [NOW - 1000, NOW - 2000, NOW - 3000] };
-const rateScoped = checkToolPolicy({ toolId: 'api.call', scope: 'svc', policies: ratePolicies, usage: otherScopeUsage, now: NOW });
+const rateScoped = checkToolPolicy({ toolId: 'api.call', scope: 'svc', actionTags: ['read'], policies: ratePolicies, usage: otherScopeUsage, now: NOW });
 eq(rateScoped.decision, 'auto', 'rate: usage under a different scope key does not count');
 
 // floor beats rate: even under cap, a floor tag forces ask (and floorEnforced)
@@ -287,7 +290,7 @@ let win: ToolUsageWindow = {};
 win = recordToolUse(win, 'api.call', 'svc', NOW - 3000);
 win = recordToolUse(win, 'api.call', 'svc', NOW - 2000);
 win = recordToolUse(win, 'api.call', 'svc', NOW - 1000);
-const afterThree = checkToolPolicy({ toolId: 'api.call', scope: 'svc', policies: ratePolicies, usage: win, now: NOW });
+const afterThree = checkToolPolicy({ toolId: 'api.call', scope: 'svc', actionTags: ['read'], policies: ratePolicies, usage: win, now: NOW });
 eq(afterThree.decision, 'ask', 'round-trip: recording to cap then check -> ask');
 eq(afterThree.rateRemaining, 0, 'round-trip: remaining 0 at cap');
 

@@ -1,5 +1,19 @@
 import { supabase } from '../lib/supabase';
 import { useEffect, useState } from 'react';
+import { safeGetUserForAccessToken } from '../lib/authSession';
+
+export interface AgentApprovalsExactAuthority {
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  authorityGeneration: number;
+}
+
+export type AgentApprovalAuthorityGuard = () => boolean;
+
+export type ResolveAgentApprovalResult =
+  | { ok: true; approval: AgentApproval }
+  | { ok: false; error: string };
 
 export interface AgentApproval {
   id: string;
@@ -75,15 +89,95 @@ export async function resolveApproval(
   if (!Array.isArray(data) || data.length === 0) return; // already resolved/expired
 }
 
-export async function getPendingApprovals(circleId: string): Promise<AgentApproval[]> {
+/**
+ * Office-safe pending-only decision. The captured bearer is verified as the
+ * captured user, the row is bound to the captured circle, and a returned row
+ * must prove who resolved it before the UI may continue to any runtime-owned
+ * action. A retired lifecycle always fails closed.
+ */
+export async function resolveApprovalExact(
+  approvalId: string,
+  status: 'approved' | 'rejected',
+  authority: AgentApprovalsExactAuthority,
+  isCurrent: AgentApprovalAuthorityGuard,
+): Promise<ResolveAgentApprovalResult> {
+  const id = String(approvalId || '').trim();
+  const userId = String(authority?.userId || '').trim();
+  const circleId = String(authority?.circleId || '').trim();
+  const accessToken = String(authority?.accessToken || '').trim();
+  if (
+    !id
+    || !userId
+    || !circleId
+    || !accessToken
+    || accessToken.length > 16_384
+    || !Number.isSafeInteger(authority?.authorityGeneration)
+    || authority.authorityGeneration <= 0
+    || !isCurrent()
+  ) return { ok: false, error: 'This approval belongs to a retired Office session.' };
+  const { value: verifiedUser } = await safeGetUserForAccessToken(accessToken);
+  if (verifiedUser?.id !== userId || !isCurrent()) {
+    return { ok: false, error: 'The signed-in Office account changed before this approval could be resolved.' };
+  }
   const { data, error } = await supabase
     .from('agent_approvals')
-    .select('*')
+    .update({
+      status,
+      resolved_at: new Date().toISOString(),
+      resolved_by: userId,
+    })
+    .eq('id', id)
     .eq('circle_id', circleId)
     .eq('status', 'pending')
+    .setHeader('Authorization', `Bearer ${accessToken}`)
+    .select('*');
+  if (!isCurrent()) {
+    return { ok: false, error: 'The Office account changed while the approval was resolving.' };
+  }
+  if (error) return { ok: false, error: error.message };
+  const row = Array.isArray(data) && data.length === 1 ? data[0] as AgentApproval & { resolved_by?: string } : null;
+  if (
+    !row
+    || row.id !== id
+    || row.circle_id !== circleId
+    || row.status !== status
+    || row.resolved_by !== userId
+  ) {
+    return { ok: false, error: 'This approval is no longer pending or its resolution receipt was invalid.' };
+  }
+  return { ok: true, approval: row };
+}
+
+export async function getPendingApprovals(
+  circleId: string,
+  authority?: AgentApprovalsExactAuthority | null,
+): Promise<AgentApproval[]> {
+  const normalizedCircleId = String(circleId || '').trim();
+  const normalizedUserId = String(authority?.userId || '').trim();
+  const authorityCircleId = String(authority?.circleId || '').trim();
+  const accessToken = String(authority?.accessToken || '').trim();
+  if (authority && (
+    !normalizedCircleId
+    || !normalizedUserId
+    || authorityCircleId !== normalizedCircleId
+    || !accessToken
+    || !Number.isSafeInteger(authority.authorityGeneration)
+    || authority.authorityGeneration <= 0
+  )) return [];
+  if (authority) {
+    const { value: verifiedUser } = await safeGetUserForAccessToken(accessToken);
+    if (verifiedUser?.id !== normalizedUserId) return [];
+  }
+  let query = supabase
+    .from('agent_approvals')
+    .select('*')
+    .eq('circle_id', normalizedCircleId)
+    .eq('status', 'pending')
     .order('requested_at', { ascending: false });
+  if (authority) query = query.setHeader('Authorization', `Bearer ${accessToken}`);
+  const { data, error } = await query;
   if (error) throw error;
-  return data || [];
+  return (data || []).filter((row) => row?.circle_id === normalizedCircleId);
 }
 
 export async function getAgentControl(
@@ -148,14 +242,27 @@ export async function upsertAgentControl(
   if (error) throw error;
 }
 
-export function useAgentApprovals(circleId?: string): AgentApproval[] {
+export function useAgentApprovals(
+  circleId?: string,
+  authority?: AgentApprovalsExactAuthority | null,
+): AgentApproval[] {
   const [approvals, setApprovals] = useState<AgentApproval[]>([]);
+  const authorityKey = authority
+    ? `${authority.userId}\u0000${authority.circleId}\u0000${authority.accessToken}\u0000${authority.authorityGeneration}`
+    : 'compatibility';
 
   useEffect(() => {
-    if (!circleId) return;
-    getPendingApprovals(circleId).then(setApprovals);
+    let cancelled = false;
+    setApprovals([]);
+    if (!circleId) return () => { cancelled = true; };
+    const capturedAuthority = authority ? { ...authority } : null;
+    const publish = (rows: AgentApproval[]) => {
+      if (!cancelled) setApprovals(rows);
+    };
+    const refresh = () => getPendingApprovals(circleId, capturedAuthority).then(publish).catch(() => {});
+    void refresh();
     const channel = supabase
-      .channel('agent_approvals_' + circleId)
+      .channel(`agent_approvals_${circleId}_${capturedAuthority?.userId || 'compat'}_${capturedAuthority?.authorityGeneration || 0}`)
       .on(
         'postgres_changes',
         {
@@ -164,11 +271,14 @@ export function useAgentApprovals(circleId?: string): AgentApproval[] {
           table: 'agent_approvals',
           filter: 'circle_id=eq.' + circleId,
         },
-        () => getPendingApprovals(circleId).then(setApprovals),
+        () => { void refresh(); },
       )
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [circleId]);
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [authorityKey, circleId]);
 
   return approvals;
 }

@@ -146,19 +146,30 @@ export async function getFileContent(
   owner: string,
   repo: string,
   path: string,
+  branch?: string,
 ): Promise<{ content: string; size: number; sha: string; error: string | null }> {
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const refQuery = branch ? `?ref=${encodeURIComponent(branch)}` : '';
   const { data, error } = await ghFetch<GitHubFileContent>(
-    `/repos/${owner}/${repo}/contents/${path}`,
+    `/repos/${owner}/${repo}/contents/${encodedPath}${refQuery}`,
     token,
   );
   if (error || !data) return { content: '', size: 0, sha: '', error: error || 'No data' };
 
+  // The contents endpoint can omit inline content for larger files. Treat that
+  // as an explicit readback failure instead of decoding an absent payload.
+  if (typeof data.content !== 'string' || !data.content || data.encoding !== 'base64') {
+    return { content: '', size: data.size, sha: data.sha, error: 'GitHub did not return inline base64 file content' };
+  }
+
   // Decode base64
   try {
-    const decoded = atob(data.content.replace(/\n/g, ''));
+    const binary = atob(data.content.replace(/\n/g, ''));
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    const decoded = new TextDecoder().decode(bytes);
     return { content: decoded, size: data.size, sha: data.sha, error: null };
   } catch {
-    return { content: '[Binary file — cannot display]', size: data.size, sha: data.sha, error: null };
+    return { content: '', size: data.size, sha: data.sha, error: 'GitHub file content was not valid base64 text' };
   }
 }
 
@@ -794,6 +805,14 @@ export async function commitMultipleFiles(
     );
     if (!refData) return { success: false, error: 'Branch not found' };
     const baseSha = refData.object.sha;
+    const { data: baseCommit, error: baseCommitError } = await ghFetch<{ tree: { sha: string } }>(
+      `/repos/${owner}/${repo}/git/commits/${encodeURIComponent(baseSha)}`,
+      token,
+    );
+    if (baseCommitError || !baseCommit?.tree?.sha) {
+      return { success: false, error: baseCommitError || 'Base commit tree not found' };
+    }
+    const baseTreeSha = baseCommit.tree.sha;
 
     // 2. Create blobs for each file
     const treeItems: { path: string; mode: string; type: string; sha: string }[] = [];
@@ -820,7 +839,7 @@ export async function commitMultipleFiles(
         Accept: 'application/vnd.github.v3+json',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ base_tree: baseSha, tree: treeItems }),
+      body: JSON.stringify({ base_tree: baseTreeSha, tree: treeItems }),
     });
     if (!treeRes.ok) return { success: false, error: 'Failed to create tree' };
     const tree = await treeRes.json();

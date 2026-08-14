@@ -1,5 +1,5 @@
 {
-  "stamp": "2026-08-05T08:38:17.804Z",
+  "stamp": "2026-08-14T08:31:24.624Z",
   "typecheck": {
     "total": 0,
     "byFile": {}
@@ -7,7 +7,6 @@
   "suites": {
     "total": 573,
     "failing": [
-      "smoke:progressive-tool-disclosure",
       "smoke:tool-result-formatters"
     ]
   },
@@ -28,7 +27,6 @@
   },
   "diff": {
     "regressions": [
-      "suite newly failing: smoke:progressive-tool-disclosure",
       "suite newly failing: smoke:tool-result-formatters",
       "invariant PASS→FAIL: memories are reachable by semantic search",
       "invariant PASS→FAIL: hot-path indexes present"
@@ -37,6 +35,8 @@
       "invariant FAIL→PASS: recent memories are traceable to the run that produced them"
     ],
     "known": [],
-    "flaky": []
+    "flaky": [
+      "smoke:progressive-tool-disclosure"
+    ]
   }
 }

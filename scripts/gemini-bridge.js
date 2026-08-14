@@ -650,13 +650,9 @@ async function launchGeminiCliSessions(data) {
 }
 
 function findLaunchedGeminiSession(sessionId) {
-  const key = String(sessionId || '').trim().toLowerCase();
-  if (!key) return null;
-  return cachedSessions.find((s) =>
-    String(s.sessionId || '').toLowerCase() === key
-    || String(s.displayName || '').toLowerCase() === key
-    || String(s.sessionId || '').toLowerCase().startsWith(key)
-  ) || null;
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  const matches = cachedSessions.filter((session) => session.sessionId === sessionId);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function buildGeminiFollowupPrompt(message) {
@@ -668,8 +664,8 @@ function buildGeminiFollowupPrompt(message) {
 }
 
 async function sendToLaunchedGeminiSession(data) {
-  const session = findLaunchedGeminiSession(data.sessionId || data.target || data.displayName);
-  if (!session) return { ok: false, error: 'Gemini CLI session not found.' };
+  const session = findLaunchedGeminiSession(data.sessionId);
+  if (!session) return { ok: false, error: 'An exact Gemini CLI session id is required.' };
   if (!session.terminalTitle) {
     return {
       ok: false,

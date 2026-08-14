@@ -251,7 +251,7 @@ async function handleCat(
 ): Promise<GitHubCommandResult> {
   try {
     const { content, size, sha, error } = await getFileContent(
-      token, repo.owner, repo.repo, filePath,
+      token, repo.owner, repo.repo, filePath, repo.branch,
     );
     if (error) return errorResult(error);
 
@@ -280,7 +280,7 @@ async function handleEdit(
 ): Promise<GitHubCommandResult> {
   try {
     const { content, sha, size, error } = await getFileContent(
-      token, repo.owner, repo.repo, filePath,
+      token, repo.owner, repo.repo, filePath, repo.branch,
     );
     if (error) return errorResult(error);
 

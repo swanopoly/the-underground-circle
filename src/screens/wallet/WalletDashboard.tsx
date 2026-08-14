@@ -558,8 +558,8 @@ export default function WalletDashboard({
           style={s.actionBtn}
           onPress={() => setActiveTab('swap')}
         >
-          <View style={[s.actionBtnIcon, { backgroundColor: '#22d3ee20' }]}>
-            <Text style={[s.actionBtnEmoji, { color: '#22d3ee' }]}>⇄</Text>
+          <View style={[s.actionBtnIcon, { backgroundColor: '#6366f120' }]}>
+            <Text style={[s.actionBtnEmoji, { color: '#6366f1' }]}>⇄</Text>
           </View>
           <Text style={s.actionBtnLabel}>SWAP</Text>
         </Pressable>
@@ -1271,11 +1271,11 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   swapArrowText: { color: '#888', fontSize: 14 },
-  swapInfo: { alignItems: 'center', padding: 12, backgroundColor: '#22d3ee10', borderRadius: 8, marginBottom: 16 },
-  swapInfoText: { color: '#22d3ee', fontSize: 12, fontWeight: '600' },
+  swapInfo: { alignItems: 'center', padding: 12, backgroundColor: '#6366f110', borderRadius: 8, marginBottom: 16 },
+  swapInfoText: { color: '#6366f1', fontSize: 12, fontWeight: '600' },
   swapInfoSubtext: { color: '#6f6f6f', fontSize: 10, marginTop: 2 },
   swapBtn: {
-    backgroundColor: '#22d3ee', borderRadius: 12, paddingVertical: 16, alignItems: 'center',
+    backgroundColor: '#6366f1', borderRadius: 12, paddingVertical: 16, alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   swapBtnDisabled: { backgroundColor: '#000000', opacity: 0.5 },

@@ -3311,6 +3311,12 @@ export async function dispatchAuthorizedComputerAppMutation<T, TArgs>(args: {
   handler: (
     sealedArgs: ComputerAppSealedMutationArgs<TArgs>,
   ) => T | Promise<T>;
+  /**
+   * Transient final-entry fence (for example Chat STOP). It is evaluated only
+   * after all asynchronous argument binding and immediately before consuming
+   * the authorization/entering the handler. False leaves the app untouched.
+   */
+  shouldEnterHandler?: () => boolean;
   /** Test-only deterministic clock; production callers should omit it. */
   now?: string | number;
 }): Promise<ComputerAppMutationDispatchResult<T>> {
@@ -3401,6 +3407,10 @@ export async function dispatchAuthorizedComputerAppMutation<T, TArgs>(args: {
     || liveClaim.expiresAtMs < handlerEntryMs
   ) {
     throw new Error('Computer app mutation dispatch refused: authorization or idempotency reservation changed while binding handler arguments.');
+  }
+  if (args.shouldEnterHandler && args.shouldEnterHandler() !== true) {
+    releaseUndispatchedClaim();
+    throw new Error('Computer app mutation dispatch refused: transient handler-entry authority was revoked before dispatch.');
   }
   // Consume synchronously before invoking/awaiting the handler so concurrent
   // callers cannot reuse one allowed object to duplicate a side effect.

@@ -241,7 +241,7 @@ export default function SearchModal({ circleId, visible, onClose, onSelect, onAc
               {recentForRender.length > 0 && (
                 <View style={{ gap: 2 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingRight: 14 }}>
-                    <Text style={[s.groupLabel, { color: "#22d3ee" }]}>Recent</Text>
+                    <Text style={[s.groupLabel, { color: "#6366f1" }]}>Recent</Text>
                     <Pressable
                       onPress={() => { clearRecentActions(); setRecentActions([]); }}
                       style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}
@@ -262,7 +262,7 @@ export default function SearchModal({ circleId, visible, onClose, onSelect, onAc
                         style={[s.row, active && s.rowActive]}
                       >
                         <View style={[s.kindChip, { borderColor: "#6366f160" }]}>
-                          <Text style={[s.kindChipText, { color: "#22d3ee" }]}>↺</Text>
+                          <Text style={[s.kindChipText, { color: "#6366f1" }]}>↺</Text>
                         </View>
                         <View style={{ flex: 1, minWidth: 0 }}>
                           <Text style={s.rowTitle} numberOfLines={1}>{a.label}</Text>

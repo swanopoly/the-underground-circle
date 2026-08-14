@@ -42,6 +42,7 @@ import type { ChatAutomationOutcome } from './runChatAutomationPlan';
 import type { ChatFailureRecoveryOption } from './chatFailureRecovery';
 import type { StreamChatResult } from './swanbotStream';
 import type { SwanBotStructuredResponse } from './swanbot';
+import type { OpenSwanTerminalReceipt } from './openswanSessionRuntimeAdapters';
 import type { AdvancedCommandResult } from './advancedChatCommands';
 import type { ConversationalIntentResult } from './conversationalRouter';
 import {
@@ -403,6 +404,71 @@ export function normalizeStructuredResponse(
     data: {
       ...(response.tool_actions?.length ? { toolActionCount: response.tool_actions.length } : {}),
       ...(response.artifacts?.length ? { artifactCount: response.artifacts.length } : {}),
+    },
+  };
+}
+
+/**
+ * OpenSwan's session runtime owns terminal truth for its typed tool loop.
+ * Unlike `normalizeStructuredResponse`, this adapter must never infer success
+ * from assistant prose: capped, guarded, edge-failed, and cancelled turns can
+ * all contain useful text while remaining non-complete.
+ */
+export function normalizeOpenSwanTerminalOutcome(
+  response: SwanBotStructuredResponse & { terminal: OpenSwanTerminalReceipt },
+): ChatLaneOutcome {
+  const terminal = response.terminal;
+  const fallback = response.routing?.routing_fallback;
+  const servedBy: ChatLaneServedBy = {
+    model: response.routing?.provider_model || response.usage?.model || null,
+    transport: response.routing?.provider_routed || 'openswan',
+    ...(fallback
+      ? { fallback: true, fallbackReason: `${fallback.provider}: ${fallback.reason}` }
+      : {}),
+  };
+
+  const base = {
+    lane: 'openswan_v2' as const,
+    message: clipMessage(response.response, terminal.state === 'succeeded' ? '(done)' : '(OpenSwan did not finish this turn)'),
+    recoveryOptions: [] as ChatFailureRecoveryOption[],
+    servedBy,
+    data: {
+      openSwanTerminalState: terminal.state,
+      openSwanTerminalReason: terminal.reason,
+      completionVerified: terminal.completionVerified,
+      resumable: terminal.resumable,
+      ...(terminal.checkpoint ? { checkpoint: terminal.checkpoint } : {}),
+      ...(response.tool_actions?.length ? { toolActionCount: response.tool_actions.length } : {}),
+      ...(response.artifacts?.length ? { artifactCount: response.artifacts.length } : {}),
+    },
+  };
+
+  if (terminal.state === 'succeeded' && terminal.completionVerified) {
+    return { ...base, status: 'completed' };
+  }
+
+  if (terminal.state === 'failed') {
+    return {
+      ...base,
+      status: 'failed',
+      recovery: {
+        recoverableBy: 'user',
+        retrySideEffectSafe: false,
+        reason: `openswan_${terminal.reason}`,
+      },
+    };
+  }
+
+  // Partial and cancelled turns are policy/user terminals rather than lane
+  // transport failures. Keep them neutral in lane-health while retaining the
+  // richer state in `data` for Chat outcome/recovery presentation.
+  return {
+    ...base,
+    status: 'blocked',
+    recovery: {
+      recoverableBy: 'user',
+      retrySideEffectSafe: false,
+      reason: `openswan_${terminal.reason}`,
     },
   };
 }

@@ -76,7 +76,7 @@ export const HF_CATEGORIES: { key: HFCategory; label: string; icon: string; colo
   { key: 'text2text-generation', label: 'Text-to-Text', icon: 'T', color: '#6366f1' },
   { key: 'text-to-image', label: 'Image Gen', icon: 'I', color: '#ec4899' },
   { key: 'image-to-text', label: 'Vision', icon: 'V', color: '#f59e0b' },
-  { key: 'translation', label: 'Translation', icon: 'Tr', color: '#22d3ee' },
+  { key: 'translation', label: 'Translation', icon: 'Tr', color: '#6366f1' },
   { key: 'summarization', label: 'Summarize', icon: 'S', color: '#a855f7' },
   { key: 'all', label: 'All Types', icon: '*', color: '#a0a0b0' },
 ];

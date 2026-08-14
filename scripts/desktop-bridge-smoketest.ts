@@ -335,6 +335,49 @@ const validateInstalledAppQueryName = extractBridgeFunction<(name: unknown) => s
 const shouldUseInstalledAppsCache = extractBridgeFunction<(cache: unknown, nowMs: number, ttlMs: number) => boolean>('shouldUseInstalledAppsCache');
 const shellSingleQuote = extractBridgeFunction<(s: unknown) => string>('shellSingleQuote');
 
+// Execute the shipped version-aware app-candidate ranker. Adobe Illustrator
+// keeps its release year in the containing directory while both inner bundles
+// are named `Adobe Illustrator.app`; an explicit 2026 request must never pick
+// the first 2025 directory encountered by the filesystem walk.
+{
+  const start = bridgeSource.indexOf('function normalizeMacAppName');
+  const end = bridgeSource.indexOf('function resolveInstalledMacApp', start);
+  assert(start >= 0 && end > start, 'installed: version-aware resolver helpers are locatable');
+  // eslint-disable-next-line no-new-func
+  const rankMacAppCandidate = new Function(
+    `${bridgeSource.slice(start, end)}; return rankMacAppCandidate;`,
+  )() as (
+    query: string,
+    candidate: { name: string; appPath: string },
+  ) => { score: number; versionRank: number };
+  const illustrator2025 = {
+    name: 'Adobe Illustrator',
+    appPath: '/Applications/Adobe Illustrator 2025/Adobe Illustrator.app',
+  };
+  const illustrator2026 = {
+    name: 'Adobe Illustrator',
+    appPath: '/Applications/Adobe Illustrator 2026/Adobe Illustrator.app',
+  };
+  const exact2026Old = rankMacAppCandidate('Adobe Illustrator 2026', illustrator2025);
+  const exact2026Current = rankMacAppCandidate('Adobe Illustrator 2026', illustrator2026);
+  assert(
+    exact2026Current.score > exact2026Old.score && exact2026Current.versionRank === 2026,
+    'installed: explicit Illustrator 2026 request selects the 2026 directory',
+  );
+  const exact2025Old = rankMacAppCandidate('Adobe Illustrator 2025', illustrator2025);
+  const exact2025Current = rankMacAppCandidate('Adobe Illustrator 2025', illustrator2026);
+  assert(
+    exact2025Old.score > exact2025Current.score && exact2025Old.versionRank === 2025,
+    'installed: explicit Illustrator 2025 request still selects the 2025 directory',
+  );
+  const genericOld = rankMacAppCandidate('Adobe Illustrator', illustrator2025);
+  const genericCurrent = rankMacAppCandidate('Adobe Illustrator', illustrator2026);
+  assert(
+    genericOld.score === genericCurrent.score && genericCurrent.versionRank > genericOld.versionRank,
+    'installed: unversioned Illustrator request retains latest-version tie-break',
+  );
+}
+
 // dedupe: case-insensitive, strips .app, bounded, sorted, truncated flag
 {
   const r = dedupeInstalledAppEntries([

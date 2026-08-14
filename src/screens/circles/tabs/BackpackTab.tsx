@@ -22,7 +22,6 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useBackpackData } from '../../../hooks/useBackpackData';
-import StatCube from '../../../components/StatCube';
 import {
   PIXEL_COLORS, PIXEL_ICONS, GRID, PX,
   pixelCard, pixelInset, pixelHeader, pixelLabel, pixelBody, pixelMuted,
@@ -78,11 +77,11 @@ const COMPARTMENTS: {
   { key: 'performance', label: 'Performance',      iconLabel: '#',  color: '#fbbf24', description: 'Top performers & metrics' },
   { key: 'projects',    label: 'Projects',         iconLabel: '[]', color: '#6366f1', description: 'Tags, memory & project rooms' },
   { key: 'analytics',   label: 'Analytics',        iconLabel: '//', color: '#a855f7', description: 'Deep office analytics' },
-  { key: 'canvas',      label: 'Canvas',           iconLabel: '::',  color: '#22d3ee', description: 'Pixel agent visualization' },
+  { key: 'canvas',      label: 'Canvas',           iconLabel: '::',  color: '#6366f1', description: 'Pixel agent visualization' },
   { key: 'prompts',     label: 'Prompts',          iconLabel: 'P',  color: '#f43f5e', description: 'Prompt library & management' },
   { key: 'llm-bench',   label: 'LLM Bench',        iconLabel: '|=|', color: '#3b82f6', description: 'BlackSwan vs industry models' },
   { key: 'model-lab',   label: 'Model Lab',        iconLabel: '🧬',  color: '#8b5cf6', description: 'Train, optimize & deploy custom LLMs' },
-  { key: 'trading',     label: 'Trading Bot',      iconLabel: '◎',   color: '#22d3ee', description: 'Solana trading, DCA, alerts & P&L' },
+  { key: 'trading',     label: 'Trading Bot',      iconLabel: '◎',   color: '#6366f1', description: 'Solana trading, DCA, alerts & P&L' },
   { key: 'devices',     label: 'Devices',          iconLabel: '🖨',   color: '#a855f7', description: 'Printers, 3D printers, serial & USB' },
 ];
 
@@ -250,78 +249,94 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
     : 100;
   // Format tokens
   const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}K` : String(n);
+  const summaryMetrics: Array<{
+    label: string;
+    value: string;
+    detail: string;
+    color: string;
+    target: Compartment;
+  }> = [
+    {
+      label: 'Spend today',
+      value: `$${data.periodCosts.today.toFixed(2)}`,
+      detail: `$${data.periodCosts.week.toFixed(2)} this week`,
+      color: '#f59e0b',
+      target: 'cost',
+    },
+    {
+      label: 'Agents',
+      value: String(data.agentCount),
+      detail: `${activeAgents} active`,
+      color: '#6366f1',
+      target: 'farm',
+    },
+    {
+      label: 'Tokens today',
+      value: fmtTokens(data.totalTokensToday),
+      detail: `${data.totalMessagesToday} messages`,
+      color: '#3b82f6',
+      target: 'traces',
+    },
+    {
+      label: 'Health',
+      value: `${healthPct}%`,
+      detail: `${healthyAgents}/${data.enrichedAgents.length || 1} healthy`,
+      color: healthPct >= 90 ? '#22c55e' : healthPct >= 70 ? '#f59e0b' : '#ef4444',
+      target: 'farm',
+    },
+  ];
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
-      {/* ─── Header — pixel-styled ─── */}
+      {/* ─── Backpack overview ─── */}
       <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <View style={styles.headerPixelIcon}>
-            <Text style={styles.headerPixelChar}>.</Text>
-          </View>
-          <View>
-            <Text style={styles.headerTitle}>BACKPACK</Text>
-            <Text style={styles.headerSubtitle}>
-              {data.lastRefreshed ? `.web Digital Brain updated ${new Date(data.lastRefreshed).toLocaleTimeString()}` : '.web Digital Brain for this circle'}
-            </Text>
-          </View>
+        <View style={styles.headerCopy}>
+          <Text style={styles.headerEyebrow}>PRIVATE WORKSPACE</Text>
+          <Text style={styles.headerTitle}>Backpack</Text>
+          <Text style={styles.headerSubtitle}>
+            {data.lastRefreshed
+              ? `Your circle snapshot, updated ${new Date(data.lastRefreshed).toLocaleTimeString()}`
+              : 'Your digital brain, activity, and tools in one place.'}
+          </Text>
         </View>
-        <Pressable onPress={data.refresh} style={styles.refreshBtn}>
-          <Text style={styles.refreshText}>↻</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Refresh Backpack data"
+          onPress={data.refresh}
+          style={({ hovered, pressed }: any) => [
+            styles.refreshBtn,
+            hovered && Platform.OS === 'web' ? styles.refreshBtnHover : null,
+            pressed ? styles.refreshBtnPressed : null,
+          ]}
+        >
+          <Text style={styles.refreshIcon}>↻</Text>
+          <Text style={styles.refreshText}>Refresh</Text>
         </Pressable>
       </View>
 
-      <SecondBrainDashboard
-        circleId={circleId}
-        userId={data.currentUserId}
-        accentColor={accentColor}
-        onOpenCompartment={(key) => setActiveCompartment(key as Compartment)}
-      />
-
-      {/* ─── Journey Dashboard — Pixel Stat Blocks ─── */}
-      <View style={styles.statsSection}>
-        <Text style={styles.sectionLabel}>JOURNEY DASHBOARD</Text>
-        <View style={[styles.statsGrid, isDesktop && styles.statsGridDesktop]}>
-          <StatCube
-            icon="$"
-            label="Spend"
-            value={`$${data.periodCosts.today.toFixed(2)}`}
-            subtitle={`$${data.periodCosts.week.toFixed(2)} this week`}
-            color="#f59e0b"
-            onPress={() => setActiveCompartment('cost')}
-            delay={0}
-          />
-          <StatCube
-            icon="A"
-            label="Agents"
-            value={String(data.agentCount)}
-            subtitle={`${activeAgents} active`}
-            color="#6366f1"
-            onPress={() => setActiveCompartment('farm')}
-            delay={100}
-          />
-          <StatCube
-            icon="T"
-            label="Tokens"
-            value={fmtTokens(data.totalTokensToday)}
-            subtitle={`${data.totalMessagesToday} msgs today`}
-            color="#3b82f6"
-            onPress={() => setActiveCompartment('traces')}
-            delay={200}
-          />
-          <StatCube
-            icon="+"
-            label="Health"
-            value={`${healthPct}%`}
-            subtitle={`${healthyAgents}/${data.enrichedAgents.length || 1}`}
-            color={healthPct >= 90 ? '#22c55e' : healthPct >= 70 ? '#f59e0b' : '#ef4444'}
-            onPress={() => setActiveCompartment('farm')}
-            delay={300}
-          />
-        </View>
+      <View style={[styles.summaryBar, !isDesktop && styles.summaryBarCompact]}>
+        {summaryMetrics.map(metric => (
+          <Pressable
+            key={metric.label}
+            accessibilityRole="button"
+            onPress={() => setActiveCompartment(metric.target)}
+            style={({ hovered, pressed }: any) => [
+              styles.summaryMetric,
+              !isDesktop && styles.summaryMetricCompact,
+              hovered && Platform.OS === 'web' ? styles.summaryMetricHover : null,
+              pressed ? styles.summaryMetricPressed : null,
+            ]}
+          >
+            <View style={styles.summaryMetricLabelRow}>
+              <View style={[styles.summaryMetricDot, { backgroundColor: metric.color }]} />
+              <Text style={styles.summaryMetricLabel}>{metric.label}</Text>
+            </View>
+            <Text style={styles.summaryMetricValue}>{metric.value}</Text>
+            <Text style={styles.summaryMetricDetail}>{metric.detail}</Text>
+          </Pressable>
+        ))}
       </View>
 
-      {/* ─── Budget Alert (if any) ─── */}
       {data.budgetAlerts.length > 0 && (
         <View style={[styles.alertBanner, {
           borderColor: data.budgetAlerts[0].level === 'critical' ? '#ef4444' :
@@ -334,51 +349,54 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
         </View>
       )}
 
-      {/* ─── Recent Activity Feed ─── */}
-      {data.recentActivity.length > 0 && (
-        <View style={styles.activitySection}>
-          <Text style={styles.sectionLabel}>RECENT ACTIVITY</Text>
-          {data.recentActivity.slice(0, 5).map((act, i) => (
-            <View key={i} style={styles.activityRow}>
-              <View style={[styles.activityDot, { backgroundColor: act.color }]} />
-              <Text style={styles.activityText} numberOfLines={1}>{act.text}</Text>
-              <Text style={styles.activityTime}>{act.time}</Text>
+      <SecondBrainDashboard
+        circleId={circleId}
+        userId={data.currentUserId}
+        accentColor={accentColor}
+        onOpenCompartment={(key) => setActiveCompartment(key as Compartment)}
+      />
+
+      <View style={[styles.secondaryGrid, isDesktop && styles.secondaryGridDesktop]}>
+        {data.recentActivity.length > 0 && (
+          <View style={styles.activitySection}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionLabel}>Recent activity</Text>
+              <Text style={styles.sectionMeta}>Latest {Math.min(3, data.recentActivity.length)}</Text>
             </View>
-          ))}
-        </View>
-      )}
+            {data.recentActivity.slice(0, 3).map((act, i) => (
+              <View key={i} style={styles.activityRow}>
+                <View style={[styles.activityDot, { backgroundColor: act.color }]} />
+                <Text style={styles.activityText} numberOfLines={1}>{act.text}</Text>
+                <Text style={styles.activityTime}>{act.time}</Text>
+              </View>
+            ))}
+          </View>
+        )}
 
-      {/* ─── Bottom Backpack Tabs ─── */}
-      <View style={styles.bottomTabs}>
-        <View>
-          <Text style={styles.sectionLabel}>BACKPACK TOOLS</Text>
-          <Text style={styles.sectionHint}>Digital Brain stays primary. Open the older compartments from here.</Text>
+        <View style={styles.bottomTabs}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionLabel}>Tools</Text>
+            <Text style={styles.sectionMeta}>{COMPARTMENTS.length} available</Text>
+          </View>
+          <Text style={styles.sectionHint}>Open a focused workspace without leaving your Backpack.</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bottomTabsRow}>
+            {COMPARTMENTS.map((comp) => (
+              <Pressable
+                key={comp.key}
+                accessibilityRole="button"
+                onPress={() => setActiveCompartment(comp.key)}
+                style={({ hovered, pressed }: any) => [
+                  styles.bottomTab,
+                  hovered && Platform.OS === 'web' ? styles.bottomTabHover : null,
+                  pressed ? styles.bottomTabPressed : null,
+                ]}
+              >
+                <View style={[styles.bottomTabDot, { backgroundColor: comp.color }]} />
+                <Text style={styles.bottomTabLabel}>{comp.label}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
         </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bottomTabsRow}>
-          {COMPARTMENTS.map((comp) => (
-            <Pressable
-              key={comp.key}
-              onPress={() => setActiveCompartment(comp.key)}
-              style={({ hovered, pressed }: any) => [
-                styles.bottomTab,
-                { borderColor: comp.color + '38' },
-                hovered && Platform.OS === 'web' ? { backgroundColor: comp.color + '12', transform: [{ translateY: -1 }] } as any : null,
-                pressed && Platform.OS === 'web' ? { transform: [{ scale: 0.98 }] } as any : null,
-              ]}
-            >
-              <Text style={[styles.bottomTabIcon, { color: comp.color }]}>{comp.iconLabel}</Text>
-              <Text style={styles.bottomTabLabel}>{comp.label}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      </View>
-
-      {/* ─── Pack Status Footer ─── */}
-      <View style={styles.packStatus}>
-        <View style={styles.packDivider} />
-        <Text style={styles.packStatusText}>
-          [{COMPARTMENTS.length}] compartments packed :: {data.sessionCount} sessions tracked
-        </Text>
       </View>
     </ScrollView>
   );
@@ -449,73 +467,96 @@ function CompartmentCard({
 // ─── Styles ───────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: PIXEL_COLORS.bg0 },
-  scrollContent: { paddingBottom: 40 },
+  container: { flex: 1, backgroundColor: '#07090d' },
+  scrollContent: { paddingBottom: 48 },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
   loadingText: { color: PIXEL_COLORS.text2, fontSize: 12, fontFamily: 'monospace' },
 
-  // Header — pixel-art styled
+  // Overview header
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-end',
+    flexWrap: 'wrap',
+    gap: GRID.md,
     paddingHorizontal: GRID.lg,
-    paddingTop: GRID.lg,
-    paddingBottom: GRID.md,
+    paddingTop: 28,
+    paddingBottom: 18,
   },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: GRID.md },
-  headerPixelIcon: {
-    width: 32,
-    height: 32,
-    backgroundColor: PIXEL_COLORS.indigo + '18',
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.indigo + '40',
-    borderRadius: 2,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  headerPixelChar: {
-    color: PIXEL_COLORS.indigo,
-    fontSize: 14,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  headerTitle: {
-    color: PIXEL_COLORS.text0,
-    fontSize: 16,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
-  headerSubtitle: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace', marginTop: 2 },
-  refreshBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 2,
-    backgroundColor: PIXEL_COLORS.bg2,
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.border1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  refreshText: { color: PIXEL_COLORS.text2, fontSize: 16, fontFamily: 'monospace' },
-
-  // Stats
-  statsSection: { paddingHorizontal: GRID.lg, marginBottom: GRID.xl },
-  sectionLabel: {
-    color: PIXEL_COLORS.text2,
+  headerCopy: { flex: 1, minWidth: 240 },
+  headerEyebrow: {
+    color: '#788398',
     fontSize: 10,
     fontWeight: '700',
-    fontFamily: 'monospace',
-    letterSpacing: 2,
-    marginBottom: GRID.sm,
-    textTransform: 'uppercase',
+    letterSpacing: 1.5,
+    marginBottom: 6,
   },
-  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID.sm },
-  statsGridDesktop: { flexWrap: 'nowrap' },
+  headerTitle: {
+    color: '#f7f8fb',
+    fontSize: 30,
+    lineHeight: 35,
+    fontWeight: '700',
+    letterSpacing: -0.8,
+  },
+  headerSubtitle: { color: '#8f9aae', fontSize: 13, lineHeight: 19, marginTop: 4 },
+  refreshBtn: {
+    minHeight: 40,
+    borderRadius: 10,
+    backgroundColor: '#0f131c',
+    borderWidth: 1,
+    borderColor: '#242b38',
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    gap: 7,
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.16s ease' } as any : {}),
+  },
+  refreshBtnHover: { backgroundColor: '#151a25', borderColor: '#343d4e' },
+  refreshBtnPressed: { opacity: 0.78, transform: [{ scale: 0.98 }] },
+  refreshIcon: { color: '#aab4c6', fontSize: 15 },
+  refreshText: { color: '#dce2ec', fontSize: 12, fontWeight: '600' },
 
-  // Alert — pixel border
+  // Circle snapshot
+  summaryBar: {
+    marginHorizontal: GRID.lg,
+    marginBottom: 18,
+    padding: 4,
+    flexDirection: 'row',
+    gap: 4,
+    borderWidth: 1,
+    borderColor: '#1b2230',
+    borderRadius: 16,
+    backgroundColor: '#0b0f16',
+  },
+  summaryBarCompact: { flexWrap: 'wrap' },
+  summaryMetric: {
+    flex: 1,
+    minWidth: 120,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    gap: 3,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.16s ease' } as any : {}),
+  },
+  summaryMetricCompact: { flexBasis: '46%' },
+  summaryMetricHover: { backgroundColor: '#121722' },
+  summaryMetricPressed: { backgroundColor: '#161c28', opacity: 0.86 },
+  summaryMetricLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  summaryMetricDot: { width: 6, height: 6, borderRadius: 999 },
+  summaryMetricLabel: { color: '#8d98ab', fontSize: 11, fontWeight: '600' },
+  summaryMetricValue: { color: '#f2f4f8', fontSize: 22, lineHeight: 27, fontWeight: '700', letterSpacing: -0.35 },
+  summaryMetricDetail: { color: '#667186', fontSize: 10, lineHeight: 15 },
+
+  sectionLabel: {
+    color: '#e5e9f0',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: GRID.sm },
+  sectionMeta: { color: '#657086', fontSize: 10, fontWeight: '500' },
+
+  // Budget alert
   alertBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -523,8 +564,8 @@ const styles = StyleSheet.create({
     marginHorizontal: GRID.lg,
     marginBottom: GRID.lg,
     padding: GRID.md,
-    borderWidth: 2,
-    borderRadius: 2,
+    borderWidth: 1,
+    borderRadius: 12,
   },
   alertIcon: {
     color: '#f59e0b',
@@ -534,7 +575,7 @@ const styles = StyleSheet.create({
     width: 20,
     textAlign: 'center',
   },
-  alertText: { flex: 1, color: PIXEL_COLORS.text1, fontSize: 12, fontFamily: 'monospace' },
+  alertText: { flex: 1, color: '#dce2eb', fontSize: 12, lineHeight: 18 },
 
   // Compartments
   compartmentsSection: { paddingHorizontal: GRID.lg },
@@ -544,7 +585,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     marginBottom: GRID.sm,
   },
-  sectionHint: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace', marginTop: -4 },
+  sectionHint: { color: '#748096', fontSize: 11, lineHeight: 16 },
   viewToggle: {
     paddingVertical: 4,
     paddingHorizontal: GRID.sm,
@@ -710,15 +751,29 @@ const styles = StyleSheet.create({
     borderColor: PIXEL_COLORS.bg0,
   },
 
-  // Recent Activity
-  activitySection: { paddingHorizontal: GRID.lg, marginTop: GRID.lg },
+  // Secondary dashboard content
+  secondaryGrid: {
+    marginHorizontal: GRID.lg,
+    gap: GRID.md,
+  },
+  secondaryGridDesktop: { flexDirection: 'row', alignItems: 'stretch' },
+  activitySection: {
+    flex: 1,
+    minWidth: 280,
+    padding: GRID.md,
+    borderWidth: 1,
+    borderColor: '#1b2230',
+    borderRadius: 14,
+    backgroundColor: '#0b0f16',
+    gap: 4,
+  },
   activityRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: GRID.sm,
-    paddingVertical: 6,
+    paddingVertical: 9,
     borderBottomWidth: 1,
-    borderBottomColor: PIXEL_COLORS.border0,
+    borderBottomColor: '#171d28',
   },
   activityDot: {
     width: 6,
@@ -728,66 +783,51 @@ const styles = StyleSheet.create({
   activityText: {
     flex: 1,
     fontSize: 11,
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text1,
+    color: '#b8c1cf',
   },
   activityTime: {
     fontSize: 10,
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text3,
+    color: '#687388',
   },
 
-  // Bottom tabs — secondary Backpack tools live below the Digital Brain.
+  // Focused tool launcher
   bottomTabs: {
-    marginHorizontal: GRID.lg,
-    marginTop: GRID.xl,
+    flex: 1.5,
+    minWidth: 280,
     padding: GRID.md,
-    gap: GRID.sm,
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 2,
-    backgroundColor: PIXEL_COLORS.bg1,
+    gap: 7,
+    borderWidth: 1,
+    borderColor: '#1b2230',
+    borderRadius: 14,
+    backgroundColor: '#0b0f16',
   },
   bottomTabsRow: {
     flexDirection: 'row',
-    gap: GRID.sm,
-    paddingRight: GRID.md,
+    gap: 7,
+    paddingRight: GRID.sm,
+    paddingTop: 3,
   },
   bottomTab: {
-    minWidth: 112,
-    minHeight: 66,
-    borderWidth: 2,
-    borderRadius: 2,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingVertical: GRID.sm,
-    paddingHorizontal: GRID.md,
+    minHeight: 36,
+    borderWidth: 1,
+    borderColor: '#232b39',
+    borderRadius: 999,
+    backgroundColor: '#10151e',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
+    gap: 7,
     ...(Platform.OS === 'web' ? { transition: 'all 0.16s ease', cursor: 'pointer' } as any : {}),
   },
-  bottomTabIcon: {
-    fontSize: 14,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
+  bottomTabHover: { backgroundColor: '#171d28', borderColor: '#343d4d' },
+  bottomTabPressed: { opacity: 0.78, transform: [{ scale: 0.98 }] },
+  bottomTabDot: { width: 6, height: 6, borderRadius: 999 },
   bottomTabLabel: {
-    color: PIXEL_COLORS.text2,
-    fontSize: 9,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 0.4,
+    color: '#b8c1cf',
+    fontSize: 10,
+    fontWeight: '600',
     textAlign: 'center',
   },
-
-  // Pack Status Footer
-  packStatus: { paddingHorizontal: GRID.lg, paddingVertical: GRID.xl, alignItems: 'center' },
-  packDivider: {
-    width: 48,
-    height: 2,
-    backgroundColor: PIXEL_COLORS.border0,
-    borderRadius: 0,
-    marginBottom: GRID.md,
-  },
-  packStatusText: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace' },
 });

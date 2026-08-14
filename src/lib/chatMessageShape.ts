@@ -29,7 +29,11 @@ export function shapePersistedChatMessage(row: any, options: ChatMessageShapeOpt
     content: isBot ? stripPersistedChatBotPrefix(row?.content || '') : (row?.content || ''),
     isBot,
     isUser: row?.user_id === options.currentUserId && !isBot,
-    authorId: isBot ? null : (typeof row?.user_id === 'string' ? row.user_id : null),
+    // Preserve the database author even for bot envelopes. `isBot` controls
+    // presentation, not row ownership; reload-sensitive authority recovery
+    // must be able to prove that the bot/run row was written for the same
+    // authenticated requester instead of trusting embedded metadata alone.
+    authorId: typeof row?.user_id === 'string' ? row.user_id : null,
     userName: isBot
       ? options.botDisplayName
       : (row?.user?.display_name || row?.user?.username || fallbackUserName),

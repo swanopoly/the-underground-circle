@@ -18,7 +18,7 @@ const SECTION_TYPE_COLORS: Record<string, string> = {
   explore: '#22c55e',
   challenge: '#f59e0b',
   reflect: '#a855f7',
-  connect: '#22d3ee',
+  connect: '#6366f1',
 };
 
 // ─── Content Section Component ────────────────────────────────────────────

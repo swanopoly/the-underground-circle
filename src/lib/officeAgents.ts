@@ -54,6 +54,87 @@ export interface OfficeAgent {
   statusNote?: string;
 }
 
+/**
+ * Durable cost fields published with a Circle Office agent. The database row
+ * owns calendar-day and lifetime totals; live bridge sessions own only their
+ * cumulative session meter. Keeping those meanings separate prevents a login,
+ * bridge restart, or local-cache restore from changing a value labelled
+ * "today".
+ */
+export interface DurableOfficeAgentCostLike {
+  id?: string | null;
+  name?: string | null;
+  provider?: string | null;
+  estimated_cost_today?: number | string | null;
+  estimated_cost_total?: number | string | null;
+}
+
+function finiteNonNegativeCost(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function normalizedCostIdentity(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+/**
+ * Resolve one durable cost row without order-dependent provider fallback.
+ * Exact DB id/name wins. A provider-level fallback is allowed only when both
+ * sides are singular; multiple same-provider sessions must not all inherit the
+ * same aggregate or pick whichever DB row happened to load last.
+ */
+export function findDurableOfficeAgentCost<T extends DurableOfficeAgentCostLike>(
+  agent: Pick<OfficeAgent, 'name' | 'providerType' | 'connectionId' | 'sessionKey'>,
+  rows: readonly T[],
+  options: { liveProviderAgentCount?: number } = {},
+): T | null {
+  const candidates = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  if (agent.connectionId === 'db-agent') {
+    const exactId = candidates.filter((row) => String(row.id || '') === agent.sessionKey);
+    if (exactId.length === 1) return exactId[0];
+    if (exactId.length > 1) return null;
+  }
+
+  const agentName = normalizedCostIdentity(agent.name);
+  if (agentName) {
+    const exactName = candidates.filter((row) => normalizedCostIdentity(row.name) === agentName);
+    if (exactName.length === 1) return exactName[0];
+    if (exactName.length > 1) return null;
+  }
+
+  if (options.liveProviderAgentCount !== 1) return null;
+  const provider = normalizedCostIdentity(agent.providerType);
+  if (!provider) return null;
+  const providerRows = candidates.filter((row) => normalizedCostIdentity(row.provider) === provider);
+  return providerRows.length === 1 ? providerRows[0] : null;
+}
+
+/** Apply server-owned daily/lifetime totals while retaining session lineage. */
+export function applyDurableOfficeAgentCost(
+  agent: OfficeAgent,
+  durable: DurableOfficeAgentCostLike | null | undefined,
+): OfficeAgent {
+  const sessionCost = finiteNonNegativeCost(agent.sessionCostToday ?? agent.costToday);
+  if (!durable) {
+    const costToday = finiteNonNegativeCost(agent.costToday);
+    return {
+      ...agent,
+      costToday,
+      sessionCostToday: sessionCost,
+      costTotal: Math.max(costToday, finiteNonNegativeCost(agent.costTotal)),
+    };
+  }
+
+  const costToday = finiteNonNegativeCost(durable.estimated_cost_today);
+  return {
+    ...agent,
+    costToday,
+    sessionCostToday: sessionCost,
+    costTotal: Math.max(costToday, finiteNonNegativeCost(durable.estimated_cost_total)),
+  };
+}
+
 export const STATUS_COLORS: Record<AgentStatus, string> = {
   active: '#22c55e',
   idle: '#22c55e',
@@ -188,7 +269,7 @@ export function reconcileAgentStatusWithConnection(
 export const AGENT_COLORS = [
   '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899',
   '#14b8a6', '#f472b6', '#fb923c', '#dc2626', '#84cc16', '#38bdf8',
-  '#a855f7', '#22d3ee', '#e879f9', '#facc15',
+  '#a855f7', '#6366f1', '#e879f9', '#facc15',
 ];
 
 // Empty default — no mock data

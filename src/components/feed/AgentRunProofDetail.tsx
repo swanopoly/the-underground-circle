@@ -177,7 +177,7 @@ const s = StyleSheet.create({
     fontFamily: 'monospace',
   },
   chipTextLink: {
-    color: '#22d3ee',
+    color: '#6366f1',
     fontSize: 10,
     fontFamily: 'monospace',
     textDecorationLine: 'underline',

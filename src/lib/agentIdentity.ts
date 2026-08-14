@@ -17,7 +17,78 @@ import { getAgentIdentityKey, type AgentIdentityKeyInput } from './agentIdentity
 export { getAgentIdentityKey } from './agentIdentityKey';
 
 const STORAGE_KEY_AGENT_IDENTITY = '@agent_identity_store';
+const STORAGE_KEY_AGENT_IDENTITY_EXACT_PREFIX = '@agent_identity_store_v2';
 const TERMINAL_CONFIG_TAG_PREFIX = 'uc_terminal_config:';
+const MAX_AGENT_IDENTITY_SCOPE_PART_LENGTH = 200;
+const MAX_AGENT_IDENTITY_ACCESS_TOKEN_LENGTH = 16_384;
+const MAX_AGENT_IDENTITY_CACHE_BYTES = 4 * 1024 * 1024;
+const MAX_AGENT_IDENTITIES_PER_SCOPE = 5_000;
+
+/**
+ * A caller-captured identity authority. Exact APIs never obtain a replacement
+ * session from mutable global auth state. `circleId` scopes the device cache;
+ * the current server schema remains owner-global (`user_id, session_key`).
+ */
+export interface AgentIdentityExactAuthority {
+  userId: string;
+  accessToken: string;
+  circleId?: string | null;
+}
+
+interface NormalizedAgentIdentityExactAuthority {
+  userId: string;
+  accessToken: string;
+  circleId: string | null;
+}
+
+export interface AgentIdentityExactSyncResult {
+  ok: boolean;
+  identities: Map<string, AgentIdentity>;
+  error?: 'invalid_authority' | 'authority_mismatch' | 'server_unavailable' | 'invalid_response';
+}
+
+export interface AgentIdentityExactSaveResult {
+  ok: boolean;
+  localSaved: boolean;
+  serverSaved: boolean;
+  error?: 'invalid_authority' | 'authority_mismatch' | 'invalid_payload' | 'local_write_failed' | 'server_unavailable';
+}
+
+function normalizeAgentIdentityScopePart(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > MAX_AGENT_IDENTITY_SCOPE_PART_LENGTH) return null;
+  return normalized;
+}
+
+function normalizeAgentIdentityExactAuthority(
+  authority: AgentIdentityExactAuthority | null | undefined,
+): NormalizedAgentIdentityExactAuthority | null {
+  if (!authority || typeof authority !== 'object') return null;
+  const userId = normalizeAgentIdentityScopePart(authority.userId);
+  const accessToken = typeof authority.accessToken === 'string' ? authority.accessToken.trim() : '';
+  if (!userId || !accessToken || accessToken.length > MAX_AGENT_IDENTITY_ACCESS_TOKEN_LENGTH) return null;
+  const hasCircleId = authority.circleId !== undefined && authority.circleId !== null;
+  const circleId = hasCircleId ? normalizeAgentIdentityScopePart(authority.circleId) : null;
+  if (hasCircleId && !circleId) return null;
+  return { userId, accessToken, circleId };
+}
+
+/**
+ * Exact cache key used by authenticated callers. Returns null on an invalid
+ * boundary and intentionally never aliases the ownerless legacy key.
+ */
+export function agentIdentityExactStorageKey(
+  authority: AgentIdentityExactAuthority | null | undefined,
+): string | null {
+  const normalized = normalizeAgentIdentityExactAuthority(authority);
+  if (!normalized) return null;
+  const ownerPart = encodeURIComponent(normalized.userId);
+  const circlePart = normalized.circleId
+    ? `circle:${encodeURIComponent(normalized.circleId)}`
+    : 'account';
+  return `${STORAGE_KEY_AGENT_IDENTITY_EXACT_PREFIX}:user:${ownerPart}:${circlePart}`;
+}
 
 export type TerminalLaunchMode = 'safe' | 'auto' | 'full-auto';
 
@@ -91,7 +162,10 @@ export function applyIdentityToAgent(agent: OfficeAgent, identity?: AgentIdentit
     ...agent,
     name: identity.customName || agent.name,
     color: identity.customColor || agent.color,
-    costToday: Math.max(agent.costToday, identity.totalCostAllTime),
+    // Identity history is lifetime data. Never hydrate it into the daily
+    // field: doing so made a logout/login replace today's server total with an
+    // arbitrary cached all-time maximum.
+    costTotal: Math.max(agent.costTotal, identity.totalCostAllTime),
     tokensUsed: Math.max(agent.tokensUsed, identity.totalTokensAllTime),
     messagesProcessed: Math.max(agent.messagesProcessed, identity.totalMessages),
     spirit: identity.spiritId || agent.spirit,
@@ -173,6 +247,127 @@ export async function loadAgentIdentities(): Promise<Map<string, AgentIdentity>>
   } catch (error) {
     console.error('Failed to load agent identities:', error);
     return new Map();
+  }
+}
+
+function parseExactAgentIdentityCache(raw: string | null): Map<string, AgentIdentity> | null {
+  if (!raw) return new Map();
+  if (raw.length > MAX_AGENT_IDENTITY_CACHE_BYTES) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    if (entries.length > MAX_AGENT_IDENTITIES_PER_SCOPE) return null;
+    const identities = new Map<string, AgentIdentity>();
+    for (const [key, value] of entries) {
+      const normalizedKey = normalizeAgentIdentityScopePart(key);
+      if (
+        !normalizedKey
+        || normalizedKey !== key
+        || !value
+        || typeof value !== 'object'
+        || Array.isArray(value)
+      ) return null;
+      const identity = value as Partial<AgentIdentity>;
+      if (identity.sessionKey !== key) return null;
+      const requiredNumbers = [
+        identity.totalCostAllTime,
+        identity.totalTokensAllTime,
+        identity.totalSessionsAllTime,
+        identity.firstSeen,
+        identity.lastSeen,
+        identity.totalMessages,
+        identity.totalTurns,
+      ];
+      if (requiredNumbers.some(number => typeof number !== 'number' || !Number.isFinite(number) || number < 0)) {
+        return null;
+      }
+      identities.set(key, identity as AgentIdentity);
+    }
+    return identities;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyAgentIdentityExactAuthority(
+  input: AgentIdentityExactAuthority | null | undefined,
+): Promise<NormalizedAgentIdentityExactAuthority | null> {
+  const authority = normalizeAgentIdentityExactAuthority(input);
+  if (!authority) return null;
+  try {
+    const { data, error } = await supabase.auth.getUser(authority.accessToken);
+    if (error || !data.user || data.user.id !== authority.userId) return null;
+    return authority;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read only the cache owned by the exact verified user/circle authority.
+ * This never reads or migrates `@agent_identity_store`.
+ */
+export async function loadAgentIdentitiesExact(
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<Map<string, AgentIdentity>> {
+  const authority = await verifyAgentIdentityExactAuthority(capturedAuthority);
+  if (!authority) return new Map();
+  const key = agentIdentityExactStorageKey(authority);
+  if (!key) return new Map();
+  try {
+    return parseExactAgentIdentityCache(await storage.getItem(key)) || new Map();
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Fetch the durable owner-global identities using only the caller-captured
+ * bearer. A response containing another owner or malformed identity fails as
+ * a whole rather than being partially accepted.
+ */
+export async function syncAgentIdentitiesFromServerExact(
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSyncResult> {
+  const syntacticAuthority = normalizeAgentIdentityExactAuthority(capturedAuthority);
+  if (!syntacticAuthority) {
+    return { ok: false, identities: new Map(), error: 'invalid_authority' };
+  }
+  const authority = await verifyAgentIdentityExactAuthority(syntacticAuthority);
+  if (!authority) {
+    return { ok: false, identities: new Map(), error: 'authority_mismatch' };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('agent_identities')
+      .select('*')
+      .eq('user_id', authority.userId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error || !Array.isArray(data)) {
+      return { ok: false, identities: new Map(), error: 'server_unavailable' };
+    }
+    if (data.length > MAX_AGENT_IDENTITIES_PER_SCOPE) {
+      return { ok: false, identities: new Map(), error: 'invalid_response' };
+    }
+    const identities = new Map<string, AgentIdentity>();
+    for (const row of data as Array<Record<string, unknown>>) {
+      const sessionKey = normalizeAgentIdentityScopePart(row?.session_key);
+      if (row?.user_id !== authority.userId || !sessionKey || identities.has(sessionKey)) {
+        return { ok: false, identities: new Map(), error: 'invalid_response' };
+      }
+      const identity = rowToIdentity(row);
+      if (identity.sessionKey !== sessionKey) {
+        return { ok: false, identities: new Map(), error: 'invalid_response' };
+      }
+      identities.set(sessionKey, identity);
+    }
+    const validated = parseExactAgentIdentityCache(JSON.stringify(Object.fromEntries(identities.entries())));
+    return validated && validated.size === identities.size
+      ? { ok: true, identities: validated }
+      : { ok: false, identities: new Map(), error: 'invalid_response' };
+  } catch {
+    return { ok: false, identities: new Map(), error: 'server_unavailable' };
   }
 }
 
@@ -398,6 +593,86 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
   }
 }
 
+async function persistIdentitiesToServerExact(
+  identities: Map<string, AgentIdentity>,
+  authority: NormalizedAgentIdentityExactAuthority,
+): Promise<boolean> {
+  if (_identitiesPersistDisabled) return false;
+  const rows = Array.from(identities.values()).map(identity => identityToRow(authority.userId, identity));
+  if (rows.length === 0) return true;
+  try {
+    let { error } = await supabase
+      .from('agent_identities')
+      .upsert(rows, { onConflict: 'user_id,session_key' })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error) {
+      const code = String((error as { code?: unknown }).code || '');
+      if (code === 'PGRST204' && String(error.message || '').includes('terminal_config')) {
+        const fallbackRows = rows.map(({ terminal_config, ...row }) => row);
+        const retry = await supabase
+          .from('agent_identities')
+          .upsert(fallbackRows, { onConflict: 'user_id,session_key' })
+          .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+        error = retry.error;
+        if (!error) return true;
+      }
+      if (shouldDisableIdentityPersistence(error)) disableIdentityPersistenceForSession(error);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist an exact scope synchronously enough to return a truthful receipt.
+ * Both local and durable writes are bound to the same verified captured owner;
+ * this function never re-reads the current global session.
+ */
+export async function saveAgentIdentitiesExact(
+  identities: Map<string, AgentIdentity>,
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSaveResult> {
+  const syntacticAuthority = normalizeAgentIdentityExactAuthority(capturedAuthority);
+  if (!syntacticAuthority) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+  }
+  if (!(identities instanceof Map) || identities.size > MAX_AGENT_IDENTITIES_PER_SCOPE) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  const authority = await verifyAgentIdentityExactAuthority(syntacticAuthority);
+  if (!authority) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_mismatch' };
+  }
+  const key = agentIdentityExactStorageKey(authority);
+  if (!key) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+  }
+
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(Object.fromEntries(identities.entries()));
+    if (
+      serialized.length > MAX_AGENT_IDENTITY_CACHE_BYTES
+      || parseExactAgentIdentityCache(serialized)?.size !== identities.size
+    ) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'local_write_failed' };
+    }
+    await storage.setItem(key, serialized);
+    if (await storage.getItem(key) !== serialized) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'local_write_failed' };
+    }
+  } catch {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'local_write_failed' };
+  }
+
+  const serverSaved = await persistIdentitiesToServerExact(identities, authority);
+  return serverSaved
+    ? { ok: true, localSaved: true, serverSaved: true }
+    : { ok: false, localSaved: true, serverSaved: false, error: 'server_unavailable' };
+}
+
 // ─── Update Agent Identity ─────────────────────────────────
 
 export async function updateAgentIdentity(
@@ -431,18 +706,51 @@ export async function updateAgentIdentity(
   await saveAgentIdentities(identities);
 }
 
+export async function updateAgentIdentityExact(
+  sessionKey: string,
+  updates: Partial<AgentIdentity>,
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSaveResult> {
+  const normalizedSessionKey = normalizeAgentIdentityScopePart(sessionKey);
+  if (!normalizedSessionKey) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  const identities = await loadAgentIdentitiesExact(capturedAuthority);
+  const existing = identities.get(normalizedSessionKey);
+  const now = Date.now();
+  identities.set(normalizedSessionKey, existing
+    ? { ...existing, ...updates, sessionKey: normalizedSessionKey, lastSeen: now }
+    : {
+      totalCostAllTime: 0,
+      totalTokensAllTime: 0,
+      totalSessionsAllTime: 0,
+      firstSeen: now,
+      lastSeen: now,
+      totalMessages: 0,
+      totalTurns: 0,
+      ...updates,
+      sessionKey: normalizedSessionKey,
+    });
+  return saveAgentIdentitiesExact(identities, capturedAuthority);
+}
+
 // ─── Record Agent Activity ─────────────────────────────────
 
 export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
   const sessionKey = getAgentIdentityKey(agent);
   const identities = await loadAgentIdentities();
   const existing = identities.get(sessionKey);
+  const lifetimeCost = Math.max(
+    agent.costTotal || 0,
+    agent.sessionCostToday || 0,
+    agent.costToday || 0,
+  );
   
   if (existing) {
     // Update existing identity with cumulative data
     identities.set(sessionKey, {
       ...existing,
-      totalCostAllTime: Math.max(existing.totalCostAllTime, agent.costToday),
+      totalCostAllTime: Math.max(existing.totalCostAllTime, lifetimeCost),
       totalTokensAllTime: Math.max(existing.totalTokensAllTime, agent.tokensUsed),
       totalMessages: Math.max(existing.totalMessages, agent.messagesProcessed),
       mostUsedModel: agent.model,
@@ -454,7 +762,7 @@ export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
     // New agent - create identity
     identities.set(sessionKey, {
       sessionKey,
-      totalCostAllTime: agent.costToday,
+      totalCostAllTime: lifetimeCost,
       totalTokensAllTime: agent.tokensUsed,
       totalSessionsAllTime: 1,
       firstSeen: Date.now(),
@@ -468,6 +776,49 @@ export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
   }
   
   await saveAgentIdentities(identities);
+}
+
+export async function recordAgentActivityExact(
+  agent: OfficeAgent,
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSaveResult> {
+  const sessionKey = normalizeAgentIdentityScopePart(getAgentIdentityKey(agent));
+  if (!sessionKey) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  const identities = await loadAgentIdentitiesExact(capturedAuthority);
+  const existing = identities.get(sessionKey);
+  const lifetimeCost = Math.max(
+    agent.costTotal || 0,
+    agent.sessionCostToday || 0,
+    agent.costToday || 0,
+  );
+  const now = Date.now();
+  identities.set(sessionKey, existing
+    ? {
+      ...existing,
+      totalCostAllTime: Math.max(existing.totalCostAllTime, lifetimeCost),
+      totalTokensAllTime: Math.max(existing.totalTokensAllTime, agent.tokensUsed),
+      totalMessages: Math.max(existing.totalMessages, agent.messagesProcessed),
+      mostUsedModel: agent.model,
+      boundAiProvider: existing.boundAiProvider || agent.providerType,
+      boundModel: agent.model || existing.boundModel,
+      lastSeen: now,
+    }
+    : {
+      sessionKey,
+      totalCostAllTime: lifetimeCost,
+      totalTokensAllTime: agent.tokensUsed,
+      totalSessionsAllTime: 1,
+      firstSeen: now,
+      lastSeen: now,
+      totalMessages: agent.messagesProcessed,
+      totalTurns: 0,
+      mostUsedModel: agent.model,
+      boundAiProvider: agent.providerType,
+      boundModel: agent.model,
+    });
+  return saveAgentIdentitiesExact(identities, capturedAuthority);
 }
 
 // ─── Restore Agent from Identity ──────────────────────────
@@ -517,6 +868,25 @@ export async function restoreAllAgents(agents: OfficeAgent[]): Promise<OfficeAge
   });
 }
 
+export async function restoreAllAgentsExact(
+  agents: OfficeAgent[],
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<OfficeAgent[]> {
+  const identities = await loadAgentIdentitiesExact(capturedAuthority);
+  const restored = agents.map(agent => (
+    applyIdentityToAgent(agent, getAgentIdentityByAgent(identities, agent))
+  ));
+  return restored.sort((a, b) => {
+    const idA = identities.get(getAgentIdentityKey(a));
+    const idB = identities.get(getAgentIdentityKey(b));
+    if (idA?.isPrimary && !idB?.isPrimary) return -1;
+    if (!idA?.isPrimary && idB?.isPrimary) return 1;
+    if (idA?.isCustomized && !idB?.isCustomized) return -1;
+    if (!idA?.isCustomized && idB?.isCustomized) return 1;
+    return (idB?.bondLevel || 0) - (idA?.bondLevel || 0);
+  });
+}
+
 // ─── Agent Statistics ──────────────────────────────────────
 
 export async function getAgentStats(sessionKey: string): Promise<AgentIdentity | null> {
@@ -533,6 +903,18 @@ export async function getAllAgentStats(): Promise<AgentIdentity[]> {
 
 export async function renameAgent(sessionKey: string, newName: string): Promise<void> {
   await updateAgentIdentity(sessionKey, { customName: newName, isCustomized: true });
+}
+
+export async function renameAgentExact(
+  sessionKey: string,
+  newName: string,
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSaveResult> {
+  return updateAgentIdentityExact(
+    sessionKey,
+    { customName: newName.slice(0, 200), isCustomized: true },
+    capturedAuthority,
+  );
 }
 
 // ─── Set Main Agent for Provider ──────────────────────────
@@ -570,6 +952,41 @@ export async function setMainAgentForProvider(
   await saveAgentIdentities(identities);
 }
 
+export async function setMainAgentForProviderExact(
+  sessionKey: string,
+  providerType: string,
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSaveResult> {
+  const normalizedSessionKey = normalizeAgentIdentityScopePart(sessionKey);
+  const normalizedProviderType = normalizeAgentIdentityScopePart(providerType);
+  if (!normalizedSessionKey || !normalizedProviderType) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  const identities = await loadAgentIdentitiesExact(capturedAuthority);
+  for (const [key, identity] of identities) {
+    if (identity.boundAiProvider === normalizedProviderType && identity.isPrimary) {
+      identities.set(key, { ...identity, isPrimary: false });
+    }
+  }
+  const existing = identities.get(normalizedSessionKey);
+  const now = Date.now();
+  identities.set(normalizedSessionKey, existing
+    ? { ...existing, isPrimary: true, boundAiProvider: normalizedProviderType, lastSeen: now }
+    : {
+      sessionKey: normalizedSessionKey,
+      totalCostAllTime: 0,
+      totalTokensAllTime: 0,
+      totalSessionsAllTime: 0,
+      firstSeen: now,
+      lastSeen: now,
+      totalMessages: 0,
+      totalTurns: 0,
+      isPrimary: true,
+      boundAiProvider: normalizedProviderType,
+    });
+  return saveAgentIdentitiesExact(identities, capturedAuthority);
+}
+
 // ─── Customize Agent Appearance ────────────────────────────
 
 export async function customizeAgent(
@@ -585,6 +1002,22 @@ export async function customizeAgent(
       ...appearance,
     },
   });
+}
+
+export async function customizeAgentExact(
+  sessionKey: string,
+  appearance: Partial<AgentAppearance>,
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSaveResult> {
+  const identities = await loadAgentIdentitiesExact(capturedAuthority);
+  const existing = identities.get(sessionKey);
+  return updateAgentIdentityExact(sessionKey, {
+    appearance: {
+      ...DEFAULT_APPEARANCE,
+      ...(existing?.appearance || {}),
+      ...appearance,
+    },
+  }, capturedAuthority);
 }
 
 // ─── Get All Session Keys ──────────────────────────────────

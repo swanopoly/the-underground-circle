@@ -80,7 +80,13 @@ async function main() {
     readLocalSecret,
     writeLocalSecret,
   } = require('../src/lib/localSecrets') as typeof import('../src/lib/localSecrets');
-  const { readNativeLocalSecret, writeNativeLocalSecret } = __localSecretsTestables;
+  const {
+    deleteVerifiedNativeLocalSecret,
+    readNativeLocalSecret,
+    readVerifiedNativeLocalSecret,
+    writeNativeLocalSecret,
+    writeVerifiedNativeLocalSecret,
+  } = __localSecretsTestables;
 
   const collisionCases: Array<readonly [string, string]> = [
     ['a:b', 'c'],
@@ -122,6 +128,22 @@ async function main() {
     'native secret round-trips');
   assert.equal(smokeState.calls.some((call) => call.key === historicalKey), false,
     'unreadable historical keys are never passed to SecureStore 15');
+
+  assert.equal(await writeVerifiedNativeLocalSecret(secureStoreStub, namespace, id, 'verified-native'), true,
+    'strict native authority write acknowledges an exact SecureStore readback');
+  assert.deepEqual(await readVerifiedNativeLocalSecret(secureStoreStub, namespace, id), {
+    status: 'found', value: 'verified-native',
+  }, 'strict native authority read reports exact presence');
+  smokeState.failNext = { operation: 'get', key: nativeKey };
+  assert.equal(await writeVerifiedNativeLocalSecret(secureStoreStub, namespace, id, 'unverified-native'), false,
+    'strict native write fails closed when its readback cannot be verified');
+  assert.equal(smokeState.values.has(nativeKey), false,
+    'failed strict native readback removes the unverified authority value');
+  await secureStoreStub.setItemAsync(nativeKey, 'delete-me');
+  assert.equal(await deleteVerifiedNativeLocalSecret(secureStoreStub, namespace, id), true,
+    'strict native delete acknowledges only verified absence');
+  assert.deepEqual(await readVerifiedNativeLocalSecret(secureStoreStub, namespace, id), { status: 'missing' },
+    'strict native read distinguishes absence from storage failure');
 
   const firstCollisionPair = collisionCases[0];
   const secondCollisionPair = collisionCases[1];

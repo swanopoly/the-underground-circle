@@ -89,7 +89,7 @@ export const PROMPT_CATEGORIES: PromptCategory[] = [
   },
   {
     title: 'CREATE',
-    color: '#22d3ee',
+    color: '#6366f1',
     prompts: [
       { label: 'Build Page', desc: 'Generate a webpage', text: '/build-page ' },
       { label: 'Code', desc: 'Generate code', text: '/code ' },

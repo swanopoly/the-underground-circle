@@ -2,6 +2,11 @@
  * kanban.ts — Types and config for the Trello-style Kanban board
  */
 
+import type {
+  OpenSwanTerminalReason,
+  OpenSwanTerminalState,
+} from '../lib/openswanSessionRuntimeAdapters';
+
 export type TaskStatus = 'backlog' | 'todo' | 'in_progress' | 'peer_review' | 'review' | 'approved' | 'done';
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
 
@@ -62,6 +67,22 @@ export interface TaskRunOutput {
   mark_complete?: boolean;
   needs_review?: boolean;
   artifacts?: TaskRunArtifact[];
+  handoff_status?: 'accepted' | 'outcome_unknown';
+  completion_verified?: boolean;
+  external_session_id?: string | null;
+  external_dispatch_kind?: 'sessions_send' | 'sessions_spawn' | null;
+  external_connection_id?: string | null;
+  external_provider_run_id?: string | null;
+  canonical_agent_run_id?: string | null;
+
+  /**
+   * Exact bounded OpenSwan terminal projection. Checkpoint contents never enter
+   * the task ledger; only their availability is retained for recovery UX.
+   */
+  terminal_state?: OpenSwanTerminalState;
+  terminal_reason?: OpenSwanTerminalReason;
+  terminal_resumable?: boolean;
+  terminal_checkpoint_available?: boolean;
 }
 
 export interface TaskRun {
@@ -291,6 +312,20 @@ export const MODEL_ICONS: Record<string, { icon: string; label: string; color: s
   'claude-haiku':  { icon: '\u26A1', label: 'Haiku',  color: '#f59e0b' },
   'claude-sonnet': { icon: '\u{1F3AF}', label: 'Sonnet', color: '#8b5cf6' },
   'claude-opus':   { icon: '\u{1F9E0}', label: 'Opus',   color: '#ef4444' },
+  'claude-sonnet-5': { icon: '\u{1F3AF}', label: 'Sonnet 5', color: '#8b5cf6' },
+  'claude-opus-5': { icon: '\u{1F9E0}', label: 'Opus 5', color: '#ef4444' },
+  'claude-fable-5': { icon: '\u{1F9E0}', label: 'Fable 5', color: '#7c3aed' },
+  'gpt-5.6-sol':   { icon: '\u2726', label: 'GPT-5.6 Sol', color: '#059669' },
+  'gpt-5.6-terra': { icon: '\u2726', label: 'GPT-5.6 Terra', color: '#10b981' },
+  'gpt-5.6-luna':  { icon: '\u2726', label: 'GPT-5.6 Luna', color: '#34d399' },
+  'gpt-5.5':       { icon: '\u2726', label: 'GPT-5.5', color: '#10b981' },
+  'gpt-5.5-pro':   { icon: '\u2726', label: 'GPT-5.5 Pro', color: '#059669' },
+  'gpt-5.4':       { icon: '\u2726', label: 'GPT-5.4', color: '#10b981' },
+  'gpt-5.4-mini':  { icon: '\u2726', label: 'GPT-5.4 Mini', color: '#34d399' },
+  'gpt-5.4-nano':  { icon: '\u2726', label: 'GPT-5.4 Nano', color: '#6ee7b7' },
+  'gemini-3.6-flash': { icon: '\u264A', label: 'Gemini 3.6', color: '#4285f4' },
+  'gemini-3.5-flash': { icon: '\u264A', label: 'Gemini 3.5', color: '#4285f4' },
+  'gemini-3.5-flash-lite': { icon: '\u264A', label: 'Gemini 3.5 Lite', color: '#60a5fa' },
   'gpt-4.1':       { icon: '\u2726', label: 'GPT-4.1', color: '#10b981' },
   'gpt-4o':        { icon: '\u2728', label: 'GPT-4o', color: '#10b981' },
   'o4-mini':       { icon: '\u{1F9EE}', label: 'O4 Mini', color: '#f59e0b' },

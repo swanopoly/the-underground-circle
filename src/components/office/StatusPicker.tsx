@@ -54,18 +54,22 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
   const [status, setStatus] = useState<UserStatus>(DEFAULT_STATUS);
   const [expanded, setExpanded] = useState(false);
   const [noteText, setNoteText] = useState('');
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState('');
   const expiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveStatusRef = useRef<(nextStatus: UserStatus) => void>(() => {});
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   // ─── Load current status from profile ─────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from('profiles')
           .select('user_status')
           .eq('id', userId)
           .single();
+        if (error) throw error;
         if (data?.user_status) {
           const s = data.user_status as UserStatus;
           setStatus(s);
@@ -73,7 +77,8 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
           scheduleExpiry(s);
         }
       } catch {
-        // Column may not exist yet — migration not run
+        setSaveState('error');
+        setSaveError('Presence could not be loaded. Your local selection is still available.');
       }
     })();
     return () => {
@@ -87,11 +92,11 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
     if (!s.expiresAt) return;
     const remaining = new Date(s.expiresAt).getTime() - Date.now();
     if (remaining <= 0) {
-      saveStatus({ ...DEFAULT_STATUS });
+      saveStatusRef.current({ ...DEFAULT_STATUS });
       return;
     }
     expiryTimerRef.current = setTimeout(() => {
-      saveStatus({ ...DEFAULT_STATUS });
+      saveStatusRef.current({ ...DEFAULT_STATUS });
     }, Math.min(remaining, 2_147_483_647));
   }, []);
 
@@ -100,14 +105,19 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
     setStatus(newStatus);
     setNoteText(newStatus.note || '');
     scheduleExpiry(newStatus);
+    setSaveState('saving');
+    setSaveError('');
 
     try {
-      await supabase
+      const { error } = await supabase
         .from('profiles')
         .update({ user_status: newStatus as any })
         .eq('id', userId);
+      if (error) throw error;
+      setSaveState('saved');
     } catch {
-      // Migration may not be run
+      setSaveState('error');
+      setSaveError('Presence was not saved. Check your connection and try again.');
     }
 
     // Broadcast to circle
@@ -123,6 +133,9 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
       // Best effort
     }
   }, [userId, circleId, scheduleExpiry]);
+  // Expiry timers always call the latest callback, including the current
+  // user/circle identity after a navigation change.
+  saveStatusRef.current = saveStatus;
 
   // ─── Select status mode ───────────────────────────────────────────────────
   const handleSelectMode = useCallback((mode: StatusMode) => {
@@ -164,6 +177,10 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
       <Pressable
         onPress={() => setExpanded(!expanded)}
         style={[styles.compactRow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        accessibilityRole="button"
+        accessibilityLabel={`Presence: ${currentOption.label}${status.note ? `, ${status.note}` : ''}`}
+        accessibilityHint={expanded ? 'Collapse presence settings' : 'Open presence settings'}
+        accessibilityState={{ expanded }}
       >
         <Animated.View style={[
           styles.statusDot,
@@ -179,6 +196,15 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
         ) : null}
         <Text style={styles.chevron}>{expanded ? '^' : 'v'}</Text>
       </Pressable>
+
+      {saveState === 'saving' || saveState === 'saved' ? (
+        <Text accessibilityLiveRegion="polite" style={styles.saveStatus}>
+          {saveState === 'saving' ? 'Saving presence…' : 'Presence saved'}
+        </Text>
+      ) : null}
+      {saveState === 'error' ? (
+        <Text accessibilityLiveRegion="polite" style={[styles.saveStatus, styles.saveError]}>{saveError}</Text>
+      ) : null}
 
       {/* Expanded picker */}
       {expanded && (
@@ -196,6 +222,9 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
                     isActive && { backgroundColor: opt.color + '30', borderColor: opt.color },
                     Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Set presence to ${opt.label}`}
+                  accessibilityState={{ selected: isActive }}
                 >
                   <View style={[styles.pillDot, { backgroundColor: opt.color }]} />
                   <Text style={[
@@ -220,6 +249,8 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
             maxLength={80}
             returnKeyType="done"
             onSubmitEditing={handleNoteBlur}
+            accessibilityLabel="Presence note"
+            accessibilityHint="Optional context such as reviewing a pull request"
           />
 
           {/* Timer presets */}
@@ -240,6 +271,9 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
                     isActive && { backgroundColor: accentColor + '30', borderColor: accentColor },
                     Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={preset.minutes ? `Clear presence after ${preset.label}` : 'Do not clear presence automatically'}
+                  accessibilityState={{ selected: !!isActive }}
                 >
                   <Text style={[styles.timerBtnText, isActive && { color: accentColor }]}>
                     {preset.label}
@@ -258,10 +292,10 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#0a0a0f',
+    backgroundColor: '#111827',
     borderWidth: 1,
-    borderColor: '#1a1a2e',
-    borderRadius: 2,
+    borderColor: '#ffffff18',
+    borderRadius: 12,
   },
   compactRow: {
     flexDirection: 'row',
@@ -269,7 +303,7 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 8,
     paddingVertical: 6,
-    height: 40,
+    minHeight: 44,
   },
   statusDot: {
     width: 8,
@@ -313,8 +347,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 2,
+    paddingVertical: 8,
+    minHeight: 40,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#2a2a2a',
     backgroundColor: '#111118',
@@ -335,13 +370,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#111118',
     borderWidth: 1,
     borderColor: '#2a2a2a',
-    borderRadius: 2,
+    borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 6,
     fontSize: 11,
     fontFamily: 'monospace',
     color: '#ccc',
-    height: 32,
+    minHeight: 44,
   },
   timerRow: {
     flexDirection: 'row',
@@ -357,8 +392,10 @@ const styles = StyleSheet.create({
   },
   timerBtn: {
     paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 2,
+    paddingVertical: 8,
+    minWidth: 44,
+    minHeight: 40,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: '#2a2a2a',
     backgroundColor: '#111118',
@@ -368,5 +405,14 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontFamily: 'monospace',
     color: '#888',
+  },
+  saveStatus: {
+    color: '#94a3b8',
+    fontSize: 9,
+    paddingHorizontal: 8,
+    paddingBottom: 6,
+  },
+  saveError: {
+    color: '#fca5a5',
   },
 });

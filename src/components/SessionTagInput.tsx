@@ -8,6 +8,7 @@ import {
 import {
   SessionTag, TAG_CATEGORIES, TagCategory,
   parseTagString, createTag, loadTagSuggestions,
+  type OfficeSessionStorageScope,
 } from '../lib/sessionTags';
 import SessionTagsHelp from './SessionTagsHelp';
 
@@ -16,9 +17,16 @@ interface Props {
   currentTags: SessionTag[];
   onAddTag: (tag: SessionTag) => void;
   onRemoveTag: (tagKey: string) => void;
+  storageScope?: OfficeSessionStorageScope;
 }
 
-export default function SessionTagInput({ sessionKey, currentTags, onAddTag, onRemoveTag }: Props) {
+export default function SessionTagInput({
+  sessionKey,
+  currentTags,
+  onAddTag,
+  onRemoveTag,
+  storageScope,
+}: Props) {
   const [input, setInput] = useState('');
   const [suggestions, setSuggestions] = useState<SessionTag[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -26,8 +34,14 @@ export default function SessionTagInput({ sessionKey, currentTags, onAddTag, onR
 
   // Load suggestions on mount
   useEffect(() => {
-    loadTagSuggestions().then(setSuggestions);
-  }, []);
+    let cancelled = false;
+    setSuggestions([]);
+    if (!storageScope) return () => { cancelled = true; };
+    loadTagSuggestions(storageScope).then((loaded) => {
+      if (!cancelled) setSuggestions(loaded);
+    });
+    return () => { cancelled = true; };
+  }, [storageScope?.circleId, storageScope?.userId]);
 
   // Filter suggestions based on input
   const filteredSuggestions = input.trim()

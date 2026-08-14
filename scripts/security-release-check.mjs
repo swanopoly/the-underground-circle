@@ -6,6 +6,9 @@ const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 const npmScripts = [
   'check:public-env-security',
+  'smoke:dependency-override-compat',
+  'smoke:expo-image-asset-guard',
+  'check:expo-image-assets',
   'smoke:auth-session',
   'smoke:auth-security-flow',
   'smoke:auth-logout-storage-security',

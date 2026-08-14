@@ -175,6 +175,10 @@ async function main(): Promise<void> {
     path.join(process.cwd(), 'src/lib/runChatAutomationPlan.ts'),
     'utf8',
   );
+  const authorityCoreSource = fs.readFileSync(
+    path.join(process.cwd(), 'src/lib/chatPlanApprovalAuthorityCore.ts'),
+    'utf8',
+  );
   assert(
     !dispatcherSource.includes('data.rawError')
       && !dispatcherSource.includes('rawError:'),
@@ -184,7 +188,11 @@ async function main(): Promise<void> {
     dispatcherSource.includes('gateAuthority.approvalIntentFingerprint !== approvalIntentFingerprint')
       && dispatcherSource.includes('programFingerprint')
       && dispatcherSource.includes('requestIdentityFingerprint')
-      && dispatcherSource.includes('issuedChatPlanApprovalAuthorities.has'),
+      && dispatcherSource.includes('issueChatPlanApprovalAuthorityObject')
+      && authorityCoreSource.includes('issuedChatPlanApprovalAuthorities.has')
+      && authorityCoreSource.includes('authority.approvalIntentFingerprint === expected.approvalIntentFingerprint')
+      && authorityCoreSource.includes('authority.requestIdentityFingerprint === expected.requestIdentityFingerprint')
+      && authorityCoreSource.includes('authority.programFingerprint === expected.programFingerprint'),
     'dispatcher-issued capability is bound to exact approval intent, request, and compiler program',
   );
 

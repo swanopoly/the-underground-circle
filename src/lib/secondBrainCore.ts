@@ -261,7 +261,7 @@ export function buildSecondBrainBaseViews(
       title: 'All active',
       description: 'Every non-archived node in this circle brain.',
       queryHint: 'status != archived',
-      color: '#22d3ee',
+      color: '#6366f1',
       notes: active,
     },
     {

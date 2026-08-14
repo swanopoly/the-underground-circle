@@ -531,51 +531,20 @@ async function launchCursorComposerSessions(data) {
 }
 
 function findManagedCursorSession(value) {
-  const key = String(value || '').trim().toLowerCase();
-  if (!key) return null;
-  return cachedSessions.find((session) =>
-    String(session.sessionId || '').toLowerCase() === key
-    || String(session.displayName || '').toLowerCase() === key
-    || String(session.sessionId || '').toLowerCase().startsWith(key)
-  ) || null;
+  if (typeof value !== 'string' || !value) return null;
+  const matches = cachedSessions.filter((session) => session.sessionId === value);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 async function sendToManagedCursorSession(data) {
-  const session = findManagedCursorSession(data.sessionId || data.target || data.displayName);
-  if (!session) return { ok: false, error: 'Cursor Composer session not found.' };
-  const message = normalizeCliPrompt(data.message || data.command || data.prompt || '');
-  if (!message) return { ok: false, error: 'Missing message.' };
-  const result = await sendPromptToCursorComposer({
-    prompt: [
-      '[UC-CURSOR-COMPOSER-CONTROL]',
-      'Follow-up instruction from The Underground Circle chat:',
-      message,
-    ].join('\n'),
-    projectDir: session.projectDir,
-    appName: data.appName,
-  });
-  if (!result.ok) return { ok: false, error: result.error || 'Cursor Composer handoff failed.', session };
-  const updated = registerManagedCursorSession({
-    ...session,
-    status: 'active',
-    task: promptPreview(message, 240),
-    prompt: message,
-    lastActivity: new Date().toISOString(),
-    messageCount: (session.messageCount || 0) + 1,
-    userMessages: (session.userMessages || 0) + 1,
-    recentActions: [
-      ...(session.recentActions || []).slice(-4),
-      `Chat sent: ${promptPreview(message, 120)}`,
-    ],
-  });
-  doScan();
+  const session = findManagedCursorSession(data.sessionId);
+  if (!session) return { ok: false, error: 'An exact Cursor Composer session id is required.' };
   return {
-    ok: true,
+    ok: false,
     provider: 'cursor',
-    sessionId: updated.sessionId,
-    displayName: updated.displayName,
-    message: `Sent to ${updated.displayName || updated.sessionId}.`,
-    session: updated,
+    sessionId: session.sessionId,
+    displayName: session.displayName,
+    error: 'Exact Cursor Composer session input is unavailable because the bridge cannot bind GUI focus to one verified Composer conversation. Nothing was sent.',
   };
 }
 

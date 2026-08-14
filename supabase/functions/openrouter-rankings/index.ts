@@ -34,6 +34,19 @@ type PopularModel = {
   contextWindow?: number;
 };
 
+const RETIRED_POPULAR_MODEL_IDS = new Set([
+  "gpt-4o", "gpt-4o-mini", "gpt-4.1-nano", "o3-mini", "o4-mini",
+  "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.1-pro-preview",
+  "deepseek-chat", "deepseek-reasoner",
+]);
+
+function isAllowedPopularModelId(value: string): boolean {
+  const parts = value.toLowerCase().replace(/^openrouter\//, "").split("/");
+  const tail = (parts.at(-1) || "").replace(/:.*$/, "");
+  if (!tail || RETIRED_POPULAR_MODEL_IDS.has(tail)) return false;
+  return !parts.some((part) => part === "x-ai" || part === "xai" || part === "grok" || part.startsWith("grok-"));
+}
+
 const OPENROUTER_RANKINGS_URL = "https://openrouter.ai/rankings";
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
 const CACHE_TTL_MS = 10 * 60_000;
@@ -234,10 +247,9 @@ async function buildResponse(limit: number) {
   const currentRows = latestDate ? rows.filter((row) => row.date === latestDate) : rows;
   const maps = buildCatalogMaps(catalog);
 
-  const models: PopularModel[] = currentRows
+  const candidates = currentRows
     .sort((a, b) => totalTokens(b) - totalTokens(a))
-    .slice(0, limit)
-    .map((row, index) => {
+    .map((row) => {
       const slug = row.variant_permaslug || row.model_permaslug || "";
       const catalogModel = resolveCatalogModel(row, maps);
       const provider = catalogModel?.id ? providerFromSlug(catalogModel.id) : providerFromSlug(slug);
@@ -247,24 +259,39 @@ async function buildResponse(limit: number) {
       const inPrice = formatPrice(catalogModel?.pricing?.prompt);
       const outPrice = formatPrice(catalogModel?.pricing?.completion);
       const priceLabel = inPrice && outPrice ? `${inPrice}->${outPrice}` : inPrice || outPrice || null;
-      const description = [
-        `#${index + 1} OpenRouter weekly usage`,
-        provider,
-        `${tokenLabel} tokens`,
-        changeLabel ? `${changeLabel} weekly` : null,
-        priceLabel,
-      ].filter(Boolean).join(" | ");
-
       return {
         id: `openrouter/${catalogModel?.id || slug}`,
         label: cleanLabel(catalogModel, slug),
         provider,
-        rank: index + 1,
-        tokens: tokenCount,
+        tokenCount,
         tokenLabel,
         changeLabel,
-        description,
+        priceLabel,
         contextWindow: catalogModel?.context_length,
+      };
+    })
+    .filter((candidate) => isAllowedPopularModelId(candidate.id))
+    .slice(0, limit);
+
+  const models: PopularModel[] = candidates.map((candidate, index) => {
+      const description = [
+        `#${index + 1} OpenRouter weekly usage`,
+        candidate.provider,
+        `${candidate.tokenLabel} tokens`,
+        candidate.changeLabel ? `${candidate.changeLabel} weekly` : null,
+        candidate.priceLabel,
+      ].filter(Boolean).join(" | ");
+
+      return {
+        id: candidate.id,
+        label: candidate.label,
+        provider: candidate.provider,
+        rank: index + 1,
+        tokens: candidate.tokenCount,
+        tokenLabel: candidate.tokenLabel,
+        changeLabel: candidate.changeLabel,
+        description,
+        contextWindow: candidate.contextWindow,
       };
     });
 

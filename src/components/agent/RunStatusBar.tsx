@@ -149,7 +149,7 @@ function SubagentLiveChip({
 
   return (
     <Animated.View style={[s.liveChip, { borderColor, backgroundColor: `${color}14` }]}>
-      <ActivityDots colors={[color, '#22d3ee', '#f59e0b']} />
+      <ActivityDots colors={[color, '#6366f1', '#f59e0b']} />
       <View style={[s.liveChipBadge, { borderColor: `${color}50`, backgroundColor: `${color}20` }]}>
         <Text style={[s.liveChipBadgeText, { color }]}>{icon || name.charAt(0)}</Text>
       </View>

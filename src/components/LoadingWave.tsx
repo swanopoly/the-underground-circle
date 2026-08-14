@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { View, StyleSheet, Platform } from 'react-native';
 
-const WAVE_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#22d3ee'];
+const WAVE_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#6366f1'];
 const DOT_COUNT = WAVE_COLORS.length;
 const R = 22;          // radius for circle + star shapes
 const DOT_SIZE = 9;

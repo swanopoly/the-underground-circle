@@ -7,7 +7,10 @@
  * to a circle-settings JSONB blob if cross-device sync is demanded.
  *
  * Every load/save re-hydrates the in-memory registry in `computerGrantGate`
- * so the synchronous chat router sees the current active scopes.
+ * so the synchronous chat router sees the current active scopes. The canonical
+ * effect policy currently exposes no grantable router mutation category, so
+ * legacy broad scopes sanitize to an empty registry until a future positively
+ * safe category is added there.
  */
 
 import { storage } from './storage';

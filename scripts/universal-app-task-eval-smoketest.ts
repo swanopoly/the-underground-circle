@@ -19,6 +19,7 @@ import {
   type GenericAppNavigatorWorkflowGoalKind,
 } from '../src/lib/genericAppNavigator';
 import {
+  buildChatComputerRequestedActionContract,
   buildChatComputerRequestRoute,
   constraintBlocksToolCall,
   type ChatComputerRequestRoute,
@@ -495,6 +496,26 @@ function assertWholeRequestAndBounds(testCase: UniversalAppEvalCase, route: Chat
   }
 }
 
+function assertRequestedActionCoverage(
+  testCase: UniversalAppEvalCase,
+  route: ChatComputerRequestRoute,
+): void {
+  const contract = buildChatComputerRequestedActionContract(testCase.request);
+  check(contract, `${testCase.category}: two-part request emits an action-accounting contract`);
+  equal(contract.actionCount, 2, `${testCase.category}: both requested actions remain independently visible`);
+  equal(contract.actions[0]?.id, 'A1', `${testCase.category}: first requested action has stable id A1`);
+  equal(contract.actions[1]?.id, 'A2', `${testCase.category}: second requested action has stable id A2`);
+  equal(contract.capped, false, `${testCase.category}: representative two-action request is not capped`);
+  check(
+    route.completionProof.some((item) => /^A1\s+independently verified\b/.test(item)),
+    `${testCase.category}: completion proof retains A1`,
+  );
+  check(
+    route.completionProof.some((item) => /^A2\s+independently verified\b/.test(item)),
+    `${testCase.category}: completion proof retains A2`,
+  );
+}
+
 function assertDesktopSurface(testCase: UniversalAppEvalCase, route: ChatComputerRequestRoute): void {
   oneOf(route.kind, ['desktop_app', 'hybrid'] as const, `${testCase.category}: named desktop app stays on a desktop-capable route`);
   check(route.routeId !== 'browser', `${testCase.category}: named desktop app does not inherit a browser route id`);
@@ -697,6 +718,7 @@ for (const testCase of CORPUS) {
     const route = buildChatComputerRequestRoute(testCase.request);
     check(route, `${testCase.category}: planner returns a computer route for ${JSON.stringify(testCase.request)}`);
     assertWholeRequestAndBounds(testCase, route);
+    assertRequestedActionCoverage(testCase, route);
     if (testCase.surface === 'desktop') assertDesktopSurface(testCase, route);
     else assertBrowserSurface(testCase, route);
     assertPolicy(testCase, route);
@@ -711,6 +733,7 @@ for (const testCase of ADVERSARIAL_COMMON_APP_CORPUS) {
     const route = buildChatComputerRequestRoute(testCase.request);
     check(route, `${testCase.group}: planner returns a computer route for ${JSON.stringify(testCase.request)}`);
     assertWholeRequestAndBounds(testCase, route);
+    if (/\band\b/i.test(testCase.request)) assertRequestedActionCoverage(testCase, route);
 
     if (testCase.surface === 'desktop') {
       equal(route.kind, 'desktop_app', `${testCase.group}: explicit common app stays on the desktop-app route`);

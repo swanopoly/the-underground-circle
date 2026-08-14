@@ -639,7 +639,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
         const elapsed = Date.now() - buildStartTime.current;
         const secs = Math.round(elapsed / 1000);
         const finishWords = ['FINISHED ✓', 'DONE ✓', 'SHIPPED ✓', 'NAILED IT ✓', 'CRUSHED IT ✓'];
-        spawnFloat(finishWords[Math.floor(Math.random() * finishWords.length)], '#22d3ee');
+        spawnFloat(finishWords[Math.floor(Math.random() * finishWords.length)], '#6366f1');
         if (secs > 0 && secs < 300) spawnFloat(`${secs}s BUILD`, '#818cf8', 350);
         if (secs <= 5) spawnFloat('SPEED RUN!', '#f59e0b', 600);
         if (secs <= 2) spawnFloat('INSTANT!', '#ec4899', 800);
@@ -873,7 +873,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     if (now - lastIdleFloatRef.current < 3000) return;
     lastIdleFloatRef.current = now;
     const id = floatId.current++;
-    setFloatingText(prev => [...prev, { id, text: behaviorText!, color: '#22d3ee', x: (Math.random() - 0.5) * 30 }]);
+    setFloatingText(prev => [...prev, { id, text: behaviorText!, color: '#6366f1', x: (Math.random() - 0.5) * 30 }]);
     setTimeout(() => setFloatingText(prev => prev.filter(f => f.id !== id)), 2500);
   }, [agent.status, agent.activity]);
 
@@ -883,7 +883,16 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   const PX = 2.5 * scale;
 
   return (
-    <Pressable onPress={onPress} onPressIn={handlePressIn} onPressOut={handlePressOut} style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : undefined}>
+    <Pressable
+      onPress={onPress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${agent.name} agent panel`}
+      accessibilityHint="Shows current work, controls, activity, memory, runs, and agent settings."
+      accessibilityState={{ selected }}
+      style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : undefined}
+    >
       <Animated.View style={[styles.container, {
           transform: [
             { translateX: Animated.add(danceX, swayAnim) },

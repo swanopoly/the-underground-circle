@@ -237,7 +237,7 @@ function detectTrigger(text: string): TriggerOption | null {
 
 const TRIGGER_LABELS: Record<TriggerType, { label: string; color: string }> = {
   schedule: { label: 'SCHEDULE', color: '#6366f1' },
-  event:    { label: 'EVENT',    color: '#22d3ee' },
+  event:    { label: 'EVENT',    color: '#6366f1' },
   manual:   { label: 'MANUAL',   color: '#f59e0b' },
   webhook:  { label: 'WEBHOOK',  color: '#a855f7' },
 };
@@ -251,8 +251,8 @@ const OUTPUT_LABELS: Record<OutputTarget, string> = {
 
 const MODEL_OPTIONS = [
   { value: 'claude-haiku',  label: 'Haiku 4.5',  sub: 'fast · cheap',   color: '#22c55e' },
-  { value: 'claude-sonnet', label: 'Sonnet 4.6', sub: 'balanced',        color: '#3b82f6' },
-  { value: 'claude-opus',   label: 'Opus 4.6',   sub: 'most powerful',   color: '#f59e0b' },
+  { value: 'claude-sonnet', label: 'Sonnet 5',   sub: 'balanced',        color: '#3b82f6' },
+  { value: 'claude-opus',   label: 'Opus 5',     sub: 'most powerful',   color: '#f59e0b' },
 ];
 
 function runStatusIcon(status: string): string {
@@ -2196,7 +2196,7 @@ function RunRow({
           {/* ── Wallets ── */}
           {wallets.length > 0 && (
             <View style={sectionBox}>
-              <Text style={[sectionHead, { color: '#22d3ee' }]}>CONNECTED WALLETS ({wallets.length})</Text>
+              <Text style={[sectionHead, { color: '#6366f1' }]}>CONNECTED WALLETS ({wallets.length})</Text>
               {wallets.map((w: any, i: number) => (
                 <Text key={i} style={{ color: '#9e9e9e', fontSize: 9, fontFamily: 'monospace', lineHeight: 13 }}>
                   {'\u25CE'} {w.name} — {w.address?.slice(0, 8)}...{w.address?.slice(-4)}{w.portfolioUsd ? ` ($${w.portfolioUsd.toFixed(2)})` : ''}
@@ -3076,17 +3076,17 @@ const s = StyleSheet.create({
     alignItems: 'center',
     maxWidth: 280,
     borderRadius: 4,
-    backgroundColor: '#22d3ee14',
+    backgroundColor: '#6366f114',
     borderWidth: 1,
     borderColor: '#6366f130',
     paddingHorizontal: 5,
     paddingVertical: 1,
     gap: 4,
   },
-  subjectBadgePrefix: { color: '#22d3ee', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
+  subjectBadgePrefix: { color: '#6366f1', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
   subjectBadgeText: { color: '#b5f3ff', fontSize: 9, fontWeight: '800', fontFamily: 'monospace', flexShrink: 1 },
   subjectBadgeKey: { color: '#7dd3fc', fontSize: 8, fontWeight: '700', fontFamily: 'monospace', flexShrink: 1, opacity: 0.85 },
-  subjectBadgeAliasCount: { color: '#22d3ee', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
+  subjectBadgeAliasCount: { color: '#6366f1', fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
   statsRow: { flexDirection: 'row', gap: 10, marginTop: 3 },
   statText: { color: '#6f6f6f', fontSize: 9, fontFamily: 'monospace' },
   errorRow: { paddingHorizontal: 10, paddingBottom: 4 },

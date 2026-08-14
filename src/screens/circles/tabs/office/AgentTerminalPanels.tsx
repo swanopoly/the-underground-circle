@@ -1,12 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import { supabase } from '../../../../lib/supabase';
 import { MONO } from './AgentPanelShared';
 import { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   getAgentIdentityKey,
-  loadAgentIdentities,
-  updateAgentIdentity,
+  loadAgentIdentitiesExact,
+  updateAgentIdentityExact,
+  type AgentIdentityExactAuthority,
   type TerminalAgentOfficeConfig,
   type TerminalLaunchMode,
 } from '../../../../lib/agentIdentity';
@@ -40,6 +40,17 @@ function modeLabel(mode: TerminalLaunchMode): string {
   if (mode === 'full-auto') return 'Full Auto';
   if (mode === 'auto') return 'Auto Edit';
   return 'Safe';
+}
+
+function normalizeTerminalIdentityAuthority(
+  circleId: string | undefined,
+  authority: AgentIdentityExactAuthority | null | undefined,
+): AgentIdentityExactAuthority | null {
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  if (!circleId || !userId || authorityCircleId !== circleId || !accessToken) return null;
+  return { userId, circleId: authorityCircleId, accessToken };
 }
 
 export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }> }) {
@@ -215,18 +226,29 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
 export function AgentTerminalProfilePanel({
   agent,
   circleId,
-  userId,
+  identityAuthority,
   onRenameAgent,
   onIdentityChange,
 }: {
   agent: OfficeAgent;
   circleId?: string;
-  userId?: string | null;
+  identityAuthority?: AgentIdentityExactAuthority | null;
   onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<void> | void;
   onIdentityChange?: () => void;
 }) {
   const identityKey = getAgentIdentityKey(agent);
   const provider = normalizeTerminalProvider(agent.providerType);
+  const exactIdentityAuthority = useMemo(
+    () => normalizeTerminalIdentityAuthority(circleId, identityAuthority),
+    [circleId, identityAuthority?.accessToken, identityAuthority?.circleId, identityAuthority?.userId],
+  );
+  const identityRequestKey = exactIdentityAuthority
+    ? `${exactIdentityAuthority.userId}\u0000${exactIdentityAuthority.circleId}\u0000${agent.id}\u0000${identityKey}`
+    : '';
+  const latestIdentityRequestKeyRef = useRef(identityRequestKey);
+  const latestIdentityAccessTokenRef = useRef(exactIdentityAuthority?.accessToken || '');
+  latestIdentityRequestKeyRef.current = identityRequestKey;
+  latestIdentityAccessTokenRef.current = exactIdentityAuthority?.accessToken || '';
   const [displayName, setDisplayName] = useState(agent.name);
   const [config, setConfig] = useState<TerminalAgentOfficeConfig>({
     defaultCwd: agent.projectDir || '',
@@ -240,9 +262,24 @@ export function AgentTerminalProfilePanel({
   const [result, setResult] = useState<string>('');
 
   useEffect(() => {
+    setDisplayName(agent.name);
+    setConfig({
+      defaultCwd: agent.projectDir || '',
+      defaultModel: agent.model && agent.model !== 'unknown' ? agent.model : '',
+      defaultPrompt: '',
+      launchMode: 'safe',
+      autoSaveMemory: true,
+    });
+    setResult('');
+    if (!exactIdentityAuthority || !identityRequestKey) return;
     let cancelled = false;
-    loadAgentIdentities().then((identities) => {
-      if (cancelled) return;
+    const capturedRequestKey = identityRequestKey;
+    loadAgentIdentitiesExact(exactIdentityAuthority).then((identities) => {
+      if (
+        cancelled
+        || latestIdentityRequestKeyRef.current !== capturedRequestKey
+        || latestIdentityAccessTokenRef.current !== exactIdentityAuthority.accessToken
+      ) return;
       const identity = identities.get(identityKey);
       setDisplayName(identity?.customName || agent.name);
       setConfig({
@@ -254,14 +291,19 @@ export function AgentTerminalProfilePanel({
       });
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [agent.id, agent.model, agent.name, agent.projectDir, identityKey]);
+  }, [agent.id, agent.model, agent.name, agent.projectDir, exactIdentityAuthority, identityKey, identityRequestKey]);
 
   const patchConfig = (patch: Partial<TerminalAgentOfficeConfig>) => {
     setConfig(prev => ({ ...prev, ...patch }));
   };
 
-  const saveProfile = async () => {
-    if (!identityKey) return;
+  const saveProfile = async (): Promise<boolean> => {
+    const capturedAuthority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!identityKey || !capturedAuthority || !capturedRequestKey) {
+      setResult('Sign in to this circle before saving an Office terminal profile.');
+      return false;
+    }
     setSaving(true);
     setResult('');
     try {
@@ -269,7 +311,11 @@ export function AgentTerminalProfilePanel({
       if (cleanName && cleanName !== agent.name && onRenameAgent) {
         await onRenameAgent(agent, cleanName);
       }
-      await updateAgentIdentity(identityKey, {
+      if (
+        latestIdentityRequestKeyRef.current !== capturedRequestKey
+        || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+      ) return false;
+      const receipt = await updateAgentIdentityExact(identityKey, {
         customName: cleanName || undefined,
         boundAiProvider: agent.providerType,
         boundModel: config.defaultModel?.trim() || agent.model,
@@ -281,17 +327,38 @@ export function AgentTerminalProfilePanel({
           autoSaveMemory: config.autoSaveMemory !== false,
         },
         isCustomized: true,
-      });
+      }, capturedAuthority);
+      if (!receipt.localSaved) throw new Error(receipt.error || 'identity save failed');
+      if (
+        latestIdentityRequestKeyRef.current !== capturedRequestKey
+        || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+      ) return false;
       onIdentityChange?.();
       setResult('Saved terminal profile. Chat assignments will use this profile.');
+      return true;
     } catch (err: any) {
-      setResult(`Save failed: ${err?.message || 'unknown error'}`);
+      if (
+        latestIdentityRequestKeyRef.current === capturedRequestKey
+        && latestIdentityAccessTokenRef.current === capturedAuthority.accessToken
+      ) {
+        setResult(`Save failed: ${err?.message || 'unknown error'}`);
+      }
+      return false;
     } finally {
-      setSaving(false);
+      if (
+        latestIdentityRequestKeyRef.current === capturedRequestKey
+        && latestIdentityAccessTokenRef.current === capturedAuthority.accessToken
+      ) setSaving(false);
     }
   };
 
   const launchFromProfile = async () => {
+    const capturedAuthority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (!capturedAuthority || !capturedRequestKey) {
+      setResult('Sign in to this circle before launching an Office terminal profile.');
+      return;
+    }
     if (!provider) {
       setResult('This agent does not support managed terminal launches yet.');
       return;
@@ -299,7 +366,11 @@ export function AgentTerminalProfilePanel({
     setLaunching(true);
     setResult('');
     try {
-      await saveProfile();
+      if (
+        !await saveProfile()
+        || latestIdentityRequestKeyRef.current !== capturedRequestKey
+        || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+      ) return;
       const prompt = config.defaultPrompt?.trim()
         || `Stand by as ${displayName.trim() || agent.name}. Wait for delegated tasks from The Underground Circle.`;
       const input = {
@@ -310,7 +381,7 @@ export function AgentTerminalProfilePanel({
         projectDir: config.defaultCwd?.trim() || undefined,
         cwd: config.defaultCwd?.trim() || undefined,
         circleId,
-        userId: userId || undefined,
+        userId: capturedAuthority.userId,
       };
 
       const launchResult = provider === 'claude-code'
@@ -326,15 +397,27 @@ export function AgentTerminalProfilePanel({
           ? await launchCodexSessions({ ...input, fullAuto: config.launchMode === 'full-auto' })
           : await launchGeminiCliSessions({ ...input, yolo: config.launchMode === 'full-auto' });
 
+      if (
+        latestIdentityRequestKeyRef.current !== capturedRequestKey
+        || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+      ) return;
       if (launchResult.ok && launchResult.launched > 0) {
         setResult(`Launched ${launchResult.launched} managed ${provider === 'gemini' ? 'Gemini CLI' : provider} session from this Office profile.`);
       } else {
         setResult(`Launch failed: ${launchResult.error || launchResult.failed?.[0]?.error || 'unknown error'}`);
       }
     } catch (err: any) {
-      setResult(`Launch failed: ${err?.message || 'unknown error'}`);
+      if (
+        latestIdentityRequestKeyRef.current === capturedRequestKey
+        && latestIdentityAccessTokenRef.current === capturedAuthority.accessToken
+      ) {
+        setResult(`Launch failed: ${err?.message || 'unknown error'}`);
+      }
     } finally {
-      setLaunching(false);
+      if (
+        latestIdentityRequestKeyRef.current === capturedRequestKey
+        && latestIdentityAccessTokenRef.current === capturedAuthority.accessToken
+      ) setLaunching(false);
     }
   };
 
@@ -417,14 +500,14 @@ export function AgentTerminalProfilePanel({
         <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' as any }}>
           <Pressable
             onPress={saveProfile}
-            disabled={saving}
-            style={[{ backgroundColor: '#22c55e', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 8, opacity: saving ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            disabled={saving || !exactIdentityAuthority}
+            style={[{ backgroundColor: '#22c55e', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 8, opacity: saving || !exactIdentityAuthority ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: exactIdentityAuthority ? 'pointer' : 'not-allowed' } as any]}
           >
             <Text style={{ color: '#050508', fontSize: 12, fontWeight: '900', fontFamily: MONO }}>{saving ? 'SAVING...' : 'SAVE PROFILE'}</Text>
           </Pressable>
           <Pressable
             onPress={launchFromProfile}
-            disabled={launching || !provider}
+            disabled={launching || !provider || !exactIdentityAuthority}
             style={[{ backgroundColor: provider ? '#38bdf8' : '#252536', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 8, opacity: launching ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: provider ? 'pointer' : 'not-allowed' } as any]}
           >
             <Text style={{ color: '#050508', fontSize: 12, fontWeight: '900', fontFamily: MONO }}>{launching ? 'LAUNCHING...' : 'LAUNCH FROM PROFILE'}</Text>
@@ -447,12 +530,14 @@ export function AgentQuickTerminal({
   circleId,
   providerType,
   sessionKey,
+  identityAuthority,
 }: {
   agentName: string;
   agentId: string;
   circleId: string;
   providerType?: string;
   sessionKey?: string;
+  identityAuthority?: AgentIdentityExactAuthority | null;
 }) {
   const [input, setInput] = useState('');
   const [history, setHistory] = useState<{ role: 'user' | 'agent' | 'error'; text: string }[]>([]);
@@ -463,34 +548,75 @@ export function AgentQuickTerminal({
   const dragStartH = useRef(0);
   const terminalProvider = normalizeTerminalProvider(providerType);
   const isManagedTerminal = Boolean(terminalProvider && sessionKey);
+  const exactIdentityAuthority = useMemo(
+    () => normalizeTerminalIdentityAuthority(circleId, identityAuthority),
+    [circleId, identityAuthority?.accessToken, identityAuthority?.circleId, identityAuthority?.userId],
+  );
+  const terminalRequestKey = exactIdentityAuthority
+    ? `${exactIdentityAuthority.userId}\u0000${exactIdentityAuthority.circleId}\u0000${agentId}\u0000${agentName}\u0000${providerType || ''}\u0000${sessionKey || ''}`
+    : '';
+  const latestTerminalRequestKeyRef = useRef(terminalRequestKey);
+  const latestTerminalAccessTokenRef = useRef(exactIdentityAuthority?.accessToken || '');
+  latestTerminalRequestKeyRef.current = terminalRequestKey;
+  latestTerminalAccessTokenRef.current = exactIdentityAuthority?.accessToken || '';
+
+  useEffect(() => {
+    setInput('');
+    setHistory([]);
+    setSending(false);
+  }, [exactIdentityAuthority?.accessToken, terminalRequestKey]);
+
+  const isTerminalRequestCurrent = (
+    capturedRequestKey: string,
+    capturedAccessToken: string,
+  ): boolean => (
+    !!capturedRequestKey
+    && latestTerminalRequestKeyRef.current === capturedRequestKey
+    && latestTerminalAccessTokenRef.current === capturedAccessToken
+  );
 
   const handleSend = async () => {
-    if (!input.trim() || sending) return;
+    const capturedAuthority = exactIdentityAuthority;
+    const capturedRequestKey = terminalRequestKey;
+    if (!input.trim() || sending || !capturedAuthority || !capturedRequestKey) return;
     const message = input.trim();
     setInput('');
     setHistory(prev => [...prev, { role: 'user', text: message }]);
     setSending(true);
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+    setTimeout(() => {
+      if (isTerminalRequestCurrent(capturedRequestKey, capturedAuthority.accessToken)) {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      }
+    }, 50);
     try {
       if (isManagedTerminal && terminalProvider && sessionKey) {
         const result = await sendTerminalAgentSessionMessage(terminalProvider, sessionKey, message);
         if (!result.ok) throw new Error(result.error || 'Terminal send failed');
+        if (!isTerminalRequestCurrent(capturedRequestKey, capturedAuthority.accessToken)) return;
         setHistory(prev => [...prev, { role: 'agent', text: result.response || 'Message sent to managed terminal session.' }]);
       } else {
         const { getSwanBotResponse } = await import('../../../../lib/swanbot');
+        if (!isTerminalRequestCurrent(capturedRequestKey, capturedAuthority.accessToken)) return;
         const response = await getSwanBotResponse(`@${agentName}: ${message}`, {
-          userId: (await supabase.auth.getUser()).data.user?.id || '',
-          circleId,
+          userId: capturedAuthority.userId,
+          circleId: capturedAuthority.circleId || circleId,
           agentId,
           agentName,
         });
+        if (!isTerminalRequestCurrent(capturedRequestKey, capturedAuthority.accessToken)) return;
         setHistory(prev => [...prev, { role: 'agent', text: response }]);
       }
     } catch (e: any) {
+      if (!isTerminalRequestCurrent(capturedRequestKey, capturedAuthority.accessToken)) return;
       setHistory(prev => [...prev, { role: 'error', text: e.message || 'Failed' }]);
     }
+    if (!isTerminalRequestCurrent(capturedRequestKey, capturedAuthority.accessToken)) return;
     setSending(false);
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+    setTimeout(() => {
+      if (isTerminalRequestCurrent(capturedRequestKey, capturedAuthority.accessToken)) {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      }
+    }, 50);
   };
 
   const handleResizeStart = (e: any) => {
@@ -533,14 +659,15 @@ export function AgentQuickTerminal({
           style={{ flex: 1, color: '#e8e8f8', fontSize: 12, fontFamily: MONO, minHeight: 36, maxHeight: 100, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           value={input}
           onChangeText={setInput}
-          placeholder={`Command ${agentName}...`}
+          editable={!!exactIdentityAuthority}
+          placeholder={exactIdentityAuthority ? `Command ${agentName}...` : 'Sign in to this circle to message this agent'}
           placeholderTextColor="#3b3b5b"
           onSubmitEditing={handleSend}
           returnKeyType="send"
           autoCapitalize="none"
           multiline
         />
-        <Pressable onPress={handleSend} disabled={sending || !input.trim()} accessibilityRole="button" style={{ backgroundColor: '#8b5cf6', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6, opacity: sending || !input.trim() ? 0.4 : 1 }}>
+        <Pressable onPress={handleSend} disabled={sending || !input.trim() || !exactIdentityAuthority} accessibilityRole="button" style={{ backgroundColor: '#8b5cf6', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6, opacity: sending || !input.trim() || !exactIdentityAuthority ? 0.4 : 1 }}>
           <Text style={{ color: '#fff', fontSize: 14, fontWeight: '800', fontFamily: MONO }}>{sending ? '..' : '>>'}</Text>
         </Pressable>
       </View>

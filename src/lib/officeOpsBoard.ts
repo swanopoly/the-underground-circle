@@ -93,6 +93,8 @@ export interface OfficeRunNode {
   /** Legacy ids / session keys / memory aliases used to attach live runs. */
   subjectAliases: string[];
   status: string;
+  /** Accepted connected-agent ledger awaiting a typed provider lifecycle result. */
+  awaitingExternalResult: boolean;
   isSubagent: boolean;
   parentRunId?: string;
   /** metadata.delegationDepth when present, else tree depth (orphans ≥ 1). */
@@ -116,6 +118,14 @@ export interface OfficeBuildingBoardCounts {
   activeSubagents: number;
   waitingApproval: number;
   queued: number;
+  /** Accepted external handoffs across the full unbounded building set. */
+  awaitingExternalResults: number;
+  /** Accepted handoffs that are top-level roots across the full set. */
+  awaitingExternalRoots: number;
+  /** Accepted handoffs that are true parent-linked children across the full set. */
+  awaitingExternalSubagents: number;
+  /** Accepted handoffs whose canonical ledger status is still queued. */
+  awaitingExternalQueued: number;
 }
 
 export interface OfficeBuildingBoard {
@@ -279,6 +289,18 @@ function metadataRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * Exact acceptance-only lifecycle marker shared by Office and Chat run trace.
+ * All three fields are required so an ordinary queued run, partial legacy row,
+ * or eventually verified provider result keeps its existing presentation.
+ */
+export function isAwaitingConnectedAgentResultMetadata(metadata: unknown): boolean {
+  const record = metadataRecord(metadata);
+  return record.externalLifecycle === 'awaiting_typed_result'
+    && record.handoffStatus === 'accepted'
+    && record.completionVerified === false;
+}
+
 function cleanSubjectString(value: unknown): string | undefined {
   if (typeof value !== 'string' && typeof value !== 'number') return undefined;
   const text = String(value).replace(/\s+/g, ' ').trim();
@@ -379,7 +401,11 @@ function deriveDeclaredDepth(run: AgentRunLike): number | null {
 }
 
 function isSubagentRun(run: AgentRunLike): boolean {
-  return Boolean(run.parent_run_id || (typeof run.delegated_to === 'string' && run.delegated_to.trim()));
+  if (run.parent_run_id) return true;
+  // This marker describes a top-level external delegation ledger. Its
+  // `delegated_to` is attribution, not proof that the row is a child run.
+  if (isAwaitingConnectedAgentResultMetadata(run.metadata)) return false;
+  return Boolean(typeof run.delegated_to === 'string' && run.delegated_to.trim());
 }
 
 // ── 1. Building-now board ────────────────────────────────────────────────────
@@ -472,6 +498,7 @@ export function buildOfficeBuildingBoard(
       subjectDbId: subject.subjectDbId,
       subjectAliases: subject.subjectAliases,
       status: run.status,
+      awaitingExternalResult: isAwaitingConnectedAgentResultMetadata(run.metadata),
       isSubagent,
       parentRunId: run.parent_run_id || undefined,
       depth,
@@ -496,6 +523,19 @@ export function buildOfficeBuildingBoard(
     activeSubagents: building.filter((run) => isSubagentRun(run)).length,
     waitingApproval: building.filter((run) => run.status === 'waiting_approval').length,
     queued: building.filter((run) => run.status === 'queued').length,
+    // Count accepted handoffs before the root/child display bounds are applied.
+    // The card must never relabel an undisplayed accepted row as ordinary queued
+    // work merely because the row fell beyond maxRoots/maxChildrenPerRoot.
+    awaitingExternalResults: building.filter((run) => isAwaitingConnectedAgentResultMetadata(run.metadata)).length,
+    awaitingExternalRoots: building.filter(
+      (run) => !isSubagentRun(run) && isAwaitingConnectedAgentResultMetadata(run.metadata),
+    ).length,
+    awaitingExternalSubagents: building.filter(
+      (run) => isSubagentRun(run) && isAwaitingConnectedAgentResultMetadata(run.metadata),
+    ).length,
+    awaitingExternalQueued: building.filter(
+      (run) => run.status === 'queued' && isAwaitingConnectedAgentResultMetadata(run.metadata),
+    ).length,
   };
 
   const recentlyFinished = all
@@ -720,13 +760,23 @@ export function buildOfficeAgentAccountabilityIndex(
     if (endedMs == null || endedMs > nowMs || nowMs - endedMs > windowMs) continue;
 
     const subject = deriveRunSubjectIdentity(run);
-    const keys = uniqueSubjectStrings([
+    const displayKeys = new Set(uniqueSubjectStrings([
       deriveAgentName(run),
-      subject.subjectKey,
       subject.subjectDisplayName,
+    ]).map((value) => value.trim().toLowerCase()).filter(Boolean));
+    const exactKeys = uniqueSubjectStrings([
+      subject.subjectKey,
       subject.subjectDbId,
       subject.subjectAliases,
-    ]).map((value) => value.trim().toLowerCase()).filter(Boolean);
+    ])
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => value && !displayKeys.has(value));
+    // Canonical identity must not also populate a shared display-name bucket:
+    // two agents may legitimately have the same name. Name matching is kept
+    // only for genuinely identity-less legacy rows.
+    const keys = exactKeys.length > 0
+      ? exactKeys
+      : Array.from(displayKeys);
     if (keys.length === 0) continue;
 
     const failed = run.status === 'failed';
@@ -783,10 +833,12 @@ export function formatAccountabilityCounts(entry: OfficeAgentAccountability | nu
 // OpenSwan / HuggingSwan are synthetic pinned roster rows: no session files,
 // no bridge, no per-turn heartbeat — their status field is a static default
 // (or a DB row clamped to idle/building/offline) that nothing bumps mid-task.
-// Live `agent_runs` rows ARE authoritative evidence of work happening — the
-// executing runtime itself writes them, and the Building-Now board already
-// renders them — so it is safe to UPGRADE a synthetic agent's status from run
-// evidence. This is deliberately the mirror image of
+// Runtime-owned live `agent_runs` rows are evidence of work happening. The
+// exact accepted connected-agent ledger marker is narrower evidence: the
+// provider accepted the handoff, but execution/completion is still unverified.
+// Both appear on the Building-Now board, but only runtime-owned running rows may
+// upgrade a synthetic agent to `active`; acceptance-only rows stay `building`.
+// This is deliberately the mirror image of
 // reconcileAgentStatusWithConnection (O2, officeAgents.ts): O2 only DEMOTES
 // because a session-derived status can outlive its dead bridge; O8 only
 // UPGRADES because a live run row cannot exist without work actually running.
@@ -890,11 +942,13 @@ export function deriveSyntheticAgentStatusFromRuns(
   });
 
   const top = candidates[0];
-  const label = SYNTHETIC_ACTIVITY_LABELS[top.status] || 'Working';
+  const label = top.awaitingExternalResult
+    ? 'Accepted · awaiting update'
+    : SYNTHETIC_ACTIVITY_LABELS[top.status] || 'Working';
   const title =
     truncateText((typeof top.title === 'string' && top.title.trim()) || 'Untitled run', SYNTHETIC_ACTIVITY_TITLE_MAX);
   return {
-    status: top.status === 'running' ? 'active' : 'building',
+    status: !top.awaitingExternalResult && top.status === 'running' ? 'active' : 'building',
     activity: `${label}: ${title}`,
     runId: top.runId,
   };

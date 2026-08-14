@@ -129,6 +129,14 @@ export function installAuthFocusStyles(): void {
       outline-width: 2px !important;
       outline-offset: 1px !important;
     }
+    /* Opt-out for fields whose own shell lights up on focus. The ring is
+       drawn on the bare <input>, which has no radius, so it reads as a
+       hard-edged box inside the shell's rounded border. Only tag a field
+       that has a replacement indicator — an untagged field keeps the ring. */
+    [data-uc-auth-surface] [data-uc-auth-field]:focus,
+    [data-uc-auth-surface] [data-uc-auth-field]:focus-visible {
+      outline: none !important;
+    }
   `;
   document.head.appendChild(style);
 }

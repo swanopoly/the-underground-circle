@@ -5302,10 +5302,12 @@ async function runLoop(args: {
 
 const MODEL_MAP: Record<string, string> = {
   "claude-haiku":  "claude-haiku-4-5-20251001",
-  "claude-sonnet": "claude-sonnet-4-6",
+  "claude-sonnet": "claude-sonnet-5",
   "claude-fable":  "claude-fable-5",
   "claude-fable-5": "claude-fable-5",
-  "claude-opus":   "claude-opus-4-8",
+  "claude-opus-5": "claude-opus-5",
+  "claude-sonnet-5": "claude-sonnet-5",
+  "claude-opus":   "claude-opus-5",
   "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
   "claude-opus-4-6": "claude-opus-4-6",

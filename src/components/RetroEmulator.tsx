@@ -26,7 +26,7 @@ export const EMULATOR_SYSTEMS: EmulatorSystem[] = [
   { id: 'n64',    name: 'Nintendo 64',       core: 'n64',     icon: '🟢', color: '#22c55e', extensions: ['.n64', '.z64', '.v64'] },
   // ── Sega ──
   { id: 'segaMD', name: 'Sega Genesis',      core: 'segaMD',  icon: '⚫', color: '#3b82f6', extensions: ['.md', '.gen', '.bin'] },
-  { id: 'segaMS', name: 'Sega Master System', core: 'segaMS', icon: '🔵', color: '#22d3ee', extensions: ['.sms'] },
+  { id: 'segaMS', name: 'Sega Master System', core: 'segaMS', icon: '🔵', color: '#6366f1', extensions: ['.sms'] },
   { id: 'segaGG', name: 'Sega Game Gear',    core: 'segaGG',  icon: '⬛', color: '#f97316', extensions: ['.gg'] },
   { id: 'segaCD', name: 'Sega CD',           core: 'segaCD',  icon: '🔵', color: '#6366f1', extensions: ['.iso', '.bin', '.cue'] },
   { id: 'segaSaturn', name: 'Sega Saturn',   core: 'segaSaturn', icon: '⚪', color: '#a855f7', extensions: ['.iso', '.bin', '.cue'] },
@@ -41,7 +41,7 @@ export const EMULATOR_SYSTEMS: EmulatorSystem[] = [
   { id: 'pce',    name: 'TurboGrafx-16',     core: 'pce',     icon: '🟠', color: '#f97316', extensions: ['.pce'] },
   { id: 'ngp',    name: 'Neo Geo Pocket',    core: 'ngp',     icon: '🔶', color: '#ec4899', extensions: ['.ngp', '.ngc'] },
   { id: 'vb',     name: 'Virtual Boy',       core: 'vb',      icon: '🔴', color: '#ef4444', extensions: ['.vb', '.vboy'] },
-  { id: 'ws',     name: 'WonderSwan',        core: 'ws',      icon: '🔷', color: '#22d3ee', extensions: ['.ws', '.wsc'] },
+  { id: 'ws',     name: 'WonderSwan',        core: 'ws',      icon: '🔷', color: '#6366f1', extensions: ['.ws', '.wsc'] },
 ];
 
 // Group systems by category
@@ -156,7 +156,7 @@ const GENRE_COLORS: Record<string, string> = {
   'Puzzle':     '#f59e0b',
   'Arcade':     '#ec4899',
   'Fighting':   '#f97316',
-  'Card Game':  '#22d3ee',
+  'Card Game':  '#6366f1',
 };
 
 // ─── Main component ──────────────────────────────────────────────────────────

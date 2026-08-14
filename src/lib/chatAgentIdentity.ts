@@ -5,11 +5,17 @@ export {
   BOT_META_MARKER,
   formatPersistedChatBotMessage,
   isPersistedChatBotMessage,
+  projectPersistedOpenSwanTerminal,
+  projectPersistedOpenSwanResumeLocator,
+  projectPersistedOpenSwanMultiActionCompletion,
   readPersistedChatBotMetadata,
   stripPersistedChatBotPrefix,
   type PersistedChatBotMetadata,
   type PersistedChatRecoveryReliabilitySummary,
+  type PersistedOpenSwanTerminal,
+  type PersistedOpenSwanMultiActionCompletion,
 } from './persistedChatMetadata';
+export type { OpenSwanResumeLocator } from './toolLoopResume';
 
 export const CHAT_AGENT_STORAGE_KEY = 'uc_agent_name';
 export const CHAT_AGENT_AVATAR_STORAGE_KEY = 'uc_agent_avatar';

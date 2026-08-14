@@ -1,5 +1,14 @@
 # Office Tab - Pixel Office for AI Agents
 
+> **Historical bootstrap specification.** This file describes the original MVP
+> and is not the current implementation contract. For current ownership and
+> truth requirements, use `docs/AGENTS_ROADMAP.md`, `CLAUDE.md`, and
+> `docs/UC_APP_STACK_REFERENCE.md`. The live Office now uses the canonical
+> 81-item addon registry, real roster/run sources, truthful addon states,
+> searchable filters, five room kits, bounded undo/redo, and mobile/keyboard
+> editing described in the 2026-08-12 roadmap entry. Do not reintroduce the mock
+> agents, fixed layout, or status assumptions below.
+
 ## Overview
 Add an "OFFICE" tab to the Circle detail view (CircleDetailScreen.tsx) that shows a pixel art virtual office where AI agents live and work. Inspired by office.xyz, claude-office whiteboard system, and Braintrust observability.
 

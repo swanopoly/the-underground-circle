@@ -107,8 +107,8 @@ function extractOfficeAgentName(message: string): string | null {
 
 function extractRequestedModel(message: string): string | undefined {
   const lower = message.toLowerCase();
-  if (/\bopus\b/.test(lower)) return 'claude-opus-4-8';
-  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-4-6';
+  if (/\bopus\b/.test(lower)) return 'claude-opus-5';
+  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-5';
   if (/\bhaiku\b/.test(lower)) return 'claude-haiku-4-5';
   return undefined;
 }

@@ -32,12 +32,12 @@ interface QuickActionPillSpec {
 }
 
 const QUICK_ACTIONS: QuickActionPillSpec[] = [
-  { insert: '/run ',      label: 'RUN',       icon: '$',  hint: 'Run a shell command on your machine via the bridge', color: '#22d3ee' },
+  { insert: '/run ',      label: 'RUN',       icon: '$',  hint: 'Run a shell command on your machine via the bridge', color: '#6366f1' },
   { insert: '/assign ',   label: 'ASSIGN',    icon: '→',  hint: 'Assign a task to a specific agent session by name',  color: '#22c55e' },
   { insert: '/mission ',  label: 'MISSION',   icon: '#',  hint: 'Mission status, create, complete',                   color: '#f59e0b' },
   { insert: '/remember ', label: 'REMEMBER',  icon: '◆',  hint: 'Save something to memory',                           color: '#a855f7' },
   { insert: '/memories',  label: 'MEMORIES',  icon: '☰',  hint: 'Open the memory viewer',                             color: '#a855f7' },
-  { insert: '/diag',      label: 'DIAG',      icon: '✓',  hint: 'Probe all local bridges',                            color: '#22d3ee' },
+  { insert: '/diag',      label: 'DIAG',      icon: '✓',  hint: 'Probe all local bridges',                            color: '#6366f1' },
   { insert: '/search ',   label: 'SEARCH',    icon: '⌕',  hint: 'Search this chat',                                   color: '#94a3b8' },
 ];
 
@@ -52,7 +52,7 @@ interface Props {
   accentColor?: string;
 }
 
-export default function QuickActionDock({ onInsert, hidden, accentColor = '#22d3ee' }: Props) {
+export default function QuickActionDock({ onInsert, hidden, accentColor = '#6366f1' }: Props) {
   if (hidden) return null;
   return (
     <View style={s.dock} nativeID="section-quick-action-dock">

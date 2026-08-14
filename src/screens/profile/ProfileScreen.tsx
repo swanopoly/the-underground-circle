@@ -75,14 +75,14 @@ function ensureHeroAuraStyle() {
       padding: 2px;
       background: conic-gradient(
         from var(--uc-aura-ang, 0deg),
-        #6366f1, #ec4899, #f59e0b, #22d3ee,
+        #6366f1, #ec4899, #f59e0b, #6366f1,
         #a855f7, #06b6d4, #6366f1
       );
       animation: uc-aura-rotate 8s linear infinite;
       box-shadow:
         0 30px 60px -20px rgba(99, 102, 241, 0.45),
         0 18px 40px -16px rgba(236, 72, 153, 0.35),
-        0 0 80px -10px rgba(34, 211, 238, 0.18),
+        0 0 80px -10px rgba(99, 102, 241, 0.18),
         0 1px 0 rgba(255, 255, 255, 0.04) inset;
       transform: perspective(1400px) rotateX(1.5deg);
       will-change: --uc-aura-ang, transform;
@@ -96,7 +96,7 @@ function ensureHeroAuraStyle() {
       padding: 8px;
       background: conic-gradient(
         from var(--uc-aura-ang, 0deg),
-        #6366f140, #ec489940, #f59e0b40, #22d3ee40,
+        #6366f140, #ec489940, #f59e0b40, #6366f140,
         #a855f740, #06b6d440, #6366f140
       );
       filter: blur(14px);
@@ -855,7 +855,6 @@ export default function ProfileScreen({ navigation, route }: any) {
             <Text style={styles.themeColorName}>
               {themeColor === '#6366f1' ? 'Indigo' :
                themeColor === '#a855f7' ? 'Purple' :
-               themeColor === '#22d3ee' ? 'Cyan' :
                themeColor === '#22c55e' ? 'Green' :
                themeColor === '#f43f5e' ? 'Rose' :
                themeColor === '#f59e0b' ? 'Amber' :
@@ -867,7 +866,7 @@ export default function ProfileScreen({ navigation, route }: any) {
           {showThemeSelector && (
             <Card style={styles.themeSelector}>
               <View style={styles.themeColors}>
-                {['#6366f1', '#a855f7', '#22d3ee', '#22c55e', '#f43f5e', '#f59e0b', '#3b82f6', '#fbbf24'].map(color => (
+                {['#6366f1', '#a855f7', '#6366f1', '#22c55e', '#f43f5e', '#f59e0b', '#3b82f6', '#fbbf24'].map(color => (
                   <Pressable
                     key={color}
                     style={[

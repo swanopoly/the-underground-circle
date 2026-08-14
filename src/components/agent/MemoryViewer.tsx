@@ -154,7 +154,7 @@ function isArchiveDerivedMemory(mem: MemoryEntry): boolean {
   return source === 'thread_archive_match' || source === 'thread_archive_recommendation';
 }
 
-export default function MemoryViewer({ circleId, threadId, userId, accentColor = '#22d3ee', onClose }: Props) {
+export default function MemoryViewer({ circleId, threadId, userId, accentColor = '#6366f1', onClose }: Props) {
   const [memories, setMemories] = useState<MemoryBuckets>({ circle: [], user: [], session: [], total: 0 });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<ViewerTab>('inbox');
@@ -846,8 +846,8 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
             <Text style={s.metaBadgeText}>{String(mem.scope).toUpperCase()}</Text>
           </View>
           {providerLabel(mem) ? (
-            <View style={[s.metaBadge, { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee10' }]}>
-              <Text style={[s.metaBadgeText, { color: '#22d3ee' }]}>{providerLabel(mem)!.toUpperCase()}</Text>
+            <View style={[s.metaBadge, { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f110' }]}>
+              <Text style={[s.metaBadgeText, { color: '#6366f1' }]}>{providerLabel(mem)!.toUpperCase()}</Text>
             </View>
           ) : null}
           <Text style={s.cardDate}>{new Date(mem.updated_at || mem.created_at).toLocaleDateString()}</Text>
@@ -902,8 +902,8 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
     return (
       <View key={mem.id} style={s.inboxCard}>
         <View style={s.cardTopRow}>
-          <View style={[s.metaBadge, { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#22d3ee12' }]}>
-            <Text style={[s.metaBadgeText, { color: '#22d3ee' }]}>{provider.toUpperCase()}</Text>
+          <View style={[s.metaBadge, { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f112' }]}>
+            <Text style={[s.metaBadgeText, { color: '#6366f1' }]}>{provider.toUpperCase()}</Text>
           </View>
           <View style={[s.metaBadge, { borderColor: '#ffffff', backgroundColor: '#ffffff' }]}>
             <Text style={[s.metaBadgeText, { color: '#000000' }]}>{knowledgeKind === 'user_startup_context' ? 'STARTUP' : 'LEARNED'}</Text>
@@ -979,7 +979,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
         </View>
         <View style={s.statCard}>
           <Text style={s.statLabel}>NEWLY LEARNED</Text>
-          <Text style={[s.statValue, { color: '#22d3ee' }]}>{inboxMemories.length}</Text>
+          <Text style={[s.statValue, { color: '#6366f1' }]}>{inboxMemories.length}</Text>
         </View>
         <View style={s.statCard}>
           <Text style={s.statLabel}>AVG TRUST</Text>
