@@ -41,6 +41,7 @@ for (const marker of [
   "'whiteboardNotes'",
   "'budgetConfig'",
   "'idleConfig'",
+  "'sharedChatOptIn'",
   "'agentFilterMode'",
   "'telegramMetadata'",
   "normalized_key ~ '(password|passwd|secret|token|apikey|accesskey|privatekey|credential|authorization|bearer|cookie|sessionkey|webhook)'",
@@ -150,6 +151,24 @@ check(
   validatorBody.includes('jsonb_array_length(preference_entry.value) > 8')
     && validatorBody.includes('length(btrim(text_value)) NOT BETWEEN 1 AND 80'),
   'whiteboard count and note length are bounded',
+);
+check(
+  validatorBody.includes(
+    "WHERE idle_key NOT IN ('masterEnabled', 'behaviors', 'sharedChatOptIn')",
+  )
+    && validatorBody.includes("preference_entry.value ? 'sharedChatOptIn'")
+    && validatorBody.includes(
+      "jsonb_typeof(preference_entry.value -> 'sharedChatOptIn') <> 'boolean'",
+    ),
+  'idle config permits only the optional boolean shared-chat opt-in extension',
+);
+const idleRequiredShape = validatorBody.slice(
+  validatorBody.indexOf("WHEN 'idleConfig' THEN"),
+  validatorBody.indexOf('IF EXISTS (', validatorBody.indexOf("WHEN 'idleConfig' THEN")),
+);
+check(
+  !idleRequiredShape.includes('sharedChatOptIn'),
+  'legacy idle configs remain valid without sharedChatOptIn',
 );
 
 const scrubStart = migration.indexOf('DO $legacy_telegram_scrub$');

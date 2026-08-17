@@ -1,57 +1,15 @@
--- Owner-private, circle-scoped Office preferences with atomic patch authority.
+-- Circle-global idle-behavior reservations.
 --
--- `profiles.office_preferences` is a flat profile blob and profile rows are
--- readable by fellow circle members. It therefore cannot own private Office
--- state or credentials. This migration introduces an exact owner+circle row,
--- limits it to reviewed non-secret fields, and makes one server-side patch RPC
--- the only authenticated mutation surface.
+-- Browser schedulers must claim through this RPC before producing any behavior
+-- side effect. The conditional UPSERT is the single serialization point across
+-- tabs, devices, and circle members; callers never receive direct table DML.
 
 BEGIN;
 
-CREATE OR REPLACE FUNCTION public.office_preferences_contains_secret_key_v1(
-  p_value jsonb
-)
-RETURNS boolean
-LANGUAGE plpgsql
-IMMUTABLE
-STRICT
-SET search_path = pg_catalog, public
-AS $function$
-DECLARE
-  object_entry record;
-  array_entry jsonb;
-  normalized_key text;
-BEGIN
-  CASE jsonb_typeof(p_value)
-    WHEN 'object' THEN
-      FOR object_entry IN SELECT key, value FROM jsonb_each(p_value)
-      LOOP
-        normalized_key := regexp_replace(lower(object_entry.key), '[^a-z0-9]', '', 'g');
-        IF lower(object_entry.key) IN ('__proto__', 'prototype', 'constructor')
-           OR normalized_key ~ '(password|passwd|secret|token|apikey|accesskey|privatekey|credential|authorization|bearer|cookie|sessionkey|webhook)' THEN
-          RETURN true;
-        END IF;
-        IF public.office_preferences_contains_secret_key_v1(object_entry.value) THEN
-          RETURN true;
-        END IF;
-      END LOOP;
-    WHEN 'array' THEN
-      FOR array_entry IN SELECT value FROM jsonb_array_elements(p_value)
-      LOOP
-        IF public.office_preferences_contains_secret_key_v1(array_entry) THEN
-          RETURN true;
-        END IF;
-      END LOOP;
-    ELSE
-      NULL;
-  END CASE;
-  RETURN false;
-END;
-$function$;
-
-REVOKE ALL ON FUNCTION public.office_preferences_contains_secret_key_v1(jsonb)
-  FROM PUBLIC, anon, authenticated, service_role;
-
+-- Forward-compatible preference validator repair for databases that already
+-- applied the original §45 before sharedChatOptIn was introduced. This exact
+-- definition replaces the existing function in place, so its table constraint
+-- and patch RPC observe the new optional boolean without rebuilding either.
 CREATE OR REPLACE FUNCTION public.validate_office_user_preferences_v1(
   p_preferences jsonb
 )
@@ -334,87 +292,54 @@ $function$;
 REVOKE ALL ON FUNCTION public.validate_office_user_preferences_v1(jsonb)
   FROM PUBLIC, anon, authenticated, service_role;
 
-CREATE TABLE IF NOT EXISTS public.office_user_preferences (
-  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS public.circle_idle_behavior_claims (
   circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
-  preferences jsonb NOT NULL DEFAULT '{}'::jsonb,
-  revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
-  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (user_id, circle_id)
+  behavior_id text NOT NULL,
+  claimed_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  claimed_at timestamptz NOT NULL,
+  next_eligible_at timestamptz NOT NULL,
+  PRIMARY KEY (circle_id, behavior_id)
 );
 
-ALTER TABLE public.office_user_preferences
-  DROP CONSTRAINT IF EXISTS office_user_preferences_document_valid;
-ALTER TABLE public.office_user_preferences
-  ADD CONSTRAINT office_user_preferences_document_valid
-  CHECK (public.validate_office_user_preferences_v1(preferences));
-
-ALTER TABLE public.office_user_preferences ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.office_user_preferences FORCE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS office_user_preferences_select_own ON public.office_user_preferences;
-CREATE POLICY office_user_preferences_select_own
-ON public.office_user_preferences
-FOR SELECT
-TO authenticated
-USING (
-  user_id = auth.uid()
-  AND EXISTS (
-    SELECT 1
-    FROM public.circle_members AS membership
-    WHERE membership.circle_id = office_user_preferences.circle_id
-      AND membership.user_id = auth.uid()
-  )
-);
-
-REVOKE ALL ON TABLE public.office_user_preferences FROM PUBLIC, anon, authenticated;
-GRANT SELECT ON TABLE public.office_user_preferences TO authenticated;
-
-CREATE OR REPLACE FUNCTION public.read_my_office_preferences_v1(
-  p_circle_id uuid
-)
-RETURNS jsonb
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, public
-AS $function$
-DECLARE
-  actor_id uuid := auth.uid();
-  stored_preferences jsonb;
-  stored_revision bigint;
-  stored_updated_at timestamptz;
-BEGIN
-  IF actor_id IS NULL THEN
-    RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501';
-  END IF;
-  IF p_circle_id IS NULL THEN
-    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
-  END IF;
-  PERFORM 1
-  FROM public.circle_members AS membership
-  WHERE membership.circle_id = p_circle_id
-    AND membership.user_id = actor_id
-  FOR KEY SHARE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
-  END IF;
-
-  SELECT preferences, revision, updated_at
-  INTO stored_preferences, stored_revision, stored_updated_at
-  FROM public.office_user_preferences
-  WHERE user_id = actor_id
-    AND circle_id = p_circle_id;
-
-  RETURN jsonb_build_object(
-    'preferences', coalesce(stored_preferences, '{}'::jsonb),
-    'revision', coalesce(stored_revision, 0),
-    'updatedAt', to_jsonb(stored_updated_at)
+ALTER TABLE public.circle_idle_behavior_claims
+  DROP CONSTRAINT IF EXISTS circle_idle_behavior_claims_behavior_id_valid;
+ALTER TABLE public.circle_idle_behavior_claims
+  ADD CONSTRAINT circle_idle_behavior_claims_behavior_id_valid
+  CHECK (
+    behavior_id IN (
+      'streak_guardian',
+      'stale_task_detector',
+      'circle_pulse_monitor',
+      'knowledge_curator',
+      'memory_digest',
+      'morning_briefing',
+      'weekly_retro',
+      'goal_pace_tracker',
+      'codebase_scanner',
+      'dependency_health',
+      'cost_efficiency_report'
+    )
   );
-END;
-$function$;
 
-CREATE OR REPLACE FUNCTION public.patch_my_office_preferences_v1(
+ALTER TABLE public.circle_idle_behavior_claims
+  DROP CONSTRAINT IF EXISTS circle_idle_behavior_claims_window_valid;
+ALTER TABLE public.circle_idle_behavior_claims
+  ADD CONSTRAINT circle_idle_behavior_claims_window_valid
+  CHECK (
+    next_eligible_at > claimed_at
+    AND next_eligible_at <= claimed_at + interval '7 days'
+  );
+
+ALTER TABLE public.circle_idle_behavior_claims ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.circle_idle_behavior_claims FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE public.circle_idle_behavior_claims
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.claim_idle_behavior_run_v1(
   p_circle_id uuid,
-  p_patch jsonb
+  p_behavior_id text,
+  p_cooldown_minutes integer
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -422,249 +347,124 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $function$
 DECLARE
-  actor_id uuid := auth.uid();
-  patch_entry record;
-  next_preferences jsonb;
-  accepted_revision bigint;
-  accepted_updated_at timestamptz;
-  patch_key_count integer;
+  v_actor_id uuid := auth.uid();
+  v_server_now timestamptz;
+  v_effective_cooldown_minutes integer;
+  v_claimed_at timestamptz;
+  v_next_eligible_at timestamptz;
+  v_affected_rows integer := 0;
+  v_claimed boolean := false;
 BEGIN
-  IF actor_id IS NULL THEN
+  IF v_actor_id IS NULL THEN
     RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501';
   END IF;
   IF p_circle_id IS NULL THEN
-    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+    RAISE EXCEPTION 'circle_id_required' USING ERRCODE = '22023';
   END IF;
+  IF p_behavior_id IS NULL OR p_behavior_id NOT IN (
+    'streak_guardian',
+    'stale_task_detector',
+    'circle_pulse_monitor',
+    'knowledge_curator',
+    'memory_digest',
+    'morning_briefing',
+    'weekly_retro',
+    'goal_pace_tracker',
+    'codebase_scanner',
+    'dependency_health',
+    'cost_efficiency_report'
+  ) THEN
+    RAISE EXCEPTION 'idle_behavior_not_allowed' USING ERRCODE = '22023';
+  END IF;
+  IF p_cooldown_minutes IS NULL OR p_cooldown_minutes NOT BETWEEN 1 AND 10080 THEN
+    RAISE EXCEPTION 'idle_behavior_cooldown_out_of_bounds' USING ERRCODE = '22023';
+  END IF;
+
   PERFORM 1
   FROM public.circle_members AS membership
   WHERE membership.circle_id = p_circle_id
-    AND membership.user_id = actor_id
+    AND membership.user_id = v_actor_id
   FOR KEY SHARE;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
-  END IF;
-  IF p_patch IS NULL
-     OR jsonb_typeof(p_patch) <> 'object'
-     OR octet_length(p_patch::text) > 131072 THEN
-    RAISE EXCEPTION 'invalid_office_preferences_patch' USING ERRCODE = '22023';
-  END IF;
-  SELECT count(*) INTO patch_key_count FROM jsonb_object_keys(p_patch);
-  IF patch_key_count NOT BETWEEN 1 AND 7
-     OR EXISTS (
-       SELECT 1
-       FROM jsonb_object_keys(p_patch) AS patch_key
-       WHERE patch_key NOT IN (
-         'agentNames',
-         'appearances',
-         'whiteboardNotes',
-         'budgetConfig',
-         'idleConfig',
-         'agentFilterMode',
-         'telegramMetadata'
-       )
-     )
-     OR public.office_preferences_contains_secret_key_v1(p_patch) THEN
-    RAISE EXCEPTION 'invalid_office_preferences_patch' USING ERRCODE = '22023';
+    RAISE EXCEPTION 'circle_membership_required' USING ERRCODE = '42501';
   END IF;
 
-  -- Establish and lock the exact owner+circle row. A concurrent first writer
-  -- waits on the same unique key, then reads the winner before applying its own
-  -- disjoint top-level patch; no client read/merge race is possible.
-  INSERT INTO public.office_user_preferences(user_id, circle_id)
-  VALUES (actor_id, p_circle_id)
-  ON CONFLICT (user_id, circle_id) DO NOTHING;
+  v_effective_cooldown_minutes := CASE
+    WHEN p_behavior_id IN (
+      'streak_guardian',
+      'circle_pulse_monitor',
+      'morning_briefing',
+      'weekly_retro',
+      'goal_pace_tracker'
+    )
+      THEN greatest(p_cooldown_minutes, 1440)
+    ELSE p_cooldown_minutes
+  END;
+  v_server_now := clock_timestamp();
 
-  SELECT preferences
-  INTO next_preferences
-  FROM public.office_user_preferences
-  WHERE user_id = actor_id
-    AND circle_id = p_circle_id
-  FOR UPDATE;
+  INSERT INTO public.circle_idle_behavior_claims AS current_claim (
+    circle_id,
+    behavior_id,
+    claimed_by,
+    claimed_at,
+    next_eligible_at
+  )
+  VALUES (
+    p_circle_id,
+    p_behavior_id,
+    v_actor_id,
+    v_server_now,
+    v_server_now + make_interval(mins => v_effective_cooldown_minutes)
+  )
+  ON CONFLICT (circle_id, behavior_id) DO UPDATE
+  SET claimed_by = EXCLUDED.claimed_by,
+      claimed_at = EXCLUDED.claimed_at,
+      next_eligible_at = EXCLUDED.next_eligible_at
+  WHERE current_claim.next_eligible_at <= EXCLUDED.claimed_at
+  RETURNING current_claim.claimed_at, current_claim.next_eligible_at
+    INTO v_claimed_at, v_next_eligible_at;
 
-  IF next_preferences IS NULL THEN
-    RAISE EXCEPTION 'office_preferences_row_unavailable' USING ERRCODE = '55000';
-  END IF;
+  GET DIAGNOSTICS v_affected_rows = ROW_COUNT;
+  v_claimed := v_affected_rows = 1;
 
-  FOR patch_entry IN SELECT key, value FROM jsonb_each(p_patch)
-  LOOP
-    next_preferences := next_preferences - patch_entry.key;
-    IF patch_entry.value <> 'null'::jsonb THEN
-      next_preferences := next_preferences || jsonb_build_object(patch_entry.key, patch_entry.value);
+  IF NOT v_claimed THEN
+    SELECT claim.claimed_at, claim.next_eligible_at
+      INTO v_claimed_at, v_next_eligible_at
+    FROM public.circle_idle_behavior_claims AS claim
+    WHERE claim.circle_id = p_circle_id
+      AND claim.behavior_id = p_behavior_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'idle_behavior_claim_state_unavailable' USING ERRCODE = '40001';
     END IF;
-  END LOOP;
-
-  IF NOT public.validate_office_user_preferences_v1(next_preferences)
-     OR octet_length(next_preferences::text) > 131072 THEN
-    RAISE EXCEPTION 'invalid_office_preferences_document' USING ERRCODE = '22023';
+    v_effective_cooldown_minutes := greatest(
+      1,
+      least(
+        10080,
+        ceil(extract(epoch FROM (v_next_eligible_at - v_claimed_at)) / 60)::integer
+      )
+    );
   END IF;
 
-  UPDATE public.office_user_preferences
-  SET preferences = next_preferences,
-      revision = revision + 1,
-      updated_at = clock_timestamp()
-  WHERE user_id = actor_id
-    AND circle_id = p_circle_id
-  RETURNING revision, updated_at INTO accepted_revision, accepted_updated_at;
-
-  -- Value-free receipt: it proves the server-accepted revision and timestamp
-  -- without reflecting any preference or credential-adjacent caller input.
   RETURN jsonb_build_object(
     'schemaVersion', 1,
-    'accepted', true,
-    'revision', accepted_revision,
-    'updatedAt', accepted_updated_at
+    'claimed', v_claimed,
+    'behaviorId', p_behavior_id,
+    'effectiveCooldownMinutes', v_effective_cooldown_minutes,
+    'claimedAt', to_jsonb(v_claimed_at),
+    'nextEligibleAt', to_jsonb(v_next_eligible_at)
   );
 END;
 $function$;
 
-REVOKE ALL ON FUNCTION public.read_my_office_preferences_v1(uuid)
+REVOKE ALL ON FUNCTION public.claim_idle_behavior_run_v1(uuid, text, integer)
   FROM PUBLIC, anon, authenticated, service_role;
-REVOKE ALL ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)
-  FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.read_my_office_preferences_v1(uuid)
-  TO authenticated;
-GRANT EXECUTE ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)
+GRANT EXECUTE ON FUNCTION public.claim_idle_behavior_run_v1(uuid, text, integer)
   TO authenticated;
 
--- Remove the known legacy Telegram credential object from the circle-readable
--- profile blob. The UPDATE transforms rows in place and never selects, returns,
--- logs, or copies the values. Reapplication is a no-op once the key is absent.
-DO $legacy_telegram_scrub$
-BEGIN
-  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
-     AND EXISTS (
-       SELECT 1
-       FROM pg_catalog.pg_attribute
-       WHERE attrelid = 'public.profiles'::regclass
-         AND attname = 'office_preferences'
-         AND NOT attisdropped
-     ) THEN
-    UPDATE public.profiles
-    SET office_preferences = office_preferences
-      - 'telegramConfig'
-      - 'agentNames'
-      - 'whiteboardNotes'
-      - 'budgetConfig'
-      - 'idleConfig'
-      - 'agentFilterMode'
-      - 'appearances'
-    WHERE jsonb_typeof(office_preferences) = 'object'
-      AND office_preferences ?| ARRAY[
-        'telegramConfig',
-        'agentNames',
-        'whiteboardNotes',
-        'budgetConfig',
-        'idleConfig',
-        'agentFilterMode',
-        'appearances'
-      ];
-  END IF;
-END;
-$legacy_telegram_scrub$;
-
--- `profiles.agent_appearance` was a second circle-readable legacy store for
--- the same private appearance map. Erase it in place without projecting its
--- contents. The canonical owner-private copy now lives in
--- `office_user_preferences.preferences.appearances`.
-DO $legacy_agent_appearance_scrub$
-BEGIN
-  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
-     AND EXISTS (
-       SELECT 1
-       FROM pg_catalog.pg_attribute
-       WHERE attrelid = 'public.profiles'::regclass
-         AND attname = 'agent_appearance'
-         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
-         AND NOT attisdropped
-     ) THEN
-    UPDATE public.profiles
-    SET agent_appearance = '{}'::jsonb
-    WHERE agent_appearance IS DISTINCT FROM '{}'::jsonb;
-  END IF;
-END;
-$legacy_agent_appearance_scrub$;
-
-CREATE OR REPLACE FUNCTION public.strip_legacy_private_office_profile_keys_v1()
-RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, public
-AS $function$
-BEGIN
-  IF NEW.office_preferences IS NOT NULL
-     AND jsonb_typeof(NEW.office_preferences) = 'object' THEN
-    NEW.office_preferences := NEW.office_preferences
-      - 'telegramConfig'
-      - 'agentNames'
-      - 'whiteboardNotes'
-      - 'budgetConfig'
-      - 'idleConfig'
-      - 'agentFilterMode'
-      - 'appearances';
-  END IF;
-  RETURN NEW;
-END;
-$function$;
-
-REVOKE ALL ON FUNCTION public.strip_legacy_private_office_profile_keys_v1()
-  FROM PUBLIC, anon, authenticated, service_role;
-
-DO $legacy_profile_trigger$
-BEGIN
-  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
-     AND EXISTS (
-       SELECT 1
-       FROM pg_catalog.pg_attribute
-       WHERE attrelid = 'public.profiles'::regclass
-         AND attname = 'office_preferences'
-         AND NOT attisdropped
-     ) THEN
-    DROP TRIGGER IF EXISTS strip_legacy_private_office_profile_keys_v1
-      ON public.profiles;
-    CREATE TRIGGER strip_legacy_private_office_profile_keys_v1
-    BEFORE INSERT OR UPDATE OF office_preferences ON public.profiles
-    FOR EACH ROW
-    EXECUTE FUNCTION public.strip_legacy_private_office_profile_keys_v1();
-  END IF;
-END;
-$legacy_profile_trigger$;
-
--- Keep the legacy appearance column empty even while older clients still
--- include it in profile inserts or updates. Only this deprecated field is
--- normalized; every unrelated NEW profile field passes through unchanged.
-CREATE OR REPLACE FUNCTION public.strip_legacy_private_office_agent_appearance_v1()
-RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, public
-AS $function$
-BEGIN
-  NEW.agent_appearance := '{}'::jsonb;
-  RETURN NEW;
-END;
-$function$;
-
-REVOKE ALL ON FUNCTION public.strip_legacy_private_office_agent_appearance_v1()
-  FROM PUBLIC, anon, authenticated, service_role;
-
-DO $legacy_agent_appearance_trigger$
-BEGIN
-  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
-     AND EXISTS (
-       SELECT 1
-       FROM pg_catalog.pg_attribute
-       WHERE attrelid = 'public.profiles'::regclass
-         AND attname = 'agent_appearance'
-         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
-         AND NOT attisdropped
-     ) THEN
-    DROP TRIGGER IF EXISTS strip_legacy_private_office_agent_appearance_v1
-      ON public.profiles;
-    CREATE TRIGGER strip_legacy_private_office_agent_appearance_v1
-    BEFORE INSERT OR UPDATE OF agent_appearance ON public.profiles
-    FOR EACH ROW
-    EXECUTE FUNCTION public.strip_legacy_private_office_agent_appearance_v1();
-  END IF;
-END;
-$legacy_agent_appearance_trigger$;
+COMMENT ON TABLE public.circle_idle_behavior_claims IS
+  'Circle-global cooldown reservations claimed atomically before idle behavior side effects.';
+COMMENT ON FUNCTION public.claim_idle_behavior_run_v1(uuid, text, integer) IS
+  'Atomically reserves one allowlisted idle behavior for an authenticated circle member.';
 
 COMMIT;
 

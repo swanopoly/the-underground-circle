@@ -1,6 +1,6 @@
 // ─── Idle Agent Behaviors ────────────────────────────────────────────────────
 // Background tasks that agents perform while idle. Toggleable per-behavior,
-// with 3 tiers: Tier 1 (pure Supabase, auto-on), Tier 2 (AI via automation-executor),
+// with 3 tiers: Tier 1 (pure Supabase; shared-chat writers require opt-in), Tier 2 (AI via automation-executor),
 // Tier 3 (owner-only, uses Claude Code bridge or AI analysis).
 
 import { supabase } from './supabase';
@@ -29,6 +29,8 @@ export interface IdleBehaviorDef {
   floatingText: string;
   taskLabel: string;
   ownerOnly: boolean;
+  /** True when the behavior can append a user-visible message to shared Chat. */
+  writesToSharedChat: boolean;
   requiresBridge: boolean;
   requiresClaude: boolean;
 }
@@ -41,6 +43,11 @@ export interface BehaviorState {
 
 export interface IdleBehaviorConfig {
   masterEnabled: boolean;
+  /**
+   * Shared Chat writes require a separate, explicit persisted opt-in. Missing
+   * legacy values normalize to false; an enabled behavior flag is insufficient.
+   */
+  sharedChatOptIn: boolean;
   behaviors: Record<string, BehaviorState>;
 }
 
@@ -62,10 +69,11 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     icon: '\uD83D\uDD25',
     tier: 1,
     category: 'engagement',
-    defaultCooldownMinutes: 240,
+    defaultCooldownMinutes: 1440,
     floatingText: 'CHECKING...',
     taskLabel: 'Checking streaks...',
-    ownerOnly: false,
+    ownerOnly: true,
+    writesToSharedChat: true,
     requiresBridge: false,
     requiresClaude: false,
   },
@@ -80,6 +88,7 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     floatingText: 'REVIEWING...',
     taskLabel: 'Scanning tasks...',
     ownerOnly: false,
+    writesToSharedChat: false,
     requiresBridge: false,
     requiresClaude: false,
   },
@@ -90,10 +99,11 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     icon: '\uD83D\uDC93',
     tier: 1,
     category: 'engagement',
-    defaultCooldownMinutes: 480,
+    defaultCooldownMinutes: 1440,
     floatingText: 'MONITORING...',
     taskLabel: 'Checking circle pulse...',
-    ownerOnly: false,
+    ownerOnly: true,
+    writesToSharedChat: true,
     requiresBridge: false,
     requiresClaude: false,
   },
@@ -108,6 +118,7 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     floatingText: 'CURATING...',
     taskLabel: 'Curating knowledge base...',
     ownerOnly: false,
+    writesToSharedChat: false,
     requiresBridge: false,
     requiresClaude: false,
   },
@@ -122,6 +133,7 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     floatingText: 'DIGESTING...',
     taskLabel: 'Generating memory digest...',
     ownerOnly: false,
+    writesToSharedChat: false,
     requiresBridge: false,
     requiresClaude: false,
   },
@@ -137,7 +149,8 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     defaultCooldownMinutes: 1440,
     floatingText: 'BRIEFING...',
     taskLabel: 'Preparing morning briefing...',
-    ownerOnly: false,
+    ownerOnly: true,
+    writesToSharedChat: true,
     requiresBridge: false,
     requiresClaude: true,
   },
@@ -151,7 +164,8 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     defaultCooldownMinutes: 10080,
     floatingText: 'REFLECTING...',
     taskLabel: 'Generating weekly retro...',
-    ownerOnly: false,
+    ownerOnly: true,
+    writesToSharedChat: true,
     requiresBridge: false,
     requiresClaude: true,
   },
@@ -162,10 +176,11 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     icon: '\uD83C\uDFAF',
     tier: 2,
     category: 'productivity',
-    defaultCooldownMinutes: 720,
+    defaultCooldownMinutes: 1440,
     floatingText: 'ANALYZING...',
     taskLabel: 'Analyzing goal pace...',
-    ownerOnly: false,
+    ownerOnly: true,
+    writesToSharedChat: true,
     requiresBridge: false,
     requiresClaude: true,
   },
@@ -182,6 +197,7 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     floatingText: 'SCANNING...',
     taskLabel: 'Scanning codebase...',
     ownerOnly: true,
+    writesToSharedChat: false,
     requiresBridge: true,
     requiresClaude: false,
   },
@@ -196,6 +212,7 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     floatingText: 'AUDITING...',
     taskLabel: 'Checking dependencies...',
     ownerOnly: true,
+    writesToSharedChat: false,
     requiresBridge: true,
     requiresClaude: false,
   },
@@ -210,6 +227,7 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
     floatingText: 'OPTIMIZING...',
     taskLabel: 'Analyzing cost efficiency...',
     ownerOnly: true,
+    writesToSharedChat: false,
     requiresBridge: false,
     requiresClaude: true,
   },
@@ -219,7 +237,10 @@ export const IDLE_BEHAVIORS: IdleBehaviorDef[] = [
 
 export function getDefaultBehaviorState(def: IdleBehaviorDef): BehaviorState {
   return {
-    enabled: def.tier === 1, // Tier 1 on by default
+    // Shared-chat mutation is never enabled merely because a Tier 1 behavior
+    // was added to the catalog. It requires both an explicit behavior toggle
+    // and the separate persisted sharedChatOptIn capability.
+    enabled: def.tier === 1 && !def.writesToSharedChat,
     cooldownMinutes: def.defaultCooldownMinutes,
     lastRanAt: null,
   };
@@ -230,20 +251,103 @@ export function getDefaultIdleConfig(): IdleBehaviorConfig {
   for (const def of IDLE_BEHAVIORS) {
     behaviors[def.id] = getDefaultBehaviorState(def);
   }
-  return { masterEnabled: true, behaviors };
+  return { masterEnabled: true, sharedChatOptIn: false, behaviors };
+}
+
+const MAX_IDLE_COOLDOWN_MINUTES = 10_080;
+const IDLE_SERVER_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+const MAX_IDLE_SERVER_TIMESTAMP_MS = Date.UTC(2100, 0, 1);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getOwnValue(record: Record<string, unknown> | null, key: string): unknown {
+  return record && Object.prototype.hasOwnProperty.call(record, key)
+    ? record[key]
+    : undefined;
+}
+
+function normalizeIdleTimestamp(value: unknown): string | null {
+  if (
+    typeof value !== 'string'
+    || value.length > 40
+    || !IDLE_SERVER_TIMESTAMP_PATTERN.test(value)
+  ) {
+    return null;
+  }
+  const milliseconds = Date.parse(value);
+  if (
+    !Number.isFinite(milliseconds)
+    || milliseconds < 0
+    || milliseconds >= MAX_IDLE_SERVER_TIMESTAMP_MS
+  ) {
+    return null;
+  }
+  return new Date(milliseconds).toISOString();
+}
+
+/**
+ * Converts storage, server, or compatibility input into the complete current
+ * config. Unknown behavior ids are dropped and legacy shared-chat authority is
+ * never inferred from an old enabled flag.
+ */
+export function normalizeIdleConfig(input: unknown): IdleBehaviorConfig {
+  const defaults = getDefaultIdleConfig();
+  if (!isRecord(input)) return defaults;
+
+  // Resolve this capability before behavior flags. A legacy `enabled: true`
+  // must be erased while opt-in is absent, otherwise enabling one safe writer
+  // later could resurrect every latent shared-chat flag in the old blob.
+  const sharedChatOptIn = getOwnValue(input, 'sharedChatOptIn') === true;
+  const behaviorInput = getOwnValue(input, 'behaviors');
+  const rawBehaviors = isRecord(behaviorInput) ? behaviorInput : {};
+  const behaviors: Record<string, BehaviorState> = {};
+  for (const def of IDLE_BEHAVIORS) {
+    const fallback = defaults.behaviors[def.id];
+    const candidateState = getOwnValue(rawBehaviors, def.id);
+    const rawState: Record<string, unknown> | null = isRecord(candidateState)
+      ? candidateState
+      : null;
+    const rawCooldown = getOwnValue(rawState, 'cooldownMinutes');
+    const rawEnabled = getOwnValue(rawState, 'enabled');
+    const rawLastRanAt = getOwnValue(rawState, 'lastRanAt');
+    const cooldownMinutes = def.writesToSharedChat
+      ? def.defaultCooldownMinutes
+      : typeof rawCooldown === 'number'
+        && Number.isSafeInteger(rawCooldown)
+        && rawCooldown >= 1
+        && rawCooldown <= MAX_IDLE_COOLDOWN_MINUTES
+        ? rawCooldown
+        : fallback.cooldownMinutes;
+    behaviors[def.id] = {
+      enabled: def.writesToSharedChat && !sharedChatOptIn
+        ? false
+        : typeof rawEnabled === 'boolean'
+          ? rawEnabled
+          : fallback.enabled,
+      cooldownMinutes,
+      lastRanAt: normalizeIdleTimestamp(rawLastRanAt),
+    };
+  }
+
+  const rawMasterEnabled = getOwnValue(input, 'masterEnabled');
+  return {
+    masterEnabled: typeof rawMasterEnabled === 'boolean'
+      ? rawMasterEnabled
+      : defaults.masterEnabled,
+    // Missing and malformed legacy authority fail closed. This stays separate
+    // from per-behavior enabled state so old `enabled: true` blobs cannot post.
+    sharedChatOptIn,
+    behaviors,
+  };
 }
 
 export async function loadIdleConfig(): Promise<IdleBehaviorConfig> {
   try {
     const raw = await storage.getItem(STORAGE_KEY_IDLE);
     if (!raw) return getDefaultIdleConfig();
-    const parsed = JSON.parse(raw) as IdleBehaviorConfig;
-    // Forward-merge: add any new behaviors not in stored config
-    const defaults = getDefaultIdleConfig();
-    for (const id of Object.keys(defaults.behaviors)) {
-      if (!parsed.behaviors[id]) parsed.behaviors[id] = defaults.behaviors[id];
-    }
-    return parsed;
+    return normalizeIdleConfig(JSON.parse(raw));
   } catch {
     return getDefaultIdleConfig();
   }
@@ -251,7 +355,7 @@ export async function loadIdleConfig(): Promise<IdleBehaviorConfig> {
 
 export async function saveIdleConfig(config: IdleBehaviorConfig): Promise<void> {
   try {
-    await storage.setItem(STORAGE_KEY_IDLE, JSON.stringify(config));
+    await storage.setItem(STORAGE_KEY_IDLE, JSON.stringify(normalizeIdleConfig(config)));
   } catch {
     console.error('[idleBehaviors] Failed to save config');
   }
@@ -277,9 +381,12 @@ interface SchedulerContext {
   readonly onConfigUpdate: (config: IdleBehaviorConfig) => void;
   readonly isAuthorityCurrent: IdleSchedulerAuthorityCheck;
   readonly predecessorDrain: Promise<void>;
+  readonly behaviorDeferrals: Map<string, number>;
   intervalId: ReturnType<typeof setInterval> | null;
   initialTimeoutId: ReturnType<typeof setTimeout> | null;
   tickPromise: Promise<void> | null;
+  claimTransportFailureCount: number;
+  claimTransportDeferredUntil: number;
   cancelled: boolean;
   tickInFlight: boolean;
 }
@@ -293,6 +400,9 @@ class IdleSchedulerRetiredError extends Error {
 
 const activeSchedulers = new Map<string, SchedulerContext>();
 const noOpSchedulerCleanup: IdleSchedulerCleanup = () => {};
+const CLAIM_TRANSPORT_BACKOFF_BASE_MS = 5 * 60 * 1000;
+const CLAIM_TRANSPORT_BACKOFF_MAX_MS = 60 * 60 * 1000;
+const CLAIM_TRANSPORT_BACKOFF_MAX_EXPONENT = 8;
 
 function schedulerInstanceKey(authority: IdleSchedulerAuthority): string {
   return [
@@ -361,8 +471,75 @@ function schedulerAuthScope(context: SchedulerContext): Readonly<{
   };
 }
 
+function isClaimTransportDeferred(context: SchedulerContext): boolean {
+  return context.claimTransportDeferredUntil > Date.now();
+}
+
+function deferClaimTransport(context: SchedulerContext): void {
+  context.claimTransportFailureCount = Math.min(
+    CLAIM_TRANSPORT_BACKOFF_MAX_EXPONENT,
+    context.claimTransportFailureCount + 1,
+  );
+  const delay = Math.min(
+    CLAIM_TRANSPORT_BACKOFF_MAX_MS,
+    CLAIM_TRANSPORT_BACKOFF_BASE_MS
+      * (2 ** Math.max(0, context.claimTransportFailureCount - 1)),
+  );
+  context.claimTransportDeferredUntil = Date.now() + delay;
+}
+
+function clearClaimTransportDeferral(context: SchedulerContext): void {
+  context.claimTransportFailureCount = 0;
+  context.claimTransportDeferredUntil = 0;
+}
+
+function cacheBehaviorDeferral(
+  context: SchedulerContext,
+  behaviorId: string,
+  nextEligibleAt: string,
+): void {
+  const deadline = Date.parse(nextEligibleAt);
+  if (Number.isFinite(deadline)) context.behaviorDeferrals.set(behaviorId, deadline);
+}
+
+function isBehaviorDeferred(context: SchedulerContext, behaviorId: string): boolean {
+  const deadline = context.behaviorDeferrals.get(behaviorId);
+  if (deadline === undefined) return false;
+  if (deadline > Date.now()) return true;
+  context.behaviorDeferrals.delete(behaviorId);
+  return false;
+}
+
 function idleConfigExactStorageKey(authority: IdleSchedulerAuthority): string {
   return `${STORAGE_KEY_IDLE}:v2:${encodeURIComponent(authority.userId)}:${encodeURIComponent(authority.circleId)}`;
+}
+
+function hasExactIdleConfigStorageScope(authority: IdleSchedulerAuthority): boolean {
+  return Boolean(
+    authority
+    && typeof authority.userId === 'string'
+    && authority.userId.length > 0
+    && authority.userId.length <= 512
+    && typeof authority.circleId === 'string'
+    && authority.circleId.length > 0
+    && authority.circleId.length <= 512
+  );
+}
+
+/**
+ * Loads only the authenticated user+circle namespace. The ownerless legacy key
+ * is intentionally excluded because it cannot prove which account created it.
+ */
+export async function loadIdleConfigExact(
+  authority: IdleSchedulerAuthority,
+): Promise<IdleBehaviorConfig> {
+  if (!hasExactIdleConfigStorageScope(authority)) return getDefaultIdleConfig();
+  try {
+    const raw = await storage.getItem(idleConfigExactStorageKey(authority));
+    return raw ? normalizeIdleConfig(JSON.parse(raw)) : getDefaultIdleConfig();
+  } catch {
+    return getDefaultIdleConfig();
+  }
 }
 
 async function saveIdleConfigExact(
@@ -370,11 +547,106 @@ async function saveIdleConfigExact(
   config: IdleBehaviorConfig,
 ): Promise<void> {
   const key = idleConfigExactStorageKey(context.authority);
-  const serialized = JSON.stringify(config);
+  const serialized = JSON.stringify(normalizeIdleConfig(config));
   await awaitWhileSchedulerCurrent(context, () => storage.setItem(key, serialized));
   const receipt = await awaitWhileSchedulerCurrent(context, () => storage.getItem(key));
   if (receipt !== serialized) {
     throw new Error('Idle configuration receipt mismatch');
+  }
+}
+
+interface IdleBehaviorRunClaimReceipt {
+  readonly schemaVersion: 1;
+  readonly claimed: boolean;
+  readonly behaviorId: string;
+  readonly claimedAt: string | null;
+  readonly nextEligibleAt: string;
+  readonly effectiveCooldownMinutes?: number;
+}
+
+type IdleBehaviorRunClaimAttempt = Readonly<
+  | { status: 'receipt'; receipt: IdleBehaviorRunClaimReceipt }
+  | { status: 'transport_failure' }
+>;
+
+function normalizeIdleServerTimestamp(value: unknown): string | null {
+  return normalizeIdleTimestamp(value);
+}
+
+function parseIdleBehaviorRunClaimReceipt(
+  input: unknown,
+  expectedBehaviorId: string,
+): IdleBehaviorRunClaimReceipt | null {
+  const candidate = Array.isArray(input)
+    ? input.length === 1 ? input[0] : null
+    : input;
+  if (!isRecord(candidate)) return null;
+  if (
+    candidate.schemaVersion !== 1
+    || typeof candidate.claimed !== 'boolean'
+    || candidate.behaviorId !== expectedBehaviorId
+    || !Object.prototype.hasOwnProperty.call(candidate, 'claimedAt')
+    || !Object.prototype.hasOwnProperty.call(candidate, 'nextEligibleAt')
+  ) {
+    return null;
+  }
+
+  const claimedAt = candidate.claimedAt === null
+    ? null
+    : normalizeIdleServerTimestamp(candidate.claimedAt);
+  const nextEligibleAt = normalizeIdleServerTimestamp(candidate.nextEligibleAt);
+  if ((candidate.claimed && !claimedAt) || !nextEligibleAt) return null;
+  if (claimedAt && Date.parse(nextEligibleAt) <= Date.parse(claimedAt)) return null;
+
+  const effectiveCooldown = candidate.effectiveCooldownMinutes;
+  if (
+    effectiveCooldown !== undefined
+    && (
+      typeof effectiveCooldown !== 'number'
+      || !Number.isSafeInteger(effectiveCooldown)
+      || effectiveCooldown < 1
+      || effectiveCooldown > MAX_IDLE_COOLDOWN_MINUTES
+    )
+  ) {
+    return null;
+  }
+
+  return Object.freeze({
+    schemaVersion: 1,
+    claimed: candidate.claimed,
+    behaviorId: expectedBehaviorId,
+    claimedAt,
+    nextEligibleAt,
+    ...(effectiveCooldown === undefined
+      ? {}
+      : { effectiveCooldownMinutes: effectiveCooldown as number }),
+  });
+}
+
+async function claimIdleBehaviorRun(
+  def: IdleBehaviorDef,
+  state: BehaviorState,
+  context: SchedulerContext,
+): Promise<IdleBehaviorRunClaimAttempt> {
+  try {
+    const { data, error } = await awaitWhileSchedulerCurrent(context, () => supabase
+      .rpc('claim_idle_behavior_run_v1', {
+        p_circle_id: context.authority.circleId,
+        p_behavior_id: def.id,
+        p_cooldown_minutes: state.cooldownMinutes,
+      })
+      .setHeader('Authorization', `Bearer ${context.authority.accessToken}`));
+    const receipt = error ? null : parseIdleBehaviorRunClaimReceipt(data, def.id);
+    if (!receipt) {
+      deferClaimTransport(context);
+      return { status: 'transport_failure' };
+    }
+    clearClaimTransportDeferral(context);
+    return { status: 'receipt', receipt };
+  } catch (error) {
+    if (error instanceof IdleSchedulerRetiredError) throw error;
+    deferClaimTransport(context);
+    return { status: 'transport_failure' };
   }
 }
 
@@ -499,6 +771,25 @@ export function startIdleScheduler(
       () => undefined,
     ) ?? Promise.resolve()
   ))).then(() => undefined);
+  const behaviorDeferrals = new Map<string, number>();
+  let claimTransportFailureCount = 0;
+  let claimTransportDeferredUntil = 0;
+  for (const previous of predecessors) {
+    for (const [behaviorId, deadline] of previous.behaviorDeferrals) {
+      behaviorDeferrals.set(
+        behaviorId,
+        Math.max(deadline, behaviorDeferrals.get(behaviorId) ?? 0),
+      );
+    }
+    claimTransportFailureCount = Math.max(
+      claimTransportFailureCount,
+      previous.claimTransportFailureCount,
+    );
+    claimTransportDeferredUntil = Math.max(
+      claimTransportDeferredUntil,
+      previous.claimTransportDeferredUntil,
+    );
+  }
   predecessors.forEach(retireScheduler);
 
   const context: SchedulerContext = {
@@ -510,9 +801,12 @@ export function startIdleScheduler(
       ? isAuthorityCurrent
       : () => true,
     predecessorDrain,
+    behaviorDeferrals,
     intervalId: null,
     initialTimeoutId: null,
     tickPromise: null,
+    claimTransportFailureCount,
+    claimTransportDeferredUntil,
     cancelled: false,
     tickInFlight: false,
   };
@@ -544,6 +838,60 @@ function isBehaviorDue(state: BehaviorState): boolean {
   return elapsed >= state.cooldownMinutes * 60 * 1000;
 }
 
+type IdleBehaviorRunOutcome =
+  | 'executed'
+  | 'claim_denied'
+  | 'claim_transport_failure'
+  | 'claim_burned';
+
+function isBehaviorAuthorizedByConfig(
+  def: IdleBehaviorDef,
+  context: SchedulerContext,
+  config: IdleBehaviorConfig,
+): boolean {
+  const state = config.behaviors[def.id];
+  return Boolean(
+    config.masterEnabled
+    && state?.enabled
+    && (!def.ownerOnly || context.isOwner)
+    && (!def.writesToSharedChat || config.sharedChatOptIn)
+  );
+}
+
+async function projectIdleBehaviorClaim(
+  def: IdleBehaviorDef,
+  context: SchedulerContext,
+  latestConfig: IdleBehaviorConfig,
+  claimedAt: string | null,
+): Promise<IdleBehaviorConfig> {
+  if (!claimedAt) return latestConfig;
+  const latestState = latestConfig.behaviors[def.id];
+  if (!latestState) return latestConfig;
+  const latestMilliseconds = latestState.lastRanAt
+    ? Date.parse(latestState.lastRanAt)
+    : Number.NaN;
+  const claimedMilliseconds = Date.parse(claimedAt);
+  const projectedRanAt = Number.isFinite(latestMilliseconds)
+    && latestMilliseconds >= claimedMilliseconds
+    ? latestState.lastRanAt
+    : claimedAt;
+  const projectedConfig: IdleBehaviorConfig = {
+    ...latestConfig,
+    behaviors: {
+      ...latestConfig.behaviors,
+      [def.id]: {
+        ...latestState,
+        lastRanAt: projectedRanAt,
+      },
+    },
+  };
+  assertSchedulerCurrent(context);
+  context.onConfigUpdate(projectedConfig);
+  await saveIdleConfigExact(context, projectedConfig);
+  assertSchedulerCurrent(context);
+  return projectedConfig;
+}
+
 async function tickScheduler(context: SchedulerContext): Promise<void> {
   if (!isSchedulerCurrent(context) || context.tickInFlight) return;
   context.tickInFlight = true;
@@ -557,15 +905,15 @@ async function tickScheduler(context: SchedulerContext): Promise<void> {
       retireScheduler(context);
       throw new IdleSchedulerRetiredError();
     }
-    const config = context.getConfig();
-    assertSchedulerCurrent(context);
-    if (!config.masterEnabled) return;
+    if (isClaimTransportDeferred(context)) return;
 
     for (const def of IDLE_BEHAVIORS) {
       assertSchedulerCurrent(context);
-      if (def.ownerOnly && !context.isOwner) continue;
+      const config = normalizeIdleConfig(context.getConfig());
+      if (!config.masterEnabled) return;
       const state = config.behaviors[def.id];
-      if (!state || !state.enabled) continue;
+      if (!state || !isBehaviorAuthorizedByConfig(def, context, config)) continue;
+      if (isBehaviorDeferred(context, def.id)) continue;
       if (!isBehaviorDue(state)) continue;
 
       // Check bridge availability for tier 3 bridge behaviors.
@@ -578,7 +926,8 @@ async function tickScheduler(context: SchedulerContext): Promise<void> {
       }
 
       // Run one behavior per tick to avoid status thrashing.
-      await runBehavior(def, context, config);
+      const runOutcome = await runBehavior(def, context, config);
+      if (runOutcome === 'claim_denied') continue;
       return;
     }
   } finally {
@@ -592,9 +941,41 @@ async function runBehavior(
   def: IdleBehaviorDef,
   context: SchedulerContext,
   config: IdleBehaviorConfig,
-): Promise<void> {
-  const { circleId, userId } = context.authority;
+): Promise<IdleBehaviorRunOutcome> {
+  const { circleId } = context.authority;
   assertSchedulerCurrent(context);
+
+  // The database claim is the circle-global concurrency boundary shared by
+  // tabs, devices, members, native runtimes, and module reloads. It advances
+  // the cooldown at claim time (at-most-once attempt semantics), so retirement
+  // after a committed message can never make a replacement replay that write.
+  const normalizedConfig = normalizeIdleConfig(config);
+  const state = normalizedConfig.behaviors[def.id];
+  if (!state) return 'claim_burned';
+  const claimAttempt = await claimIdleBehaviorRun(def, state, context);
+  if (claimAttempt.status === 'transport_failure') return 'claim_transport_failure';
+  const claim = claimAttempt.receipt;
+  cacheBehaviorDeferral(context, def.id, claim.nextEligibleAt);
+
+  // Config may change while the cross-tab claim is in flight. Re-read it after
+  // the await, preserve every latest toggle, and project only this behavior's
+  // server timestamp. A denied claim advances local history/deferral, while a
+  // successful claim revoked in flight is deliberately burned with zero task
+  // effects.
+  assertSchedulerCurrent(context);
+  const latestConfig = normalizeIdleConfig(context.getConfig());
+  const stillAuthorized = isBehaviorAuthorizedByConfig(def, context, latestConfig);
+  await projectIdleBehaviorClaim(def, context, latestConfig, claim.claimedAt);
+  if (!claim.claimed) return 'claim_denied';
+  if (!stillAuthorized) return 'claim_burned';
+
+  // Revalidate once more after exact persistence so an opt-out that races the
+  // local receipt cannot be followed by a shared write.
+  const executionConfig = normalizeIdleConfig(context.getConfig());
+  if (!isBehaviorAuthorizedByConfig(def, context, executionConfig)) {
+    return 'claim_burned';
+  }
+
   console.log(`[idleBehaviors] Running ${def.id} for circle ${circleId}`);
 
   let result: BehaviorResult = { success: false, error: 'Unknown error' };
@@ -625,7 +1006,7 @@ async function runBehavior(
 
     result = await executeBehavior(def, context);
   } catch (e: any) {
-    if (e instanceof IdleSchedulerRetiredError) return;
+    if (e instanceof IdleSchedulerRetiredError) return 'claim_burned';
     result = { success: false, error: e.message || String(e) };
   }
   assertSchedulerCurrent(context);
@@ -648,21 +1029,7 @@ async function runBehavior(
     context,
     () => updateAgentStatus(circleId, 'idle' as any, {}, schedulerAuthScope(context)),
   );
-
-  // 5. Persist lastRanAt only while this exact authority still owns the circle.
-  const updated: IdleBehaviorConfig = {
-    ...config,
-    behaviors: {
-      ...config.behaviors,
-      [def.id]: {
-        ...config.behaviors[def.id],
-        lastRanAt: new Date().toISOString(),
-      },
-    },
-  };
-  assertSchedulerCurrent(context);
-  context.onConfigUpdate(updated);
-  await saveIdleConfigExact(context, updated);
+  return 'executed';
 }
 
 // ─── Behavior Dispatcher ──────────────────────────────────────────────────────

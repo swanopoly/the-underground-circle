@@ -48,8 +48,19 @@ for (const marker of [header, source, footer]) {
   );
 }
 check(
-  /^\s*$/u.test(consolidated.slice(sectionEnd + footer.length)),
-  '§45 is the closed executable tail of consolidated SQL',
+  consolidated.indexOf(
+    '-- BEGIN SECTION 46: Circle-global idle-behavior claims',
+    sectionEnd + footer.length,
+  ) > sectionEnd,
+  '§46 follows the closed §45 boundary',
+);
+const nextSectionStart = consolidated.indexOf(
+  '-- BEGIN SECTION 46: Circle-global idle-behavior claims',
+  sectionEnd + footer.length,
+);
+check(
+  /^\s*$/u.test(consolidated.slice(sectionEnd + footer.length, nextSectionStart)),
+  '§45 has no executable drift before §46',
 );
 check(
   consolidated.includes('--   §45 Owner-private, circle-scoped Office user preferences'),

@@ -284,7 +284,11 @@ import {
 } from '../../../lib/workspaceAdaptation';
 import {
   IdleBehaviorConfig,
-  startIdleScheduler, getDefaultIdleConfig,
+  type IdleSchedulerAuthority,
+  getDefaultIdleConfig,
+  loadIdleConfigExact,
+  normalizeIdleConfig,
+  startIdleScheduler,
 } from '../../../lib/idleBehaviors';
 import { supabase } from '../../../lib/supabase';
 import { subscribeWithReconnect } from '../../../lib/subscribeWithReconnect';
@@ -433,6 +437,42 @@ type OfficeExactAuthority = AgentIdentityExactAuthority & {
   circleId: string;
   generation: number;
 };
+
+function idleConfigAuthorityKey(authority: Readonly<{
+  userId: string;
+  circleId: string;
+  authorityGeneration: number;
+}>): string {
+  return [
+    encodeURIComponent(authority.userId),
+    encodeURIComponent(authority.circleId),
+    String(authority.authorityGeneration),
+  ].join(':');
+}
+
+function mergeRemoteIdleConfigWithExactRunHistory(
+  remoteValue: unknown,
+  exactLocalConfig: IdleBehaviorConfig,
+): IdleBehaviorConfig {
+  const remoteConfig = normalizeIdleConfig(remoteValue);
+  const localConfig = normalizeIdleConfig(exactLocalConfig);
+  const behaviors = { ...remoteConfig.behaviors };
+  for (const [behaviorId, remoteState] of Object.entries(remoteConfig.behaviors)) {
+    const localState = localConfig.behaviors[behaviorId];
+    if (!localState?.lastRanAt) continue;
+    const remoteRanAt = remoteState.lastRanAt ? Date.parse(remoteState.lastRanAt) : Number.NaN;
+    const localRanAt = Date.parse(localState.lastRanAt);
+    if (
+      !Number.isFinite(localRanAt)
+      || localRanAt > Date.now() + 5 * 60_000
+      || (Number.isFinite(remoteRanAt) && remoteRanAt >= localRanAt)
+    ) continue;
+    // Remote preferences own user choices. The exact local receipt may only
+    // advance run history so a slower remote write cannot make work due again.
+    behaviors[behaviorId] = { ...remoteState, lastRanAt: localState.lastRanAt };
+  }
+  return { ...remoteConfig, behaviors };
+}
 
 function toOfficeDashboardAuthority(authority: OfficeExactAuthority): OfficeDashboardExactAuthority {
   return {
@@ -1108,6 +1148,7 @@ export default function OfficeTab({
   // so the save useEffect doesn't fire on the initial load.
   const budgetLoadedRef = useRef(false);
   const idleLoadedRef = useRef(false);
+  const [idleConfigReadyAuthorityKey, setIdleConfigReadyAuthorityKey] = useState<string | null>(null);
   const remoteBudgetAppliedRef = useRef(false);
   const remoteIdleAppliedRef = useRef(false);
   const [activeCatalogCat, setActiveCatalogCat] = useState<string>('connected');
@@ -1619,7 +1660,6 @@ export default function OfficeTab({
     let cancelled = false;
     let heartbeatCleanup: (() => Promise<void>) | null = null;
     let presenceCleanup: (() => Promise<void>) | null = null;
-    let idleSchedulerCleanup: (() => void) | null = null;
     const connectedConns = connections.filter(c => c.status === 'connected');
     const requestedAuthority = authAuthorityRef.current;
     const requestedScope = floorLayoutScope;
@@ -1632,33 +1672,6 @@ export default function OfficeTab({
       && authAuthorityRef.current?.generation === requestedAuthority.generation
       && layoutSaveScopeRef.current === requestedScope
     );
-
-    // Start idle behavior scheduler (runs alongside heartbeat)
-    const isOwner = userEmail === OWNER_EMAIL;
-    if (userId && requestedAuthority && requestedScope) {
-      idleSchedulerCleanup = startIdleScheduler(
-        {
-          circleId,
-          userId,
-          accessToken: requestedAuthority.accessToken,
-          authorityGeneration: requestedAuthority.generation,
-        },
-        isOwner,
-        () => idleConfigRef.current,
-        (updated) => {
-          if (!requestIsCurrent()) return;
-          setIdleConfig(updated);
-          idleConfigRef.current = updated;
-        },
-        (authority) => Boolean(
-          requestIsCurrent()
-          && authority.circleId === requestedAuthority.circleId
-          && authority.userId === requestedAuthority.userId
-          && authority.accessToken === requestedAuthority.accessToken
-          && authority.authorityGeneration === requestedAuthority.generation
-        ),
-      );
-    }
 
     if (connectedConns.length > 0 && requestedAuthority && requestedScope) {
       const authority = {
@@ -1725,7 +1738,6 @@ export default function OfficeTab({
       cancelled = true;
       void heartbeatCleanup?.();
       void presenceCleanup?.();
-      idleSchedulerCleanup?.();
     };
   }, [
     circleId,
@@ -2617,6 +2629,64 @@ export default function OfficeTab({
   const authoritativeLayoutReadRef = useRef(false);
   const skipNextLayoutPersistenceRef = useRef(false);
   const initRef = useRef<string | null>(null);
+
+  // Idle work owns a dedicated exact-authority lifecycle. It must not restart
+  // when bridge presence, the asynchronously hydrated display name, or other
+  // heartbeat-only inputs churn. More importantly, it cannot observe transient
+  // defaults: the exact local receipt and remote preference read must reconcile
+  // after membership proof before this generation becomes runnable.
+  useEffect(() => {
+    let cancelled = false;
+    const requestedAuthority = committedAuthAuthority;
+    if (!requestedAuthority || !floorLayoutHydrated) return undefined;
+    const schedulerAuthority: IdleSchedulerAuthority = {
+      circleId: requestedAuthority.circleId,
+      userId: requestedAuthority.userId,
+      accessToken: requestedAuthority.accessToken,
+      authorityGeneration: requestedAuthority.generation,
+    };
+    const requestedReadyKey = idleConfigAuthorityKey(schedulerAuthority);
+    if (
+      idleConfigReadyAuthorityKey !== requestedReadyKey
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return undefined;
+
+    const requestIsCurrent = () => Boolean(
+      !cancelled
+      && idleConfigReadyAuthorityKey === requestedReadyKey
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
+    const cleanup = startIdleScheduler(
+      schedulerAuthority,
+      userEmail === OWNER_EMAIL,
+      () => idleConfigRef.current,
+      (updated) => {
+        if (!requestIsCurrent()) return;
+        const normalized = normalizeIdleConfig(updated);
+        idleConfigRef.current = normalized;
+        setIdleConfig(normalized);
+      },
+      (authority) => Boolean(
+        requestIsCurrent()
+        && authority.circleId === schedulerAuthority.circleId
+        && authority.userId === schedulerAuthority.userId
+        && authority.accessToken === schedulerAuthority.accessToken
+        && authority.authorityGeneration === schedulerAuthority.authorityGeneration
+      ),
+    );
+
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, [
+    committedAuthAuthority,
+    floorLayoutHydrated,
+    idleConfigReadyAuthorityKey,
+    isOfficeAuthorityCurrent,
+    userEmail,
+  ]);
+
   const mutateFloorsDurably = useCallback((
     update: (current: OfficeFloor[]) => OfficeFloor[],
     detail = 'Saving every floor item and tool…',
@@ -2652,8 +2722,9 @@ export default function OfficeTab({
     });
   }, [mutateFloorsDurably]);
   useEffect(() => {
-    const initializationKey = committedAuthScopeKey
-      ? `${committedAuthScopeKey}:retry:${officeAccessRetry}`
+    const requestedAuthority = committedAuthAuthority;
+    const initializationKey = committedAuthScopeKey && requestedAuthority
+      ? `${committedAuthScopeKey}:generation:${requestedAuthority.generation}:retry:${officeAccessRetry}`
       : null;
     if (
       !authReady
@@ -2661,6 +2732,11 @@ export default function OfficeTab({
       || !authSession?.access_token
       || !floorLayoutScope
       || !initializationKey
+      || !requestedAuthority
+      || requestedAuthority.userId !== currentUserId
+      || requestedAuthority.circleId !== circleId
+      || requestedAuthority.accessToken !== authSession.access_token
+      || requestedAuthority.generation !== authAuthorityRef.current?.generation
       || initRef.current === initializationKey
     ) return;
     let cancelled = false;
@@ -2668,7 +2744,13 @@ export default function OfficeTab({
       userId: currentUserId,
       accessToken: authSession.access_token,
     };
-    const requestedAuthorityGeneration = authAuthorityRef.current?.generation;
+    const requestedAuthorityGeneration = requestedAuthority.generation;
+    const idleSchedulerAuthority: IdleSchedulerAuthority = {
+      circleId,
+      userId: currentUserId,
+      accessToken: authSession.access_token,
+      authorityGeneration: requestedAuthorityGeneration,
+    };
     const requestedScope = floorLayoutScope;
     const requestIsCurrent = () => (
       !cancelled
@@ -2734,6 +2816,7 @@ export default function OfficeTab({
     const defaultIdleConfig = getDefaultIdleConfig();
     setIdleConfig(defaultIdleConfig);
     idleConfigRef.current = defaultIdleConfig;
+    setIdleConfigReadyAuthorityKey(null);
     floorsInitializedRef.current = false;
     authoritativeLayoutReadRef.current = false;
     skipNextLayoutPersistenceRef.current = false;
@@ -2820,6 +2903,8 @@ export default function OfficeTab({
         runOfficeLayoutRequestWithDeadline(() => storage.getItem(privateStorageKeys.appearances)).catch(() => null),
         runOfficeLayoutRequestWithDeadline(() => storage.getItem(privateStorageKeys.whiteboardNotes)).catch(() => null),
         runOfficeLayoutRequestWithDeadline(() => storage.getItem(privateStorageKeys.telegramMetadata)).catch(() => null),
+        runOfficeLayoutRequestWithDeadline(() => loadIdleConfigExact(idleSchedulerAuthority))
+          .catch(() => getDefaultIdleConfig()),
       ]);
 
       // A scoped cache can make an authorized Office fast, but it cannot prove
@@ -2890,7 +2975,15 @@ export default function OfficeTab({
       });
 
       // ── Await localStorage reads (started earlier, runs in parallel with connections) ──
-      const [namesRaw, telegramSecretResult, layoutCacheRaw, appearancesRaw, notesRaw, telegramMetadataRaw] = await storagePromise;
+      const [
+        namesRaw,
+        telegramSecretResult,
+        layoutCacheRaw,
+        appearancesRaw,
+        notesRaw,
+        telegramMetadataRaw,
+        exactLocalIdleConfig,
+      ] = await storagePromise;
       if (!requestIsCurrent()) return;
 
       // Apply exact-scope local state immediately. Telegram authority is
@@ -2946,6 +3039,9 @@ export default function OfficeTab({
       let bestFloorId = localCurrentFloorId;
       let remoteLayoutUpdatedAt = 0;
       let remotePrefsRecord: Record<string, unknown> | null = null;
+      let remoteIdleConfigValue: unknown = null;
+      let hasRemoteIdleConfig = false;
+      let idlePreferencesResolved = false;
       try {
         if (requestIsCurrent()) {
           // Layout authority and private preference enrichment are independent:
@@ -2970,6 +3066,7 @@ export default function OfficeTab({
           const prefsRes = prefsResult.status === 'fulfilled'
             ? prefsResult.value
             : { ok: false, preferences: null, revision: 0, error: String(prefsResult.reason || '') };
+          idlePreferencesResolved = prefsRes.ok === true;
 
           // Merge floors
           if (!layoutRes.ok) {
@@ -3038,12 +3135,11 @@ export default function OfficeTab({
               budgetLoadedRef.current = true;
               setBudgetConfig(remote.budgetConfig);
             }
-            // Remote idle behavior config — same load-then-flag dance.
+            // Remote settings remain primary. Reconciliation with the exact
+            // local run receipt happens once below, after every source settles.
             if (remote.idleConfig && typeof remote.idleConfig === 'object') {
-              remoteIdleAppliedRef.current = true;
-              idleLoadedRef.current = true;
-              setIdleConfig(remote.idleConfig);
-              idleConfigRef.current = remote.idleConfig;
+              remoteIdleConfigValue = remote.idleConfig;
+              hasRemoteIdleConfig = true;
             }
             // Agent filter mode (which subset of agents the user
             // wants to see — mine / all / active / bonded).
@@ -3116,6 +3212,23 @@ export default function OfficeTab({
 
       if (!requestIsCurrent()) return;
 
+      if (idlePreferencesResolved) {
+        const normalizedLocalIdleConfig = normalizeIdleConfig(exactLocalIdleConfig);
+        const hydratedIdleConfig = hasRemoteIdleConfig
+          ? mergeRemoteIdleConfigWithExactRunHistory(
+              remoteIdleConfigValue,
+              normalizedLocalIdleConfig,
+            )
+          : normalizedLocalIdleConfig;
+        // A remote read owns toggles/cooldowns/opt-in. Skip the hydration echo;
+        // later user changes and scheduler receipts still persist normally.
+        remoteIdleAppliedRef.current = hasRemoteIdleConfig;
+        idleLoadedRef.current = true;
+        idleConfigRef.current = hydratedIdleConfig;
+        setIdleConfig(hydratedIdleConfig);
+        setIdleConfigReadyAuthorityKey(idleConfigAuthorityKey(idleSchedulerAuthority));
+      }
+
       appearancesLoadedRef.current = true;
       prefsLoadedRef.current = true;
       if (officeUserPreferencesAvailableRef.current) {
@@ -3183,11 +3296,11 @@ export default function OfficeTab({
           setSessionTags(merged);
         }).catch(() => {});
 
-        // Budget and idle legacy browser keys are ownerless and cannot prove
-        // which account created them. They are never imported. Remote values
-        // were applied above; absent values keep safe in-memory defaults.
+        // The budget legacy browser key is ownerless and cannot prove which
+        // account created it, so it is never imported. Idle readiness is not a
+        // deferred ref flip: it was committed reactively above only after the
+        // exact local and remote preference sources resolved.
         budgetLoadedRef.current = true;
-        idleLoadedRef.current = true;
       }, 350);
 
       (initRef as any)._cancelDeferredEnrichment = cancelDeferredEnrichment;
@@ -3223,11 +3336,11 @@ export default function OfficeTab({
       sessionsRef.current.clear();
       sessionFingerprintsRef.current.clear();
     };
-    // This boot path owns long-lived subscriptions/pollers. Re-running it
-    // for callback identity churn tears down the office runtime, so only
-    // restart when the actual circle changes.
+    // This boot path owns long-lived subscriptions/pollers. Re-running it for
+    // callback identity churn tears down the Office runtime, so restart only
+    // for an exact authority generation, circle, or explicit access retry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authReady, circleId, committedAuthScopeKey, currentUserId, enqueueVerifiedLocalLayoutSave, floorLayoutScope, officeAccessRetry, privateStorageKeys]);
+  }, [authReady, circleId, committedAuthAuthority, committedAuthScopeKey, currentUserId, enqueueVerifiedLocalLayoutSave, floorLayoutScope, officeAccessRetry, privateStorageKeys]);
 
   // Membership is a lease, not a one-time boot fact. Realtime changes are
   // invalidation signals and a bounded poll covers missed DELETE events or a
@@ -3258,6 +3371,8 @@ export default function OfficeTab({
       ));
       initRef.current = null;
       setFloorLayoutHydratedCircleId(null);
+      setIdleConfigReadyAuthorityKey(null);
+      idleLoadedRef.current = false;
       setOfficeAccessError(message);
       setComputerTaskCard(null);
       setOfficeAgentPlans([]);
@@ -4372,9 +4487,22 @@ export default function OfficeTab({
 
   // Save idle config to the owner-and-circle Office preference row.
   useEffect(() => {
-    if (!idleLoadedRef.current) return;
-    pushOfficePreferences({ idleConfig });
-  }, [idleConfig, pushOfficePreferences]);
+    const requestedAuthority = authAuthorityRef.current;
+    if (
+      !idleLoadedRef.current
+      || !requestedAuthority
+      || idleConfigReadyAuthorityKey !== idleConfigAuthorityKey({
+        userId: requestedAuthority.userId,
+        circleId: requestedAuthority.circleId,
+        authorityGeneration: requestedAuthority.generation,
+      })
+    ) return;
+    if (remoteIdleAppliedRef.current) {
+      remoteIdleAppliedRef.current = false;
+      return;
+    }
+    pushOfficePreferences({ idleConfig }, requestedAuthority);
+  }, [idleConfig, idleConfigReadyAuthorityKey, pushOfficePreferences]);
 
   // Save agent filter mode (mine / all / active / bonded) to
   // the private Office preference row so the user's preferred view persists
@@ -6815,8 +6943,9 @@ export default function OfficeTab({
   // ─── Idle behavior handlers ──────────────────────────────
 
   const handleIdleConfigChange = useCallback(async (config: IdleBehaviorConfig) => {
-    setIdleConfig(config);
-    idleConfigRef.current = config;
+    const normalized = normalizeIdleConfig(config);
+    setIdleConfig(normalized);
+    idleConfigRef.current = normalized;
   }, []);
 
   // Rolling spend is server-backed. Session `totalCost` is cumulative and its

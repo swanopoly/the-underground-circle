@@ -87,7 +87,7 @@ cross-surface focus requests continue to override the default.
 
 | Concern | File(s) |
 |---|---|
-| Office exact runtime authority and account-switch lifecycle | `src/lib/officeDashboardPersistence.ts`, `src/lib/connectionManager.ts`, `src/lib/computerTaskState.ts`, `src/lib/agentPlanPersistence.ts`, `src/lib/computerUseHistory.ts`, `src/lib/llmProviders.ts`, `src/lib/workspaceAdaptation.ts`, `src/lib/oauthConnect.ts`, `src/lib/idleBehaviors.ts`, `src/lib/officeTerminal.ts`, `src/lib/agentInvocation.ts`, `src/lib/circleOffice.ts`, `src/services/customThemes.ts`, `src/services/sharedMemory.ts`, `src/services/hitlService.ts`, `src/services/runApprovalsService.ts`, `src/components/OfficeTerminal.tsx`, `src/components/ComputerUseHistoryPanel.tsx`, `src/components/HitlApprovalBanner.tsx`, `src/components/RunApprovalBanner.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/ProfileTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `scripts/{computer-task-private-authority,office-customize-private-authority,workspace-adaptation-exact-authority,oauth-disconnect-authority-lifecycle,office-terminal-mutation-authority,office-invocation-exact-authority,idle-behavior-scheduler-lifecycle,circle-office-exact-auth-scope,office-dashboard-persistence-authority}-smoketest.ts` |
+| Office exact runtime authority and account-switch lifecycle | `src/lib/officeDashboardPersistence.ts`, `src/lib/connectionManager.ts`, `src/lib/computerTaskState.ts`, `src/lib/agentPlanPersistence.ts`, `src/lib/computerUseHistory.ts`, `src/lib/llmProviders.ts`, `src/lib/workspaceAdaptation.ts`, `src/lib/oauthConnect.ts`, `src/lib/idleBehaviors.ts`, `src/lib/officeTerminal.ts`, `src/lib/agentInvocation.ts`, `src/lib/circleOffice.ts`, `src/services/customThemes.ts`, `src/services/sharedMemory.ts`, `src/services/hitlService.ts`, `src/services/runApprovalsService.ts`, `src/components/OfficeTerminal.tsx`, `src/components/ComputerUseHistoryPanel.tsx`, `src/components/HitlApprovalBanner.tsx`, `src/components/RunApprovalBanner.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/ProfileTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/migrations/20260817120000_circle_idle_behavior_claims.sql`, `docs/RUN_THIS_SQL.sql` §46, `scripts/{computer-task-private-authority,office-customize-private-authority,workspace-adaptation-exact-authority,oauth-disconnect-authority-lifecycle,office-terminal-mutation-authority,office-invocation-exact-authority,idle-behavior-scheduler-lifecycle,circle-idle-behavior-claims-sql,circle-office-exact-auth-scope,office-dashboard-persistence-authority}-smoketest.ts`, `scripts/circle-idle-behavior-claims-sql-behavior-smoketest.sh` |
 | Chat plan approval capability identity | `src/lib/chatPlanApprovalAuthorityCore.ts`, `src/lib/runChatAutomationPlan.ts`, `src/lib/openswanToolApprovals.ts`, `scripts/chat-plan-tool-manifest-smoketest.ts`, `scripts/openswan-runtime-approval-smoketest.ts` |
 | Dependency compatibility and Expo image build boundary | `package.json`, `package-lock.json`, `scripts/dependency-override-compat-smoketest.mjs`, `scripts/expo-image-asset-guard.mjs`, `scripts/expo-image-asset-guard-smoketest.mjs`, `scripts/security-release-check.mjs` |
 | Agent standards and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `scripts/openswan-lane-report.ts`, `.github/workflows/openswan-release.yml`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md`, `docs/SWANBOT_OPENSWAN_AGENT_LANES_2026-06-29.md` |
@@ -860,10 +860,22 @@ Calendar/Email and Figma status, popup, provider-read, and disconnect work use
 the captured bearer and reject late results after a generation change. Shared
 OAuth helpers retain mutable-session fallbacks for non-Office callers only. The
 idle scheduler receives the captured user/circle/generation and a guard closed
-over the token-bearing Office lifecycle, returns one exact cleanup for its
-initial timeout and interval, and drains an in-flight retired predecessor before
+over the token-bearing Office lifecycle, but it does not start from transient
+defaults. Its dedicated effect waits until exact membership and preference
+hydration resolve for that scope, including a valid no-row result; bridge and
+display-name churn cannot rearm it. It returns one exact cleanup for its initial
+timeout and interval and drains an in-flight retired predecessor before
 replacement work. Its circle-only stop signature remains a compatibility path.
-These are source-level boundaries; live two-account/two-tab switching, native
+
+Every behavior claims `(circle_id,behavior_id)` through
+`claim_idle_behavior_run_v1` before status, activity, message, memory mutation,
+bridge command, or Edge execution. The §46 SECURITY DEFINER boundary verifies membership, uses an
+atomic server-clock reservation, forces RLS, revokes direct authenticated table
+DML, and fails closed on rejected or malformed receipts. All five shared-Chat
+behaviors are owner-only explicit opt-ins; legacy configs normalize them off,
+their minimum cadence is one day, and Weekly Retro remains weekly. Local `lastRanAt` is only an exact-
+scope cache/display projection, not multi-client authority. These are source-
+level boundaries; §46 application, live two-member/two-tab contention, native
 secret-store cleanup, real-provider OAuth, and deployed behavior are not
 claimed.
 

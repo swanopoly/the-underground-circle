@@ -214,6 +214,16 @@ BEGIN
      OR profile_preferences #>> '{autoApprove,file}' <> 'ask' THEN
     RAISE EXCEPTION 'legacy appearance insert guard changed unrelated profile fields';
   END IF;
+  IF NOT public.validate_office_user_preferences_v1(
+    '{"idleConfig":{"masterEnabled":true,"behaviors":{}}}'::jsonb
+  ) THEN
+    RAISE EXCEPTION 'legacy idle config without sharedChatOptIn was rejected';
+  END IF;
+  IF public.validate_office_user_preferences_v1(
+    '{"idleConfig":{"masterEnabled":true,"behaviors":{},"sharedChatOptIn":"true"}}'::jsonb
+  ) THEN
+    RAISE EXCEPTION 'non-boolean sharedChatOptIn was accepted';
+  END IF;
 END;
 $catalog$;
 
@@ -244,7 +254,7 @@ BEGIN
       'appearances', jsonb_build_object('agent', appearance),
       'whiteboardNotes', '["Ship it"]'::jsonb,
       'budgetConfig', '{"enabled":true,"daily":25,"hardLimit":false}'::jsonb,
-      'idleConfig', '{"masterEnabled":true,"behaviors":{"streak_guardian":{"enabled":true,"cooldownMinutes":240,"lastRanAt":null}}}'::jsonb,
+      'idleConfig', '{"masterEnabled":true,"behaviors":{"streak_guardian":{"enabled":true,"cooldownMinutes":240,"lastRanAt":null}},"sharedChatOptIn":true}'::jsonb,
       'agentFilterMode', '"mine"'::jsonb,
       'telegramMetadata', '{"chatId":"-1001234567890","botName":"openswan_bot"}'::jsonb
     )
@@ -269,6 +279,7 @@ BEGIN
      OR response #>> '{preferences,agentNames,agent}' <> 'Swan'
      OR response #>> '{preferences,telegramMetadata,botName}' <> 'openswan_bot'
      OR response #>> '{preferences,telegramMetadata,chatId}' <> '-1001234567890'
+     OR response #>> '{preferences,idleConfig,sharedChatOptIn}' <> 'true'
      OR response ->> 'revision' <> '2'
      OR response ? 'userId'
      OR response ? 'user_id' THEN

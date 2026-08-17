@@ -77,7 +77,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 
 | Concern | Owner |
 |---|---|
-| Office exact runtime authority and account-switch lifecycle | `src/lib/officeDashboardPersistence.ts`, `src/lib/connectionManager.ts`, `src/lib/computerTaskState.ts`, `src/lib/agentPlanPersistence.ts`, `src/lib/computerUseHistory.ts`, `src/lib/llmProviders.ts`, `src/lib/workspaceAdaptation.ts`, `src/lib/oauthConnect.ts`, `src/lib/idleBehaviors.ts`, `src/lib/officeTerminal.ts`, `src/lib/agentInvocation.ts`, `src/lib/circleOffice.ts`, `src/services/customThemes.ts`, `src/services/sharedMemory.ts`, `src/services/hitlService.ts`, `src/services/runApprovalsService.ts`, `src/components/OfficeTerminal.tsx`, `src/components/ComputerUseHistoryPanel.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/ProfileTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/CustomizePanel.tsx` |
+| Office exact runtime authority and account-switch lifecycle | `src/lib/officeDashboardPersistence.ts`, `src/lib/connectionManager.ts`, `src/lib/computerTaskState.ts`, `src/lib/agentPlanPersistence.ts`, `src/lib/computerUseHistory.ts`, `src/lib/llmProviders.ts`, `src/lib/workspaceAdaptation.ts`, `src/lib/oauthConnect.ts`, `src/lib/idleBehaviors.ts`, `src/lib/officeTerminal.ts`, `src/lib/agentInvocation.ts`, `src/lib/circleOffice.ts`, `src/services/customThemes.ts`, `src/services/sharedMemory.ts`, `src/services/hitlService.ts`, `src/services/runApprovalsService.ts`, `src/components/OfficeTerminal.tsx`, `src/components/ComputerUseHistoryPanel.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/ProfileTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/migrations/20260817120000_circle_idle_behavior_claims.sql`, `docs/RUN_THIS_SQL.sql` §46, `scripts/circle-idle-behavior-claims-sql-smoketest.ts`, `scripts/circle-idle-behavior-claims-sql-behavior-smoketest.sh` |
 | Chat plan approval capability identity | `src/lib/chatPlanApprovalAuthorityCore.ts`, `src/lib/runChatAutomationPlan.ts`, `src/lib/openswanToolApprovals.ts` |
 | Dependency compatibility and Expo image build boundary | `package.json`, `package-lock.json`, `scripts/dependency-override-compat-smoketest.mjs`, `scripts/expo-image-asset-guard.mjs`, `scripts/expo-image-asset-guard-smoketest.mjs`, `scripts/security-release-check.mjs` |
 | Chat planning and terminal transport | `src/lib/chatAutomationPlanner.ts`, `src/lib/chatTerminalTransportPolicy.ts` |
@@ -916,10 +916,19 @@ resolved row before notifying callers. Calendar/Email and Figma continuations
 likewise carry the captured token and reject popup/provider results after an
 account switch. The idle scheduler retains the exact cleanup returned to its
 mount, cancels both timers, fences work through the token-bearing Office
-lifecycle, and drains a retired predecessor before replacement work. Shared
-compatibility signatures remain for explicitly non-Office callers; do not use
-them as Office authority. These are source and focused-smoke claims, not live
-two-account, native-secret-store, provider, or deployment proof.
+lifecycle, and drains a retired predecessor before replacement work. Its
+dedicated effect starts only after exact user/circle membership and preference
+hydration resolve; it no longer runs transient defaults or restarts for display-
+name and bridge churn. Every behavior reserves a server-clock
+`(circle_id,behavior_id)` claim through the membership-checked §46 RPC before
+status, activity, message, memory mutation, bridge command, or Edge execution.
+All five shared-Chat behaviors are owner-only explicit opt-ins, legacy configs
+normalize them off, their minimum cadence is one day, and Weekly Retro remains
+weekly. Local `lastRanAt` is cache/display
+state rather than cross-client authority. Shared compatibility signatures remain
+for explicitly non-Office callers; do not use them as Office authority. These
+are source and focused-smoke claims, not §46 application, live two-member
+contention, native-secret-store, provider, or deployment proof.
 
 The 2026-08-14 continuation applies this boundary to Office computer-task
 state, agent-plan queues, Profile computer-use history, provider-key/custom-

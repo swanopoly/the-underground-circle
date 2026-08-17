@@ -2719,6 +2719,12 @@ export default function CustomizePanel({
               <Text style={[styles.connectInfoText, { marginBottom: 12 }]}>
                 Agents do useful work in the background when idle — checking streaks, scanning tasks, curating knowledge.
               </Text>
+              <View style={idleStyles.sharedChatNotice}>
+                <Text style={idleStyles.sharedChatNoticeTitle}>SHARED CHAT · OWNER OPT-IN</Text>
+                <Text style={idleStyles.sharedChatNoticeText}>
+                  Chat nudges stay off until the owner explicitly enables one. Private data checks do not gain permission to post messages.
+                </Text>
+              </View>
 
               {/* Master toggle */}
               <View style={styles.budgetToggle}>
@@ -2739,26 +2745,48 @@ export default function CustomizePanel({
                   {IDLE_BEHAVIORS.filter(b => b.tier === 1).map(b => {
                     const state = idleConfig.behaviors[b.id];
                     if (!state) return null;
+                    const ownerOnlyBehavior = b.ownerOnly || b.writesToSharedChat;
+                    const ownerRestricted = ownerOnlyBehavior && !isOwner;
+                    const effectivelyEnabled = state.enabled
+                      && (!b.writesToSharedChat || (idleConfig.sharedChatOptIn && isOwner));
                     return (
-                      <View key={b.id} style={idleStyles.behaviorRow}>
+                      <View key={b.id} style={[idleStyles.behaviorRow, ownerRestricted && idleStyles.behaviorRowDisabled]}>
                         <View style={idleStyles.behaviorInfo}>
-                          <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                          <Text style={idleStyles.behaviorName}>
+                            {b.icon} {b.name}{b.writesToSharedChat ? ' · SHARED CHAT' : ''}{ownerOnlyBehavior ? ' · OWNER ONLY' : ''}
+                          </Text>
                           <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
                           <Text style={idleStyles.behaviorMeta}>
                             Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : b.defaultCooldownMinutes >= 60 ? `${Math.round(b.defaultCooldownMinutes / 60)}h` : `${b.defaultCooldownMinutes}m`}
                             {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
+                            {b.writesToSharedChat && !idleConfig.sharedChatOptIn ? ' · Opt-in required' : ''}
+                            {ownerRestricted ? ' · Only the owner can enable this' : ''}
                           </Text>
                         </View>
                         <Pressable
+                          accessibilityRole="switch"
+                          accessibilityLabel={`${b.name}${b.writesToSharedChat ? ' shared Chat opt-in' : ' idle behavior'}`}
+                          accessibilityState={{ checked: effectivelyEnabled, disabled: ownerRestricted }}
+                          disabled={ownerRestricted}
                           onPress={() => {
+                            if (ownerRestricted) return;
+                            const nextEnabled = !effectivelyEnabled;
                             onIdleConfigChange({
                               ...idleConfig,
-                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                              sharedChatOptIn: b.writesToSharedChat && nextEnabled
+                                ? true
+                                : idleConfig.sharedChatOptIn,
+                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: nextEnabled } },
                             });
                           }}
-                          style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          style={[
+                            styles.toggle,
+                            effectivelyEnabled && styles.toggleActive,
+                            ownerRestricted && idleStyles.toggleDisabled,
+                            Platform.OS === 'web' && { cursor: ownerRestricted ? 'not-allowed' : 'pointer' } as any,
+                          ]}
                         >
-                          <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                          <View style={[styles.toggleKnob, effectivelyEnabled && styles.toggleKnobActive]} />
                         </Pressable>
                       </View>
                     );
@@ -2770,26 +2798,48 @@ export default function CustomizePanel({
                   {IDLE_BEHAVIORS.filter(b => b.tier === 2).map(b => {
                     const state = idleConfig.behaviors[b.id];
                     if (!state) return null;
+                    const ownerOnlyBehavior = b.ownerOnly || b.writesToSharedChat;
+                    const ownerRestricted = ownerOnlyBehavior && !isOwner;
+                    const effectivelyEnabled = state.enabled
+                      && (!b.writesToSharedChat || (idleConfig.sharedChatOptIn && isOwner));
                     return (
-                      <View key={b.id} style={idleStyles.behaviorRow}>
+                      <View key={b.id} style={[idleStyles.behaviorRow, ownerRestricted && idleStyles.behaviorRowDisabled]}>
                         <View style={idleStyles.behaviorInfo}>
-                          <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                          <Text style={idleStyles.behaviorName}>
+                            {b.icon} {b.name}{b.writesToSharedChat ? ' · SHARED CHAT' : ''}{ownerOnlyBehavior ? ' · OWNER ONLY' : ''}
+                          </Text>
                           <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
                           <Text style={idleStyles.behaviorMeta}>
                             Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : `${Math.round(b.defaultCooldownMinutes / 60)}h`}
                             {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
+                            {b.writesToSharedChat && !idleConfig.sharedChatOptIn ? ' · Opt-in required' : ''}
+                            {ownerRestricted ? ' · Only the owner can enable this' : ''}
                           </Text>
                         </View>
                         <Pressable
+                          accessibilityRole="switch"
+                          accessibilityLabel={`${b.name}${b.writesToSharedChat ? ' shared Chat opt-in' : ' idle behavior'}`}
+                          accessibilityState={{ checked: effectivelyEnabled, disabled: ownerRestricted }}
+                          disabled={ownerRestricted}
                           onPress={() => {
+                            if (ownerRestricted) return;
+                            const nextEnabled = !effectivelyEnabled;
                             onIdleConfigChange({
                               ...idleConfig,
-                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                              sharedChatOptIn: b.writesToSharedChat && nextEnabled
+                                ? true
+                                : idleConfig.sharedChatOptIn,
+                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: nextEnabled } },
                             });
                           }}
-                          style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          style={[
+                            styles.toggle,
+                            effectivelyEnabled && styles.toggleActive,
+                            ownerRestricted && idleStyles.toggleDisabled,
+                            Platform.OS === 'web' && { cursor: ownerRestricted ? 'not-allowed' : 'pointer' } as any,
+                          ]}
                         >
-                          <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                          <View style={[styles.toggleKnob, effectivelyEnabled && styles.toggleKnobActive]} />
                         </Pressable>
                       </View>
                     );
@@ -2807,27 +2857,39 @@ export default function CustomizePanel({
                       {IDLE_BEHAVIORS.filter(b => b.tier === 3).map(b => {
                         const state = idleConfig.behaviors[b.id];
                         if (!state) return null;
+                        const effectivelyEnabled = state.enabled
+                          && (!b.writesToSharedChat || idleConfig.sharedChatOptIn);
                         return (
                           <View key={b.id} style={idleStyles.behaviorRow}>
                             <View style={idleStyles.behaviorInfo}>
-                              <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                              <Text style={idleStyles.behaviorName}>
+                                {b.icon} {b.name}{b.writesToSharedChat ? ' · SHARED CHAT · OWNER ONLY' : ''}
+                              </Text>
                               <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
                               <Text style={idleStyles.behaviorMeta}>
                                 Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : `${Math.round(b.defaultCooldownMinutes / 60)}h`}
                                 {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
                                 {b.requiresBridge ? ' · Needs bridge' : ''}
+                                {b.writesToSharedChat && !idleConfig.sharedChatOptIn ? ' · Opt-in required' : ''}
                               </Text>
                             </View>
                             <Pressable
+                              accessibilityRole="switch"
+                              accessibilityLabel={`${b.name}${b.writesToSharedChat ? ' shared Chat opt-in' : ' idle behavior'}`}
+                              accessibilityState={{ checked: effectivelyEnabled }}
                               onPress={() => {
+                                const nextEnabled = !effectivelyEnabled;
                                 onIdleConfigChange({
                                   ...idleConfig,
-                                  behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                                  sharedChatOptIn: b.writesToSharedChat && nextEnabled
+                                    ? true
+                                    : idleConfig.sharedChatOptIn,
+                                  behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: nextEnabled } },
                                 });
                               }}
-                              style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                              style={[styles.toggle, effectivelyEnabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                             >
-                              <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                              <View style={[styles.toggleKnob, effectivelyEnabled && styles.toggleKnobActive]} />
                             </Pressable>
                           </View>
                         );
@@ -2854,6 +2916,27 @@ function formatLastRan(iso: string): string {
 }
 
 const idleStyles = StyleSheet.create({
+  sharedChatNotice: {
+    borderWidth: 1,
+    borderColor: '#f5920050',
+    backgroundColor: '#f592000d',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+  },
+  sharedChatNoticeTitle: {
+    color: '#f5a623',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    marginBottom: 4,
+  },
+  sharedChatNoticeText: {
+    color: '#a8a8a8',
+    fontSize: 10,
+    lineHeight: 15,
+    fontFamily: 'monospace',
+  },
   behaviorRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2863,6 +2946,8 @@ const idleStyles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#ffffff08',
   },
+  behaviorRowDisabled: { opacity: 0.55 },
+  toggleDisabled: { opacity: 0.6 },
   behaviorInfo: { flex: 1, marginRight: 12 },
   behaviorName: {
     fontSize: 12,

@@ -113,6 +113,7 @@ assert.equal(dirtyLayout.floors[0].name, '<b>Safe</b>', 'validation does not mut
 assert.equal(validated.sanitizedLayout.floors[0].name, 'Safe', 'server payload is sanitized clone');
 
 const officeTab = read('src/screens/circles/tabs/OfficeTab.tsx');
+const customizePanel = read('src/screens/circles/tabs/office/CustomizePanel.tsx');
 const officeSections = read('src/screens/circles/tabs/office/OfficeSections.tsx');
 const attention = read('src/lib/chatAttentionQueue.ts');
 const historyCore = read('src/lib/runHistoryFilterCore.ts');
@@ -218,6 +219,97 @@ assert(
     && !officeTab.includes('loadBudgetConfig()')
     && !officeTab.includes('loadIdleConfig()'),
   'private and transient Office state is cleared before a new authenticated scope hydrates',
+);
+const idleSchedulerEffectStart = officeTab.indexOf('// Idle work owns a dedicated exact-authority lifecycle.');
+const idleSchedulerEffectEnd = officeTab.indexOf('const mutateFloorsDurably', idleSchedulerEffectStart);
+assert(idleSchedulerEffectStart >= 0 && idleSchedulerEffectEnd > idleSchedulerEffectStart, 'dedicated idle scheduler effect is present');
+const idleSchedulerEffect = officeTab.slice(idleSchedulerEffectStart, idleSchedulerEffectEnd);
+assert(
+  idleSchedulerEffect.includes('const requestedAuthority = committedAuthAuthority')
+    && idleSchedulerEffect.includes('idleConfigReadyAuthorityKey !== requestedReadyKey')
+    && idleSchedulerEffect.includes('!requestedAuthority || !floorLayoutHydrated')
+    && idleSchedulerEffect.includes('authorityGeneration: requestedAuthority.generation'),
+  'idle scheduling requires the committed generation plus exact config and membership hydration',
+);
+assert(
+  idleSchedulerEffect.includes('startIdleScheduler(')
+    && !idleSchedulerEffect.includes('connections.filter')
+    && !idleSchedulerEffect.includes('currentUserName')
+    && !idleSchedulerEffect.includes('startHeartbeat(')
+    && !idleSchedulerEffect.includes('joinPresenceChannel('),
+  'bridge and presence churn cannot restart the dedicated idle scheduler',
+);
+assert.equal(
+  (officeTab.match(/startIdleScheduler\(/g) || []).length,
+  1,
+  'Office owns exactly one scheduler start site',
+);
+assert(
+  officeTab.includes('loadIdleConfigExact(idleSchedulerAuthority)')
+    && officeTab.includes('idlePreferencesResolved = prefsRes.ok === true')
+    && officeTab.includes('mergeRemoteIdleConfigWithExactRunHistory(')
+    && officeTab.includes('setIdleConfigReadyAuthorityKey(idleConfigAuthorityKey(idleSchedulerAuthority))'),
+  'idle readiness follows exact local load plus a resolved remote preference read',
+);
+assert(
+  officeTab.includes('Remote preferences own user choices. The exact local receipt may only')
+    && officeTab.includes('remoteRanAt >= localRanAt')
+    && officeTab.includes('localRanAt > Date.now() + 5 * 60_000'),
+  'remote idle settings stay primary while only sensible newer exact run history advances',
+);
+assert(
+  officeTab.includes('setIdleConfigReadyAuthorityKey(null)')
+    && officeTab.includes('idleConfigReadyAuthorityKey !== idleConfigAuthorityKey({')
+    && officeTab.includes('remoteIdleAppliedRef.current = false;'),
+  'authority changes reset idle readiness and hydration cannot echo stale settings',
+);
+assert(
+  officeTab.includes('`${committedAuthScopeKey}:generation:${requestedAuthority.generation}:retry:${officeAccessRetry}`')
+    && officeTab.includes('requestedAuthority.generation !== authAuthorityRef.current?.generation')
+    && officeTab.includes('[authReady, circleId, committedAuthAuthority, committedAuthScopeKey'),
+  'an auth retry hydrates and starts one replacement scheduler for the new committed generation',
+);
+assert(
+  customizePanel.includes('SHARED CHAT · OWNER OPT-IN')
+    && customizePanel.includes('b.writesToSharedChat && nextEnabled')
+    && customizePanel.includes('? true\n                                : idleConfig.sharedChatOptIn')
+    && customizePanel.includes('const ownerOnlyBehavior = b.ownerOnly || b.writesToSharedChat')
+    && customizePanel.includes('const ownerRestricted = ownerOnlyBehavior && !isOwner')
+    && customizePanel.includes('disabled={ownerRestricted}')
+    && customizePanel.includes('Only the owner can enable this'),
+  'Customize makes shared Chat authority an explicit owner-only opt-in',
+);
+const tierTwoIdleStart = customizePanel.indexOf('{/* Tier 2 — AI-Powered */}');
+const tierTwoIdleEnd = customizePanel.indexOf('{/* Tier 3 — Owner Only */}', tierTwoIdleStart);
+assert(tierTwoIdleStart >= 0 && tierTwoIdleEnd > tierTwoIdleStart, 'Tier 2 idle controls are present');
+const tierTwoIdleControls = customizePanel.slice(tierTwoIdleStart, tierTwoIdleEnd);
+assert(
+  tierTwoIdleControls.includes('const ownerOnlyBehavior = b.ownerOnly || b.writesToSharedChat')
+    && tierTwoIdleControls.includes('const ownerRestricted = ownerOnlyBehavior && !isOwner')
+    && tierTwoIdleControls.includes('idleConfig.sharedChatOptIn && isOwner')
+    && tierTwoIdleControls.includes('sharedChatOptIn: b.writesToSharedChat && nextEnabled')
+    && tierTwoIdleControls.includes('disabled={ownerRestricted}')
+    && tierTwoIdleControls.includes('accessibilityState={{ checked: effectivelyEnabled, disabled: ownerRestricted }}'),
+  'every AI-powered shared Chat writer uses the same explicit owner opt-in control',
+);
+const tierThreeIdleStart = customizePanel.indexOf('{/* Tier 3 — Owner Only */}');
+const tierThreeIdleEnd = customizePanel.indexOf('</ScrollView>', tierThreeIdleStart);
+assert(tierThreeIdleStart >= 0 && tierThreeIdleEnd > tierThreeIdleStart, 'Tier 3 idle controls are present');
+const tierThreeIdleControls = customizePanel.slice(tierThreeIdleStart, tierThreeIdleEnd);
+assert(
+  tierThreeIdleControls.includes('!b.writesToSharedChat || idleConfig.sharedChatOptIn')
+    && tierThreeIdleControls.includes("b.writesToSharedChat ? ' · SHARED CHAT · OWNER ONLY' : ''")
+    && tierThreeIdleControls.includes("b.writesToSharedChat && !idleConfig.sharedChatOptIn ? ' · Opt-in required' : ''")
+    && tierThreeIdleControls.includes('const nextEnabled = !effectivelyEnabled')
+    && tierThreeIdleControls.includes('sharedChatOptIn: b.writesToSharedChat && nextEnabled')
+    && tierThreeIdleControls.includes('accessibilityState={{ checked: effectivelyEnabled }}')
+    && !tierThreeIdleControls.includes('enabled: !state.enabled'),
+  'owner-only Tier 3 shared writers cannot appear enabled or toggle on without explicit Chat opt-in',
+);
+assert.equal(
+  (customizePanel.match(/sharedChatOptIn: b\.writesToSharedChat && nextEnabled/g) || []).length,
+  3,
+  'Tier 1, Tier 2, and Tier 3 all grant shared Chat opt-in only on an explicit enabling toggle',
 );
 assert(
   !officeTab.includes("localStorage.getItem('uc_office_agent_filter_v1')")
