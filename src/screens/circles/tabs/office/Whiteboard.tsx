@@ -9,7 +9,7 @@ import {
   calculateDailyScore,
 } from '../../../../lib/officeAgents';
 import { isBlackSwanAvailable } from '../../../../lib/blackswanLLM';
-import { CronJob } from '../../../../lib/openswanService';
+import { CronJob, formatCronSchedule } from '../../../../lib/openswanService';
 import { useAgentActivity, AgentActivity } from '../../../../services/agentActivityLogger';
 import { supabase } from '../../../../lib/supabase';
 import { safeGetUser } from '../../../../lib/authSession';
@@ -1992,7 +1992,7 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
             <View key={job.id} style={s.cronRow}>
               <View style={[s.cronDot, { backgroundColor: job.enabled ? C.active : C.offline }]} />
               <Text style={[s.cronName, !job.enabled && { color: C.textTert }]} numberOfLines={1}>{job.name || job.id.slice(0, 10)}</Text>
-              <Text style={s.cronSched}>{job.schedule?.expr || job.schedule?.kind || ''}</Text>
+              <Text style={s.cronSched}>{formatCronSchedule(job.schedule)}</Text>
             </View>
           ))}
         </View>

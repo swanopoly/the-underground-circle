@@ -88,6 +88,7 @@ cross-surface focus requests continue to override the default.
 | Concern | File(s) |
 |---|---|
 | Office exact runtime authority and account-switch lifecycle | `src/lib/officeDashboardPersistence.ts`, `src/lib/connectionManager.ts`, `src/lib/computerTaskState.ts`, `src/lib/agentPlanPersistence.ts`, `src/lib/computerUseHistory.ts`, `src/lib/llmProviders.ts`, `src/lib/workspaceAdaptation.ts`, `src/lib/oauthConnect.ts`, `src/lib/idleBehaviors.ts`, `src/lib/officeTerminal.ts`, `src/lib/agentInvocation.ts`, `src/lib/circleOffice.ts`, `src/services/customThemes.ts`, `src/services/sharedMemory.ts`, `src/services/hitlService.ts`, `src/services/runApprovalsService.ts`, `src/components/OfficeTerminal.tsx`, `src/components/ComputerUseHistoryPanel.tsx`, `src/components/HitlApprovalBanner.tsx`, `src/components/RunApprovalBanner.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/ProfileTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/migrations/20260817120000_circle_idle_behavior_claims.sql`, `docs/RUN_THIS_SQL.sql` §46, `scripts/{computer-task-private-authority,office-customize-private-authority,workspace-adaptation-exact-authority,oauth-disconnect-authority-lifecycle,office-terminal-mutation-authority,office-invocation-exact-authority,idle-behavior-scheduler-lifecycle,circle-idle-behavior-claims-sql,circle-office-exact-auth-scope,office-dashboard-persistence-authority}-smoketest.ts`, `scripts/circle-idle-behavior-claims-sql-behavior-smoketest.sh` |
+| Office Agent panel router and canonical Chat handoff | `src/lib/{agentRunSystem,agentRuntimeSubject,chatAgentTargets,circleIntegrations,circleOffice,officeAgentSessionBinding,openswanService,progression,siteAutomation}.ts`, `src/services/hitlService.ts`, `src/components/AgentControlCard.tsx`, `src/components/rpg/{AgentEvolutionCard,StreakFlame,XPEventFeed}.tsx`, `src/screens/circles/CircleDetailScreen.tsx`, `src/screens/circles/tabs/{ChatTab,OfficeTab}.tsx`, `src/screens/circles/tabs/office/{AgentPanel,AgentPanelShell,AgentOverviewPanel,AgentActivityPanel,AgentGatewayPanels,AgentTerminalPanels,AgentMemoryPanel,AgentRunsPanel,AgentSpiritPanel,AgentEvolutionPanel,Whiteboard}.tsx`, `src/screens/circles/tabs/office/{AgentPanelTabs,useAgentPanelLayout}.ts`, and the `office-agent-*` plus OpenSwan panel/lifecycle smokes |
 | Chat plan approval capability identity | `src/lib/chatPlanApprovalAuthorityCore.ts`, `src/lib/runChatAutomationPlan.ts`, `src/lib/openswanToolApprovals.ts`, `scripts/chat-plan-tool-manifest-smoketest.ts`, `scripts/openswan-runtime-approval-smoketest.ts` |
 | Dependency compatibility and Expo image build boundary | `package.json`, `package-lock.json`, `scripts/dependency-override-compat-smoketest.mjs`, `scripts/expo-image-asset-guard.mjs`, `scripts/expo-image-asset-guard-smoketest.mjs`, `scripts/security-release-check.mjs` |
 | Agent standards and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `scripts/openswan-lane-report.ts`, `.github/workflows/openswan-release.yml`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md`, `docs/SWANBOT_OPENSWAN_AGENT_LANES_2026-06-29.md` |
@@ -629,33 +630,42 @@ set/clear RPCs, and `invoke_agent_v2`. That versioned RPC composes the canonical
 Office claim exactly once and returns its bound-or-missing binding snapshot;
 public `circle_office_agents` rows never receive session identity or secrets.
 
-The Office agent drawer follows the same progressive-disclosure rule as Chat's
-Control Panel. Opening an agent performs no speculative imports for Terminal,
-Memory, Runs, Spirit, or gateway tabs and never creates a durable Office row as
-a read-side effect. The OpenSwan tab loads only its exact connection/session
-snapshot and one task composer by default; a successful send remains an
-accepted handoff with completion explicitly unverified. Binding, session
-history/status, runtime agents, subagents, search, and Cron inventory load only
-after `Advanced options` opens, so unavailable data is not presented as zero.
-Closing the disclosure drops cached history, runtime inventory, and private
-binding rows; reopening obtains a fresh exact snapshot.
-Provider and Cron mutations are single-flight, Cron run/create actions require
-confirmation, and the collapsed Office command board leaves full bridge
-diagnostics dormant. Overview labels the Claude allowlist as read-only
-diagnostics, never as a task/shell handoff; it does not create fake queued
-activity, and its embedded summary has no second set of destructive controls.
-Standalone offline/remove controls say what they actually change, require
-confirmation, and scope a published row by exact UUID. Panel auth reads use the
-captured exact Office user/circle/bearer authority and never recover mutable
-global auth. The shell keeps one identity/status header, current work and
-connection truth in the default Overview, and identity/memory preferences
-behind an accessible Agent details disclosure. Centered mode owns dialog focus
-and restores the exact semantic opener; docked mode remains non-modal. Compact
-web always uses modal sheet semantics, stays above sticky Office controls, and
-keeps 44 px action targets. The compact bridge summary performs one
-generation-fenced mount probe plus manual refresh, using the shared OpenSwan
-browser-proxy/native-direct endpoint order; Office auto-connect remains the
-sole background poller.
+The Office Agent popup follows the same progressive-disclosure rule as Chat's
+Control Panel and has four primary destinations: Overview, Work, Runtime, and
+More. Their contextual sections remain capability-filtered, so a DB-only or
+unauthenticated OpenSwan row cannot expose unusable live Runtime or Schedule
+routes. Opening an agent performs no speculative section imports or name-based
+database creation. Lazy failures show a retry, and subject/authority-generation
+changes synchronously reset the route and remount section resources so one
+agent's stale data cannot render beneath another agent.
+
+The popup owns no parallel task conversation. Overview, OpenSwan, and Terminal
+encode the exact agent target and optional bounded draft through the typed
+Circle handle. Chat waits for thread/draft hydration, selects and focuses that
+target, and never auto-sends; it remains the single owner of durable messages,
+approvals, canonical runs, proof, and recovery. OpenSwan initially loads only
+exact connection/session evidence; private binding, history/status, runtime
+agents, subagents, and search stay under Advanced options. Those provider
+inventories are accepted only as bounded structured evidence, never inferred
+from prose. Schedules are truthfully connection-level, omit ambiguous
+current-session targeting, retain only the last verified same-scope snapshot
+on failure, require exact action/target receipts plus fresh postconditions, and
+lock mutation after an unknown outcome until an exact refresh succeeds.
+Runtime and schedule reads/mutations use the captured Office
+user/circle/bearer/generation boundary.
+
+Overview Pause/Resume, main-agent, and Terminal profile mutations remain
+unavailable until their exact reads resolve. The
+bridge card owns only a bounded read-only health probe. Runs is a presentation
+surface and cannot reap canonical rows on mount. Memory and Spirit expose
+retry/error states and confirmation-gated, receipt-checked destructive actions;
+Spirit, WordPress, and integration absence is shown only after a verified read;
+raw identity/session details remain behind Inspect disclosures. Centered and
+compact modes block background interaction, own and restore focus, and honor
+reduced motion; docked mode stays non-modal and its resize handle supports
+keyboard/assistive actions. The live roster, not the click-time object, feeds
+the open panel. Prior authenticated panel QA predates this router revision, so
+fresh responsive/native/provider validation remains pending.
 Run
 `npm run check:openswan-control-panels` when changing these boundaries.
 

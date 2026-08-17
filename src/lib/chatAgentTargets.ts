@@ -3,6 +3,7 @@ import {
   isUuidLike,
   type AgentRuntimeSubjectMetadata,
 } from './agentRuntimeSubject';
+import { decodeEntityHandle, encodeEntityHandle } from './entityHandleCore';
 
 export type ChatAgentTargetStatus =
   | 'active'
@@ -58,6 +59,104 @@ export interface ChatAgentTarget<TAgent extends ChatAgentLike = ChatAgentLike> {
 
 export const DEFAULT_CHAT_AGENT_TARGET_ID = 'chat-agent::openswan';
 const DEFAULT_CHAT_AGENT_RUNTIME_ID = 'default::blackswan';
+export const CHAT_AGENT_FOCUS_DRAFT_MAX = 3_500;
+
+export type ChatAgentFocusResolution = Readonly<{
+  officeAgentId: string;
+  targetId: string;
+  requestId: number;
+}>;
+
+const OFFICE_BRIDGE_PROVIDER_BY_PREFIX: Readonly<Record<string, string>> = Object.freeze({
+  cc: 'claude-code',
+  codex: 'codex',
+  cursor: 'cursor',
+  gemini: 'gemini',
+});
+
+/**
+ * Normalize a visible, user-reviewable Office-to-Chat draft. These handoffs
+ * may contain a multi-line task or generated artifact, so they intentionally
+ * use a larger bound than one-line quick-action composer seeds. The value is
+ * still stripped of non-whitespace controls and clamped before it crosses the
+ * surface boundary; Chat never submits it automatically.
+ */
+export function normalizeChatAgentFocusDraft(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
+    .trim();
+  if (!normalized) return null;
+  return normalized.slice(0, CHAT_AGENT_FOCUS_DRAFT_MAX);
+}
+
+/**
+ * Translate an exact Office roster id into the selector id actually owned by
+ * Chat. Office and Chat historically used different structural namespaces for
+ * the same local bridge session (`cc::<session>` vs
+ * `bridge::claude-code::<session>`), while a disconnected synthetic provider
+ * main corresponds to Chat's setup preset rather than a live agent. Keep those
+ * translations structural and exact; display names are never identity.
+ *
+ * Entity-handle encode/decode supplies the same bounded, secret-free id
+ * validation used at the cross-surface navigation boundary. An Office-only
+ * provider placeholder with no Chat setup target fails closed so callers can
+ * disable the handoff instead of selecting a fabricated unavailable agent.
+ */
+export function chatAgentTargetIdFromOfficeAgentId(officeAgentId: unknown): string | null {
+  if (typeof officeAgentId !== 'string') return null;
+  const encoded = encodeEntityHandle({
+    surface: 'chat',
+    kind: 'agent',
+    id: officeAgentId,
+  });
+  const decoded = decodeEntityHandle(encoded);
+  if (!decoded || decoded.surface !== 'chat' || decoded.kind !== 'agent') return null;
+  if (decoded.id === DEFAULT_CHAT_AGENT_RUNTIME_ID) return DEFAULT_CHAT_AGENT_TARGET_ID;
+
+  const providerMain = /^provider-main::([A-Za-z0-9._-]+)$/.exec(decoded.id);
+  if (providerMain) {
+    const provider = normalizeChatAgentProvider(providerMain[1]);
+    if (provider === 'openswan') return DEFAULT_CHAT_AGENT_TARGET_ID;
+    return PRESET_BY_PROVIDER.has(provider) ? `preset::${provider}` : null;
+  }
+
+  const bridgeSession = /^(cc|codex|cursor|gemini)::(.+)$/.exec(decoded.id);
+  if (bridgeSession) {
+    const provider = OFFICE_BRIDGE_PROVIDER_BY_PREFIX[bridgeSession[1]];
+    return provider ? `agent::bridge::${provider}::${bridgeSession[2]}` : null;
+  }
+
+  return `agent::${decoded.id}`;
+}
+
+/**
+ * Admit a Chat focus request only once and in strictly increasing order.
+ * Navigation owns the request sequence; Chat owns selection. Keeping this
+ * gate pure makes duplicate, stale, malformed, and replayed requests inert.
+ */
+export function resolveChatAgentFocusRequest(
+  officeAgentId: unknown,
+  requestId: unknown,
+  lastAcceptedRequestId: unknown,
+): ChatAgentFocusResolution | null {
+  if (!Number.isSafeInteger(requestId) || (requestId as number) <= 0) return null;
+  const prior = Number.isSafeInteger(lastAcceptedRequestId) && (lastAcceptedRequestId as number) >= 0
+    ? lastAcceptedRequestId as number
+    : 0;
+  if ((requestId as number) <= prior) return null;
+  const targetId = chatAgentTargetIdFromOfficeAgentId(officeAgentId);
+  if (!targetId) return null;
+  const encoded = encodeEntityHandle({ surface: 'chat', kind: 'agent', id: officeAgentId });
+  const decoded = decodeEntityHandle(encoded);
+  if (!decoded) return null;
+  return Object.freeze({
+    officeAgentId: decoded.id,
+    targetId,
+    requestId: requestId as number,
+  });
+}
 
 export type ParsedChatAgentAssignment = Readonly<{
   selectorKind: 'id' | 'name';

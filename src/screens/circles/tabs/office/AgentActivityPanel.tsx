@@ -1,5 +1,5 @@
-import React from 'react';
-import { Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { Platform, Pressable, Text, View } from 'react-native';
 import { getAgentIdentityKey } from '../../../../lib/agentIdentity';
 import { OfficeAgent } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
@@ -10,6 +10,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
   statusColor: string;
   statusLabel: string;
 }) {
+  const [inspectOpen, setInspectOpen] = useState(false);
   const isActive = agent.status === 'active' || agent.status === 'building';
   const sessionKey = getAgentIdentityKey(agent);
   const sessionInfo = [
@@ -140,7 +141,21 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         </View>
       )}
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+      <Pressable
+        onPress={() => setInspectOpen(open => !open)}
+        accessibilityRole="button"
+        accessibilityLabel={inspectOpen ? 'Hide raw session details' : 'Inspect raw session details'}
+        accessibilityState={{ expanded: inspectOpen }}
+        style={[{ minHeight: 44, borderWidth: 1, borderColor: '#30363d', borderRadius: 6, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: '#c9d1d9', fontSize: 12, fontWeight: '700' }}>Inspect session details</Text>
+          <Text style={{ color: '#707086', fontSize: 11, lineHeight: 16 }}>IDs, connection metadata, and the local runtime message log.</Text>
+        </View>
+        <Text style={{ color: '#8b949e', fontSize: 16 }}>{inspectOpen ? '−' : '+'}</Text>
+      </Pressable>
+
+      {inspectOpen ? <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>SESSION CONTEXT</Text>
         {sessionInfo.map((row, index) => (
           <View key={row.label} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderBottomWidth: index < sessionInfo.length - 1 ? 1 : 0, borderBottomColor: '#151520' }}>
@@ -148,9 +163,9 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
             <Text style={{ color: '#a0a0b0', fontSize: 12, fontFamily: MONO, maxWidth: '62%', textAlign: 'right' }} numberOfLines={1}>{row.value}</Text>
           </View>
         ))}
-      </View>
+      </View> : null}
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+      {inspectOpen ? <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>
           MESSAGE LOG {agent.recentMessages.length > 0 ? `(${agent.recentMessages.length})` : ''}
         </Text>
@@ -172,7 +187,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         ) : (
           <Text style={{ color: '#808090', fontSize: 13, fontStyle: 'italic', fontFamily: MONO }}>No recent messages recorded.</Text>
         )}
-      </View>
+      </View> : null}
     </View>
   );
 }

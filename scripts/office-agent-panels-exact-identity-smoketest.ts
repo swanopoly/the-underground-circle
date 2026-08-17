@@ -5,6 +5,7 @@ const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.ur
 const panel = read('src/screens/circles/tabs/office/AgentPanel.tsx');
 const overview = read('src/screens/circles/tabs/office/AgentOverviewPanel.tsx');
 const terminal = read('src/screens/circles/tabs/office/AgentTerminalPanels.tsx');
+const memory = read('src/screens/circles/tabs/office/AgentMemoryPanel.tsx');
 const spirit = read('src/screens/circles/tabs/office/AgentSpiritPanel.tsx');
 
 let assertions = 0;
@@ -15,9 +16,13 @@ function check(condition: unknown, message: string): void {
 
 check(panel.includes('identityAuthority?: AgentIdentityExactAuthority | null'), 'AgentPanel accepts one exact identity authority');
 check(panel.includes('authorityCircleId !== circleId'), 'AgentPanel rejects a mismatched authority circle');
+check(panel.includes('Number.isSafeInteger(generation)') && panel.includes('generation <= 0'), 'AgentPanel requires positive generation-bearing authority');
 check(!panel.includes('safeGetUser'), 'AgentPanel never recovers mutable global auth');
-check((panel.match(/identityAuthority=\{exactIdentityAuthority\}/g) || []).length === 4, 'AgentPanel threads exact authority to Overview, both Terminal panels, and Spirit');
-check((panel.match(/key=\{`\$\{exactIdentityAuthority\?\.userId/g) || []).length === 4, 'private child state remounts at the user boundary');
+check((panel.match(/identityAuthority=\{exactIdentityAuthority\}/g) || []).length >= 5, 'AgentPanel threads exact authority to Overview, both Terminal surfaces, Spirit, and Memory');
+check((panel.match(/isIdentityAuthorityCurrent=\{isExactIdentityAuthorityCurrent\}/g) || []).length >= 4, 'AgentPanel threads one lifecycle fence to Runtime, Spirit, Memory, and Cron');
+check(panel.includes('chatAgentTargetIdFromOfficeAgentId(chatAgentId)'), 'AgentPanel admits Chat handoff only when the exact Office identity resolves to a canonical Chat target');
+check((panel.match(/onOpenInChat=\{openAgentInChat\}/g) || []).length >= 5, 'all task-creating child surfaces share the exact canonical Chat handoff');
+check(panel.includes('key={panelScopeKey}') && panel.includes('<memoryPanelModule.default'), 'Memory state remounts at the complete agent and authority boundary');
 check(panel.includes('if (!onRenameAgent || !exactIdentityAuthority) return'), 'panel-shell rename fails closed without authority');
 
 check(overview.includes('loadAgentIdentitiesExact(exactIdentityAuthority)'), 'Overview reads the exact identity cache');
@@ -28,35 +33,53 @@ check(!/\brenameAgent\(/.test(overview), 'Overview has no ownerless rename fallb
 check(!/\bsetMainAgentForProvider\(/.test(overview), 'Overview has no ownerless primary-agent mutation');
 check(overview.includes('latestIdentityRequestKeyRef.current !== capturedRequestKey'), 'Overview rejects late identity reads and mutations');
 check(overview.includes(".setHeader('Authorization', `Bearer ${accessToken}`)"), 'Overview memory status binds the captured bearer');
-check(overview.includes('!receipt.localSaved'), 'Overview requires a truthful local identity receipt');
+check(overview.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved'), 'Overview requires a complete durable identity receipt');
+check(overview.includes('isParentIdentityAuthorityCurrent(authority)'), 'Overview composes its local request fence with the parent authority lifecycle');
 
 check(terminal.includes('loadAgentIdentitiesExact(exactIdentityAuthority)'), 'Terminal profile reads exact-scoped identity data');
 check(terminal.includes('updateAgentIdentityExact(identityKey'), 'Terminal profile writes with captured exact authority');
 check(!/\bloadAgentIdentities\(/.test(terminal), 'Terminal profile has no ownerless identity read');
 check(!/\bupdateAgentIdentity\(/.test(terminal), 'Terminal profile has no ownerless identity write');
-check(terminal.includes('latestIdentityRequestKeyRef.current !== capturedRequestKey'), 'Terminal rejects late profile results');
-check(terminal.includes('Sign in to this circle before saving'), 'Terminal fails closed with actionable locked-state copy');
-check(terminal.includes('if (!receipt.localSaved)'), 'Terminal requires a truthful exact-save receipt');
-check(!terminal.includes('safeGetUser'), 'Quick Terminal never recovers mutable global auth');
-check(terminal.includes('identityAuthority?: AgentIdentityExactAuthority | null'), 'both Terminal surfaces accept exact identity authority');
-check(terminal.includes('userId: capturedAuthority.userId'), 'SwanBot fallback receives the captured owner');
-check(terminal.includes('circleId: capturedAuthority.circleId || circleId'), 'SwanBot fallback remains bound to the captured circle');
-check((terminal.match(/isTerminalRequestCurrent\(capturedRequestKey, capturedAuthority\.accessToken\)/g) || []).length >= 7, 'Quick Terminal fences late imports, sends, errors, history, and scroll updates');
-check(terminal.includes("setHistory([])") && terminal.includes("setInput('')"), 'Quick Terminal clears private conversation state on authority or agent change');
-
-for (const source of [overview, terminal, spirit]) {
-  check(!source.includes('${exactIdentityAuthority.accessToken}'), 'bearer material is not embedded in request identity strings');
+check(terminal.includes('latestIdentityRequestKeyRef.current !== capturedRequestKey'), 'Terminal profile rejects late results');
+check(terminal.includes('Sign in to this circle before saving'), 'Terminal profile fails closed with actionable locked-state copy');
+check(terminal.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved'), 'Terminal profile requires a truthful durable exact-save receipt');
+check(!terminal.includes('safeGetUser'), 'Terminal surfaces never recover mutable global auth');
+check(terminal.includes('onOpenInChat?: (draft?: string) => void'), 'Quick Terminal exposes only the canonical Chat handoff');
+check(terminal.includes('onOpenInChat(message)') && !/onOpenInChat\(message\);\s*setInput\(''\)/.test(terminal), 'Quick Terminal carries a draft to Chat without clearing it before admission');
+check(terminal.includes('Chat owns the durable message, approvals, run, proof, and recovery trail.'), 'Quick Terminal explains canonical Chat ownership');
+for (const retiredDirectPath of ['sendSwanBotMessage', 'loadConversationHistory', 'listConversationSessions', 'sendSessionMessage']) {
+  check(!terminal.includes(retiredDirectPath), `Quick Terminal has no direct ${retiredDirectPath} path`);
 }
 
-check(spirit.includes('loadAgentIdentitiesExact(authority)'), 'Spirit hydrates only the exact identity scope');
+check(memory.includes('identityAuthority: AgentMemoryPanelAuthority | null'), 'Memory requires exact authority');
+check(memory.includes('isIdentityAuthorityCurrent: AgentMemoryPanelAuthorityFence'), 'Memory requires a lifecycle fence');
+check(memory.includes(".setHeader('Authorization', bearer)"), 'Memory reads bind the captured bearer');
+check(memory.includes('if (result.error) throw result.error'), 'Memory propagates read failures instead of converting them to empty state');
+check(memory.includes('The memory change did not return exactly one receipt.'), 'Memory mutations require exactly one row receipt');
+check(memory.includes(".eq('circle_id', authority.circleId)") && memory.includes(".eq('user_id', authority.userId)"), 'Memory writes bind exact circle and owner filters');
+check(!memory.includes("import('../../../../lib/agentMemory')") && !memory.includes("import('../../../../lib/memoryActions')"), 'Memory has no ambient mutation helper path');
+check(memory.includes('onOpenInChat(request.slice(0, 3_500))'), 'new Memory and instruction drafts continue through canonical Chat');
+check(!memory.includes('<ScrollView'), 'Memory leaves vertical scrolling to the panel shell');
+
+check(spirit.includes('syncAgentIdentitiesFromServerExact(authority)'), 'Spirit hydrates from a durable exact identity snapshot');
 check(spirit.includes('updateAgentIdentityExact(stableSessionKey, updates, authority)'), 'Spirit identity patches bind captured authority');
 check(!/\bloadAgentIdentities\(/.test(spirit), 'Spirit has no ownerless identity read');
 check(!/\bupdateAgentIdentity\(/.test(spirit), 'Spirit has no ownerless identity write');
 check(!spirit.includes('safeGetUser'), 'Spirit never swaps to mutable global auth');
-check((spirit.match(/updateAgentSpirit\([^\n]+authority\)/g) || []).length === 4, 'every Spirit public-row mutation receives captured authority');
-check((spirit.match(/isIdentityRequestCurrent\(capturedRequestKey\)/g) || []).length >= 20, 'Spirit guards asynchronous state publication across authority changes');
-check(spirit.includes('setCustomProfiles([])') && spirit.includes('setSoulText(\'\')'), 'Spirit clears private state when its exact scope changes');
+check(!spirit.includes('updateAgentSpirit('), 'Spirit has no ambient or zero-row-success public assignment helper');
+check(!spirit.includes('.ilike(') && !spirit.includes(".upsert({\n        circle_id"), 'Spirit never name-matches or auto-creates a public agent row');
+check(spirit.includes(".select('id, user_id')") && spirit.includes('deleteReceipts.length !== 1'), 'Spirit profile deletion requires one exact receipt');
+check(spirit.includes(".select('id, circle_id, owner_id, spirit, spirit_emoji')") && spirit.includes('receipts.length !== 1'), 'Spirit assignment changes require one exact owner-scoped public receipt');
+check(spirit.includes('receipt.serverSaved'), 'Spirit identity state changes require durable server persistence');
+check(spirit.includes('isIdentityAuthorityCurrent(current)'), 'Spirit fences late results against the current authority generation');
+check(spirit.includes('setCustomProfiles([])') && spirit.includes("setSoulText('')"), 'Spirit clears private state when its exact scope changes');
+check(spirit.includes("useState<'loading' | 'ready' | 'error'>('loading')") && spirit.includes('Retry loading verified Spirit identity'), 'Spirit distinguishes verified empty identity from retryable load failure');
 check(spirit.includes(".eq('user_id', authority.userId)"), 'Spirit server operations filter the captured owner');
 check(spirit.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"), 'Spirit server operations bind the captured bearer');
+check(!spirit.includes("import('../../../../lib/memoryService')"), 'Spirit artifacts use Chat instead of an ambient memory writer');
+
+for (const source of [overview, terminal, memory, spirit]) {
+  check(!source.includes('${exactIdentityAuthority.accessToken}'), 'bearer material is not embedded in request identity strings');
+}
 
 console.log(`office agent panels exact-identity smoke passed (${assertions} assertions)`);

@@ -105,6 +105,11 @@ export function useAgentPanelLayout() {
     document.body.style.userSelect = 'none';
   }, [panelMode, sideWidth]);
 
+  const resizeSideBy = useCallback((delta: number) => {
+    if (panelMode !== 'side' || !Number.isFinite(delta)) return;
+    setSideWidth(width => Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, width + delta)));
+  }, [panelMode]);
+
   const panelGeometry = useMemo(() => {
     const maxCenteredWidth = Math.max(320, viewport.w - (POPUP_PADDING * 2));
     const minCenteredWidth = Math.min(CENTER_MIN_W, maxCenteredWidth);
@@ -150,5 +155,6 @@ export function useAgentPanelLayout() {
     setBackdropOn,
     toggleMode,
     startSideResize,
+    resizeSideBy,
   };
 }

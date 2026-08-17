@@ -89,6 +89,8 @@ import {
   formatChatAgentProviderLabel,
   isOpenSwanChatAgentTarget,
   parseChatAgentAssignmentCommand,
+  normalizeChatAgentFocusDraft,
+  resolveChatAgentFocusRequest,
   resolveChatAgentAssignmentTarget,
   resolveChatAgentTarget,
   type ChatAgentTarget,
@@ -2147,7 +2149,29 @@ function interruptOrphanedComputerTaskState(record: ComputerTaskStateRecord): Co
   };
 }
 
-export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleId: string; accentColor?: string }) {
+interface ChatTabProps {
+  circleId: string;
+  accentColor?: string;
+  focusAgentId?: string | null;
+  focusAgentDraft?: string | null;
+  focusAgentRequestId?: number;
+}
+
+type PendingChatAgentFocus = {
+  circleId: string;
+  officeAgentId: string;
+  targetId: string;
+  draft: string | null;
+  requestId: number;
+};
+
+export default function ChatTab({
+  circleId,
+  accentColor = '#6366f1',
+  focusAgentId = null,
+  focusAgentDraft = null,
+  focusAgentRequestId = 0,
+}: ChatTabProps) {
   const navigation = useNavigation<any>();
   const { width: viewportWidth } = useWindowDimensions();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -2446,6 +2470,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     try { localStorage.setItem(chatModeStorageKey, chatMode); } catch { /* quota */ }
   }, [chatModeStorageKey, chatMode]);
   const [selectedChatAgentId, setSelectedChatAgentId] = useState<string>(DEFAULT_CHAT_AGENT_TARGET_ID);
+  const [pendingAgentFocus, setPendingAgentFocus] = useState<PendingChatAgentFocus | null>(null);
+  const lastAcceptedAgentFocusRequestRef = useRef(0);
+  const lastAppliedAgentFocusRequestRef = useRef(0);
   const chatAgentStorageKey = activeThreadId ? `uc_chat_agent:${activeThreadId}` : null;
   useEffect(() => {
     if (!chatAgentStorageKey || typeof localStorage === 'undefined') return;
@@ -2460,6 +2487,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!chatAgentStorageKey || typeof localStorage === 'undefined') return;
     try { localStorage.setItem(chatAgentStorageKey, selectedChatAgentId); } catch { /* quota */ }
   }, [chatAgentStorageKey, selectedChatAgentId]);
+  // Navigation requests are exact-id and monotonically identified. Hold the
+  // newest valid request until the selected conversation and its saved draft
+  // have hydrated; applying sooner would let per-thread persistence overwrite
+  // the requested target or composer text a moment later.
+  useEffect(() => {
+    const resolved = resolveChatAgentFocusRequest(
+      focusAgentId,
+      focusAgentRequestId,
+      lastAcceptedAgentFocusRequestRef.current,
+    );
+    if (!resolved) return;
+    lastAcceptedAgentFocusRequestRef.current = resolved.requestId;
+    const draft = normalizeChatAgentFocusDraft(focusAgentDraft);
+    setPendingAgentFocus({
+      circleId,
+      officeAgentId: resolved.officeAgentId,
+      targetId: resolved.targetId,
+      draft,
+      requestId: resolved.requestId,
+    });
+  }, [circleId, focusAgentDraft, focusAgentId, focusAgentRequestId]);
   const [agentName, setAgentNameState] = useState<string>(MAIN_CHAT_AGENT_NAME);
   const [editingAgentName, setEditingAgentName] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
@@ -6257,6 +6305,37 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+  useEffect(() => {
+    if (!pendingAgentFocus) return;
+    if (pendingAgentFocus.circleId !== circleId) {
+      setPendingAgentFocus(null);
+      return;
+    }
+    if (pendingAgentFocus.requestId <= lastAppliedAgentFocusRequestRef.current) {
+      setPendingAgentFocus(null);
+      return;
+    }
+    if (
+      !activeThreadId
+      || threadLoadState.status !== 'ready'
+      || threadLoadState.threadId !== activeThreadId
+    ) return;
+
+    lastAppliedAgentFocusRequestRef.current = pendingAgentFocus.requestId;
+    setSelectedChatAgentId(pendingAgentFocus.targetId);
+    if (pendingAgentFocus.draft !== null) setInput(pendingAgentFocus.draft);
+    setPendingAgentFocus(null);
+
+    // Selection and an optional bounded draft are the entire handoff. Focus is
+    // deferred one paint so the hydrated composer owns the caret; no send path
+    // is called and the user remains the only actor who can submit the turn.
+    const focusComposer = () => inputRef.current?.focus();
+    if (Platform.OS === 'web' && typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(focusComposer);
+    } else {
+      setTimeout(focusComposer, 0);
+    }
+  }, [activeThreadId, circleId, pendingAgentFocus, threadLoadState.status, threadLoadState.threadId]);
   // STOP button for OpenSwan typed-loop turns — holds the live turn's cancel
   // handle so the steering bar can abort it at the next loop boundary.
   const openSwanAbortRef = useRef<AbortController | null>(null);

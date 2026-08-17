@@ -1,14 +1,78 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Platform, Pressable, Text, TextInput, View } from 'react-native';
+import type {
+  OfficeConnectionAuthorityFence,
+  OfficeConnectionExactAuthority,
+} from '../../../../lib/connectionManager';
 import { supabase } from '../../../../lib/supabase';
 import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
-import { getAgentSoulInfo, getMemorySoulKey } from './agentSoulMemory';
+import { isUuidLike } from '../../../../lib/agentRuntimeSubject';
+import { getMemorySoulKey } from './agentSoulMemory';
 import { MONO, formatMsgTime } from './AgentPanelShared';
 
-function buildManualMemoryTitle(content: string, prefix: string): string {
-  const compact = content.replace(/\s+/g, ' ').trim();
-  const snippet = compact.length > 48 ? `${compact.slice(0, 48).trim()}...` : compact;
-  return `${prefix}: ${snippet}`;
+export type AgentMemoryPanelAuthority = OfficeConnectionExactAuthority;
+export type AgentMemoryPanelAuthorityFence = OfficeConnectionAuthorityFence;
+
+interface AgentMemoryPanelProps {
+  circleId: string;
+  userId?: string;
+  agentId: string;
+  agentAliases?: string[];
+  agentName: string;
+  accentColor: string;
+  identityAuthority: AgentMemoryPanelAuthority | null;
+  isIdentityAuthorityCurrent: AgentMemoryPanelAuthorityFence;
+  onOpenInChat?: (draft?: string) => void;
+}
+
+function normalizeMemoryAuthority(
+  circleId: string,
+  userId: string | undefined,
+  authority: AgentMemoryPanelAuthority | null | undefined,
+): AgentMemoryPanelAuthority | null {
+  const authorityUserId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  const generation = Number(authority?.generation);
+  if (
+    !circleId
+    || !authorityUserId
+    || (userId && userId !== authorityUserId)
+    || authorityCircleId !== circleId
+    || !accessToken
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return {
+    userId: authorityUserId,
+    circleId: authorityCircleId,
+    accessToken,
+    generation,
+  };
+}
+
+function requireOneMemoryReceipt(
+  data: unknown,
+  expected: {
+    id: string;
+    circleId: string;
+    userId: string;
+    verify: (row: any) => boolean;
+  },
+): any {
+  if (!Array.isArray(data) || data.length !== 1) {
+    throw new Error('The memory change did not return exactly one receipt.');
+  }
+  const row = data[0];
+  if (
+    String(row?.id || '') !== expected.id
+    || String(row?.circle_id || '') !== expected.circleId
+    || String(row?.user_id || '') !== expected.userId
+    || !expected.verify(row)
+  ) {
+    throw new Error('The memory change returned a mismatched receipt.');
+  }
+  return row;
 }
 
 function getMemoryTimestamp(mem: any): string {
@@ -79,47 +143,177 @@ type MemorySection = {
   borderColor: string;
 };
 
-export default function AgentMemoryPanel({ circleId, userId, agentId, agentAliases = [], agentName, accentColor }: {
-  circleId: string; userId?: string; agentId: string; agentAliases?: string[]; agentName: string; accentColor: string;
-}) {
+export default function AgentMemoryPanel({
+  circleId,
+  userId,
+  agentId,
+  agentAliases = [],
+  agentName,
+  accentColor,
+  identityAuthority,
+  isIdentityAuthorityCurrent,
+  onOpenInChat,
+}: AgentMemoryPanelProps) {
   const [memories, setMemories] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [newMemory, setNewMemory] = useState('');
   const [newSkill, setNewSkill] = useState('');
+  const [showIdentityDetails, setShowIdentityDetails] = useState(false);
   const [viewMode, setViewMode] = useState<'all' | 'agent' | 'shared' | 'private' | 'skills'>('all');
   const [addError, setAddError] = useState<string | null>(null);
-  const [savingStandard, setSavingStandard] = useState(false);
   const [saveResult, setSaveResult] = useState<string | null>(null);
   const [soulKey, setSoulKey] = useState<string | null>(null);
   const [soulLabel, setSoulLabel] = useState<string | null>(null);
+  const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
+  const [mutatingMemoryId, setMutatingMemoryId] = useState<string | null>(null);
+  const [memoryActionStatus, setMemoryActionStatus] = useState<string | null>(null);
+  const memoryMutationLockRef = useRef<string | null>(null);
+  const exactMemoryAuthority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
+  const authorityScopeKey = exactMemoryAuthority
+    ? `${exactMemoryAuthority.userId}|${exactMemoryAuthority.circleId}|${exactMemoryAuthority.generation}`
+    : 'locked';
 
   // Tracks the currently intended (agentId, circleId) pair. If either changes
   // while a fetch is in flight, the old promise resolves into setters that are
   // no-ops (the key check fails), so rapid agent switching doesn't race.
   const loadKeyRef = useRef('');
   const load = useCallback(async () => {
+    const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
     const lookupIds = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
-    const key = `${circleId}|${lookupIds.join(',')}|${userId || ''}`;
+    const key = `${circleId}|${lookupIds.join(',')}|${authorityScopeKey}`;
     loadKeyRef.current = key;
     setLoading(true);
+    setLoadError(null);
+    if (!authority || !isIdentityAuthorityCurrent(authority)) {
+      setMemories([]);
+      setSoulKey(null);
+      setSoulLabel(null);
+      setLoadError('Memory is locked until this Office session has exact user and circle authority.');
+      setLoading(false);
+      return;
+    }
     try {
-      const { getUserMemories } = await import('../../../../lib/agentMemory');
-      const [memoryBuckets, soul] = await Promise.all([
-        Promise.all(lookupIds.map(id => getUserMemories(circleId, userId, id))),
-        getAgentSoulInfo({ circleId, agentId, agentName, userId }),
-      ]);
-      if (loadKeyRef.current !== key) return; // stale
-      const merged = memoryBuckets.flatMap(data => [...data.agent, ...data.circle, ...data.user, ...data.session]);
-      setMemories(dedupeMemoryGroups(merged, soul.soulKey || null));
-      setSoulKey(soul.soulKey);
-      setSoulLabel(soul.soulLabel);
+      const bearer = `Bearer ${authority.accessToken}`;
+      const queries = [
+        supabase
+          .from('memory_entries')
+          .select('*')
+          .eq('circle_id', authority.circleId)
+          .eq('scope', 'circle')
+          .eq('is_active', true)
+          .order('created_at', { ascending: false })
+          .limit(200)
+          .setHeader('Authorization', bearer),
+        supabase
+          .from('memory_entries')
+          .select('*')
+          .eq('circle_id', authority.circleId)
+          .eq('scope', 'session')
+          .eq('visibility', 'circle_shared')
+          .eq('is_active', true)
+          .order('updated_at', { ascending: false })
+          .limit(200)
+          .setHeader('Authorization', bearer),
+        supabase
+          .from('memory_entries')
+          .select('*')
+          .eq('circle_id', authority.circleId)
+          .eq('scope', 'session')
+          .eq('visibility', 'private')
+          .eq('user_id', authority.userId)
+          .eq('is_active', true)
+          .order('updated_at', { ascending: false })
+          .limit(200)
+          .setHeader('Authorization', bearer),
+        supabase
+          .from('memory_entries')
+          .select('*')
+          .eq('circle_id', authority.circleId)
+          .eq('scope', 'user')
+          .eq('user_id', authority.userId)
+          .eq('is_active', true)
+          .order('updated_at', { ascending: false })
+          .limit(200)
+          .setHeader('Authorization', bearer),
+      ];
+      if (lookupIds.length > 0) {
+        let agentQuery = supabase
+          .from('memory_entries')
+          .select('*')
+          .eq('circle_id', authority.circleId)
+          .eq('scope', 'agent')
+          .eq('visibility', 'private')
+          .eq('user_id', authority.userId)
+          .eq('is_active', true)
+          .order('updated_at', { ascending: false })
+          .limit(200);
+        agentQuery = lookupIds.length === 1
+          ? agentQuery.eq('agent_id', lookupIds[0])
+          : agentQuery.in('agent_id', lookupIds);
+        queries.push(agentQuery.setHeader('Authorization', bearer));
+      }
+
+      const memoryResults = await Promise.all(queries);
+      for (const result of memoryResults) {
+        if (result.error) throw result.error;
+      }
+      if (
+        loadKeyRef.current !== key
+        || !isIdentityAuthorityCurrent(authority)
+      ) return;
+
+      const merged = memoryResults
+        .flatMap(result => result.data || [])
+        .filter(row => String(row?.circle_id || '') === authority.circleId)
+        .sort((a, b) => new Date(getMemoryTimestamp(b)).getTime() - new Date(getMemoryTimestamp(a)).getTime())
+        .slice(0, 200);
+
+      const publishedAgentId = lookupIds.find(isUuidLike) || null;
+      let soulRow: any = null;
+      if (publishedAgentId) {
+        const { data, error } = await supabase
+          .from('circle_office_agents')
+          .select('id, spirit')
+          .eq('id', publishedAgentId)
+          .eq('circle_id', authority.circleId)
+          .eq('owner_id', authority.userId)
+          .setHeader('Authorization', bearer)
+          .maybeSingle();
+        if (error) throw error;
+        soulRow = data;
+      } else if (agentName.trim()) {
+        const { data, error } = await supabase
+          .from('circle_office_agents')
+          .select('id, spirit')
+          .eq('circle_id', authority.circleId)
+          .eq('owner_id', authority.userId)
+          .eq('name', agentName.trim())
+          .setHeader('Authorization', bearer)
+          .limit(2);
+        if (error) throw error;
+        // A name is display metadata, not durable identity. Use it only when
+        // it resolves uniquely; duplicate names leave the Soul lane neutral.
+        soulRow = Array.isArray(data) && data.length === 1 ? data[0] : null;
+      }
+      if (
+        loadKeyRef.current !== key
+        || !isIdentityAuthorityCurrent(authority)
+      ) return;
+      const nextSoulKey = soulRow?.spirit ? `soul:${soulRow.spirit}` : null;
+      setMemories(dedupeMemoryGroups(merged, nextSoulKey));
+      setSoulKey(nextSoulKey);
+      setSoulLabel(soulRow?.spirit || null);
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to load memories:', err);
+      if (loadKeyRef.current === key && isIdentityAuthorityCurrent(authority)) {
+        setLoadError('Memory could not be loaded. Check the connection and try again.');
+      }
     }
     if (loadKeyRef.current === key) setLoading(false);
-  }, [agentAliases, agentId, agentName, circleId, userId]);
+  }, [agentAliases, agentId, agentName, authorityScopeKey, circleId, identityAuthority, isIdentityAuthorityCurrent, userId]);
 
   useEffect(() => {
     void load();
@@ -237,128 +431,195 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
   });
   const filteredCount = visibleSections.reduce((sum, section) => sum + section.items.length, 0);
 
-  const handleSave = async (id: string) => {
+  const mutateMemoryExact = async (
+    mem: any,
+    patch: Record<string, unknown>,
+    verify: (row: any) => boolean,
+  ): Promise<any> => {
+    const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
+    const memoryId = String(mem?.id || '').trim();
+    const memoryScope = String(mem?.scope || '').trim();
+    if (
+      !authority
+      || !isIdentityAuthorityCurrent(authority)
+      || !memoryId
+      || !['agent', 'user', 'session'].includes(memoryScope)
+      || String(mem?.circle_id || '') !== authority.circleId
+      || String(mem?.user_id || '') !== authority.userId
+    ) {
+      throw new Error('This memory is not writable under the current Office authority.');
+    }
+    const { data, error } = await supabase
+      .from('memory_entries')
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq('id', memoryId)
+      .eq('circle_id', authority.circleId)
+      .eq('user_id', authority.userId)
+      .eq('scope', memoryScope)
+      .eq('is_active', true)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+      .select('id, circle_id, user_id, scope, content, is_active, pinned, retrieval_mode, importance');
+    if (error) throw error;
+    if (!isIdentityAuthorityCurrent(authority)) {
+      throw new Error('The Office session changed before the memory receipt was verified.');
+    }
+    return requireOneMemoryReceipt(data, {
+      id: memoryId,
+      circleId: authority.circleId,
+      userId: authority.userId,
+      verify,
+    });
+  };
+
+  const beginMemoryMutation = (memoryId: string): boolean => {
+    if (!memoryId || memoryMutationLockRef.current) return false;
+    memoryMutationLockRef.current = memoryId;
+    setMutatingMemoryId(memoryId);
+    setMemoryActionStatus(null);
+    return true;
+  };
+
+  const finishMemoryMutation = (memoryId: string) => {
+    if (memoryMutationLockRef.current === memoryId) memoryMutationLockRef.current = null;
+    const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
+    if (authority && isIdentityAuthorityCurrent(authority)) {
+      setMutatingMemoryId(current => current === memoryId ? null : current);
+    }
+  };
+
+  const canPublishMemoryMutation = (): boolean => {
+    const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
+    return !!authority && isIdentityAuthorityCurrent(authority);
+  };
+
+  const handleSave = async (mem: any) => {
+    const id = String(mem?.id || '');
+    if (!beginMemoryMutation(id)) return;
     try {
-      const { editMemory } = await import('../../../../lib/agentMemory');
-      await editMemory(id, { content: editContent });
+      await mutateMemoryExact(mem, { content: editContent, embedding: null }, row => row.content === editContent);
+      if (!canPublishMemoryMutation()) return;
       setEditingId(null);
-      load();
+      setMemoryActionStatus(`Updated memory: ${String(mem?.title || 'Untitled memory')}`);
+      await load();
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to save memory:', err);
+      if (canPublishMemoryMutation()) {
+        setMemoryActionStatus(`ERROR: Could not update memory: ${String(mem?.title || 'Untitled memory')}`);
+      }
+    } finally {
+      finishMemoryMutation(id);
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (mem: any, title: string) => {
+    const id = String(mem?.id || '');
+    if (!beginMemoryMutation(id)) return;
+    setDeletingMemoryId(id);
     try {
-      const { deleteMemory } = await import('../../../../lib/agentMemory');
-      await deleteMemory(id);
-      load();
+      await mutateMemoryExact(mem, { is_active: false }, row => row.is_active === false);
+      if (!canPublishMemoryMutation()) return;
+      setEditingId(current => current === id ? null : current);
+      setMemoryActionStatus(`Deleted memory: ${title}`);
+      await load();
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to delete memory:', err);
+      if (canPublishMemoryMutation()) setMemoryActionStatus(`ERROR: Could not delete memory: ${title}`);
+    } finally {
+      if (canPublishMemoryMutation()) {
+        setDeletingMemoryId(current => current === id ? null : current);
+      }
+      finishMemoryMutation(id);
     }
   };
 
-  const handleAdd = async () => {
-    if (!newMemory.trim()) return;
-    if (!userId) {
-      setAddError('Sign in required to save memory');
+  const requestDeleteMemory = (mem: any) => {
+    if (mutatingMemoryId) return;
+    const title = String(mem.title || 'Untitled memory').trim() || 'Untitled memory';
+    const confirmDelete = () => { void handleDelete(mem, title); };
+    const message = `Delete "${title}"? This cannot be undone.`;
+
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm(message)) confirmDelete();
       return;
     }
-    setAddError(null);
+
+    Alert.alert('Delete memory?', message, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: confirmDelete },
+    ]);
+  };
+
+  const handlePinToggle = async (mem: any) => {
+    const id = String(mem?.id || '');
+    if (!beginMemoryMutation(id)) return;
+    const nextPinned = !mem.pinned;
     try {
-      const { saveSoulAwareAgentMemory } = await import('../../../../lib/memoryService');
-      const content = newMemory.trim();
-      const result = await saveSoulAwareAgentMemory({
-        circleId,
-        userId,
-        agentId,
-        agentName,
-        memoryKind: 'finding',
-        source: 'agent_panel_manual_note',
-        namespace: 'agent_private_pattern',
-        title: buildManualMemoryTitle(content, 'Agent note'),
-        content,
-        importance: 0.72,
-        sourceType: 'manual',
-        currentSoulKey: soulKey,
-        feedback: soulLabel
-          ? `Manual note saved from the agent panel while Soul ${soulLabel} was active.`
-          : 'Manual note saved from the agent panel.',
-      });
-      if (!result) {
-        setAddError('Save failed — check console for RLS/auth errors');
-        console.error('[AgentMemoryPanel] saveSoulAwareAgentMemory note returned null. circleId:', circleId, 'userId:', userId, 'agentId:', agentId);
-        return;
+      await mutateMemoryExact(mem, { pinned: nextPinned }, row => row.pinned === nextPinned);
+      if (!canPublishMemoryMutation()) return;
+      setMemoryActionStatus(`${nextPinned ? 'Pinned' : 'Unpinned'} memory: ${String(mem?.title || 'Untitled memory')}`);
+      await load();
+    } catch (err) {
+      console.warn('[AgentMemoryPanel] Failed to update memory pin:', err);
+      if (canPublishMemoryMutation()) {
+        setMemoryActionStatus(`ERROR: Could not ${nextPinned ? 'pin' : 'unpin'} memory: ${String(mem?.title || 'Untitled memory')}`);
       }
-      setNewMemory('');
-      load();
-    } catch (err: any) {
-      console.error('[AgentMemoryPanel] handleAdd error:', err);
-      setAddError(err?.message || 'Failed to save memory');
+    } finally {
+      finishMemoryMutation(id);
     }
   };
 
-  const handleAddSkill = async () => {
-    if (!newSkill.trim()) return;
-    if (!userId) {
-      setAddError('Sign in required to save instructions');
-      return;
-    }
-    setAddError(null);
+  const handlePromote = async (mem: any) => {
+    const id = String(mem?.id || '');
+    if (!beginMemoryMutation(id)) return;
     try {
-      const { saveSoulAwareAgentMemory } = await import('../../../../lib/memoryService');
-      const content = newSkill.trim();
-      const result = await saveSoulAwareAgentMemory({
-        circleId,
-        userId,
-        agentId,
-        agentName,
-        memoryKind: 'instruction',
-        source: 'agent_panel_manual_instruction',
-        namespace: 'agent_private_pattern',
-        title: buildManualMemoryTitle(content, 'Agent instruction'),
-        content,
-        importance: 0.9,
-        sourceType: 'manual',
-        currentSoulKey: soulKey,
-        feedback: soulLabel
-          ? `Manual instruction saved from the agent panel while Soul ${soulLabel} was active.`
-          : 'Manual instruction saved from the agent panel.',
-      });
-      if (!result) {
-        setAddError('Save failed — check console for RLS/auth errors');
-        console.error('[AgentMemoryPanel] saveSoulAwareAgentMemory instruction returned null. circleId:', circleId, 'userId:', userId, 'agentId:', agentId);
-        return;
+      await mutateMemoryExact(mem, {
+        importance: 0.95,
+        retrieval_mode: 'startup',
+        pinned: true,
+      }, row => (
+        row.pinned === true
+        && row.retrieval_mode === 'startup'
+        && Number(row.importance) === 0.95
+      ));
+      if (!canPublishMemoryMutation()) return;
+      setMemoryActionStatus(`Promoted memory: ${String(mem?.title || 'Untitled memory')}`);
+      await load();
+    } catch (err) {
+      console.warn('[AgentMemoryPanel] Failed to promote memory:', err);
+      if (canPublishMemoryMutation()) {
+        setMemoryActionStatus(`ERROR: Could not promote memory: ${String(mem?.title || 'Untitled memory')}`);
       }
-      setNewSkill('');
-      load();
-    } catch (err: any) {
-      console.error('[AgentMemoryPanel] handleAddSkill error:', err);
-      setAddError(err?.message || 'Failed to save skill');
+    } finally {
+      finishMemoryMutation(id);
     }
   };
 
-  const handleSaveReasoningStandard = async () => {
-    if (!userId) {
-      setSaveResult('ERROR: Not authenticated');
+  // Manual inserts still flow through the broader memory pipeline, which does
+  // not yet accept this captured bearer or return a row receipt. Keep the
+  // panel truthful: existing rows can be managed exactly here; new durable
+  // memory is created through Chat until that transport is exact end-to-end.
+  const continueMemoryWriteInChat = (kind: 'memory' | 'instruction') => {
+    if (!canPublishMemoryMutation() || !onOpenInChat) {
+      setAddError('Continue in Chat to add new memory. This panel only enables mutations that return an exact row receipt.');
       return;
     }
-    setSavingStandard(true);
-    setSaveResult(null);
-    try {
-      const { saveResponseStandardMemory } = await import('../../../../lib/memoryService');
-      const saved = await saveResponseStandardMemory(circleId, userId);
-      if (!saved) {
-        setSaveResult('ERROR: Failed to save reasoning standard');
-        return;
-      }
-      setSaveResult('Saved reasoning standard');
-      load();
-    } catch (err: any) {
-      console.error('[AgentMemoryPanel] handleSaveReasoningStandard error:', err);
-      setSaveResult(`ERROR: ${err?.message || 'Failed to save reasoning standard'}`);
+    const content = (kind === 'instruction' ? newSkill : newMemory).trim();
+    const request = kind === 'instruction'
+      ? content
+        ? `Add this as a durable startup instruction for this agent:\n\n${content}`
+        : 'Help me add a durable startup instruction for this agent.'
+      : content
+        ? `Remember this as durable private memory for this agent:\n\n${content}`
+        : 'Help me add durable private memory for this agent.';
+    onOpenInChat(request.slice(0, 3_500));
+  };
+
+  const continueReasoningStandardInChat = () => {
+    if (!canPublishMemoryMutation() || !onOpenInChat) {
+      setSaveResult('Continue in Chat to add the reasoning standard.');
+      return;
     }
-    setSavingStandard(false);
+    onOpenInChat('Add the current response reasoning standard as a durable user-wide startup instruction. Show me the exact memory receipt before claiming it is saved.');
   };
 
   const kindColors: Record<string, string> = { preference: '#909098', fact: '#909098', decision: '#a0a0b0', finding: '#909098', instruction: '#a0a0b0', policy: '#909098', context: '#606075' };
@@ -376,10 +637,12 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
   // deleting here would silently destroy data for every circle member.
   // Likewise, agent/user/session memories owned by someone else are read-only.
   const canEditMemory = (mem: any): boolean => {
-    if (!userId) return false;
+    if (!exactMemoryAuthority || !isIdentityAuthorityCurrent(exactMemoryAuthority)) return false;
     if (mem.scope === 'circle') return false;
     // user_id is the canonical owner for agent/user/session scopes
-    return !!mem.user_id && mem.user_id === userId;
+    return !!mem.user_id
+      && mem.user_id === exactMemoryAuthority.userId
+      && mem.circle_id === exactMemoryAuthority.circleId;
   };
 
   const renderMemoryCard = (mem: any) => {
@@ -441,10 +704,27 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
       {editingId === mem.id && editable ? (
         <View style={{ gap: 4 }}>
           <TextInput value={editContent} onChangeText={setEditContent} multiline autoFocus
-            style={{ color: '#f0f0f5', fontSize: 12, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, padding: 10, minHeight: 36, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
+            accessibilityLabel={`Edit memory: ${String(mem.title || 'Untitled memory')}`}
+            style={{ color: '#f0f0f5', fontSize: 12, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, padding: 10, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
           <View style={{ flexDirection: 'row', gap: 4 }}>
-            <Pressable onPress={() => handleSave(mem.id)} style={{ backgroundColor: '#22c55e20', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40' }}><Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Save</Text></Pressable>
-            <Pressable onPress={() => setEditingId(null)} style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}><Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Cancel</Text></Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Save changes to ${String(mem.title || 'memory')}`}
+              accessibilityState={{ disabled: mutatingMemoryId !== null, busy: mutatingMemoryId === mem.id }}
+              disabled={mutatingMemoryId !== null}
+              onPress={() => { void handleSave(mem); }}
+              style={{ backgroundColor: '#22c55e20', paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.5 : 1 }}
+            >
+              <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{mutatingMemoryId === mem.id ? 'Saving…' : 'Save'}</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Cancel editing ${String(mem.title || 'memory')}`}
+              onPress={() => setEditingId(null)}
+              style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Cancel</Text>
+            </Pressable>
           </View>
         </View>
       ) : (
@@ -452,32 +732,45 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
           <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, lineHeight: 18 }}>{mem.content}</Text>
           {editable ? (
             <View style={{ flexDirection: 'row', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
-              <Pressable onPress={() => { setEditingId(mem.id); setEditContent(mem.content); }} style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Edit memory: ${String(mem.title || 'Untitled memory')}`}
+                disabled={mutatingMemoryId !== null}
+                accessibilityState={{ disabled: mutatingMemoryId !== null }}
+                onPress={() => { setEditingId(mem.id); setEditContent(mem.content); }}
+                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
+              >
                 <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Edit</Text>
               </Pressable>
               <Pressable
-                onPress={async () => {
-                  const { pinMemory, unpinMemory } = await import('../../../../lib/memoryActions');
-                  if (mem.pinned) await unpinMemory(mem.id);
-                  else await pinMemory(mem.id);
-                  void load();
-                }}
-                style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: mem.pinned ? '#6366f140' : '#2a2a3e', backgroundColor: mem.pinned ? '#6366f110' : undefined }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                accessibilityRole="button"
+                accessibilityLabel={`${mem.pinned ? 'Unpin' : 'Pin'} memory: ${String(mem.title || 'Untitled memory')}`}
+                disabled={mutatingMemoryId !== null}
+                accessibilityState={{ disabled: mutatingMemoryId !== null, busy: mutatingMemoryId === mem.id, selected: !!mem.pinned }}
+                onPress={() => { void handlePinToggle(mem); }}
+                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: mem.pinned ? '#6366f140' : '#2a2a3e', backgroundColor: mem.pinned ? '#6366f110' : undefined, minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
               >
                 <Text style={{ color: mem.pinned ? '#6366f1' : '#a0a0b0', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{mem.pinned ? 'Unpin' : 'Pin'}</Text>
               </Pressable>
               <Pressable
-                onPress={async () => {
-                  const { promoteMemory } = await import('../../../../lib/memoryActions');
-                  await promoteMemory(mem.id);
-                  void load();
-                }}
-                style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                accessibilityRole="button"
+                accessibilityLabel={`Promote memory: ${String(mem.title || 'Untitled memory')}`}
+                disabled={mutatingMemoryId !== null}
+                accessibilityState={{ disabled: mutatingMemoryId !== null, busy: mutatingMemoryId === mem.id }}
+                onPress={() => { void handlePromote(mem); }}
+                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
               >
                 <Text style={{ color: '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Promote</Text>
               </Pressable>
-              <Pressable onPress={() => handleDelete(mem.id)} style={[{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                <Text style={{ color: '#ef4444', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Delete</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Delete memory: ${String(mem.title || 'Untitled memory')}`}
+                disabled={mutatingMemoryId !== null}
+                accessibilityState={{ disabled: mutatingMemoryId !== null, busy: deletingMemoryId === mem.id }}
+                onPress={() => requestDeleteMemory(mem)}
+                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#ef444450', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null && deletingMemoryId !== mem.id ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId === null ? 'pointer' : 'default' } as any]}
+              >
+                <Text style={{ color: '#ef4444', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{deletingMemoryId === mem.id ? 'Deleting…' : 'Delete'}</Text>
               </Pressable>
             </View>
           ) : (
@@ -518,38 +811,72 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
         <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({filteredCount}/{memories.length})</Text>
         <Text style={{ color: '#606075', fontSize: 11, fontFamily: MONO }} numberOfLines={1}>{agentName}</Text>
         <Pressable
-          onPress={handleSaveReasoningStandard}
-          disabled={savingStandard}
-          style={[{ marginLeft: 'auto', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, backgroundColor: accentColor + '20', borderWidth: 1, borderColor: accentColor + '40', opacity: savingStandard ? 0.7 : 1 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          accessibilityRole="button"
+          accessibilityLabel="Continue in Chat to add the reasoning standard"
+          onPress={continueReasoningStandardInChat}
+          style={[{ marginLeft: 'auto', paddingHorizontal: 10, borderRadius: 2, backgroundColor: accentColor + '20', borderWidth: 1, borderColor: accentColor + '40', minHeight: 44, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
-          <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{savingStandard ? 'SAVING...' : 'SAVE REASONING STD'}</Text>
+          <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CONTINUE IN CHAT</Text>
         </Pressable>
       </View>
       {saveResult && (
-        <Text style={{ color: saveResult.startsWith('ERROR') || saveResult.startsWith('EXCEPTION') ? '#ef4444' : '#22c55e', fontSize: 11, fontFamily: MONO }}>{saveResult}</Text>
+        <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: saveResult.startsWith('ERROR') || saveResult.startsWith('EXCEPTION') ? '#ef4444' : '#22c55e', fontSize: 11, fontFamily: MONO }}>{saveResult}</Text>
       )}
+      {memoryActionStatus ? (
+        <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: memoryActionStatus.startsWith('ERROR') ? '#ef4444' : '#22c55e', fontSize: 11, fontFamily: MONO }}>
+          {memoryActionStatus}
+        </Text>
+      ) : null}
+      {loadError ? (
+        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 2, padding: 10, gap: 8 }}>
+          <Text style={{ color: '#fca5a5', fontSize: 12, fontFamily: MONO, lineHeight: 17 }}>{loadError}</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading agent memory"
+            accessibilityState={{ disabled: loading, busy: loading }}
+            disabled={loading}
+            onPress={() => { void load(); }}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 2, alignItems: 'center', justifyContent: 'center', opacity: loading ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: loading ? 'default' : 'pointer' } as any]}
+          >
+            <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>{loading ? 'RETRYING…' : 'RETRY'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
       <Text style={{ color: '#707086', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
-        The reasoning standard saves as a user-wide startup instruction. Notes and skills added below save as agent-private memory for {agentName}.
+        Existing private memory can be edited here with exact row receipts. Add new notes, instructions, and reasoning standards through Chat so they retain the canonical conversation and run lineage.
       </Text>
       {soulKey ? (
         <Text style={{ color: '#8b5cf6', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
           Active soul memory lane: {soulLabel || soulKey}
         </Text>
       ) : null}
-      <View style={{ backgroundColor: '#080810', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 7, gap: 4 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Text style={{ color: '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>SUBJECT</Text>
-          <Text style={{ color: accentColor, fontSize: 11, fontFamily: MONO, flex: 1 }} numberOfLines={1}>
-            {canonicalSubjectId || 'unassigned'}
-          </Text>
-          <Text style={{ color: '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
-            {subjectAliases.length} {subjectAliases.length === 1 ? 'ALIAS' : 'ALIASES'}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Inspect memory identity details"
+        accessibilityState={{ expanded: showIdentityDetails }}
+        onPress={() => setShowIdentityDetails(current => !current)}
+        style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+      >
+        <Text style={{ color: '#8b92a8', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
+          {showIdentityDetails ? 'HIDE IDENTITY DETAILS' : 'INSPECT IDENTITY DETAILS'}
+        </Text>
+      </Pressable>
+      {showIdentityDetails ? (
+        <View style={{ backgroundColor: '#080810', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 7, gap: 4 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Text style={{ color: '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CANONICAL SUBJECT</Text>
+            <Text style={{ color: accentColor, fontSize: 11, fontFamily: MONO, flex: 1 }} numberOfLines={1}>
+              {canonicalSubjectId || 'unassigned'}
+            </Text>
+            <Text style={{ color: '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
+              {subjectAliases.length} {subjectAliases.length === 1 ? 'ALIAS' : 'ALIASES'}
+            </Text>
+          </View>
+          <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 15 }} numberOfLines={2}>
+            Memory resolves through the canonical subject{subjectAliases.length > 0 ? ` and legacy aliases: ${aliasPreview}${aliasOverflow}` : '; no legacy aliases are attached.'}
           </Text>
         </View>
-        <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 15 }} numberOfLines={2}>
-          Memory resolves through the canonical subject{subjectAliases.length > 0 ? ` and legacy aliases: ${aliasPreview}${aliasOverflow}` : '; no legacy aliases are attached.'}
-        </Text>
-      </View>
+      ) : null}
 
       {/* Filter pills — active = solid accent, idle = low-contrast outline.
           The previous design tinted the active pill at 20% opacity which was
@@ -560,9 +887,13 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
           return (
             <Pressable
               key={mode}
+              accessibilityRole="button"
+              accessibilityLabel={`Show ${mode} memories`}
+              accessibilityState={{ selected: active }}
               onPress={() => setViewMode(mode)}
               style={[{
-                paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
+                paddingHorizontal: 10, borderRadius: 999, minHeight: 44, minWidth: 44,
+                alignItems: 'center', justifyContent: 'center',
                 backgroundColor: active ? accentColor : 'transparent',
                 borderWidth: 1, borderColor: active ? accentColor : '#2a2a3e',
               }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -582,15 +913,16 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
         <TextInput
           value={newMemory}
           onChangeText={setNewMemory}
-          placeholder={userId ? 'Add a memory...' : 'Sign in to save memory'}
-          editable={!!userId}
+          accessibilityLabel="New agent memory"
+          placeholder="Draft a new memory for Chat..."
+          editable={!!onOpenInChat && !!exactMemoryAuthority}
           placeholderTextColor="#606075"
-          style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
-          onSubmitEditing={handleAdd}
+          style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+          onSubmitEditing={() => continueMemoryWriteInChat('memory')}
           returnKeyType="done"
         />
-        <Pressable disabled={!userId} onPress={handleAdd} style={[{ backgroundColor: accentColor + '20', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40', opacity: userId ? 1 : 0.45 }, Platform.OS === 'web' && { cursor: userId ? 'pointer' : 'default' } as any]}>
-          <Text style={{ color: accentColor, fontSize: 12, fontWeight: '700', fontFamily: MONO }}>+</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this new agent memory" onPress={() => continueMemoryWriteInChat('memory')} style={[{ backgroundColor: accentColor + '20', paddingHorizontal: 8, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40', minHeight: 44, minWidth: 56, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CHAT</Text>
         </Pressable>
       </View>
 
@@ -599,32 +931,33 @@ export default function AgentMemoryPanel({ circleId, userId, agentId, agentAlias
           <TextInput
             value={newSkill}
             onChangeText={setNewSkill}
-            placeholder={userId ? 'Add a skill/instruction...' : 'Sign in to save instructions'}
-            editable={!!userId}
+            accessibilityLabel="New agent skill or instruction"
+            placeholder="Draft a new instruction for Chat..."
+            editable={!!onOpenInChat && !!exactMemoryAuthority}
             placeholderTextColor="#606075"
-            style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
-            onSubmitEditing={handleAddSkill}
+            style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            onSubmitEditing={() => continueMemoryWriteInChat('instruction')}
             returnKeyType="done"
           />
-          <Pressable disabled={!userId} onPress={handleAddSkill} style={[{ backgroundColor: '#a855f720', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740', opacity: userId ? 1 : 0.45 }, Platform.OS === 'web' && { cursor: userId ? 'pointer' : 'default' } as any]}>
-            <Text style={{ color: '#a855f7', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>+Skill</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this new agent instruction" onPress={() => continueMemoryWriteInChat('instruction')} style={[{ backgroundColor: '#a855f720', paddingHorizontal: 8, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740', minHeight: 44, minWidth: 56, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+            <Text style={{ color: '#a855f7', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CHAT</Text>
           </Pressable>
         </View>
       )}
 
       {addError && (
-        <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, padding: 4 }}>{addError}</Text>
+        <Text accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, padding: 4 }}>{addError}</Text>
       )}
 
-      <ScrollView style={{ maxHeight: 350 }} nestedScrollEnabled showsVerticalScrollIndicator>
+      <View>
         {loading ? (
-          <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
-        ) : filteredCount === 0 ? (
-          <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Use the inputs above or let the agent build memory through work.</Text>
+          <ActivityIndicator accessibilityLabel="Loading agent memory" accessibilityRole="progressbar" size="small" color={accentColor} style={{ padding: 20 }} />
+        ) : loadError && memories.length === 0 ? null : filteredCount === 0 ? (
+          <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Continue with this agent in Chat to build durable memory through work.</Text>
         ) : (
           visibleSections.map(renderMemorySection)
         )}
-      </ScrollView>
+      </View>
     </View>
   );
 }

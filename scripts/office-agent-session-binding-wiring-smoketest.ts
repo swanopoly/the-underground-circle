@@ -262,8 +262,8 @@ async function main(): Promise<void> {
   expectMatch(gatewaySource, /clearOfficeAgentSessionBinding/, 'AgentGatewayPanels exposes owner unbinding');
   expectMatch(
     gatewaySource,
-    /\.find\(\s*\(?\s*conn\s*\)?\s*=>\s*conn\.id\s*===\s*agent\.connectionId\s*\)/,
-    'AgentGatewayPanels resolves the displayed connection by exact connectionId',
+    /\.filter\(\s*\(?\s*conn\s*\)?\s*=>\s*conn\.id\s*===\s*runtimeConnectionId\s*\)/,
+    'AgentGatewayPanels resolves the displayed connection by the exact runtime route',
   );
   expectNoMatch(
     gatewaySource,
@@ -300,8 +300,8 @@ async function main(): Promise<void> {
   );
   expectMatch(
     openSwanPanelMount,
-    /key=\{[\s\S]{0,180}agent\.connectionId[\s\S]{0,180}agent\.sessionKey|key=\{[\s\S]{0,180}agent\.sessionKey[\s\S]{0,180}agent\.connectionId/,
-    'OpenSwan panel remount key includes both exact connectionId and sessionKey',
+    /key=\{[\s\S]{0,180}runtimeConnectionId[\s\S]{0,180}agent\.sessionKey|key=\{[\s\S]{0,180}agent\.sessionKey[\s\S]{0,180}runtimeConnectionId/,
+    'OpenSwan panel remount key includes both exact runtime connection and session key',
   );
 
   const refreshSection = sourceSection(
@@ -407,11 +407,11 @@ async function main(): Promise<void> {
     /sessions\.find\([\s\S]{0,180}session\.sessionKey\s*===\s*agent\.sessionKey/,
     'AgentGatewayPanels never silently chooses the first duplicate exact session',
   );
-  expectMatch(bindDisplayedSession, /connection\.id\s*!==\s*agent\.connectionId/, 'bind action rejects a connection retained from another displayed target');
-  expectMatch(bindDisplayedSession, new RegExp(`${escapedSessionProvenance}\\s*!==\\s*agent\\.connectionId`), 'bind action rejects session rows loaded for another connection');
+  expectMatch(bindDisplayedSession, /connection\.id\s*!==\s*runtimeConnectionId/, 'bind action rejects a connection retained from another exact runtime route');
+  expectMatch(bindDisplayedSession, new RegExp(`${escapedSessionProvenance}\\s*!==\\s*runtimeConnectionId`), 'bind action rejects session rows loaded for another runtime connection');
   expectMatch(bindDisplayedSession, new RegExp(`${escapedExactSessionMatches}\\.length\\s*!==\\s*1`), 'bind action rejects missing or duplicate exact session rows');
-  expectMatch(exactSessionReadiness, /connection\.id\s*===\s*agent\.connectionId/, 'bind readiness proves the loaded connection is the displayed connection');
-  expectMatch(exactSessionReadiness, new RegExp(`${escapedSessionProvenance}\\s*===\\s*agent\\.connectionId`), 'bind readiness proves session-list provenance matches the displayed connection');
+  expectMatch(exactSessionReadiness, /connection\.id\s*===\s*runtimeConnectionId/, 'bind readiness proves the loaded connection is the exact runtime route');
+  expectMatch(exactSessionReadiness, new RegExp(`${escapedSessionProvenance}\\s*===\\s*runtimeConnectionId`), 'bind readiness proves session-list provenance matches the exact runtime route');
   expectMatch(exactSessionReadiness, new RegExp(`${escapedExactSessionMatches}\\.length\\s*===\\s*1`), 'bind readiness requires exactly one matching session row');
 
   // ── Canonical invocation and fail-closed dispatch ────────────────────────
@@ -515,7 +515,7 @@ async function main(): Promise<void> {
   const officeSubscription = sourceSection(
     officeSource,
     '// ─── Terminal command subscription',
-    ['// Merge live presence into circle office agents'],
+    ['  useEffect(() => {\n    let cancelled = false;'],
     'Office subscribed terminal routing',
   );
   const blackSwanTargetHelper = sourceSection(

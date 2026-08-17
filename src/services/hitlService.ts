@@ -39,6 +39,131 @@ export interface AgentControl {
   require_approval_for: string[];
 }
 
+export type AgentControlExactAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+export type AgentControlAuthorityFence = (
+  authority: AgentControlExactAuthority,
+) => boolean;
+
+export type AgentControlExactResult =
+  | { ok: true; control: AgentControl | null }
+  | { ok: false; error: string };
+
+function normalizeAgentControlAuthority(
+  circleId: string,
+  authority: AgentControlExactAuthority | null | undefined,
+): AgentControlExactAuthority | null {
+  const userId = String(authority?.userId || '').trim();
+  const authorityCircleId = String(authority?.circleId || '').trim();
+  const accessToken = String(authority?.accessToken || '').trim();
+  const generation = Number(authority?.generation || 0);
+  if (
+    !circleId
+    || !userId
+    || authorityCircleId !== circleId
+    || !accessToken
+    || accessToken.length > 16_384
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId: authorityCircleId, accessToken, generation };
+}
+
+function normalizeAgentControlSessionKey(sessionKey: string): string | null {
+  const value = String(sessionKey || '').trim();
+  return value && value.length <= 240 ? value : null;
+}
+
+/**
+ * Exact Office control read. It binds the caller-captured bearer, verifies the
+ * captured user, and rejects every late result through the supplied lifecycle
+ * fence. It never consults the mutable global auth session.
+ */
+export async function getAgentControlExact(
+  circleId: string,
+  sessionKey: string,
+  capturedAuthority: AgentControlExactAuthority,
+  isCurrent: AgentControlAuthorityFence,
+): Promise<AgentControlExactResult> {
+  const authority = normalizeAgentControlAuthority(circleId, capturedAuthority);
+  const exactSessionKey = normalizeAgentControlSessionKey(sessionKey);
+  if (!authority || !exactSessionKey || typeof isCurrent !== 'function' || !isCurrent(authority)) {
+    return { ok: false, error: 'This agent control belongs to a retired Office session.' };
+  }
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (verifiedUser?.id !== authority.userId || !isCurrent(authority)) {
+    return { ok: false, error: 'The signed-in Office account changed while controls were loading.' };
+  }
+  const { data, error } = await supabase
+    .from('agent_controls')
+    .select('*')
+    .eq('circle_id', authority.circleId)
+    .eq('session_key', exactSessionKey)
+    .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+    .maybeSingle();
+  if (!isCurrent(authority)) {
+    return { ok: false, error: 'The Office session changed while controls were loading.' };
+  }
+  if (error) return { ok: false, error: 'Agent controls could not be loaded.' };
+  if (data && (data.circle_id !== authority.circleId || data.session_key !== exactSessionKey)) {
+    return { ok: false, error: 'Agent controls returned an invalid identity receipt.' };
+  }
+  return { ok: true, control: data || null };
+}
+
+/** Exact pause/settings mutation with one verified row receipt. */
+export async function upsertAgentControlExact(
+  circleId: string,
+  sessionKey: string,
+  agentName: string,
+  updates: Partial<Omit<AgentControl, 'id' | 'circle_id' | 'session_key' | 'agent_name'>>,
+  capturedAuthority: AgentControlExactAuthority,
+  isCurrent: AgentControlAuthorityFence,
+): Promise<AgentControlExactResult> {
+  const authority = normalizeAgentControlAuthority(circleId, capturedAuthority);
+  const exactSessionKey = normalizeAgentControlSessionKey(sessionKey);
+  const exactAgentName = String(agentName || '').trim().slice(0, 200);
+  if (
+    !authority
+    || !exactSessionKey
+    || !exactAgentName
+    || typeof isCurrent !== 'function'
+    || !isCurrent(authority)
+  ) return { ok: false, error: 'This agent control belongs to a retired Office session.' };
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (verifiedUser?.id !== authority.userId || !isCurrent(authority)) {
+    return { ok: false, error: 'The signed-in Office account changed before the control could be saved.' };
+  }
+  const { data, error } = await supabase
+    .from('agent_controls')
+    .upsert({
+      ...updates,
+      circle_id: authority.circleId,
+      session_key: exactSessionKey,
+      agent_name: exactAgentName,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'circle_id,session_key' })
+    .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+    .select('*');
+  if (!isCurrent(authority)) {
+    return { ok: false, error: 'The Office session changed while the control was saving.' };
+  }
+  if (error) return { ok: false, error: 'Agent controls could not be saved.' };
+  const row = Array.isArray(data) && data.length === 1 ? data[0] as AgentControl : null;
+  if (
+    !row
+    || row.circle_id !== authority.circleId
+    || row.session_key !== exactSessionKey
+    || row.agent_name !== exactAgentName
+  ) return { ok: false, error: 'Agent controls returned an invalid save receipt.' };
+  return { ok: true, control: row };
+}
+
 export async function requestApproval(
   circleId: string,
   sessionKey: string,

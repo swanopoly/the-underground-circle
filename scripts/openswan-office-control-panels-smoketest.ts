@@ -129,7 +129,9 @@ check(
   frontend.includes('const [advancedOpen, setAdvancedOpen] = useState(false);')
     && frontend.includes('const essentialSnapshotLoaded = useRef(false);')
     && frontend.includes('Drop it when the disclosure closes;')
-    && frontend.includes('setSessionHistory(null);\n      setPublishedOpenSwanAgents([]);\n      setSessionBindings({});'),
+    && frontend.includes("setAdvancedLaneState(buildAdvancedLaneState('idle'));")
+    && frontend.includes('setPublishedOpenSwanAgents([]);')
+    && frontend.includes('setSessionBindings({});'),
   'the Office OpenSwan runtime opens in the essential state',
 );
 check(
@@ -149,11 +151,13 @@ for (const call of [
   check(refresh.indexOf(call) > advancedGuardIndex, `${call} stays behind Advanced options`);
 }
 check(
-  frontend.indexOf('SEND TASK TO THIS SESSION') >= 0
-    && frontend.indexOf('SEND TASK TO THIS SESSION') < frontend.indexOf('ADVANCED OPTIONS')
-    && frontend.includes('One exact-session handoff.')
-    && frontend.includes('Completion is unverified.'),
-  'one exact-session task action is primary and its acknowledgement is non-terminal',
+  frontend.indexOf('CONTINUE WITH THIS AGENT IN CHAT') >= 0
+    && frontend.indexOf('CONTINUE WITH THIS AGENT IN CHAT') < frontend.indexOf('ADVANCED OPTIONS')
+    && frontend.includes('Chat owns the durable message, approval, run, proof, and recovery trail.')
+    && frontend.includes('onOpenInChat(taskInput.trim())')
+    && !frontend.includes('sendSessionMessage(')
+    && !frontend.includes('spawnSubAgent('),
+  'the primary task path carries an exact-agent draft into canonical Chat without a second execution owner',
 );
 check(
   frontend.includes("accessibilityState={{ expanded: advancedOpen }}")
@@ -165,15 +169,52 @@ check(
 );
 check(
   frontend.includes('{advancedOpen ? (\n        <View style={{ flexDirection: \'row\', flexWrap: \'wrap\', gap: 10, marginTop: 10 }}>')
-    && frontend.includes('setActionNotice(String(resultSummary')
+    && frontend.includes('setActionNotice(result.summary.slice')
     && frontend.includes('{actionNotice ? <Text'),
   'unloaded diagnostic counters are hidden and completed panel actions leave a visible bounded receipt',
 );
 check(
-  frontend.includes('if (!advancedOpen || !circleId || !userId || isBlackSwanRuntime)')
+  frontend.includes('!advancedOpen')
+    && frontend.includes('!circleId')
+    && frontend.includes('!userId')
+    && frontend.includes('isBlackSwanRuntime')
+    && frontend.includes('hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)')
+    && frontend.includes('loadOfficeConnectionsExact(identityAuthority, isIdentityAuthorityCurrent)')
+    && frontend.includes('getUserCircleAgentsExact(circleId, capturedAuthority)')
+    && frontend.includes('readOfficeAgentSessionBindingsBatch(')
+    && frontend.includes('capturedAuthority,')
     && frontend.includes('const actionInFlight = useRef(false);')
     && frontend.includes('if (actionInFlight.current) return;'),
-  'private binding reads and provider mutations stay gated and single-flight',
+  'private binding reads and provider mutations use captured exact authority and stay single-flight',
+);
+check(
+  frontend.includes('const bindingRefreshGeneration = sessionRefreshGeneration.current;')
+    && frontend.includes('const bindingFingerprint = loadedConnectionFingerprint;')
+    && frontend.indexOf('const verifiedSessions = await listSessions(verifiedConfig);') < frontend.indexOf('const savedBinding = await setOfficeAgentSessionBinding(')
+    && frontend.includes('bindingRefreshGeneration !== sessionRefreshGeneration.current')
+    && frontend.includes('matchesOpenSwanConnectionFingerprint(bindingFingerprint, latestConfig.connection)'),
+  'binding revalidates the exact runtime and session after confirmation before saving a route',
+);
+check(
+  frontend.includes('const expectedBinding = sessionBindings[officeAgent.id];')
+    && frontend.indexOf('readOfficeAgentSessionBindingsBatch([officeAgent.id], capturedAuthority)') < frontend.indexOf('clearOfficeAgentSessionBinding(officeAgent.id, capturedAuthority)')
+    && frontend.includes('The session route changed while confirmation was open.'),
+  'unbinding rechecks the exact displayed route after confirmation before clearing it',
+);
+check(
+  gatewayPanels.includes("type AdvancedLaneStatus = 'idle' | 'loading' | 'ready' | 'unsupported' | 'error'")
+    && frontend.includes("advancedLaneState.jobs === 'unsupported'")
+    && frontend.includes('Cron inventory could not be verified.')
+    && frontend.includes('Subagent inventory could not be verified.')
+    && frontend.includes('Runtime agent inventory could not be verified.')
+    && frontend.includes('Session history could not be verified.'),
+  'advanced runtime lanes distinguish verified empty, unsupported, and failed evidence',
+);
+check(
+  frontend.includes('if (!result.ok) return { ok: false, error: \'Runtime memory search failed.')
+    && frontend.includes('if (!result.ok) return { ok: false, error: \'Runtime web search failed.')
+    && frontend.includes('result.commit?.();'),
+  'runtime search failures cannot be painted as green successful results',
 );
 check(
   frontend.includes('MANAGE IN CRON JOBS')
@@ -241,30 +282,34 @@ check(
   'Overview exposes the diagnostic allowlist truthfully and never pretends an activity row or raw shell toggle is a task handoff',
 );
 check(
-  agentControlCard.includes("import { safeGetUser } from '../lib/authSession';")
+  agentControlCard.includes('compact, read-only runtime connection summary')
     && agentControlCard.includes("provider === 'openswan'")
     && agentControlCard.includes('getLocalOpenSwanDiscoveryEndpoints()[0]')
-    && agentControlCard.includes('bridgeCheckGenerationRef.current')
-    && agentControlCard.includes('bridgeAbortRef.current?.abort()')
+    && agentControlCard.includes('requestGenerationRef.current')
+    && agentControlCard.includes('requestAbortRef.current?.abort()')
+    && agentControlCard.includes('const timeoutId = setTimeout(() => controller.abort(), 5_000)')
     && !agentControlCard.includes('supabase.auth.getUser')
+    && !agentControlCard.includes('safeGetUser')
     && !agentControlCard.includes('fetch(`http://localhost:${port}/health`')
     && !agentControlCard.includes('setInterval(checkBridge'),
-  'the compact agent control uses bounded auth, the platform-aware OpenSwan proxy, and one fenced manual health probe',
+  'the read-only bridge summary uses the platform-aware OpenSwan proxy and one bounded generation-fenced probe',
 );
 check(
-  agentControlCard.includes("agent.connectionId === 'db-agent' && isUuidLike(agent.sessionKey)")
-    && agentControlCard.includes("? scoped.eq('id', agent.sessionKey)")
-    && agentControlCard.includes('!embedded ? (\n      <View style={[c.powerRow')
-    && agentControlCard.includes('Mark ${agent.name} offline?')
-    && agentControlCard.includes('Remove ${agent.name} from this Office?'),
-  'embedded Overview has no duplicate destructive controls and standalone mutations confirm exact owner-scoped rows',
+  agentControlCard.includes('type Props = {\n  agent: OfficeAgent;\n};')
+    && !agentControlCard.includes('onDelete')
+    && !agentControlCard.includes('onRunCommand')
+    && !agentControlCard.includes(".from('circle_office_agents')")
+    && !agentControlCard.includes('.delete()')
+    && !agentControlCard.includes('.update('),
+  'the Overview bridge summary has one narrow read-only contract and owns no duplicate agent mutations',
 );
 check(
-  agentControlCard.includes('MARK OFFLINE')
-    && agentControlCard.includes('START HELP')
-    && !agentControlCard.includes("'|| KILL'")
-    && !agentControlCard.includes('▶ START BRIDGE'),
-  'control labels describe what the panel actually does instead of claiming process kill or automatic restart',
+  agentControlCard.includes('accessibilityLabel="Refresh runtime connection status"')
+    && agentControlCard.includes("accessibilityRole=\"alert\"")
+    && agentControlCard.includes('Run npm run start, then confirm the OpenSwan proxy on port 18790 is healthy.')
+    && !agentControlCard.includes('MARK OFFLINE')
+    && !agentControlCard.includes('START BRIDGE'),
+  'the bridge summary exposes a truthful refresh action and visible provider-specific recovery guidance',
 );
 
 const bridgeReadinessEffect = section(

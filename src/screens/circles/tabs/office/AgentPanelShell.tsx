@@ -9,10 +9,14 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { OfficeAgent } from '../../../../lib/officeAgents';
+import type { OfficeAgent } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
-import { AgentPanelTab, AgentPanelTabKey } from './AgentPanelTabs';
-import { MONO } from './AgentPanelShared';
+import {
+  getAgentPanelGroupForTab,
+  type AgentPanelGroup,
+  type AgentPanelTab,
+  type AgentPanelTabKey,
+} from './AgentPanelTabs';
 
 // ── Per-tab error boundary ──────────────────────────────────────────────────
 // Wraps the active tab's rendered content so a single tab that throws (e.g.
@@ -25,38 +29,36 @@ interface TabErrorBoundaryProps {
   children: React.ReactNode;
 }
 interface TabErrorBoundaryState {
-  error: Error | null;
+  failed: boolean;
 }
 class TabErrorBoundary extends React.Component<TabErrorBoundaryProps, TabErrorBoundaryState> {
-  state: TabErrorBoundaryState = { error: null };
+  state: TabErrorBoundaryState = { failed: false };
 
-  static getDerivedStateFromError(error: Error): TabErrorBoundaryState {
-    return { error };
+  static getDerivedStateFromError(): TabErrorBoundaryState {
+    return { failed: true };
   }
 
-  componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error('[AgentPanel] Tab threw:', this.props.tabKey, error, info);
+  componentDidCatch(_error: Error, info: React.ErrorInfo) {
+    console.error('[AgentPanel] Section render failed:', this.props.tabKey, info.componentStack);
   }
 
   componentDidUpdate(prevProps: TabErrorBoundaryProps) {
     // Auto-reset when the user switches tabs so a failed tab doesn't stick.
-    if (prevProps.tabKey !== this.props.tabKey && this.state.error) {
-      this.setState({ error: null });
+    if (prevProps.tabKey !== this.props.tabKey && this.state.failed) {
+      this.setState({ failed: false });
     }
   }
 
   render() {
-    if (this.state.error) {
-      const msg = this.state.error.message || 'Unknown error';
+    if (this.state.failed) {
       return (
         <View style={styles.errorFallback}>
           <Text style={styles.errorFallbackTitle}>This section could not load</Text>
-          <Text style={styles.errorFallbackMessage} numberOfLines={4}>{msg}</Text>
           <Text style={styles.errorFallbackHint}>
-            Try again, switch sections, or reopen the agent panel.
+            Try again, switch sections, or reopen the agent panel. No private error details are displayed here.
           </Text>
           <Pressable
-            onPress={() => this.setState({ error: null })}
+            onPress={() => this.setState({ failed: false })}
             accessibilityRole="button"
             accessibilityLabel="Try loading this agent section again"
             style={[
@@ -98,12 +100,15 @@ interface Props {
   onClose: () => void;
   onToggleMode: () => void;
   onStartSideResize: (pageX: number) => void;
+  onResizeSideBy: (delta: number) => void;
   canRemoveAgent: boolean;
   removingAgent: boolean;
   onRemoveAgent: () => Promise<void>;
   tabs: AgentPanelTab[];
+  tabGroups: AgentPanelGroup[];
   panelTab: AgentPanelTabKey;
   setPanelTab: (tabKey: AgentPanelTabKey) => void;
+  contentKey: string;
   children: React.ReactNode;
 }
 
@@ -126,6 +131,16 @@ function ensureOpenAnimStyle() {
     .uc-agent-panel-open {
       animation: uc-agent-panel-open 110ms ease-out;
       will-change: opacity;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .uc-agent-panel-open {
+        animation: none !important;
+        transition: none !important;
+        will-change: auto;
+      }
+      .uc-agent-panel-backdrop {
+        transition: none !important;
+      }
     }
   `;
   document.head.appendChild(style);
@@ -153,12 +168,15 @@ export default function AgentPanelShell({
   onClose,
   onToggleMode,
   onStartSideResize,
+  onResizeSideBy,
   canRemoveAgent,
   removingAgent,
   onRemoveAgent,
   tabs,
+  tabGroups,
   panelTab,
   setPanelTab,
+  contentKey,
   children,
 }: Props) {
   // AgentPanel owns the single Escape/focus-trap listener. Keeping a second
@@ -169,10 +187,43 @@ export default function AgentPanelShell({
     ensureOpenAnimStyle();
   }, []);
 
-  const currentTabIndex = tabs.findIndex(tab => tab.key === panelTab);
-  const prevTab = currentTabIndex > 0 ? tabs[currentTabIndex - 1] : null;
-  const nextTab = currentTabIndex >= 0 && currentTabIndex < tabs.length - 1 ? tabs[currentTabIndex + 1] : null;
   const providerMeta = PROVIDER_META[agent.providerType];
+  const activeGroup = getAgentPanelGroupForTab(tabGroups, panelTab) || tabGroups[0] || null;
+  const activeTab = tabs.find(tab => tab.key === panelTab) || activeGroup?.tabs[0] || null;
+  const hasContextualTabs = (activeGroup?.tabs.length || 0) > 1;
+  const activeTabLabelId = hasContextualTabs
+    ? `uc-agent-panel-route-${panelTab}`
+    : `uc-agent-panel-destination-${activeGroup?.key || 'overview'}`;
+
+  const focusWebTab = (nativeId: string) => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const focus = () => document.getElementById(nativeId)?.focus({ preventScroll: true });
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focus);
+    else focus();
+  };
+
+  const handleArrowNavigation = (
+    event: any,
+    keys: readonly string[],
+    currentKey: string,
+    selectKey: (key: string) => void,
+    nativeIdForKey: (key: string) => string,
+  ) => {
+    const key = event?.nativeEvent?.key || event?.key;
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key) || keys.length < 2) return;
+    event.preventDefault?.();
+    const currentIndex = Math.max(0, keys.indexOf(currentKey));
+    const nextIndex = key === 'Home'
+      ? 0
+      : key === 'End'
+        ? keys.length - 1
+        : key === 'ArrowLeft'
+          ? (currentIndex - 1 + keys.length) % keys.length
+          : (currentIndex + 1) % keys.length;
+    const nextKey = keys[nextIndex];
+    selectKey(nextKey);
+    focusWebTab(nativeIdForKey(nextKey));
+  };
 
   const renderRemoveButton = (desktop = false) => canRemoveAgent ? (
     <View style={desktop ? styles.desktopActionRow : styles.mobileActionRow}>
@@ -196,58 +247,134 @@ export default function AgentPanelShell({
     </View>
   ) : null;
 
-  const renderTabNavigation = (desktop = false) => (
-    <View
-      style={[styles.tabNavShell, desktop && styles.tabNavShellDesktop]}
-      accessibilityRole={desktop ? 'tablist' : undefined}
-    >
-      {!desktop && (
-        <Pressable
-          onPress={() => prevTab && setPanelTab(prevTab.key)}
-          disabled={!prevTab}
-          accessibilityRole="button"
-          accessibilityLabel={prevTab ? `Previous tab: ${prevTab.label}` : 'Previous tab unavailable'}
-          accessibilityState={{ disabled: !prevTab }}
-          style={[styles.tabNavArrow, { opacity: prevTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: prevTab ? 'pointer' : 'default' } as any]}
-        >
-          <Text style={styles.tabNavArrowText}>{'<'}</Text>
-        </Pressable>
-      )}
+  const renderTabNavigation = (desktop = false) => {
+    const groupKeys = tabGroups.map(group => group.key);
+    const selectGroupKey = (groupKey: string) => {
+      const group = tabGroups.find(candidate => candidate.key === groupKey);
+      if (!group) return;
+      const currentRoute = group.tabs.find(tab => tab.key === panelTab);
+      setPanelTab((currentRoute || group.tabs[0]).key);
+    };
+    const routeKeys = activeGroup?.tabs.map(tab => tab.key) || [];
+    const selectRouteKey = (tabKey: string) => {
+      const route = activeGroup?.tabs.find(tab => tab.key === tabKey);
+      if (route) setPanelTab(route.key);
+    };
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabNavScroller} contentContainerStyle={styles.tabNavContent}>
-        {tabs.map(tab => (
-          <Pressable
-            key={tab.key}
-            onPress={() => setPanelTab(tab.key)}
-            accessibilityRole="tab"
-            accessibilityLabel={`${tab.label} tab`}
-            accessibilityHint={tab.description}
-            accessibilityState={{ selected: panelTab === tab.key }}
-            style={[
-              styles.tabNavItem,
-              panelTab === tab.key && { borderBottomColor: agent.color || '#6366f1', backgroundColor: (agent.color || '#6366f1') + '12' },
-              ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
-            ]}
+    return (
+      <View style={[styles.navigationShell, desktop && styles.navigationShellDesktop]}>
+        <View
+          style={styles.tabNavShell}
+          accessibilityRole="tablist"
+          {...(Platform.OS === 'web' ? ({ role: 'tablist', 'aria-label': 'Agent panel destinations' } as any) : {})}
+        >
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.tabNavScroller}
+            contentContainerStyle={styles.primaryTabNavContent}
           >
-            <Text style={[styles.tabNavItemText, panelTab === tab.key && styles.tabNavItemTextActive]}>{tab.label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+            {tabGroups.map(group => {
+              const selected = activeGroup?.key === group.key;
+              const nativeId = `uc-agent-panel-destination-${group.key}`;
+              return (
+                <Pressable
+                  key={group.key}
+                  nativeID={nativeId}
+                  onPress={() => selectGroupKey(group.key)}
+                  accessibilityRole="tab"
+                  accessibilityLabel={`${group.label} destination`}
+                  accessibilityHint={group.description}
+                  accessibilityState={{ selected }}
+                  {...(Platform.OS === 'web' ? ({
+                    role: 'tab',
+                    'aria-selected': selected,
+                    'aria-controls': 'uc-agent-panel-tabpanel',
+                    tabIndex: selected ? 0 : -1,
+                    onKeyDown: (event: any) => handleArrowNavigation(
+                      event,
+                      groupKeys,
+                      activeGroup?.key || group.key,
+                      selectGroupKey,
+                      key => `uc-agent-panel-destination-${key}`,
+                    ),
+                  } as any) : {})}
+                  style={[
+                    styles.primaryTabNavItem,
+                    selected && {
+                      borderBottomColor: agent.color || '#6366f1',
+                      backgroundColor: (agent.color || '#6366f1') + '12',
+                    },
+                    Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
+                  ]}
+                >
+                  <Text style={[styles.primaryTabNavItemText, selected && styles.tabNavItemTextActive]}>
+                    {group.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
 
-      {!desktop && (
-        <Pressable
-          onPress={() => nextTab && setPanelTab(nextTab.key)}
-          disabled={!nextTab}
-          accessibilityRole="button"
-          accessibilityLabel={nextTab ? `Next tab: ${nextTab.label}` : 'Next tab unavailable'}
-          accessibilityState={{ disabled: !nextTab }}
-          style={[styles.tabNavArrow, { opacity: nextTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: nextTab ? 'pointer' : 'default' } as any]}
-        >
-          <Text style={styles.tabNavArrowText}>{'>'}</Text>
-        </Pressable>
-      )}
-    </View>
-  );
+        {hasContextualTabs && activeGroup ? (
+          <View
+            style={styles.contextualTabNavShell}
+            accessibilityRole="tablist"
+            {...(Platform.OS === 'web' ? ({ role: 'tablist', 'aria-label': `${activeGroup.label} sections` } as any) : {})}
+          >
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.tabNavScroller}
+              contentContainerStyle={styles.contextualTabNavContent}
+            >
+              {activeGroup.tabs.map(tab => {
+                const selected = panelTab === tab.key;
+                const nativeId = `uc-agent-panel-route-${tab.key}`;
+                return (
+                  <Pressable
+                    key={tab.key}
+                    nativeID={nativeId}
+                    onPress={() => setPanelTab(tab.key)}
+                    accessibilityRole="tab"
+                    accessibilityLabel={`${tab.label} tab`}
+                    accessibilityHint={tab.description}
+                    accessibilityState={{ selected }}
+                    {...(Platform.OS === 'web' ? ({
+                      role: 'tab',
+                      'aria-selected': selected,
+                      'aria-controls': 'uc-agent-panel-tabpanel',
+                      tabIndex: selected ? 0 : -1,
+                      onKeyDown: (event: any) => handleArrowNavigation(
+                        event,
+                        routeKeys,
+                        panelTab,
+                        selectRouteKey,
+                        key => `uc-agent-panel-route-${key}`,
+                      ),
+                    } as any) : {})}
+                    style={[
+                      styles.contextualTabNavItem,
+                      selected && {
+                        borderColor: (agent.color || '#6366f1') + '70',
+                        backgroundColor: (agent.color || '#6366f1') + '14',
+                      },
+                      Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
+                    ]}
+                  >
+                    <Text style={[styles.contextualTabNavItemText, selected && styles.tabNavItemTextActive]}>
+                      {tab.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+        ) : null}
+      </View>
+    );
+  };
 
   const headerMeta = [
     agent.role || null,
@@ -351,33 +478,36 @@ export default function AgentPanelShell({
 
   return (
     <>
-      {isDesktop && Platform.OS === 'web' && (
-        <View
-          pointerEvents={panelMode === 'center' ? 'auto' : 'none'}
-          style={{
-            position: 'fixed',
-            top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(0,0,0,0.45)',
-            zIndex: 99,
-            opacity: backdropOpacity,
-            transition: 'opacity 280ms cubic-bezier(0.4, 0, 0.2, 1)',
-            cursor: panelMode === 'center' ? 'pointer' : 'default',
-          } as any}
-          // onClick is a web-only RN Web extension; spread to bypass typing
-          {...({ onClick: onClose } as any)}
+      {panelMode === 'center' && (
+        <Pressable
+          onPress={onClose}
+          accessible={false}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          {...(Platform.OS === 'web' ? ({ className: 'uc-agent-panel-backdrop' } as any) : {})}
+          style={[
+            styles.modalBackdrop,
+            { opacity: backdropOpacity },
+            Platform.OS === 'web' && ({
+              position: 'fixed',
+              transition: 'opacity 280ms cubic-bezier(0.4, 0, 0.2, 1)',
+              cursor: 'pointer',
+            } as any),
+          ]}
         />
       )}
 
       <Animated.View
         nativeID="uc-agent-panel-root"
         accessibilityViewIsModal={panelMode === 'center'}
+        importantForAccessibility={panelMode === 'center' ? 'yes' : 'auto'}
         // The CSS keyframe (uc-agent-panel-open) drives the open fade on web.
         // scaleAnim/opacityAnim values are pinned to 1/1 by AgentPanel during
         // open, so they're no-ops here unless the close animation runs them
         // back down to 0. className is a web-only RN Web extension so we
         // spread it via `as any` to avoid TypeScript noise.
         {...(Platform.OS === 'web' ? ({
-          className: isDesktop ? 'uc-agent-panel-open' : undefined,
+          className: 'uc-agent-panel-open',
           role: 'dialog',
           'aria-modal': panelMode === 'center' ? true : undefined,
           'aria-labelledby': 'uc-agent-panel-title',
@@ -399,12 +529,32 @@ export default function AgentPanelShell({
           isDesktop && Platform.OS === 'web' ? ({ transition: panelTransition } as any) : null,
         ]}>
         {isDesktop && Platform.OS === 'web' && panelMode === 'side' && (
-          <View
+          <Pressable
             onPointerDown={(e: any) => onStartSideResize(e.nativeEvent?.pageX || e.pageX || 0)}
+            accessibilityRole="adjustable"
+            accessibilityLabel="Resize docked agent panel"
+            accessibilityValue={{ min: 380, max: 720, now: Math.round(panelGeometry.width), text: `${Math.round(panelGeometry.width)} pixels wide` }}
+            accessibilityActions={[{ name: 'increment', label: 'Make panel wider' }, { name: 'decrement', label: 'Make panel narrower' }]}
+            onAccessibilityAction={(event) => {
+              if (event.nativeEvent.actionName === 'increment') onResizeSideBy(24);
+              if (event.nativeEvent.actionName === 'decrement') onResizeSideBy(-24);
+            }}
+            {...({
+              tabIndex: 0,
+              onKeyDown: (event: any) => {
+                if (event.key === 'ArrowLeft') {
+                  event.preventDefault?.();
+                  onResizeSideBy(24);
+                } else if (event.key === 'ArrowRight') {
+                  event.preventDefault?.();
+                  onResizeSideBy(-24);
+                }
+              },
+            } as any)}
             style={styles.sideResizeHandle as any}
           >
             <View style={styles.sideResizeGrip} />
-          </View>
+          </Pressable>
         )}
 
         {!isDesktop ? (
@@ -422,8 +572,18 @@ export default function AgentPanelShell({
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          <TabErrorBoundary tabKey={panelTab} accentColor={agent.color || '#6366f1'}>
-            {children}
+          <TabErrorBoundary key={contentKey} tabKey={panelTab} accentColor={agent.color || '#6366f1'}>
+            <View
+              nativeID="uc-agent-panel-tabpanel"
+              accessibilityRole={'tabpanel' as any}
+              accessibilityLabel={activeTab ? `${activeTab.label} section` : 'Agent section'}
+              {...(Platform.OS === 'web' ? ({
+                role: 'tabpanel',
+                'aria-labelledby': activeTabLabelId,
+              } as any) : {})}
+            >
+              {children}
+            </View>
           </TabErrorBoundary>
           {panelTab === 'overview' ? renderRemoveButton(isDesktop) : null}
         </ScrollView>
@@ -433,6 +593,15 @@ export default function AgentPanelShell({
 }
 
 const styles = StyleSheet.create({
+  modalBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 99,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
   panel: {
     position: 'absolute',
     zIndex: 100,
@@ -483,10 +652,10 @@ const styles = StyleSheet.create({
   },
   sideResizeHandle: {
     position: 'absolute',
-    left: -3,
+    left: -8,
     top: 0,
     bottom: 0,
-    width: 8,
+    width: 16,
     zIndex: 12,
     cursor: 'col-resize' as any,
     justifyContent: 'center',
@@ -734,41 +903,30 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 24,
   },
+  navigationShell: {
+    backgroundColor: '#161b22',
+  },
+  navigationShellDesktop: {
+    paddingHorizontal: 12,
+    paddingTop: 4,
+  },
   tabNavShell: {
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomWidth: 1,
     borderBottomColor: '#21262d',
-    marginBottom: 0,
     backgroundColor: '#161b22',
-  },
-  tabNavShellDesktop: {
-    marginBottom: 0,
-    paddingHorizontal: 12,
-    paddingTop: 4,
-    paddingBottom: 4,
-    backgroundColor: '#161b22',
-    borderBottomColor: '#21262d',
-  },
-  tabNavArrow: {
-    minWidth: 44,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tabNavArrowText: {
-    color: '#8b949e',
-    fontSize: 16,
-    fontWeight: '600',
   },
   tabNavScroller: {
     flex: 1,
-    maxHeight: 44,
   },
-  tabNavContent: {
+  primaryTabNavContent: {
+    flexGrow: 1,
     gap: 2,
   },
-  tabNavItem: {
+  primaryTabNavItem: {
+    flexGrow: 1,
+    alignItems: 'center',
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: 2,
@@ -778,9 +936,36 @@ const styles = StyleSheet.create({
     minHeight: 44,
     justifyContent: 'center',
   },
-  tabNavItemText: {
+  primaryTabNavItemText: {
     color: '#8b949e',
     fontSize: 13,
+    fontWeight: '500',
+  },
+  contextualTabNavShell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+    backgroundColor: '#0d1117',
+  },
+  contextualTabNavContent: {
+    gap: 6,
+  },
+  contextualTabNavItem: {
+    minHeight: 36,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    backgroundColor: 'transparent',
+    justifyContent: 'center',
+  },
+  contextualTabNavItemText: {
+    color: '#8b949e',
+    fontSize: 12,
     fontWeight: '500',
   },
   tabNavItemTextActive: {
@@ -801,12 +986,6 @@ const styles = StyleSheet.create({
     color: '#f85149',
     fontSize: 14,
     fontWeight: '600',
-  },
-  errorFallbackMessage: {
-    color: '#e6edf3',
-    fontSize: 12,
-    fontFamily: MONO,
-    lineHeight: 18,
   },
   errorFallbackHint: {
     color: '#8b949e',

@@ -1,4 +1,5 @@
-import { supabase } from './supabase';
+import { safeGetUserForAccessToken } from './authSession';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { buildIntegrationSaveHealthState } from './integrationHealthBadgeCore';
 
 export type CircleIntegrationProvider =
@@ -108,6 +109,42 @@ export interface CircleIntegrationRecord {
   last_validated_at?: string | null;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface CircleCapabilityExactReadAuthority {
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}
+
+export type CircleCapabilityPreflight = {
+  ok: boolean;
+  missingCapabilities: string[];
+  missingConnectors: string[];
+};
+
+export type CircleCapabilityPreflightExactResult =
+  | { readOk: true; preflight: CircleCapabilityPreflight }
+  | { readOk: false; error: string };
+
+function normalizeCircleCapabilityReadAuthority(
+  circleId: string,
+  authority: CircleCapabilityExactReadAuthority | null | undefined,
+): CircleCapabilityExactReadAuthority | null {
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  const generation = Number(authority?.generation);
+  if (
+    !circleId
+    || !userId
+    || authorityCircleId !== circleId
+    || !accessToken
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId: authorityCircleId, accessToken, generation };
 }
 
 export interface IntegrationDefinition {
@@ -1491,6 +1528,65 @@ export async function buildCircleCapabilityPreflight(opts: {
     missingCapabilities,
     missingConnectors,
   };
+}
+
+/**
+ * Strict read-side preflight for authority-sensitive UI. This deliberately
+ * bypasses the legacy list helpers because they convert database errors into
+ * an empty integration list, which is indistinguishable from a verified
+ * circle with no connectors.
+ */
+export async function buildCircleCapabilityPreflightExact(opts: {
+  circleId: string;
+  requiredCapabilities?: string[];
+  requiredConnectors?: string[];
+  authority: CircleCapabilityExactReadAuthority;
+}): Promise<CircleCapabilityPreflightExactResult> {
+  const authority = normalizeCircleCapabilityReadAuthority(opts.circleId, opts.authority);
+  if (!authority) return { readOk: false, error: 'invalid_authority' };
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (!verifiedUser || verifiedUser.id !== authority.userId) {
+    return { readOk: false, error: 'authority_mismatch' };
+  }
+
+  try {
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { data, error } = await exactClient
+      .from('circle_integrations')
+      .select('circle_id, provider, status, is_active, capability_flags')
+      .eq('circle_id', authority.circleId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error) return { readOk: false, error: error.message || 'integration_read_failed' };
+    if (!Array.isArray(data)) return { readOk: false, error: 'invalid_integration_response' };
+    if (data.some(row => String((row as any)?.circle_id || '') !== authority.circleId)) {
+      return { readOk: false, error: 'mismatched_integration_response' };
+    }
+    const integrations = data
+      .filter(row => isIntegrationUsableForCapability(row as CircleIntegrationRecord));
+    const providers = new Set(integrations.map(row => row.provider as CircleIntegrationProvider));
+    const capabilities = new Set(integrations.flatMap(row => (
+      Array.isArray(row.capability_flags) ? row.capability_flags : []
+    )));
+    const missingCapabilities = (opts.requiredCapabilities || [])
+      .filter(capability => !capabilities.has(capability));
+    const missingConnectors = (opts.requiredConnectors || []).filter(requirement => {
+      const mapped = CONNECTOR_PROVIDER_ALIASES[requirement] || [];
+      if (mapped.length === 0) return !providers.has(requirement as CircleIntegrationProvider);
+      return !mapped.some(provider => providers.has(provider));
+    });
+    return {
+      readOk: true,
+      preflight: {
+        ok: missingCapabilities.length === 0 && missingConnectors.length === 0,
+        missingCapabilities,
+        missingConnectors,
+      },
+    };
+  } catch (error: any) {
+    return { readOk: false, error: error?.message || 'integration_read_failed' };
+  }
 }
 
 export type CircleOwnershipReadiness = {

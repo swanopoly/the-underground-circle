@@ -25,6 +25,7 @@ import { rememberLastProfileCircle } from '../../lib/profileNavigation';
 import { safeGetUser } from '../../lib/authSession';
 import { OWNER_EMAIL } from '../../lib/officeConfig';
 import { decodeEntityHandle, encodeEntityHandle } from '../../lib/entityHandleCore';
+import { normalizeChatAgentFocusDraft } from '../../lib/chatAgentTargets';
 
 // ─── Inject CSS animation for tab dot pulse (web only) ───────────────────
 if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('uc-tab-dot-css')) {
@@ -99,6 +100,11 @@ type OfficeRunFocusRequest = {
   runId: string;
   requestId: number;
 } | null;
+type ChatAgentFocusRequest = {
+  agentId: string;
+  draft: string | null;
+  requestId: number;
+} | null;
 
 // Explicit URL tabs are navigation authority. A bare circle route means the
 // user just entered the workspace, so it always starts in Office instead of
@@ -168,26 +174,40 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
   const [officeRunFocus, setOfficeRunFocus] = useState<OfficeRunFocusRequest>(null);
+  const [chatAgentFocus, setChatAgentFocus] = useState<ChatAgentFocusRequest>(null);
   const officeRunFocusSequenceRef = useRef(0);
-  // This first adoption is deliberately narrow: only a validated
-  // `office:run:<id>` may open Office's existing run drawer. Malformed,
-  // mismatched, or future entity kinds still switch tabs but cannot focus UI.
-  const captureCrossSurfaceFocus = useCallback((rawFocus: unknown, target: Tab) => {
+  const chatAgentFocusSequenceRef = useRef(0);
+  // Cross-surface focus is deliberately allowlisted. Only a validated
+  // `office:run:<id>` may open Office's run drawer and only a validated
+  // `chat:agent:<id>` may select a Chat target. Malformed, mismatched, or
+  // future entity kinds can still use the existing generic tab navigation but
+  // cannot focus destination UI.
+  const captureCrossSurfaceFocus = useCallback((rawFocus: unknown, target: Tab, rawDraft?: unknown): boolean => {
     const handle = decodeEntityHandle(rawFocus);
-    if (
-      target !== 'OFFICE'
-      || handle?.kind !== 'run'
-      || handle.surface !== 'office'
-    ) return;
-    officeRunFocusSequenceRef.current += 1;
-    setOfficeRunFocus({
-      runId: handle.id,
-      requestId: officeRunFocusSequenceRef.current,
-    });
+    if (target === 'OFFICE' && handle?.kind === 'run' && handle.surface === 'office') {
+      officeRunFocusSequenceRef.current += 1;
+      setOfficeRunFocus({
+        runId: handle.id,
+        requestId: officeRunFocusSequenceRef.current,
+      });
+      return true;
+    }
+    if (target === 'CHAT' && handle?.kind === 'agent' && handle.surface === 'chat') {
+      const draft = normalizeChatAgentFocusDraft(rawDraft);
+      chatAgentFocusSequenceRef.current += 1;
+      setChatAgentFocus({
+        agentId: handle.id,
+        draft,
+        requestId: chatAgentFocusSequenceRef.current,
+      });
+      return true;
+    }
+    return false;
   }, []);
   useEffect(() => {
     officeRunFocusSequenceRef.current = 0;
     setOfficeRunFocus(null);
+    setChatAgentFocus(null);
   }, [circleId]);
   // Owner-only tab gate. null = auth read pending (tabs stay hidden), so a
   // non-owner never sees a Backpack flash while the session resolves.
@@ -273,7 +293,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       if (target === 'INTEGRATIONS' && marketplaceItemId) {
         setMarketplaceFocus({ itemId: marketplaceItemId, groupKey: null, ts: Date.now() });
       }
-      captureCrossSurfaceFocus(e?.detail?.focus, target);
+      captureCrossSurfaceFocus(e?.detail?.focus, target, e?.detail?.draft);
       setActiveTab(target);
     };
     window.addEventListener('keydown', onKey);
@@ -308,6 +328,13 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   // Chat pop-out state — renders FloatingChat overlay that persists across tabs
   const [chatPopout, setChatPopout] = useState(false);
   const [chatMountKey, setChatMountKey] = useState(0);
+  const openAgentInChat = useCallback((focus: string, draft?: string) => {
+    if (!captureCrossSurfaceFocus(focus, 'CHAT', draft)) return;
+    // The full Chat surface owns agent selection and its per-thread composer.
+    // Close a floating chat first so the validated request has one destination.
+    setChatPopout(false);
+    setActiveTab('CHAT');
+  }, [captureCrossSurfaceFocus, setActiveTab]);
 
   // Loading gate: show the Circle shell as soon as its data is ready. Office
   // is the default tab and handles its own queries, subscriptions, and loading
@@ -455,6 +482,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           accentColor={accentColor}
           focusRunId={officeRunFocus?.runId || null}
           focusRunRequestId={officeRunFocus?.requestId || 0}
+          onOpenAgentInChat={openAgentInChat}
           onReady={handleOfficeReady}
         />
       </LazyTab>
@@ -462,7 +490,13 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       {/* Other tabs — lazy mount on first visit, stay mounted after */}
       {!chatPopout && (
         <LazyTab key={`chat-${chatMountKey}`} tabKey="CHAT" activeTab={activeTab}>
-          <ChatTab circleId={circleId} accentColor={accentColor} />
+          <ChatTab
+            circleId={circleId}
+            accentColor={accentColor}
+            focusAgentId={chatAgentFocus?.agentId || null}
+            focusAgentDraft={chatAgentFocus?.draft || null}
+            focusAgentRequestId={chatAgentFocus?.requestId || 0}
+          />
         </LazyTab>
       )}
       <LazyTab tabKey="ROOMS" activeTab={activeTab}>

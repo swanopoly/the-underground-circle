@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import AgentControlCard from '../../../../components/AgentControlCard';
 import {
@@ -6,38 +6,68 @@ import {
   loadAgentIdentitiesExact,
   renameAgentExact,
   setMainAgentForProviderExact,
+  syncAgentIdentitiesFromServerExact,
   type AgentIdentityExactAuthority,
 } from '../../../../lib/agentIdentity';
-import { PROVIDER_META } from '../../../../lib/connectionManager';
+import {
+  PROVIDER_META,
+  type OfficeConnectionAuthorityFence,
+} from '../../../../lib/connectionManager';
 import { OfficeAgent } from '../../../../lib/officeAgents';
-import { upsertAgentControl, useAgentControl } from '../../../../services/hitlService';
+import {
+  getAgentControlExact,
+  upsertAgentControlExact,
+  type AgentControl,
+  type AgentControlExactAuthority,
+} from '../../../../services/hitlService';
 import { supabase } from '../../../../lib/supabase';
 import { formatRelativeTime, MONO, shortPath } from './AgentPanelShared';
 
 // ─── Quick Actions strip ────────────────────────────────────────────────────
-// Top-of-console action row. The Overview surface exposes only the bridge's
-// read-only diagnostic allowlist; real task handoffs belong to Chat, the
-// OpenSwan tab, or the Terminal tab where identity and receipt semantics are
-// explicit. Pause/Resume toggles agent_controls.is_paused. Copy Session pulls
-// the exact key into the clipboard for terminal/runtime inspection.
+// Primary actions stay task-focused: continue with this exact subject in Chat,
+// or pause/resume its Circle control. Raw session identifiers and the Claude
+// diagnostic allowlist remain behind one Inspect disclosure.
 
 function QuickActionsStrip({
-  agent, circleId, sessionKey, isPaused, onRunCommand,
+  agent,
+  circleId,
+  sessionKey,
+  identityAuthority,
+  isIdentityAuthorityCurrent,
+  onOpenInChat,
+  onRunCommand,
 }: {
   agent: OfficeAgent;
   circleId?: string;
   sessionKey: string;
-  isPaused: boolean;
+  identityAuthority: AgentControlExactAuthority | null;
+  isIdentityAuthorityCurrent: (authority: AgentControlExactAuthority) => boolean;
+  onOpenInChat?: (draft?: string) => void;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
 }) {
-  const [composerOpen, setComposerOpen] = useState(false);
+  type ControlState = {
+    status: 'loading' | 'ready' | 'error';
+    control: AgentControl | null;
+    message: string | null;
+  };
+
+  const [inspectOpen, setInspectOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
+  const [controlState, setControlState] = useState<ControlState>({
+    status: 'loading',
+    control: null,
+    message: null,
+  });
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const controlReadGenerationRef = useRef(0);
+  const controlMutationGenerationRef = useRef(0);
 
   const canRunDiagnostics = agent.providerType === 'claude-code' && !!onRunCommand;
+  const isPaused = controlState.control?.is_paused === true;
+  const controlReady = controlState.status === 'ready';
 
   const showToast = (msg: string) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -52,6 +82,61 @@ function QuickActionsStrip({
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
   }, []);
 
+  const loadControl = useCallback(async () => {
+    const generation = controlReadGenerationRef.current + 1;
+    controlReadGenerationRef.current = generation;
+    controlMutationGenerationRef.current += 1;
+    setControlBusy(false);
+    setControlState({ status: 'loading', control: null, message: null });
+    const authority = identityAuthority;
+    if (!circleId || !authority || !isIdentityAuthorityCurrent(authority)) {
+      if (controlReadGenerationRef.current === generation) {
+        setControlState({
+          status: 'error',
+          control: null,
+          message: 'Pause controls are unavailable until this Office session is ready.',
+        });
+      }
+      return;
+    }
+
+    try {
+      const result = await getAgentControlExact(circleId, sessionKey, authority, isIdentityAuthorityCurrent);
+      if (
+        controlReadGenerationRef.current !== generation
+        || !isIdentityAuthorityCurrent(authority)
+      ) return;
+      if (!result.ok) {
+        setControlState({
+          status: 'error',
+          control: null,
+          message: 'The agent pause status could not be loaded.',
+        });
+        return;
+      }
+      setControlState({ status: 'ready', control: result.control, message: null });
+    } catch {
+      if (
+        controlReadGenerationRef.current === generation
+        && isIdentityAuthorityCurrent(authority)
+      ) {
+        setControlState({
+          status: 'error',
+          control: null,
+          message: 'The agent pause status could not be loaded.',
+        });
+      }
+    }
+  }, [circleId, identityAuthority, isIdentityAuthorityCurrent, sessionKey]);
+
+  useEffect(() => {
+    void loadControl();
+    return () => {
+      controlReadGenerationRef.current += 1;
+      controlMutationGenerationRef.current += 1;
+    };
+  }, [loadControl]);
+
   const handleSend = async () => {
     const text = draft.trim();
     if (!text || sending) return;
@@ -65,7 +150,6 @@ function QuickActionsStrip({
         showToast('Use Chat, OpenSwan, or Terminal to send this agent a task');
       }
       setDraft('');
-      setComposerOpen(false);
     } catch (error: unknown) {
       showToast(error instanceof Error ? error.message : 'Diagnostic failed');
     } finally {
@@ -74,19 +158,60 @@ function QuickActionsStrip({
   };
 
   const handleTogglePause = async () => {
-    if (controlBusy) return;
+    if (controlBusy || !controlReady) return;
+    const mutationGeneration = controlMutationGenerationRef.current + 1;
+    controlMutationGenerationRef.current = mutationGeneration;
     setControlBusy(true);
+    const authority = identityAuthority;
     try {
-      if (!circleId) {
-        showToast('No circle context available');
+      if (!circleId || !authority || !isIdentityAuthorityCurrent(authority)) {
+        if (controlMutationGenerationRef.current === mutationGeneration) {
+          setControlState({
+            status: 'error',
+            control: controlState.control,
+            message: 'The Office session changed before the pause setting could be saved.',
+          });
+        }
         return;
       }
-      await upsertAgentControl(circleId, sessionKey, agent.name, { is_paused: !isPaused });
-      showToast(isPaused ? 'Resumed' : 'Paused');
-    } catch (error: unknown) {
-      showToast(error instanceof Error ? error.message : 'Status update failed');
+      const result = await upsertAgentControlExact(
+        circleId,
+        sessionKey,
+        agent.name,
+        { is_paused: !isPaused },
+        authority,
+        isIdentityAuthorityCurrent,
+      );
+      if (
+        controlMutationGenerationRef.current !== mutationGeneration
+        || !isIdentityAuthorityCurrent(authority)
+      ) return;
+      if (!result.ok) {
+        setControlState({
+          status: 'error',
+          control: controlState.control,
+          message: 'The pause setting could not be saved. Reload its status before retrying.',
+        });
+        return;
+      }
+      setControlState({ status: 'ready', control: result.control, message: null });
+      showToast(isPaused ? 'Agent resumed' : 'Agent paused');
+    } catch {
+      if (
+        controlMutationGenerationRef.current === mutationGeneration
+        && authority
+        && isIdentityAuthorityCurrent(authority)
+      ) {
+        setControlState({
+          status: 'error',
+          control: controlState.control,
+          message: 'The pause setting could not be saved. Reload its status before retrying.',
+        });
+      }
     } finally {
-      setControlBusy(false);
+      if (controlMutationGenerationRef.current === mutationGeneration) {
+        setControlBusy(false);
+      }
     }
   };
 
@@ -108,70 +233,125 @@ function QuickActionsStrip({
   return (
     <View style={overviewStyles.actionsBlock}>
       <View style={overviewStyles.actionsRow}>
-        {canRunDiagnostics ? (
-          <Pressable
-            onPress={() => setComposerOpen(value => !value)}
-            accessibilityRole="button"
-            accessibilityLabel={composerOpen ? 'Close diagnostics' : 'Open read-only diagnostics'}
-            accessibilityState={{ expanded: composerOpen }}
-            style={[overviewStyles.actionButton, { borderColor: accentColor + '55', backgroundColor: accentColor + '14' }]}
-          >
-            <Text style={[overviewStyles.actionButtonText, { color: accentColor }]}>{composerOpen ? 'Close diagnostics' : 'Diagnostics'}</Text>
-          </Pressable>
-        ) : null}
         <Pressable
-          onPress={handleTogglePause}
-          disabled={controlBusy}
+          onPress={() => onOpenInChat?.()}
+          disabled={!onOpenInChat}
           accessibilityRole="button"
-          accessibilityLabel={isPaused ? `Resume ${agent.name}` : `Pause ${agent.name}`}
-          accessibilityState={{ disabled: controlBusy, busy: controlBusy }}
-          style={[overviewStyles.actionButton, controlBusy && overviewStyles.actionButtonDisabled]}
+          accessibilityLabel={`Continue with ${agent.name} in Chat`}
+          accessibilityHint="Selects this exact agent in Chat without sending a message."
+          accessibilityState={{ disabled: !onOpenInChat }}
+          style={[
+            overviewStyles.actionButton,
+            { borderColor: accentColor + '70', backgroundColor: accentColor + '18' },
+            !onOpenInChat && overviewStyles.actionButtonDisabled,
+          ]}
         >
-          <Text style={overviewStyles.actionButtonText}>{controlBusy ? 'Updating…' : isPaused ? 'Resume' : 'Pause'}</Text>
+          <Text style={[overviewStyles.actionButtonText, { color: accentColor }]}>Continue in Chat</Text>
         </Pressable>
         <Pressable
-          onPress={handleCopySession}
+          onPress={handleTogglePause}
+          disabled={controlBusy || !controlReady}
           accessibilityRole="button"
-          accessibilityLabel="Copy session key"
-          accessibilityHint="Copies the exact runtime session identifier."
-          style={overviewStyles.actionButton}
+          accessibilityLabel={controlReady
+            ? (isPaused ? `Resume ${agent.name}` : `Pause ${agent.name}`)
+            : `Pause status unavailable for ${agent.name}`}
+          accessibilityState={{
+            disabled: controlBusy || !controlReady,
+            busy: controlBusy || controlState.status === 'loading',
+          }}
+          style={[overviewStyles.actionButton, (controlBusy || !controlReady) && overviewStyles.actionButtonDisabled]}
         >
-          <Text style={overviewStyles.actionButtonText}>Copy session</Text>
+          <Text style={overviewStyles.actionButtonText}>
+            {controlBusy
+              ? 'Updating…'
+              : controlState.status === 'loading'
+                ? 'Checking…'
+                : controlState.status === 'error'
+                  ? 'Unavailable'
+                  : isPaused ? 'Resume' : 'Pause'}
+          </Text>
         </Pressable>
       </View>
 
-      {composerOpen && (
+      {controlState.status === 'loading' ? (
+        <Text style={overviewStyles.controlStateText} accessibilityLiveRegion="polite">
+          Checking the exact agent pause status…
+        </Text>
+      ) : controlState.status === 'ready' ? (
+        <Text style={overviewStyles.controlStateText} accessibilityLiveRegion="polite">
+          {isPaused ? 'Agent is paused.' : 'Agent is ready to run.'}
+        </Text>
+      ) : (
+        <View style={overviewStyles.controlError} accessibilityRole="alert" accessibilityLiveRegion="polite">
+          <Text style={overviewStyles.controlErrorText}>{controlState.message}</Text>
+          <Pressable
+            onPress={() => { void loadControl(); }}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading agent pause status"
+            style={overviewStyles.controlRetryButton}
+          >
+            <Text style={overviewStyles.controlRetryButtonText}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
+
+      <Pressable
+        onPress={() => setInspectOpen(value => !value)}
+        accessibilityRole="button"
+        accessibilityLabel={inspectOpen ? 'Hide session inspection tools' : 'Show session inspection tools'}
+        accessibilityState={{ expanded: inspectOpen }}
+        style={overviewStyles.inlineDisclosure}
+      >
+        <Text style={overviewStyles.inlineDisclosureText}>{inspectOpen ? 'Hide session tools' : 'Inspect session'}</Text>
+      </Pressable>
+
+      {inspectOpen && (
         <View style={overviewStyles.diagnosticComposer}>
-          <TextInput
-            value={draft}
-            onChangeText={setDraft}
-            placeholder="Read-only command · e.g. git status"
-            placeholderTextColor="#606075"
-            multiline
-            autoFocus
-            accessibilityLabel="Read-only diagnostic command"
-            style={overviewStyles.diagnosticInput}
-            onSubmitEditing={handleSend}
-          />
           <View style={overviewStyles.diagnosticFooter}>
-            <Text style={overviewStyles.diagnosticHint}>
-              Claude bridge read-only diagnostic allowlist
-            </Text>
+            <Text style={overviewStyles.diagnosticHint} numberOfLines={1}>{sessionKey}</Text>
             <Pressable
-              onPress={handleSend}
-              disabled={sending || !draft.trim()}
+              onPress={handleCopySession}
               accessibilityRole="button"
-              accessibilityLabel="Run read-only diagnostic"
-              accessibilityState={{ disabled: sending || !draft.trim(), busy: sending }}
-              style={[
-                overviewStyles.runDiagnosticButton,
-                { backgroundColor: accentColor },
-                (sending || !draft.trim()) && overviewStyles.actionButtonDisabled,
-              ]}
+              accessibilityLabel="Copy session key"
+              accessibilityHint="Copies the exact runtime session identifier."
+              style={overviewStyles.smallButton}
             >
-              <Text style={overviewStyles.runDiagnosticButtonText}>{sending ? 'Running…' : 'Run'}</Text>
+              <Text style={overviewStyles.smallButtonText}>Copy session</Text>
             </Pressable>
           </View>
+          {canRunDiagnostics ? (
+            <>
+              <TextInput
+                value={draft}
+                onChangeText={setDraft}
+                placeholder="Read-only command · e.g. git status"
+                placeholderTextColor="#606075"
+                multiline
+                accessibilityLabel="Read-only diagnostic command"
+                style={overviewStyles.diagnosticInput}
+                onSubmitEditing={handleSend}
+              />
+              <View style={overviewStyles.diagnosticFooter}>
+                <Text style={overviewStyles.diagnosticHint}>Claude bridge read-only diagnostic allowlist</Text>
+                <Pressable
+                  onPress={handleSend}
+                  disabled={sending || !draft.trim()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Run read-only diagnostic"
+                  accessibilityState={{ disabled: sending || !draft.trim(), busy: sending }}
+                  style={[
+                    overviewStyles.runDiagnosticButton,
+                    { backgroundColor: accentColor },
+                    (sending || !draft.trim()) && overviewStyles.actionButtonDisabled,
+                  ]}
+                >
+                  <Text style={overviewStyles.runDiagnosticButtonText}>{sending ? 'Running…' : 'Run'}</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <Text style={overviewStyles.diagnosticHint}>Read-only diagnostics are not available for this provider.</Text>
+          )}
         </View>
       )}
 
@@ -293,7 +473,7 @@ function computeBurnRate(samples: Array<{ t: number; tokens: number }>): number 
   return Math.round(deltaTokens / deltaMinutes);
 }
 
-type SyncState = 'loading' | 'fresh' | 'stale' | 'cold' | 'empty' | 'error';
+type SyncState = 'locked' | 'loading' | 'fresh' | 'stale' | 'cold' | 'empty' | 'error';
 interface MemorySyncStatus {
   state: SyncState;
   lastSavedAt: string | null;
@@ -319,18 +499,27 @@ interface MemorySyncStatus {
  */
 function normalizeIdentityAuthority(
   circleId: string | undefined,
-  authority: AgentIdentityExactAuthority | null | undefined,
-): AgentIdentityExactAuthority | null {
+  authority: (AgentIdentityExactAuthority & { generation?: number }) | null | undefined,
+): (AgentIdentityExactAuthority & AgentControlExactAuthority) | null {
   const userId = authority?.userId?.trim();
   const authorityCircleId = authority?.circleId?.trim();
   const accessToken = authority?.accessToken?.trim();
-  if (!circleId || !userId || authorityCircleId !== circleId || !accessToken) return null;
-  return { userId, circleId: authorityCircleId, accessToken };
+  const generation = Number(authority?.generation || 0);
+  if (
+    !circleId
+    || !userId
+    || authorityCircleId !== circleId
+    || !accessToken
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId: authorityCircleId, accessToken, generation };
 }
 
 function useMemorySyncStatus(
   circleId: string | undefined,
-  identityAuthority: AgentIdentityExactAuthority | null,
+  identityAuthority: (AgentIdentityExactAuthority & AgentControlExactAuthority) | null,
+  isIdentityAuthorityCurrent: (authority: AgentControlExactAuthority) => boolean,
 ): MemorySyncStatus {
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [state, setState] = useState<SyncState>('loading');
@@ -340,12 +529,15 @@ function useMemorySyncStatus(
   useEffect(() => {
     if (!circleId || !userId || !accessToken) {
       setLastSavedAt(null);
-      setState('loading');
+      setState('locked');
       return;
     }
+    setLastSavedAt(null);
+    setState('loading');
     let cancelled = false;
     const tick = async () => {
       try {
+        if (!identityAuthority || !isIdentityAuthorityCurrent(identityAuthority)) return;
         const { data, error } = await supabase
           .from('memory_entries')
           .select('updated_at')
@@ -356,7 +548,7 @@ function useMemorySyncStatus(
           .limit(1)
           .maybeSingle()
           .setHeader('Authorization', `Bearer ${accessToken}`);
-        if (cancelled) return;
+        if (cancelled || !isIdentityAuthorityCurrent(identityAuthority)) return;
         if (error) {
           setState('error');
           return;
@@ -383,13 +575,14 @@ function useMemorySyncStatus(
       cancelled = true;
       clearInterval(id);
     };
-  }, [accessToken, circleId, userId]);
+  }, [accessToken, circleId, identityAuthority, isIdentityAuthorityCurrent, userId]);
 
   if (state === 'fresh') return { state, lastSavedAt, color: '#22c55e', label: 'SYNCED', detail: lastSavedAt ? formatRelativeTime(lastSavedAt) : 'just now' };
   if (state === 'stale') return { state, lastSavedAt, color: '#f59e0b', label: 'STALE', detail: `last sync ${formatRelativeTime(lastSavedAt || undefined)}` };
   if (state === 'cold') return { state, lastSavedAt, color: '#6b7280', label: 'IDLE', detail: `last sync ${formatRelativeTime(lastSavedAt || undefined)}` };
   if (state === 'empty') return { state, lastSavedAt: null, color: '#6b7280', label: 'EMPTY', detail: 'no memories saved yet' };
-  if (state === 'error') return { state, lastSavedAt: null, color: '#ef4444', label: 'ERROR', detail: 'sync check failed — check RLS' };
+  if (state === 'error') return { state, lastSavedAt: null, color: '#ef4444', label: 'ERROR', detail: 'memory sync could not be checked' };
+  if (state === 'locked') return { state, lastSavedAt: null, color: '#8b949e', label: 'LOCKED', detail: 'sign in to this Circle to check memory sync' };
   return { state: 'loading', lastSavedAt: null, color: '#3a3a4e', label: 'CHECKING', detail: 'probing memory sync…' };
 }
 
@@ -397,41 +590,60 @@ export default function AgentOverviewPanel({
   agent,
   circleId,
   identityAuthority,
+  isIdentityAuthorityCurrent: isParentIdentityAuthorityCurrent,
   onClose,
   onRenameAgent,
   onAgentIdentityChange,
+  onOpenInChat,
   onRunCommand,
 }: {
   agent: OfficeAgent;
   circleId?: string;
-  identityAuthority?: AgentIdentityExactAuthority | null;
+  identityAuthority?: (AgentIdentityExactAuthority & { generation?: number }) | null;
+  isIdentityAuthorityCurrent: OfficeConnectionAuthorityFence;
   onClose: () => void;
-  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<void> | void;
+  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<boolean> | boolean;
   onAgentIdentityChange?: () => void;
+  onOpenInChat?: (draft?: string) => void;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
 }) {
   const exactIdentityAuthority = useMemo(
     () => normalizeIdentityAuthority(circleId, identityAuthority),
-    [circleId, identityAuthority?.accessToken, identityAuthority?.circleId, identityAuthority?.userId],
+    [circleId, identityAuthority?.accessToken, identityAuthority?.circleId, identityAuthority?.generation, identityAuthority?.userId],
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const memorySync = useMemorySyncStatus(circleId, detailsOpen ? exactIdentityAuthority : null);
   const [renamingAgent, setRenamingAgent] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [isMainAgent, setIsMainAgent] = useState(false);
+  const [mainAgentStatus, setMainAgentStatus] = useState<'idle' | 'locked' | 'loading' | 'ready' | 'error'>('idle');
+  const [mainAgentBusy, setMainAgentBusy] = useState(false);
+  const [mainAgentReloadGeneration, setMainAgentReloadGeneration] = useState(0);
 
   const sessionKey = useMemo(
     () => getAgentIdentityKey(agent),
     [agent],
   );
   const identityRequestKey = exactIdentityAuthority
-    ? `${exactIdentityAuthority.userId}\u0000${exactIdentityAuthority.circleId}\u0000${agent.id}\u0000${sessionKey}`
+    ? `${exactIdentityAuthority.userId}\u0000${exactIdentityAuthority.circleId}\u0000${exactIdentityAuthority.generation}\u0000${agent.id}\u0000${sessionKey}`
     : '';
   const latestIdentityRequestKeyRef = useRef(identityRequestKey);
   const latestIdentityAccessTokenRef = useRef(exactIdentityAuthority?.accessToken || '');
   latestIdentityRequestKeyRef.current = identityRequestKey;
   latestIdentityAccessTokenRef.current = exactIdentityAuthority?.accessToken || '';
-  const control = useAgentControl(circleId, sessionKey);
+  const isIdentityAuthorityCurrent = useCallback((authority: AgentControlExactAuthority) => (
+    !!exactIdentityAuthority
+    && isParentIdentityAuthorityCurrent(authority)
+    && latestIdentityRequestKeyRef.current === identityRequestKey
+    && latestIdentityAccessTokenRef.current === authority.accessToken
+    && exactIdentityAuthority.userId === authority.userId
+    && exactIdentityAuthority.circleId === authority.circleId
+    && exactIdentityAuthority.generation === authority.generation
+  ), [exactIdentityAuthority, identityRequestKey, isParentIdentityAuthorityCurrent]);
+  const memorySync = useMemorySyncStatus(
+    circleId,
+    detailsOpen ? exactIdentityAuthority : null,
+    isIdentityAuthorityCurrent,
+  );
   const providerMeta = PROVIDER_META[agent.providerType];
 
   useEffect(() => {
@@ -439,26 +651,63 @@ export default function AgentOverviewPanel({
     setRenamingAgent(false);
     setAgentNameDraft('');
     setIsMainAgent(false);
+    setMainAgentStatus('idle');
+    setMainAgentBusy(false);
   }, [agent.id, identityRequestKey]);
+
+  useEffect(() => () => {
+    latestIdentityRequestKeyRef.current = '';
+    latestIdentityAccessTokenRef.current = '';
+  }, []);
 
   useEffect(() => {
     setIsMainAgent(false);
-    if (!detailsOpen || !exactIdentityAuthority || !identityRequestKey) return;
+    setMainAgentBusy(false);
+    if (!detailsOpen) {
+      setMainAgentStatus('idle');
+      return;
+    }
+    if (!exactIdentityAuthority || !identityRequestKey) {
+      setMainAgentStatus('locked');
+      return;
+    }
     let cancelled = false;
     const capturedRequestKey = identityRequestKey;
-    loadAgentIdentitiesExact(exactIdentityAuthority)
-      .then(ids => {
+    const capturedAuthority = exactIdentityAuthority;
+    setMainAgentStatus('loading');
+    Promise.all([
+      loadAgentIdentitiesExact(exactIdentityAuthority),
+      syncAgentIdentitiesFromServerExact(exactIdentityAuthority),
+    ])
+      .then(([localIdentities, serverResult]) => {
         if (
           cancelled
+          || !isIdentityAuthorityCurrent(capturedAuthority)
           || latestIdentityRequestKeyRef.current !== capturedRequestKey
-          || latestIdentityAccessTokenRef.current !== exactIdentityAuthority.accessToken
+          || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
         ) return;
+        if (!serverResult.ok) {
+          setMainAgentStatus('error');
+          return;
+        }
+        const ids = new Map(localIdentities);
+        for (const [key, identity] of serverResult.identities) ids.set(key, identity);
         const identity = ids.get(sessionKey);
         setIsMainAgent(identity?.isPrimary === true);
+        setMainAgentStatus('ready');
       })
-      .catch(err => console.warn('[AgentOverviewPanel] Failed to load identities:', err));
+      .catch(err => {
+        console.warn('[AgentOverviewPanel] Failed to load identities:', err);
+        if (
+          cancelled
+          || !isIdentityAuthorityCurrent(capturedAuthority)
+          || latestIdentityRequestKeyRef.current !== capturedRequestKey
+          || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+        ) return;
+        setMainAgentStatus('error');
+      });
     return () => { cancelled = true; };
-  }, [detailsOpen, exactIdentityAuthority, identityRequestKey, sessionKey]);
+  }, [detailsOpen, exactIdentityAuthority, identityRequestKey, isIdentityAuthorityCurrent, mainAgentReloadGeneration, sessionKey]);
 
   const currentObjective = agent.lastUserMessage || agent.activity || 'No current task captured yet.';
   const projectLabel = agent.projectDir ? shortPath(agent.projectDir) : 'No active project detected';
@@ -474,6 +723,48 @@ export default function AgentOverviewPanel({
     agent.model !== 'unknown' ? agent.model : null,
     formatRelativeTime(agent.lastActive),
   ].filter((value): value is string => !!value).join(' · ');
+  const mainAgentVerified = mainAgentStatus === 'ready';
+  const mainAgentDisabled = !exactIdentityAuthority || !mainAgentVerified || isMainAgent || mainAgentBusy;
+
+  const handleSetMainAgent = async () => {
+    const capturedAuthority = exactIdentityAuthority;
+    const capturedRequestKey = identityRequestKey;
+    if (
+      mainAgentDisabled
+      || !capturedAuthority
+      || !capturedRequestKey
+      || !isIdentityAuthorityCurrent(capturedAuthority)
+    ) return;
+    setMainAgentBusy(true);
+    try {
+      const receipt = await setMainAgentForProviderExact(sessionKey, agent.providerType, capturedAuthority);
+      if (
+        !isIdentityAuthorityCurrent(capturedAuthority)
+        || latestIdentityRequestKeyRef.current !== capturedRequestKey
+        || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
+      ) return;
+      if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
+        setMainAgentStatus('error');
+        return;
+      }
+      setIsMainAgent(true);
+      setMainAgentStatus('ready');
+      onAgentIdentityChange?.();
+    } catch (err) {
+      console.warn('[AgentOverviewPanel] Failed to set main agent:', err);
+      if (
+        isIdentityAuthorityCurrent(capturedAuthority)
+        && latestIdentityRequestKeyRef.current === capturedRequestKey
+        && latestIdentityAccessTokenRef.current === capturedAuthority.accessToken
+      ) setMainAgentStatus('error');
+    } finally {
+      if (
+        isIdentityAuthorityCurrent(capturedAuthority)
+        && latestIdentityRequestKeyRef.current === capturedRequestKey
+        && latestIdentityAccessTokenRef.current === capturedAuthority.accessToken
+      ) setMainAgentBusy(false);
+    }
+  };
 
   return (
     <View nativeID="section-agent-overview" style={overviewStyles.container}>
@@ -481,7 +772,9 @@ export default function AgentOverviewPanel({
         agent={agent}
         circleId={circleId}
         sessionKey={sessionKey}
-        isPaused={!!control?.is_paused}
+        identityAuthority={exactIdentityAuthority}
+        isIdentityAuthorityCurrent={isIdentityAuthorityCurrent}
+        onOpenInChat={onOpenInChat}
         onRunCommand={onRunCommand}
       />
       <NowDoingPanel agent={agent} currentObjective={currentObjective} />
@@ -490,13 +783,6 @@ export default function AgentOverviewPanel({
         <View nativeID="section-agent-controls" style={overviewStyles.connectionSummary}>
           <AgentControlCard
             agent={agent}
-            circleId={circleId}
-            control={control}
-            onClose={() => {}}
-            onOpenPanel={() => {}}
-            onDisconnect={onClose}
-            onRunCommand={onRunCommand}
-            embedded
           />
         </View>
       )}
@@ -524,10 +810,6 @@ export default function AgentOverviewPanel({
                 <Text style={overviewStyles.detailValue} numberOfLines={2}>{item.value}</Text>
               </View>
             ))}
-            <View style={overviewStyles.detailRow}>
-              <Text style={overviewStyles.detailLabel}>Session</Text>
-              <Text style={[overviewStyles.detailValue, overviewStyles.sessionValue]} numberOfLines={1} selectable>{sessionKey}</Text>
-            </View>
           </View>
 
           {['claude-code', 'cursor', 'codex', 'gemini'].includes(agent.providerType) ? (
@@ -562,19 +844,23 @@ export default function AgentOverviewPanel({
                         const capturedRequestKey = identityRequestKey;
                         if (cleanName && capturedAuthority && capturedRequestKey) {
                           if (onRenameAgent) {
-                            await onRenameAgent(agent, cleanName);
+                            const saved = await onRenameAgent(agent, cleanName);
+                            if (!saved) return;
                           } else {
                             const receipt = await renameAgentExact(sessionKey, cleanName, capturedAuthority);
-                            if (!receipt.localSaved) return;
+                            if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) return;
                           }
                           if (
-                            latestIdentityRequestKeyRef.current !== capturedRequestKey
+                            !isIdentityAuthorityCurrent(capturedAuthority)
+                            || latestIdentityRequestKeyRef.current !== capturedRequestKey
                             || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
                           ) return;
                           onAgentIdentityChange?.();
                         }
                         if (
-                          latestIdentityRequestKeyRef.current === capturedRequestKey
+                          !!capturedAuthority
+                          && isIdentityAuthorityCurrent(capturedAuthority)
+                          && latestIdentityRequestKeyRef.current === capturedRequestKey
                           && latestIdentityAccessTokenRef.current === capturedAuthority?.accessToken
                         ) setRenamingAgent(false);
                       }}
@@ -607,32 +893,49 @@ export default function AgentOverviewPanel({
               </View>
 
               <Pressable
-                onPress={async () => {
-                  const capturedAuthority = exactIdentityAuthority;
-                  const capturedRequestKey = identityRequestKey;
-                  if (!capturedAuthority || !capturedRequestKey) return;
-                  const receipt = await setMainAgentForProviderExact(sessionKey, agent.providerType, capturedAuthority);
-                  if (
-                    !receipt.localSaved
-                    || latestIdentityRequestKeyRef.current !== capturedRequestKey
-                    || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
-                  ) return;
-                  setIsMainAgent(true);
-                  onAgentIdentityChange?.();
-                }}
-                disabled={!exactIdentityAuthority || isMainAgent}
+                onPress={handleSetMainAgent}
+                disabled={mainAgentDisabled}
                 accessibilityRole="button"
-                accessibilityLabel={isMainAgent ? `${agent.name} is the main Office agent` : `Set ${agent.name} as the main Office agent`}
-                accessibilityState={{ disabled: !exactIdentityAuthority || isMainAgent, selected: isMainAgent }}
+                accessibilityLabel={isMainAgent
+                  ? `${agent.name} is the main Office agent`
+                  : mainAgentStatus === 'loading'
+                    ? `Checking whether ${agent.name} is the main Office agent`
+                    : `Set ${agent.name} as the main Office agent`}
+                accessibilityState={{ disabled: mainAgentDisabled, selected: mainAgentVerified && isMainAgent, busy: mainAgentBusy || mainAgentStatus === 'loading' }}
                 style={[
                   overviewStyles.primaryAgentButton,
                   isMainAgent && { borderColor: agent.color + '55', backgroundColor: agent.color + '12' },
-                  (!exactIdentityAuthority || isMainAgent) && overviewStyles.actionButtonDisabled,
+                  mainAgentDisabled && overviewStyles.actionButtonDisabled,
                 ]}
               >
                 <View style={[overviewStyles.primaryAgentMarker, { backgroundColor: isMainAgent ? agent.color : '#484f58' }]} />
-                <Text style={overviewStyles.primaryAgentText}>{isMainAgent ? 'Main Office agent' : 'Set as main Office agent'}</Text>
+                <Text style={overviewStyles.primaryAgentText}>
+                  {mainAgentBusy
+                    ? 'Updating main agent…'
+                    : mainAgentStatus === 'loading'
+                      ? 'Checking main agent…'
+                      : isMainAgent
+                        ? 'Main Office agent'
+                        : 'Set as main Office agent'}
+                </Text>
               </Pressable>
+              {mainAgentStatus === 'locked' ? (
+                <Text accessibilityRole="alert" style={overviewStyles.mainAgentStatusText}>
+                  Main-agent status is locked until this Office session has exact identity authority.
+                </Text>
+              ) : mainAgentStatus === 'error' ? (
+                <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={overviewStyles.mainAgentErrorRow}>
+                  <Text style={overviewStyles.mainAgentErrorText}>Main-agent status could not be verified. No change is available until it reloads.</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry loading main Office agent status"
+                    onPress={() => setMainAgentReloadGeneration(value => value + 1)}
+                    style={overviewStyles.mainAgentRetryButton}
+                  >
+                    <Text style={overviewStyles.mainAgentRetryText}>Retry</Text>
+                  </Pressable>
+                </View>
+              ) : null}
             </View>
           ) : null}
         </View>
@@ -675,6 +978,44 @@ const overviewStyles = StyleSheet.create({
   },
   actionButtonDisabled: {
     opacity: 0.5,
+  },
+  controlStateText: {
+    color: '#8b949e',
+    fontSize: 11,
+    lineHeight: 17,
+  },
+  controlError: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f8514948',
+    backgroundColor: '#f8514910',
+  },
+  controlErrorText: {
+    color: '#f0a09b',
+    fontSize: 11,
+    lineHeight: 17,
+    flex: 1,
+    minWidth: 180,
+  },
+  controlRetryButton: {
+    minHeight: 44,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f8514960',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  controlRetryButtonText: {
+    color: '#f0a09b',
+    fontSize: 12,
+    fontWeight: '600',
   },
   diagnosticComposer: {
     gap: 10,
@@ -1054,5 +1395,38 @@ const overviewStyles = StyleSheet.create({
     color: '#e6edf3',
     fontSize: 12,
     fontWeight: '600',
+  },
+  mainAgentStatusText: {
+    color: '#8b949e',
+    fontSize: 11,
+    lineHeight: 17,
+  },
+  mainAgentErrorRow: {
+    gap: 8,
+    padding: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ef444455',
+    backgroundColor: '#2a0b0b',
+  },
+  mainAgentErrorText: {
+    color: '#fca5a5',
+    fontSize: 11,
+    lineHeight: 17,
+  },
+  mainAgentRetryButton: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ef444466',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  mainAgentRetryText: {
+    color: '#fca5a5',
+    fontSize: 11,
+    fontWeight: '700',
   },
 });

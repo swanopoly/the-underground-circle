@@ -25,6 +25,34 @@ export interface OfficeAgentSessionBindingRecord extends OfficeAgentSessionBindi
   readonly updatedAt?: string;
 }
 
+/**
+ * Optional caller-captured bearer for panel/runtime reads and mutations.
+ * Supplying this authority never falls back to the mutable global auth
+ * session: malformed bearer material fails closed before a request is made.
+ */
+export type OfficeAgentSessionBindingAuthority = Readonly<{
+  accessToken: string;
+}>;
+
+function bindingAccessToken(
+  authority: OfficeAgentSessionBindingAuthority | null | undefined,
+): string | null | undefined {
+  if (authority == null) return undefined;
+  const accessToken = String(authority.accessToken || '').trim();
+  return accessToken && accessToken.length <= 16_384 ? accessToken : null;
+}
+
+function bindCapturedBearer<T extends { setHeader(name: string, value: string): T }>(
+  query: T,
+  authority: OfficeAgentSessionBindingAuthority | null | undefined,
+): T | null {
+  const accessToken = bindingAccessToken(authority);
+  if (accessToken === null) return null;
+  return accessToken === undefined
+    ? query
+    : query.setHeader('Authorization', `Bearer ${accessToken}`);
+}
+
 export interface OfficeSessionSnapshot {
   readonly connections: readonly AgentConnection[];
   readonly sessionsByConnection: OfficeAgentSessionsByConnection;
@@ -179,6 +207,7 @@ function bindingReadFailure(
  */
 export async function readOfficeAgentSessionBindingsBatch(
   officeAgentIds: readonly string[],
+  authority?: OfficeAgentSessionBindingAuthority | null,
 ): Promise<OfficeAgentSessionBindingBatchReadResult> {
   if (!Array.isArray(officeAgentIds)) {
     return Object.freeze({
@@ -208,10 +237,18 @@ export async function readOfficeAgentSessionBindingsBatch(
   }
 
   try {
-    const { data, error } = await supabase
+    const query = bindCapturedBearer(supabase
       .from('office_agent_session_bindings')
       .select('id, office_agent_id, agent_bot_id, session_key, created_at, updated_at')
-      .in('office_agent_id', requestedOfficeAgentIds);
+      .in('office_agent_id', requestedOfficeAgentIds), authority);
+    if (!query) {
+      return Object.freeze({
+        ok: false,
+        reason: 'invalid_input',
+        error: 'The captured Office session authority is invalid.',
+      });
+    }
+    const { data, error } = await query;
     if (error) return bindingReadFailure(error);
     if (!Array.isArray(data) || data.length > requestedOfficeAgentIds.length) {
       return Object.freeze({
@@ -247,14 +284,17 @@ export async function readOfficeAgentSessionBindingsBatch(
 /** Read one owner-scoped binding. Missing schema and missing binding both fail closed. */
 export async function readOfficeAgentSessionBinding(
   officeAgentId: string,
+  authority?: OfficeAgentSessionBindingAuthority | null,
 ): Promise<OfficeAgentSessionBindingRecord | null> {
   if (!isUuid(officeAgentId)) return null;
   try {
-    const { data, error } = await supabase
+    const query = bindCapturedBearer(supabase
       .from('office_agent_session_bindings')
       .select('id, office_agent_id, agent_bot_id, session_key, created_at, updated_at')
       .eq('office_agent_id', officeAgentId)
-      .maybeSingle();
+      .maybeSingle(), authority);
+    if (!query) return null;
+    const { data, error } = await query;
     if (error || !data) return null;
     return parseBindingRow(data);
   } catch {
@@ -270,15 +310,18 @@ export async function setOfficeAgentSessionBinding(
   officeAgentId: string,
   agentBotId: string,
   sessionKey: string,
+  authority?: OfficeAgentSessionBindingAuthority | null,
 ): Promise<OfficeAgentSessionBindingRecord> {
   if (!isUuid(officeAgentId) || !isUuid(agentBotId) || !isSessionKey(sessionKey)) {
     throw new Error('Invalid Office agent session binding.');
   }
-  const { data, error } = await supabase.rpc('set_office_agent_session_binding', {
+  const query = bindCapturedBearer(supabase.rpc('set_office_agent_session_binding', {
     p_office_agent_id: officeAgentId,
     p_agent_bot_id: agentBotId,
     p_session_key: sessionKey,
-  });
+  }), authority);
+  if (!query) throw new Error('The captured Office session authority is invalid.');
+  const { data, error } = await query;
   if (error) {
     throw new Error(isOfficeAgentSessionBindingSchemaUnavailable(error)
       ? 'Office session binding is not installed yet. Apply database section 36, then reload.'
@@ -294,16 +337,21 @@ export async function setOfficeAgentSessionBinding(
         agentBotId,
         sessionKey,
       })
-    : parseBindingRow(data) || await readOfficeAgentSessionBinding(officeAgentId);
+    : parseBindingRow(data) || await readOfficeAgentSessionBinding(officeAgentId, authority);
   if (!binding) throw new Error('Office session binding could not be verified after saving.');
   return binding;
 }
 
-export async function clearOfficeAgentSessionBinding(officeAgentId: string): Promise<boolean> {
+export async function clearOfficeAgentSessionBinding(
+  officeAgentId: string,
+  authority?: OfficeAgentSessionBindingAuthority | null,
+): Promise<boolean> {
   if (!isUuid(officeAgentId)) return false;
-  const { data, error } = await supabase.rpc('clear_office_agent_session_binding', {
+  const query = bindCapturedBearer(supabase.rpc('clear_office_agent_session_binding', {
     p_office_agent_id: officeAgentId,
-  });
+  }), authority);
+  if (!query) return false;
+  const { data, error } = await query;
   if (error) {
     throw new Error(isOfficeAgentSessionBindingSchemaUnavailable(error)
       ? 'Office session binding is not installed yet. Apply database section 36, then reload.'

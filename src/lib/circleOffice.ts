@@ -514,28 +514,58 @@ export async function setAgentsOffline(
 
 // ─── Check if user has any published agents in a circle ──────────────────────
 
-export async function getUserCircleAgents(
+export type UserCircleAgentsExactReadResult =
+  | Readonly<{ ok: true; agents: CircleOfficeAgent[] }>
+  | Readonly<{ ok: false; error: string }>;
+
+/**
+ * Strict owner-scoped inventory for authority-sensitive panels. Unlike the
+ * legacy convenience reader, an auth/query/receipt failure is distinct from a
+ * verified empty inventory so UI never turns a dropped request into "publish
+ * an agent first".
+ */
+export async function getUserCircleAgentsExact(
   circleId: string,
-  capturedScope?: CircleOfficeAuthScope,
-): Promise<CircleOfficeAgent[]> {
+  capturedScope: CircleOfficeAuthScope,
+): Promise<UserCircleAgentsExactReadResult> {
   try {
     const normalizedCircleId = normalizeResourceId(circleId);
-    if (!normalizedCircleId) return [];
+    if (!normalizedCircleId) return { ok: false, error: 'The Circle Office scope is invalid.' };
     const authority = await resolveAuthority(capturedScope);
-    if (!authority) return [];
+    if (!authority) return { ok: false, error: 'The captured Office authority is no longer valid.' };
     const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
-    const { data } = await exactClient
+    const { data, error } = await exactClient
       .from('circle_office_agents')
       .select('*')
       .eq('circle_id', normalizedCircleId)
       .eq('owner_id', authority.userId)
       .setHeader('Authorization', `Bearer ${authority.accessToken}`);
 
-    return (data || [])
-      .filter((row) => row?.circle_id === normalizedCircleId && row?.owner_id === authority.userId)
-      .map((row) => fromRow(row, authority.userId));
-  } catch { return []; }
+    if (error || !Array.isArray(data)) {
+      return { ok: false, error: 'Published Office agents could not be loaded.' };
+    }
+    if (data.some((row) => row?.circle_id !== normalizedCircleId || row?.owner_id !== authority.userId)) {
+      return { ok: false, error: 'Published Office agents returned an invalid authority receipt.' };
+    }
+    return { ok: true, agents: data.map((row) => fromRow(row, authority.userId)) };
+  } catch {
+    return { ok: false, error: 'Published Office agents could not be loaded.' };
+  }
+}
+
+export async function getUserCircleAgents(
+  circleId: string,
+  capturedScope?: CircleOfficeAuthScope,
+): Promise<CircleOfficeAgent[]> {
+  if (!capturedScope) {
+    const authority = await resolveAuthority();
+    if (!authority) return [];
+    const result = await getUserCircleAgentsExact(circleId, authority);
+    return result.ok ? result.agents : [];
+  }
+  const result = await getUserCircleAgentsExact(circleId, capturedScope);
+  return result.ok ? result.agents : [];
 }
 
 // ─── Subscribe to real-time changes ──────────────────────────────────────────

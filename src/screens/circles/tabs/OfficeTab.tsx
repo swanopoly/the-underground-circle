@@ -6,6 +6,7 @@ import {
 import OfficeFloorView from './office/OfficeFloor';
 import PixelAgent from './office/PixelAgent';
 import AgentPanel from './office/AgentPanel';
+import { resolveAgentPanelRuntimeConnectionId } from './office/AgentPanelTabs';
 import { OfficeIntelligenceSection, OfficeRuntimeSection, OfficeWorkspaceSection } from './office/OfficeSections';
 import { OFFICE_DESK_POSITIONS, OFFICE_FLOOR_GRID_SIZE, OFFICE_FLOOR_HEIGHT, OFFICE_FLOOR_WIDTH } from './office/officeFloorLayout';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
@@ -100,6 +101,8 @@ import OfficeBridgeReadinessStrip from '../../../components/office/OfficeBridgeR
 import OfficeLaneHealthStrip from '../../../components/office/OfficeLaneHealthStrip';
 import OfficeBridgeDiagPanel from '../../../components/office/OfficeBridgeDiagPanel';
 import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
+import { normalizeChatAgentFocusDraft } from '../../../lib/chatAgentTargets';
+import { encodeEntityHandle } from '../../../lib/entityHandleCore';
 import type { OfficeBridgeReadinessSnapshot as OfficeBridgeReadinessSnapshotModel } from '../../../lib/officeBridgeReadiness';
 import { useCustomThemesExact, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import {
@@ -217,7 +220,7 @@ import { isApprovalRowLive } from '../../../lib/approvalCardModelCore';
 import { isRuntimeOwnedAgentApprovalActionType } from '../../../lib/agentApprovalsWorker';
 import { showAlert, showConfirm } from '../../../lib/alert';
 import type { ComputerTaskChecklistCard } from '../../../lib/computerTaskState';
-import { useAgentApprovals, useAgentControl, type AgentApprovalsExactAuthority } from '../../../services/hitlService';
+import { useAgentApprovals, type AgentApprovalsExactAuthority } from '../../../services/hitlService';
 import {
   CircleOfficeAgent,
   loadCircleOfficeAgents,
@@ -396,6 +399,7 @@ interface Props {
   accentColor: string;
   focusRunId?: string | null;
   focusRunRequestId?: number;
+  onOpenAgentInChat?: (focus: string, draft?: string) => void;
   onAgentStats?: (stats: AgentStats) => void;
   onReady?: () => void;
 }
@@ -488,6 +492,7 @@ export default function OfficeTab({
   accentColor,
   focusRunId = null,
   focusRunRequestId = 0,
+  onOpenAgentInChat,
   onAgentStats,
   onReady,
 }: Props) {
@@ -563,20 +568,25 @@ export default function OfficeTab({
       || !authority
       || authority.userId !== authUser?.id
       || authority.circleId !== circleId
+      || authority.accessToken !== authSession?.access_token
     ) return null;
     return { ...authority };
-  }, [authReady, authUser?.id, circleId]);
+  }, [authReady, authSession?.access_token, authUser?.id, circleId]);
   const isOfficeAuthorityCurrent = useCallback((authority: OfficeExactAuthority | null | undefined): boolean => {
     const current = authAuthorityRef.current;
     return Boolean(
-      authority
+      authReady
+      && authority
       && current
+      && authority.userId === authUser?.id
+      && authority.circleId === circleId
+      && authority.accessToken === authSession?.access_token
       && current.userId === authority.userId
       && current.circleId === authority.circleId
       && current.accessToken === authority.accessToken
       && current.generation === authority.generation
     );
-  }, []);
+  }, [authReady, authSession?.access_token, authUser?.id, circleId]);
   const officeInvocationLifecycleRef = useRef<{
     authority: OfficeExactAuthority;
     controller: AbortController;
@@ -1067,10 +1077,6 @@ export default function OfficeTab({
     (opsBoard?.building ?? []).forEach(visit);
     return map;
   }, [opsBoard]);
-
-  // Agent control hook for selected agent
-  const selectedSessionKey = getAgentIdentityKey(selectedAgent);
-  const agentControl = useAgentControl(circleId, selectedSessionKey);
 
   // Read-only local diagnostics through the Claude bridge allowlist.
   const handleRunCommand = React.useCallback(async (cmd: string) => {
@@ -4068,6 +4074,19 @@ export default function OfficeTab({
       return { ...agent, status: upgrade.status, activity: upgrade.activity ?? agent.activity };
     });
   }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id, opsRunNodesByAgent]);
+  useEffect(() => {
+    setSelectedAgent(previous => {
+      if (!previous) return null;
+      const current = displayAgents.find(candidate => candidate.id === previous.id) || null;
+      // The popup is a live projection of the canonical roster, never a
+      // snapshot captured at click time. If the subject retires, close it.
+      return current;
+    });
+  }, [displayAgents]);
+  const selectedAgentRuntimeConnectionId = useMemo(
+    () => resolveAgentPanelRuntimeConnectionId(selectedAgent, connections),
+    [connections, selectedAgent],
+  );
   const terminalCommandAgents = useMemo<CircleOfficeAgent[]>(() => (
     [
       {
@@ -4547,6 +4566,12 @@ export default function OfficeTab({
     if (editMode) return;
     setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
   }, [editMode]);
+
+  const handleOpenAgentInChat = useCallback((agentId: string, draft?: string) => {
+    const focus = encodeEntityHandle({ surface: 'chat', kind: 'agent', id: agentId });
+    if (!focus) return;
+    onOpenAgentInChat?.(focus, normalizeChatAgentFocusDraft(draft) || undefined);
+  }, [onOpenAgentInChat]);
 
   const handleOpenAutomate = useCallback(() => {
     setTerminalInitialTab('automations');
@@ -6623,13 +6648,18 @@ export default function OfficeTab({
 
   const handleRenameAgent = useCallback(async (agent: OfficeAgent, newName: string) => {
     const normalizedName = newName.trim();
-    if (!normalizedName) return;
+    if (!normalizedName) return false;
     const requestedAuthority = captureOfficeAuthority();
-    if (!requestedAuthority) return;
+    if (!requestedAuthority) return false;
 
     const identityKey = getAgentIdentityKey(agent);
     const identitySave = await renameAgentExact(identityKey, normalizedName, requestedAuthority);
-    if (!isOfficeAuthorityCurrent(requestedAuthority) || !identitySave.localSaved) return;
+    if (
+      !isOfficeAuthorityCurrent(requestedAuthority)
+      || !identitySave.ok
+      || !identitySave.localSaved
+      || !identitySave.serverSaved
+    ) return false;
 
     const updated = {
       ...agentNames,
@@ -6652,6 +6682,7 @@ export default function OfficeTab({
 
     const identities = await loadAgentIdentitiesExact(requestedAuthority);
     if (isOfficeAuthorityCurrent(requestedAuthority)) setAgentIdentities(identities);
+    return isOfficeAuthorityCurrent(requestedAuthority);
   }, [
     agentNames,
     captureOfficeAuthority,
@@ -7942,25 +7973,32 @@ export default function OfficeTab({
           sessionTags={sessionTags}
           sessionStorageScope={officeSessionStorageScope || undefined}
           identityAuthority={captureOfficeAuthority()}
+          runtimeConnectionId={selectedAgentRuntimeConnectionId}
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
           circleId={circleId}
           appearances={appearances}
-          onAppearanceChange={(id, a) => {
+          onAppearanceChange={async (id, a) => {
             const requestedAuthority = captureOfficeAuthority();
-            if (!requestedAuthority) return;
+            if (!requestedAuthority) throw new Error('Sign in to this circle before saving appearance changes.');
             const identityKey = getAgentIdentityKey(selectedAgent) || id;
-            setAppearances(prev => ({ ...prev, [id]: a, [identityKey]: a }));
-            void updateAgentIdentityExact(
+            const receipt = await updateAgentIdentityExact(
               identityKey,
               { appearance: a, isCustomized: true },
               requestedAuthority,
-            ).then(() => {
-              if (isOfficeAuthorityCurrent(requestedAuthority)) void refreshAgentIdentities();
-            });
+            );
+            if (!isOfficeAuthorityCurrent(requestedAuthority)) {
+              throw new Error('The Office account changed before this appearance could be saved.');
+            }
+            if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
+              throw new Error('Appearance was not saved durably. Check the connection and retry.');
+            }
+            setAppearances(prev => ({ ...prev, [id]: a, [identityKey]: a }));
+            await refreshAgentIdentities();
           }}
           environmentType={currentTheme.environmentType}
           onRunCommand={handleRunCommand}
+          onOpenAgentInChat={onOpenAgentInChat ? handleOpenAgentInChat : undefined}
         />
       )}
 

@@ -56,6 +56,7 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
   };
 
   const update = (patch: Partial<AgentAppearance>) => {
+    if (saveState === 'saving') return;
     setSaveState('saving');
     setErrorMsg(null);
     try {
@@ -100,6 +101,10 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
           return (
             <Pressable
               key={color}
+              accessibilityRole="button"
+              accessibilityLabel={`${label.toLowerCase()} color ${color}`}
+              accessibilityState={{ selected: active, disabled: saveState === 'saving' }}
+              disabled={saveState === 'saving'}
               onPress={() => onSelect(color)}
               style={[
                 styles.swatch,
@@ -129,6 +134,10 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
         {items.map(item => (
           <Pressable
             key={item.key}
+            accessibilityRole="button"
+            accessibilityLabel={`${label.toLowerCase()} ${item.name.toLowerCase()}`}
+            accessibilityState={{ selected: item.active, disabled: saveState === 'saving' }}
+            disabled={saveState === 'saving'}
             onPress={() => {
               const field = label === 'HAT'
                 ? 'hat'
@@ -202,6 +211,9 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
             return (
               <Pressable
                 key={c.key}
+                accessibilityRole="button"
+                accessibilityLabel={`Show ${c.label.toLowerCase()} customization options`}
+                accessibilityState={{ selected: active }}
                 onPress={() => setCategory(c.key)}
                 style={[
                   styles.categoryPill,
@@ -350,7 +362,8 @@ const styles = StyleSheet.create({
   },
   categoryPill: {
     flex: 1,
-    paddingVertical: 6,
+    minHeight: 44,
+    justifyContent: 'center',
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#2a2a3e',
@@ -376,8 +389,8 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   swatch: {
-    width: 32,
-    height: 32,
+    width: 44,
+    height: 44,
     borderRadius: 8,
     marginRight: 8,
     borderWidth: 2,
@@ -399,6 +412,7 @@ const styles = StyleSheet.create({
   },
   itemCard: {
     width: 84,
+    minHeight: 72,
     paddingVertical: 10,
     paddingHorizontal: 8,
     marginRight: 8,

@@ -41,11 +41,47 @@ const serviceWrappers = section(
   'function isWebDirectLocalGateway',
   'OpenSwan service lifecycle wrappers',
 );
+const toolCapabilityState = section(
+  service,
+  'const unsupportedToolCache',
+  '// Per-tool timeouts.',
+  'OpenSwan capability cooldowns',
+);
 const rawToolInvoker = section(
   service,
   '// Per-tool timeouts.',
   '// ─── High-level API',
   'OpenSwan raw tool invoker',
+);
+const cronInventoryService = section(
+  service,
+  'export interface CronJob',
+  'export async function sendAgentTask',
+  'OpenSwan cron inventory service',
+);
+const agentInventoryService = section(
+  service,
+  'export async function listAgents',
+  'export async function spawnSubAgent',
+  'OpenSwan runtime-agent inventory service',
+);
+const sessionInventoryService = section(
+  service,
+  'export async function testConnection',
+  'export async function getSessionStatus',
+  'OpenSwan exact session inventory service',
+);
+const providerParsers = section(
+  service,
+  '// ─── Parsers',
+  '// ─── Polling Manager',
+  'OpenSwan structured provider parsers',
+);
+const webSearchService = section(
+  service,
+  'export interface OpenSwanWebSearchResult',
+  '// ─── Parsers',
+  'OpenSwan structured web-search service',
 );
 const spawnService = section(
   service,
@@ -137,6 +173,21 @@ assert.doesNotMatch(
   /sessions_send/,
   'sessions_send remains on the declared slow client boundary',
 );
+assert.match(toolCapabilityState, /const unsupportedToolEndpointCache = new Map<string, number>\(\);/, 'endpoint capability failures expire instead of surviving until page reload');
+assert.match(rawToolInvoker, /if \(tool === 'sessions_list'\) markToolRpcEndpointUnsupported\(endpointKey\);/, 'only the baseline session inventory may classify the whole tool endpoint as unsupported');
+assert.match(rawToolInvoker, /markToolUnsupported\(endpointKey, tool\);[\s\S]{0,320}if \(tool === 'sessions_list'\)/, 'an optional-tool 404 is cached per tool without disabling other capabilities');
+assert.match(cronInventoryService, /Array\.isArray\(rawJobs\)[\s\S]{0,420}jobs\.every\(\(job\): job is CronJob => !!job\)[\s\S]{0,220}new Set\(ids\)\.size === ids\.length/, 'cron inventory rejects malformed, partial, and duplicate structured snapshots');
+assert.match(cronInventoryService, /raw\.enabled === undefined && raw\.disabled === undefined/, 'cron inventory never assumes a missing enabled state is true');
+assert.match(agentInventoryService, /const rawAgents = Array\.isArray\(raw\)/, 'runtime-agent inventory requires a recognized structured array');
+assert.match(agentInventoryService, /new Set\(agents\)\.size !== agents\.length/, 'runtime-agent inventory rejects malformed members and duplicates');
+assert.match(sessionInventoryService, /if \(!sessions\) \{[\s\S]{0,160}no trustworthy structured session inventory/, 'session inventory rejects malformed 2xx payloads instead of publishing empty evidence');
+assert.match(providerParsers, /isProviderRecord\(raw\.details\)[\s\S]{0,120}Array\.isArray\(raw\.details\.sessions\)/, 'session identity comes only from structured details.sessions');
+assert.doesNotMatch(providerParsers, /parseSessionsFromText|session\[:\\s\]/, 'session identity is never fabricated from prose');
+assert.match(providerParsers, /seen\.has\(sessionKey\)/, 'duplicate exact session keys invalidate the whole snapshot');
+assert.match(detailedListService, /return \{ ok: false, subagents: \[\], error: 'OpenSwan returned no structured subagent inventory' \}/, 'unrecognized subagent payloads become lane errors rather than verified empty state');
+assert.match(webSearchService, /result\.result\?\.details\?\.citations/, 'web search consumes the structured citations inventory');
+assert.match(webSearchService, /parsed\.protocol !== 'https:' \|\| parsed\.username \|\| parsed\.password/, 'web-search citations require credential-free HTTPS URLs');
+assert.doesNotMatch(webSearchService, /result\.result\?\.results\s*\|\|\s*\[\]/, 'web-search prose or unknown schemas never become verified empty results');
 
 // OfficeChat must let the service's 25s gateway disposition arrive before the
 // service's 30s client abort. It may call the service directly or use a wrapper
@@ -172,21 +223,34 @@ assert.doesNotMatch(
   'OfficeChat never gives an accepted session send a completion checkmark',
 );
 
-assert.match(
+assert.doesNotMatch(
   agentGatewayPanels,
-  /runAction\('Send message', async \(config\) => \{[\s\S]{0,220}const result = await sendSessionMessage\([\s\S]{0,220}if \(!result\.ok\) throw new Error\(result\.error \|\|[\s\S]{0,160}return result\.reply/,
-  'AgentGatewayPanels direct session send throws result.error before runAction can save normal action memory',
+  /\bsendSessionMessage\b|\bspawnSubAgent\b|\bsaveSoulAwareAgentMemory\b/,
+  'AgentGatewayPanels does not own a second task, subagent, or action-memory execution path',
 );
 assert.match(
   agentGatewayPanels,
-  /runAction\('Spawn subagent', async \(config\) => \{[\s\S]{0,220}const result = await spawnSubAgent\([\s\S]{0,220}if \(!result\.ok\) throw new Error\(result\.error \|\|[\s\S]{0,160}return result\.reply/,
-  'AgentGatewayPanels spawn throws result.error before runAction can save normal action memory',
+  /onOpenInChat\(taskInput\.trim\(\)\)/,
+  'the primary Runtime task carries its draft to canonical Chat without auto-send',
 );
 assert.match(
   agentGatewayPanels,
-  /const resultSummary = await fn\(config\);[\s\S]{0,180}if \(circleId && userId\) \{[\s\S]{0,300}saveSoulAwareAgentMemory/,
-  'runAction saves action memory only after its callback resolves successfully',
+  /onOpenInChat\(messageInput\.trim\(\)\)/,
+  'the advanced session-message draft also hands off to canonical Chat',
 );
+assert.match(
+  agentGatewayPanels,
+  /onOpenInChat\(`Delegate this to a subagent: \$\{spawnInput\.trim\(\)\}`\)/,
+  'the advanced delegation draft also hands off to canonical Chat',
+);
+assert.match(
+  agentGatewayPanels,
+  /const result = await fn\(config\);[\s\S]{0,180}if \(!result\.ok\) throw new Error\(result\.error\);[\s\S]{0,180}result\.commit\?\.\(\);/,
+  'read-only runtime search results commit only after an exact successful result',
+);
+assert.match(service, /export function parseCronMutationReceipt\([\s\S]{0,2200}if \(expectedAction === 'run' && !runId\) return null;/, 'cron actions require a structured exact target receipt and run lineage');
+assert.doesNotMatch(section(service, 'export async function manageCronJob', 'export async function createCronJob', 'cron mutation'), /\.match\(|'Done'/, 'cron mutation success is never inferred from provider prose');
+assert.doesNotMatch(section(service, 'export async function createCronJob', 'export async function searchMemory', 'cron creation'), /'created'|idMatch|\.match\(/, 'cron creation never fabricates an id or infers it from prose');
 
 // The service preserves provider identity for every recognized disposition,
 // but only a typed true acceptance returns ok:true.

@@ -23,7 +23,7 @@ assert.ok(defaultOpenSwan.legacyIds.includes('default::blackswan'));
 assert.ok(defaultOpenSwan.legacyIds.includes('openswan:main_chat'));
 assert.ok(defaultOpenSwan.memoryAgentAliases.includes('default::blackswan'));
 assert.ok(defaultOpenSwan.memoryAgentAliases.includes('openswan:main_chat'));
-assert.ok(defaultOpenSwan.runAgentAliases.includes('OpenSwan'));
+assert.equal(defaultOpenSwan.runAgentAliases.includes('OpenSwan'), false);
 
 const dbAgentId = '11111111-1111-4111-8111-111111111111';
 const dbBackedAgent = buildAgentRuntimeSubject({
@@ -38,7 +38,19 @@ assert.equal(dbBackedAgent.memoryAgentId, dbAgentId);
 assert.equal(dbBackedAgent.runAgentId, dbAgentId);
 assert.equal(dbBackedAgent.metadata.agentDbId, dbAgentId);
 assert.equal(dbBackedAgent.metadata.agentSessionKey, dbAgentId);
-assert.ok(dbBackedAgent.runAgentAliases.includes('Scout'));
+assert.equal(dbBackedAgent.runAgentAliases.includes('Scout'), false);
+
+const renamedExactAgent = buildAgentRuntimeSubject({
+  id: 'local::release-agent',
+  name: 'OpenSwan',
+  sessionKey: 'release-session',
+  providerType: 'openswan',
+});
+assert.equal(renamedExactAgent.subjectKey, 'release-session');
+assert.equal(renamedExactAgent.memoryAgentId, 'release-session');
+assert.equal(renamedExactAgent.runAgentId, 'release-session');
+assert.equal(renamedExactAgent.runAgentAliases.includes('OpenSwan'), false);
+assert.equal(renamedExactAgent.legacyIds.includes('default::blackswan'), false);
 
 const liveSession = buildAgentRuntimeSubject({
   id: 'local::session-alpha',

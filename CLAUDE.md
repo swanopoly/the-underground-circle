@@ -78,6 +78,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Concern | Owner |
 |---|---|
 | Office exact runtime authority and account-switch lifecycle | `src/lib/officeDashboardPersistence.ts`, `src/lib/connectionManager.ts`, `src/lib/computerTaskState.ts`, `src/lib/agentPlanPersistence.ts`, `src/lib/computerUseHistory.ts`, `src/lib/llmProviders.ts`, `src/lib/workspaceAdaptation.ts`, `src/lib/oauthConnect.ts`, `src/lib/idleBehaviors.ts`, `src/lib/officeTerminal.ts`, `src/lib/agentInvocation.ts`, `src/lib/circleOffice.ts`, `src/services/customThemes.ts`, `src/services/sharedMemory.ts`, `src/services/hitlService.ts`, `src/services/runApprovalsService.ts`, `src/components/OfficeTerminal.tsx`, `src/components/ComputerUseHistoryPanel.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/ProfileTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/migrations/20260817120000_circle_idle_behavior_claims.sql`, `docs/RUN_THIS_SQL.sql` §46, `scripts/circle-idle-behavior-claims-sql-smoketest.ts`, `scripts/circle-idle-behavior-claims-sql-behavior-smoketest.sh` |
+| Office Agent panel router and canonical Chat handoff | `src/lib/{agentRunSystem,agentRuntimeSubject,chatAgentTargets,circleIntegrations,circleOffice,officeAgentSessionBinding,openswanService,progression,siteAutomation}.ts`, `src/services/hitlService.ts`, `src/components/AgentControlCard.tsx`, `src/components/rpg/{AgentEvolutionCard,StreakFlame,XPEventFeed}.tsx`, `src/screens/circles/CircleDetailScreen.tsx`, `src/screens/circles/tabs/{ChatTab,OfficeTab}.tsx`, `src/screens/circles/tabs/office/{AgentPanel,AgentPanelShell,AgentOverviewPanel,AgentActivityPanel,AgentGatewayPanels,AgentTerminalPanels,AgentMemoryPanel,AgentRunsPanel,AgentSpiritPanel,AgentEvolutionPanel,Whiteboard}.tsx`, `src/screens/circles/tabs/office/{AgentPanelTabs,useAgentPanelLayout}.ts`, and the `office-agent-*` plus OpenSwan panel/lifecycle smokes |
 | Chat plan approval capability identity | `src/lib/chatPlanApprovalAuthorityCore.ts`, `src/lib/runChatAutomationPlan.ts`, `src/lib/openswanToolApprovals.ts` |
 | Dependency compatibility and Expo image build boundary | `package.json`, `package-lock.json`, `scripts/dependency-override-compat-smoketest.mjs`, `scripts/expo-image-asset-guard.mjs`, `scripts/expo-image-asset-guard-smoketest.mjs`, `scripts/security-release-check.mjs` |
 | Chat planning and terminal transport | `src/lib/chatAutomationPlanner.ts`, `src/lib/chatTerminalTransportPolicy.ts` |
@@ -699,30 +700,34 @@ snapshot. It never copies the session identity onto the public
 `circle_office_agents` row. The gateway token is never written to the binding,
 Office agent, claim, or run: it remains in device-local secret storage.
 
-The Office agent drawer is task-first and lazy. Its default Overview performs
-no name-based agent creation and does not prefetch Terminal, Memory, Runs,
-Spirit, or gateway bundles. The OpenSwan tab initially loads only the exact
-connection/session evidence needed for one task handoff; acceptance is shown as
-nonterminal and completion remains unverified. Binding, history/status,
-runtime-agent, subagent, search, and Cron diagnostics activate only behind one
-accessible Advanced options disclosure, and unloaded diagnostics are not shown
-as zero. Closing it drops cached history, runtime inventory, and private
-binding rows so reopening requires a fresh exact snapshot. Provider and Cron
-mutations are single-flight; Cron run/create actions
-are confirmed and always release their busy lock. The collapsed Office command
-board does not poll the full bridge-readiness catalog. Overview exposes the
-Claude bridge allowlist as read-only diagnostics, not a shell or task sender;
-it never writes a fake queued activity row, and the embedded summary does not
-duplicate destructive controls. Standalone offline/removal actions are
-confirmation-gated, truthfully labeled, and exact-UUID scoped for published
-agents. Its compact bridge summary performs one generation-fenced mount probe
-plus manual refresh through the shared OpenSwan browser-proxy/native-direct
-endpoint order; it does not duplicate the Office auto-connect poller. The panel uses
-the captured exact Office user/circle/bearer authority and never recovers
-mutable global auth. It opens with one identity/status header, current work,
-connection truth, and collapsed Agent details. Centered mode owns and restores
-focus, docked mode is non-modal, and compact web always uses modal sheet
-semantics above sticky Office controls with 44 px action targets. Run
+The Office Agent popup is task-first and lazy without becoming another task
+runtime. It has four stable destinations (Overview, Work, Runtime, More) whose
+contextual routes are capability-filtered; DB-only or unauthenticated rows do
+not expose unusable live OpenSwan sections. Lazy failures are retryable, and a
+subject or authority-generation change resets and remounts section resources.
+
+Overview, OpenSwan, and Terminal pass an exact agent id plus optional bounded
+draft through the typed Circle handle into hydrated Chat. Chat selects and
+focuses the target but never auto-sends; it remains the owner of durable
+messages, approvals, runs, proof, and recovery. OpenSwan loads only exact
+connection/session evidence by default, with private binding/history/search
+behind Advanced options. Schedules are explicitly connection-level, omit the
+ambiguous current target, preserve the last verified same-scope snapshot on
+failure, require structured action/target receipts and fresh postconditions,
+and fail closed for mutation until refreshed. Session, status, history,
+subagent, runtime-agent, Cron, and web-search evidence is accepted only from
+bounded structured provider payloads. Runtime, schedules, Pause/Resume,
+main-agent, and terminal-profile controls consume captured
+user/circle/bearer/generation authority; an unknown read cannot mutate state.
+
+The compact bridge summary is read-only. Runs never mutates the ledger merely
+because it was viewed. Memory and Spirit destructive actions are confirmed and
+receipt-checked; Spirit, WordPress, and integration absence appears only after
+a verified read, while raw subject/session metadata is disclosed only under
+Inspect. Centered and compact modes block the background and restore focus,
+docked mode remains non-modal, reduced motion is honored, and the dock resize
+handle supports keyboard/assistive input. The open panel reconciles from the
+live roster rather than retaining a click-time agent snapshot. Run
 `npm run check:openswan-control-panels` for this surface.
 
 After the claim, the pure resolver still requires the exact Office-agent UUID,
