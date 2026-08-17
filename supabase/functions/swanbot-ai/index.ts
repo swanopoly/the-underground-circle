@@ -11,6 +11,16 @@ import {
 } from "../_shared/edge.ts";
 import { checkCircleClaudeBudget } from "../_claude/anthropic.ts";
 import { wrapUntrusted } from "../_shared/untrusted.ts";
+import {
+  exactAgentSpiritContextErrorResponse,
+  resolveExactAgentSpiritContext,
+  type ExactAgentSpiritContext,
+} from "../_shared/agent-spirit-context.ts";
+import {
+  parseSwanBotExactAgentTarget,
+  prependAssignedAgentSpiritPrompt,
+  type SwanBotExactAgentTarget,
+} from "../../../src/lib/agentSpiritPromptCore.ts";
 // Secret-hygiene gate for memory writes. Pure, dependency-free module shared
 // verbatim with the client writers (`agentRunSystem.saveMemory`,
 // `userMemory.ts`) — one source of truth, no `_shared/` duplicate to drift.
@@ -585,7 +595,14 @@ function routeSkills(message: string, spirit?: string | null, ctx?: any): string
 
 // ─── Context Gathering ───────────────────────────────────────────────────────
 
-async function gatherCircleContext(supabase: any, circleId: string, userId: string, userMessage?: string, targetAgentName?: string) {
+async function gatherCircleContext(
+  supabase: any,
+  circleId: string,
+  userId: string,
+  userMessage?: string,
+  targetAgentName?: string,
+  exactAgentContext?: ExactAgentSpiritContext,
+) {
   const today = new Date().toISOString().split("T")[0];
   const weekAgo = new Date();
   weekAgo.setDate(weekAgo.getDate() - 7);
@@ -651,9 +668,18 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     // below, Alice's `/remember` preference was loaded verbatim into Bob's next
     // turn. Shared rows are fair game; private rows only for their own owner.
     safe(supabase.from("memory_entries").select("title, content, memory_kind, importance, scope, retrieval_mode, metadata, updated_at").eq("circle_id", circleId).eq("is_active", true).or(`visibility.neq.private,user_id.eq.${userId}`).order("importance", { ascending: false }).order("updated_at", { ascending: false }).limit(30)),
-    // Agent personality + spirit + spawn config — load for TARGETED agent, fallback to BlackSwan
-    safeSingle(supabase.from("agent_personalities").select("personality").eq("user_id", userId).eq("circle_id", circleId).eq("agent_name", targetAgentName || "BlackSwan").maybeSingle()),
-    safeSingle(supabase.from("circle_office_agents").select("spirit, current_goal").eq("circle_id", circleId).eq("name", targetAgentName || "BlackSwan").maybeSingle()),
+    // Legacy requests without immutable target identity retain the old
+    // BlackSwan/name compatibility lookup. Exact Office/session targets use the
+    // pre-resolved id-bound snapshot and never issue a service-role name query.
+    exactAgentContext?.exactTarget
+      ? Promise.resolve(null)
+      : safeSingle(supabase.from("agent_personalities").select("personality").eq("user_id", userId).eq("circle_id", circleId).eq("agent_name", targetAgentName || "BlackSwan").maybeSingle()),
+    exactAgentContext?.exactTarget
+      ? Promise.resolve({
+          spirit: exactAgentContext.spiritId,
+          current_goal: exactAgentContext.currentGoal,
+        })
+      : safeSingle(supabase.from("circle_office_agents").select("spirit, current_goal").eq("circle_id", circleId).eq("name", targetAgentName || "BlackSwan").maybeSingle()),
     // SOUL wisdom — Phase 3: pre-distilled guidance for this agent's spirit
     safe(supabase.from("soul_wisdom").select("soul_key, body, generated_at, source_count").eq("circle_id", circleId).limit(5)),
   ]);
@@ -702,6 +728,7 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     memories,
     agentPersonality: agentPersonality?.personality || null,
     spirit: agentSpirit?.spirit || null,
+    agentSpiritPrompt: exactAgentContext?.spiritPrompt || null,
     soulWisdom: soulWisdomRows || [],
     spawnConfig: (() => {
       try {
@@ -1141,7 +1168,11 @@ function isUuidLike(value: unknown): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
 }
 
-function normalizeSwanBotTargetAgentMetadata(input: Record<string, unknown>, targetAgentName: string): Record<string, unknown> {
+function normalizeSwanBotTargetAgentMetadata(
+  input: Record<string, unknown>,
+  targetAgentName: string,
+  exactTarget?: SwanBotExactAgentTarget,
+): Record<string, unknown> {
   const subject = input.agentSubject && typeof input.agentSubject === "object"
     ? input.agentSubject as Record<string, unknown>
     : input.agentSubjectMetadata && typeof input.agentSubjectMetadata === "object"
@@ -1150,11 +1181,13 @@ function normalizeSwanBotTargetAgentMetadata(input: Record<string, unknown>, tar
   const subjectKey = cleanAgentSubjectString(input.targetAgentSubjectKey)
     || cleanAgentSubjectString(input.agentSubjectKey)
     || cleanAgentSubjectString(subject.agentSubjectKey);
-  const dbId = cleanAgentSubjectString(input.targetAgentDbId)
+  const dbId = exactTarget?.dbId
+    || cleanAgentSubjectString(input.targetAgentDbId)
     || cleanAgentSubjectString(input.agentDbId)
     || cleanAgentSubjectString(subject.agentDbId)
     || (isUuidLike(input.targetAgentId) ? cleanAgentSubjectString(input.targetAgentId) : undefined);
-  const sessionKey = cleanAgentSubjectString(input.agentSessionKey)
+  const sessionKey = exactTarget?.sessionKey
+    || cleanAgentSubjectString(input.agentSessionKey)
     || cleanAgentSubjectString(subject.agentSessionKey);
   const legacyIds = cleanAgentSubjectStringArray([
     ...cleanAgentSubjectStringArray(input.targetAgentLegacyIds),
@@ -1175,6 +1208,22 @@ function normalizeSwanBotTargetAgentMetadata(input: Record<string, unknown>, tar
     };
   }
   return out;
+}
+
+function withCanonicalSwanBotTargetName(
+  metadata: Record<string, unknown>,
+  targetAgentName: string,
+): Record<string, unknown> {
+  const agentSubject = metadata.agentSubject && typeof metadata.agentSubject === 'object'
+    ? metadata.agentSubject as Record<string, unknown>
+    : null;
+  return {
+    ...metadata,
+    targetAgent: targetAgentName,
+    ...(agentSubject
+      ? { agentSubject: { ...agentSubject, agentDisplayName: targetAgentName } }
+      : {}),
+  };
 }
 
 async function createSwanBotV1Run(
@@ -3914,8 +3963,16 @@ Deno.serve(async (req: Request) => {
     const maxTokens = typeof body.maxTokens === "number" && Number.isFinite(body.maxTokens)
       ? Math.min(Math.max(Math.floor(body.maxTokens), 1), 8_192)
       : undefined;
-    const targetAgentDisplayName = targetAgentName || "BlackSwan";
-    swanBotV1TargetAgentMetadata = normalizeSwanBotTargetAgentMetadata(body as unknown as Record<string, unknown>, targetAgentDisplayName);
+    let targetAgentDisplayName = targetAgentName || "BlackSwan";
+    const exactTargetResult = parseSwanBotExactAgentTarget(body as unknown as Record<string, unknown>);
+    if (!exactTargetResult.ok) {
+      return errResponse(400, exactTargetResult.error, "Invalid or conflicting exact agent identity.");
+    }
+    swanBotV1TargetAgentMetadata = normalizeSwanBotTargetAgentMetadata(
+      body as unknown as Record<string, unknown>,
+      targetAgentDisplayName,
+      exactTargetResult.target,
+    );
 
     if (
       typeof message !== "string"
@@ -3943,6 +4000,36 @@ Deno.serve(async (req: Request) => {
       userId,
     });
     if (membershipRejection) return membershipRejection;
+    const relayToolsDisabled = body.tools_disabled === true
+      || (Array.isArray(body.tools) && body.tools.length === 0);
+    const exactAgentContextResult = relayToolsDisabled
+      ? {
+          ok: true as const,
+          context: {
+            exactTarget: exactTargetResult.target.exact,
+            canonicalAgentName: null,
+            spiritId: null,
+            spiritPrompt: null,
+            currentGoal: null,
+          },
+        }
+      : await resolveExactAgentSpiritContext(supabase, {
+          circleId,
+          userId,
+          target: exactTargetResult.target,
+        });
+    if (!exactAgentContextResult.ok) {
+      const failure = exactAgentSpiritContextErrorResponse(exactAgentContextResult.code);
+      return errResponse(failure.status, failure.code, failure.message);
+    }
+    const exactAgentContext = exactAgentContextResult.context;
+    if (exactAgentContext.canonicalAgentName) {
+      targetAgentDisplayName = exactAgentContext.canonicalAgentName;
+    }
+    swanBotV1TargetAgentMetadata = withCanonicalSwanBotTargetName(
+      swanBotV1TargetAgentMetadata,
+      targetAgentDisplayName,
+    );
     if (isHostedCustomEndpointModel(model)) {
       return errResponse(
         400,
@@ -3990,12 +4077,14 @@ Deno.serve(async (req: Request) => {
     // it here either finishes the summarize call honestly or fails visibly
     // (Anthropic rejects tool_use history without tools → 502 → the callers'
     // existing limit-note fallback) — never a silent persona answer.
-    const relayToolsDisabled = body.tools_disabled === true
-      || (Array.isArray(body.tools) && body.tools.length === 0);
     const hasRelayTools = !relayToolsDisabled && !!body.tools && Array.isArray(body.tools) && body.tools.length > 0;
     if (hasRelayTools || relayToolsDisabled) {
       const isMarketplaceRelay = hasRelayTools && !!model && /^(openai|openai_compatible|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama|github-models)\//.test(model);
       let routingFallback: { provider: string; reason: string } | null = null;
+      const relaySystemPrompt = prependAssignedAgentSpiritPrompt(
+        body.system_override || "You are OpenSwan, a helpful AI assistant.",
+        relayToolsDisabled ? null : exactAgentContext.spiritPrompt,
+      );
 
       if (isMarketplaceRelay && circleId) {
         const slashIdx = model!.indexOf("/");
@@ -4089,7 +4178,7 @@ Deno.serve(async (req: Request) => {
               provider: providerKey,
               modelId: tail,
               endpointOverride,
-              systemPrompt: body.system_override || "You are OpenSwan, a helpful AI assistant.",
+              systemPrompt: relaySystemPrompt,
               messages: oaiMessages,
               tools: oaiTools,
               apiKey: providerApiKey,
@@ -4171,7 +4260,7 @@ Deno.serve(async (req: Request) => {
       const relayMessages = body.tool_messages && body.tool_messages.length > 0
         ? body.tool_messages
         : [{ role: "user", content: message }];
-      const relaySystem = body.system_override || "You are OpenSwan, a helpful AI assistant.";
+      const relaySystem = relaySystemPrompt;
       const relayMaxTokens = maxTokens || 4096;
 
       if (isMarketplaceRelay) {
@@ -4357,9 +4446,17 @@ Deno.serve(async (req: Request) => {
       targetAgentMetadata: swanBotV1TargetAgentMetadata,
     });
 
-    // Gather full circle context (includes relevant knowledge entries + memories)
-    // Pass targetAgentName so we load the correct agent's spirit + spawn config
-    const context: any = await gatherCircleContext(supabase, circleId, userId, message, targetAgentName);
+    // Gather full circle context. Immutable targets carry the exact id-bound
+    // Spirit/spawn snapshot above; only a legacy request without exact identity
+    // may enter gatherCircleContext's compatibility name lookup.
+    const context: any = await gatherCircleContext(
+      supabase,
+      circleId,
+      userId,
+      message,
+      targetAgentDisplayName,
+      exactAgentContext,
+    );
     context.wikiContext = wikiContext || null;
 
     // Route skills — spirit-aware + context-gated
@@ -4388,8 +4485,12 @@ Deno.serve(async (req: Request) => {
       frozenPrompt = context.agentPersonality + "\n\n" + frozenPrompt;
     }
 
-    // Prepend agent spirit prompt — already fetched in parallel context gathering
-    if (context.spirit) {
+    // Exact targets use the complete canonical built-in/custom prompt resolved
+    // from immutable server identity. The static map below remains only for a
+    // legacy request that supplied no exact DB/session identity.
+    if (context.agentSpiritPrompt) {
+      frozenPrompt = context.agentSpiritPrompt + "\n\n" + frozenPrompt;
+    } else if (context.spirit) {
       const spiritId = context.spirit;
       {
         // Map spirit ID to prompt prefix

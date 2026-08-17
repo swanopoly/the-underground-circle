@@ -32,9 +32,9 @@ interface Props {
   agent: OfficeAgent | null;
   onClose: () => void;
   isDesktop?: boolean;
-  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<boolean> | boolean;
+  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<boolean>;
   onAgentIdentityChange?: () => void;
-  onRemoveAgent?: (agent: OfficeAgent) => Promise<void> | void;
+  onRemoveAgent?: (agent: OfficeAgent) => Promise<boolean>;
   sessionTags?: Map<string, SessionTag[]>;
   onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
   onRemoveSessionTag?: (sessionKey: string, tagKey: string) => void;
@@ -45,11 +45,16 @@ interface Props {
   identityAuthority?: AgentPanelIdentityAuthority | null;
   runtimeConnectionId?: string | null;
   appearances?: Record<string, AgentAppearance>;
-  onAppearanceChange?: (id: string, appearance: AgentAppearance) => void | Promise<void>;
+  onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<boolean>;
   environmentType?: EnvironmentType;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
   onOpenAgentInChat?: (agentId: string, draft?: string) => void;
 }
+
+export type AgentPanelActionNotice = {
+  kind: 'success' | 'error';
+  message: string;
+} | null;
 
 type GatewayPanelsModule = typeof import('./AgentGatewayPanels');
 type TerminalPanelsModule = typeof import('./AgentTerminalPanels');
@@ -214,8 +219,6 @@ export default function AgentPanel({
   // into a non-modal inspector. Keep the preference for the next desktop
   // visit, but use centered dialog semantics at compact widths.
   const effectivePanelMode = isDesktop ? panelMode : 'center';
-  const [editing, setEditing] = useState(false);
-  const [editName, setEditName] = useState('');
   // Office supplies one immutable user/circle/bearer snapshot. Never recover
   // a replacement identity authority from the mutable global auth client.
   const exactIdentityAuthority = useMemo<OfficeConnectionExactAuthority | null>(() => {
@@ -258,16 +261,21 @@ export default function AgentPanel({
     latestExactIdentityAuthorityRef.current = null;
   }, []);
   const userId = exactIdentityAuthority?.userId || null;
-  const [removingAgent, setRemovingAgent] = useState(false);
   const returnFocusRef = useRef<HTMLElement | null>(null);
-  const [reduceMotion, setReduceMotion] = useState(false);
+  // `null` means the platform preference has not resolved yet. Treat unknown
+  // (and a failed read) as reduced motion so native never flashes an entrance
+  // animation before it knows the user's accessibility preference.
+  const [reduceMotionPreference, setReduceMotionPreference] = useState<boolean | null>(null);
+  const reduceMotion = reduceMotionPreference !== false;
 
   useEffect(() => {
     let mounted = true;
     void AccessibilityInfo.isReduceMotionEnabled().then(enabled => {
-      if (mounted) setReduceMotion(enabled);
-    }).catch(() => {});
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+      if (mounted) setReduceMotionPreference(enabled);
+    }).catch(() => {
+      if (mounted) setReduceMotionPreference(true);
+    });
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotionPreference);
     return () => {
       mounted = false;
       subscription.remove();
@@ -280,6 +288,22 @@ export default function AgentPanel({
   // Initialize at 1/1 so the open frame paints fully visible immediately.
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
+  const panelAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const previouslyOpenAgentRef = useRef<OfficeAgent | null>(null);
+  const stopPanelAnimation = useCallback(() => {
+    panelAnimationRef.current?.stop();
+    panelAnimationRef.current = null;
+    scaleAnim.stopAnimation();
+    opacityAnim.stopAnimation();
+    slideAnim.stopAnimation();
+  }, [opacityAnim, scaleAnim, slideAnim]);
+  const startPanelAnimation = useCallback((animation: Animated.CompositeAnimation) => {
+    stopPanelAnimation();
+    panelAnimationRef.current = animation;
+    animation.start(() => {
+      if (panelAnimationRef.current === animation) panelAnimationRef.current = null;
+    });
+  }, [stopPanelAnimation]);
   // A published Office row already carries its exact UUID as the db-agent
   // session key. Never create or name-match a durable agent merely because a
   // read-only panel opened; live runtime sessions keep their own exact subject.
@@ -310,6 +334,30 @@ export default function AgentPanel({
     identityAuthority?.accessToken,
     runtimeConnectionId,
   ]);
+  const [renameDraft, setRenameDraft] = useState<{ scopeKey: string; name: string } | null>(null);
+  const [renameBusyScopeKey, setRenameBusyScopeKey] = useState<string | null>(null);
+  const [removeBusyScopeKey, setRemoveBusyScopeKey] = useState<string | null>(null);
+  const [scopedActionNotice, setScopedActionNotice] = useState<(
+    NonNullable<AgentPanelActionNotice> & { scopeKey: string }
+  ) | null>(null);
+  const latestPanelScopeKeyRef = useRef(panelScopeKey);
+  latestPanelScopeKeyRef.current = panelScopeKey;
+  const renameInFlightRef = useRef(false);
+  const removeInFlightRef = useRef(false);
+  const renameRequestGenerationRef = useRef(0);
+  const removeRequestGenerationRef = useRef(0);
+  const editing = renameDraft?.scopeKey === panelScopeKey;
+  const editName = editing ? renameDraft.name : '';
+  const renameBusy = renameBusyScopeKey === panelScopeKey;
+  const removingAgent = removeBusyScopeKey === panelScopeKey;
+  const actionNotice = scopedActionNotice?.scopeKey === panelScopeKey
+    ? scopedActionNotice
+    : null;
+  const setEditName = useCallback((name: string) => {
+    setRenameDraft(current => current?.scopeKey === panelScopeKey
+      ? { ...current, name }
+      : current);
+  }, [panelScopeKey]);
   const panelCapabilities = useMemo<AgentPanelCapabilities>(() => ({
     hasCircleContext: !!circleId,
     hasIdentityAuthority: !!exactIdentityAuthority,
@@ -481,30 +529,34 @@ export default function AgentPanel({
   useEffect(() => {
     let rafId: number | null = null;
     let timerId: any = null;
+    const wasOpen = previouslyOpenAgentRef.current !== null;
+    const isOpening = !!agent && !wasOpen;
+    previouslyOpenAgentRef.current = agent;
+    stopPanelAnimation();
     if (agent) {
       // Open: render at full opacity/scale and let CSS keyframes handle the
       // entrance feel on web. The previous Animated.Value-driven scale+fade
       // re-rendered the entire panel tree on every frame and felt laggy.
       scaleAnim.setValue(1);
       opacityAnim.setValue(1);
-      setBackdropOn(reduceMotion);
-      if (!reduceMotion && typeof requestAnimationFrame !== 'undefined') {
+      setBackdropOn(reduceMotion || !isOpening);
+      if (!reduceMotion && isOpening && typeof requestAnimationFrame !== 'undefined') {
         rafId = requestAnimationFrame(() => setBackdropOn(true));
-      } else if (!reduceMotion) {
+      } else if (!reduceMotion && isOpening) {
         timerId = setTimeout(() => setBackdropOn(true), 16);
       }
       // Mobile bottom sheet slide — uses native driver via Animated, fast
       if (!isDesktop) {
-        if (reduceMotion) {
+        if (reduceMotion || !isOpening) {
           slideAnim.setValue(0);
         } else {
           slideAnim.setValue(400);
-          Animated.spring(slideAnim, {
+          startPanelAnimation(Animated.spring(slideAnim, {
             toValue: 0,
             useNativeDriver: Platform.OS !== 'web',
             tension: 180,
             friction: 20,
-          }).start();
+          }));
         }
       }
     } else {
@@ -516,28 +568,43 @@ export default function AgentPanel({
         opacityAnim.setValue(0);
         if (!isDesktop) slideAnim.setValue(0);
       } else {
-        Animated.parallel([
+        startPanelAnimation(Animated.parallel([
           Animated.timing(scaleAnim, { toValue: 0.97, duration: 80, useNativeDriver: Platform.OS !== 'web' }),
           Animated.timing(opacityAnim, { toValue: 0, duration: 80, useNativeDriver: Platform.OS !== 'web' }),
-        ]).start();
-        if (!isDesktop) {
-          Animated.timing(slideAnim, { toValue: 400, duration: 120, useNativeDriver: Platform.OS !== 'web' }).start();
-        }
+          ...(!isDesktop
+            ? [Animated.timing(slideAnim, { toValue: 400, duration: 120, useNativeDriver: Platform.OS !== 'web' })]
+            : []),
+        ]));
       }
     }
     return () => {
       if (rafId !== null && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(rafId);
       if (timerId !== null) clearTimeout(timerId);
+      stopPanelAnimation();
     };
-  }, [agent, isDesktop, reduceMotion]);
+  }, [agent, isDesktop, reduceMotion, setBackdropOn, startPanelAnimation, stopPanelAnimation]);
 
   // Extract sessionKey early so hooks always run in same order
   const sessionKey = agent ? getAgentIdentityKey(agent) : undefined;
 
   useEffect(() => {
-    setEditing(false);
-    setEditName('');
-  }, [agent?.id]);
+    setRenameDraft(null);
+    setRenameBusyScopeKey(null);
+    setRemoveBusyScopeKey(null);
+    setScopedActionNotice(null);
+    renameInFlightRef.current = false;
+    removeInFlightRef.current = false;
+    renameRequestGenerationRef.current += 1;
+    removeRequestGenerationRef.current += 1;
+  }, [panelScopeKey]);
+
+  useEffect(() => () => {
+    latestPanelScopeKeyRef.current = 'closed';
+    renameRequestGenerationRef.current += 1;
+    removeRequestGenerationRef.current += 1;
+    renameInFlightRef.current = false;
+    removeInFlightRef.current = false;
+  }, []);
 
   if (!agent) return null;
 
@@ -550,6 +617,7 @@ export default function AgentPanel({
   const runtimeIdentityAuthority = exactIdentityAuthority;
   const currentTags = sessionTags?.get(sessionKey!) || [];
   const canRemoveAgent = !!onRemoveAgent
+    && !!exactIdentityAuthority
     && !!dbAgentId
     && agent.id !== 'default::blackswan'
     && agent.id !== 'blackswan-default'
@@ -564,6 +632,7 @@ export default function AgentPanel({
       scaleAnim={scaleAnim}
       opacityAnim={opacityAnim}
       slideAnim={slideAnim}
+      reduceMotion={reduceMotion}
       backdropOpacity={backdropOpacity}
       panelTransition={panelTransition}
       statusColor={statusColor}
@@ -572,17 +641,74 @@ export default function AgentPanel({
       editName={editName}
       setEditName={setEditName}
       onStartRename={() => {
-        if (!onRenameAgent || !exactIdentityAuthority) return;
-        setEditName(agent.name);
-        setEditing(true);
+        if (!onRenameAgent || !exactIdentityAuthority || renameInFlightRef.current) return;
+        setScopedActionNotice(null);
+        setRenameDraft({ scopeKey: panelScopeKey, name: agent.name });
       }}
       onSubmitRename={async () => {
-        if (!editName.trim() || !onRenameAgent || !exactIdentityAuthority) return;
-        const saved = await onRenameAgent(agent, editName.trim());
-        if (saved && isExactIdentityAuthorityCurrent(exactIdentityAuthority)) setEditing(false);
+        const normalizedName = editName.trim();
+        const capturedAuthority = exactIdentityAuthority;
+        const capturedScopeKey = panelScopeKey;
+        if (
+          !normalizedName
+          || !onRenameAgent
+          || !capturedAuthority
+          || renameInFlightRef.current
+          || !isExactIdentityAuthorityCurrent(capturedAuthority)
+        ) return;
+        renameInFlightRef.current = true;
+        const requestGeneration = renameRequestGenerationRef.current + 1;
+        renameRequestGenerationRef.current = requestGeneration;
+        setRenameBusyScopeKey(capturedScopeKey);
+        setScopedActionNotice(null);
+        try {
+          const saved = await onRenameAgent(agent, normalizedName);
+          if (
+            latestPanelScopeKeyRef.current !== capturedScopeKey
+            || renameRequestGenerationRef.current !== requestGeneration
+            || !isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) return;
+          if (saved !== true) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent name was not saved. Try again.',
+            });
+            return;
+          }
+          setRenameDraft(null);
+          setScopedActionNotice({
+            scopeKey: capturedScopeKey,
+            kind: 'success',
+            message: 'Agent name saved.',
+          });
+        } catch (err) {
+          console.warn('[AgentPanel] Rename failed:', err);
+          if (
+            latestPanelScopeKeyRef.current === capturedScopeKey
+            && renameRequestGenerationRef.current === requestGeneration
+            && isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent name was not saved. Try again.',
+            });
+          }
+        } finally {
+          if (renameRequestGenerationRef.current === requestGeneration) {
+            renameInFlightRef.current = false;
+            if (latestPanelScopeKeyRef.current === capturedScopeKey) setRenameBusyScopeKey(null);
+          }
+        }
       }}
-      onCancelRename={() => setEditing(false)}
+      onCancelRename={() => {
+        if (renameInFlightRef.current) return;
+        setRenameDraft(null);
+      }}
       canRenameAgent={!!onRenameAgent && !!exactIdentityAuthority}
+      renameBusy={renameBusy}
+      actionNotice={actionNotice}
       onClose={onClose}
       onToggleMode={toggleMode}
       onStartSideResize={startSideResize}
@@ -590,19 +716,65 @@ export default function AgentPanel({
       canRemoveAgent={canRemoveAgent}
       removingAgent={removingAgent}
       onRemoveAgent={async () => {
-        if (removingAgent || !onRemoveAgent) return;
-        const confirmed = await showConfirm({
-          title: `Remove ${agent.name} from this Office?`,
-          message: 'This removes the published Office agent. It does not stop a local runtime or delete its files.',
-          confirmLabel: 'Remove agent',
-          destructive: true,
-        });
-        if (!confirmed) return;
-        setRemovingAgent(true);
+        const capturedAuthority = exactIdentityAuthority;
+        const capturedScopeKey = panelScopeKey;
+        if (
+          removeInFlightRef.current
+          || !onRemoveAgent
+          || !capturedAuthority
+          || !isExactIdentityAuthorityCurrent(capturedAuthority)
+        ) return;
+        removeInFlightRef.current = true;
+        const requestGeneration = removeRequestGenerationRef.current + 1;
+        removeRequestGenerationRef.current = requestGeneration;
         try {
-          await onRemoveAgent(agent);
+          const confirmed = await showConfirm({
+            title: `Remove ${agent.name} from this Office?`,
+            message: 'This removes the published Office agent. It does not stop a local runtime or delete its files.',
+            confirmLabel: 'Remove agent',
+            destructive: true,
+          });
+          if (
+            !confirmed
+            || latestPanelScopeKeyRef.current !== capturedScopeKey
+            || removeRequestGenerationRef.current !== requestGeneration
+            || !isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) return;
+          setRemoveBusyScopeKey(capturedScopeKey);
+          setScopedActionNotice(null);
+          const removed = await onRemoveAgent(agent);
+          if (
+            latestPanelScopeKeyRef.current !== capturedScopeKey
+            || removeRequestGenerationRef.current !== requestGeneration
+            || !isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) return;
+          if (removed !== true) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent could not be removed. Try again.',
+            });
+            return;
+          }
+          onClose();
+        } catch (err) {
+          console.warn('[AgentPanel] Agent removal failed:', err);
+          if (
+            latestPanelScopeKeyRef.current === capturedScopeKey
+            && removeRequestGenerationRef.current === requestGeneration
+            && isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent could not be removed. Try again.',
+            });
+          }
         } finally {
-          setRemovingAgent(false);
+          if (removeRequestGenerationRef.current === requestGeneration) {
+            removeInFlightRef.current = false;
+            if (latestPanelScopeKeyRef.current === capturedScopeKey) setRemoveBusyScopeKey(null);
+          }
         }
       }}
       tabs={tabs}
@@ -618,10 +790,10 @@ export default function AgentPanel({
           key={`${exactIdentityAuthority?.userId || 'locked'}::${exactIdentityAuthority?.circleId || circleId || 'none'}::${agent.id}`}
           agent={agent}
           circleId={circleId}
+          runtimeConnectionId={runtimeConnectionId}
           identityAuthority={exactIdentityAuthority}
           isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
           onClose={onClose}
-          onRenameAgent={onRenameAgent}
           onAgentIdentityChange={onAgentIdentityChange}
           onRunCommand={onRunCommand}
           onOpenInChat={openAgentInChat}

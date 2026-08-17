@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../../../lib/supabase';
+import { useExactRunHistoryAuthority } from '../../../hooks/useAuth';
 import { subscribeWithReconnect } from '../../../lib/subscribeWithReconnect';
 import {
   MAX_DRAFT_LENGTH,
@@ -2173,6 +2174,10 @@ export default function ChatTab({
   focusAgentRequestId = 0,
 }: ChatTabProps) {
   const navigation = useNavigation<any>();
+  const {
+    exactAuthority: runHistoryExactAuthority,
+    isExactAuthorityCurrent: isRunHistoryExactAuthorityCurrent,
+  } = useExactRunHistoryAuthority(circleId);
   const { width: viewportWidth } = useWindowDimensions();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -19303,6 +19308,8 @@ export default function ChatTab({
         currentUserId={currentUserId}
         chatSessionId={activeThreadId}
         title="OpenSwan Run History"
+        exactAuthority={runHistoryExactAuthority}
+        isExactAuthorityCurrent={isRunHistoryExactAuthorityCurrent}
         onClose={() => setShowRunHistory(false)}
       />
       {threadNavigationNotice ? (

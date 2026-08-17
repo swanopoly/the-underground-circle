@@ -359,6 +359,8 @@ export default function XPEventFeed({
           ref={scrollRef}
           style={styles.scroll}
           showsVerticalScrollIndicator={false}
+          nestedScrollEnabled
+          accessibilityLabel="Recent XP events"
         >
           {events.map(event => (
             <FeedRow

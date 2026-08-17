@@ -19455,21 +19455,15 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'agent.set_spirit': {
-      try {
-        const a = args as any;
-        const agentId = typeof a.agent_id === 'string' ? a.agent_id.trim() : '';
-        if (!agentId || typeof a.spirit !== 'string') {
-          return { ok: false, resultsText: 'agent_id and spirit are required.' } as any;
-        }
-        const spirit = a.spirit.trim();
-        const { error } = await supabase
-          .from('circle_office_agents')
-          .update({ spirit: spirit || null, updated_at: new Date().toISOString() })
-          .eq('id', agentId)
-          .eq('circle_id', context.circleId);
-        if (error) return { ok: false, resultsText: `Set spirit failed: ${error.message}` } as any;
-        return { ok: true, resultsText: spirit ? `Agent spirit set to "${spirit}".` : 'Agent spirit cleared.' } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      // Published Spirit is a two-table identity mutation. This runtime
+      // context intentionally carries no reusable bearer/generation authority,
+      // so it cannot safely call the owner-bound §48 transaction. Keep the
+      // model tool fail-closed until Chat supplies an exact reviewed command
+      // authority rather than falling back to an ambient public-row update.
+      return {
+        ok: false,
+        resultsText: 'Spirit changes require the exact published-agent editor in Office. No Spirit data was changed.',
+      } as any;
     }
     case 'memory.pin':
     case 'memory.unpin': {

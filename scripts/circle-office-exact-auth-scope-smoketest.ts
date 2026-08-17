@@ -140,7 +140,6 @@ const operationSections = [
   ['status', 'export async function updateAgentStatus', '// ─── Set all user'],
   ['offline', 'export async function setAgentsOffline', '// ─── Check if user'],
   ['own roster', 'export async function getUserCircleAgents', '// ─── Subscribe'],
-  ['spirit', 'export async function updateAgentSpirit', '// ─── Update gateway'],
   ['gateway', 'export async function updateAgentGatewayUrl', '// ─── Remove a published'],
   ['remove', 'export async function removeCircleOfficeAgent', '__END__'],
 ] as const;
@@ -170,6 +169,9 @@ assert(
   source.includes('function hiddenKey(userId: string, circleId: string, name: string)'),
   'hidden-agent suppression is partitioned by user and circle',
 );
+const retiredSpirit = section('export async function updateAgentSpirit', '// ─── Update gateway');
+assert(retiredSpirit.includes("return { error: 'atomic_spirit_assignment_required' }"), 'legacy public-only Spirit mutation fails closed');
+assert(!retiredSpirit.includes(".from('circle_office_agents')"), 'legacy Spirit mutation cannot bypass the atomic assignment RPC');
 
 console.log(`\nPASS: ${assertions} Circle Office exact-auth assertions`);
 }

@@ -104,8 +104,8 @@ cross-surface focus requests continue to override the default.
 | Chat attachment identity and visual-brief boundary | `src/lib/chatMedia.ts`, `src/lib/chatAttachments.ts`, `src/lib/attachmentPreflightCore.ts`, `src/lib/attachmentRoutingCore.ts`, `src/lib/openSwanAttachmentSourceCore.ts`, `src/lib/openSwanAttachmentTurnSources.ts`, `src/lib/openSwanDesktopAttachmentAuthority.ts`, `src/lib/chatAutomationPlanner.ts`, `src/lib/chatDesktopAttachmentRouting.ts`, `src/lib/desktopBridge.ts`, `scripts/claude-bridge.js`, `src/lib/chatVisualBriefCore.ts`, `src/lib/chatVisualBrief.ts`, `src/lib/swanbotStream.ts`, `src/lib/{openswanSessionRuntime,openswanSessionRuntimeAdapters,openswanTaskPlanner,openswanToolRuntime,swanbot}.ts`, `src/lib/openswanTools/index.ts`, `supabase/functions/chat-stream/index.ts`, `supabase/migrations/{20260813160000_message_attachment_link_integrity,20260813170000_message_attachment_visibility_integrity,20260813180000_device_private_run_approval_authority}.sql`, `docs/RUN_THIS_SQL.sql` §§39-41, `scripts/{chat-single-attachment-authority,chat-single-attachment-routing-safety,chat-desktop-attachment-open-wiring,openswan-desktop-attachment-authority,openswan-desktop-attachment-runtime,desktop-attachment-open-capability,desktop-bridge-safe-refresh,desktop-attachment-app-identity,openswan-original-user-task-egress-wiring,openswan-attachment-egress-guard,device-private-run-approval-authority}-smoketest.ts` |
 | Chat connected coding-agent handoff | `src/lib/chatAgentTargets.ts`, `src/lib/customAgentBridgeDispatcher.ts`, `src/lib/bridgeTaskDispatcher.ts`, `src/lib/connectedAgentDispatch.ts`, `src/lib/terminalAgentControl.ts`, `src/lib/terminalAgentSessionLauncher.ts`, `src/screens/circles/tabs/ChatTab.tsx` |
 | Chat thread/message database authority | `supabase/migrations/20260805_messages_thread_rls_and_reactions.sql`, `docs/RUN_THIS_SQL.sql` §31, `scripts/messages-thread-rls-smoketest.ts` |
-| SwanBot client path | `src/lib/swanbot.ts`, `src/lib/swanbotClientToolDispatcher.ts` |
-| SwanBot edge path | `supabase/functions/swanbot-ai/index.ts` |
+| SwanBot client path and assigned Spirit prompt | `src/lib/{swanbot,agentSpirits,agentSpiritPromptCore,spiritCareerProfiles,spiritOperationsProfiles}.ts`, `src/lib/swanbotClientToolDispatcher.ts`, `scripts/swanbot-exact-agent-spirit-smoketest.ts` |
+| SwanBot exact target/edge path | `supabase/functions/_shared/agent-spirit-context.ts`, `supabase/functions/{swanbot-ai,swanbot-v2-ai}/index.ts` |
 | SwanBot v2 typed loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts`, `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `src/lib/swanbotV2BatchRuntime.ts`, `src/lib/swanbotV2BatchPolicy.ts`, `src/lib/swanbotV2ClientLoopFlag.ts` |
 | SwanBot continuation checkpoint privacy | `supabase/functions/_shared/swanbot-continuation-crypto.ts`, `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/migrations/20260726_swanbot_continuation_privacy.sql`, `docs/RUN_THIS_SQL.sql` §29 |
 | SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts`, `scripts/swanbot-openswan-readiness-report.ts`, `supabase/migrations/20260805_openswan_production_readiness_contract.sql`, `docs/RUN_THIS_SQL.sql` §32 |
@@ -113,7 +113,7 @@ cross-surface focus requests continue to override the default.
 | OpenSwan session runtime, exact resume, multi-action completion, and terminal truth | `src/lib/openswanSessionRuntime.ts`, `src/lib/openswanSessionRuntimeAdapters.ts`, `src/lib/openSwanMultiActionCompletionCore.ts`, `src/lib/toolLoopResume.ts`, `src/lib/openswanTaskPlanner.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/agentRunSystem.ts`, `src/lib/chatLaneOutcome.ts`, `src/lib/chatOutcomeSignals.ts`, `src/lib/persistedChatMetadata.ts`, `src/lib/roomMessageMetadata.ts`, `src/lib/roomChatService.ts`, `src/screens/circles/tabs/ChatTab.tsx`, `scripts/openswan-{terminal-outcome-contract,multi-action-completion-core,multi-action-report-tool,multi-action-artifact-evidence,multi-action-provider-causality,multi-action-read-evidence,multi-action-terminal-wiring,multi-action-semantic-evidence,resume-locator}-smoketest.ts`, `scripts/{agent-run-metadata-merge-cas,chat-multi-action-routing-invariants,room-chat-multi-action-persistence,room-message-reload-pagination}-smoketest.ts` |
 | Room document context, reviewed edits, and GitHub submission | `src/screens/circles/tabs/RoomsTab.tsx`, `src/lib/roomChatFileContext.ts`, `src/lib/roomChatService.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/builderGithubSave.ts`, `src/lib/github.ts`, `src/lib/githubChatCommands.ts`, `src/screens/circles/tabs/chat/BuilderGithubSaveModal.tsx`, `scripts/{room-chat-file-context,room-chat-minimal-ui,room-github-submit}-smoketest.ts` |
 | Owner-private Office agent → OpenSwan session binding | `src/lib/officeAgentSessionBindingCore.ts`, `src/lib/officeAgentSessionBinding.ts`, `src/lib/agentAutoConnect.ts`, `src/lib/agentAutoConnectState.ts`, `src/lib/agentInvocation.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/AgentGatewayPanels.tsx`, `supabase/migrations/20260807170000_office_agent_session_bindings.sql`, `docs/RUN_THIS_SQL.sql` §36 |
-| Office dashboard truth, stable cost semantics, exact private-state lifecycle, per-circle layout, and complete floor presets | `src/lib/officeDashboardPersistence.ts`, `src/lib/officeLayoutLocalCache.ts`, `src/lib/officeLayoutSaveReceiptCore.ts`, `src/lib/officePreferenceWriteQueueCore.ts`, `src/lib/officeFloorPresetCore.ts`, `src/lib/chatAttentionQueue.ts`, `src/lib/runHistoryFilterCore.ts`, `src/lib/officeAgents.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentPresence.ts`, `src/lib/agentHeartbeat.ts`, `src/lib/sessionCache.ts`, `src/lib/sessionTags.ts`, `src/lib/claudeUsage.ts`, `src/components/chat/RunHistoryDrawer.tsx`, `src/components/office/OfficeOpsBoardCards.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/AgentRunsPanel.tsx`, `src/screens/circles/tabs/office/AgentActivityPanel.tsx`, `src/screens/circles/tabs/office/Whiteboard.tsx`, `supabase/migrations/20260811120000_office_dashboard_state_and_floor_presets.sql`, `supabase/migrations/20260813140000_office_layout_exact_save_receipt.sql`, `supabase/migrations/20260813220000_office_user_preferences.sql`, `docs/RUN_THIS_SQL.sql` §§37/45, `scripts/office-layout-local-cache-smoketest.ts`, `scripts/office-layout-save-receipt-core-smoketest.ts`, `scripts/office-user-preferences-sql-parity-smoketest.ts`, `scripts/office-private-runtime-wiring-smoketest.ts`, `scripts/agent-identity-exact-authority-smoketest.ts` |
+| Office dashboard truth, stable cost semantics, exact private-state lifecycle, per-circle layout, and complete floor presets | `src/lib/officeDashboardPersistence.ts`, `src/lib/officeLayoutLocalCache.ts`, `src/lib/officeLayoutSaveReceiptCore.ts`, `src/lib/officePreferenceWriteQueueCore.ts`, `src/lib/officeFloorPresetCore.ts`, `src/lib/chatAttentionQueue.ts`, `src/lib/runHistoryFilterCore.ts`, `src/lib/officeAgents.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentPresence.ts`, `src/lib/agentHeartbeat.ts`, `src/lib/sessionCache.ts`, `src/lib/sessionTags.ts`, `src/lib/claudeUsage.ts`, `src/components/chat/RunHistoryDrawer.tsx`, `src/components/office/OfficeOpsBoardCards.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/AgentRunsPanel.tsx`, `src/screens/circles/tabs/office/AgentActivityPanel.tsx`, `src/screens/circles/tabs/office/Whiteboard.tsx`, `supabase/migrations/20260811120000_office_dashboard_state_and_floor_presets.sql`, `supabase/migrations/20260813140000_office_layout_exact_save_receipt.sql`, `supabase/migrations/20260813220000_office_user_preferences.sql`, `supabase/migrations/20260817130000_agent_identity_primary_rpc.sql`, `docs/RUN_THIS_SQL.sql` §§37/45/47, `scripts/office-layout-local-cache-smoketest.ts`, `scripts/office-layout-save-receipt-core-smoketest.ts`, `scripts/office-user-preferences-sql-parity-smoketest.ts`, `scripts/office-private-runtime-wiring-smoketest.ts`, `scripts/agent-identity-exact-authority-smoketest.ts`, `scripts/agent-identity-primary-rpc-sql-smoketest.ts`, `scripts/agent-identity-primary-rpc-sql-behavior-smoketest.sh` |
 | Office addon catalog, data truth, reversible floor editor, and OAuth credential control | `src/lib/officeConfig.ts`, `src/lib/officeAddonExperienceCore.ts`, `src/lib/officeValidation.ts`, `src/lib/animationHelpers.ts`, `src/lib/oauthConnect.ts`, `src/lib/officeTerminal.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/OfficeFloor.tsx`, `src/screens/circles/tabs/office/InteractiveFurniture.tsx`, `src/screens/circles/tabs/office/AgentPanelShell.tsx`, `src/screens/circles/tabs/office/officeFloorLayout.ts`, `src/components/OfficeTerminal.tsx`, `src/components/PhoneMessenger.tsx`, `src/components/office/ConnectAllBridgesPanel.tsx`, `src/components/office/OfficeBridgeDiagPanel.tsx`, `src/components/office/OfficeBridgeReadinessStrip.tsx`, `src/components/office/StatusPicker.tsx`, `src/components/office/WorldClockBar.tsx`, `supabase/functions/email-calendar-oauth/index.ts`, `supabase/migrations/20260813190000_atomic_oauth_credential_store.sql`, `docs/RUN_THIS_SQL.sql` §42, `scripts/office-addon-registry-smoketest.ts`, `scripts/office-addon-experience-core-smoketest.ts`, `scripts/office-addon-ui-wiring-smoketest.ts`, `scripts/office-validation-smoketest.ts`, `scripts/oauth-popup-boundary-smoketest.ts`, `scripts/oauth-credential-control-sql-smoketest.ts`, `scripts/oauth-credential-control-sql-behavior-smoketest.sh`, `scripts/office-terminal-broadcast-authority-smoketest.ts`, `scripts/office-authenticated-local-e2e.mjs` |
 | Personal Figma OAuth and server-only file projection | `src/lib/oauthConnect.ts`, `src/lib/oauthCallbackRelay.ts`, `src/lib/figmaBuilder.ts`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/functions/figma-oauth/index.ts`, `supabase/migrations/20260813200000_figma_oauth_credential_control.sql`, `docs/RUN_THIS_SQL.sql` §43, `scripts/figma-oauth-boundary-smoketest.ts`, `scripts/figma-oauth-credential-control-sql-smoketest.ts`, `scripts/figma-oauth-credential-control-sql-behavior-smoketest.sh` |
 | Agent runtime subject identity | `src/lib/agentRuntimeSubject.ts`, `src/lib/agentIdentityKey.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentInvocation.ts`, `src/lib/agentRuntime.ts`, `src/lib/swanbotV2BatchRuntimeCore.ts` |
@@ -655,9 +655,19 @@ Runtime and schedule reads/mutations use the captured Office
 user/circle/bearer/generation boundary.
 
 Overview Pause/Resume, main-agent, and Terminal profile mutations remain
-unavailable until their exact reads resolve. The
+unavailable until their exact reads resolve. Main-agent selection is the
+transactional exception to the single-row identity CAS path: §47 serializes
+one authenticated owner, clears and promotes inside one RPC transaction,
+enforces at most one primary per exact provider with a partial unique index,
+and returns a bounded owner/session/provider receipt before the current
+generation may replace that provider's exact local cache lane. Its narrow
+server guard also rejects direct deletion of a primary row while preserving
+ordinary non-primary deletion and provider metadata writes. The
 bridge card owns only a bounded read-only health probe. Runs is a presentation
-surface and cannot reap canonical rows on mount. Memory and Spirit expose
+surface and cannot reap canonical rows on mount. Its exact-subject scan exposes
+a partial result when the bounded candidate window is exhausted, supports
+operator-driven 1,000-row continuation up to 5,000, and shows an empty state
+only after completeness is proven. Memory and Spirit expose
 retry/error states and confirmation-gated, receipt-checked destructive actions;
 Spirit, WordPress, and integration absence is shown only after a verified read;
 raw identity/session details remain behind Inspect disclosures. Centered and
@@ -666,6 +676,32 @@ reduced motion; docked mode stays non-modal and its resize handle supports
 keyboard/assistive actions. The live roster, not the click-time object, feeds
 the open panel. Prior authenticated panel QA predates this router revision, so
 fresh responsive/native/provider validation remains pending.
+
+Published Office Spirit assignment uses
+`supabase/migrations/20260817140000_agent_spirit_assignment_rpc.sql`, mirrored
+as §48 in `docs/RUN_THIS_SQL.sql`. One owner/circle/member-bound transaction
+locks the exact published row and optional custom profile, updates the public
+Office projection plus private identity together, and returns a bounded exact
+two-row receipt before generation-fenced local publication. The paired profile
+delete RPC rejects any owner profile still referenced by a public or private
+Spirit projection and serializes with assignment; direct authenticated profile
+DELETE is revoked. Narrow triggers reject direct published public/private
+Spirit inserts, updates, or projection-key retargets, including the
+private-preseed/public-insert order, and reject deletion of the private row
+backing a published Spirit,
+while preserving ordinary null publishes and private live-session built-in or
+cleared Spirit writes and private identity deletion. Private custom assignments validate the exact same-owner
+profile UUID, name, and emoji under `FOR KEY SHARE`, serializing with profile
+deletion so no delete/assignment ordering can leave a dangling reference.
+Unverifiable 2xx receipts remain `outcome_unknown` and require refresh
+before retry. Target-keyed in-process mutation epochs plus an exact-scope cache
+publication lock prevent older §47/§48/profile-delete completions from
+overwriting newer local truth in one JavaScript realm. Cross-tab cache ordering
+still has no durable revision/CAS and therefore reconciles from server truth on
+the next exact refresh rather than claiming cross-tab local linearizability.
+Memory Soul projection requires an exact published-agent UUID and never falls
+back to mutable display-name matching.
+§48 is pending/not applied.
 Run
 `npm run check:openswan-control-panels` when changing these boundaries.
 
@@ -758,6 +794,24 @@ stay under Other alongside paused and approval-waiting rows. Only fresh
 update they become `Stale · Not Active`. Chat Run Trace shows no spinner, STOP, or Run
 Again for this state because those local controls cannot control the external
 provider session.
+
+Opening Run History is read-only and never reaps or terminalizes a run. Its
+list, direct-focus, steps, artifacts, child-run, and Realtime reads use one
+captured user/circle/bearer/generation authority; retired snapshots are hidden
+synchronously, exact circle membership is proved before an empty ledger is
+trusted, and a failed proof read is never presented as an empty history. Memory
+references and recommendations in this drawer are read-only run proof; memory
+changes belong to the canonical Memory surface. Both selected-run Realtime
+channels must report subscribed before the snapshot is labeled live; channel
+loss marks it possibly stale and exposes a manually fenced exact refresh and
+reconnect action.
+Its explicit stale Cancel action captures exact user/circle/bearer/generation
+authority, revalidates that authority and the unchanged stale heartbeat after
+confirmation, and accepts only one exact guarded row receipt. A zero-row
+compare-and-set is visibly reconciled without replay or fabricated completion.
+The Office Mine roster is also structural: exact owned DB ids, provider-main
+ids, and provenance-stamped local connection ids qualify, while equal display
+names never imply ownership.
 
 Feed uses the same classifier rather than treating every open row as active.
 Its query requests the canonical active-only subset and its render pass

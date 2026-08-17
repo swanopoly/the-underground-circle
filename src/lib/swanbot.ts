@@ -413,8 +413,9 @@ function buildOpenSwanRuntimeContextBundle(args: {
   activeSoulKey?: string | null;
   identity?: any;
   spirit?: { id: string; name: string; tagline: string } | null;
+  spiritBehaviorPrompt?: string | null;
 }): string | null {
-  const { context, data, activeSoulKey, identity, spirit } = args;
+  const { context, data, activeSoulKey, identity, spirit, spiritBehaviorPrompt } = args;
   const sections: string[] = [];
 
   sections.push([
@@ -432,7 +433,9 @@ function buildOpenSwanRuntimeContextBundle(args: {
   if (contextSubjectKey) identityLines.push(`Agent subject key: ${contextSubjectKey}`);
   const legacyIds = getContextAgentLegacyIds(context);
   if (legacyIds.length) identityLines.push(`Legacy agent ids: ${legacyIds.slice(0, 6).join(', ')}`);
-  if (identity?.customProfileName) identityLines.push(`Custom profile: ${identity.customProfileName}`);
+  // A custom profile's name is private configuration, not model context. The
+  // bounded behavior projection is injected below without exposing its label.
+  if (context.spiritId?.startsWith('custom::')) identityLines.push('Custom Spirit profile assigned.');
   if (identity?.boundAiProvider || identity?.boundModel) {
     identityLines.push(`Preferred runtime: ${identity?.boundAiProvider || 'unknown'} / ${identity?.boundModel || 'unknown'}`);
   }
@@ -460,6 +463,8 @@ function buildOpenSwanRuntimeContextBundle(args: {
     soulLines.push(identity.soulPrompt.trim().slice(0, 1200));
   }
   if (soulLines.length > 1) sections.push(soulLines.join('\n'));
+
+  if (spiritBehaviorPrompt) sections.push(spiritBehaviorPrompt);
 
   sections.push([
     '## Runtime Bundle · TOOLS.md',
@@ -4742,9 +4747,52 @@ async function buildSystemPromptAsync(
   // runtime bundle (built AFTER the wave), so they live in outer scope.
   let identity: any = null;
   let spirit: { id: string; name: string; tagline: string } | null = null;
+  let spiritBehaviorPrompt: string | null = null;
 
   const contextTasks: Array<Promise<void>> = [];
   const addContextTask = (fn: () => Promise<void>): void => { contextTasks.push(fn()); };
+
+  // Only an explicit turn-scoped Spirit assignment may affect model behavior.
+  // `contextSpiritIdResolved` can fall back to an ambient local identity cache,
+  // which is useful for presentation/retrieval but is not prompt authority.
+  addContextTask(async () => {
+    try {
+      const explicitAssignedSpiritId = typeof context.spiritId === 'string'
+        ? context.spiritId
+        : null;
+      if (!explicitAssignedSpiritId) return;
+      const { buildAssignedAgentSpiritPrompt } = await import('./agentSpiritPromptCore');
+      if (!explicitAssignedSpiritId.startsWith('custom::')) {
+        const built = buildAssignedAgentSpiritPrompt({ spiritId: explicitAssignedSpiritId });
+        if (built.ok) spiritBehaviorPrompt = built.prompt;
+        return;
+      }
+
+      const profileId = explicitAssignedSpiritId.slice('custom::'.length);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(profileId)) return;
+      // Client-side prompt construction may read only the authenticated user's
+      // exact explicitly assigned profile. The edge also defaults custom
+      // behavior to owner-only unless a future explicit shared contract proves
+      // otherwise.
+      const profileResult = await withTimeout(Promise.resolve(
+        supabase
+          .from('custom_agent_profiles')
+          .select('id,user_id,system_prompt,skill_bundle,risk_tier,action_posture,evidence_posture,communication_density,skepticism,escalation_trigger')
+          .eq('id', profileId)
+          .eq('user_id', context.userId)
+          .maybeSingle(),
+      ));
+      if (profileResult && !profileResult.error && profileResult.data) {
+        const built = buildAssignedAgentSpiritPrompt({
+          spiritId: explicitAssignedSpiritId,
+          customProfile: profileResult.data,
+          expectedCustomProfileId: profileId,
+          expectedOwnerId: context.userId,
+        });
+        if (built.ok) spiritBehaviorPrompt = built.prompt;
+      }
+    } catch (e) { console.warn('[SwanBot] Explicit Spirit behavior failed:', e); }
+  });
 
   if (loadProfile) addContextTask(async () => {
     try {
@@ -4932,7 +4980,14 @@ async function buildSystemPromptAsync(
         });
         identity = identities.get(identityKey);
         if (identity) {
-          spirit = identity.spiritId ? (getSpiritById(identity.spiritId) || null) : null;
+          // Explicit turn identity wins over ambient presentation so the label
+          // cannot contradict the exact behavior prompt. With no explicit
+          // assignment, preserve the existing presentation-only fallback.
+          spirit = context.spiritId
+            ? (getSpiritById(context.spiritId) || null)
+            : identity.spiritId
+              ? (getSpiritById(identity.spiritId) || null)
+              : null;
           const identityLines = ['## Agent Identity'];
           if (spirit) {
             identityLines.push(`Spirit: ${spirit.name} (${spirit.id})`);
@@ -5079,6 +5134,7 @@ async function buildSystemPromptAsync(
     activeSoulKey,
     identity,
     spirit,
+    spiritBehaviorPrompt,
   });
   if (runtimeBundle) sections.push({ key: 'runtime_bundle', body: runtimeBundle });
 

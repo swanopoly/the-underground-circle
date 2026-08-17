@@ -19,6 +19,16 @@ for (const marker of [
 ]) {
   assert(overview.includes(marker), `Overview wires ${marker}`);
 }
+assert(
+  overview.includes("showToast('Diagnostic failed. Review bridge status and retry.');")
+    && overview.includes("showToast(output || 'Diagnostic completed');\n        setDraft('');")
+    && !overview.includes('showToast(error instanceof Error ? error.message'),
+  'Overview retains a failed diagnostic draft and never exposes raw transport errors',
+);
+assert(
+  overview.includes('Circle memory {memorySync.label.toLowerCase()}'),
+  'Overview labels its user-and-circle memory probe without implying agent-specific freshness',
+);
 
 for (const marker of [
   'CONNECTION CRON JOBS',

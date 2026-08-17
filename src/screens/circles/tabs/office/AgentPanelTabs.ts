@@ -85,6 +85,34 @@ function isOpenSwanAgent(agent: OfficeAgent): boolean {
 }
 
 /**
+ * The loopback browser proxy owns gateway-token injection, so its canonical
+ * endpoint is the one OpenSwan connection that is valid without a client-side
+ * token. Keep this exception deliberately narrow: direct gateway and remote
+ * endpoints still require an actual, unmasked credential.
+ */
+function isCanonicalTokenlessLocalOpenSwanProxy(endpoint: unknown): boolean {
+  if (typeof endpoint !== 'string' || !endpoint.trim()) return false;
+  try {
+    const url = new URL(endpoint.trim());
+    const hostname = url.hostname.toLowerCase();
+    const loopback = hostname === 'localhost'
+      || hostname === '127.0.0.1'
+      || hostname === '[::1]'
+      || hostname === '::1';
+    return url.protocol === 'http:'
+      && loopback
+      && url.port === '18790'
+      && (url.pathname === '' || url.pathname === '/')
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve the exact connection that may back runtime-only panel routes. The
  * built-in OpenSwan card is a product identity, not a connection id: it may use
  * one singular connected OpenSwan runtime, but two candidates are deliberately
@@ -96,14 +124,17 @@ export function resolveAgentPanelRuntimeConnectionId(
   connections: readonly AgentConnection[],
 ): string | null {
   if (!agent || !isOpenSwanAgent(agent) || !Array.isArray(connections)) return null;
-  const eligible = connections.filter(connection => (
-    connection.provider === 'openswan'
-    && connection.enabled
-    && connection.status === 'connected'
-    && !!String(connection.endpoint || '').trim()
-    && !!String(connection.token || '').trim()
-    && connection.token !== '***'
-  ));
+  const eligible = connections.filter(connection => {
+    const endpoint = String(connection.endpoint || '').trim();
+    const token = String(connection.token || '').trim();
+    const hasExplicitCredential = !!token && token !== '***';
+    const usesTokenlessLocalProxy = !token && isCanonicalTokenlessLocalOpenSwanProxy(endpoint);
+    return connection.provider === 'openswan'
+      && connection.enabled
+      && connection.status === 'connected'
+      && !!endpoint
+      && (hasExplicitCredential || usesTokenlessLocalProxy);
+  });
   const isBuiltIn = agent.id === 'default::blackswan'
     || agent.id === 'blackswan-default'
     || agent.id === 'openswan:main_chat';
@@ -134,13 +165,14 @@ export function getAgentPanelTabs(
     TAB_CATALOG.activity,
     ...(hasPrivateScope ? [TAB_CATALOG.runs, TAB_CATALOG.memory] : []),
     ...(openSwanRuntimeAgent ? [TAB_CATALOG.openswan] : []),
-    // The profile portion of Terminal remains useful even when a command
-    // bridge or circle-scoped quick terminal is unavailable.
-    TAB_CATALOG.terminal,
+    // Terminal, Spirit, and Customize all read or persist owner-private agent
+    // identity. Do not advertise a locked route while exact authority is still
+    // unavailable; Overview and Activity remain truthful read-only fallbacks.
+    ...(hasPrivateScope ? [TAB_CATALOG.terminal] : []),
     ...(openSwanRuntimeAgent ? [TAB_CATALOG.cron] : []),
-    TAB_CATALOG.spirit,
+    ...(hasPrivateScope ? [TAB_CATALOG.spirit] : []),
     ...(hasPrivateScope ? [TAB_CATALOG.evolution] : []),
-    ...(canCustomize ? [TAB_CATALOG.customize] : []),
+    ...(hasPrivateScope && canCustomize ? [TAB_CATALOG.customize] : []),
   ];
 }
 

@@ -7,7 +7,7 @@
  * Surfaces: main_chat, room_chat, feed_task, office_terminal, floating_chat, scheduled, api
  */
 
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { safeGetUserForAccessToken } from './authSession';
 import type {
   OfficeConnectionAuthorityFence,
@@ -44,7 +44,12 @@ import {
   buildConnectedAgentAcceptedRunProjection,
   type ConnectedAgentHandoffReceipt,
 } from './connectedAgentHandoffCore';
-import { bucketRunForHistory } from './runHistoryFilterCore';
+import {
+  bucketRunForHistory,
+  classifyRunHistoryRealtimeStatus,
+  classifyStaleRunCancelReceipt,
+  type RunHistoryRealtimeState,
+} from './runHistoryFilterCore';
 import { isAwaitingConnectedAgentResultMetadata } from './officeOpsBoard';
 
 /**
@@ -95,6 +100,7 @@ export type AgentRunExactReadErrorCode =
   | 'invalid_authority'
   | 'authority_mismatch'
   | 'authority_retired'
+  | 'membership_denied'
   | 'scope_mismatch'
   | 'backend_error'
   | 'invalid_response';
@@ -104,6 +110,18 @@ export type AgentRunStrictReadOptions = Readonly<{
   authority: AgentRunExactReadAuthority;
   isAuthorityCurrent: AgentRunExactReadAuthorityFence;
 }>;
+
+export type AgentRunExactStaleCancelResult =
+  | Readonly<{ ok: true; run: AgentRun }>
+  | Readonly<{
+      ok: false;
+      reason:
+        | AgentRunExactReadErrorCode
+        | 'invalid_request'
+        | 'no_match'
+        | 'not_found';
+      currentRun?: AgentRun | null;
+    }>;
 
 const AGENT_RUN_EXACT_SCOPE_PART_MAX = 240;
 const AGENT_RUN_EXACT_ACCESS_TOKEN_MAX = 16_384;
@@ -184,6 +202,26 @@ async function resolveAgentRunStrictReadAuthority(
   }
   if (verifiedUser.id !== authority.userId) {
     throw new AgentRunExactReadError('authority_mismatch');
+  }
+  // RLS intentionally turns an inaccessible circle query into a successful
+  // empty result. Prove the exact subject's membership first so strict readers
+  // can distinguish a verified-empty run ledger from access denial.
+  assertAgentRunExactAuthorityCurrent(authority, options.isAuthorityCurrent);
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const { data: membership, error: membershipError } = await exactClient
+    .from('circle_members')
+    .select('circle_id,user_id')
+    .eq('circle_id', authority.circleId)
+    .eq('user_id', authority.userId)
+    .maybeSingle();
+  assertAgentRunExactAuthorityCurrent(authority, options.isAuthorityCurrent);
+  if (membershipError) throw new AgentRunExactReadError('backend_error');
+  if (
+    !membership
+    || String(membership.circle_id || '') !== authority.circleId
+    || String(membership.user_id || '') !== authority.userId
+  ) {
+    throw new AgentRunExactReadError('membership_denied');
   }
   return authority;
 }
@@ -848,6 +886,130 @@ export async function updateRunStatus(
   return true;
 }
 
+const STALE_RUN_CANCELLABLE_STATUSES = new Set<RunStatus>([
+  'queued',
+  'planning',
+  'running',
+  'waiting_approval',
+  'paused',
+]);
+
+/**
+ * Exact compare-and-set for the Run History drawer's explicit stale Cancel.
+ *
+ * This is intentionally separate from ambient `updateRunStatus`: the caller
+ * must present one captured bearer authority and a live lifecycle fence, and
+ * the UPDATE is scoped by exact row, circle, owner, observed active status, and
+ * observed heartbeat timestamp. Success requires one exact returned row. A
+ * zero-row response is reconciled and reported as a visible conflict; it is
+ * never treated as success and never patched into local UI state.
+ */
+export async function cancelStaleRunExact(
+  input: Readonly<{
+    runId: string;
+    circleId: string;
+    expectedStatus: RunStatus;
+    expectedUpdatedAt: string;
+    metadata?: Record<string, unknown> | null;
+  }>,
+  options: AgentRunStrictReadOptions,
+): Promise<AgentRunExactStaleCancelResult> {
+  const runId = normalizeAgentRunExactScopePart(input.runId);
+  const circleId = normalizeAgentRunExactScopePart(input.circleId);
+  const expectedUpdatedAt = typeof input.expectedUpdatedAt === 'string'
+    ? input.expectedUpdatedAt.trim()
+    : '';
+  if (
+    !runId
+    || !circleId
+    || !STALE_RUN_CANCELLABLE_STATUSES.has(input.expectedStatus)
+    || !expectedUpdatedAt
+    || !Number.isFinite(Date.parse(expectedUpdatedAt))
+  ) return { ok: false, reason: 'invalid_request' };
+
+  let authority: AgentRunExactReadAuthority;
+  try {
+    authority = await resolveAgentRunStrictReadAuthority(options, circleId);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof AgentRunExactReadError ? error.code : 'backend_error',
+    };
+  }
+
+  const cancelledAt = new Date().toISOString();
+  const metadata = input.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata)
+    ? {
+        ...input.metadata,
+        manuallyClosedAsStale: true,
+        manuallyClosedAt: cancelledAt,
+        manuallyClosedReason: 'no_fresh_activity',
+      }
+    : {
+        manuallyClosedAsStale: true,
+        manuallyClosedAt: cancelledAt,
+        manuallyClosedReason: 'no_fresh_activity',
+      };
+
+  try {
+    // Last synchronous fence before dispatch: an authority retired while the
+    // confirmation or bearer verification was pending cannot issue a write.
+    assertAgentRunExactAuthorityCurrent(authority, options.isAuthorityCurrent);
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { data, error } = await exactClient
+      .from('agent_runs')
+      .update({
+        status: 'cancelled',
+        updated_at: cancelledAt,
+        completed_at: cancelledAt,
+        metadata,
+      })
+      .eq('id', runId)
+      .eq('circle_id', circleId)
+      .eq('user_id', authority.userId)
+      .eq('status', input.expectedStatus)
+      .eq('updated_at', expectedUpdatedAt)
+      .select('*');
+    assertAgentRunExactAuthorityCurrent(authority, options.isAuthorityCurrent);
+    if (error) return { ok: false, reason: 'backend_error' };
+
+    const receipt = classifyStaleRunCancelReceipt(data, {
+      runId,
+      circleId,
+      userId: authority.userId,
+      cancelledAt,
+    });
+    if (receipt.ok) return { ok: true, run: mapRun(receipt.row) };
+    if (receipt.reason !== 'no_match') return { ok: false, reason: 'invalid_response' };
+
+    // Reconcile a lost compare-and-set so the UI can retain the stale row and
+    // distinguish a changed row from an inaccessible/deleted row. This is a
+    // read only; there is no retry/replay of the destructive operation.
+    assertAgentRunExactAuthorityCurrent(authority, options.isAuthorityCurrent);
+    const { data: current, error: reconcileError } = await exactClient
+      .from('agent_runs')
+      .select('*')
+      .eq('id', runId)
+      .eq('circle_id', circleId)
+      .eq('user_id', authority.userId)
+      .maybeSingle();
+    assertAgentRunExactAuthorityCurrent(authority, options.isAuthorityCurrent);
+    if (reconcileError) return { ok: false, reason: 'backend_error' };
+    if (!current) return { ok: false, reason: 'not_found', currentRun: null };
+    if (
+      String(current.id || '') !== runId
+      || String(current.circle_id || '') !== circleId
+      || String(current.user_id || '') !== authority.userId
+    ) return { ok: false, reason: 'invalid_response' };
+    return { ok: false, reason: 'no_match', currentRun: mapRun(current) };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof AgentRunExactReadError ? error.code : 'backend_error',
+    };
+  }
+}
+
 // Honest STOP: promote a run to 'completed' only when the user has not already
 // cancelled it. The console flips agent_runs.status to 'cancelled' without
 // holding the runtime's abort signal, so even after the runtime re-checks the
@@ -1438,48 +1600,95 @@ export async function resolveRunApproval(
 
 // ── 6. Query Runs ───────────────────────────────────────────────────────────
 
-export async function getRun(runId: string): Promise<AgentRun | null> {
-  const { data, error } = await supabase.from('agent_runs').select('*').eq('id', runId).single();
-  if (error || !data) return null;
+export async function getRun(
+  runId: string,
+  readOptions?: AgentRunStrictReadOptions,
+): Promise<AgentRun | null> {
+  const strictRead = readOptions?.strict === true;
+  const authority = strictRead
+    ? await resolveAgentRunStrictReadAuthority(readOptions)
+    : null;
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  let query = client.from('agent_runs').select('*').eq('id', runId);
+  if (authority) query = query.eq('circle_id', authority.circleId);
+  const { data, error } = await query.maybeSingle();
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  if (error) {
+    if (strictRead) throw new AgentRunExactReadError('backend_error');
+    return null;
+  }
+  if (!data) return null;
+  if (authority && (
+    String(data.id || '') !== runId
+    || String(data.circle_id || '') !== authority.circleId
+  )) throw new AgentRunExactReadError('invalid_response');
   return mapRun(data);
 }
 
 export async function listRuns(
   circleId: string,
   opts?: { surface?: RunSurface; status?: RunStatus; roomId?: string; userId?: string; agentId?: string; agentAliases?: string[]; limit?: number },
+  readOptions?: AgentRunStrictReadOptions,
 ): Promise<AgentRun[]> {
+  const strictRead = readOptions?.strict === true;
+  const authority = strictRead
+    ? await resolveAgentRunStrictReadAuthority(readOptions, circleId)
+    : null;
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
   const requestedLimit = opts?.limit || 50;
   const agentAliases = uniqueStrings([opts?.agentId, ...(opts?.agentAliases || [])]);
   const queryLimit = agentAliases.length > 0 ? Math.max(requestedLimit, 200) : requestedLimit;
-  let query = supabase.from('agent_runs').select('*').eq('circle_id', circleId).order('created_at', { ascending: false }).limit(queryLimit);
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  let query = client.from('agent_runs').select('*').eq('circle_id', circleId).order('created_at', { ascending: false }).limit(queryLimit);
   if (opts?.surface) query = query.eq('surface', opts.surface);
   if (opts?.status) query = query.eq('status', opts.status);
   if (opts?.roomId) query = query.eq('room_id', opts.roomId);
   if (opts?.userId) query = query.eq('user_id', opts.userId);
   const { data, error } = await query;
-  if (error || !data) return [];
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  if (error || !Array.isArray(data)) {
+    if (strictRead) throw new AgentRunExactReadError(error ? 'backend_error' : 'invalid_response');
+    return [];
+  }
+  if (authority && data.some(row => String(row?.circle_id || '') !== authority.circleId)) {
+    throw new AgentRunExactReadError('invalid_response');
+  }
   const runs = data.map(mapRun);
   return agentAliases.length === 0
     ? runs
     : runs.filter(run => runMatchesAgentAliases(run, agentAliases)).slice(0, requestedLimit);
 }
 
-export async function listRunsForAgentSubject(
+export type AgentRunSubjectListOptions = {
+  surface?: RunSurface;
+  status?: RunStatus;
+  roomId?: string;
+  userId?: string;
+  agentId?: string;
+  agentAliases?: string[];
+  agentName?: string;
+  limit?: number;
+  scanPageSize?: number;
+  maxScanRows?: number;
+};
+
+export type AgentRunSubjectListResult = Readonly<{
+  runs: AgentRun[];
+  /** True only when the server proved there are no unscanned candidate rows. */
+  complete: boolean;
+  scannedRows: number;
+}>;
+
+async function scanRunsForAgentSubject(
   circleId: string,
-  opts: {
-    surface?: RunSurface;
-    status?: RunStatus;
-    roomId?: string;
-    userId?: string;
-    agentId?: string;
-    agentAliases?: string[];
-    agentName?: string;
-    limit?: number;
-    scanPageSize?: number;
-    maxScanRows?: number;
-  },
+  opts: AgentRunSubjectListOptions,
   readOptions?: AgentRunStrictReadOptions,
-): Promise<AgentRun[]> {
+): Promise<AgentRunSubjectListResult> {
   const strictRead = readOptions?.strict === true;
   const authority = strictRead
     ? await resolveAgentRunStrictReadAuthority(readOptions, circleId)
@@ -1499,16 +1708,28 @@ export async function listRunsForAgentSubject(
   const fallbackAgentName = agentAliases.length === 0 ? String(opts.agentName || '').trim() : '';
   const matchesEverySubject = agentAliases.length === 0 && !fallbackAgentName;
   if (matchesEverySubject && !strictRead) {
-    return listRuns(circleId, opts);
+    const runs = await listRuns(circleId, opts);
+    return {
+      runs,
+      // The compatibility reader is limit-bounded and has no exact total.
+      complete: runs.length < requestedLimit,
+      scannedRows: runs.length,
+    };
   }
 
   const scanPageSize = Math.max(requestedLimit, Math.min(Math.max(opts.scanPageSize || 200, 50), 500));
-  const maxScanRows = Math.max(scanPageSize, opts.maxScanRows || 1000);
+  const maxScanRows = Math.min(
+    Math.max(scanPageSize, opts.maxScanRows || 1000),
+    5_000,
+  );
   const matches: AgentRun[] = [];
   let from = 0;
+  let scannedRows = 0;
+  let complete = false;
 
   while (from < maxScanRows && matches.length < requestedLimit) {
     const to = Math.min(from + scanPageSize - 1, maxScanRows - 1);
+    const requestedPageRows = to - from + 1;
     let query = supabase
       .from('agent_runs')
       .select('*')
@@ -1536,20 +1757,45 @@ export async function listRunsForAgentSubject(
     if (authority && data.some(row => String(row?.circle_id || '') !== authority.circleId)) {
       throw new AgentRunExactReadError('invalid_response');
     }
+    scannedRows += data.length;
 
     for (const run of data.map(mapRun)) {
       if (matchesEverySubject || runMatchesAgent(run, agentAliases, fallbackAgentName)) matches.push(run);
       if (matches.length >= requestedLimit) break;
     }
 
-    if (data.length < scanPageSize) break;
-    from += scanPageSize;
+    if (data.length < requestedPageRows) {
+      complete = true;
+      break;
+    }
+    from += requestedPageRows;
   }
 
   if (authority) {
     assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
   }
-  return matches.slice(0, requestedLimit);
+  return { runs: matches.slice(0, requestedLimit), complete, scannedRows };
+}
+
+/** Backward-compatible row-only subject reader. */
+export async function listRunsForAgentSubject(
+  circleId: string,
+  opts: AgentRunSubjectListOptions,
+  readOptions?: AgentRunStrictReadOptions,
+): Promise<AgentRun[]> {
+  return (await scanRunsForAgentSubject(circleId, opts, readOptions)).runs;
+}
+
+/**
+ * Exact panel reader that preserves scan completeness. A bounded scan that
+ * reaches its cap must never be rendered as a verified empty/full history.
+ */
+export async function listRunsForAgentSubjectPage(
+  circleId: string,
+  opts: AgentRunSubjectListOptions,
+  readOptions?: AgentRunStrictReadOptions,
+): Promise<AgentRunSubjectListResult> {
+  return scanRunsForAgentSubject(circleId, opts, readOptions);
 }
 
 export async function listChildRuns(
@@ -1592,8 +1838,17 @@ export async function listChatSessionRuns(
   circleId: string,
   chatSessionId: string,
   limit = 50,
+  readOptions?: AgentRunStrictReadOptions,
 ): Promise<AgentRun[]> {
-  const { data, error } = await supabase
+  const strictRead = readOptions?.strict === true;
+  const authority = strictRead
+    ? await resolveAgentRunStrictReadAuthority(readOptions, circleId)
+    : null;
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  const { data, error } = await client
     .from('agent_runs')
     .select('*')
     .eq('circle_id', circleId)
@@ -1601,7 +1856,16 @@ export async function listChatSessionRuns(
     .eq('chat_session_id', chatSessionId)
     .order('created_at', { ascending: false })
     .limit(limit);
-  if (error || !data) return [];
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  if (error || !Array.isArray(data)) {
+    if (strictRead) throw new AgentRunExactReadError(error ? 'backend_error' : 'invalid_response');
+    return [];
+  }
+  if (authority && data.some(row => (
+    String(row?.circle_id || '') !== authority.circleId
+    || String(row?.surface || '') !== 'main_chat'
+    || String(row?.chat_session_id || '') !== chatSessionId
+  ))) throw new AgentRunExactReadError('invalid_response');
   return data.map(mapRun);
 }
 
@@ -1887,9 +2151,30 @@ export async function getRunSteps(
   return data.map(mapStep);
 }
 
-export async function getRunArtifacts(runId: string): Promise<RunArtifact[]> {
-  const { data, error } = await supabase.from('agent_run_artifacts').select('*').eq('run_id', runId).order('created_at');
-  if (error || !data) return [];
+export async function getRunArtifacts(
+  runId: string,
+  readOptions?: AgentRunStrictReadOptions,
+): Promise<RunArtifact[]> {
+  const strictRead = readOptions?.strict === true;
+  const authority = strictRead
+    ? await resolveAgentRunStrictReadAuthority(readOptions)
+    : null;
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  let query = client.from('agent_run_artifacts').select('*').eq('run_id', runId).order('created_at');
+  if (authority) query = query.eq('circle_id', authority.circleId);
+  const { data, error } = await query;
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  if (error || !Array.isArray(data)) {
+    if (strictRead) throw new AgentRunExactReadError(error ? 'backend_error' : 'invalid_response');
+    return [];
+  }
+  if (authority && data.some(row => (
+    String(row?.circle_id || '') !== authority.circleId
+    || String(row?.run_id || '') !== runId
+  ))) throw new AgentRunExactReadError('invalid_response');
   return data.map(mapArtifact);
 }
 
@@ -2412,22 +2697,64 @@ export async function buildMemoryContext(
 
 // ── 8. Realtime Subscriptions ───────────────────────────────────────────────
 
-export function subscribeToRun(runId: string, callback: (run: AgentRun) => void) {
-  return supabase
-    .channel(`run:${runId}`)
+export function subscribeToRun(
+  runId: string,
+  callback: (run: AgentRun) => void,
+  readOptions?: AgentRunStrictReadOptions,
+  onLifecycle?: (state: RunHistoryRealtimeState) => void,
+) {
+  const strictRead = readOptions?.strict === true;
+  const authority = strictRead
+    ? normalizeAgentRunExactReadAuthority(readOptions.authority)
+    : null;
+  if (strictRead && !authority) throw new AgentRunExactReadError('invalid_authority');
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  return client
+    .channel(authority ? `run:${runId}:${authority.generation}` : `run:${runId}`)
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'agent_runs', filter: `id=eq.${runId}` }, (payload) => {
-      callback(mapRun(payload.new));
+      if (authority && !isAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent)) return;
+      const row = payload.new as Record<string, unknown> | null;
+      if (!row || String(row.id || '') !== runId) return;
+      if (authority && String(row.circle_id || '') !== authority.circleId) return;
+      callback(mapRun(row));
     })
-    .subscribe();
+    .subscribe((status) => {
+      if (authority && !isAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent)) return;
+      try { onLifecycle?.(classifyRunHistoryRealtimeStatus(status)); } catch {}
+    });
 }
 
-export function subscribeToRunSteps(runId: string, callback: (step: RunStep) => void) {
-  return supabase
-    .channel(`run-steps:${runId}`)
+export function subscribeToRunSteps(
+  runId: string,
+  callback: (step: RunStep) => void,
+  readOptions?: AgentRunStrictReadOptions,
+  onLifecycle?: (state: RunHistoryRealtimeState) => void,
+) {
+  const strictRead = readOptions?.strict === true;
+  const authority = strictRead
+    ? normalizeAgentRunExactReadAuthority(readOptions.authority)
+    : null;
+  if (strictRead && !authority) throw new AgentRunExactReadError('invalid_authority');
+  if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  return client
+    .channel(authority ? `run-steps:${runId}:${authority.generation}` : `run-steps:${runId}`)
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'agent_run_steps', filter: `run_id=eq.${runId}` }, (payload) => {
-      callback(mapStep(payload.new));
+      if (authority && !isAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent)) return;
+      const row = payload.new as Record<string, unknown> | null;
+      if (!row || String(row.run_id || '') !== runId) return;
+      if (authority && String(row.circle_id || '') !== authority.circleId) return;
+      callback(mapStep(row));
     })
-    .subscribe();
+    .subscribe((status) => {
+      if (authority && !isAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent)) return;
+      try { onLifecycle?.(classifyRunHistoryRealtimeStatus(status)); } catch {}
+    });
 }
 
 /**

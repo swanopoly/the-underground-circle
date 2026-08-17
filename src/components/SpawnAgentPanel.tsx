@@ -9,11 +9,15 @@
 
 import React, { useState, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, TextInput, Pressable, ScrollView, Platform,
+  View, Text, StyleSheet, TextInput, Pressable, ScrollView, Platform, Alert,
 } from 'react-native';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, type AgentSpirit } from '../lib/agentSpirits';
-import { publishAgentToCircle, updateAgentSpirit, PROVIDER_DISPLAY } from '../lib/circleOffice';
-import { updateAgentIdentity } from '../lib/agentIdentity';
+import { publishAgentToCircle, PROVIDER_DISPLAY } from '../lib/circleOffice';
+import {
+  updateAgentIdentityExact,
+  updatePublishedAgentSpiritExact,
+} from '../lib/agentIdentity';
+import { useExactCircleAuthority } from '../hooks/useAuth';
 
 const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 
@@ -137,6 +141,10 @@ const STEPS: { key: Step; label: string; num: number }[] = [
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props) {
+  // This hook is the app's generic immutable circle/bearer generation owner;
+  // Spawn uses the same fence as Run History instead of recovering ambient
+  // auth midway through a multi-receipt publication.
+  const { exactAuthority, isExactAuthorityCurrent } = useExactCircleAuthority(circleId);
   const [step, setStep] = useState<Step>('identity');
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,39 +217,39 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
 
   // ── Deploy agent ──
   const handleDeploy = useCallback(async () => {
-    if (!config.name.trim()) return;
+    if (!config.name.trim() || deploying) return;
+    const authority = exactAuthority;
+    if (!authority || !isExactAuthorityCurrent(authority)) {
+      setError('Sign in to this Circle again before publishing an agent.');
+      return;
+    }
     setDeploying(true);
     setError(null);
 
     const providerInfo = PROVIDER_DISPLAY[config.provider] || PROVIDER_DISPLAY['generic-agent'];
     const toolIcon = config.spirit?.emoji || providerInfo.icon;
+    let localIdentityRefreshNeeded = false;
+    try {
+      const result = await publishAgentToCircle({
+        circleId,
+        provider: config.provider,
+        name: config.name.trim(),
+        color: config.color,
+        toolIcon,
+      }, authority);
+      if (!isExactAuthorityCurrent(authority)) return;
+      const publishedAgentId = String(result.agent?.id || '').trim();
+      if (
+        result.error
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(publishedAgentId)
+      ) {
+        if (result.error) console.warn('[SpawnAgentPanel] Publish failed:', result.error);
+        setError('The agent could not be published. Check the connection and try again.');
+        return;
+      }
 
-    const result = await publishAgentToCircle({
-      circleId,
-      provider: config.provider,
-      name: config.name.trim(),
-      color: config.color,
-      toolIcon,
-    });
-
-    if (result.error) {
-      setError(result.error);
-      setDeploying(false);
-      return;
-    }
-
-    // Set the spirit if one was chosen
-    if (result.agent && config.spirit) {
-      await updateAgentSpirit(
-        result.agent.id,
-        config.spirit.name,
-        config.spirit.emoji,
-      );
-    }
-
-    // Store extended config in the published office row so chat + Office can
-    // reuse model/runtime preferences for assign and restore flows.
-    if (result.agent) {
+      // Store extended config in the exact published row so Chat + Office can
+      // reuse model/runtime preferences for assign and restore flows.
       const extendedConfig = {
         modelPreference: config.modelPreference,
         autonomy: config.autonomy,
@@ -251,24 +259,46 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
         customInstructions: config.customInstructions,
       };
       const { supabase } = await import('../lib/supabase');
-      await supabase
+      const expectedGoal = JSON.stringify(extendedConfig);
+      const expectedModel = config.modelPreference === 'auto' ? null : config.modelPreference;
+      const { data: configReceipts, error: configError } = await supabase
         .from('circle_office_agents')
         .update({
-          current_goal: JSON.stringify(extendedConfig),
-          model_name: config.modelPreference === 'auto' ? null : config.modelPreference,
+          current_goal: expectedGoal,
+          model_name: expectedModel,
           status: 'idle',
           updated_at: new Date().toISOString(),
         })
-        .eq('id', result.agent.id);
+        .eq('id', publishedAgentId)
+        .eq('circle_id', authority.circleId)
+        .eq('owner_id', authority.userId)
+        .eq('is_published', true)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+        .select('id, circle_id, owner_id, is_published, current_goal, model_name, status');
+      if (!isExactAuthorityCurrent(authority)) return;
+      const configReceipt = Array.isArray(configReceipts) && configReceipts.length === 1
+        ? configReceipts[0]
+        : null;
+      if (
+        configError
+        || !configReceipt
+        || configReceipt.id !== publishedAgentId
+        || configReceipt.circle_id !== authority.circleId
+        || configReceipt.owner_id !== authority.userId
+        || configReceipt.is_published !== true
+        || configReceipt.current_goal !== expectedGoal
+        || configReceipt.model_name !== expectedModel
+        || configReceipt.status !== 'idle'
+      ) {
+        if (configError) console.warn('[SpawnAgentPanel] Config save failed:', configError);
+        setError('The agent was published, but its setup could not be verified. Try again.');
+        return;
+      }
 
-      await updateAgentIdentity(result.agent.id, {
+      const identityReceipt = await updateAgentIdentityExact(publishedAgentId, {
         customName: config.name.trim(),
         customColor: config.color,
-        spiritId: config.spirit?.id || null,
-        spiritEmoji: config.spirit?.emoji || null,
         soulPrompt: config.customInstructions || null,
-        customProfileName: config.spirit?.name || null,
-        boundAiProvider: config.provider,
         boundModel: config.modelPreference === 'auto' ? undefined : config.modelPreference,
         tags: Array.from(new Set([
           config.provider,
@@ -277,12 +307,67 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
           config.autonomy,
         ].filter(Boolean))),
         isCustomized: true,
-      });
-    }
+      }, authority, isExactAuthorityCurrent);
+      if (!isExactAuthorityCurrent(authority)) return;
+      if (identityReceipt.error === 'outcome_unknown') {
+        const warning = 'The agent was published, but its private identity outcome could not be verified. Reopen the agent after the roster refreshes; do not deploy it again.';
+        if (Platform.OS === 'web') {
+          if (typeof window !== 'undefined') window.alert(warning);
+        } else {
+          Alert.alert('Agent published', warning);
+        }
+        onCreated(publishedAgentId, config.name.trim());
+        return;
+      }
+      if (!identityReceipt.serverSaved) {
+        setError('The agent was published, but its private identity could not be verified. Try again.');
+        return;
+      }
+      localIdentityRefreshNeeded ||= !identityReceipt.localSaved;
 
-    setDeploying(false);
-    onCreated(result.agent?.id || '', config.name.trim());
-  }, [config, circleId, onCreated]);
+      const spiritReceipt = await updatePublishedAgentSpiritExact({
+        officeAgentId: publishedAgentId,
+        sessionKey: publishedAgentId,
+        spiritId: config.spirit?.id || null,
+        spiritEmoji: config.spirit?.emoji || null,
+        customProfileId: null,
+      }, authority, isExactAuthorityCurrent);
+      if (!isExactAuthorityCurrent(authority)) return;
+      if (spiritReceipt.error === 'outcome_unknown') {
+        const warning = 'The agent was published, but its Spirit outcome could not be verified. Reopen the agent after the roster refreshes before making another Spirit change; do not deploy it again.';
+        if (Platform.OS === 'web') {
+          if (typeof window !== 'undefined') window.alert(warning);
+        } else {
+          Alert.alert('Agent published', warning);
+        }
+        onCreated(publishedAgentId, config.name.trim());
+        return;
+      }
+      if (!spiritReceipt.serverSaved) {
+        setError('The agent was published, but its Spirit could not be verified. Try again.');
+        return;
+      }
+      localIdentityRefreshNeeded ||= !spiritReceipt.localSaved;
+
+      if (localIdentityRefreshNeeded) {
+        const warning = 'The agent and Spirit were saved, but this device could not refresh its private identity cache. Reopen the agent after the roster refreshes; do not deploy it again.';
+        if (Platform.OS === 'web') {
+          if (typeof window !== 'undefined') window.alert(warning);
+        } else {
+          Alert.alert('Agent published', warning);
+        }
+      }
+
+      onCreated(publishedAgentId, config.name.trim());
+    } catch (deployError) {
+      console.warn('[SpawnAgentPanel] Exact publication failed:', deployError);
+      if (isExactAuthorityCurrent(authority)) {
+        setError('The agent setup could not be verified. Check the connection and try again.');
+      }
+    } finally {
+      setDeploying(false);
+    }
+  }, [circleId, config, deploying, exactAuthority, isExactAuthorityCurrent, onCreated]);
 
   // ── Render steps ──
   return (

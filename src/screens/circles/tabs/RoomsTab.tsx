@@ -25,6 +25,7 @@ import ChatArtifacts from '../../../components/chat/ChatArtifacts';
 import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
 import RunExecutionCard from '../../../components/chat/RunExecutionCard';
 import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
+import { useExactRunHistoryAuthority } from '../../../hooks/useAuth';
 import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
 import {
   getStoredToken, storeToken, removeToken, validateToken as ghValidateToken,
@@ -2284,6 +2285,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile, githubRepoFullNa
   githubRepoFullName?: string | null;
   onSubmitToGitHub?: () => void;
 }) {
+  const {
+    exactAuthority: runHistoryExactAuthority,
+    isExactAuthorityCurrent: isRunHistoryExactAuthorityCurrent,
+  } = useExactRunHistoryAuthority(circleId || '');
   const [messages, setMessages]   = useState<RoomMessage[]>([]);
   const [input, setInput]         = useState('');
   const [showAssign, setShowAssign] = useState(false);
@@ -4105,6 +4110,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile, githubRepoFullNa
         circleId={circleId || ''}
         roomId={roomId}
         title="Room Run History"
+        exactAuthority={runHistoryExactAuthority}
+        isExactAuthorityCurrent={isRunHistoryExactAuthorityCurrent}
         onClose={() => setShowRunHistory(false)}
       />
 

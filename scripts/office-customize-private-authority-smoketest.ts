@@ -96,7 +96,10 @@ has(customize, "setApiKeyInputs(prev => ({ ...prev, [provider]: '' }))", 'save r
 has(customize, 'setApiKeyInputs({});', 'scope cleanup clears every plaintext API-key input');
 has(customize, "setNewToken('');", 'scope cleanup clears the connection token input');
 has(customize, ".setHeader('Authorization', `Bearer ${authority.accessToken}`)", 'direct Customize database requests carry captured Authorization');
-check((customize.match(/updateAgentSpirit\([^\n]+authority\)/g) || []).length === 2, 'both Customize spirit mutations carry captured authority');
+has(customize, 'updatePublishedAgentSpiritExact({', 'Customize routes published Spirit through the atomic exact writer');
+has(customize, 'receipt.ok || !receipt.localSaved || !receipt.serverSaved', 'Customize requires the full durable Spirit receipt');
+lacks(customize, ".ilike('name', agentName)", 'Customize never name-matches a published agent');
+lacks(customize, 'updateAgentSpirit(', 'Customize cannot call the retired public-only Spirit writer');
 has(customize, 'controller.signal.aborted\n        || !figmaAuthorityIsCurrent(authority)', 'Figma disconnect rejects aborted or retired completion');
 has(customize, 'disconnectFigmaOAuth(\n        authority.accessToken,', 'Figma disconnect receives captured bearer');
 has(customize, 'generation === figmaStatusGeneration.current,\n        controller.signal,', 'Figma disconnect receives exact fence and abort signal');

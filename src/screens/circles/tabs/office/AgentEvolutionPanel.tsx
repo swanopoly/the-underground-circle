@@ -5,7 +5,11 @@ import XPEventFeed from '../../../../components/rpg/XPEventFeed';
 import StreakFlame from '../../../../components/rpg/StreakFlame';
 import { getAgentProgression, AgentProgression } from '../../../../lib/progression';
 import { getBondProgress, getMasteryProgress, getMasteryLevel } from '../../../../lib/mastery';
-import { loadStreak, isStreakActive } from '../../../../lib/missionStreaks';
+import {
+  isStreakActive,
+  loadMissionStreakExact,
+  type MissionStreak,
+} from '../../../../lib/missionStreaks';
 import type {
   OfficeConnectionAuthorityFence,
   OfficeConnectionExactAuthority,
@@ -35,6 +39,7 @@ export default function AgentEvolutionPanel({
   isIdentityAuthorityCurrent,
 }: Props) {
   const [progression, setProgression] = useState<AgentProgression | null>(null);
+  const [streak, setStreak] = useState<MissionStreak | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadGeneration, setReloadGeneration] = useState(0);
@@ -61,6 +66,7 @@ export default function AgentEvolutionPanel({
   useEffect(() => {
     if (!userId || !agentId || !exactAuthority) {
       setProgression(null);
+      setStreak(null);
       setLoadError('Progression is unavailable until this agent has an authenticated identity.');
       setLoading(false);
       return;
@@ -69,14 +75,21 @@ export default function AgentEvolutionPanel({
     setLoading(true);
     setLoadError(null);
     setProgression(null);
+    setStreak(null);
     const capturedAuthority = exactAuthority;
-    getAgentProgression(userId, agentId, circleId, exactAgentIds, {
-      authority: capturedAuthority,
-      isAuthorityCurrent: isIdentityAuthorityCurrent,
-      strict: true,
-    })
-      .then(data => {
-        if (!cancelled && isIdentityAuthorityCurrent(capturedAuthority)) setProgression(data);
+    Promise.all([
+      getAgentProgression(userId, agentId, circleId, exactAgentIds, {
+        authority: capturedAuthority,
+        isAuthorityCurrent: isIdentityAuthorityCurrent,
+        strict: true,
+      }),
+      loadMissionStreakExact(capturedAuthority, isIdentityAuthorityCurrent),
+    ])
+      .then(([data, streakResult]) => {
+        if (cancelled || !isIdentityAuthorityCurrent(capturedAuthority)) return;
+        if (!streakResult.ok) throw new Error(`streak_${streakResult.error}`);
+        setProgression(data);
+        setStreak(streakResult.streak);
       })
       .catch(err => {
         console.warn('[AgentEvolutionPanel] Failed to load progression:', err);
@@ -91,7 +104,12 @@ export default function AgentEvolutionPanel({
   if (loading) {
     return (
       <View style={{ padding: 24, alignItems: 'center' }}>
-        <ActivityIndicator size="small" color={accentColor} />
+        <ActivityIndicator
+          accessibilityRole="progressbar"
+          accessibilityLabel="Loading verified agent progression and streak"
+          size="small"
+          color={accentColor}
+        />
       </View>
     );
   }
@@ -136,8 +154,9 @@ export default function AgentEvolutionPanel({
   // Only the unlock_kind strings are used by AgentEvolutionCard
   const unlockKinds = (progression?.unlocks ?? []).map(u => u.unlock_kind);
 
-  // Streak is user-level (mission streak system), not agent-level
-  const streak = userId ? loadStreak(userId, circleId) : null;
+  // Streak is user-level (mission streak system), not agent-level. The panel
+  // uses only the exact durable receipt loaded above; a missing/corrupt local
+  // cache or failed backend read can never masquerade as a verified zero.
   const streakDays = streak && isStreakActive(streak) ? streak.currentStreak : 0;
 
   return (
@@ -173,6 +192,7 @@ export default function AgentEvolutionPanel({
         </View>
       )}
       <View style={{ alignItems: 'center', marginTop: 12 }}>
+        <Text style={{ color: '#8b949e', fontSize: 11, marginBottom: 4 }}>Owner mission streak</Text>
         <StreakFlame streakDays={streakDays} accentColor={accentColor} />
       </View>
     </>

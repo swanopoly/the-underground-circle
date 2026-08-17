@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Platform, Pressable, Text, View } from 'react-native';
 import { getAgentIdentityKey } from '../../../../lib/agentIdentity';
-import { OfficeAgent } from '../../../../lib/officeAgents';
+import { OfficeAgent, resolveOfficeAgentExecutionTruth } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
 import { cacheHitPct, formatMsgTime, formatRelativeTime, formatTokens, MONO, shortPath } from './AgentPanelShared';
 
@@ -11,7 +11,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
   statusLabel: string;
 }) {
   const [inspectOpen, setInspectOpen] = useState(false);
-  const isActive = agent.status === 'active' || agent.status === 'building';
+  const executionTruth = resolveOfficeAgentExecutionTruth(agent);
   const sessionKey = getAgentIdentityKey(agent);
   const sessionInfo = [
     { label: 'Session ID', value: sessionKey || agent.id },
@@ -25,6 +25,13 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
     { label: 'Uptime', value: agent.uptime || formatRelativeTime(agent.lastActive) },
   ];
 
+  // Inspect contains raw runtime identifiers and local message excerpts. A
+  // subject switch must collapse it synchronously with the new agent scope so
+  // the previous agent's diagnostics never remain open under a new heading.
+  useEffect(() => {
+    setInspectOpen(false);
+  }, [agent.id, agent.sessionKey, agent.connectionId]);
+
   return (
     <View nativeID="section-agent-activity-detail" style={{ paddingHorizontal: 12, gap: 16, paddingBottom: 16 }}>
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
@@ -34,14 +41,24 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
           <Text style={{ color: '#909098', fontSize: 12, marginLeft: 'auto', fontFamily: MONO }}>{formatRelativeTime(agent.lastActive)}</Text>
         </View>
         <Text style={{ color: '#e7e7f0', fontSize: 16, fontWeight: '700', marginBottom: 4 }}>
-          {agent.currentToolName ? `${agent.currentToolName} in progress` : agent.activity && agent.activity !== 'Idle' ? agent.activity : 'No active execution captured'}
+          {executionTruth.state === 'warning'
+            ? 'Execution status needs verification'
+            : executionTruth.currentToolName
+              ? `${executionTruth.currentToolName} in progress`
+              : executionTruth.state === 'active' && executionTruth.activity && executionTruth.activity !== 'Idle'
+                ? executionTruth.activity
+                : 'No active execution captured'}
         </Text>
         <Text style={{ color: '#9b9bad', fontSize: 13, lineHeight: 19 }}>
-          {agent.currentToolFile
-            ? `Current file: ${shortPath(agent.currentToolFile)}`
-            : isActive
+          {executionTruth.state === 'warning'
+            ? `Runtime status warning: ${executionTruth.statusWarning}. Refresh the connection before assigning new work.`
+            : executionTruth.currentToolFile
+              ? `Current file: ${shortPath(executionTruth.currentToolFile)}`
+            : executionTruth.state === 'active'
               ? 'Agent is connected and available for execution.'
-              : 'Agent is not currently executing work.'}
+              : executionTruth.state === 'connected'
+                ? 'Agent is connected and is not currently executing work.'
+                : 'Agent is offline or unavailable for execution.'}
         </Text>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
           <View style={{ backgroundColor: '#13131c', borderWidth: 1, borderColor: '#232334', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 }}>

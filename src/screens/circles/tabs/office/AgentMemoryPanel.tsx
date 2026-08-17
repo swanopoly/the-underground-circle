@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, Text, TextInput, View } from 'react-native';
 import type {
   OfficeConnectionAuthorityFence,
@@ -57,6 +57,7 @@ function requireOneMemoryReceipt(
     id: string;
     circleId: string;
     userId: string;
+    scope: string;
     verify: (row: any) => boolean;
   },
 ): any {
@@ -68,6 +69,7 @@ function requireOneMemoryReceipt(
     String(row?.id || '') !== expected.id
     || String(row?.circle_id || '') !== expected.circleId
     || String(row?.user_id || '') !== expected.userId
+    || String(row?.scope || '') !== expected.scope
     || !expected.verify(row)
   ) {
     throw new Error('The memory change returned a mismatched receipt.');
@@ -143,6 +145,92 @@ type MemorySection = {
   borderColor: string;
 };
 
+type ExactMemoryLaneExpectation = Readonly<{
+  circleId: string;
+  scope: 'circle' | 'session' | 'user' | 'agent';
+  visibility: 'circle_shared' | 'private';
+  userId?: string;
+  agentIds?: ReadonlySet<string>;
+}>;
+
+function requireExactMemoryLaneRows(
+  data: unknown,
+  expected: ExactMemoryLaneExpectation,
+): any[] {
+  if (!Array.isArray(data)) {
+    throw new Error(`The ${expected.scope} memory lane returned a malformed response.`);
+  }
+  const seen = new Set<string>();
+  for (const candidate of data) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`The ${expected.scope} memory lane returned a malformed row.`);
+    }
+    const row = candidate as Record<string, any>;
+    const id = String(row.id || '').trim();
+    const timestamp = new Date(String(getMemoryTimestamp(row) || '')).getTime();
+    if (
+      !id
+      || seen.has(id)
+      || String(row.circle_id || '') !== expected.circleId
+      || row.scope !== expected.scope
+      || row.visibility !== expected.visibility
+      || row.is_active !== true
+      || !Number.isFinite(timestamp)
+      || (expected.userId !== undefined && String(row.user_id || '') !== expected.userId)
+      || (
+        expected.agentIds !== undefined
+        && !expected.agentIds.has(String(row.agent_id || '').trim())
+      )
+    ) {
+      throw new Error(`The ${expected.scope} memory lane returned a mismatched row.`);
+    }
+    seen.add(id);
+  }
+  return data;
+}
+
+function requireExactSoulRows(
+  data: unknown,
+  expected: Readonly<{
+    circleId: string;
+    userId: string;
+    allowedIds?: ReadonlySet<string>;
+  }>,
+): any[] {
+  if (!Array.isArray(data) || data.length > 2) {
+    throw new Error('The active Soul lookup returned a malformed response.');
+  }
+  const seen = new Set<string>();
+  for (const candidate of data) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error('The active Soul lookup returned a malformed row.');
+    }
+    const row = candidate as Record<string, any>;
+    const id = String(row.id || '').trim();
+    if (
+      !id
+      || seen.has(id)
+      || String(row.circle_id || '') !== expected.circleId
+      || String(row.owner_id || '') !== expected.userId
+      || (row.spirit !== null && row.spirit !== undefined && typeof row.spirit !== 'string')
+      || (expected.allowedIds && !expected.allowedIds.has(id))
+    ) {
+      throw new Error('The active Soul lookup returned a mismatched row.');
+    }
+    seen.add(id);
+  }
+  return data;
+}
+
+function isExactMemoryLoadRequestCurrent(
+  currentGeneration: number,
+  currentScopeKey: string,
+  requestGeneration: number,
+  capturedScopeKey: string,
+): boolean {
+  return currentGeneration === requestGeneration && currentScopeKey === capturedScopeKey;
+}
+
 export default function AgentMemoryPanel({
   circleId,
   userId,
@@ -167,47 +255,105 @@ export default function AgentMemoryPanel({
   const [saveResult, setSaveResult] = useState<string | null>(null);
   const [soulKey, setSoulKey] = useState<string | null>(null);
   const [soulLabel, setSoulLabel] = useState<string | null>(null);
+  const [verifiedScopeKey, setVerifiedScopeKey] = useState<string | null>(null);
+  const [snapshotTruncated, setSnapshotTruncated] = useState(false);
   const [deletingMemoryId, setDeletingMemoryId] = useState<string | null>(null);
   const [mutatingMemoryId, setMutatingMemoryId] = useState<string | null>(null);
   const [memoryActionStatus, setMemoryActionStatus] = useState<string | null>(null);
   const memoryMutationLockRef = useRef<string | null>(null);
+  const loadRequestGenerationRef = useRef(0);
+  const verifiedScopeKeyRef = useRef<string | null>(null);
   const exactMemoryAuthority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
   const authorityScopeKey = exactMemoryAuthority
     ? `${exactMemoryAuthority.userId}|${exactMemoryAuthority.circleId}|${exactMemoryAuthority.generation}`
     : 'locked';
+  const lookupIds = useMemo(
+    () => Array.from(new Set(
+      [agentId, ...agentAliases]
+        .map(id => String(id || '').trim())
+        .filter(id => !!id && id.length <= 200)
+        .slice(0, 64),
+    )),
+    [agentAliases, agentId],
+  );
+  const lookupSignature = lookupIds.join('\u0000');
+  const memoryLoadScopeKey = [
+    authorityScopeKey,
+    circleId,
+    lookupSignature,
+    agentName.trim(),
+  ].join('\u0001');
+  const currentMemoryLoadScopeKeyRef = useRef(memoryLoadScopeKey);
+  currentMemoryLoadScopeKeyRef.current = memoryLoadScopeKey;
+  const hasVerifiedSnapshot = verifiedScopeKey === memoryLoadScopeKey;
+  const visibleMemories = hasVerifiedSnapshot ? memories : [];
+  const visibleSoulKey = hasVerifiedSnapshot ? soulKey : null;
+  const visibleSoulLabel = hasVerifiedSnapshot ? soulLabel : null;
 
-  // Tracks the currently intended (agentId, circleId) pair. If either changes
-  // while a fetch is in flight, the old promise resolves into setters that are
-  // no-ops (the key check fails), so rapid agent switching doesn't race.
-  const loadKeyRef = useRef('');
+  // Every request gets a distinct generation, including realtime, polling,
+  // retry, and post-mutation reloads within the same scope. Scope keys alone
+  // cannot prevent an older same-scope response from overwriting a newer one.
   const load = useCallback(async () => {
     const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
-    const lookupIds = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
-    const key = `${circleId}|${lookupIds.join(',')}|${authorityScopeKey}`;
-    loadKeyRef.current = key;
-    setLoading(true);
-    setLoadError(null);
-    if (!authority || !isIdentityAuthorityCurrent(authority)) {
+    const capturedScopeKey = memoryLoadScopeKey;
+    const requestGeneration = loadRequestGenerationRef.current + 1;
+    loadRequestGenerationRef.current = requestGeneration;
+    const isGenerationCurrent = () => isExactMemoryLoadRequestCurrent(
+      loadRequestGenerationRef.current,
+      currentMemoryLoadScopeKeyRef.current,
+      requestGeneration,
+      capturedScopeKey,
+    );
+    const isExactRequestCurrent = () => (
+      !!authority
+      && isGenerationCurrent()
+      && isIdentityAuthorityCurrent(authority)
+    );
+
+    if (verifiedScopeKeyRef.current !== capturedScopeKey) {
+      verifiedScopeKeyRef.current = null;
+      setVerifiedScopeKey(null);
       setMemories([]);
       setSoulKey(null);
       setSoulLabel(null);
-      setLoadError('Memory is locked until this Office session has exact user and circle authority.');
-      setLoading(false);
+      setSnapshotTruncated(false);
+    }
+    setLoading(true);
+    setLoadError(null);
+    if (!authority || !isIdentityAuthorityCurrent(authority)) {
+      if (isGenerationCurrent()) {
+        setLoadError('Memory is locked until this Office session has exact user and circle authority.');
+        setLoading(false);
+      }
       return;
     }
     try {
       const bearer = `Bearer ${authority.accessToken}`;
-      const queries = [
-        supabase
+      const laneRequests: Array<{ expected: ExactMemoryLaneExpectation; request: any }> = [
+        {
+          expected: {
+            circleId: authority.circleId,
+            scope: 'circle',
+            visibility: 'circle_shared',
+          },
+          request: supabase
           .from('memory_entries')
           .select('*')
           .eq('circle_id', authority.circleId)
           .eq('scope', 'circle')
+          .eq('visibility', 'circle_shared')
           .eq('is_active', true)
           .order('created_at', { ascending: false })
-          .limit(200)
+          .limit(201)
           .setHeader('Authorization', bearer),
-        supabase
+        },
+        {
+          expected: {
+            circleId: authority.circleId,
+            scope: 'session',
+            visibility: 'circle_shared',
+          },
+          request: supabase
           .from('memory_entries')
           .select('*')
           .eq('circle_id', authority.circleId)
@@ -215,9 +361,17 @@ export default function AgentMemoryPanel({
           .eq('visibility', 'circle_shared')
           .eq('is_active', true)
           .order('updated_at', { ascending: false })
-          .limit(200)
+          .limit(201)
           .setHeader('Authorization', bearer),
-        supabase
+        },
+        {
+          expected: {
+            circleId: authority.circleId,
+            scope: 'session',
+            visibility: 'private',
+            userId: authority.userId,
+          },
+          request: supabase
           .from('memory_entries')
           .select('*')
           .eq('circle_id', authority.circleId)
@@ -226,18 +380,28 @@ export default function AgentMemoryPanel({
           .eq('user_id', authority.userId)
           .eq('is_active', true)
           .order('updated_at', { ascending: false })
-          .limit(200)
+          .limit(201)
           .setHeader('Authorization', bearer),
-        supabase
+        },
+        {
+          expected: {
+            circleId: authority.circleId,
+            scope: 'user',
+            visibility: 'private',
+            userId: authority.userId,
+          },
+          request: supabase
           .from('memory_entries')
           .select('*')
           .eq('circle_id', authority.circleId)
           .eq('scope', 'user')
+          .eq('visibility', 'private')
           .eq('user_id', authority.userId)
           .eq('is_active', true)
           .order('updated_at', { ascending: false })
-          .limit(200)
+          .limit(201)
           .setHeader('Authorization', bearer),
+        },
       ];
       if (lookupIds.length > 0) {
         let agentQuery = supabase
@@ -249,77 +413,102 @@ export default function AgentMemoryPanel({
           .eq('user_id', authority.userId)
           .eq('is_active', true)
           .order('updated_at', { ascending: false })
-          .limit(200);
+          .limit(201);
         agentQuery = lookupIds.length === 1
           ? agentQuery.eq('agent_id', lookupIds[0])
           : agentQuery.in('agent_id', lookupIds);
-        queries.push(agentQuery.setHeader('Authorization', bearer));
+        laneRequests.push({
+          expected: {
+            circleId: authority.circleId,
+            scope: 'agent',
+            visibility: 'private',
+            userId: authority.userId,
+            agentIds: new Set(lookupIds),
+          },
+          request: agentQuery.setHeader('Authorization', bearer),
+        });
       }
 
-      const memoryResults = await Promise.all(queries);
-      for (const result of memoryResults) {
+      const memoryResults = await Promise.all(laneRequests.map(lane => lane.request));
+      if (!isExactRequestCurrent()) return;
+      const laneRows: any[][] = [];
+      const seenMemoryIds = new Set<string>();
+      for (let index = 0; index < memoryResults.length; index += 1) {
+        const result = memoryResults[index];
         if (result.error) throw result.error;
+        const rows = requireExactMemoryLaneRows(result.data, laneRequests[index].expected);
+        for (const row of rows) {
+          const id = String(row.id);
+          if (seenMemoryIds.has(id)) {
+            throw new Error('The memory snapshot returned the same row in multiple lanes.');
+          }
+          seenMemoryIds.add(id);
+        }
+        laneRows.push(rows);
       }
-      if (
-        loadKeyRef.current !== key
-        || !isIdentityAuthorityCurrent(authority)
-      ) return;
 
-      const merged = memoryResults
-        .flatMap(result => result.data || [])
-        .filter(row => String(row?.circle_id || '') === authority.circleId)
+      const mergedRows = laneRows
+        .flat()
         .sort((a, b) => new Date(getMemoryTimestamp(b)).getTime() - new Date(getMemoryTimestamp(a)).getTime())
-        .slice(0, 200);
+      const nextSnapshotTruncated = laneRows.some(rows => rows.length > 200) || mergedRows.length > 200;
+      const merged = mergedRows.slice(0, 200);
 
-      const publishedAgentId = lookupIds.find(isUuidLike) || null;
+      const publishedAgentIds = lookupIds.filter(isUuidLike);
       let soulRow: any = null;
-      if (publishedAgentId) {
+      if (publishedAgentIds.length > 0) {
         const { data, error } = await supabase
           .from('circle_office_agents')
-          .select('id, spirit')
-          .eq('id', publishedAgentId)
+          .select('id, circle_id, owner_id, name, spirit')
+          .in('id', publishedAgentIds)
           .eq('circle_id', authority.circleId)
           .eq('owner_id', authority.userId)
-          .setHeader('Authorization', bearer)
-          .maybeSingle();
-        if (error) throw error;
-        soulRow = data;
-      } else if (agentName.trim()) {
-        const { data, error } = await supabase
-          .from('circle_office_agents')
-          .select('id, spirit')
-          .eq('circle_id', authority.circleId)
-          .eq('owner_id', authority.userId)
-          .eq('name', agentName.trim())
           .setHeader('Authorization', bearer)
           .limit(2);
+        if (!isExactRequestCurrent()) return;
         if (error) throw error;
-        // A name is display metadata, not durable identity. Use it only when
-        // it resolves uniquely; duplicate names leave the Soul lane neutral.
-        soulRow = Array.isArray(data) && data.length === 1 ? data[0] : null;
+        const rows = requireExactSoulRows(data, {
+          circleId: authority.circleId,
+          userId: authority.userId,
+          allowedIds: new Set(publishedAgentIds),
+        });
+        if (rows.length > 1) {
+          throw new Error('More than one published agent matched this exact identity.');
+        }
+        soulRow = rows[0] || null;
       }
-      if (
-        loadKeyRef.current !== key
-        || !isIdentityAuthorityCurrent(authority)
-      ) return;
+      if (!isExactRequestCurrent()) return;
       const nextSoulKey = soulRow?.spirit ? `soul:${soulRow.spirit}` : null;
       setMemories(dedupeMemoryGroups(merged, nextSoulKey));
       setSoulKey(nextSoulKey);
       setSoulLabel(soulRow?.spirit || null);
+      setSnapshotTruncated(nextSnapshotTruncated);
+      verifiedScopeKeyRef.current = capturedScopeKey;
+      setVerifiedScopeKey(capturedScopeKey);
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to load memories:', err);
-      if (loadKeyRef.current === key && isIdentityAuthorityCurrent(authority)) {
-        setLoadError('Memory could not be loaded. Check the connection and try again.');
+      if (isExactRequestCurrent()) {
+        setLoadError(verifiedScopeKeyRef.current === capturedScopeKey
+          ? 'Memory refresh failed. Showing the last verified snapshot for this agent and Office session.'
+          : 'Memory could not be loaded. Check the connection and try again.');
       }
     }
-    if (loadKeyRef.current === key) setLoading(false);
-  }, [agentAliases, agentId, agentName, authorityScopeKey, circleId, identityAuthority, isIdentityAuthorityCurrent, userId]);
+    if (isExactRequestCurrent()) setLoading(false);
+  }, [
+    agentName,
+    circleId,
+    identityAuthority,
+    isIdentityAuthorityCurrent,
+    lookupIds,
+    memoryLoadScopeKey,
+    userId,
+  ]);
 
   useEffect(() => {
     void load();
     return () => {
-      // Mark any in-flight fetch as stale by rotating the key.
-      loadKeyRef.current = '';
+      // Retire this request generation even when the replacement has the same
+      // user/circle/agent scope.
+      loadRequestGenerationRef.current += 1;
     };
   }, [load]);
 
@@ -356,35 +545,42 @@ export default function AgentMemoryPanel({
     [...items].sort((a, b) => new Date(getMemoryTimestamp(b)).getTime() - new Date(getMemoryTimestamp(a)).getTime())
   ), []);
 
-  const currentSoulMemories = sortMemories(memories.filter(mem =>
+  const currentSoulMemories = sortMemories(visibleMemories.filter(mem =>
     mem.scope === 'agent' &&
     mem.memory_kind !== 'instruction' &&
-    !!soulKey &&
-    getMemorySoulKey(mem) === soulKey
+    !!visibleSoulKey &&
+    getMemorySoulKey(mem) === visibleSoulKey
   ));
-  const otherSoulMemories = sortMemories(memories.filter(mem =>
+  const otherSoulMemories = sortMemories(visibleMemories.filter(mem =>
     mem.scope === 'agent' &&
     mem.memory_kind !== 'instruction' &&
     !!getMemorySoulKey(mem) &&
-    getMemorySoulKey(mem) !== soulKey
+    getMemorySoulKey(mem) !== visibleSoulKey
   ));
-  const agentCoreMemories = sortMemories(memories.filter(mem =>
+  const agentCoreMemories = sortMemories(visibleMemories.filter(mem =>
     mem.scope === 'agent' &&
     mem.memory_kind !== 'instruction' &&
     !getMemorySoulKey(mem)
   ));
-  const sharedMemories = sortMemories(memories.filter(mem => mem.scope === 'circle' && mem.memory_kind !== 'instruction'));
-  const userPrivateMemories = sortMemories(memories.filter(mem => (mem.scope === 'user' || mem.scope === 'session') && mem.memory_kind !== 'instruction'));
-  const startupInstructions = sortMemories(memories.filter(mem => mem.memory_kind === 'instruction' || mem.retrieval_mode === 'startup'));
+  const sharedMemories = sortMemories(visibleMemories.filter(mem => (
+    mem.scope === 'circle'
+    || (mem.scope === 'session' && mem.visibility === 'circle_shared')
+  ) && mem.memory_kind !== 'instruction'));
+  const userPrivateMemories = sortMemories(visibleMemories.filter(mem => (
+    (mem.scope === 'user' || mem.scope === 'session')
+    && mem.visibility === 'private'
+    && mem.memory_kind !== 'instruction'
+  )));
+  const startupInstructions = sortMemories(visibleMemories.filter(mem => mem.memory_kind === 'instruction' || mem.retrieval_mode === 'startup'));
 
   const groupedSections: MemorySection[] = [
     {
       key: 'agent',
-      title: soulKey ? 'Current Soul Memory' : 'Agent Private Memory',
-      subtitle: soulKey
-        ? `Memories aligned to the active Soul${soulLabel ? ` (${soulLabel})` : ''}.`
+      title: visibleSoulKey ? 'Current Soul Memory' : 'Agent Private Memory',
+      subtitle: visibleSoulKey
+        ? `Memories aligned to the active Soul${visibleSoulLabel ? ` (${visibleSoulLabel})` : ''}.`
         : 'Specialized notes and working patterns for this agent only.',
-      items: soulKey ? currentSoulMemories : agentCoreMemories,
+      items: visibleSoulKey ? currentSoulMemories : agentCoreMemories,
       borderColor: accentColor + '35',
     },
     {
@@ -398,7 +594,7 @@ export default function AgentMemoryPanel({
       key: 'agent-core',
       title: 'Agent Core Memory',
       subtitle: 'Agent-private memory not attached to a specific Soul.',
-      items: soulKey ? agentCoreMemories : [],
+      items: visibleSoulKey ? agentCoreMemories : [],
       borderColor: '#33415555',
     },
     {
@@ -467,6 +663,7 @@ export default function AgentMemoryPanel({
       id: memoryId,
       circleId: authority.circleId,
       userId: authority.userId,
+      scope: memoryScope,
       verify,
     });
   };
@@ -625,7 +822,7 @@ export default function AgentMemoryPanel({
   const kindColors: Record<string, string> = { preference: '#909098', fact: '#909098', decision: '#a0a0b0', finding: '#909098', instruction: '#a0a0b0', policy: '#909098', context: '#606075' };
   const scopeLabels: Record<string, string> = { agent: 'agent', circle: 'shared', user: 'user', session: 'session' };
   const scopeColors: Record<string, string> = { agent: accentColor, circle: '#909098', user: '#22c55e', session: '#f59e0b' };
-  const subjectLookupIds = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
+  const subjectLookupIds = lookupIds;
   const canonicalSubjectId = String(agentId || '').trim();
   const subjectAliases = subjectLookupIds.filter(id => id !== canonicalSubjectId);
   const aliasPreview = subjectAliases.slice(0, 3).join(', ');
@@ -808,7 +1005,7 @@ export default function AgentMemoryPanel({
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT MEMORY</Text>
-        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({filteredCount}/{memories.length})</Text>
+        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({filteredCount}/{visibleMemories.length})</Text>
         <Text style={{ color: '#606075', fontSize: 11, fontFamily: MONO }} numberOfLines={1}>{agentName}</Text>
         <Pressable
           accessibilityRole="button"
@@ -842,12 +1039,22 @@ export default function AgentMemoryPanel({
           </Pressable>
         </View>
       ) : null}
+      {loading && hasVerifiedSnapshot ? (
+        <Text accessibilityLiveRegion="polite" style={{ color: '#8b92a8', fontSize: 11, fontFamily: MONO }}>
+          REFRESHING THE LAST VERIFIED MEMORY SNAPSHOT…
+        </Text>
+      ) : null}
+      {hasVerifiedSnapshot && snapshotTruncated ? (
+        <Text accessibilityLiveRegion="polite" style={{ color: '#f59e0b', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
+          Showing the newest 200 verified entries. Older entries remain on the server and are not represented in this snapshot.
+        </Text>
+      ) : null}
       <Text style={{ color: '#707086', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
         Existing private memory can be edited here with exact row receipts. Add new notes, instructions, and reasoning standards through Chat so they retain the canonical conversation and run lineage.
       </Text>
-      {soulKey ? (
+      {visibleSoulKey ? (
         <Text style={{ color: '#8b5cf6', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
-          Active soul memory lane: {soulLabel || soulKey}
+          Active soul memory lane: {visibleSoulLabel || visibleSoulKey}
         </Text>
       ) : null}
       <Pressable
@@ -950,10 +1157,16 @@ export default function AgentMemoryPanel({
       )}
 
       <View>
-        {loading ? (
+        {loading && !hasVerifiedSnapshot ? (
           <ActivityIndicator accessibilityLabel="Loading agent memory" accessibilityRole="progressbar" size="small" color={accentColor} style={{ padding: 20 }} />
-        ) : loadError && memories.length === 0 ? null : filteredCount === 0 ? (
-          <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No memories yet. Continue with this agent in Chat to build durable memory through work.</Text>
+        ) : loadError && !hasVerifiedSnapshot ? null : filteredCount === 0 ? (
+          <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>
+            {snapshotTruncated
+              ? 'No entries for this view appear in the newest 200 verified rows. Older server entries are not represented.'
+              : visibleMemories.length > 0
+                ? 'No verified entries in this view.'
+                : 'No memories yet. Continue with this agent in Chat to build durable memory through work.'}
+          </Text>
         ) : (
           visibleSections.map(renderMemorySection)
         )}

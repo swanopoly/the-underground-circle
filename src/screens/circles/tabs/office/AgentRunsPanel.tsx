@@ -11,25 +11,31 @@ import { planRunReap } from '../../../../lib/runStallPolicyCore';
 import { isAwaitingConnectedAgentResultMetadata } from '../../../../lib/officeOpsBoard';
 import { bucketRunForHistory, describeRunHistoryStatus } from '../../../../lib/runHistoryFilterCore';
 import type {
+  AgentRun,
   AgentRunExactReadAuthority,
   AgentRunExactReadAuthorityFence,
   AgentRunStrictReadOptions,
+  RunStep,
 } from '../../../../lib/agentRunSystem';
 
 type StatusFilter = 'all' | 'completed' | 'running' | 'failed';
 
 type RunDetailsState = {
+  rootRunId: string | null;
   runId: string | null;
+  selectedRun: AgentRun | null;
   status: 'idle' | 'loading' | 'ready' | 'error';
-  steps: any[];
-  childRuns: any[];
+  steps: RunStep[];
+  childRuns: AgentRun[];
   error: string | null;
 };
 
 const PAGE_SIZE = 10;
 const EMPTY_STALE_RUN_IDS = new Set<string>();
 const EMPTY_RUN_DETAILS: RunDetailsState = {
+  rootRunId: null,
   runId: null,
+  selectedRun: null,
   status: 'idle',
   steps: [],
   childRuns: [],
@@ -153,7 +159,9 @@ export default function AgentRunsPanel({
   const [runDetails, setRunDetails] = useState<RunDetailsState>(EMPTY_RUN_DETAILS);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
+  const [scanLimit, setScanLimit] = useState(1_000);
   const [hasMore, setHasMore] = useState(false);
+  const [snapshotTruncated, setSnapshotTruncated] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [freshnessTick, setFreshnessTick] = useState(0);
   const listRequestGenerationRef = useRef(0);
@@ -196,6 +204,7 @@ export default function AgentRunsPanel({
   const hasVerifiedSnapshot = verifiedScopeKey === readScopeKey;
   const verifiedRuns = hasVerifiedSnapshot ? runs : [];
   const verifiedHasMore = hasVerifiedSnapshot ? hasMore : false;
+  const verifiedSnapshotTruncated = hasVerifiedSnapshot ? snapshotTruncated : false;
   const verifiedStaleRunIds = hasVerifiedSnapshot ? staleRunIds : EMPTY_STALE_RUN_IDS;
 
   useEffect(() => {
@@ -223,7 +232,7 @@ export default function AgentRunsPanel({
         return;
       }
       try {
-        const { listRunsForAgentSubject } = await import('../../../../lib/agentRunSystem');
+        const { listRunsForAgentSubjectPage } = await import('../../../../lib/agentRunSystem');
         if (
           !requestTargetsCurrentScope()
           || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)
@@ -234,12 +243,14 @@ export default function AgentRunsPanel({
           authority: capturedAuthority,
           isAuthorityCurrent: isIdentityAuthorityCurrent,
         };
-        const rawData = await listRunsForAgentSubject(circleId, {
+        const scanResult = await listRunsForAgentSubjectPage(circleId, {
           agentId,
           agentAliases: normalizedAgentAliases,
           agentName,
           limit: pageSize + 1,
+          maxScanRows: scanLimit,
         }, strictReadOptions);
+        const rawData = scanResult.runs;
         // Run-reaper: classify liveness off the heartbeat column only.
         // started_at deliberately OMITTED so runs from producers that never
         // heartbeat classify as 'live' (core fail-safe), not false-reaped.
@@ -263,6 +274,7 @@ export default function AgentRunsPanel({
           setRuns(data);
           setHasMore(false);
         }
+        setSnapshotTruncated(!scanResult.complete && data.length <= pageSize);
         setVerifiedScopeKey(capturedScopeKey);
       } catch (err) {
         console.warn('[AgentRunsPanel] Failed to list runs:', err);
@@ -291,21 +303,29 @@ export default function AgentRunsPanel({
     pageSize,
     readScopeKey,
     reloadGeneration,
+    scanLimit,
   ]);
 
-  const loadRunDetails = useCallback(async (runId: string) => {
+  const loadRunDetails = useCallback(async (
+    runId: string,
+    options?: { rootRunId?: string; selectedRun?: AgentRun | null },
+  ) => {
     const requestGeneration = ++detailRequestGenerationRef.current;
     const capturedScopeKey = readScopeKey;
     const capturedAuthority = exactReadAuthority;
+    const rootRunId = options?.rootRunId || runId;
+    const selectedRun = options?.selectedRun || null;
     const requestTargetsCurrentScope = () => (
       detailRequestGenerationRef.current === requestGeneration
       && currentReadScopeKeyRef.current === capturedScopeKey
     );
-    setRunDetails({ runId, status: 'loading', steps: [], childRuns: [], error: null });
+    setRunDetails({ rootRunId, runId, selectedRun, status: 'loading', steps: [], childRuns: [], error: null });
     if (!capturedAuthority || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)) {
       if (requestTargetsCurrentScope()) {
         setRunDetails({
+          rootRunId,
           runId,
+          selectedRun,
           status: 'error',
           steps: [],
           childRuns: [],
@@ -334,12 +354,14 @@ export default function AgentRunsPanel({
         !requestTargetsCurrentScope()
         || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)
       ) return;
-      setRunDetails({ runId, status: 'ready', steps: stepData, childRuns: childRunData, error: null });
+      setRunDetails({ rootRunId, runId, selectedRun, status: 'ready', steps: stepData, childRuns: childRunData, error: null });
     } catch (err) {
       console.warn('[AgentRunsPanel] Failed to load run steps:', err);
       if (!requestTargetsCurrentScope()) return;
       setRunDetails({
+        rootRunId,
         runId,
+        selectedRun,
         status: 'error',
         steps: [],
         childRuns: [],
@@ -421,6 +443,26 @@ export default function AgentRunsPanel({
         </View>
       ) : null}
 
+      {verifiedSnapshotTruncated ? (
+        <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1908', borderRadius: 2, padding: 10, gap: 6 }}>
+          <Text style={{ color: '#fcd34d', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
+            Run history is partial. The bounded scan reached {scanLimit.toLocaleString()} candidate rows before proving there are no older runs for this exact agent.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={scanLimit >= 5_000 ? 'Maximum exact agent run scan reached' : 'Scan one thousand more candidate agent runs'}
+            accessibilityState={{ disabled: loading || scanLimit >= 5_000, busy: loading }}
+            disabled={loading || scanLimit >= 5_000}
+            onPress={() => setScanLimit(value => Math.min(value + 1_000, 5_000))}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 2, alignItems: 'center', justifyContent: 'center', opacity: loading || scanLimit >= 5_000 ? 0.55 : 1 }, Platform.OS === 'web' && ({ cursor: loading || scanLimit >= 5_000 ? 'default' : 'pointer' } as any)]}
+          >
+            <Text style={{ color: '#fcd34d', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>
+              {loading ? 'SCANNING…' : scanLimit >= 5_000 ? 'SCAN LIMIT REACHED' : 'SCAN 1,000 MORE'}
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       {runDataResolved ? (
         <>
           <OpenSwanQualityAggregate
@@ -482,13 +524,20 @@ export default function AgentRunsPanel({
           <ActivityIndicator accessibilityLabel="Loading agent runs" accessibilityRole="progressbar" size="small" color={accentColor} style={{ padding: 20 }} />
         ) : loadError && runs.length === 0 ? null : loadError && verifiedRuns.length === 0 ? null : visibleRuns.length === 0 ? (
           <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>
-            {verifiedRuns.length === 0 ? 'No runs yet.' : `No ${statusFilter === 'all' ? '' : statusFilter + ' '}runs.`}
+            {verifiedRuns.length === 0
+              ? verifiedSnapshotTruncated
+                ? 'No matching runs were found in the verified portion of history.'
+                : 'No runs yet.'
+              : `No ${statusFilter === 'all' ? '' : statusFilter + ' '}runs.`}
           </Text>
         ) : (
           <>
             {visibleRuns.map((run: any) => {
               const isExpanded = expandedRun === run.id;
-              const currentDetails = isExpanded && runDetails.runId === run.id ? runDetails : null;
+              // A specialist drill-down stays anchored beneath its visible
+              // top-level run. `rootRunId` prevents selecting a child from
+              // collapsing the only card capable of rendering its details.
+              const currentDetails = isExpanded && runDetails.rootRunId === run.id ? runDetails : null;
               const awaitingExternalResult = isAwaitingConnectedAgentResultMetadata(run.metadata);
               const runPresentation = describeRunHistoryStatus(run, Date.now());
               const sc = runPresentation.stale ? '#f59e0b' : awaitingExternalResult ? '#60a5fa' : (STATUS_COLORS[run.status] || '#606075');
@@ -557,7 +606,7 @@ export default function AgentRunsPanel({
                       {(subjectSummary.subjectKey || subjectSummary.aliases.length > 0 || subjectSummary.dbId) ? (
                         <View style={{ borderWidth: 1, borderColor: '#24243a', backgroundColor: '#0b0b14', borderRadius: 2, padding: 8, marginBottom: 8, gap: 5 }}>
                           <Text style={{ color: '#909098', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
-                            SUBJECT IDENTITY
+                            {currentDetails?.selectedRun ? 'PARENT SUBJECT IDENTITY' : 'SUBJECT IDENTITY'}
                           </Text>
                           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
                             {subjectSummary.displayName ? (
@@ -577,6 +626,48 @@ export default function AgentRunsPanel({
                           ) : null}
                         </View>
                       ) : null}
+                      {currentDetails?.selectedRun ? (() => {
+                        const selectedChild = currentDetails.selectedRun;
+                        const selectedChildSummary = buildRunMetadataSummaryProps(selectedChild.metadata);
+                        const selectedChildSubject = getRunSubjectSummary(selectedChild, agentName);
+                        const selectedChildStatusColor = STATUS_COLORS[selectedChild.status] || '#606075';
+                        return (
+                          <View
+                            accessibilityLiveRegion="polite"
+                            style={{ borderWidth: 1, borderColor: '#6d28d955', backgroundColor: '#120b24', borderRadius: 2, padding: 10, marginBottom: 10, gap: 6 }}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <View style={{ width: 7, height: 7, borderRadius: 999, backgroundColor: selectedChildStatusColor }} />
+                              <Text style={{ color: '#c4b5fd', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
+                                VIEWING SPECIALIST RUN
+                              </Text>
+                              <Text style={{ color: selectedChildStatusColor, fontSize: 10, fontWeight: '800', fontFamily: MONO, marginLeft: 'auto' }}>
+                                {String(selectedChild.status || 'unknown').toUpperCase()}
+                              </Text>
+                            </View>
+                            <Text style={{ color: '#f0eaff', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>
+                              {selectedChild.title || selectedChild.mode || 'Untitled specialist run'}
+                            </Text>
+                            <Text style={{ color: '#81759c', fontSize: 10, fontFamily: MONO }} numberOfLines={1}>
+                              RUN {selectedChild.id}
+                              {selectedChildSubject.subjectKey ? ` · SUBJECT ${selectedChildSubject.subjectKey}` : ''}
+                            </Text>
+                            <RunMetadataSummary
+                              {...selectedChildSummary}
+                              variant="compact"
+                              accentColor="#a855f7"
+                            />
+                            <Pressable
+                              accessibilityRole="button"
+                              accessibilityLabel={`Back to parent run: ${String(run.title || 'Untitled run')}`}
+                              onPress={() => { void loadRunDetails(run.id); }}
+                              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#7c3aed66', borderRadius: 2, justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
+                            >
+                              <Text style={{ color: '#c4b5fd', fontSize: 10, fontWeight: '800', fontFamily: MONO }}>BACK TO PARENT RUN</Text>
+                            </Pressable>
+                          </View>
+                        );
+                      })() : null}
                       {!currentDetails || currentDetails.status === 'loading' ? (
                         <View accessibilityLiveRegion="polite" style={{ minHeight: 64, alignItems: 'center', justifyContent: 'center', gap: 6 }}>
                           <ActivityIndicator accessibilityLabel={`Loading details for ${String(run.title || 'run')}`} accessibilityRole="progressbar" size="small" color={accentColor} />
@@ -587,8 +678,13 @@ export default function AgentRunsPanel({
                           <Text style={{ color: '#fca5a5', fontSize: 12, fontFamily: MONO }}>{currentDetails.error}</Text>
                           <Pressable
                             accessibilityRole="button"
-                            accessibilityLabel={`Retry loading details for ${String(run.title || 'run')}`}
-                            onPress={() => { void loadRunDetails(run.id); }}
+                            accessibilityLabel={`Retry loading details for ${String(currentDetails.selectedRun?.title || run.title || 'run')}`}
+                            onPress={() => {
+                              void loadRunDetails(currentDetails.runId || run.id, {
+                                rootRunId: run.id,
+                                selectedRun: currentDetails.selectedRun,
+                              });
+                            }}
                             style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 2, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
                           >
                             <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RETRY DETAILS</Text>
@@ -611,10 +707,12 @@ export default function AgentRunsPanel({
                               <Pressable
                                 key={childRun.id}
                                 accessibilityRole="button"
-                                accessibilityLabel={`Open specialist run: ${String(childRun.title || childRun.mode || 'Untitled run')}`}
+                                accessibilityLabel={`View specialist run details: ${String(childRun.title || childRun.mode || 'Untitled run')}`}
                                 onPress={() => {
-                                  setExpandedRun(childRun.id);
-                                  void loadRunDetails(childRun.id);
+                                  void loadRunDetails(childRun.id, {
+                                    rootRunId: run.id,
+                                    selectedRun: childRun,
+                                  });
                                 }}
                                 style={{
                                   borderWidth: 1,

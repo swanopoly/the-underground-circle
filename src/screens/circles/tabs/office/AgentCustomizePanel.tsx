@@ -19,9 +19,9 @@ const PANTS_COLORS = ['#2d2d3d', '#2a2a2a', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1
 interface Props {
   agent: OfficeAgent;
   appearances?: Record<string, AgentAppearance>;
-  // onAppearanceChange may be sync (legacy) or return a Promise — we inspect
-  // the return value at call time so either contract works.
-  onAppearanceChange: (id: string, appearance: AgentAppearance) => void | Promise<void>;
+  // Customization is a durable command, not an optimistic presentation hook.
+  // Only an explicit true receipt may be rendered as saved.
+  onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<boolean>;
   environmentType?: EnvironmentType;
 }
 
@@ -38,54 +38,68 @@ const CATEGORIES: Array<{ key: Category; label: string; color: string }> = [
 export default function AgentCustomizePanel({ agent, appearances, onAppearanceChange, environmentType }: Props) {
   const appearance = appearances?.[agent.id] || appearances?.[agent.name] || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
   const [saveState, setSaveState] = useState<SaveState>('idle');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [category, setCategory] = useState<Category>('colors');
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveInFlightRef = useRef(false);
+  const saveGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
 
-  // Clear the pending timer on unmount so we don't call setState on a dead
-  // component after a rapid close-reopen.
-  useEffect(() => () => {
-    if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+  // Generation fencing prevents a late durable receipt from publishing into
+  // a closed or newly selected agent panel.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      saveGenerationRef.current += 1;
+      saveInFlightRef.current = false;
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    };
   }, []);
 
-  const flashSaved = () => {
+  const flashSaved = (generation: number) => {
+    if (!mountedRef.current || saveGenerationRef.current !== generation) return;
     setSaveState('saved');
-    setErrorMsg(null);
     if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-    savedTimerRef.current = setTimeout(() => setSaveState('idle'), 1200);
+    savedTimerRef.current = setTimeout(() => {
+      if (mountedRef.current && saveGenerationRef.current === generation) setSaveState('idle');
+    }, 1200);
   };
 
   const update = (patch: Partial<AgentAppearance>) => {
-    if (saveState === 'saving') return;
+    if (saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    const generation = saveGenerationRef.current + 1;
+    saveGenerationRef.current = generation;
     setSaveState('saving');
-    setErrorMsg(null);
-    try {
-      const result = onAppearanceChange(agent.id, { ...appearance, ...patch });
-      if (result && typeof (result as Promise<void>).then === 'function') {
-        (result as Promise<void>)
-          .then(flashSaved)
-          .catch((err: unknown) => {
-            console.warn('[AgentCustomizePanel] Failed to persist appearance:', err);
-            setSaveState('error');
-            setErrorMsg(err instanceof Error ? err.message : 'save failed');
-          });
-      } else {
-        // Sync callback — we optimistically report "saved". This mirrors the
-        // existing behaviour where the parent debounces a background write;
-        // if that write fails, the parent should surface its own error.
-        flashSaved();
-      }
-    } catch (err) {
-      console.warn('[AgentCustomizePanel] Failed to persist appearance:', err);
-      setSaveState('error');
-      setErrorMsg(err instanceof Error ? err.message : 'save failed');
+    if (savedTimerRef.current) {
+      clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = null;
     }
+
+    void (async () => {
+      try {
+        const saved = await onAppearanceChange(agent.id, { ...appearance, ...patch });
+        if (!mountedRef.current || saveGenerationRef.current !== generation) return;
+        if (saved !== true) {
+          setSaveState('error');
+          return;
+        }
+        flashSaved(generation);
+      } catch (err) {
+        console.warn('[AgentCustomizePanel] Failed to persist appearance:', err);
+        if (mountedRef.current && saveGenerationRef.current === generation) {
+          setSaveState('error');
+        }
+      } finally {
+        if (saveGenerationRef.current === generation) saveInFlightRef.current = false;
+      }
+    })();
   };
 
   const saveIndicator = (() => {
     if (saveState === 'saving') return { color: '#6366f1', dot: '#6366f1', label: 'SAVING…' };
     if (saveState === 'saved') return { color: '#22c55e', dot: '#22c55e', label: '✓ SAVED' };
-    if (saveState === 'error') return { color: '#ef4444', dot: '#ef4444', label: errorMsg ? `✕ ${errorMsg.slice(0, 40)}` : '✕ NOT SAVED' };
+    if (saveState === 'error') return { color: '#ef4444', dot: '#ef4444', label: '✕ NOT SAVED — TRY AGAIN' };
     return { color: '#606075', dot: '#2a2a3e', label: 'READY' };
   })();
 
@@ -183,7 +197,13 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
       <View style={styles.body}>
         {/* Save status — transient feedback so users see that each color/emoji
             click actually persisted (or failed). Fades back to READY after 1.2s. */}
-        <View style={styles.saveRow}>
+        <View
+          style={styles.saveRow}
+          accessibilityRole={saveState === 'error' ? 'alert' : undefined}
+          accessibilityLiveRegion={saveState === 'error' ? 'assertive' : 'polite'}
+          accessibilityState={{ busy: saveState === 'saving' }}
+          accessibilityLabel={`Customization save status: ${saveIndicator.label}`}
+        >
           <View style={[styles.saveDot, { backgroundColor: saveIndicator.dot }]} />
           <Text style={[styles.saveLabel, { color: saveIndicator.color }]} numberOfLines={1}>
             {saveIndicator.label}

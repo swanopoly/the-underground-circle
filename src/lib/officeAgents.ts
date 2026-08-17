@@ -147,6 +147,56 @@ export function isConnectedOfficeStatus(status: AgentStatus | string | undefined
   return status === 'active' || status === 'building' || status === 'idle';
 }
 
+export type OfficeAgentExecutionTruth = {
+  state: 'warning' | 'active' | 'connected' | 'unavailable';
+  statusWarning: string;
+  currentToolName: string;
+  currentToolFile: string;
+  activity: string;
+};
+
+/**
+ * Resolve the execution claims that a user-facing Office surface may make.
+ * Bridge reconciliation deliberately retains recent tool fields for
+ * diagnostics, so a warning or non-live status must fence those fields before
+ * UI copy can describe them as current work.
+ */
+export function resolveOfficeAgentExecutionTruth(
+  agent: Pick<OfficeAgent, 'status' | 'statusNote' | 'currentToolName' | 'currentToolFile' | 'activity'>,
+): OfficeAgentExecutionTruth {
+  const statusWarning = typeof agent.statusNote === 'string'
+    ? agent.statusNote.trim().slice(0, 240)
+    : '';
+  if (statusWarning) {
+    return {
+      state: 'warning',
+      statusWarning,
+      currentToolName: '',
+      currentToolFile: '',
+      activity: '',
+    };
+  }
+
+  const active = agent.status === 'active' || agent.status === 'building';
+  if (active) {
+    return {
+      state: 'active',
+      statusWarning: '',
+      currentToolName: String(agent.currentToolName || '').trim(),
+      currentToolFile: String(agent.currentToolFile || '').trim(),
+      activity: String(agent.activity || '').trim(),
+    };
+  }
+
+  return {
+    state: isConnectedOfficeStatus(agent.status) ? 'connected' : 'unavailable',
+    statusWarning: '',
+    currentToolName: '',
+    currentToolFile: '',
+    activity: '',
+  };
+}
+
 export function getOfficeStatusColor(status: AgentStatus | string | undefined): string {
   if (status === 'error') return STATUS_COLORS.error;
   if (status === 'offline' || !status) return STATUS_COLORS.offline;

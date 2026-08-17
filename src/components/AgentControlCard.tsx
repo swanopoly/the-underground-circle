@@ -11,13 +11,20 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import type { OfficeAgent } from '../lib/officeAgents';
 import { getBridgeUrl } from '../lib/bridgeEnvironment';
+import {
+  BRIDGE_CATALOG,
+  parseBridgeHealth,
+  type BridgeName,
+} from '../lib/bridgeHealthDiag';
 import { getLocalOpenSwanDiscoveryEndpoints } from '../lib/connectionManager';
 
 type Props = {
   agent: OfficeAgent;
+  /** Exact connected OpenSwan connection resolved by the Office owner. */
+  runtimeConnectionId?: string | null;
 };
 
-type BridgeState = 'checking' | 'online' | 'offline' | 'unsupported';
+type BridgeState = 'checking' | 'online' | 'degraded' | 'offline' | 'unsupported';
 
 const BRIDGE_PORTS: Readonly<Record<string, number>> = {
   'claude-code': 7778,
@@ -37,6 +44,13 @@ function bridgeEndpoint(provider: string): string | null {
   return port ? getBridgeUrl(port) : null;
 }
 
+function bridgeCatalogName(provider: string): BridgeName | null {
+  if (provider === 'gemini') return 'gemini-cli';
+  if (provider === 'openswan') return 'openswan-proxy';
+  if (provider === 'claude-code' || provider === 'codex' || provider === 'cursor') return provider;
+  return null;
+}
+
 function offlineHelp(provider: string): string {
   if (provider === 'openswan') return 'Run npm run start, then confirm the OpenSwan proxy on port 18790 is healthy.';
   if (provider === 'claude-code') return 'Run npm run start, then confirm the Claude Code bridge on port 7778 is healthy.';
@@ -46,10 +60,12 @@ function offlineHelp(provider: string): string {
   return 'This provider does not advertise a local bridge health endpoint.';
 }
 
-export default function AgentControlCard({ agent }: Props) {
+export default function AgentControlCard({ agent, runtimeConnectionId }: Props) {
   const provider = bridgeProvider(agent);
+  const hasExactRuntimeConnection = provider === 'openswan' && !!runtimeConnectionId?.trim();
   const [state, setState] = useState<BridgeState>('checking');
   const [detail, setDetail] = useState('Checking runtime connection…');
+  const [guidance, setGuidance] = useState<string | null>(null);
   const requestGenerationRef = useRef(0);
   const requestAbortRef = useRef<AbortController | null>(null);
 
@@ -59,20 +75,34 @@ export default function AgentControlCard({ agent }: Props) {
     requestAbortRef.current?.abort();
     requestAbortRef.current = null;
 
+    // Office already resolved this id from one enabled, connected, exact
+    // OpenSwan connection. AgentControlCard does not receive (and must not
+    // recover) the private connection endpoint/token, so consume that canonical
+    // snapshot instead of probing an unrelated localhost gateway.
+    if (hasExactRuntimeConnection) {
+      setState('online');
+      setDetail('Connected through this agent’s exact Office runtime connection.');
+      setGuidance(null);
+      return;
+    }
+
     const endpoint = bridgeEndpoint(provider);
     if (!BRIDGE_PORTS[provider]) {
       setState('unsupported');
       setDetail('No local bridge health contract is available for this provider.');
+      setGuidance(null);
       return;
     }
     if (!endpoint) {
       setState('offline');
       setDetail('The local bridge is unavailable in this environment.');
+      setGuidance(null);
       return;
     }
 
     setState('checking');
     setDetail('Checking runtime connection…');
+    setGuidance(null);
     const controller = new AbortController();
     requestAbortRef.current = controller;
     const timeoutId = setTimeout(() => controller.abort(), 5_000);
@@ -83,22 +113,41 @@ export default function AgentControlCard({ agent }: Props) {
       })
       .then(payload => {
         if (generation !== requestGenerationRef.current) return;
-        const sessionCount = Number(payload?.sessions || 0);
+        const catalogName = bridgeCatalogName(provider);
+        const catalogEntry = catalogName
+          ? BRIDGE_CATALOG.find(entry => entry.name === catalogName)
+          : null;
+        if (!catalogEntry) throw new Error('bridge_contract_missing');
+        const parsed = parseBridgeHealth(catalogEntry, payload);
+        setGuidance(parsed.hint || null);
+        if (parsed.status === 'offline') {
+          setState('offline');
+          setDetail(parsed.detail);
+          return;
+        }
+        if (parsed.status === 'degraded') {
+          setState('degraded');
+          setDetail(parsed.detail);
+          return;
+        }
         setState('online');
-        setDetail(sessionCount > 0
-          ? `Connected · ${sessionCount} active session${sessionCount === 1 ? '' : 's'}`
-          : 'Connected · no active sessions reported');
+        setDetail(parsed.sessionCount === undefined
+          ? 'Provider bridge reachable'
+          : parsed.sessionCount > 0
+            ? `Provider bridge reachable · ${parsed.sessionCount} session${parsed.sessionCount === 1 ? '' : 's'} reported`
+            : 'Provider bridge reachable · no sessions reported');
       })
       .catch(() => {
         if (generation !== requestGenerationRef.current) return;
         setState('offline');
         setDetail('Runtime bridge could not be reached.');
+        setGuidance(null);
       })
       .finally(() => {
         clearTimeout(timeoutId);
         if (generation === requestGenerationRef.current) requestAbortRef.current = null;
       });
-  }, [provider]);
+  }, [hasExactRuntimeConnection, provider]);
 
   useEffect(() => {
     checkBridge();
@@ -111,7 +160,7 @@ export default function AgentControlCard({ agent }: Props) {
 
   const tone = state === 'online'
     ? '#22c55e'
-    : state === 'offline'
+    : state === 'offline' || state === 'degraded'
       ? '#f59e0b'
       : '#8b949e';
 
@@ -120,31 +169,41 @@ export default function AgentControlCard({ agent }: Props) {
       <View style={styles.summaryRow} accessibilityLiveRegion="polite">
         <View style={[styles.statusDot, { backgroundColor: tone }]} />
         <View style={styles.copy}>
-          <Text style={styles.title}>Runtime connection</Text>
+          <Text style={styles.title}>{hasExactRuntimeConnection ? 'Runtime connection' : 'Provider bridge'}</Text>
           <Text style={[styles.detail, { color: tone }]}>{detail}</Text>
         </View>
-        <Pressable
-          onPress={checkBridge}
-          disabled={state === 'checking'}
-          accessibilityRole="button"
-          accessibilityLabel="Refresh runtime connection status"
-          accessibilityState={{ disabled: state === 'checking', busy: state === 'checking' }}
-          style={({ hovered }: any) => [
-            styles.refreshButton,
-            hovered && styles.refreshButtonHover,
-            state === 'checking' && styles.disabled,
-            Platform.OS === 'web' && ({ cursor: state === 'checking' ? 'wait' : 'pointer' } as any),
-          ]}
-        >
-          {state === 'checking'
-            ? <ActivityIndicator size="small" color="#8b949e" />
-            : <Text style={styles.refreshText}>Refresh</Text>}
-        </Pressable>
+        {!hasExactRuntimeConnection ? (
+          <Pressable
+            onPress={checkBridge}
+            disabled={state === 'checking'}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh provider bridge status"
+            accessibilityState={{ disabled: state === 'checking', busy: state === 'checking' }}
+            style={({ hovered }: any) => [
+              styles.refreshButton,
+              hovered && styles.refreshButtonHover,
+              state === 'checking' && styles.disabled,
+              Platform.OS === 'web' && ({ cursor: state === 'checking' ? 'wait' : 'pointer' } as any),
+            ]}
+          >
+            {state === 'checking'
+              ? <ActivityIndicator size="small" color="#8b949e" />
+              : <Text style={styles.refreshText}>Refresh</Text>}
+          </Pressable>
+        ) : null}
       </View>
 
-      {state === 'offline' || state === 'unsupported' ? (
+      {!hasExactRuntimeConnection ? (
+        <View style={styles.scopeNote}>
+          <Text style={styles.scopeNoteText}>
+            Provider-level check only. This does not verify the selected agent’s exact runtime session.
+          </Text>
+        </View>
+      ) : null}
+
+      {state === 'offline' || state === 'degraded' || state === 'unsupported' ? (
         <View style={styles.help} accessibilityRole="alert">
-          <Text style={styles.helpText}>{offlineHelp(provider)}</Text>
+          <Text style={styles.helpText}>{guidance || offlineHelp(provider)}</Text>
         </View>
       ) : null}
     </View>
@@ -216,5 +275,15 @@ const styles = StyleSheet.create({
     color: '#8b949e',
     fontSize: 11,
     lineHeight: 16,
+  },
+  scopeNote: {
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
+    paddingTop: 8,
+  },
+  scopeNoteText: {
+    color: '#6e7681',
+    fontSize: 10,
+    lineHeight: 15,
   },
 });

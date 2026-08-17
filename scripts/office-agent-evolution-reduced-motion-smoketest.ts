@@ -15,9 +15,10 @@ for (const [name, source] of [['Evolution card', evolution], ['Streak flame', fl
   check(
     source.includes('AccessibilityInfo.isReduceMotionEnabled()')
       && source.includes("AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion)")
+      && source.includes('const [reduceMotion, setReduceMotion] = useState(true)')
       && source.includes('if (mounted) setReduceMotion(true)')
       && source.includes('subscription.remove()'),
-    `${name} follows the live platform preference and fails safely to static motion`,
+    `${name} starts static, follows the live platform preference, and fails safely to static motion`,
   );
 }
 

@@ -3,6 +3,13 @@ import { Platform } from 'react-native';
 
 type PanelMode = 'center' | 'side';
 
+type ActiveSideResize = {
+  onMove: (event: MouseEvent) => void;
+  onUp: () => void;
+  previousCursor: string;
+  previousUserSelect: string;
+};
+
 const POPUP_PADDING = 24;
 const CENTER_W_RATIO = 0.62;
 const CENTER_H_RATIO = 0.68;
@@ -47,6 +54,7 @@ export function useAgentPanelLayout() {
   const [backdropOn, setBackdropOn] = useState(false);
   const dragStartX = useRef(0);
   const dragStartW = useRef(0);
+  const activeSideResizeRef = useRef<ActiveSideResize | null>(null);
   const [viewport, setViewport] = useState(() => ({
     w: typeof window !== 'undefined' ? window.innerWidth : 1920,
     h: typeof window !== 'undefined' ? window.innerHeight : 1080,
@@ -80,8 +88,35 @@ export function useAgentPanelLayout() {
     setPanelMode(mode => (mode === 'center' ? 'side' : 'center'));
   }, []);
 
+  const stopSideResize = useCallback((updateState = true) => {
+    const activeResize = activeSideResizeRef.current;
+    if (!activeResize) return;
+    activeSideResizeRef.current = null;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('mousemove', activeResize.onMove);
+      window.removeEventListener('mouseup', activeResize.onUp);
+      window.removeEventListener('blur', activeResize.onUp);
+    }
+    if (typeof document !== 'undefined') {
+      document.body.style.cursor = activeResize.previousCursor;
+      document.body.style.userSelect = activeResize.previousUserSelect;
+    }
+    if (updateState) setIsResizing(false);
+  }, []);
+
+  useEffect(() => {
+    if (panelMode !== 'side') stopSideResize();
+  }, [panelMode, stopSideResize]);
+
+  useEffect(() => () => {
+    // Never update hook state during teardown, but always restore global DOM
+    // listeners and the body styles captured when resizing began.
+    stopSideResize(false);
+  }, [stopSideResize]);
+
   const startSideResize = useCallback((startPageX: number) => {
     if (Platform.OS !== 'web' || panelMode !== 'side' || typeof window === 'undefined') return;
+    stopSideResize();
     dragStartX.current = startPageX;
     dragStartW.current = sideWidth;
     setIsResizing(true);
@@ -91,19 +126,17 @@ export function useAgentPanelLayout() {
       setSideWidth(Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, dragStartW.current + delta)));
     };
 
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      setIsResizing(false);
-    };
+    const onUp = () => stopSideResize();
 
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    activeSideResizeRef.current = { onMove, onUp, previousCursor, previousUserSelect };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', onUp);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-  }, [panelMode, sideWidth]);
+  }, [panelMode, sideWidth, stopSideResize]);
 
   const resizeSideBy = useCallback((delta: number) => {
     if (panelMode !== 'side' || !Number.isFinite(delta)) return;

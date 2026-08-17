@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   Animated,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -86,6 +87,7 @@ interface Props {
   scaleAnim: Animated.Value;
   opacityAnim: Animated.Value;
   slideAnim: Animated.Value;
+  reduceMotion: boolean;
   backdropOpacity: number;
   panelTransition: string;
   statusColor: string;
@@ -94,9 +96,11 @@ interface Props {
   editName: string;
   setEditName: (value: string) => void;
   onStartRename: () => void;
-  onSubmitRename: () => void;
+  onSubmitRename: () => Promise<void>;
   onCancelRename: () => void;
   canRenameAgent: boolean;
+  renameBusy: boolean;
+  actionNotice: { kind: 'success' | 'error'; message: string } | null;
   onClose: () => void;
   onToggleMode: () => void;
   onStartSideResize: (pageX: number) => void;
@@ -154,6 +158,7 @@ export default function AgentPanelShell({
   scaleAnim,
   opacityAnim,
   slideAnim,
+  reduceMotion,
   backdropOpacity,
   panelTransition,
   statusColor,
@@ -165,6 +170,8 @@ export default function AgentPanelShell({
   onSubmitRename,
   onCancelRename,
   canRenameAgent,
+  renameBusy,
+  actionNotice,
   onClose,
   onToggleMode,
   onStartSideResize,
@@ -206,7 +213,6 @@ export default function AgentPanelShell({
     event: any,
     keys: readonly string[],
     currentKey: string,
-    selectKey: (key: string) => void,
     nativeIdForKey: (key: string) => string,
   ) => {
     const key = event?.nativeEvent?.key || event?.key;
@@ -221,7 +227,9 @@ export default function AgentPanelShell({
           ? (currentIndex - 1 + keys.length) % keys.length
           : (currentIndex + 1) % keys.length;
     const nextKey = keys[nextIndex];
-    selectKey(nextKey);
+    // These routes lazy-load, so follow the WAI-ARIA manual-activation model:
+    // arrows move focus without fetching or replacing the active panel. The
+    // focused Pressable activates through Enter/Space (or a pointer press).
     focusWebTab(nativeIdForKey(nextKey));
   };
 
@@ -229,15 +237,15 @@ export default function AgentPanelShell({
     <View style={desktop ? styles.desktopActionRow : styles.mobileActionRow}>
       <Pressable
         onPress={onRemoveAgent}
-        disabled={removingAgent}
+        disabled={removingAgent || renameBusy}
         accessibilityRole="button"
         accessibilityLabel={`Remove ${agent.name} from this Office`}
         accessibilityHint="Removes the published Office agent after confirmation. It does not stop the local runtime."
-        accessibilityState={{ disabled: removingAgent, busy: removingAgent }}
+        accessibilityState={{ disabled: removingAgent || renameBusy, busy: removingAgent }}
         style={[
           styles.removeButton,
-          removingAgent && { opacity: 0.65 },
-          Platform.OS === 'web' && { cursor: removingAgent ? 'wait' : 'pointer' } as any,
+          (removingAgent || renameBusy) && { opacity: 0.65 },
+          Platform.OS === 'web' && { cursor: removingAgent ? 'wait' : renameBusy ? 'not-allowed' : 'pointer' } as any,
         ]}
       >
         <Text style={styles.removeButtonText}>
@@ -256,10 +264,6 @@ export default function AgentPanelShell({
       setPanelTab((currentRoute || group.tabs[0]).key);
     };
     const routeKeys = activeGroup?.tabs.map(tab => tab.key) || [];
-    const selectRouteKey = (tabKey: string) => {
-      const route = activeGroup?.tabs.find(tab => tab.key === tabKey);
-      if (route) setPanelTab(route.key);
-    };
 
     return (
       <View style={[styles.navigationShell, desktop && styles.navigationShellDesktop]}>
@@ -294,8 +298,7 @@ export default function AgentPanelShell({
                     onKeyDown: (event: any) => handleArrowNavigation(
                       event,
                       groupKeys,
-                      activeGroup?.key || group.key,
-                      selectGroupKey,
+                      group.key,
                       key => `uc-agent-panel-destination-${key}`,
                     ),
                   } as any) : {})}
@@ -349,8 +352,7 @@ export default function AgentPanelShell({
                       onKeyDown: (event: any) => handleArrowNavigation(
                         event,
                         routeKeys,
-                        panelTab,
-                        selectRouteKey,
+                        tab.key,
                         key => `uc-agent-panel-route-${key}`,
                       ),
                     } as any) : {})}
@@ -395,25 +397,40 @@ export default function AgentPanelShell({
                 style={styles.desktopHeaderNameInput}
                 value={editName}
                 onChangeText={setEditName}
+                editable={!renameBusy}
                 autoFocus
                 onSubmitEditing={onSubmitRename}
                 placeholder={agent.name}
                 placeholderTextColor="#484f58"
                 accessibilityLabel="Agent name"
+                accessibilityState={{ disabled: renameBusy, busy: renameBusy }}
               />
               <Pressable
                 onPress={onSubmitRename}
-                style={[styles.desktopRenameAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
+                disabled={renameBusy || !editName.trim()}
+                style={[
+                  styles.desktopRenameAction,
+                  (renameBusy || !editName.trim()) && styles.commandActionDisabled,
+                  Platform.OS === 'web' ? ({ cursor: renameBusy ? 'wait' : !editName.trim() ? 'not-allowed' : 'pointer' } as any) : null,
+                ]}
                 accessibilityRole="button"
                 accessibilityLabel="Save agent name"
+                accessibilityState={{ disabled: renameBusy || !editName.trim(), busy: renameBusy }}
               >
-                <Text style={styles.desktopRenameActionText}>Save</Text>
+                <Text style={styles.desktopRenameActionText}>{renameBusy ? 'Saving…' : 'Save'}</Text>
               </Pressable>
               <Pressable
                 onPress={onCancelRename}
-                style={[styles.desktopRenameAction, styles.desktopRenameCancelAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
+                disabled={renameBusy}
+                style={[
+                  styles.desktopRenameAction,
+                  styles.desktopRenameCancelAction,
+                  renameBusy && styles.commandActionDisabled,
+                  Platform.OS === 'web' ? ({ cursor: renameBusy ? 'not-allowed' : 'pointer' } as any) : null,
+                ]}
                 accessibilityRole="button"
                 accessibilityLabel="Cancel rename"
+                accessibilityState={{ disabled: renameBusy }}
               >
                 <Text style={[styles.desktopRenameActionText, styles.desktopRenameCancelActionText]}>Cancel</Text>
               </Pressable>
@@ -476,7 +493,7 @@ export default function AgentPanelShell({
     </View>
   );
 
-  return (
+  const panelLayer = (
     <>
       {panelMode === 'center' && (
         <Pressable
@@ -564,6 +581,25 @@ export default function AgentPanelShell({
         ) : null}
 
         {renderHeader()}
+        {actionNotice ? (
+          <View
+            style={[
+              styles.commandNotice,
+              actionNotice.kind === 'error' ? styles.commandNoticeError : styles.commandNoticeSuccess,
+            ]}
+            accessibilityRole={actionNotice.kind === 'error' ? 'alert' : undefined}
+            accessibilityLiveRegion={actionNotice.kind === 'error' ? 'assertive' : 'polite'}
+          >
+            <Text
+              style={[
+                styles.commandNoticeText,
+                actionNotice.kind === 'error' ? styles.commandNoticeErrorText : styles.commandNoticeSuccessText,
+              ]}
+            >
+              {actionNotice.message}
+            </Text>
+          </View>
+        ) : null}
         {renderTabNavigation(isDesktop)}
 
         <ScrollView
@@ -580,6 +616,7 @@ export default function AgentPanelShell({
               {...(Platform.OS === 'web' ? ({
                 role: 'tabpanel',
                 'aria-labelledby': activeTabLabelId,
+                tabIndex: 0,
               } as any) : {})}
             >
               {children}
@@ -590,9 +627,32 @@ export default function AgentPanelShell({
       </Animated.View>
     </>
   );
+
+  // Native Modal creates a separate accessibility/window boundary: TalkBack
+  // cannot walk into the Office behind the compact sheet, and Android hardware
+  // Back is routed through onRequestClose. RN Web keeps the existing dialog and
+  // docked-inspector DOM so its focus trap/restoration behavior is unchanged.
+  if (Platform.OS !== 'web' && panelMode === 'center') {
+    return (
+      <Modal
+        visible
+        transparent
+        animationType={reduceMotion ? 'none' : 'fade'}
+        statusBarTranslucent
+        onRequestClose={onClose}
+      >
+        <View style={styles.nativeModalRoot}>{panelLayer}</View>
+      </Modal>
+    );
+  }
+
+  return panelLayer;
 }
 
 const styles = StyleSheet.create({
+  nativeModalRoot: {
+    flex: 1,
+  },
   modalBackdrop: {
     position: 'absolute',
     top: 0,
@@ -753,6 +813,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
+  commandActionDisabled: {
+    opacity: 0.6,
+  },
   desktopRenameCancelAction: {
     borderColor: '#30363d',
     backgroundColor: 'transparent',
@@ -849,6 +912,30 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: '400',
     lineHeight: 26,
+  },
+  commandNotice: {
+    minHeight: 36,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+  },
+  commandNoticeError: {
+    backgroundColor: '#f8514910',
+    borderBottomColor: '#f8514938',
+  },
+  commandNoticeSuccess: {
+    backgroundColor: '#22c55e10',
+    borderBottomColor: '#22c55e38',
+  },
+  commandNoticeText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  commandNoticeErrorText: {
+    color: '#ff7b72',
+  },
+  commandNoticeSuccessText: {
+    color: '#3fb950',
   },
   desktopActionRow: {
     marginTop: 24,

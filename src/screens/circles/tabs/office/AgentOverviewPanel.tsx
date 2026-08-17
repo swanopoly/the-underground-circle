@@ -4,7 +4,6 @@ import AgentControlCard from '../../../../components/AgentControlCard';
 import {
   getAgentIdentityKey,
   loadAgentIdentitiesExact,
-  renameAgentExact,
   setMainAgentForProviderExact,
   syncAgentIdentitiesFromServerExact,
   type AgentIdentityExactAuthority,
@@ -145,13 +144,17 @@ function QuickActionsStrip({
       if (canRunDiagnostics && onRunCommand) {
         const res = await onRunCommand(text);
         const output = String(res.stdout || res.stderr || '').trim().slice(0, 100);
-        showToast(res.ok ? (output || 'Diagnostic completed') : (output || 'Diagnostic failed'));
+        if (!res.ok) {
+          showToast('Diagnostic failed. Review bridge status and retry.');
+          return;
+        }
+        showToast(output || 'Diagnostic completed');
+        setDraft('');
       } else {
         showToast('Use Chat, OpenSwan, or Terminal to send this agent a task');
       }
-      setDraft('');
-    } catch (error: unknown) {
-      showToast(error instanceof Error ? error.message : 'Diagnostic failed');
+    } catch {
+      showToast('Diagnostic failed. Review bridge status and retry.');
     } finally {
       setSending(false);
     }
@@ -589,20 +592,20 @@ function useMemorySyncStatus(
 export default function AgentOverviewPanel({
   agent,
   circleId,
+  runtimeConnectionId,
   identityAuthority,
   isIdentityAuthorityCurrent: isParentIdentityAuthorityCurrent,
   onClose,
-  onRenameAgent,
   onAgentIdentityChange,
   onOpenInChat,
   onRunCommand,
 }: {
   agent: OfficeAgent;
   circleId?: string;
+  runtimeConnectionId?: string | null;
   identityAuthority?: (AgentIdentityExactAuthority & { generation?: number }) | null;
   isIdentityAuthorityCurrent: OfficeConnectionAuthorityFence;
   onClose: () => void;
-  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<boolean> | boolean;
   onAgentIdentityChange?: () => void;
   onOpenInChat?: (draft?: string) => void;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
@@ -612,8 +615,6 @@ export default function AgentOverviewPanel({
     [circleId, identityAuthority?.accessToken, identityAuthority?.circleId, identityAuthority?.generation, identityAuthority?.userId],
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [renamingAgent, setRenamingAgent] = useState(false);
-  const [agentNameDraft, setAgentNameDraft] = useState('');
   const [isMainAgent, setIsMainAgent] = useState(false);
   const [mainAgentStatus, setMainAgentStatus] = useState<'idle' | 'locked' | 'loading' | 'ready' | 'error'>('idle');
   const [mainAgentBusy, setMainAgentBusy] = useState(false);
@@ -648,8 +649,6 @@ export default function AgentOverviewPanel({
 
   useEffect(() => {
     setDetailsOpen(false);
-    setRenamingAgent(false);
-    setAgentNameDraft('');
     setIsMainAgent(false);
     setMainAgentStatus('idle');
     setMainAgentBusy(false);
@@ -737,7 +736,12 @@ export default function AgentOverviewPanel({
     ) return;
     setMainAgentBusy(true);
     try {
-      const receipt = await setMainAgentForProviderExact(sessionKey, agent.providerType, capturedAuthority);
+      const receipt = await setMainAgentForProviderExact(
+        sessionKey,
+        agent.providerType,
+        capturedAuthority,
+        isIdentityAuthorityCurrent,
+      );
       if (
         !isIdentityAuthorityCurrent(capturedAuthority)
         || latestIdentityRequestKeyRef.current !== capturedRequestKey
@@ -782,7 +786,9 @@ export default function AgentOverviewPanel({
       {circleId && sessionKey && (
         <View nativeID="section-agent-controls" style={overviewStyles.connectionSummary}>
           <AgentControlCard
+            key={`${agent.id}:${runtimeConnectionId || 'provider'}`}
             agent={agent}
+            runtimeConnectionId={runtimeConnectionId}
           />
         </View>
       )}
@@ -818,78 +824,9 @@ export default function AgentOverviewPanel({
               <View style={[overviewStyles.memoryStatus, { borderColor: memorySync.color + '38' }]}>
                 <View style={[overviewStyles.memoryStatusDot, { backgroundColor: memorySync.color }]} />
                 <View style={overviewStyles.memoryStatusCopy}>
-                  <Text style={overviewStyles.memoryStatusTitle}>Memory {memorySync.label.toLowerCase()}</Text>
+                  <Text style={overviewStyles.memoryStatusTitle}>Circle memory {memorySync.label.toLowerCase()}</Text>
                   <Text style={overviewStyles.memoryStatusDetail}>{memorySync.detail}</Text>
                 </View>
-              </View>
-
-              <View style={overviewStyles.settingRow}>
-                <View style={overviewStyles.settingCopy}>
-                  <Text style={overviewStyles.settingLabel}>Agent name</Text>
-                  <Text style={overviewStyles.settingDescription}>Used across your private Office identity.</Text>
-                </View>
-                {renamingAgent ? (
-                  <View style={overviewStyles.renameEditor}>
-                    <TextInput
-                      value={agentNameDraft}
-                      onChangeText={setAgentNameDraft}
-                      placeholder={agent.name}
-                      placeholderTextColor="#484f58"
-                      autoFocus
-                      accessibilityLabel="Agent name"
-                      style={overviewStyles.renameInput}
-                      onSubmitEditing={async () => {
-                        const cleanName = agentNameDraft.trim();
-                        const capturedAuthority = exactIdentityAuthority;
-                        const capturedRequestKey = identityRequestKey;
-                        if (cleanName && capturedAuthority && capturedRequestKey) {
-                          if (onRenameAgent) {
-                            const saved = await onRenameAgent(agent, cleanName);
-                            if (!saved) return;
-                          } else {
-                            const receipt = await renameAgentExact(sessionKey, cleanName, capturedAuthority);
-                            if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) return;
-                          }
-                          if (
-                            !isIdentityAuthorityCurrent(capturedAuthority)
-                            || latestIdentityRequestKeyRef.current !== capturedRequestKey
-                            || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
-                          ) return;
-                          onAgentIdentityChange?.();
-                        }
-                        if (
-                          !!capturedAuthority
-                          && isIdentityAuthorityCurrent(capturedAuthority)
-                          && latestIdentityRequestKeyRef.current === capturedRequestKey
-                          && latestIdentityAccessTokenRef.current === capturedAuthority?.accessToken
-                        ) setRenamingAgent(false);
-                      }}
-                    />
-                    <Pressable
-                      onPress={() => setRenamingAgent(false)}
-                      accessibilityRole="button"
-                      accessibilityLabel="Cancel rename"
-                      style={overviewStyles.smallButton}
-                    >
-                      <Text style={overviewStyles.smallButtonText}>Cancel</Text>
-                    </Pressable>
-                  </View>
-                ) : (
-                  <Pressable
-                    disabled={!exactIdentityAuthority}
-                    onPress={() => {
-                      if (!exactIdentityAuthority) return;
-                      setAgentNameDraft(agent.name);
-                      setRenamingAgent(true);
-                    }}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Rename ${agent.name}`}
-                    accessibilityState={{ disabled: !exactIdentityAuthority }}
-                    style={[overviewStyles.smallButton, !exactIdentityAuthority && overviewStyles.actionButtonDisabled]}
-                  >
-                    <Text style={overviewStyles.smallButtonText}>Rename</Text>
-                  </Pressable>
-                )}
               </View>
 
               <Pressable
@@ -1316,46 +1253,6 @@ const overviewStyles = StyleSheet.create({
     color: '#8b949e',
     fontSize: 11,
   },
-  settingRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: 12,
-  },
-  settingCopy: {
-    flex: 1,
-    minWidth: 170,
-    gap: 2,
-  },
-  settingLabel: {
-    color: '#e6edf3',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  settingDescription: {
-    color: '#8b949e',
-    fontSize: 11,
-  },
-  renameEditor: {
-    flex: 1,
-    minWidth: 220,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  renameInput: {
-    flex: 1,
-    minHeight: 44,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#6366f1',
-    backgroundColor: '#010409',
-    color: '#e6edf3',
-    fontSize: 13,
-    ...(Platform.OS === 'web' ? { outlineStyle: 'none' as any } : {}),
-  } as any,
   smallButton: {
     minHeight: 44,
     paddingHorizontal: 12,

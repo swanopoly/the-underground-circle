@@ -23,7 +23,7 @@ const check = (condition: unknown, message: string): void => {
 
 const subjectRunsReader = section(
   system,
-  'export async function listRunsForAgentSubject(',
+  'async function scanRunsForAgentSubject(',
   'export async function listChildRuns(',
 );
 const childRunsReader = section(
@@ -51,6 +51,16 @@ check(
   'strict run readers verify one captured positive-generation bearer authority',
 );
 check(
+  system.includes('export type AgentRunSubjectListResult')
+    && system.includes('complete: boolean')
+    && subjectRunsReader.includes('scannedRows += data.length')
+    && subjectRunsReader.includes('Math.max(scanPageSize, opts.maxScanRows || 1000)')
+    && subjectRunsReader.includes('5_000')
+    && subjectRunsReader.includes('complete = true')
+    && subjectRunsReader.includes('export async function listRunsForAgentSubjectPage('),
+  'bounded subject scans expose whether the exact candidate history was exhausted',
+);
+check(
   system.includes("throw new AgentRunExactReadError('authority_retired')")
     && system.includes("throw new AgentRunExactReadError('scope_mismatch')")
     && system.includes("throw new AgentRunExactReadError('authority_mismatch')"),
@@ -76,7 +86,7 @@ for (const [name, reader] of [
 }
 check(
   subjectRunsReader.includes('if (matchesEverySubject && !strictRead)')
-    && subjectRunsReader.includes('return listRuns(circleId, opts);'),
+    && subjectRunsReader.includes('const runs = await listRuns(circleId, opts);'),
   'only legacy subjectless reads can use the ambient listRuns compatibility path',
 );
 check(
@@ -136,10 +146,20 @@ check(
 );
 check(
   panel.includes('strict: true,')
+    && panel.includes('listRunsForAgentSubjectPage(circleId, {')
     && panel.includes('getRunSteps(runId, strictReadOptions)')
     && panel.includes('listChildRuns(runId, 12, strictReadOptions)')
     && panel.includes('}, strictReadOptions);'),
   'Runs uses strict exact readers for the list, steps, and child runs',
+);
+check(
+  panel.includes('const [snapshotTruncated, setSnapshotTruncated]')
+    && panel.includes('const [scanLimit, setScanLimit] = useState(1_000)')
+    && panel.includes('setSnapshotTruncated(!scanResult.complete')
+    && panel.includes('No matching runs were found in the verified portion of history.')
+    && panel.includes('Run history is partial.')
+    && panel.includes("'SCAN 1,000 MORE'"),
+  'Runs never presents a capped subject scan as verified complete or empty',
 );
 check(
   panel.includes('loading && !hasVerifiedSnapshot')

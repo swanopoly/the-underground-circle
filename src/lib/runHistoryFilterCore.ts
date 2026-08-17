@@ -26,7 +26,14 @@
  *     input rows in the input order (object rows only), so the drawer's
  *     default render is unchanged.
  *
- *  3. formatRunHistoryStatsLine(stats) — the exact compact header line
+ *  3. classifyStaleRunCancelReceipt(rows, expected) — validate the exact
+ *     one-row PostgREST receipt for an explicit stale-run cancellation. A
+ *     zero-row compare-and-set is a conflict, never success.
+ *
+ *  4. classify/aggregate Realtime state — fail closed unless both selected-run
+ *     channels report subscribed.
+ *
+ *  5. formatRunHistoryStatsLine(stats) — the exact compact header line
  *     ('12 runs · 9✓ 3✗ (75%) · $4.21 today · $0.90 wasted') so the smoke can
  *     pin it and the bar component stays presentation-only.
  *
@@ -42,6 +49,21 @@ import { classifyRunFreshness } from './runFreshnessCore';
 
 export type RunStatusBucket = 'running' | 'succeeded' | 'failed' | 'other';
 export type RunStatusFilter = RunStatusBucket | 'all';
+export type RunHistoryRealtimeState = 'connecting' | 'live' | 'unavailable';
+
+/** Fail-closed projection of Supabase Realtime's channel status callback. */
+export function classifyRunHistoryRealtimeStatus(status: unknown): RunHistoryRealtimeState {
+  return status === 'SUBSCRIBED' ? 'live' : 'unavailable';
+}
+
+/** Both selected-run channels must be subscribed before the snapshot is live. */
+export function aggregateRunHistoryRealtimeState(
+  runState: RunHistoryRealtimeState,
+  stepState: RunHistoryRealtimeState,
+): RunHistoryRealtimeState {
+  if (runState === 'unavailable' || stepState === 'unavailable') return 'unavailable';
+  return runState === 'live' && stepState === 'live' ? 'live' : 'connecting';
+}
 
 /**
  * Structural subset of agentRunSystem's AgentRun that this core reads.
@@ -92,6 +114,24 @@ export interface RunHistoryFilterResult {
   stats: RunHistoryStats;
 }
 
+export type StaleRunCancelReceiptExpectation = Readonly<{
+  runId: string;
+  circleId: string;
+  userId: string;
+  cancelledAt: string;
+}>;
+
+export type StaleRunCancelReceipt =
+  | Readonly<{ ok: true; row: Record<string, unknown> }>
+  | Readonly<{ ok: false; reason: 'no_match' | 'invalid_response' }>;
+
+export type ExactRunMutationAuthorityLike = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
 export const EMPTY_RUN_HISTORY_STATS: RunHistoryStats = Object.freeze({
   count: 0,
   succeeded: 0,
@@ -103,6 +143,74 @@ export const EMPTY_RUN_HISTORY_STATS: RunHistoryStats = Object.freeze({
   todayUsd: 0,
   wastedUsd: 0,
 });
+
+/**
+ * Accept a stale-run cancellation receipt only when PostgREST returned exactly
+ * the row and terminal timestamps the guarded UPDATE requested. In particular,
+ * `[]` means the compare-and-set lost (status/liveness/scope changed) and must
+ * remain a visible failure in the drawer.
+ */
+export function classifyStaleRunCancelReceipt(
+  rows: unknown,
+  expected: StaleRunCancelReceiptExpectation | null | undefined,
+): StaleRunCancelReceipt {
+  if (!expected || typeof expected !== 'object' || Array.isArray(expected)) {
+    return { ok: false, reason: 'invalid_response' };
+  }
+  if (!Array.isArray(rows)) return { ok: false, reason: 'invalid_response' };
+  if (rows.length === 0) return { ok: false, reason: 'no_match' };
+  if (rows.length !== 1) return { ok: false, reason: 'invalid_response' };
+  const row = rows[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    return { ok: false, reason: 'invalid_response' };
+  }
+  const record = row as Record<string, unknown>;
+  const expectedCancelledAtMs = typeof expected.cancelledAt === 'string'
+    ? Date.parse(expected.cancelledAt)
+    : Number.NaN;
+  const updatedAtMs = typeof record.updated_at === 'string' ? Date.parse(record.updated_at) : Number.NaN;
+  const completedAtMs = typeof record.completed_at === 'string' ? Date.parse(record.completed_at) : Number.NaN;
+  if (
+    record.id !== expected.runId
+    || record.circle_id !== expected.circleId
+    || record.user_id !== expected.userId
+    || record.status !== 'cancelled'
+    || !Number.isFinite(expectedCancelledAtMs)
+    || !Number.isFinite(updatedAtMs)
+    || !Number.isFinite(completedAtMs)
+    || updatedAtMs !== expectedCancelledAtMs
+    || completedAtMs !== expectedCancelledAtMs
+  ) {
+    return { ok: false, reason: 'invalid_response' };
+  }
+  return { ok: true, row: record };
+}
+
+/** Pure value fence used by the mounted auth hook before its live scope checks. */
+export function isExactRunMutationAuthorityCurrent(
+  captured: ExactRunMutationAuthorityLike | null | undefined,
+  current: ExactRunMutationAuthorityLike | null | undefined,
+): boolean {
+  const boundedPart = (value: unknown, max: number): value is string => (
+    typeof value === 'string'
+    && value.length > 0
+    && value.length <= max
+    && value.trim() === value
+  );
+  return Boolean(
+    captured
+    && current
+    && boundedPart(captured.userId, 240)
+    && boundedPart(captured.circleId, 240)
+    && boundedPart(captured.accessToken, 16_384)
+    && captured.userId === current.userId
+    && captured.circleId === current.circleId
+    && captured.accessToken === current.accessToken
+    && Number.isSafeInteger(captured.generation)
+    && captured.generation > 0
+    && captured.generation === current.generation
+  );
+}
 
 // ── Status buckets ───────────────────────────────────────────────────────────
 

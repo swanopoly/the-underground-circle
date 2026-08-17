@@ -7,6 +7,7 @@ import {
   resolveAgentPanelRuntimeConnectionId,
   type AgentPanelCapabilities,
 } from '../src/screens/circles/tabs/office/AgentPanelTabs';
+import { resolveOfficeAgentExecutionTruth } from '../src/lib/officeAgents';
 
 type PanelAgent = Parameters<typeof getAgentPanelTabs>[0];
 
@@ -69,14 +70,63 @@ assert.equal(
 
 const restrictedTabs = getAgentPanelTabs(openSwanAgent, restrictedCapabilities);
 const restrictedKeys = restrictedTabs.map(tab => tab.key);
-for (const unavailable of ['memory', 'runs', 'evolution', 'cron', 'customize']) {
+for (const unavailable of ['memory', 'runs', 'evolution', 'cron', 'terminal', 'spirit', 'customize']) {
   assert(!restrictedKeys.includes(unavailable as any), `${unavailable} is hidden when its render authority is unavailable`);
 }
 assert(!restrictedKeys.includes('openswan'), 'the OpenSwan runtime route stays hidden without exact private connection authority');
 assert.deepEqual(
+  restrictedKeys,
+  ['overview', 'activity'],
+  'a locked panel exposes only routes that can render verified read-only state',
+);
+
+assert.deepEqual(
+  resolveOfficeAgentExecutionTruth({
+    status: 'active',
+    statusNote: 'bridge disconnected',
+    currentToolName: 'Write',
+    currentToolFile: '/tmp/stale.ts',
+    activity: 'Editing stale.ts',
+  }),
+  {
+    state: 'warning',
+    statusWarning: 'bridge disconnected',
+    currentToolName: '',
+    currentToolFile: '',
+    activity: '',
+  },
+  'a bridge warning suppresses retained tool fields before Activity can claim live execution',
+);
+assert.equal(
+  resolveOfficeAgentExecutionTruth({
+    status: 'offline',
+    currentToolName: 'Write',
+    currentToolFile: '/tmp/stale.ts',
+    activity: 'Editing stale.ts',
+  }).state,
+  'unavailable',
+  'an offline agent cannot become active from stale tool fields',
+);
+assert.deepEqual(
+  resolveOfficeAgentExecutionTruth({
+    status: 'active',
+    currentToolName: 'Write',
+    currentToolFile: '/tmp/live.ts',
+    activity: 'Editing live.ts',
+  }),
+  {
+    state: 'active',
+    statusWarning: '',
+    currentToolName: 'Write',
+    currentToolFile: '/tmp/live.ts',
+    activity: 'Editing live.ts',
+  },
+  'verified active execution retains its current tool evidence',
+);
+assert.deepEqual(
   getAgentPanelGroups(restrictedTabs).map(group => group.key),
-  ['overview', 'work', 'runtime', 'more'],
-  'all four destinations retain at least one useful route in a restricted scope',
+  ['overview', 'work'],
+  'empty Runtime and More destinations disappear instead of opening locked sections',
 );
 assert.equal(
   getFallbackAgentPanelTab(openSwanAgent, 'cron', restrictedCapabilities),
@@ -94,8 +144,41 @@ assert(
   }).some(tab => tab.key === 'openswan' || tab.key === 'cron'),
   'a DB-only OpenSwan presentation row does not expose unusable live-runtime routes',
 );
+assert.deepEqual(
+  getAgentPanelTabs(standardAgent, {
+    ...fullCapabilities,
+    hasIdentityAuthority: false,
+  }).map(tab => tab.key),
+  ['overview', 'activity'],
+  'generic and bridge agents do not expose private identity editors before exact authority is ready',
+);
+assert(
+  getAgentPanelTabs(standardAgent, fullCapabilities).some(tab => tab.key === 'terminal' || tab.key === 'spirit' || tab.key === 'customize'),
+  'the same identity-backed routes appear once exact circle authority is verified',
+);
 assert.equal(resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, []), null, 'built-in OpenSwan exposes no runtime route without a connection');
 assert.equal(resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, [openSwanConnection('conn-a')]), 'conn-a', 'built-in OpenSwan may use one unambiguous exact connection');
+assert.equal(
+  resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, [{ ...openSwanConnection('local-proxy'), token: '' }]),
+  'local-proxy',
+  'the canonical localhost proxy may rely on its own gateway-token injection',
+);
+assert.equal(
+  resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, [{ ...openSwanConnection('loopback-proxy'), endpoint: 'http://127.0.0.1:18790', token: '' }]),
+  'loopback-proxy',
+  'the canonical numeric loopback proxy may be tokenless',
+);
+for (const connection of [
+  { ...openSwanConnection('remote-tokenless'), endpoint: 'https://runtime.example.com', token: '' },
+  { ...openSwanConnection('direct-tokenless'), endpoint: 'http://localhost:18789', token: '' },
+  { ...openSwanConnection('masked-proxy'), token: '***' },
+]) {
+  assert.equal(
+    resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, [connection]),
+    null,
+    `${connection.id} cannot widen the tokenless local-proxy exception`,
+  );
+}
 assert.equal(resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, [openSwanConnection('conn-a'), openSwanConnection('conn-b')]), null, 'built-in OpenSwan never guesses between multiple connected runtimes');
 assert.equal(
   resolveAgentPanelRuntimeConnectionId({ ...openSwanAgent, connectionId: 'conn-b' } as PanelAgent, [openSwanConnection('conn-a'), openSwanConnection('conn-b')]),
@@ -139,6 +222,14 @@ for (const marker of [
 assert(!panel.includes('requestIdleCallback'), 'panel chunks are not speculatively prefetched');
 assert(!panel.includes('error.message'), 'lazy-section copy never exposes a raw loader error');
 assert(!shell.includes('error.message'), 'render-boundary copy never exposes a raw child error');
+assert(
+  activity.includes('const executionTruth = resolveOfficeAgentExecutionTruth(agent);')
+    && activity.includes("executionTruth.state === 'warning'")
+    && activity.includes('Runtime status warning: ${executionTruth.statusWarning}. Refresh the connection before assigning new work.')
+    && activity.includes('setInspectOpen(false);')
+    && activity.includes('[agent.id, agent.sessionKey, agent.connectionId]'),
+  'Activity never calls a bridge-disconnected agent available and retires raw diagnostics on subject changes',
+);
 
 for (const marker of [
   "role: 'tablist'",
@@ -189,7 +280,7 @@ assert(
   evolution.includes('getAgentProgression(userId, agentId, circleId, exactAgentIds, {')
     && evolution.includes('isAuthorityCurrent: isIdentityAuthorityCurrent')
     && evolution.includes('strict: true')
-    && evolution.includes('loadStreak(userId, circleId)')
+    && evolution.includes('loadMissionStreakExact(capturedAuthority, isIdentityAuthorityCurrent)')
     && evolution.includes('agentIds={exactAgentIds}')
     && evolution.includes('identityAuthority={exactAuthority}')
     && progression.includes("masteryQuery.eq('circle_id', circleId)")
@@ -213,11 +304,14 @@ assert(
   'the panel authority fails closed during same-user access-token rotation before effects commit',
 );
 assert(
-  panel.includes('onAppearanceChange?: (id: string, appearance: AgentAppearance) => void | Promise<void>')
+  panel.includes('onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<boolean>')
     && office.includes('const receipt = await updateAgentIdentityExact(')
     && office.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved')
-    && customize.includes('(result as Promise<void>).then')
-    && customize.includes('.then(flashSaved)'),
+    && office.includes('return isOfficeAuthorityCurrent(requestedAuthority)')
+    && customize.includes('onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<boolean>')
+    && customize.includes('if (saved !== true)')
+    && customize.includes("label: '✕ NOT SAVED — TRY AGAIN'")
+    && !customize.includes('optimistically report'),
   'Customize reports SAVED only after the exact durable identity receipt resolves',
 );
 assert(

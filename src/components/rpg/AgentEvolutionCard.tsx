@@ -17,7 +17,9 @@ import { BOND_UNLOCKS, BOND_LEVELS } from '../../lib/mastery';
 const MONO = Platform.OS === 'web' ? 'monospace' : undefined;
 
 function useReducedMotionPreference(): boolean {
-  const [reduceMotion, setReduceMotion] = useState(false);
+  // Fail static until the async preference read resolves so a user who has
+  // requested reduced motion never sees a one-frame entrance animation.
+  const [reduceMotion, setReduceMotion] = useState(true);
 
   useEffect(() => {
     let mounted = true;

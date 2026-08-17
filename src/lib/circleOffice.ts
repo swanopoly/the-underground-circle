@@ -598,31 +598,16 @@ export function subscribeToCircleOffice(
 // ─── Update agent spirit ──────────────────────────────────────────────────────
 
 export async function updateAgentSpirit(
-  agentId: string,
-  spirit: string | null,
-  spiritEmoji: string | null,
-  capturedScope?: CircleOfficeAuthScope,
+  _agentId: string,
+  _spirit: string | null,
+  _spiritEmoji: string | null,
+  _capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ error?: string }> {
-  try {
-    const normalizedAgentId = normalizeResourceId(agentId);
-    if (!normalizedAgentId) return { error: 'Invalid agent.' };
-    const authority = await resolveAuthority(capturedScope);
-    if (!authority) return { error: 'Not authenticated' };
-    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
-    const { error } = await exactClient
-      .from('circle_office_agents')
-      .update({
-        spirit: spirit || null,
-        spirit_emoji: spiritEmoji || null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', normalizedAgentId)
-      .eq('owner_id', authority.userId)
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
-    return error ? { error: error.message } : {};
-  } catch (e: any) {
-    return { error: e.message };
-  }
+  // Retired: updating only the peer-visible Office row split Spirit truth from
+  // the owner-private agent identity and treated zero-row updates as success.
+  // Published mutations must use updatePublishedAgentSpiritExact(), whose §48
+  // RPC verifies circle membership/ownership and commits both rows atomically.
+  return { error: 'atomic_spirit_assignment_required' };
 }
 
 // ─── Update gateway URL + public flag ────────────────────────────────────────

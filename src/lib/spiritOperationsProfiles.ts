@@ -1,4 +1,21 @@
-import type { ResearchDocument } from './researchKnowledge';
+// Kept structural and import-free so the canonical Spirit prompt catalog can
+// also be consumed by Deno Edge without pulling the client research graph.
+type SpiritResearchDocument = {
+  id: string;
+  title: string;
+  summary?: string | null;
+  content?: string | null;
+  tags?: string[] | null;
+  source_type?: 'report' | null;
+  source_title?: string | null;
+  source_url?: string | null;
+  authors?: string[] | null;
+  review_status?: 'reviewed' | null;
+  evidence_score?: number | null;
+  visibility?: 'public' | null;
+  domain_key?: 'general' | null;
+  is_active?: boolean | null;
+};
 
 export interface SpiritOperationsProfile {
   spiritId: string;
@@ -263,7 +280,7 @@ export function buildSpiritOperationsArtifact(
   };
 }
 
-export function getBuiltInSpiritOperationsResearchDocuments(): ResearchDocument[] {
+export function getBuiltInSpiritOperationsResearchDocuments(): SpiritResearchDocument[] {
   return Object.values(SPIRIT_OPERATIONS_PROFILES).map(profile => ({
     id: `builtin-spirit-ops-${profile.spiritId}`,
     title: `${profile.companyFunction} Operations Profile`,

@@ -17,10 +17,13 @@ const check = (condition: unknown, message: string) => {
 
 check(
   memory.includes("const [loadError, setLoadError] = useState<string | null>(null)")
-    && memory.includes("setLoadError('Memory could not be loaded. Check the connection and try again.')")
+    && memory.includes("? 'Memory refresh failed. Showing the last verified snapshot")
+    && memory.includes(": 'Memory could not be loaded. Check the connection and try again.'")
     && memory.includes('accessibilityLabel="Retry loading agent memory"')
-    && memory.includes('loadError && memories.length === 0 ? null'),
-  'Memory load failures render a retryable error instead of a false empty state',
+    && memory.includes('loadError && !hasVerifiedSnapshot ? null')
+    && memory.includes('loading && hasVerifiedSnapshot')
+    && memory.includes('visibleMemories.length'),
+  'Memory load failures preserve only a same-scope verified snapshot and remain retryable instead of claiming false empty state',
 );
 check(
   memory.includes('const requestDeleteMemory = (mem: any) =>')
@@ -60,9 +63,9 @@ check(
 );
 check(
   runs.includes('const detailRequestGenerationRef = useRef(0)')
-    && runs.includes("setRunDetails({ runId, status: 'loading', steps: [], childRuns: [], error: null })")
+    && runs.includes("setRunDetails({ rootRunId, runId, selectedRun, status: 'loading', steps: [], childRuns: [], error: null })")
     && runs.includes('if (detailRequestGenerationRef.current !== requestGeneration) return;')
-    && runs.includes("setRunDetails({ runId, status: 'ready', steps: stepData, childRuns: childRunData, error: null })"),
+    && runs.includes("setRunDetails({ rootRunId, runId, selectedRun, status: 'ready', steps: stepData, childRuns: childRunData, error: null })"),
   'Run details clear atomically before loading and ignore stale generations',
 );
 check(
@@ -110,15 +113,43 @@ check(
   'Custom-profile delete exposes an accessible 44px busy control',
 );
 check(
-  spirit.includes(".eq('user_id', authority.userId)")
-    && spirit.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)")
-    && spirit.includes(".select('id, user_id')")
-    && spirit.includes('deleteReceipts.length !== 1')
-    && spirit.includes('The profile deletion did not return exactly one matching receipt.')
+  spirit.includes('deleteUnreferencedCustomAgentProfileExact(')
+    && spirit.includes('authority,\n        isIdentityAuthorityCurrent,')
+    && spirit.includes('!receipt.ok || receipt.serverDeleted !== true')
+    && spirit.includes("receipt.error === 'outcome_unknown'")
+    && spirit.includes('Refresh profiles before retrying.')
+    && spirit.includes("receipt.error === 'profile_referenced'")
+    && spirit.includes('The profile deletion did not return one exact server receipt.')
+    && spirit.includes('Clear every assignment before deleting it.')
     && spirit.includes('setProfileActionStatus(`Deleted custom profile: ${profileName}`)')
     && spirit.includes('`ERROR: Could not delete custom profile: ${profileName}`')
     && customProfilesSection.includes('accessibilityLiveRegion="polite"'),
   'Custom-profile deletion retains exact owner authority and provides verified, visible success and error receipts',
+);
+check(
+  spirit.includes('const requestedProfileName = saveProfileName.trim()')
+    && spirit.includes('const expectedProfileReceipt = {')
+    && spirit.includes('Object.entries(expectedProfileReceipt).every(([field, requestedValue])')
+    && spirit.includes('returnedProfile[field] === requestedValue')
+    && spirit.includes(".select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger')")
+    && spirit.includes("String(data.user_id || '') !== authority.userId")
+    && spirit.includes("String(data.name || '') !== requestedProfileName")
+    && spirit.includes('accessibilityLabel="Save custom Spirit profile"')
+    && spirit.includes('accessibilityLabel="Cancel saving custom Spirit profile"')
+    && spirit.includes('Custom profile outcome could not be verified. Refresh profiles before retrying.')
+    && spirit.includes('minHeight: 44'),
+  'Custom-profile save validates its exact receipt and exposes accessible 44px save/cancel controls',
+);
+check(
+  (spirit.match(/^\s*<ScrollView\b/gmu) || []).length === 1
+    && spirit.includes('<ScrollView\n                  ref={personalityScrollRef}\n                  horizontal')
+    && spirit.includes('accessibilityLabel={`${showSoul ? \'Hide\' : \'Show\'} system prompt`}')
+    && spirit.includes('roleActionBtn: {\n    minHeight: 44')
+    && spirit.includes('roleSaveBtn: {\n    minHeight: 44')
+    && spirit.includes('roleDismissBtn: {\n    minHeight: 44')
+    && spirit.includes('opsActionBtn: {\n    minHeight: 44')
+    && spirit.includes('opsSaveBtn: {\n    minHeight: 44'),
+  'Spirit leaves vertical scrolling to the shell and preserves accessible 44px artifact actions',
 );
 
 console.log(`Office Agent panel safety smoke: ${assertions} passed`);

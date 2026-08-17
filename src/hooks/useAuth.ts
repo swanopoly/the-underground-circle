@@ -3,6 +3,7 @@ import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { normalizeAuthEmail } from '../lib/authUiPolicy';
 import { secureSignOut } from '../lib/authLogout';
+import { isExactRunMutationAuthorityCurrent } from '../lib/runHistoryFilterCore';
 
 interface AuthContextValue {
   session: Session | null;
@@ -76,3 +77,101 @@ export function useAuth(): AuthContextValue {
   }
   return value;
 }
+
+/**
+ * Immutable user/circle bearer authority for exact client-side operations.
+ *
+ * The generation is intentionally local to the mounted consumer. A captured
+ * authority is retired whenever its user, token, circle, or mounted lifecycle
+ * changes, and `isAuthorityCurrent` is the live fence that async confirmation
+ * and mutation paths must re-check immediately before dispatch.
+ */
+export type ExactCircleAuthAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+export type ExactCircleAuthAuthorityFence = (
+  authority: ExactCircleAuthAuthority,
+) => boolean;
+
+export function useExactRunHistoryAuthority(circleId: string): Readonly<{
+  exactAuthority: ExactCircleAuthAuthority | null;
+  isExactAuthorityCurrent: ExactCircleAuthAuthorityFence;
+}> {
+  const { session, user, loading } = useAuth();
+  const authorityRef = React.useRef<ExactCircleAuthAuthority | null>(null);
+  const generationRef = React.useRef(0);
+  const [committedAuthority, setCommittedAuthority] = React.useState<ExactCircleAuthAuthority | null>(null);
+  const authReady = !loading
+    && Boolean(circleId)
+    && Boolean(user?.id)
+    && user?.id === session?.user.id
+    && Boolean(session?.access_token);
+  // Updated during render so even an older callback captured by an in-flight
+  // confirmation sees the newest auth/circle scope before passive cleanup.
+  const liveScopeRef = React.useRef<Readonly<{
+    authReady: boolean;
+    userId: string | null;
+    circleId: string;
+    accessToken: string | null;
+  }>>({ authReady: false, userId: null, circleId: '', accessToken: null });
+  liveScopeRef.current = {
+    authReady,
+    userId: user?.id || null,
+    circleId,
+    accessToken: session?.access_token || null,
+  };
+
+  React.useEffect(() => {
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+    const authority = authReady && user?.id && session?.access_token
+      ? Object.freeze({
+          userId: user.id,
+          circleId,
+          accessToken: session.access_token,
+          generation,
+        })
+      : null;
+    authorityRef.current = authority;
+    setCommittedAuthority(authority);
+    return () => {
+      generationRef.current += 1;
+      if (authorityRef.current?.generation === generation) authorityRef.current = null;
+      setCommittedAuthority((current) => current?.generation === generation ? null : current);
+    };
+  }, [authReady, circleId, session?.access_token, user?.id]);
+
+  const isExactAuthorityCurrent = React.useCallback((authority: ExactCircleAuthAuthority): boolean => {
+    const current = authorityRef.current;
+    const liveScope = liveScopeRef.current;
+    return Boolean(
+      liveScope.authReady
+      && current
+      && authority.userId === liveScope.userId
+      && authority.circleId === liveScope.circleId
+      && authority.accessToken === liveScope.accessToken
+      && isExactRunMutationAuthorityCurrent(authority, current)
+    );
+  }, []);
+
+  const exactAuthority = committedAuthority
+    && isExactAuthorityCurrent(committedAuthority)
+      ? committedAuthority
+      : null;
+
+  return React.useMemo(() => ({ exactAuthority, isExactAuthorityCurrent }), [
+    exactAuthority,
+    isExactAuthorityCurrent,
+  ]);
+}
+
+/**
+ * Surface-neutral name for the shared exact Circle authority owner.
+ * `useExactRunHistoryAuthority` remains as the compatibility export for the
+ * existing Chat, Rooms, and Run History callers.
+ */
+export const useExactCircleAuthority = useExactRunHistoryAuthority;

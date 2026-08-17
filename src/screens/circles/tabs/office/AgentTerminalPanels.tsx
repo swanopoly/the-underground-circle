@@ -43,6 +43,11 @@ function modeLabel(mode: TerminalLaunchMode): string {
 
 type TerminalProfileLoadState = 'locked' | 'loading' | 'ready' | 'error';
 
+type ActiveOutputResize = {
+  onMove: (event: MouseEvent) => void;
+  onUp: () => void;
+};
+
 function defaultTerminalConfig(agent: OfficeAgent): TerminalAgentOfficeConfig {
   return {
     defaultCwd: agent.projectDir || '',
@@ -86,6 +91,21 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
   const scrollRef = useRef<ScrollView>(null);
   const dragStartY = useRef(0);
   const dragStartH = useRef(0);
+  const activeOutputResizeRef = useRef<ActiveOutputResize | null>(null);
+
+  const stopOutputResize = useCallback(() => {
+    const activeResize = activeOutputResizeRef.current;
+    if (!activeResize) return;
+    activeOutputResizeRef.current = null;
+    if (typeof window === 'undefined') return;
+    window.removeEventListener('mousemove', activeResize.onMove);
+    window.removeEventListener('mouseup', activeResize.onUp);
+    window.removeEventListener('blur', activeResize.onUp);
+  }, []);
+
+  useEffect(() => () => {
+    stopOutputResize();
+  }, [stopOutputResize]);
 
   const runCmd = useCallback(async (cmd: string) => {
     const trimmed = cmd.trim();
@@ -160,15 +180,18 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
     }
   }, [cmdInput, history]);
 
-  const handleResizeStart = (e: any) => {
+  const handleResizeStart = useCallback((e: any) => {
     if (Platform.OS !== 'web') return;
+    stopOutputResize();
     dragStartY.current = e.nativeEvent?.pageY || 0;
     dragStartH.current = outputHeight;
     const onMove = (ev: MouseEvent) => setOutputHeight(Math.max(150, Math.min(600, dragStartH.current + (ev.pageY - dragStartY.current))));
-    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    const onUp = () => stopOutputResize();
+    activeOutputResizeRef.current = { onMove, onUp };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
-  };
+    window.addEventListener('blur', onUp);
+  }, [outputHeight, stopOutputResize]);
 
   return (
     <View style={{ paddingHorizontal: 8, marginBottom: 8 }} nativeID="section-agent-remote-shell">
@@ -406,7 +429,7 @@ export function AgentTerminalProfilePanel({
           autoSaveMemory: config.autoSaveMemory !== false,
         },
         isCustomized: true,
-      }, capturedAuthority);
+      }, capturedAuthority, isIdentityAuthorityCurrent);
       if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
         throw new Error(receipt.error || 'identity save failed');
       }

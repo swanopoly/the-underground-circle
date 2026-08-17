@@ -77,6 +77,16 @@ import {
 // numbers. See docs/AGENTS_ROADMAP.md §6 Rule #3.
 import { callClaude, addUsage, EMPTY_USAGE, logClaudeUsage, computeCostUsd, type UsageBreakdown } from "../_claude/anthropic.ts";
 import { wrapUntrusted } from "../_shared/untrusted.ts";
+import {
+  exactAgentSpiritContextErrorResponse,
+  resolveExactAgentSpiritContext,
+  type ExactAgentSpiritContext,
+} from "../_shared/agent-spirit-context.ts";
+import {
+  parseSwanBotExactAgentTarget,
+  prependAssignedAgentSpiritPrompt,
+  type SwanBotExactAgentTarget,
+} from "../../../src/lib/agentSpiritPromptCore.ts";
 import { attachToolInputExamples } from "../../../src/lib/toolInputExamples.ts";
 // Secret-hygiene gate for the agent-callable `save_memory` tool. Pure,
 // dependency-free module shared verbatim with the client writers
@@ -3629,7 +3639,11 @@ function isUuidLike(value: unknown): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
 }
 
-function normalizeTargetAgentMetadata(input: Record<string, unknown>, targetAgentName: string): Record<string, unknown> {
+function normalizeTargetAgentMetadata(
+  input: Record<string, unknown>,
+  targetAgentName: string,
+  exactTarget?: SwanBotExactAgentTarget,
+): Record<string, unknown> {
   const subject = input.agentSubject && typeof input.agentSubject === "object"
     ? input.agentSubject as Record<string, unknown>
     : input.agentSubjectMetadata && typeof input.agentSubjectMetadata === "object"
@@ -3638,11 +3652,13 @@ function normalizeTargetAgentMetadata(input: Record<string, unknown>, targetAgen
   const subjectKey = cleanSubjectString(input.targetAgentSubjectKey)
     || cleanSubjectString(input.agentSubjectKey)
     || cleanSubjectString(subject.agentSubjectKey);
-  const dbId = cleanSubjectString(input.targetAgentDbId)
+  const dbId = exactTarget?.dbId
+    || cleanSubjectString(input.targetAgentDbId)
     || cleanSubjectString(input.agentDbId)
     || cleanSubjectString(subject.agentDbId)
     || (isUuidLike(input.targetAgentId) ? cleanSubjectString(input.targetAgentId) : undefined);
-  const sessionKey = cleanSubjectString(input.agentSessionKey)
+  const sessionKey = exactTarget?.sessionKey
+    || cleanSubjectString(input.agentSessionKey)
     || cleanSubjectString(subject.agentSessionKey);
   const legacyIds = cleanSubjectStringArray([
     ...cleanSubjectStringArray(input.targetAgentLegacyIds),
@@ -3662,6 +3678,20 @@ function normalizeTargetAgentMetadata(input: Record<string, unknown>, targetAgen
   if (legacyIds.length > 0) out.targetAgentLegacyIds = legacyIds;
   if (subjectKey || dbId || sessionKey || legacyIds.length > 0) out.agentSubject = agentSubject;
   return out;
+}
+
+function withCanonicalTargetAgentName(
+  metadata: Record<string, unknown>,
+  targetAgentName: string,
+): Record<string, unknown> {
+  const subject = metadata.agentSubject && typeof metadata.agentSubject === "object"
+    ? metadata.agentSubject as Record<string, unknown>
+    : null;
+  return {
+    ...metadata,
+    targetAgent: targetAgentName,
+    ...(subject ? { agentSubject: { ...subject, agentDisplayName: targetAgentName } } : {}),
+  };
 }
 
 type SwanBotV2FinalStopReason = "end_turn" | "max_tokens" | "client_pending" | "error";
@@ -4843,6 +4873,10 @@ async function runLoop(args: {
   targetAgentDbId?: string | null;
   targetAgentLegacyIds?: string[];
   agentSubject?: Record<string, unknown>;
+  /** Exact assigned Spirit behavior resolved before the run is created. The
+   *  raw private profile projection is provider-visible only and is never
+   *  written to run metadata or a model-visible receipt. */
+  agentSpiritPrompt?: string | null;
   /** P1: optional untrusted client memory payload (see v2MemoryInjectionCore). */
   memoryPayload?: unknown;
   supabase: SupabaseEdgeClient;
@@ -4886,6 +4920,7 @@ async function runLoop(args: {
     targetAgentDbId,
     targetAgentLegacyIds,
     agentSubject,
+    agentSpiritPrompt,
     memoryPayload,
     supabase,
     circleId,
@@ -5007,7 +5042,16 @@ async function runLoop(args: {
     ? resumeFrom.systemBlocks
     : [
         { type: "text" as const, text: `${await buildFrozenBlock(supabase, circleId, targetAgentName, activeTools)}\n\n[${mode.toUpperCase()} RESPONSE CONTRACT]\n${MODE_CONTRACT[mode]}`, cache_control: { type: "ephemeral" as const } },
-        { type: "text" as const, text: `Now: ${new Date().toISOString()}\nUser id: ${userId}${connectivityNote ? `\nConnectivity: ${connectivityNote}` : ""}${memoryBlockText ? `\n\n${memoryBlockText}` : ""}` },
+        {
+          type: "text" as const,
+          // Assigned custom Spirit text is private, per-agent context. Keep it
+          // out of the shared frozen/cacheable block and seal it only inside
+          // the authenticated continuation snapshot.
+          text: prependAssignedAgentSpiritPrompt(
+            `Now: ${new Date().toISOString()}\nUser id: ${userId}${connectivityNote ? `\nConnectivity: ${connectivityNote}` : ""}${memoryBlockText ? `\n\n${memoryBlockText}` : ""}`,
+            agentSpiritPrompt,
+          ),
+        },
       ];
 
   const ctx: ToolContext = {
@@ -5411,6 +5455,34 @@ Deno.serve(async (req: Request) => {
     return errResponse(403, "forbidden", "Not authorized for this circle.");
   }
 
+  // A fresh Chat turn may carry the same immutable Office identity in several
+  // compatibility projections. Reconcile them before any run/provider work,
+  // then resolve the published row by exact id (or the caller's exact local
+  // session). Display names are labels only and never select runtime context.
+  let freshExactTarget: SwanBotExactAgentTarget | null = null;
+  let freshExactAgentContext: ExactAgentSpiritContext | null = null;
+  if (!isContinuation) {
+    const parsedExactTarget = parseSwanBotExactAgentTarget(body);
+    if (!parsedExactTarget.ok) {
+      return errResponse(
+        400,
+        parsedExactTarget.error,
+        "The target agent identity is malformed or conflicts across request fields. No model work was started.",
+      );
+    }
+    freshExactTarget = parsedExactTarget.target;
+    const resolvedAgentContext = await resolveExactAgentSpiritContext(supabase, {
+      circleId,
+      userId,
+      target: parsedExactTarget.target,
+    });
+    if (!resolvedAgentContext.ok) {
+      const failure = exactAgentSpiritContextErrorResponse(resolvedAgentContext.code);
+      return errResponse(failure.status, failure.code, failure.message);
+    }
+    freshExactAgentContext = resolvedAgentContext.context;
+  }
+
   // Bind service-role server tools to the exact visible Chat thread supplied
   // by the authenticated client. The same authorization is repeated against
   // a continuation's sealed thread after the snapshot is opened below.
@@ -5449,6 +5521,7 @@ Deno.serve(async (req: Request) => {
   let model: string;
   let targetAgentName: string;
   let targetAgentMetadata: Record<string, unknown> = {};
+  let agentSpiritPrompt: string | null = null;
   let runId: string | null = null;
   let resumeFrom: RunContinuation | undefined;
   let resumeToolResults: SwanBotResumeToolResult[] | undefined;
@@ -5848,8 +5921,21 @@ Deno.serve(async (req: Request) => {
       return errResponse(400, "model_unsupported_on_v2", "This model is not supported on the v2 typed loop; route via swanbot-ai/llm-proxy.");
     }
     model = resolvedModel;
-    targetAgentName = body.targetAgentName || "BlackSwan";
-    targetAgentMetadata = normalizeTargetAgentMetadata(body, targetAgentName);
+    targetAgentName = freshExactAgentContext?.canonicalAgentName
+      || body.targetAgentName
+      || "BlackSwan";
+    targetAgentMetadata = normalizeTargetAgentMetadata(
+      body,
+      targetAgentName,
+      freshExactTarget || undefined,
+    );
+    if (freshExactAgentContext?.canonicalAgentName) {
+      targetAgentMetadata = withCanonicalTargetAgentName(
+        targetAgentMetadata,
+        freshExactAgentContext.canonicalAgentName,
+      );
+    }
+    agentSpiritPrompt = freshExactAgentContext?.spiritPrompt || null;
     // Optional client connectivity snapshot for the fresh-start tool gate
     // (literal booleans only; anything else is dropped so absent never gates).
     connectivity = sanitizeConnectivitySnapshot(body.connectivity);
@@ -6008,6 +6094,7 @@ Deno.serve(async (req: Request) => {
       targetAgentDbId: targetAgentMetadata.targetAgentDbId as string | null | undefined,
       targetAgentLegacyIds: targetAgentMetadata.targetAgentLegacyIds as string[] | undefined,
       agentSubject: targetAgentMetadata.agentSubject as Record<string, unknown> | undefined,
+      agentSpiritPrompt,
       memoryPayload,
       supabase, circleId, userId, threadId: requestedThreadId, runId,
       resumeFrom,

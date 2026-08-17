@@ -45,6 +45,7 @@ const officeTab = source('src/screens/circles/tabs/OfficeTab.tsx');
 const panelLayout = source('src/screens/circles/tabs/office/useAgentPanelLayout.ts');
 const whiteboard = source('src/screens/circles/tabs/office/Whiteboard.tsx');
 const agentControlCard = source('src/components/AgentControlCard.tsx');
+const bridgeHealthDiag = source('src/lib/bridgeHealthDiag.ts');
 
 check(
   agentPanel.includes('identityAuthority?: AgentIdentityExactAuthority | null;')
@@ -99,6 +100,14 @@ check(
     && panelLayout.includes('const CENTER_MAX_H = 720;')
     && panelLayout.includes('Math.min(CENTER_MAX_H, maxCenteredHeight'),
   'the centered panel stays compact and the mobile sheet owns its controls above sticky Office chrome',
+);
+check(
+  agentControlCard.includes('parseBridgeHealth(catalogEntry, payload)')
+    && agentControlCard.includes("parsed.status === 'offline'")
+    && agentControlCard.includes("parsed.status === 'degraded'")
+    && !agentControlCard.includes('Number(payload?.sessions || 0)')
+    && bridgeHealthDiag.includes("detail: 'health endpoint returned an invalid session count'"),
+  'the Overview bridge card accepts only the canonical ok=true health contract and never promotes malformed session counts',
 );
 
 const removePublishedAgent = section(
@@ -285,6 +294,8 @@ check(
   agentControlCard.includes('compact, read-only runtime connection summary')
     && agentControlCard.includes("provider === 'openswan'")
     && agentControlCard.includes('getLocalOpenSwanDiscoveryEndpoints()[0]')
+    && agentControlCard.includes('hasExactRuntimeConnection')
+    && agentControlCard.includes('Connected through this agent’s exact Office runtime connection.')
     && agentControlCard.includes('requestGenerationRef.current')
     && agentControlCard.includes('requestAbortRef.current?.abort()')
     && agentControlCard.includes('const timeoutId = setTimeout(() => controller.abort(), 5_000)')
@@ -292,10 +303,12 @@ check(
     && !agentControlCard.includes('safeGetUser')
     && !agentControlCard.includes('fetch(`http://localhost:${port}/health`')
     && !agentControlCard.includes('setInterval(checkBridge'),
-  'the read-only bridge summary uses the platform-aware OpenSwan proxy and one bounded generation-fenced probe',
+  'the read-only summary consumes an exact Office runtime snapshot or uses one bounded provider-level probe',
 );
 check(
-  agentControlCard.includes('type Props = {\n  agent: OfficeAgent;\n};')
+  agentControlCard.includes('agent: OfficeAgent;')
+    && agentControlCard.includes('runtimeConnectionId?: string | null;')
+    && agentControlCard.includes('Provider-level check only. This does not verify the selected agent’s exact runtime session.')
     && !agentControlCard.includes('onDelete')
     && !agentControlCard.includes('onRunCommand')
     && !agentControlCard.includes(".from('circle_office_agents')")
@@ -304,7 +317,14 @@ check(
   'the Overview bridge summary has one narrow read-only contract and owns no duplicate agent mutations',
 );
 check(
-  agentControlCard.includes('accessibilityLabel="Refresh runtime connection status"')
+  agentPanel.includes('runtimeConnectionId={runtimeConnectionId}')
+    && overviewPanel.includes('runtimeConnectionId?: string | null;')
+    && overviewPanel.includes('key={`${agent.id}:${runtimeConnectionId || \'provider\'}`}')
+    && overviewPanel.includes('runtimeConnectionId={runtimeConnectionId}'),
+  'exact runtime identity reaches a freshly keyed Overview bridge summary without stale provider state',
+);
+check(
+  agentControlCard.includes('accessibilityLabel="Refresh provider bridge status"')
     && agentControlCard.includes("accessibilityRole=\"alert\"")
     && agentControlCard.includes('Run npm run start, then confirm the OpenSwan proxy on port 18790 is healthy.')
     && !agentControlCard.includes('MARK OFFLINE')

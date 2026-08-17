@@ -26,9 +26,11 @@ import type {
   OfficeConnectionExactAuthority,
 } from '../../../../lib/connectionManager';
 import {
+  deleteUnreferencedCustomAgentProfileExact,
   getAgentIdentityKey,
   syncAgentIdentitiesFromServerExact,
   updateAgentIdentityExact,
+  updatePublishedAgentSpiritExact,
   type AgentIdentity,
 } from '../../../../lib/agentIdentity';
 import {
@@ -124,6 +126,8 @@ export default function AgentSpiritPanel({
   const [saveProfileName, setSaveProfileName] = useState('');
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [currentSpirit, setCurrentSpirit] = useState<string | null>(null);
+  const [spiritAssignmentBusy, setSpiritAssignmentBusy] = useState(false);
+  const [spiritAssignmentStatus, setSpiritAssignmentStatus] = useState('');
   const [dbAgentLink, setDbAgentLink] = useState<{ agentKey: string; dbAgentId: string } | null>(null);
   const [roleArtifact, setRoleArtifact] = useState<{ title: string; content: string } | null>(null);
   const [roleActionStatus, setRoleActionStatus] = useState('');
@@ -136,6 +140,8 @@ export default function AgentSpiritPanel({
 
   const personalityScrollRef = useRef<ScrollView>(null);
   const personalityScrollX = useRef(0);
+  const spiritAssignmentBusyRef = useRef(false);
+  const spiritAssignmentTokenRef = useRef(0);
   const stableSessionKey = sessionKey || getAgentIdentityKey(agent);
   const exactIdentityAuthority = useMemo(
     () => normalizeSpiritIdentityAuthority(circleId, identityAuthority),
@@ -215,12 +221,17 @@ export default function AgentSpiritPanel({
     const authority = exactIdentityAuthority;
     const capturedRequestKey = identityRequestKey;
     if (!authority || !capturedRequestKey) return false;
-    const receipt = await updateAgentIdentityExact(stableSessionKey, updates, authority);
+    const receipt = await updateAgentIdentityExact(
+      stableSessionKey,
+      updates,
+      authority,
+      isIdentityAuthorityCurrent,
+    );
     return receipt.ok
       && receipt.localSaved
-      && receipt.serverSaved
+      && receipt.serverSaved === true
       && isIdentityRequestCurrent(capturedRequestKey);
-  }, [exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, stableSessionKey]);
+  }, [exactIdentityAuthority, identityRequestKey, isIdentityAuthorityCurrent, isIdentityRequestCurrent, stableSessionKey]);
 
   const persistSpiritSelection = useCallback(async (
     spirit: string | null,
@@ -230,36 +241,68 @@ export default function AgentSpiritPanel({
     const authority = exactIdentityAuthority;
     const capturedRequestKey = identityRequestKey;
     if (!authority || !capturedRequestKey || !isIdentityRequestCurrent(capturedRequestKey)) return false;
-    if (publishedDbAgentId) {
-      const linkedAgentId = await ensureDbAgent();
-      if (!linkedAgentId || !isIdentityRequestCurrent(capturedRequestKey)) return false;
-      const { data: receipts, error } = await supabase
-        .from('circle_office_agents')
-        .update({
-          spirit,
-          spirit_emoji: spiritEmoji,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', linkedAgentId)
-        .eq('circle_id', authority.circleId)
-        .eq('owner_id', authority.userId)
-        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
-        .select('id, circle_id, owner_id, spirit, spirit_emoji');
-      if (
-        error
-        || !isIdentityRequestCurrent(capturedRequestKey)
-        || !Array.isArray(receipts)
-        || receipts.length !== 1
-        || String(receipts[0]?.id || '') !== linkedAgentId
-        || String(receipts[0]?.circle_id || '') !== authority.circleId
-        || String(receipts[0]?.owner_id || '') !== authority.userId
-        || (receipts[0]?.spirit ?? null) !== spirit
-        || (receipts[0]?.spirit_emoji ?? null) !== spiritEmoji
-      ) return false;
+    if (spiritAssignmentBusyRef.current) {
+      setSpiritAssignmentStatus('A Spirit change is already in progress.');
+      return false;
     }
-    return (await persistIdentityPatch(identityUpdates))
-      && isIdentityRequestCurrent(capturedRequestKey);
-  }, [ensureDbAgent, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, persistIdentityPatch, publishedDbAgentId]);
+    spiritAssignmentBusyRef.current = true;
+    const mutationToken = spiritAssignmentTokenRef.current + 1;
+    spiritAssignmentTokenRef.current = mutationToken;
+    setSpiritAssignmentBusy(true);
+    setSpiritAssignmentStatus('');
+    try {
+      let saved = false;
+      let durableButLocalRefreshNeeded = false;
+      let outcomeUnknown = false;
+      if (publishedDbAgentId) {
+        const linkedAgentId = await ensureDbAgent();
+        if (linkedAgentId && isIdentityRequestCurrent(capturedRequestKey)) {
+          const customProfileId = typeof identityUpdates.customProfileId === 'string'
+            ? identityUpdates.customProfileId
+            : null;
+          const receipt = await updatePublishedAgentSpiritExact({
+            officeAgentId: linkedAgentId,
+            sessionKey: stableSessionKey,
+            spiritId: spirit,
+            spiritEmoji,
+            customProfileId,
+          }, authority, isIdentityAuthorityCurrent);
+          saved = receipt.ok
+            && receipt.localSaved
+            && receipt.serverSaved === true
+            && isIdentityRequestCurrent(capturedRequestKey);
+          durableButLocalRefreshNeeded = receipt.serverSaved === true && !receipt.localSaved;
+          outcomeUnknown = receipt.error === 'outcome_unknown';
+        }
+      } else {
+        saved = (await persistIdentityPatch(identityUpdates))
+          && isIdentityRequestCurrent(capturedRequestKey);
+      }
+      if (isIdentityRequestCurrent(capturedRequestKey)) {
+        setSpiritAssignmentStatus(
+          outcomeUnknown
+            ? 'WARNING: Spirit outcome could not be verified. Refresh this Spirit before retrying.'
+            : durableButLocalRefreshNeeded
+            ? 'WARNING: Spirit was saved on the server, but this view could not refresh. Reload the Spirit panel.'
+            : saved
+              ? spirit === null ? 'Spirit assignment cleared.' : 'Spirit assignment saved.'
+              : 'ERROR: Spirit assignment was not saved. Check the connection and try again.',
+        );
+      }
+      return saved;
+    } catch (error) {
+      console.warn('[AgentSpiritPanel] Failed to persist Spirit assignment:', error);
+      if (isIdentityRequestCurrent(capturedRequestKey)) {
+        setSpiritAssignmentStatus('ERROR: Spirit assignment was not saved. Check the connection and try again.');
+      }
+      return false;
+    } finally {
+      if (spiritAssignmentTokenRef.current === mutationToken) {
+        spiritAssignmentBusyRef.current = false;
+        if (isIdentityRequestCurrent(capturedRequestKey)) setSpiritAssignmentBusy(false);
+      }
+    }
+  }, [ensureDbAgent, exactIdentityAuthority, identityRequestKey, isIdentityAuthorityCurrent, isIdentityRequestCurrent, persistIdentityPatch, publishedDbAgentId, stableSessionKey]);
 
   useEffect(() => {
     setDbAgentLink(null);
@@ -278,6 +321,10 @@ export default function AgentSpiritPanel({
     setSavingProfile(false);
     setDeletingProfileId(null);
     setProfileActionStatus('');
+    spiritAssignmentTokenRef.current += 1;
+    spiritAssignmentBusyRef.current = false;
+    setSpiritAssignmentBusy(false);
+    setSpiritAssignmentStatus('');
     setShowSaveForm(false);
     setSaveProfileName('');
     setWordpressRead({ status: 'idle', value: null, error: null });
@@ -476,18 +523,27 @@ export default function AgentSpiritPanel({
     const capturedRequestKey = identityRequestKey;
     if (!circleId || !agent || !authority || !capturedRequestKey) return;
     setSoulSaving(true);
-    const identitySaved = await persistIdentityPatch({
-      soulPrompt: soulText.trim(),
-      isCustomized: true,
-    });
-    if (!identitySaved || !isIdentityRequestCurrent(capturedRequestKey)) {
+    setSoulStatus('');
+    try {
+      const identitySaved = await persistIdentityPatch({
+        soulPrompt: soulText.trim(),
+        isCustomized: true,
+      });
+      if (!isIdentityRequestCurrent(capturedRequestKey)) return;
+      if (!identitySaved) {
+        setSoulStatus('ERROR: Soul was not saved. Check the connection and try again.');
+        return;
+      }
+      onAgentIdentityChange?.();
+      setSoulStatus('Soul saved.');
+    } catch (err) {
+      console.warn('[AgentSpiritPanel] Failed to save Soul:', err);
+      if (isIdentityRequestCurrent(capturedRequestKey)) {
+        setSoulStatus('ERROR: Soul was not saved. Check the connection and try again.');
+      }
+    } finally {
       if (isIdentityRequestCurrent(capturedRequestKey)) setSoulSaving(false);
-      return;
     }
-    onAgentIdentityChange?.();
-    setSoulStatus('Soul saved!');
-    setSoulSaving(false);
-    setTimeout(() => setSoulStatus(''), 3000);
   };
 
   const handleGenerateRoleArtifact = async (kind: 'resume' | 'interview' | 'portfolio' | 'drill' | 'work_sample') => {
@@ -545,52 +601,33 @@ export default function AgentSpiritPanel({
     const profileName = String(profile?.name || 'Untitled profile').trim() || 'Untitled profile';
     if (!authority || !capturedRequestKey || !profileId || deletingProfileId) return;
 
-    let profileDeleted = false;
     setDeletingProfileId(profileId);
     setProfileActionStatus('');
     try {
-      const { data: deleteReceipts, error } = await supabase
-        .from('custom_agent_profiles')
-        .delete()
-        .eq('id', profileId)
-        .eq('user_id', authority.userId)
-        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
-        .select('id, user_id');
+      const receipt = await deleteUnreferencedCustomAgentProfileExact(
+        profileId,
+        authority,
+        isIdentityAuthorityCurrent,
+      );
       if (!isIdentityRequestCurrent(capturedRequestKey)) return;
-      if (error) throw error;
-      if (
-        !Array.isArray(deleteReceipts)
-        || deleteReceipts.length !== 1
-        || String(deleteReceipts[0]?.id || '') !== profileId
-        || String(deleteReceipts[0]?.user_id || '') !== authority.userId
-      ) {
-        throw new Error('The profile deletion did not return exactly one matching receipt.');
+      if (!receipt.ok || receipt.serverDeleted !== true) {
+        if (receipt.error === 'outcome_unknown') {
+          setProfileActionStatus(`WARNING: ${profileName} deletion could not be verified. Refresh profiles before retrying.`);
+          return;
+        }
+        if (receipt.error === 'profile_referenced') {
+          setProfileActionStatus(`WARNING: ${profileName} is assigned to one or more agents. Clear every assignment before deleting it.`);
+          return;
+        }
+        throw new Error('The profile deletion did not return one exact server receipt.');
       }
 
-      profileDeleted = true;
       setCustomProfiles(prev => prev.filter(candidate => String(candidate.id) !== profileId));
-
-      if (currentSpirit === `custom::${profileId}`) {
-        const identitySaved = await persistSpiritSelection(null, null, {
-          spiritId: null,
-          spiritEmoji: null,
-          customProfileId: null,
-          customProfileName: null,
-          isCustomized: true,
-        });
-        if (!isIdentityRequestCurrent(capturedRequestKey)) return;
-        if (!identitySaved) throw new Error('The active Spirit assignment did not return one exact clear receipt.');
-        onAgentIdentityChange?.();
-        setCurrentSpirit(null);
-      }
-
       setProfileActionStatus(`Deleted custom profile: ${profileName}`);
     } catch (err) {
       console.warn('[AgentSpiritPanel] Failed to delete custom profile:', err);
       if (!isIdentityRequestCurrent(capturedRequestKey)) return;
-      setProfileActionStatus(profileDeleted
-        ? `WARNING: ${profileName} was deleted, but the active Spirit could not be cleared.`
-        : `ERROR: Could not delete custom profile: ${profileName}`);
+      setProfileActionStatus(`ERROR: Could not delete custom profile: ${profileName}`);
     } finally {
       if (isIdentityRequestCurrent(capturedRequestKey)) {
         setDeletingProfileId(current => current === profileId ? null : current);
@@ -601,7 +638,7 @@ export default function AgentSpiritPanel({
   const requestDeleteCustomProfile = (profile: any) => {
     if (deletingProfileId) return;
     const profileName = String(profile?.name || 'Untitled profile').trim() || 'Untitled profile';
-    const message = `Delete "${profileName}"? This cannot be undone. If it is active, its Spirit assignment will also be cleared.`;
+    const message = `Delete "${profileName}"? This cannot be undone. Profiles assigned to any agent must be cleared first.`;
     const confirmDelete = () => { void handleDeleteCustomProfile(profile); };
 
     if (Platform.OS === 'web') {
@@ -672,6 +709,21 @@ export default function AgentSpiritPanel({
           <Text style={styles.spiritHint}>
             Assign a specialty that shapes how {agent.name} thinks, responds, and what it knows.
           </Text>
+          {(spiritAssignmentBusy || spiritAssignmentStatus) ? (
+            <Text
+              accessibilityRole={spiritAssignmentStatus.startsWith('ERROR') ? 'alert' : undefined}
+              accessibilityLiveRegion="polite"
+              style={{
+                color: spiritAssignmentStatus.startsWith('ERROR') ? '#fca5a5' : '#94a3b8',
+                fontSize: 11,
+                fontFamily: 'monospace',
+                lineHeight: 16,
+                marginBottom: 8,
+              }}
+            >
+              {spiritAssignmentBusy ? 'Saving verified Spirit assignment…' : spiritAssignmentStatus}
+            </Text>
+          ) : null}
           {currentSpirit && getSpiritById(currentSpirit) && (() => {
             const s = getSpiritById(currentSpirit)!;
             const postureColors: Record<string, string> = {
@@ -727,7 +779,12 @@ export default function AgentSpiritPanel({
                     >
                       <Text style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: '700', color: editingSpirit ? '#6366f1' : '#888' }}>{editingSpirit ? 'EDITING' : 'EDIT'}</Text>
                     </Pressable>
-                    <Pressable onPress={async () => {
+                    <Pressable
+                      disabled={spiritAssignmentBusy}
+                      accessibilityRole="button"
+                      accessibilityLabel="Clear Spirit assignment"
+                      accessibilityState={{ disabled: spiritAssignmentBusy, busy: spiritAssignmentBusy }}
+                      onPress={async () => {
                       const authority = exactIdentityAuthority;
                       const capturedRequestKey = identityRequestKey;
                       if (!authority || !capturedRequestKey) return;
@@ -743,8 +800,8 @@ export default function AgentSpiritPanel({
                       setCurrentSpirit(null);
                       setEditingSpirit(false);
                     }}
-                      style={[styles.spiritClearBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                      <Text style={styles.spiritClearText}>Clear</Text>
+                      style={[styles.spiritClearBtn, spiritAssignmentBusy && { opacity: 0.45 }, Platform.OS === 'web' && { cursor: spiritAssignmentBusy ? 'default' : 'pointer' } as any]}>
+                      <Text style={styles.spiritClearText}>{spiritAssignmentBusy ? 'Saving…' : 'Clear'}</Text>
                     </Pressable>
                   </View>
                 </View>
@@ -777,7 +834,13 @@ export default function AgentSpiritPanel({
                   )}
                 </View>
 
-                <Pressable onPress={() => setShowSoul(!showSoul)} style={[{ marginTop: 10, paddingVertical: 6 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`${showSoul ? 'Hide' : 'Show'} system prompt`}
+                  accessibilityState={{ expanded: showSoul }}
+                  onPress={() => setShowSoul(!showSoul)}
+                  style={[{ marginTop: 10, minHeight: 44, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                >
                   <Text style={{ color: '#888', fontSize: 14, fontFamily: 'monospace', fontWeight: '800', letterSpacing: 1 }}>
                     {showSoul ? '▼' : '▶'} SYSTEM PROMPT ({Math.round(prompt.length / 100) * 100}+ chars)
                   </Text>
@@ -789,9 +852,9 @@ export default function AgentSpiritPanel({
                         style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12, color: '#ccc', fontFamily: 'monospace', fontSize: 14, minHeight: 200, maxHeight: 400, textAlignVertical: 'top' }}
                         placeholder="System prompt instructions..." placeholderTextColor="#333" />
                     ) : (
-                      <ScrollView style={{ maxHeight: 300, backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12 }}>
+                      <View style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12 }}>
                         <Text style={{ color: '#aaa', fontFamily: 'monospace', fontSize: 14, lineHeight: 17 }} selectable>{prompt}</Text>
-                      </ScrollView>
+                      </View>
                     )}
                   </View>
                 )}
@@ -844,9 +907,9 @@ export default function AgentSpiritPanel({
                     {roleArtifact ? (
                       <View style={styles.roleArtifactCard}>
                         <Text style={styles.roleArtifactTitle}>{roleArtifact.title}</Text>
-                        <ScrollView style={{ maxHeight: 240 }}>
+                        <View>
                           <Text selectable style={styles.roleArtifactContent}>{roleArtifact.content}</Text>
-                        </ScrollView>
+                        </View>
                         <View style={styles.roleArtifactActionRow}>
                           <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this role artifact" onPress={handleSaveRoleArtifact} style={[styles.roleSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                             <Text style={styles.roleSaveBtnText}>CONTINUE IN CHAT</Text>
@@ -1024,9 +1087,9 @@ export default function AgentSpiritPanel({
                     {opsArtifact ? (
                       <View style={styles.roleArtifactCard}>
                         <Text style={styles.roleArtifactTitle}>{opsArtifact.title}</Text>
-                        <ScrollView style={{ maxHeight: 240 }}>
+                        <View>
                           <Text selectable style={styles.roleArtifactContent}>{opsArtifact.content}</Text>
-                        </ScrollView>
+                        </View>
                         <View style={styles.roleArtifactActionRow}>
                           <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this operations artifact" onPress={handleSaveOpsArtifact} style={[styles.opsSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                             <Text style={styles.opsSaveBtnText}>CONTINUE IN CHAT</Text>
@@ -1053,46 +1116,88 @@ export default function AgentSpiritPanel({
                         <View style={{ flexDirection: 'row', gap: 8 }}>
                           <Pressable
                             onPress={async () => {
-                              if (!saveProfileName.trim()) return;
+                              const requestedProfileName = saveProfileName.trim();
+                              if (
+                                !requestedProfileName
+                                || requestedProfileName.length > 200
+                                || /[\u0000-\u001f\u007f]/u.test(requestedProfileName)
+                              ) {
+                                setProfileActionStatus('ERROR: Enter a valid profile name before saving.');
+                                return;
+                              }
                               const authority = exactIdentityAuthority;
                               const capturedRequestKey = identityRequestKey;
                               if (!authority || !capturedRequestKey) return;
                               setSavingProfile(true);
-                              const { data, error } = await supabase.from('custom_agent_profiles').upsert({
-                                user_id: authority.userId, name: saveProfileName.trim(),
-                                system_prompt: customPrompt, skill_bundle: customKnobs.skillBundle,
-                                risk_tier: customKnobs.riskTier, action_posture: customKnobs.actionPosture,
-                                evidence_posture: customKnobs.evidencePosture, communication_density: customKnobs.communicationDensity,
-                                skepticism: customKnobs.skepticism, escalation_trigger: customKnobs.escalationTrigger,
-                                emoji: getSpiritById(currentSpirit)?.emoji || '🤖', color: getSpiritById(currentSpirit)?.color || '#6366f1',
-                                tagline: `Custom ${s.name} profile`,
-                              }, { onConflict: 'user_id,name' })
-                                .setHeader('Authorization', `Bearer ${authority.accessToken}`)
-                                .select()
-                                .single();
-                              if (!isIdentityRequestCurrent(capturedRequestKey)) return;
-                              if (error) {
-                                // Surface the failure instead of silently no-op'ing. User
-                                // sees an Alert and the console gets the full error.
-                                console.warn('[AgentSpiritPanel] Failed to save profile:', error);
-                                if (Platform.OS === 'web' && typeof window !== 'undefined') {
-                                  window.alert(`Failed to save profile: ${error.message}`);
-                                } else {
-                                  const { Alert } = await import('react-native');
-                                  Alert.alert('Save failed', error.message);
+                              setProfileActionStatus('');
+                              try {
+                                const expectedProfileReceipt = {
+                                  user_id: authority.userId, name: requestedProfileName,
+                                  system_prompt: customPrompt, skill_bundle: customKnobs.skillBundle,
+                                  risk_tier: customKnobs.riskTier, action_posture: customKnobs.actionPosture,
+                                  evidence_posture: customKnobs.evidencePosture, communication_density: customKnobs.communicationDensity,
+                                  skepticism: customKnobs.skepticism, escalation_trigger: customKnobs.escalationTrigger,
+                                  emoji: getSpiritById(currentSpirit)?.emoji || '🤖', color: getSpiritById(currentSpirit)?.color || '#6366f1',
+                                  tagline: `Custom ${s.name} profile`,
+                                };
+                                const { data, error } = await supabase.from('custom_agent_profiles').upsert(
+                                  expectedProfileReceipt,
+                                  { onConflict: 'user_id,name' },
+                                )
+                                  .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+                                  .select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger')
+                                  .single();
+                                if (!isIdentityRequestCurrent(capturedRequestKey)) return;
+                                const returnedProfileId = String(data?.id || '');
+                                const returnedProfile = data as Record<string, unknown> | null;
+                                const receiptMatchesRequestedProfile = returnedProfile !== null
+                                  && Object.entries(expectedProfileReceipt).every(([field, requestedValue]) => (
+                                    returnedProfile[field] === requestedValue
+                                  ));
+                                if (
+                                  error
+                                  || !data
+                                  || !isUuidLike(returnedProfileId)
+                                  || returnedProfileId !== returnedProfileId.toLowerCase()
+                                  || String(data.user_id || '') !== authority.userId
+                                  || String(data.name || '') !== requestedProfileName
+                                  || !receiptMatchesRequestedProfile
+                                ) {
+                                  if (error) {
+                                    console.warn('[AgentSpiritPanel] Failed to save profile:', error);
+                                    setProfileActionStatus('ERROR: Custom profile was not saved. Check the connection and try again.');
+                                  } else {
+                                    setProfileActionStatus('WARNING: Custom profile outcome could not be verified. Refresh profiles before retrying.');
+                                  }
+                                  return;
                                 }
-                              } else if (data) {
                                 setCustomProfiles(prev => [...prev.filter(p => p.id !== data.id), data]);
                                 setShowSaveForm(false);
                                 setSaveProfileName('');
+                                setProfileActionStatus('Custom profile saved.');
+                              } catch (err) {
+                                console.warn('[AgentSpiritPanel] Failed to save profile:', err);
+                                if (isIdentityRequestCurrent(capturedRequestKey)) {
+                                  setProfileActionStatus('ERROR: Custom profile was not saved. Check the connection and try again.');
+                                }
+                              } finally {
+                                if (isIdentityRequestCurrent(capturedRequestKey)) setSavingProfile(false);
                               }
-                              setSavingProfile(false);
                             }}
-                            style={[{ flex: 1, paddingVertical: 10, borderRadius: 8, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', alignItems: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                            disabled={savingProfile}
+                            accessibilityRole="button"
+                            accessibilityLabel="Save custom Spirit profile"
+                            accessibilityState={{ disabled: savingProfile, busy: savingProfile }}
+                            style={[{ flex: 1, minHeight: 44, paddingVertical: 10, borderRadius: 8, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: savingProfile ? 'default' : 'pointer' } as any]}>
                             <Text style={{ color: '#22c55e', fontSize: 12, fontFamily: 'monospace', fontWeight: '800' }}>{savingProfile ? '...' : 'SAVE PROFILE'}</Text>
                           </Pressable>
-                          <Pressable onPress={() => setShowSaveForm(false)}
-                            style={[{ paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff15' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel="Cancel saving custom Spirit profile"
+                            accessibilityState={{ disabled: savingProfile }}
+                            disabled={savingProfile}
+                            onPress={() => setShowSaveForm(false)}
+                            style={[{ minHeight: 44, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8, backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff15', justifyContent: 'center' }, savingProfile && { opacity: 0.45 }, Platform.OS === 'web' && { cursor: savingProfile ? 'default' : 'pointer' } as any]}>
                             <Text style={{ color: '#888', fontSize: 12, fontFamily: 'monospace', fontWeight: '700' }}>Cancel</Text>
                           </Pressable>
                         </View>
@@ -1122,8 +1227,8 @@ export default function AgentSpiritPanel({
                         <Pressable
                           accessibilityRole="button"
                           accessibilityLabel={`Use custom profile ${String(profile.name || 'Untitled profile')}`}
-                          accessibilityState={{ selected: active, disabled: deletingProfileId !== null }}
-                          disabled={deletingProfileId !== null}
+                          accessibilityState={{ selected: active, disabled: deletingProfileId !== null || spiritAssignmentBusy, busy: spiritAssignmentBusy }}
+                          disabled={deletingProfileId !== null || spiritAssignmentBusy}
                           onPress={async () => {
                             const authority = exactIdentityAuthority;
                             const capturedRequestKey = identityRequestKey;
@@ -1139,7 +1244,7 @@ export default function AgentSpiritPanel({
                             onAgentIdentityChange?.();
                             setCurrentSpirit(`custom::${profile.id}`);
                           }}
-                          style={[styles.customProfileSelect, deletingProfileId !== null && { opacity: 0.45 }, Platform.OS === 'web' && { cursor: deletingProfileId === null ? 'pointer' : 'default' } as any]}
+                          style={[styles.customProfileSelect, (deletingProfileId !== null || spiritAssignmentBusy) && { opacity: 0.45 }, Platform.OS === 'web' && { cursor: deletingProfileId === null && !spiritAssignmentBusy ? 'pointer' : 'default' } as any]}
                         >
                           <View style={{ alignItems: 'center', marginBottom: 10 }}>
                             <Text style={{ fontSize: 28 }}>{profile.emoji || '🤖'}</Text>
@@ -1150,10 +1255,10 @@ export default function AgentSpiritPanel({
                         <Pressable
                           accessibilityRole="button"
                           accessibilityLabel={`Delete custom profile ${String(profile.name || 'Untitled profile')}`}
-                          accessibilityState={{ disabled: deletingProfileId !== null, busy: deleting }}
-                          disabled={deletingProfileId !== null}
+                          accessibilityState={{ disabled: deletingProfileId !== null || spiritAssignmentBusy, busy: deleting }}
+                          disabled={deletingProfileId !== null || spiritAssignmentBusy}
                           onPress={() => requestDeleteCustomProfile(profile)}
-                          style={[styles.customProfileDeleteBtn, deletingProfileId !== null && !deleting && { opacity: 0.45 }, Platform.OS === 'web' && { cursor: deletingProfileId === null ? 'pointer' : 'default' } as any]}
+                          style={[styles.customProfileDeleteBtn, (spiritAssignmentBusy || (deletingProfileId !== null && !deleting)) && { opacity: 0.45 }, Platform.OS === 'web' && { cursor: deletingProfileId === null && !spiritAssignmentBusy ? 'pointer' : 'default' } as any]}
                         >
                           <Text style={styles.customProfileDeleteText}>{deleting ? 'DELETING…' : 'DELETE PROFILE'}</Text>
                         </Pressable>
@@ -1179,6 +1284,10 @@ export default function AgentSpiritPanel({
                   return (
                     <Pressable
                       key={spirit.id}
+                      disabled={spiritAssignmentBusy}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Assign ${spirit.name} Spirit`}
+                      accessibilityState={{ selected: active, disabled: spiritAssignmentBusy, busy: spiritAssignmentBusy }}
                       onPress={async () => {
                         const authority = exactIdentityAuthority;
                         const capturedRequestKey = identityRequestKey;
@@ -1197,7 +1306,8 @@ export default function AgentSpiritPanel({
                       style={[
                         styles.spiritCard,
                         active && { borderColor: spirit.color + '60', backgroundColor: spirit.color + '10' },
-                        Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                        spiritAssignmentBusy && { opacity: 0.45 },
+                        Platform.OS === 'web' && { cursor: spiritAssignmentBusy ? 'default' : 'pointer' } as any,
                       ]}
                     >
                       <View style={{ alignItems: 'center', marginBottom: 10 }}>
@@ -1291,7 +1401,11 @@ export default function AgentSpiritPanel({
                   </Pressable>
                 ) : null}
                 {soulStatus ? (
-                  <Text style={{ fontSize: 11, color: soulStatus.startsWith('Error') ? '#ef4444' : '#22c55e', fontFamily: 'monospace' }}>
+                  <Text
+                    accessibilityRole={soulStatus.startsWith('ERROR') ? 'alert' : undefined}
+                    accessibilityLiveRegion={soulStatus.startsWith('ERROR') ? 'assertive' : 'polite'}
+                    style={{ fontSize: 11, color: soulStatus.startsWith('ERROR') ? '#ef4444' : '#22c55e', fontFamily: 'monospace' }}
+                  >
                     {soulStatus}
                   </Text>
                 ) : null}
@@ -1538,6 +1652,8 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   roleActionBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
@@ -1578,6 +1694,8 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   roleSaveBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
@@ -1593,6 +1711,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.7,
   },
   roleDismissBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
@@ -1706,6 +1826,8 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   opsActionBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
@@ -1721,6 +1843,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
   },
   opsSaveBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,

@@ -140,7 +140,12 @@ assert(attention.includes('blockedVisibilityMs') && attention.includes("id: `run
 assert(officeTab.includes(".freshness !== 'stale'"), 'Office poll excludes stale blocked runs');
 
 assert(historyCore.includes('PROCESSING_HISTORY_STATUSES') && historyCore.includes("if (!PROCESSING_HISTORY_STATUSES.has(status)) return 'other'"), 'ACTIVE bucket requires actually processing statuses');
-assert(historyDrawer.includes("reapRun(runId, 'heartbeat_stale')"), 'drawer reaps only canonical dead heartbeats');
+assert(
+  !historyDrawer.includes('reapRun(')
+    && historyDrawer.includes('Run history is presentation-only')
+    && historyDrawer.includes('cancelStaleRunExact('),
+  'opening the drawer is read-only; only its explicit exact-receipt Cancel may mutate',
+);
 assert(historyDrawer.includes('CLOSE AS CANCELLED'), 'stale legacy runs have an honest explicit close action');
 assert(historyDrawer.includes('has not been marked completed'), 'stale copy never fabricates completion');
 assert(historyDrawer.includes('setFreshnessTick') && historyDrawer.includes('30_000'), 'open Circle Runs ages freshness without a remount');

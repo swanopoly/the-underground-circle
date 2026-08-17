@@ -78,5 +78,10 @@ check(
   xpFeed.indexOf('if (!isNew || reduceMotion)') < xpFeed.indexOf('const entranceAnimation = Animated.parallel(['),
   'XP entrance motion starts only after the reduced-motion guard',
 );
+check(
+  xpFeed.includes('nestedScrollEnabled')
+    && xpFeed.includes('accessibilityLabel="Recent XP events"'),
+  'the bounded XP feed remains reachable inside the panel scroll owner on Android and has an accessible name',
+);
 
 console.log(`office agent read-state and reduced-motion smoke passed (${assertions} assertions)`);

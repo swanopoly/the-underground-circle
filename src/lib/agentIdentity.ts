@@ -33,13 +33,30 @@ export interface AgentIdentityExactAuthority {
   userId: string;
   accessToken: string;
   circleId?: string | null;
+  /**
+   * Monotonic lifecycle generation captured by the owning surface. Read-only
+   * compatibility callers may omit it, but every exact mutation requires it.
+   */
+  generation?: number;
 }
 
 interface NormalizedAgentIdentityExactAuthority {
   userId: string;
   accessToken: string;
   circleId: string | null;
+  generation: number | undefined;
 }
+
+export type AgentIdentityExactWriteAuthority = Readonly<{
+  userId: string;
+  accessToken: string;
+  circleId: string;
+  generation: number;
+}>;
+
+export type AgentIdentityExactAuthorityFence = (
+  authority: AgentIdentityExactWriteAuthority,
+) => boolean;
 
 export interface AgentIdentityExactSyncResult {
   ok: boolean;
@@ -50,8 +67,43 @@ export interface AgentIdentityExactSyncResult {
 export interface AgentIdentityExactSaveResult {
   ok: boolean;
   localSaved: boolean;
-  serverSaved: boolean;
-  error?: 'invalid_authority' | 'authority_mismatch' | 'invalid_payload' | 'local_write_failed' | 'server_unavailable';
+  /** Null means the RPC returned 2xx, but its receipt could not prove the outcome. */
+  serverSaved: boolean | null;
+  error?:
+    | 'invalid_authority'
+    | 'authority_mismatch'
+    | 'authority_retired'
+    | 'invalid_payload'
+    | 'invalid_local_data'
+    | 'invalid_receipt'
+    | 'outcome_unknown'
+    | 'mutation_superseded'
+    | 'local_write_failed'
+    | 'server_unavailable';
+}
+
+export type AgentPublishedSpiritAssignmentInput = Readonly<{
+  officeAgentId: string;
+  sessionKey: string;
+  spiritId: string | null;
+  spiritEmoji: string | null;
+  customProfileId: string | null;
+}>;
+
+export interface AgentCustomProfileDeleteResult {
+  ok: boolean;
+  /** Null means the RPC returned 2xx, but its receipt could not prove the outcome. */
+  serverDeleted: boolean | null;
+  error?:
+    | 'invalid_authority'
+    | 'authority_mismatch'
+    | 'authority_retired'
+    | 'invalid_payload'
+    | 'invalid_receipt'
+    | 'outcome_unknown'
+    | 'mutation_superseded'
+    | 'profile_referenced'
+    | 'server_unavailable';
 }
 
 function normalizeAgentIdentityScopePart(value: unknown): string | null {
@@ -59,6 +111,11 @@ function normalizeAgentIdentityScopePart(value: unknown): string | null {
   const normalized = value.trim();
   if (!normalized || normalized.length > MAX_AGENT_IDENTITY_SCOPE_PART_LENGTH) return null;
   return normalized;
+}
+
+function isAgentIdentityUuidLike(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
 }
 
 function normalizeAgentIdentityExactAuthority(
@@ -71,7 +128,96 @@ function normalizeAgentIdentityExactAuthority(
   const hasCircleId = authority.circleId !== undefined && authority.circleId !== null;
   const circleId = hasCircleId ? normalizeAgentIdentityScopePart(authority.circleId) : null;
   if (hasCircleId && !circleId) return null;
-  return { userId, accessToken, circleId };
+  const hasGeneration = authority.generation !== undefined && authority.generation !== null;
+  const generation = hasGeneration ? Number(authority.generation) : undefined;
+  if (hasGeneration && (!Number.isSafeInteger(generation) || Number(generation) <= 0)) return null;
+  return { userId, accessToken, circleId, generation };
+}
+
+function normalizeAgentIdentityExactWriteAuthority(
+  authority: AgentIdentityExactWriteAuthority | null | undefined,
+): AgentIdentityExactWriteAuthority | null {
+  const normalized = normalizeAgentIdentityExactAuthority(authority);
+  if (!normalized?.circleId || normalized.generation === undefined) return null;
+  return {
+    userId: normalized.userId,
+    accessToken: normalized.accessToken,
+    circleId: normalized.circleId,
+    generation: normalized.generation,
+  };
+}
+
+function isAgentIdentityExactAuthorityCurrent(
+  authority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+): boolean {
+  try {
+    return fence(authority);
+  } catch {
+    return false;
+  }
+}
+
+type AgentIdentityExactCommandEpoch = Readonly<{ key: string; epoch: number }>;
+
+const _agentIdentityExactCommandEpochs = new Map<string, number>();
+const _agentIdentityExactCachePublicationTails = new Map<string, Promise<void>>();
+
+function beginAgentIdentityExactCommand(
+  kind: 'primary' | 'published_spirit' | 'profile_delete',
+  authority: AgentIdentityExactWriteAuthority,
+  target: string,
+): AgentIdentityExactCommandEpoch {
+  // The key is exact-scope metadata only; bearer material never enters it.
+  const key = JSON.stringify([kind, authority.userId, authority.circleId, target]);
+  const epoch = (_agentIdentityExactCommandEpochs.get(key) || 0) + 1;
+  _agentIdentityExactCommandEpochs.set(key, epoch);
+  return { key, epoch };
+}
+
+function isAgentIdentityExactCommandEpochCurrent(
+  command: AgentIdentityExactCommandEpoch,
+): boolean {
+  return _agentIdentityExactCommandEpochs.get(command.key) === command.epoch;
+}
+
+function makeAgentIdentityExactCommandFence(
+  fence: AgentIdentityExactAuthorityFence,
+  command: AgentIdentityExactCommandEpoch,
+): AgentIdentityExactAuthorityFence {
+  return authority => isAgentIdentityExactAuthorityCurrent(authority, fence)
+    && isAgentIdentityExactCommandEpochCurrent(command);
+}
+
+function agentIdentityExactCommandRetirementError(
+  authority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+  command: AgentIdentityExactCommandEpoch,
+): 'authority_retired' | 'mutation_superseded' {
+  return isAgentIdentityExactAuthorityCurrent(authority, fence)
+    && !isAgentIdentityExactCommandEpochCurrent(command)
+    ? 'mutation_superseded'
+    : 'authority_retired';
+}
+
+async function withAgentIdentityExactCachePublicationLock<T>(
+  cacheKey: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const prior = _agentIdentityExactCachePublicationTails.get(cacheKey) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const tail = prior.catch(() => undefined).then(() => gate);
+  _agentIdentityExactCachePublicationTails.set(cacheKey, tail);
+  await prior.catch(() => undefined);
+  try {
+    return await task();
+  } finally {
+    release();
+    if (_agentIdentityExactCachePublicationTails.get(cacheKey) === tail) {
+      _agentIdentityExactCachePublicationTails.delete(cacheKey);
+    }
+  }
 }
 
 /**
@@ -251,7 +397,11 @@ export async function loadAgentIdentities(): Promise<Map<string, AgentIdentity>>
 }
 
 function parseExactAgentIdentityCache(raw: string | null): Map<string, AgentIdentity> | null {
-  if (!raw) return new Map();
+  // A missing cache is the normal first-device/new-scope state. Present but
+  // empty or malformed bytes are corruption and must not become verified
+  // emptiness for an exact writer.
+  if (raw === null) return new Map();
+  if (!raw) return null;
   if (raw.length > MAX_AGENT_IDENTITY_CACHE_BYTES) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -292,12 +442,23 @@ function parseExactAgentIdentityCache(raw: string | null): Map<string, AgentIden
 
 async function verifyAgentIdentityExactAuthority(
   input: AgentIdentityExactAuthority | null | undefined,
+  fence?: AgentIdentityExactAuthorityFence,
 ): Promise<NormalizedAgentIdentityExactAuthority | null> {
   const authority = normalizeAgentIdentityExactAuthority(input);
   if (!authority) return null;
+  const writeAuthority = authority.circleId && authority.generation !== undefined
+    ? normalizeAgentIdentityExactWriteAuthority({
+      userId: authority.userId,
+      accessToken: authority.accessToken,
+      circleId: authority.circleId,
+      generation: authority.generation,
+    })
+    : null;
+  if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) return null;
   try {
     const { data, error } = await supabase.auth.getUser(authority.accessToken);
     if (error || !data.user || data.user.id !== authority.userId) return null;
+    if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) return null;
     return authority;
   } catch {
     return null;
@@ -310,13 +471,20 @@ async function verifyAgentIdentityExactAuthority(
  */
 export async function loadAgentIdentitiesExact(
   capturedAuthority: AgentIdentityExactAuthority,
+  fence?: AgentIdentityExactAuthorityFence,
 ): Promise<Map<string, AgentIdentity>> {
-  const authority = await verifyAgentIdentityExactAuthority(capturedAuthority);
+  const authority = await verifyAgentIdentityExactAuthority(capturedAuthority, fence);
   if (!authority) return new Map();
+  const writeAuthority = fence
+    ? normalizeAgentIdentityExactWriteAuthority(capturedAuthority as AgentIdentityExactWriteAuthority)
+    : null;
+  if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) return new Map();
   const key = agentIdentityExactStorageKey(authority);
   if (!key) return new Map();
   try {
-    return parseExactAgentIdentityCache(await storage.getItem(key)) || new Map();
+    const raw = await storage.getItem(key);
+    if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) return new Map();
+    return parseExactAgentIdentityCache(raw) || new Map();
   } catch {
     return new Map();
   }
@@ -394,7 +562,7 @@ export async function seedIdentitiesIfServerEmpty(): Promise<number> {
     if ((count || 0) > 0) return 0;  // server already has data, nothing to seed
     const local = await loadAgentIdentities();
     if (local.size === 0) return 0;
-    const rows = Array.from(local.values()).map(id => identityToRow(user.id, id));
+    const rows = Array.from(local.values()).map(id => identityToCompatibilityRow(user.id, id));
     const { error } = await supabase
       .from('agent_identities')
       .upsert(rows, { onConflict: 'user_id,session_key' });
@@ -498,7 +666,6 @@ function identityToRow(userId: string, identity: AgentIdentity) {
     bond_id: identity.bondId ?? null,
     bond_level: typeof identity.bondLevel === 'number' ? identity.bondLevel : null,
     bond_xp: typeof identity.bondXP === 'number' ? identity.bondXP : null,
-    is_primary: !!identity.isPrimary,
     is_customized: !!identity.isCustomized,
     bound_ai_provider: identity.boundAiProvider ?? null,
     bound_model: identity.boundModel ?? null,
@@ -513,6 +680,14 @@ function identityToRow(userId: string, identity: AgentIdentity) {
     first_seen: new Date(identity.firstSeen).toISOString(),
     last_seen: new Date(identity.lastSeen).toISOString(),
   };
+}
+
+function identityToCompatibilityRow(userId: string, identity: AgentIdentity) {
+  // Ambient/full-row compatibility saves cannot author provider or primary
+  // authority. Provider metadata belongs to exact targeted mutations; primary
+  // status belongs exclusively to the transactional §47 RPC.
+  const { bound_ai_provider: _boundAiProvider, ...row } = identityToRow(userId, identity);
+  return row;
 }
 
 // Session-level kill switch. The first time the upsert fails because
@@ -563,7 +738,7 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
   try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    const rows = Array.from(identities.values()).map(id => identityToRow(user.id, id));
+    const rows = Array.from(identities.values()).map(id => identityToCompatibilityRow(user.id, id));
     if (rows.length === 0) return;
     // Batch upsert — single round-trip per save.
     let { error } = await supabase
@@ -593,36 +768,732 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
   }
 }
 
-async function persistIdentitiesToServerExact(
-  identities: Map<string, AgentIdentity>,
-  authority: NormalizedAgentIdentityExactAuthority,
-): Promise<boolean> {
-  if (_identitiesPersistDisabled) return false;
-  const rows = Array.from(identities.values()).map(identity => identityToRow(authority.userId, identity));
-  if (rows.length === 0) return true;
+type AgentIdentityExactMutationLoadResult =
+  | {
+    ok: true;
+    authority: AgentIdentityExactWriteAuthority;
+    identities: Map<string, AgentIdentity>;
+    serverIdentities: Map<string, AgentIdentity>;
+    /** Raw server version used for optimistic concurrency; absence means INSERT. */
+    serverVersions: Map<string, string>;
+  }
+  | {
+    ok: false;
+    error: 'authority_mismatch' | 'authority_retired' | 'invalid_local_data' | 'invalid_receipt' | 'server_unavailable';
+  };
+
+/**
+ * Load the mutation base from the exact device lane plus the durable owner
+ * row(s). Unlike the compatibility read API, malformed local data and remote
+ * failures are explicit and can never be reinterpreted as a new identity.
+ */
+async function loadAgentIdentityMutationBaseExact(
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+  sessionKey: string | null,
+): Promise<AgentIdentityExactMutationLoadResult> {
+  const syntacticAuthority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (!syntacticAuthority || !isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)) {
+    return { ok: false, error: 'authority_retired' };
+  }
+  const verified = await verifyAgentIdentityExactAuthority(syntacticAuthority, fence);
+  const authority = normalizeAgentIdentityExactWriteAuthority(verified as AgentIdentityExactWriteAuthority);
+  if (!authority) {
+    return isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)
+      ? { ok: false, error: 'authority_mismatch' }
+      : { ok: false, error: 'authority_retired' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, error: 'authority_retired' };
+  }
+  const key = agentIdentityExactStorageKey(authority);
+  if (!key) return { ok: false, error: 'invalid_local_data' };
+
+  let identities: Map<string, AgentIdentity>;
   try {
-    let { error } = await supabase
-      .from('agent_identities')
-      .upsert(rows, { onConflict: 'user_id,session_key' })
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
-    if (error) {
-      const code = String((error as { code?: unknown }).code || '');
-      if (code === 'PGRST204' && String(error.message || '').includes('terminal_config')) {
-        const fallbackRows = rows.map(({ terminal_config, ...row }) => row);
-        const retry = await supabase
-          .from('agent_identities')
-          .upsert(fallbackRows, { onConflict: 'user_id,session_key' })
-          .setHeader('Authorization', `Bearer ${authority.accessToken}`);
-        error = retry.error;
-        if (!error) return true;
-      }
-      if (shouldDisableIdentityPersistence(error)) disableIdentityPersistenceForSession(error);
-      return false;
+    const raw = await storage.getItem(key);
+    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, error: 'authority_retired' };
     }
-    return true;
+    const parsed = parseExactAgentIdentityCache(raw);
+    if (!parsed) return { ok: false, error: 'invalid_local_data' };
+    identities = parsed;
+  } catch {
+    return { ok: false, error: 'invalid_local_data' };
+  }
+
+  if (_identitiesPersistDisabled) return { ok: false, error: 'server_unavailable' };
+  try {
+    const serverVersions = new Map<string, string>();
+    const serverIdentities = new Map<string, AgentIdentity>();
+    let query = supabase
+      .from('agent_identities')
+      .select('*')
+      .eq('user_id', authority.userId);
+    query = sessionKey
+      ? query.eq('session_key', sessionKey).limit(2)
+      : query.limit(MAX_AGENT_IDENTITIES_PER_SCOPE + 1);
+    const { data, error } = await query
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, error: 'authority_retired' };
+    }
+    if (error) {
+      if (shouldDisableIdentityPersistence(error)) disableIdentityPersistenceForSession(error);
+      return { ok: false, error: 'server_unavailable' };
+    }
+    if (
+      !Array.isArray(data)
+      || data.length > MAX_AGENT_IDENTITIES_PER_SCOPE
+      || (sessionKey !== null && data.length > 1)
+    ) return { ok: false, error: 'invalid_receipt' };
+
+    const seen = new Set<string>();
+    for (const candidate of data) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        return { ok: false, error: 'invalid_receipt' };
+      }
+      const row = candidate as Record<string, unknown>;
+      const rowSessionKey = normalizeAgentIdentityScopePart(row.session_key);
+      const updatedAt = typeof row.updated_at === 'string' ? row.updated_at : '';
+      const firstSeen = new Date(String(row.first_seen || '')).getTime();
+      const lastSeen = new Date(String(row.last_seen || '')).getTime();
+      const requiredCounters = [
+        row.total_cost_all_time,
+        row.total_tokens_all_time,
+        row.total_sessions_all_time,
+        row.total_messages,
+        row.total_turns,
+      ];
+      if (
+        row.user_id !== authority.userId
+        || !rowSessionKey
+        || !Number.isFinite(new Date(updatedAt).getTime())
+        || !Number.isFinite(firstSeen)
+        || !Number.isFinite(lastSeen)
+        || requiredCounters.some(value => !Number.isFinite(Number(value)) || Number(value) < 0)
+        || (sessionKey !== null && rowSessionKey !== sessionKey)
+        || seen.has(rowSessionKey)
+      ) return { ok: false, error: 'invalid_receipt' };
+      const serverIdentity = rowToIdentity(row);
+      const validated = parseExactAgentIdentityCache(JSON.stringify({ [rowSessionKey]: serverIdentity }));
+      if (!validated || validated.size !== 1) return { ok: false, error: 'invalid_receipt' };
+      const current = identities.get(rowSessionKey);
+      if (!current || serverIdentity.lastSeen >= current.lastSeen) {
+        identities.set(rowSessionKey, serverIdentity);
+      }
+      serverIdentities.set(rowSessionKey, serverIdentity);
+      serverVersions.set(rowSessionKey, updatedAt);
+      seen.add(rowSessionKey);
+    }
+    return { ok: true, authority, identities, serverIdentities, serverVersions };
+  } catch {
+    return isAgentIdentityExactAuthorityCurrent(authority, fence)
+      ? { ok: false, error: 'server_unavailable' }
+      : { ok: false, error: 'authority_retired' };
+  }
+}
+
+type AgentIdentityRow = ReturnType<typeof identityToRow>;
+
+type AgentIdentityExactPersistResult =
+  | { ok: true }
+  | { ok: false; error: 'authority_retired' | 'invalid_receipt' | 'server_unavailable' };
+
+const AGENT_IDENTITY_ROW_COLUMN_BY_FIELD: Readonly<Record<string, keyof AgentIdentityRow>> = {
+  customName: 'custom_name',
+  customColor: 'custom_color',
+  appearance: 'appearance',
+  spiritId: 'spirit_id',
+  spiritEmoji: 'spirit_emoji',
+  soulPrompt: 'soul_prompt',
+  customProfileId: 'custom_profile_id',
+  customProfileName: 'custom_profile_name',
+  totalCostAllTime: 'total_cost_all_time',
+  totalTokensAllTime: 'total_tokens_all_time',
+  totalSessionsAllTime: 'total_sessions_all_time',
+  firstSeen: 'first_seen',
+  lastSeen: 'last_seen',
+  totalMessages: 'total_messages',
+  totalTurns: 'total_turns',
+  assignedFloorId: 'assigned_floor_id',
+  deskIndex: 'desk_index',
+  mostUsedModel: 'most_used_model',
+  tags: 'tags',
+  bondId: 'bond_id',
+  bondLevel: 'bond_level',
+  bondXP: 'bond_xp',
+  isCustomized: 'is_customized',
+  boundAiProvider: 'bound_ai_provider',
+  boundModel: 'bound_model',
+  terminalConfig: 'terminal_config',
+  soulTraits: 'tags',
+};
+
+function stableIdentityReceiptValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableIdentityReceiptValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, stableIdentityReceiptValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function identityReceiptColumnMatches(
+  column: keyof AgentIdentityRow,
+  actual: unknown,
+  expected: unknown,
+): boolean {
+  if (column === 'first_seen' || column === 'last_seen') {
+    const actualTime = new Date(String(actual || '')).getTime();
+    const expectedTime = new Date(String(expected || '')).getTime();
+    return Number.isFinite(actualTime) && actualTime === expectedTime;
+  }
+  if (typeof expected === 'number') return Number(actual) === expected;
+  if (typeof expected === 'boolean') return actual === expected;
+  if (expected === null) return actual === null;
+  if (typeof expected === 'object') {
+    return JSON.stringify(stableIdentityReceiptValue(actual))
+      === JSON.stringify(stableIdentityReceiptValue(expected));
+  }
+  return actual === expected;
+}
+
+function expectedIdentityReceiptColumns(
+  updates: Partial<AgentIdentity> | null,
+): ReadonlySet<keyof AgentIdentityRow> {
+  if (!updates) return new Set<keyof AgentIdentityRow>();
+  const columns = new Set<keyof AgentIdentityRow>();
+  for (const field of Object.keys(updates)) {
+    const column = AGENT_IDENTITY_ROW_COLUMN_BY_FIELD[field];
+    if (column) columns.add(column);
+  }
+  return columns;
+}
+
+function validateIdentityServerReceipts(
+  data: unknown,
+  expectedRows: AgentIdentityRow[],
+  expectedColumnsBySessionKey?: ReadonlyMap<string, ReadonlySet<keyof AgentIdentityRow>>,
+): boolean {
+  if (!Array.isArray(data) || data.length !== expectedRows.length) return false;
+  const expectedBySessionKey = new Map(expectedRows.map(row => [row.session_key, row]));
+  const seen = new Set<string>();
+  for (const candidate of data) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+    const receipt = candidate as Record<string, unknown>;
+    const sessionKey = normalizeAgentIdentityScopePart(receipt.session_key);
+    if (!sessionKey || seen.has(sessionKey)) return false;
+    const expected = expectedBySessionKey.get(sessionKey);
+    if (!expected || receipt.user_id !== expected.user_id) return false;
+    const requestedColumns = expectedColumnsBySessionKey?.get(sessionKey);
+    const columns = requestedColumns && requestedColumns.size > 0
+      ? requestedColumns
+      : new Set(Object.keys(expected) as Array<keyof AgentIdentityRow>);
+    for (const column of columns) {
+      if (!Object.prototype.hasOwnProperty.call(receipt, column)) return false;
+      if (!identityReceiptColumnMatches(column, receipt[column], expected[column])) return false;
+    }
+    seen.add(sessionKey);
+  }
+  return seen.size === expectedRows.length;
+}
+
+type AgentIdentityPrimaryRpcReceipt = {
+  providerIdentities: Map<string, AgentIdentity>;
+};
+
+/**
+ * Validate the complete versioned receipt returned by the transactional
+ * primary-agent RPC. Provider rows are a bounded, owner-exact snapshot and
+ * the requested session must be the sole primary in that snapshot.
+ */
+function parseAgentIdentityPrimaryRpcReceipt(
+  data: unknown,
+  authority: AgentIdentityExactWriteAuthority,
+  sessionKey: string,
+  providerType: string,
+): AgentIdentityPrimaryRpcReceipt | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  try {
+    if (JSON.stringify(data).length > MAX_AGENT_IDENTITY_CACHE_BYTES) return null;
+  } catch {
+    return null;
+  }
+  const receipt = data as Record<string, unknown>;
+  const receiptKeys = [
+    'schemaVersion',
+    'userId',
+    'providerType',
+    'requestedSessionKey',
+    'primarySessionKey',
+    'primaryId',
+    'primaryUpdatedAt',
+    'inserted',
+    'clearedCount',
+    'targetRowCount',
+    'rowCount',
+    'rows',
+  ] as const;
+  if (
+    Object.keys(receipt).length !== receiptKeys.length
+    || receiptKeys.some(key => !Object.prototype.hasOwnProperty.call(receipt, key))
+    || receipt.schemaVersion !== 1
+    || receipt.userId !== authority.userId
+    || receipt.providerType !== providerType
+    || receipt.requestedSessionKey !== sessionKey
+    || receipt.primarySessionKey !== sessionKey
+    || typeof receipt.primaryId !== 'string'
+    || normalizeAgentIdentityScopePart(receipt.primaryId) !== receipt.primaryId
+    || !isAgentIdentityUuidLike(receipt.primaryId)
+    || typeof receipt.primaryUpdatedAt !== 'string'
+    || !Number.isFinite(new Date(receipt.primaryUpdatedAt).getTime())
+    || typeof receipt.inserted !== 'boolean'
+    || typeof receipt.clearedCount !== 'number'
+    || !Number.isSafeInteger(receipt.clearedCount)
+    || receipt.clearedCount < 0
+    || receipt.clearedCount > 1
+    || receipt.targetRowCount !== 1
+    || typeof receipt.rowCount !== 'number'
+    || !Number.isSafeInteger(receipt.rowCount)
+    || receipt.rowCount < 1
+    || receipt.rowCount > MAX_AGENT_IDENTITIES_PER_SCOPE
+    || !Array.isArray(receipt.rows)
+    || receipt.rows.length !== receipt.rowCount
+  ) return null;
+
+  const providerIdentities = new Map<string, AgentIdentity>();
+  const seenIds = new Set<string>();
+  let primaryCount = 0;
+  let primaryRow: Record<string, unknown> | null = null;
+  for (const candidate of receipt.rows) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+    const row = candidate as Record<string, unknown>;
+    const rowId = normalizeAgentIdentityScopePart(row.id);
+    const rowSessionKey = normalizeAgentIdentityScopePart(row.session_key);
+    const updatedAt = typeof row.updated_at === 'string' ? row.updated_at : '';
+    const firstSeen = new Date(String(row.first_seen || '')).getTime();
+    const lastSeen = new Date(String(row.last_seen || '')).getTime();
+    const requiredCounters = [
+      row.total_cost_all_time,
+      row.total_tokens_all_time,
+      row.total_sessions_all_time,
+      row.total_messages,
+      row.total_turns,
+    ];
+    if (
+      !rowId
+      || !rowSessionKey
+      || row.id !== rowId
+      || !isAgentIdentityUuidLike(rowId)
+      || row.session_key !== rowSessionKey
+      || row.user_id !== authority.userId
+      || row.bound_ai_provider !== providerType
+      || typeof row.is_primary !== 'boolean'
+      || !Number.isFinite(new Date(updatedAt).getTime())
+      || !Number.isFinite(firstSeen)
+      || !Number.isFinite(lastSeen)
+      || requiredCounters.some(value => (
+        (typeof value !== 'number' && typeof value !== 'string')
+        || value === ''
+        || !Number.isFinite(Number(value))
+        || Number(value) < 0
+      ))
+      || seenIds.has(rowId)
+      || providerIdentities.has(rowSessionKey)
+    ) return null;
+    const identity = rowToIdentity(row);
+    const validated = parseExactAgentIdentityCache(JSON.stringify({ [rowSessionKey]: identity }));
+    if (!validated || validated.size !== 1) return null;
+    providerIdentities.set(rowSessionKey, identity);
+    seenIds.add(rowId);
+    if (row.is_primary) {
+      primaryCount += 1;
+      primaryRow = row;
+    }
+  }
+
+  if (
+    primaryCount !== 1
+    || !primaryRow
+    || primaryRow.session_key !== sessionKey
+    || primaryRow.id !== receipt.primaryId
+    || primaryRow.updated_at !== receipt.primaryUpdatedAt
+    || providerIdentities.get(sessionKey)?.isPrimary !== true
+  ) return null;
+  return { providerIdentities };
+}
+
+type AgentPublishedSpiritRpcReceipt = {
+  identity: AgentIdentity;
+};
+
+function parseCustomProfileDeleteRpcReceipt(
+  data: unknown,
+  authority: AgentIdentityExactWriteAuthority,
+  profileId: string,
+): boolean {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  try {
+    if (JSON.stringify(data).length > 1_048_576) return false;
   } catch {
     return false;
   }
+  const receipt = data as Record<string, unknown>;
+  const keys = ['schemaVersion', 'userId', 'profileId', 'deletedRowCount', 'profile'] as const;
+  if (
+    Object.keys(receipt).length !== keys.length
+    || keys.some(key => !Object.prototype.hasOwnProperty.call(receipt, key))
+    || receipt.schemaVersion !== 1
+    || receipt.userId !== authority.userId
+    || receipt.profileId !== profileId
+    || receipt.deletedRowCount !== 1
+    || !receipt.profile
+    || typeof receipt.profile !== 'object'
+    || Array.isArray(receipt.profile)
+  ) return false;
+  const profile = receipt.profile as Record<string, unknown>;
+  return profile.id === profileId
+    && profile.user_id === authority.userId;
+}
+
+function parsePublishedAgentSpiritRpcReceipt(
+  data: unknown,
+  authority: AgentIdentityExactWriteAuthority,
+  input: AgentPublishedSpiritAssignmentInput,
+): AgentPublishedSpiritRpcReceipt | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  try {
+    if (JSON.stringify(data).length > MAX_AGENT_IDENTITY_CACHE_BYTES) return null;
+  } catch {
+    return null;
+  }
+  const receipt = data as Record<string, unknown>;
+  const receiptKeys = [
+    'schemaVersion',
+    'userId',
+    'circleId',
+    'officeAgentId',
+    'sessionKey',
+    'spiritId',
+    'spiritEmoji',
+    'customProfileId',
+    'customProfileName',
+    'officeRowCount',
+    'identityRowCount',
+    'officeAgent',
+    'identity',
+  ] as const;
+  const customAssignment = input.customProfileId !== null;
+  const customProfileName = receipt.customProfileName;
+  if (
+    Object.keys(receipt).length !== receiptKeys.length
+    || receiptKeys.some(key => !Object.prototype.hasOwnProperty.call(receipt, key))
+    || receipt.schemaVersion !== 1
+    || receipt.userId !== authority.userId
+    || receipt.circleId !== authority.circleId
+    || receipt.officeAgentId !== input.officeAgentId
+    || receipt.sessionKey !== input.sessionKey
+    || receipt.spiritId !== input.spiritId
+    || receipt.officeRowCount !== 1
+    || receipt.identityRowCount !== 1
+    || receipt.customProfileId !== input.customProfileId
+    || (
+      customAssignment
+        ? typeof customProfileName !== 'string'
+          || normalizeAgentIdentityScopePart(customProfileName) !== customProfileName
+          || /[\u0000-\u001f\u007f]/u.test(customProfileName)
+        : customProfileName !== null
+    )
+    || (
+      customAssignment
+        ? receipt.spiritEmoji !== null
+          && (
+            typeof receipt.spiritEmoji !== 'string'
+            || receipt.spiritEmoji.trim() !== receipt.spiritEmoji
+            || receipt.spiritEmoji.length > 64
+            || /[\u0000-\u001f\u007f]/u.test(receipt.spiritEmoji)
+          )
+        : receipt.spiritEmoji !== input.spiritEmoji
+    )
+    || !receipt.officeAgent
+    || typeof receipt.officeAgent !== 'object'
+    || Array.isArray(receipt.officeAgent)
+    || !receipt.identity
+    || typeof receipt.identity !== 'object'
+    || Array.isArray(receipt.identity)
+  ) return null;
+
+  const officeRow = receipt.officeAgent as Record<string, unknown>;
+  const identityRow = receipt.identity as Record<string, unknown>;
+  const officeUpdatedAt = typeof officeRow.updated_at === 'string' ? officeRow.updated_at : '';
+  const identityUpdatedAt = typeof identityRow.updated_at === 'string' ? identityRow.updated_at : '';
+  const firstSeen = new Date(String(identityRow.first_seen || '')).getTime();
+  const lastSeen = new Date(String(identityRow.last_seen || '')).getTime();
+  const requiredCounters = [
+    identityRow.total_cost_all_time,
+    identityRow.total_tokens_all_time,
+    identityRow.total_sessions_all_time,
+    identityRow.total_messages,
+    identityRow.total_turns,
+  ];
+  if (
+    officeRow.id !== input.officeAgentId
+    || officeRow.circle_id !== authority.circleId
+    || officeRow.owner_id !== authority.userId
+    || officeRow.is_published !== true
+    || officeRow.spirit !== input.spiritId
+    || officeRow.spirit_emoji !== receipt.spiritEmoji
+    || !Number.isFinite(new Date(officeUpdatedAt).getTime())
+    || !isAgentIdentityUuidLike(identityRow.id)
+    || identityRow.user_id !== authority.userId
+    || identityRow.session_key !== input.sessionKey
+    || identityRow.spirit_id !== input.spiritId
+    || identityRow.spirit_emoji !== receipt.spiritEmoji
+    || identityRow.custom_profile_id !== input.customProfileId
+    || identityRow.custom_profile_name !== customProfileName
+    || identityRow.is_customized !== true
+    || !Number.isFinite(new Date(identityUpdatedAt).getTime())
+    || !Number.isFinite(firstSeen)
+    || !Number.isFinite(lastSeen)
+    || requiredCounters.some(value => (
+      (typeof value !== 'number' && typeof value !== 'string')
+      || value === ''
+      || !Number.isFinite(Number(value))
+      || Number(value) < 0
+    ))
+  ) return null;
+  const identity = rowToIdentity(identityRow);
+  const validated = parseExactAgentIdentityCache(JSON.stringify({ [input.sessionKey]: identity }));
+  return validated?.size === 1 ? { identity } : null;
+}
+
+function agentIdentityExactServerWriteMode(
+  serverVersions: ReadonlyMap<string, string>,
+  sessionKey: string,
+): 'update' | 'insert' {
+  return serverVersions.has(sessionKey) ? 'update' : 'insert';
+}
+
+async function persistIdentitiesToServerExact(
+  identities: Map<string, AgentIdentity>,
+  authority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+  expectedColumnsBySessionKey?: ReadonlyMap<string, ReadonlySet<keyof AgentIdentityRow>>,
+  serverVersions?: ReadonlyMap<string, string>,
+): Promise<AgentIdentityExactPersistResult> {
+  if (_identitiesPersistDisabled) return { ok: false, error: 'server_unavailable' };
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, error: 'authority_retired' };
+  }
+  const rows = Array.from(identities.values()).map(identity => identityToRow(authority.userId, identity));
+  if (rows.length === 0) return { ok: false, error: 'invalid_receipt' };
+  try {
+    // Targeted panel mutations update only the requested columns and compare
+    // the exact server version observed immediately before the write. This
+    // prevents two tabs changing disjoint fields from silently replacing each
+    // other's full identity row. A missing version is an exact INSERT lane.
+    if (expectedColumnsBySessionKey && serverVersions) {
+      for (const row of rows) {
+        if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+          return { ok: false, error: 'authority_retired' };
+        }
+        const expectedColumns = expectedColumnsBySessionKey.get(row.session_key);
+        if (!expectedColumns || expectedColumns.size === 0) {
+          return { ok: false, error: 'invalid_receipt' };
+        }
+        const writeMode = agentIdentityExactServerWriteMode(serverVersions, row.session_key);
+        const serverVersion = serverVersions.get(row.session_key);
+        let response: { data: unknown; error: any };
+        if (writeMode === 'update') {
+          if (!serverVersion) return { ok: false, error: 'invalid_receipt' };
+          const patch: Record<string, unknown> = {};
+          for (const column of expectedColumns) {
+            if (column === 'user_id' || column === 'session_key') continue;
+            patch[column] = row[column];
+          }
+          if (Object.keys(patch).length === 0) return { ok: false, error: 'invalid_receipt' };
+          response = await supabase
+            .from('agent_identities')
+            .update(patch)
+            .eq('user_id', authority.userId)
+            .eq('session_key', row.session_key)
+            .eq('updated_at', serverVersion)
+            .select('*')
+            .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+        } else {
+          response = await supabase
+            .from('agent_identities')
+            .insert(row)
+            .select('*')
+            .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+        }
+        if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+          return { ok: false, error: 'authority_retired' };
+        }
+        if (response.error) {
+          if (shouldDisableIdentityPersistence(response.error)) {
+            disableIdentityPersistenceForSession(response.error);
+          }
+          return { ok: false, error: 'server_unavailable' };
+        }
+        const receiptColumns = serverVersion ? expectedColumns : undefined;
+        if (!validateIdentityServerReceipts(
+          response.data,
+          [row],
+          receiptColumns ? new Map([[row.session_key, receiptColumns]]) : undefined,
+        )) return { ok: false, error: 'invalid_receipt' };
+      }
+      return { ok: true };
+    }
+
+    const { data, error } = await supabase
+      .from('agent_identities')
+      .upsert(rows, { onConflict: 'user_id,session_key' })
+      .select('*')
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, error: 'authority_retired' };
+    }
+    if (error) {
+      if (shouldDisableIdentityPersistence(error)) disableIdentityPersistenceForSession(error);
+      return { ok: false, error: 'server_unavailable' };
+    }
+    return validateIdentityServerReceipts(data, rows, expectedColumnsBySessionKey)
+      ? { ok: true }
+      : { ok: false, error: 'invalid_receipt' };
+  } catch {
+    return isAgentIdentityExactAuthorityCurrent(authority, fence)
+      ? { ok: false, error: 'server_unavailable' }
+      : { ok: false, error: 'authority_retired' };
+  }
+}
+
+function serializeExactIdentityMap(identities: Map<string, AgentIdentity>): string | null {
+  try {
+    const serialized = JSON.stringify(Object.fromEntries(identities.entries()));
+    if (serialized.length > MAX_AGENT_IDENTITY_CACHE_BYTES) return null;
+    const parsed = parseExactAgentIdentityCache(serialized);
+    return parsed?.size === identities.size ? serialized : null;
+  } catch {
+    return null;
+  }
+}
+
+async function publishVerifiedAgentIdentityCacheExact(
+  identities: Map<string, AgentIdentity>,
+  authority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+): Promise<AgentIdentityExactSaveResult> {
+  const serialized = serializeExactIdentityMap(identities);
+  const key = agentIdentityExactStorageKey(authority);
+  if (!serialized || !key) {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
+  }
+  try {
+    await storage.setItem(key, serialized);
+    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
+    }
+    const readback = await storage.getItem(key);
+    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
+    }
+    return readback === serialized
+      ? { ok: true, localSaved: true, serverSaved: true }
+      : { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
+  } catch {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
+  }
+}
+
+async function saveAgentIdentityMapExact(
+  identities: Map<string, AgentIdentity>,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+  persistedIdentities: Map<string, AgentIdentity>,
+  expectedColumnsBySessionKey?: ReadonlyMap<string, ReadonlySet<keyof AgentIdentityRow>>,
+  serverVersions?: ReadonlyMap<string, string>,
+): Promise<AgentIdentityExactSaveResult> {
+  const syntacticAuthority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (!syntacticAuthority || typeof fence !== 'function') {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  if (
+    !(identities instanceof Map)
+    || !(persistedIdentities instanceof Map)
+    || identities.size > MAX_AGENT_IDENTITIES_PER_SCOPE
+    || persistedIdentities.size === 0
+    || persistedIdentities.size > identities.size
+  ) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  const serialized = serializeExactIdentityMap(identities);
+  if (!serialized) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  for (const [sessionKey, identity] of persistedIdentities) {
+    if (identities.get(sessionKey) !== identity || identity.sessionKey !== sessionKey) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+    }
+  }
+
+  const verified = await verifyAgentIdentityExactAuthority(syntacticAuthority, fence);
+  const authority = normalizeAgentIdentityExactWriteAuthority(verified as AgentIdentityExactWriteAuthority);
+  if (!authority) {
+    return isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)
+      ? { ok: false, localSaved: false, serverSaved: false, error: 'authority_mismatch' }
+      : { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+
+  // Durable mutation comes first. A retired generation can therefore never
+  // publish its speculative map into the current device cache.
+  const serverResult = await persistIdentitiesToServerExact(
+    persistedIdentities,
+    authority,
+    fence,
+    expectedColumnsBySessionKey,
+    serverVersions,
+  );
+  if (!serverResult.ok) {
+    return { ok: false, localSaved: false, serverSaved: false, error: serverResult.error };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
+  }
+
+  const key = agentIdentityExactStorageKey(authority);
+  if (!key) {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
+  }
+  try {
+    await storage.setItem(key, serialized);
+    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
+    }
+    const readback = await storage.getItem(key);
+    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
+    }
+    if (readback !== serialized) {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
+    }
+  } catch {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
+  }
+  return { ok: true, localSaved: true, serverSaved: true };
 }
 
 /**
@@ -632,45 +1503,59 @@ async function persistIdentitiesToServerExact(
  */
 export async function saveAgentIdentitiesExact(
   identities: Map<string, AgentIdentity>,
-  capturedAuthority: AgentIdentityExactAuthority,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
 ): Promise<AgentIdentityExactSaveResult> {
-  const syntacticAuthority = normalizeAgentIdentityExactAuthority(capturedAuthority);
-  if (!syntacticAuthority) {
+  const authority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (!authority || typeof fence !== 'function') {
     return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
   }
-  if (!(identities instanceof Map) || identities.size > MAX_AGENT_IDENTITIES_PER_SCOPE) {
-    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
   }
-  const authority = await verifyAgentIdentityExactAuthority(syntacticAuthority);
-  if (!authority) {
-    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_mismatch' };
+  const mutationBase = await loadAgentIdentityMutationBaseExact(authority, fence, null);
+  if (!mutationBase.ok) {
+    return { ok: false, localSaved: false, serverSaved: false, error: mutationBase.error };
   }
-  const key = agentIdentityExactStorageKey(authority);
-  if (!key) {
-    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+  // This broad API is used to reconcile a freshly fetched durable snapshot
+  // into the device cache. Existing server rows win unconditionally because
+  // the caller has not declared field-level mutation intent. Only identities
+  // proven absent by the immediately preceding read are inserted. Targeted
+  // updates must use updateAgentIdentityExact/customize/etc. with CAS fields.
+  const reconciled = new Map(mutationBase.serverIdentities);
+  const newIdentities = new Map<string, AgentIdentity>();
+  const allExpectedColumns = new Map<string, ReadonlySet<keyof AgentIdentityRow>>();
+  for (const [sessionKey, identity] of identities) {
+    if (mutationBase.serverVersions.has(sessionKey)) continue;
+    reconciled.set(sessionKey, identity);
+    newIdentities.set(sessionKey, identity);
+    const row = identityToRow(mutationBase.authority.userId, identity);
+    allExpectedColumns.set(
+      sessionKey,
+      new Set(
+        (Object.keys(row) as Array<keyof AgentIdentityRow>)
+          .filter(column => column !== 'user_id' && column !== 'session_key'),
+      ),
+    );
   }
-
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(Object.fromEntries(identities.entries()));
-    if (
-      serialized.length > MAX_AGENT_IDENTITY_CACHE_BYTES
-      || parseExactAgentIdentityCache(serialized)?.size !== identities.size
-    ) {
-      return { ok: false, localSaved: false, serverSaved: false, error: 'local_write_failed' };
-    }
-    await storage.setItem(key, serialized);
-    if (await storage.getItem(key) !== serialized) {
-      return { ok: false, localSaved: false, serverSaved: false, error: 'local_write_failed' };
-    }
-  } catch {
-    return { ok: false, localSaved: false, serverSaved: false, error: 'local_write_failed' };
+  if (newIdentities.size === 0) {
+    // loadAgentIdentityMutationBaseExact already supplied the exact, validated
+    // server receipt. No durable mutation is necessary; publish only while
+    // the same generation still owns the cache lane.
+    return publishVerifiedAgentIdentityCacheExact(
+      reconciled,
+      mutationBase.authority,
+      fence,
+    );
   }
-
-  const serverSaved = await persistIdentitiesToServerExact(identities, authority);
-  return serverSaved
-    ? { ok: true, localSaved: true, serverSaved: true }
-    : { ok: false, localSaved: true, serverSaved: false, error: 'server_unavailable' };
+  return saveAgentIdentityMapExact(
+    reconciled,
+    mutationBase.authority,
+    fence,
+    newIdentities,
+    allExpectedColumns,
+    mutationBase.serverVersions,
+  );
 }
 
 // ─── Update Agent Identity ─────────────────────────────────
@@ -709,16 +1594,30 @@ export async function updateAgentIdentity(
 export async function updateAgentIdentityExact(
   sessionKey: string,
   updates: Partial<AgentIdentity>,
-  capturedAuthority: AgentIdentityExactAuthority,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
 ): Promise<AgentIdentityExactSaveResult> {
   const normalizedSessionKey = normalizeAgentIdentityScopePart(sessionKey);
-  if (!normalizedSessionKey) {
+  const authority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (
+    !normalizedSessionKey
+    || !authority
+    || typeof fence !== 'function'
+    || Object.prototype.hasOwnProperty.call(updates, 'isPrimary')
+  ) {
     return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
   }
-  const identities = await loadAgentIdentitiesExact(capturedAuthority);
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  const mutationBase = await loadAgentIdentityMutationBaseExact(authority, fence, normalizedSessionKey);
+  if (!mutationBase.ok) {
+    return { ok: false, localSaved: false, serverSaved: false, error: mutationBase.error };
+  }
+  const identities = mutationBase.identities;
   const existing = identities.get(normalizedSessionKey);
   const now = Date.now();
-  identities.set(normalizedSessionKey, existing
+  const nextIdentity: AgentIdentity = existing
     ? { ...existing, ...updates, sessionKey: normalizedSessionKey, lastSeen: now }
     : {
       totalCostAllTime: 0,
@@ -730,8 +1629,313 @@ export async function updateAgentIdentityExact(
       totalTurns: 0,
       ...updates,
       sessionKey: normalizedSessionKey,
-    });
-  return saveAgentIdentitiesExact(identities, capturedAuthority);
+    };
+  identities.set(normalizedSessionKey, nextIdentity);
+  const expectedColumns = expectedIdentityReceiptColumns({ ...updates, lastSeen: now });
+  return saveAgentIdentityMapExact(
+    identities,
+    mutationBase.authority,
+    fence,
+    new Map([[normalizedSessionKey, nextIdentity]]),
+    new Map([[normalizedSessionKey, expectedColumns]]),
+    mutationBase.serverVersions,
+  );
+}
+
+/**
+ * Atomically project one published Office agent's Spirit into both the
+ * peer-visible office row and its owner-private durable identity. A published
+ * DB agent's canonical identity key is its office-agent UUID; no caller may
+ * bind an arbitrary session key to a public row.
+ */
+export async function updatePublishedAgentSpiritExact(
+  input: AgentPublishedSpiritAssignmentInput,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+): Promise<AgentIdentityExactSaveResult> {
+  const authority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  const officeAgentId = typeof input?.officeAgentId === 'string' ? input.officeAgentId.trim() : '';
+  const sessionKey = normalizeAgentIdentityScopePart(input?.sessionKey);
+  const spiritId = input?.spiritId === null
+    ? null
+    : normalizeAgentIdentityScopePart(input?.spiritId);
+  const spiritEmoji = input?.spiritEmoji === null
+    ? null
+    : typeof input?.spiritEmoji === 'string'
+      ? input.spiritEmoji.trim()
+      : null;
+  const customProfileId = input?.customProfileId === null
+    ? null
+    : typeof input?.customProfileId === 'string'
+      ? input.customProfileId.trim()
+      : null;
+  const isCustomAssignment = customProfileId !== null;
+  if (
+    !authority
+    || typeof fence !== 'function'
+    || !isAgentIdentityUuidLike(officeAgentId)
+    || officeAgentId !== officeAgentId.toLowerCase()
+    || !sessionKey
+    || sessionKey !== officeAgentId
+    || (input.spiritId !== null && (
+      !spiritId
+      || spiritId !== input.spiritId
+      || /[\u0000-\u001f\u007f]/u.test(spiritId)
+    ))
+    || (input.spiritEmoji !== null && (
+      spiritEmoji !== input.spiritEmoji
+      || !spiritEmoji
+      || spiritEmoji.length > 64
+      || /[\u0000-\u001f\u007f]/u.test(spiritEmoji)
+    ))
+    || (input.customProfileId !== null && (
+      !customProfileId
+      || customProfileId !== input.customProfileId
+      || !isAgentIdentityUuidLike(customProfileId)
+      || customProfileId !== customProfileId.toLowerCase()
+    ))
+    || (spiritId === null && (spiritEmoji !== null || customProfileId !== null))
+    || (isCustomAssignment && spiritId !== `custom::${customProfileId}`)
+    || (!isCustomAssignment && spiritId?.startsWith('custom::'))
+  ) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  const command = beginAgentIdentityExactCommand('published_spirit', authority, officeAgentId);
+  const commandFence = makeAgentIdentityExactCommandFence(fence, command);
+  const verified = await verifyAgentIdentityExactAuthority(authority, commandFence);
+  const verifiedAuthority = normalizeAgentIdentityExactWriteAuthority(
+    verified as AgentIdentityExactWriteAuthority,
+  );
+  if (!verifiedAuthority) {
+    if (!isAgentIdentityExactCommandEpochCurrent(command)) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'mutation_superseded' };
+    }
+    return isAgentIdentityExactAuthorityCurrent(authority, fence)
+      ? { ok: false, localSaved: false, serverSaved: false, error: 'authority_mismatch' }
+      : { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+    return {
+      ok: false,
+      localSaved: false,
+      serverSaved: false,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
+  }
+  if (_identitiesPersistDisabled) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'server_unavailable' };
+  }
+
+  const normalizedInput: AgentPublishedSpiritAssignmentInput = {
+    officeAgentId,
+    sessionKey,
+    spiritId,
+    spiritEmoji,
+    customProfileId,
+  };
+  let data: unknown;
+  let rpcError: any;
+  try {
+    const response = await supabase
+      .rpc('set_published_agent_spirit_v1', {
+        p_circle_id: verifiedAuthority.circleId,
+        p_office_agent_id: officeAgentId,
+        p_spirit_id: spiritId,
+        p_spirit_emoji: spiritEmoji,
+        p_custom_profile_id: customProfileId,
+      })
+      .setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`);
+    data = response.data;
+    rpcError = response.error;
+  } catch {
+    return isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)
+      ? { ok: false, localSaved: false, serverSaved: false, error: 'server_unavailable' }
+      : {
+          ok: false,
+          localSaved: false,
+          serverSaved: false,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+  }
+  if (rpcError) {
+    if (shouldDisableIdentityPersistence(rpcError)) disableIdentityPersistenceForSession(rpcError);
+    return isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)
+      ? { ok: false, localSaved: false, serverSaved: false, error: 'server_unavailable' }
+      : {
+          ok: false,
+          localSaved: false,
+          serverSaved: false,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+  }
+  const receipt = parsePublishedAgentSpiritRpcReceipt(
+    data,
+    verifiedAuthority,
+    normalizedInput,
+  );
+  if (!receipt) {
+    return { ok: false, localSaved: false, serverSaved: null, error: 'outcome_unknown' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+    return {
+      ok: false,
+      localSaved: false,
+      serverSaved: true,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
+  }
+
+  const key = agentIdentityExactStorageKey(verifiedAuthority);
+  if (!key) {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
+  }
+  return withAgentIdentityExactCachePublicationLock(key, async () => {
+    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+      return {
+        ok: false,
+        localSaved: false,
+        serverSaved: true,
+        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+      };
+    }
+    let identities: Map<string, AgentIdentity> | null;
+    try {
+      const raw = await storage.getItem(key);
+      if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+        return {
+          ok: false,
+          localSaved: false,
+          serverSaved: true,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+      }
+      identities = parseExactAgentIdentityCache(raw);
+    } catch {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
+    }
+    if (!identities) {
+      // The server mutation is already durable. Rebuild a corrupted exact
+      // cache from the same captured owner/bearer instead of publishing a
+      // partial speculative map.
+      const recovery = await syncAgentIdentitiesFromServerExact(verifiedAuthority);
+      if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+        return {
+          ok: false,
+          localSaved: false,
+          serverSaved: true,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+      }
+      if (!recovery.ok) {
+        return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
+      }
+      identities = recovery.identities;
+    }
+    identities.set(sessionKey, receipt.identity);
+    const publication = await publishVerifiedAgentIdentityCacheExact(
+      identities,
+      verifiedAuthority,
+      commandFence,
+    );
+    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+      return {
+        ok: false,
+        localSaved: false,
+        serverSaved: true,
+        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+      };
+    }
+    return publication;
+  });
+}
+
+/** Delete one owner profile only after the server proves it is unreferenced. */
+export async function deleteUnreferencedCustomAgentProfileExact(
+  profileIdInput: string,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+): Promise<AgentCustomProfileDeleteResult> {
+  const authority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  const profileId = typeof profileIdInput === 'string' ? profileIdInput.trim() : '';
+  if (
+    !authority
+    || typeof fence !== 'function'
+    || !isAgentIdentityUuidLike(profileId)
+    || profileId !== profileIdInput
+    || profileId !== profileId.toLowerCase()
+  ) {
+    return { ok: false, serverDeleted: false, error: 'invalid_payload' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, serverDeleted: false, error: 'authority_retired' };
+  }
+  const command = beginAgentIdentityExactCommand('profile_delete', authority, profileId);
+  const commandFence = makeAgentIdentityExactCommandFence(fence, command);
+  const verified = await verifyAgentIdentityExactAuthority(authority, commandFence);
+  const verifiedAuthority = normalizeAgentIdentityExactWriteAuthority(
+    verified as AgentIdentityExactWriteAuthority,
+  );
+  if (!verifiedAuthority) {
+    if (!isAgentIdentityExactCommandEpochCurrent(command)) {
+      return { ok: false, serverDeleted: false, error: 'mutation_superseded' };
+    }
+    return isAgentIdentityExactAuthorityCurrent(authority, fence)
+      ? { ok: false, serverDeleted: false, error: 'authority_mismatch' }
+      : { ok: false, serverDeleted: false, error: 'authority_retired' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+    return {
+      ok: false,
+      serverDeleted: false,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
+  }
+  let data: unknown;
+  let rpcError: any;
+  try {
+    const response = await supabase
+      .rpc('delete_unreferenced_custom_agent_profile_v1', {
+        p_profile_id: profileId,
+      })
+      .setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`);
+    data = response.data;
+    rpcError = response.error;
+  } catch {
+    return isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)
+      ? { ok: false, serverDeleted: false, error: 'server_unavailable' }
+      : {
+          ok: false,
+          serverDeleted: false,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+  }
+  if (rpcError) {
+    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+      return {
+        ok: false,
+        serverDeleted: false,
+        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+      };
+    }
+    const errorMessage = String(rpcError?.message || rpcError?.details || '');
+    return errorMessage.includes('custom_agent_profile_still_referenced')
+      ? { ok: false, serverDeleted: false, error: 'profile_referenced' }
+      : { ok: false, serverDeleted: false, error: 'server_unavailable' };
+  }
+  if (!parseCustomProfileDeleteRpcReceipt(data, verifiedAuthority, profileId)) {
+    return { ok: false, serverDeleted: null, error: 'outcome_unknown' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+    return {
+      ok: false,
+      serverDeleted: true,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
+  }
+  return { ok: true, serverDeleted: true };
 }
 
 // ─── Record Agent Activity ─────────────────────────────────
@@ -754,7 +1958,6 @@ export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
       totalTokensAllTime: Math.max(existing.totalTokensAllTime, agent.tokensUsed),
       totalMessages: Math.max(existing.totalMessages, agent.messagesProcessed),
       mostUsedModel: agent.model,
-      boundAiProvider: existing.boundAiProvider || agent.providerType,
       boundModel: agent.model || existing.boundModel,
       lastSeen: Date.now(),
     });
@@ -770,7 +1973,6 @@ export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
       totalMessages: agent.messagesProcessed,
       totalTurns: 0,
       mostUsedModel: agent.model,
-      boundAiProvider: agent.providerType,
       boundModel: agent.model,
     });
   }
@@ -780,13 +1982,22 @@ export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
 
 export async function recordAgentActivityExact(
   agent: OfficeAgent,
-  capturedAuthority: AgentIdentityExactAuthority,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
 ): Promise<AgentIdentityExactSaveResult> {
   const sessionKey = normalizeAgentIdentityScopePart(getAgentIdentityKey(agent));
-  if (!sessionKey) {
+  const authority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (!sessionKey || !authority || typeof fence !== 'function') {
     return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
   }
-  const identities = await loadAgentIdentitiesExact(capturedAuthority);
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  const mutationBase = await loadAgentIdentityMutationBaseExact(authority, fence, sessionKey);
+  if (!mutationBase.ok) {
+    return { ok: false, localSaved: false, serverSaved: false, error: mutationBase.error };
+  }
+  const identities = mutationBase.identities;
   const existing = identities.get(sessionKey);
   const lifetimeCost = Math.max(
     agent.costTotal || 0,
@@ -794,7 +2005,7 @@ export async function recordAgentActivityExact(
     agent.costToday || 0,
   );
   const now = Date.now();
-  identities.set(sessionKey, existing
+  const nextIdentity: AgentIdentity = existing
     ? {
       ...existing,
       totalCostAllTime: Math.max(existing.totalCostAllTime, lifetimeCost),
@@ -817,8 +2028,25 @@ export async function recordAgentActivityExact(
       mostUsedModel: agent.model,
       boundAiProvider: agent.providerType,
       boundModel: agent.model,
-    });
-  return saveAgentIdentitiesExact(identities, capturedAuthority);
+    };
+  identities.set(sessionKey, nextIdentity);
+  const expectedColumns = expectedIdentityReceiptColumns({
+    totalCostAllTime: nextIdentity.totalCostAllTime,
+    totalTokensAllTime: nextIdentity.totalTokensAllTime,
+    totalMessages: nextIdentity.totalMessages,
+    mostUsedModel: nextIdentity.mostUsedModel,
+    boundAiProvider: nextIdentity.boundAiProvider,
+    boundModel: nextIdentity.boundModel,
+    lastSeen: now,
+  });
+  return saveAgentIdentityMapExact(
+    identities,
+    mutationBase.authority,
+    fence,
+    new Map([[sessionKey, nextIdentity]]),
+    new Map([[sessionKey, expectedColumns]]),
+    mutationBase.serverVersions,
+  );
 }
 
 // ─── Restore Agent from Identity ──────────────────────────
@@ -908,12 +2136,14 @@ export async function renameAgent(sessionKey: string, newName: string): Promise<
 export async function renameAgentExact(
   sessionKey: string,
   newName: string,
-  capturedAuthority: AgentIdentityExactAuthority,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
 ): Promise<AgentIdentityExactSaveResult> {
   return updateAgentIdentityExact(
     sessionKey,
     { customName: newName.slice(0, 200), isCustomized: true },
     capturedAuthority,
+    fence,
   );
 }
 
@@ -924,67 +2154,158 @@ export async function renameAgentExact(
  * Clears isPrimary from all other agents of the same provider.
  */
 export async function setMainAgentForProvider(
-  sessionKey: string,
-  providerType: string,
+  _sessionKey: string,
+  _providerType: string,
 ): Promise<void> {
-  const identities = await loadAgentIdentities();
-
-  // Clear isPrimary from all agents of same provider
-  for (const [key, identity] of identities) {
-    if (identity.boundAiProvider === providerType && identity.isPrimary) {
-      identities.set(key, { ...identity, isPrimary: false });
-    }
-  }
-
-  // Set this agent as primary
-  const existing = identities.get(sessionKey);
-  if (existing) {
-    identities.set(sessionKey, { ...existing, isPrimary: true, boundAiProvider: providerType });
-  } else {
-    identities.set(sessionKey, {
-      sessionKey,
-      totalCostAllTime: 0, totalTokensAllTime: 0, totalSessionsAllTime: 0,
-      firstSeen: Date.now(), lastSeen: Date.now(), totalMessages: 0, totalTurns: 0,
-      isPrimary: true, boundAiProvider: providerType,
-    });
-  }
-
-  await saveAgentIdentities(identities);
+  throw new Error('setMainAgentForProviderExact requires captured Office authority');
 }
 
 export async function setMainAgentForProviderExact(
   sessionKey: string,
   providerType: string,
-  capturedAuthority: AgentIdentityExactAuthority,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
 ): Promise<AgentIdentityExactSaveResult> {
   const normalizedSessionKey = normalizeAgentIdentityScopePart(sessionKey);
   const normalizedProviderType = normalizeAgentIdentityScopePart(providerType);
-  if (!normalizedSessionKey || !normalizedProviderType) {
+  const authority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (!normalizedSessionKey || !normalizedProviderType || !authority || typeof fence !== 'function') {
     return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
   }
-  const identities = await loadAgentIdentitiesExact(capturedAuthority);
-  for (const [key, identity] of identities) {
-    if (identity.boundAiProvider === normalizedProviderType && identity.isPrimary) {
-      identities.set(key, { ...identity, isPrimary: false });
-    }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
   }
-  const existing = identities.get(normalizedSessionKey);
-  const now = Date.now();
-  identities.set(normalizedSessionKey, existing
-    ? { ...existing, isPrimary: true, boundAiProvider: normalizedProviderType, lastSeen: now }
-    : {
-      sessionKey: normalizedSessionKey,
-      totalCostAllTime: 0,
-      totalTokensAllTime: 0,
-      totalSessionsAllTime: 0,
-      firstSeen: now,
-      lastSeen: now,
-      totalMessages: 0,
-      totalTurns: 0,
-      isPrimary: true,
-      boundAiProvider: normalizedProviderType,
-    });
-  return saveAgentIdentitiesExact(identities, capturedAuthority);
+  const command = beginAgentIdentityExactCommand('primary', authority, normalizedProviderType);
+  const commandFence = makeAgentIdentityExactCommandFence(fence, command);
+  const verified = await verifyAgentIdentityExactAuthority(authority, commandFence);
+  const verifiedAuthority = normalizeAgentIdentityExactWriteAuthority(
+    verified as AgentIdentityExactWriteAuthority,
+  );
+  if (!verifiedAuthority) {
+    if (!isAgentIdentityExactCommandEpochCurrent(command)) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'mutation_superseded' };
+    }
+    return isAgentIdentityExactAuthorityCurrent(authority, fence)
+      ? { ok: false, localSaved: false, serverSaved: false, error: 'authority_mismatch' }
+      : { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+    return {
+      ok: false,
+      localSaved: false,
+      serverSaved: false,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
+  }
+  if (_identitiesPersistDisabled) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'server_unavailable' };
+  }
+
+  let data: unknown;
+  let rpcError: any;
+  try {
+    const response = await supabase
+      .rpc('set_main_agent_for_provider_v1', {
+        p_session_key: normalizedSessionKey,
+        p_provider_type: normalizedProviderType,
+      })
+      .setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`);
+    data = response.data;
+    rpcError = response.error;
+  } catch {
+    return isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)
+      ? { ok: false, localSaved: false, serverSaved: false, error: 'server_unavailable' }
+      : {
+          ok: false,
+          localSaved: false,
+          serverSaved: false,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+  }
+  if (rpcError) {
+    if (shouldDisableIdentityPersistence(rpcError)) disableIdentityPersistenceForSession(rpcError);
+    return isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)
+      ? { ok: false, localSaved: false, serverSaved: false, error: 'server_unavailable' }
+      : {
+          ok: false,
+          localSaved: false,
+          serverSaved: false,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+  }
+  const receipt = parseAgentIdentityPrimaryRpcReceipt(
+    data,
+    verifiedAuthority,
+    normalizedSessionKey,
+    normalizedProviderType,
+  );
+  if (!receipt) {
+    return { ok: false, localSaved: false, serverSaved: null, error: 'outcome_unknown' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+    return {
+      ok: false,
+      localSaved: false,
+      serverSaved: true,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
+  }
+
+  const key = agentIdentityExactStorageKey(verifiedAuthority);
+  if (!key) {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
+  }
+  return withAgentIdentityExactCachePublicationLock(key, async () => {
+    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+      return {
+        ok: false,
+        localSaved: false,
+        serverSaved: true,
+        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+      };
+    }
+    let identities: Map<string, AgentIdentity> | null;
+    try {
+      const raw = await storage.getItem(key);
+      if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+        return {
+          ok: false,
+          localSaved: false,
+          serverSaved: true,
+          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+        };
+      }
+      identities = parseExactAgentIdentityCache(raw);
+    } catch {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
+    }
+    if (!identities) {
+      return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
+    }
+    // The receipt is the complete durable snapshot for the requested provider.
+    // Drop that lane from the cache before replacing it so deleted or moved
+    // server rows cannot survive as a second local primary.
+    for (const [keyToCheck, identity] of identities) {
+      if (identity.boundAiProvider === normalizedProviderType) identities.delete(keyToCheck);
+    }
+    for (const [receiptSessionKey, identity] of receipt.providerIdentities) {
+      identities.set(receiptSessionKey, identity);
+    }
+    const publication = await publishVerifiedAgentIdentityCacheExact(
+      identities,
+      verifiedAuthority,
+      commandFence,
+    );
+    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
+      return {
+        ok: false,
+        localSaved: false,
+        serverSaved: true,
+        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+      };
+    }
+    return publication;
+  });
 }
 
 // ─── Customize Agent Appearance ────────────────────────────
@@ -1007,17 +2328,61 @@ export async function customizeAgent(
 export async function customizeAgentExact(
   sessionKey: string,
   appearance: Partial<AgentAppearance>,
-  capturedAuthority: AgentIdentityExactAuthority,
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
 ): Promise<AgentIdentityExactSaveResult> {
-  const identities = await loadAgentIdentitiesExact(capturedAuthority);
-  const existing = identities.get(sessionKey);
-  return updateAgentIdentityExact(sessionKey, {
-    appearance: {
-      ...DEFAULT_APPEARANCE,
-      ...(existing?.appearance || {}),
-      ...appearance,
-    },
-  }, capturedAuthority);
+  const normalizedSessionKey = normalizeAgentIdentityScopePart(sessionKey);
+  const authority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (!normalizedSessionKey || !authority || typeof fence !== 'function') {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
+  }
+  const mutationBase = await loadAgentIdentityMutationBaseExact(
+    authority,
+    fence,
+    normalizedSessionKey,
+  );
+  if (!mutationBase.ok) {
+    return { ok: false, localSaved: false, serverSaved: false, error: mutationBase.error };
+  }
+  const identities = mutationBase.identities;
+  const existing = identities.get(normalizedSessionKey);
+  const now = Date.now();
+  const nextIdentity: AgentIdentity = existing
+    ? {
+      ...existing,
+      appearance: {
+        ...DEFAULT_APPEARANCE,
+        ...(existing.appearance || {}),
+        ...appearance,
+      },
+      lastSeen: now,
+    }
+    : {
+      sessionKey: normalizedSessionKey,
+      totalCostAllTime: 0,
+      totalTokensAllTime: 0,
+      totalSessionsAllTime: 0,
+      firstSeen: now,
+      lastSeen: now,
+      totalMessages: 0,
+      totalTurns: 0,
+      appearance: { ...DEFAULT_APPEARANCE, ...appearance },
+    };
+  identities.set(normalizedSessionKey, nextIdentity);
+  return saveAgentIdentityMapExact(
+    identities,
+    mutationBase.authority,
+    fence,
+    new Map([[normalizedSessionKey, nextIdentity]]),
+    new Map([[
+      normalizedSessionKey,
+      expectedIdentityReceiptColumns({ appearance: nextIdentity.appearance, lastSeen: now }),
+    ]]),
+    mutationBase.serverVersions,
+  );
 }
 
 // ─── Get All Session Keys ──────────────────────────────────

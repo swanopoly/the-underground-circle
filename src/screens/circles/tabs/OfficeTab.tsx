@@ -276,7 +276,7 @@ import {
 } from '../../../lib/officeAgentSessionBindingCore';
 import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
 import { getActiveRuns } from '../../../lib/agentRunSystem';
-import { buildOfficeRoster } from '../../../lib/officeRoster';
+import { buildOfficeRoster, isOfficeAgentOwnedByCurrentUser } from '../../../lib/officeRoster';
 import { useUserApiKeysExact } from '../../../lib/llmProviders';
 import { useOfficeSurfaceState } from './office/useOfficeSurfaceState';
 import {
@@ -1454,6 +1454,9 @@ export default function OfficeTab({
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
   const connectionsRef = useRef<AgentConnection[]>([]);
+  // State provenance is separate from current auth: during a same-circle
+  // account/token swap, React may briefly retain the prior connection array.
+  const connectionsAuthorityRef = useRef<OfficeConnectionExactAuthority | null>(null);
   const pollersRef = useRef<Map<string, OpenSwanPoller>>(new Map());
   const pollerGenerationsRef = useRef<Map<string, number>>(new Map());
   const sessionsRef = useRef<Map<string, OpenSwanSession[]>>(new Map());
@@ -2430,6 +2433,7 @@ export default function OfficeTab({
       isOfficeAuthorityCurrent,
     );
     if (!result.ok || !isOfficeAuthorityCurrent(requestedAuthority)) return result;
+    connectionsAuthorityRef.current = requestedAuthority;
     setConnections(result.connections);
     return result;
   }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
@@ -2799,6 +2803,7 @@ export default function OfficeTab({
     pollersRef.current.clear();
     sessionsRef.current.clear();
     sessionFingerprintsRef.current.clear();
+    connectionsAuthorityRef.current = null;
     connectionsRef.current = [];
     setConnections([]);
     setSessionsTick(tick => tick + 1);
@@ -2968,6 +2973,7 @@ export default function OfficeTab({
           if (saved.ok && saved.localSaved) scopedConnections = saved.connections;
         }
         if (!requestIsCurrent()) return;
+        connectionsAuthorityRef.current = connectionAuthority;
         setConnections(scopedConnections);
         for (const connection of scopedConnections) {
           if (connection.enabled && !shouldSkipOpenSwanConnectionAttempt(connection)) {
@@ -3393,6 +3399,7 @@ export default function OfficeTab({
       pollersRef.current.clear();
       sessionsRef.current.clear();
       sessionFingerprintsRef.current.clear();
+      connectionsAuthorityRef.current = null;
       connectionsRef.current = [];
       setConnections([]);
       setCircleOfficeAgents([]);
@@ -4012,7 +4019,7 @@ export default function OfficeTab({
           }
         }
         if (identities.size > 0 && isOfficeAuthorityCurrent(requestedAuthority)) {
-          void saveAgentIdentitiesExact(identities, requestedAuthority);
+          void saveAgentIdentitiesExact(identities, requestedAuthority, isOfficeAuthorityCurrent);
         }
       }
       setAgentIdentities(identities);
@@ -4097,34 +4104,84 @@ export default function OfficeTab({
     ]
   ), [circleId, commandTargetAgents, terminalDispatchAgents]);
 
+  const officeAgentOwnershipContext = useMemo(() => {
+    const authority = committedAuthAuthority;
+    const ownsCurrentScope = Boolean(
+      authority
+      && authority.userId === currentUserId
+      && authority.circleId === circleId
+      && isOfficeAuthorityCurrent(authority),
+    );
+    const connectionAuthority = connectionsAuthorityRef.current;
+    const ownsCurrentConnectionScope = Boolean(
+      ownsCurrentScope
+      && authority
+      && connectionAuthority
+      && connectionAuthority.userId === authority.userId
+      && connectionAuthority.circleId === authority.circleId
+      && connectionAuthority.accessToken === authority.accessToken
+      && connectionAuthority.generation === authority.generation,
+    );
+    const ownedDurableAgentIds = new Set<string>();
+    const ownedConnectionIds = new Set<string>();
+    const ownedProviderMainIds = new Set<string>();
+    if (ownsCurrentScope) {
+      for (const durableAgent of mergedCircleAgents) {
+        if (durableAgent.ownerId !== currentUserId) continue;
+        ownedDurableAgentIds.add(durableAgent.id);
+        ownedDurableAgentIds.add(`db::${durableAgent.id}`);
+        const provider = String(durableAgent.provider || '').trim();
+        if (provider) ownedProviderMainIds.add(`provider-main::${provider}`);
+      }
+    }
+    if (ownsCurrentConnectionScope) {
+      // The array and its provenance receipt must both match this exact
+      // generation. Its id is the structural custody link for live sessions.
+      for (const connection of connections) {
+        ownedConnectionIds.add(connection.id);
+        const provider = String(connection.provider || '').trim();
+        if (provider) ownedProviderMainIds.add(`provider-main::${provider}`);
+      }
+    }
+    return {
+      currentUserId: ownsCurrentScope ? currentUserId : null,
+      defaultAgentId: DEFAULT_AGENT.id,
+      ownedDurableAgentIds,
+      ownedConnectionIds,
+      ownedProviderMainIds,
+    };
+  }, [
+    circleId,
+    committedAuthAuthority,
+    connections,
+    currentUserId,
+    isOfficeAuthorityCurrent,
+    mergedCircleAgents,
+  ]);
+  const isDisplayAgentMine = useCallback(
+    (agent: OfficeAgent) => isOfficeAgentOwnedByCurrentUser(agent, officeAgentOwnershipContext),
+    [officeAgentOwnershipContext],
+  );
+
   // Precompute filter counts so every chip can show its hit count inline.
   // `mine` is bridge-pushed agents owned by the current user plus the default
   // OpenSwan (which conceptually belongs to every user who looks at it).
   // `bonded` is circle_office_agents rows — anything persisted vs synthetic.
   const agentFilterCounts = useMemo(() => {
-    const isMine = (a: OfficeAgent) => (
-      a.id === DEFAULT_AGENT.id
-      || (a as any).ownerId === currentUserId
-      || (currentUserId && mergedCircleAgents.find(c => c.name === a.name && (c as any).ownerId === currentUserId))
-    );
     const isBonded = (a: OfficeAgent) => !a.isSynthetic || a.id === DEFAULT_AGENT.id;
     const isActive = (a: OfficeAgent) => a.status === 'active' || a.status === 'building';
     return {
       all: displayAgents.length,
-      mine: displayAgents.filter(isMine).length,
+      mine: displayAgents.filter(isDisplayAgentMine).length,
       active: displayAgents.filter(isActive).length,
       bonded: displayAgents.filter(isBonded).length,
     };
-  }, [displayAgents, currentUserId, mergedCircleAgents]);
+  }, [displayAgents, isDisplayAgentMine]);
 
   const filteredDisplayAgents = useMemo(() => {
     if (agentFilterMode === 'all') return displayAgents;
     if (agentFilterMode === 'mine') {
-      return displayAgents.filter(a => (
-        a.id === DEFAULT_AGENT.id
-        || (a as any).ownerId === currentUserId
-        || (currentUserId && mergedCircleAgents.find(c => c.name === a.name && (c as any).ownerId === currentUserId))
-      ));
+      return displayAgents.filter(isDisplayAgentMine);
     }
     if (agentFilterMode === 'active') {
       return displayAgents.filter(a => a.status === 'active' || a.status === 'building');
@@ -4133,7 +4190,7 @@ export default function OfficeTab({
       return displayAgents.filter(a => !a.isSynthetic || a.id === DEFAULT_AGENT.id);
     }
     return displayAgents;
-  }, [displayAgents, agentFilterMode, currentUserId, mergedCircleAgents]);
+  }, [displayAgents, agentFilterMode, isDisplayAgentMine]);
   const WhiteboardView = whiteboardModule?.default;
   const ServerRackView = serverRackModule?.default;
   const OfficeTerminalView = officeTerminalModule?.default;
@@ -4328,7 +4385,7 @@ export default function OfficeTab({
           void (async () => {
             for (const agent of fullyEnriched) {
               if (!requestIsCurrent()) return;
-              await recordAgentActivityExact(agent, requestedAuthority);
+              await recordAgentActivityExact(agent, requestedAuthority, isOfficeAuthorityCurrent);
             }
           })().catch(() => {});
           void takeSnapshot(fullyEnriched, sessionTags, storageScope).catch(() => {});
@@ -4583,8 +4640,8 @@ export default function OfficeTab({
     const publishedAgentId = agent?.connectionId === 'db-agent' && isUuidLike(agent.sessionKey)
       ? agent.sessionKey
       : null;
-    if (!agent?.name || !publishedAgentId || !requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return;
-    if (agent.id === 'default::blackswan' || agent.id === 'blackswan-default' || agent.providerType === 'blackswan-local') return;
+    if (!agent?.name || !publishedAgentId || !requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return false;
+    if (agent.id === 'default::blackswan' || agent.id === 'blackswan-default' || agent.providerType === 'blackswan-local') return false;
     try {
       // The panel opens published agents with their exact UUID in sessionKey.
       // Never widen a destructive action to a same-name row or multiple rows.
@@ -4596,25 +4653,26 @@ export default function OfficeTab({
         .eq('circle_id', requestedAuthority.circleId)
         .eq('owner_id', requestedAuthority.userId)
         .select('id');
-      if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return false;
       if (error) {
         console.error('[OfficeTab] Failed to remove published agent:', error);
-        return;
+        return false;
       }
       const exactReceipt = removedRows?.length === 1 && removedRows[0]?.id === publishedAgentId;
       if (!exactReceipt) {
         console.error('[OfficeTab] Published agent removal returned no exact receipt.');
-        return;
+        return false;
       }
       setCircleOfficeAgents(prev => prev.filter(row => row.id !== publishedAgentId));
       // Suppress future bridge-poller republishes only after the exact durable
       // mutation returned the exact UUID receipt.
       hideAgentInOffice(requestedAuthority.userId, requestedAuthority.circleId, agent.name);
-      setSelectedAgent(null);
+      return isOfficeAuthorityCurrent(requestedAuthority);
     } catch (err) {
       if (isOfficeAuthorityCurrent(requestedAuthority)) {
         console.error('[OfficeTab] Remove agent error:', err);
       }
+      return false;
     }
   }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
 
@@ -6653,7 +6711,12 @@ export default function OfficeTab({
     if (!requestedAuthority) return false;
 
     const identityKey = getAgentIdentityKey(agent);
-    const identitySave = await renameAgentExact(identityKey, normalizedName, requestedAuthority);
+    const identitySave = await renameAgentExact(
+      identityKey,
+      normalizedName,
+      requestedAuthority,
+      isOfficeAuthorityCurrent,
+    );
     if (
       !isOfficeAuthorityCurrent(requestedAuthority)
       || !identitySave.ok
@@ -7116,6 +7179,8 @@ export default function OfficeTab({
         currentUserId={currentUserId}
         title="Circle Runs"
         initialRunId={officeRunDetailRefId}
+        exactAuthority={committedAuthAuthority}
+        isExactAuthorityCurrent={isOfficeAuthorityCurrent}
         onClose={() => setShowOfficeRunDetail(false)}
       />
 
@@ -7980,21 +8045,23 @@ export default function OfficeTab({
           appearances={appearances}
           onAppearanceChange={async (id, a) => {
             const requestedAuthority = captureOfficeAuthority();
-            if (!requestedAuthority) throw new Error('Sign in to this circle before saving appearance changes.');
+            if (!requestedAuthority) return false;
             const identityKey = getAgentIdentityKey(selectedAgent) || id;
             const receipt = await updateAgentIdentityExact(
               identityKey,
               { appearance: a, isCustomized: true },
               requestedAuthority,
+              isOfficeAuthorityCurrent,
             );
             if (!isOfficeAuthorityCurrent(requestedAuthority)) {
-              throw new Error('The Office account changed before this appearance could be saved.');
+              return false;
             }
             if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
-              throw new Error('Appearance was not saved durably. Check the connection and retry.');
+              return false;
             }
             setAppearances(prev => ({ ...prev, [id]: a, [identityKey]: a }));
             await refreshAgentIdentities();
+            return isOfficeAuthorityCurrent(requestedAuthority);
           }}
           environmentType={currentTheme.environmentType}
           onRunCommand={handleRunCommand}

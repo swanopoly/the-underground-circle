@@ -141,7 +141,7 @@ async function main(): Promise<void> {
   const older = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
   const recent = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
-  const { buildOfficeRoster } = await import('../src/lib/officeRoster');
+  const { buildOfficeRoster, isOfficeAgentOwnedByCurrentUser } = await import('../src/lib/officeRoster');
   const { DEFAULT_AGENT, HUGGINGSWAN_AGENT } = await import('../src/lib/officeAgents');
 
   const codexMain = agent({
@@ -203,6 +203,53 @@ async function main(): Promise<void> {
   assert(!roster.some(item => item.id === HUGGINGSWAN_AGENT.id), 'HuggingSwan should not double-render as a standalone roster slot');
   assert(!roster.some(item => item.id === staleUnselectedSubagent.id), 'stale unselected subagent should be hidden');
   assert(roster.every((item, index) => item.deskIndex === index), 'desk indexes should match final roster order');
+
+  // Mine is structural custody, never a display-name join. Two users can have
+  // an agent named Builder without the foreign session entering this lane.
+  const sameNameOwned = agent({
+    id: 'conn-owned::session-a',
+    name: 'Builder',
+    providerType: 'codex',
+    connectionId: 'conn-owned',
+  });
+  const sameNameForeign = agent({
+    id: 'conn-foreign::session-b',
+    name: 'Builder',
+    providerType: 'codex',
+    connectionId: 'conn-foreign',
+  });
+  const ownership = {
+    currentUserId: 'user-1',
+    defaultAgentId: DEFAULT_AGENT.id,
+    ownedDurableAgentIds: new Set(['db::durable-owned']),
+    ownedConnectionIds: new Set(['conn-owned']),
+    ownedProviderMainIds: new Set(['provider-main::opencode']),
+  };
+  assert(isOfficeAgentOwnedByCurrentUser(sameNameOwned, ownership), 'exact local connection id should enter Mine');
+  assert(!isOfficeAgentOwnedByCurrentUser(sameNameForeign, ownership), 'duplicate foreign display name must not enter Mine');
+  assert(isOfficeAgentOwnedByCurrentUser(agent({
+    id: 'db::durable-owned', name: 'Builder', providerType: 'codex', connectionId: 'db-agent',
+  }), ownership), 'exact owned DB projection id should enter Mine');
+  assert(isOfficeAgentOwnedByCurrentUser(agent({
+    id: 'provider-main::opencode', name: 'Builder', providerType: 'opencode', connectionId: 'provider-main:opencode',
+  }), ownership), 'provider main backed by an exact local connection should enter Mine');
+  const unprovenAutoDetected = agent({
+    id: 'claude-code-auto::session-a',
+    name: 'Builder',
+    providerType: 'claude-code',
+    connectionId: 'claude-code-auto',
+  });
+  assert(
+    !isOfficeAgentOwnedByCurrentUser(unprovenAutoDetected, ownership),
+    'a fixed auto-detected connection label alone must not claim current-user ownership',
+  );
+  assert(
+    isOfficeAgentOwnedByCurrentUser(unprovenAutoDetected, {
+      ...ownership,
+      ownedConnectionIds: new Set([...ownership.ownedConnectionIds, 'claude-code-auto']),
+    }),
+    'an auto-detected session enters Mine only when its exact connection is provenance-stamped to current authority',
+  );
 
   // ─── Bridge-aware status reconcile (O2, P38) ───────────────────────────────
   // Fail-visible: a dead connection DEMOTES stale active/building + annotates;

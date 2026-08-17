@@ -41,7 +41,8 @@ import {
   detectTemplate, findTemplate,
 } from '../../../../lib/soulTemplates';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById } from '../../../../lib/agentSpirits';
-import { updateAgentSpirit } from '../../../../lib/circleOffice';
+import { updatePublishedAgentSpiritExact } from '../../../../lib/agentIdentity';
+import { isUuidLike } from '../../../../lib/agentRuntimeSubject';
 
 type Tab = 'theme' | 'agents' | 'souls' | 'connections' | 'api-keys' | 'telegram' | 'budget' | 'idle';
 
@@ -472,6 +473,10 @@ export default function CustomizePanel({
   const [agentSpirit, setAgentSpirit] = useState<string | null>(null);
   const [agentDbId, setAgentDbId] = useState<string | null>(null);
   const [spiritLoaded, setSpiritLoaded] = useState<string | null>(null);
+  const [spiritReloadGeneration, setSpiritReloadGeneration] = useState(0);
+  const [spiritSaving, setSpiritSaving] = useState(false);
+  const [spiritActionStatus, setSpiritActionStatus] = useState('');
+  const spiritMutationRef = useRef<string | null>(null);
 
   // Plaintext keys/tokens and private account state must not survive a modal
   // close, unmount, bearer refresh, account switch, or circle switch.
@@ -501,6 +506,10 @@ export default function CustomizePanel({
     setAgentDbId(null);
     setAgentSpirit(null);
     setSpiritLoaded(null);
+    setSpiritReloadGeneration(0);
+    setSpiritSaving(false);
+    setSpiritActionStatus('');
+    spiritMutationRef.current = null;
     return () => {
       figmaOperationController.current?.abort();
       figmaOperationController.current = null;
@@ -527,24 +536,44 @@ export default function CustomizePanel({
     const authority = captureCustomizeAuthority();
     if (!authority || authority.circleId !== circleId) return;
     const capturedAgentId = selectedAgentId;
-    const agentName = agents.find((agent) => agent.id === capturedAgentId)?.name;
-    if (!agentName) return;
+    const selectedAgent = agents.find((agent) => agent.id === capturedAgentId);
+    const exactDbAgentId = selectedAgent?.connectionId === 'db-agent'
+      && isUuidLike(selectedAgent.sessionKey)
+      ? selectedAgent.sessionKey
+      : null;
+    if (!exactDbAgentId) {
+      setAgentDbId(null);
+      setAgentSpirit(selectedAgent?.spirit || null);
+      setSpiritLoaded(capturedAgentId);
+      setSpiritActionStatus('Shared Spirit editing requires an exact published Office agent.');
+      return;
+    }
     (async () => {
-      const { data } = await supabase
+      setSpiritActionStatus('Verifying the published Spirit…');
+      const { data, error } = await supabase
         .from('circle_office_agents')
-        .select('id, spirit, spirit_emoji')
+        .select('id, circle_id, owner_id, is_published, spirit, spirit_emoji')
+        .eq('id', exactDbAgentId)
         .eq('circle_id', authority.circleId)
         .eq('owner_id', authority.userId)
-        .ilike('name', agentName)
         .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .maybeSingle();
       if (!customizeAuthorityIsCurrent(authority) || selectedAgentIdRef.current !== capturedAgentId) return;
-      if (data) {
+      if (
+        !error
+        && data
+        && data.id === exactDbAgentId
+        && data.circle_id === authority.circleId
+        && data.owner_id === authority.userId
+        && data.is_published === true
+      ) {
         setAgentDbId(data.id);
         setAgentSpirit(data.spirit || null);
+        setSpiritActionStatus('');
       } else {
         setAgentDbId(null);
-        setAgentSpirit(null);
+        setAgentSpirit(selectedAgent?.spirit || null);
+        setSpiritActionStatus('Spirit could not be verified. Try again.');
       }
       setSpiritLoaded(capturedAgentId);
     })();
@@ -554,9 +583,76 @@ export default function CustomizePanel({
     circleId,
     customizeAuthorityIsCurrent,
     selectedAgentId,
+    spiritReloadGeneration,
     spiritLoaded,
     tab,
   ]);
+
+  const savePublishedSpirit = useCallback(async (
+    spiritId: string | null,
+    spiritEmoji: string | null,
+  ) => {
+    const authority = captureCustomizeAuthority();
+    const officeAgentId = agentDbId;
+    const capturedAgentId = selectedAgentIdRef.current;
+    if (
+      !officeAgentId
+      || !authority
+      || authority.circleId !== circleId
+      || !isUuidLike(officeAgentId)
+    ) {
+      setSpiritActionStatus('Shared Spirit editing requires an exact published Office agent.');
+      return;
+    }
+    const mutationKey = `${authority.userId}\u0000${authority.circleId}\u0000${authority.generation}\u0000${capturedAgentId}\u0000${officeAgentId}`;
+    if (spiritMutationRef.current === mutationKey) return;
+    spiritMutationRef.current = mutationKey;
+    setSpiritSaving(true);
+    setSpiritActionStatus('Saving the verified Spirit…');
+    try {
+      const receipt = await updatePublishedAgentSpiritExact({
+        officeAgentId,
+        sessionKey: officeAgentId,
+        spiritId,
+        spiritEmoji,
+        customProfileId: null,
+      }, authority, customizeAuthorityIsCurrent);
+      if (
+        !customizeAuthorityIsCurrent(authority)
+        || selectedAgentIdRef.current !== capturedAgentId
+      ) return;
+      if (receipt.error === 'outcome_unknown') {
+        setSpiritActionStatus('Spirit outcome could not be verified. Refreshing before another attempt…');
+        setSpiritLoaded(null);
+        setSpiritReloadGeneration(value => value + 1);
+        return;
+      }
+      if (receipt.serverSaved && !receipt.localSaved) {
+        setSpiritActionStatus('Spirit was saved on the server. Refreshing this device…');
+        setSpiritLoaded(null);
+        setSpiritReloadGeneration(value => value + 1);
+        return;
+      }
+      if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
+        setSpiritActionStatus('Spirit was not saved. Try again.');
+        return;
+      }
+      setAgentSpirit(spiritId);
+      setSpiritActionStatus(spiritId ? 'Spirit saved.' : 'Spirit cleared.');
+    } catch (error) {
+      console.warn('[CustomizePanel] Published Spirit save failed:', error);
+      if (
+        customizeAuthorityIsCurrent(authority)
+        && selectedAgentIdRef.current === capturedAgentId
+      ) setSpiritActionStatus('Spirit was not saved. Try again.');
+    } finally {
+      if (spiritMutationRef.current === mutationKey) spiritMutationRef.current = null;
+      if (
+        customizeAuthorityIsCurrent(authority)
+        && selectedAgentIdRef.current === capturedAgentId
+      ) setSpiritSaving(false);
+    }
+  }, [agentDbId, captureCustomizeAuthority, circleId, customizeAuthorityIsCurrent]);
 
   // Load personality when agents tab is selected
   useEffect(() => {
@@ -1540,19 +1636,46 @@ export default function CustomizePanel({
                       </View>
                     </View>
                     <Pressable
-                      onPress={async () => {
-                        const authority = captureCustomizeAuthority();
-                        if (!agentDbId || !authority || authority.circleId !== circleId) return;
-                        const result = await updateAgentSpirit(agentDbId, null, null, authority);
-                        if (!result.error && customizeAuthorityIsCurrent(authority)) setAgentSpirit(null);
-                      }}
-                      style={[{ backgroundColor: '#1a1a1a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, borderWidth: 1, borderColor: '#333' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Clear the published agent Spirit"
+                      accessibilityState={{ disabled: spiritSaving || !agentDbId, busy: spiritSaving }}
+                      disabled={spiritSaving || !agentDbId}
+                      onPress={() => { void savePublishedSpirit(null, null); }}
+                      style={[
+                        { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1a1a1a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, borderWidth: 1, borderColor: '#333' },
+                        (spiritSaving || !agentDbId) && { opacity: 0.5 },
+                        Platform.OS === 'web' && { cursor: spiritSaving || !agentDbId ? 'default' : 'pointer' } as any,
+                      ]}
                     >
-                      <Text style={{ color: '#888', fontSize: 10, fontWeight: '600' }}>CLEAR</Text>
+                      <Text style={{ color: '#888', fontSize: 10, fontWeight: '600' }}>{spiritSaving ? 'SAVING…' : 'CLEAR'}</Text>
                     </Pressable>
                   </View>
                 ) : null;
               })()}
+
+              {spiritActionStatus ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                  <Text
+                    accessibilityLiveRegion="polite"
+                    style={{ color: /not saved|could not|requires/i.test(spiritActionStatus) ? '#fca5a5' : '#8f8fa2', fontSize: 11, lineHeight: 16, flexShrink: 1 }}
+                  >
+                    {spiritActionStatus}
+                  </Text>
+                  {spiritActionStatus === 'Spirit could not be verified. Try again.' ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry loading the exact published Spirit"
+                      onPress={() => {
+                        setSpiritLoaded(null);
+                        setSpiritReloadGeneration(value => value + 1);
+                      }}
+                      style={[{ minHeight: 44, paddingHorizontal: 10, justifyContent: 'center', borderWidth: 1, borderColor: '#3a3a4e', borderRadius: 6 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    >
+                      <Text style={{ color: '#c7c7d3', fontSize: 10, fontWeight: '700' }}>RETRY</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
 
               {/* Spirit grid by category */}
               {SPIRIT_CATEGORIES.map(cat => {
@@ -1568,17 +1691,17 @@ export default function CustomizePanel({
                         return (
                           <Pressable
                             key={spirit.id}
-                            onPress={async () => {
-                              const authority = captureCustomizeAuthority();
-                              if (!agentDbId || !authority || authority.circleId !== circleId) return;
-                              const result = await updateAgentSpirit(agentDbId, spirit.id, spirit.emoji, authority);
-                              if (!result.error && customizeAuthorityIsCurrent(authority)) setAgentSpirit(spirit.id);
-                            }}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Use ${spirit.name} as the published agent Spirit`}
+                            accessibilityState={{ selected: active, disabled: spiritSaving || !agentDbId, busy: spiritSaving }}
+                            disabled={spiritSaving || !agentDbId}
+                            onPress={() => { void savePublishedSpirit(spirit.id, spirit.emoji); }}
                             style={[
                               styles.itemCard,
                               { minWidth: 72 },
                               active && { borderColor: spirit.color + '60', backgroundColor: spirit.color + '15' },
-                              Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                              (spiritSaving || !agentDbId) && { opacity: 0.5 },
+                              Platform.OS === 'web' && { cursor: spiritSaving || !agentDbId ? 'default' : 'pointer' } as any,
                             ]}
                           >
                             <Text style={styles.itemEmoji}>{spirit.emoji}</Text>

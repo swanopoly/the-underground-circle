@@ -20,7 +20,8 @@ const MONO = Platform.OS === 'web' ? 'monospace' : undefined;
 const EMBER_COUNT = 5;
 
 function useReducedMotionPreference(): boolean {
-  const [reduceMotion, setReduceMotion] = useState(false);
+  // Decorative loops stay off until the platform preference is known.
+  const [reduceMotion, setReduceMotion] = useState(true);
 
   useEffect(() => {
     let mounted = true;
