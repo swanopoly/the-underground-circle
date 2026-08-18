@@ -2,9 +2,9 @@
  * Source-only smoke for the Office Agent authority deployment preflight.
  *
  * It proves that default execution cannot consult live credentials or a
- * network, that source/parity drift fails closed, and that deployment becomes
- * ready only from an explicit fresh value-free catalog snapshot whose Edge
- * fingerprints exactly match the reviewed local source.
+ * network, that source/parity drift fails closed, and that even an exact fresh
+ * caller-supplied catalog snapshot remains unattested and cannot certify a
+ * deployment or release without a reviewed live capture plus canaries.
  */
 
 import assert from 'node:assert/strict';
@@ -31,7 +31,10 @@ const fixtureFiles = [
   'docs/AGENTS_ROADMAP.md',
   'docs/RUN_THIS_SQL.sql',
   'supabase/config.toml',
+  'supabase/migrations/20260225_circle_office.sql',
+  'supabase/migrations/20260318_rls_hardening.sql',
   'supabase/migrations/20260327_custom_agent_profiles.sql',
+  'supabase/migrations/20260522_repair_agent_identity_and_office_usage.sql',
   'supabase/migrations/20260817130000_agent_identity_primary_rpc.sql',
   'supabase/migrations/20260817140000_agent_spirit_assignment_rpc.sql',
   'src/lib/agentSpiritPromptCore.ts',
@@ -99,6 +102,7 @@ function expectedSnapshot(repoRoot: string): Record<string, unknown> {
       functions: [
         {
           identity: 'public.set_main_agent_for_provider_v1(text,text)',
+          ownerRole: 'postgres',
           securityDefiner: true,
           searchPath: '',
           executeRoles: ['authenticated'],
@@ -106,6 +110,7 @@ function expectedSnapshot(repoRoot: string): Record<string, unknown> {
         },
         {
           identity: 'public.guard_agent_identity_primary_columns_v1()',
+          ownerRole: 'postgres',
           securityDefiner: false,
           searchPath: '',
           executeRoles: [],
@@ -113,6 +118,7 @@ function expectedSnapshot(repoRoot: string): Record<string, unknown> {
         },
         {
           identity: 'public.set_published_agent_spirit_v1(uuid,uuid,text,text,uuid)',
+          ownerRole: 'postgres',
           securityDefiner: true,
           searchPath: '',
           executeRoles: ['authenticated'],
@@ -120,6 +126,7 @@ function expectedSnapshot(repoRoot: string): Record<string, unknown> {
         },
         {
           identity: 'public.delete_unreferenced_custom_agent_profile_v1(uuid)',
+          ownerRole: 'postgres',
           securityDefiner: true,
           searchPath: '',
           executeRoles: ['authenticated'],
@@ -127,6 +134,7 @@ function expectedSnapshot(repoRoot: string): Record<string, unknown> {
         },
         {
           identity: 'public.guard_circle_office_agent_spirit_columns_v1()',
+          ownerRole: 'postgres',
           securityDefiner: false,
           searchPath: '',
           executeRoles: [],
@@ -134,6 +142,7 @@ function expectedSnapshot(repoRoot: string): Record<string, unknown> {
         },
         {
           identity: 'public.guard_published_agent_identity_spirit_columns_v1()',
+          ownerRole: 'postgres',
           securityDefiner: false,
           searchPath: '',
           executeRoles: [],
@@ -156,16 +165,38 @@ function expectedSnapshot(repoRoot: string): Record<string, unknown> {
         'public.circle_office_agents',
         'public.custom_agent_profiles',
       ],
-      policyCompleteRelations: ['public.custom_agent_profiles'],
-      policies: local.databaseContract.customProfilePolicies,
-      tablePrivileges: [{
-        identity: 'public.custom_agent_profiles',
-        role: 'authenticated',
-        select: true,
-        insert: true,
-        update: true,
-        delete: false,
-      }],
+      policyCompleteRelations: [
+        'public.agent_identities',
+        'public.circle_office_agents',
+        'public.custom_agent_profiles',
+      ],
+      policies: local.databaseContract.policies,
+      tablePrivileges: [
+        {
+          identity: 'public.agent_identities',
+          role: 'authenticated',
+          select: true,
+          insert: true,
+          update: true,
+          delete: true,
+        },
+        {
+          identity: 'public.circle_office_agents',
+          role: 'authenticated',
+          select: true,
+          insert: true,
+          update: true,
+          delete: true,
+        },
+        {
+          identity: 'public.custom_agent_profiles',
+          role: 'authenticated',
+          select: true,
+          insert: true,
+          update: true,
+          delete: false,
+        },
+      ],
     },
     edge: {
       functions: [
@@ -226,20 +257,29 @@ const fixture = makeFixture();
 try {
   const snapshot = expectedSnapshot(fixture);
   const snapshotPath = writeSnapshot(fixture, snapshot);
-  const deployedRun = runPreflight([
+  const catalogRun = runPreflight([
+    '--repo-root', fixture,
+    '--catalog-snapshot', snapshotPath,
+    '--json',
+  ]);
+  check(catalogRun.status === 0, 'fresh exact value-free catalog snapshot can match the source contract');
+  const catalogReport = JSON.parse(catalogRun.stdout) as Record<string, any>;
+  check(catalogReport.status === 'catalog_contract_matches_unattested', 'matching caller-supplied catalog evidence is explicitly unattested');
+  check(catalogReport.deployment?.catalogMatches === true, 'explicit snapshot matches the catalog contract');
+  check(catalogReport.deployment?.ready === false, 'caller-supplied JSON never certifies deployment');
+  check(catalogReport.releaseReady === false, 'unattested catalog evidence is never release readiness');
+  check(catalogReport.deployment?.exactSourceVerified === true, 'all Edge source fingerprints match');
+  check(catalogReport.deployment?.networkAttempted === false, 'snapshot mode still performs no network access');
+  check(catalogReport.deployment?.mutationsPerformed === false, 'snapshot mode still performs no mutations');
+
+  const deploymentGate = runPreflight([
     '--repo-root', fixture,
     '--catalog-snapshot', snapshotPath,
     '--require-deployed',
     '--json',
   ]);
-  check(deployedRun.status === 0, 'fresh exact value-free catalog snapshot passes the explicit deployment gate');
-  const deployedReport = JSON.parse(deployedRun.stdout) as Record<string, any>;
-  check(deployedReport.status === 'deployment_verified_docs_pending', 'matching catalog evidence stays non-release while roadmap rows remain pending');
-  check(deployedReport.deployment?.ready === true, 'explicit snapshot verifies the deployed catalog contract');
-  check(deployedReport.releaseReady === false, 'pending roadmap rows prevent a final release-ready claim');
-  check(deployedReport.deployment?.exactSourceVerified === true, 'all Edge source fingerprints match');
-  check(deployedReport.deployment?.networkAttempted === false, 'snapshot mode still performs no network access');
-  check(deployedReport.deployment?.mutationsPerformed === false, 'snapshot mode still performs no mutations');
+  check(deploymentGate.status === 2, 'unsigned catalog JSON cannot satisfy the explicit deployment gate');
+  check(JSON.parse(deploymentGate.stdout).deployment.ready === false, 'require-deployed fails on the machine-readable deployment state');
 
   const roadmapPath = 'docs/AGENTS_ROADMAP.md';
   const pendingRoadmap = readFixtureFile(fixture, roadmapPath);
@@ -272,16 +312,15 @@ try {
       : line)
     .join('\n');
   writeFixtureFile(fixture, roadmapPath, appliedRoadmap);
-  const releaseRun = runPreflight([
+  const appliedCatalogRun = runPreflight([
     '--repo-root', fixture,
     '--catalog-snapshot', snapshotPath,
-    '--require-deployed',
     '--json',
   ]);
-  check(releaseRun.status === 0, 'applied roadmap plus exact deployment evidence passes');
-  const releaseReport = JSON.parse(releaseRun.stdout) as Record<string, any>;
-  check(releaseReport.status === 'release_ready', 'exact target evidence and applied roadmap converge on release-ready');
-  check(releaseReport.releaseReady === true, 'release-ready boolean requires both evidence and docs state');
+  check(appliedCatalogRun.status === 0, 'applied roadmap remains inspectable with matching catalog evidence');
+  const appliedCatalogReport = JSON.parse(appliedCatalogRun.stdout) as Record<string, any>;
+  check(appliedCatalogReport.status === 'catalog_contract_matches_unattested', 'applied docs cannot attest caller-authored catalog JSON');
+  check(appliedCatalogReport.releaseReady === false, 'applied docs plus unsigned JSON still cannot claim release readiness');
 
   const wrongIndexKeys = structuredClone(snapshot) as Record<string, any>;
   wrongIndexKeys.database.indexes[0].columns = ['user_id', 'session_key'];
@@ -345,6 +384,44 @@ try {
   check(extraRoleRun.status === 2, 'widened execute grants block deployment evidence');
   check(JSON.parse(extraRoleRun.stdout).deployment.blockers.some((item: string) => item.includes('execute roles')), 'grant drift is named');
 
+  const wrongFunctionOwner = structuredClone(snapshot) as Record<string, any>;
+  wrongFunctionOwner.database.functions[0].ownerRole = 'authenticated';
+  const wrongFunctionOwnerPath = writeSnapshot(fixture, wrongFunctionOwner, 'wrong-function-owner.json');
+  const wrongFunctionOwnerRun = runPreflight(['--repo-root', fixture, '--catalog-snapshot', wrongFunctionOwnerPath, '--json']);
+  check(wrongFunctionOwnerRun.status === 2, 'wrong function owner cannot inherit the trusted trigger/RPC boundary');
+  check(JSON.parse(wrongFunctionOwnerRun.stdout).deployment.blockers.some((item: string) => item.includes('owner role')), 'function-owner drift is named');
+
+  const permissiveIdentityPolicy = structuredClone(snapshot) as Record<string, any>;
+  permissiveIdentityPolicy.database.policies.find(
+    (item: Record<string, unknown>) => item.identity === 'public.agent_identities.Users update own agent identities',
+  ).usingExpression = 'true';
+  const permissiveIdentityPolicyPath = writeSnapshot(fixture, permissiveIdentityPolicy, 'permissive-identity-policy.json');
+  const permissiveIdentityPolicyRun = runPreflight(['--repo-root', fixture, '--catalog-snapshot', permissiveIdentityPolicyPath, '--json']);
+  check(permissiveIdentityPolicyRun.status === 2, 'permissive agent-identity policy blocks catalog evidence');
+
+  const extraOfficePolicy = structuredClone(snapshot) as Record<string, any>;
+  extraOfficePolicy.database.policies.push({
+    identity: 'public.circle_office_agents.everyone_updates',
+    command: 'UPDATE',
+    roles: ['public'],
+    usingExpression: 'true',
+    withCheckExpression: 'true',
+  });
+  const extraOfficePolicyPath = writeSnapshot(fixture, extraOfficePolicy, 'extra-office-policy.json');
+  const extraOfficePolicyRun = runPreflight(['--repo-root', fixture, '--catalog-snapshot', extraOfficePolicyPath, '--json']);
+  check(extraOfficePolicyRun.status === 2, 'unknown permissive Office policy blocks complete catalog evidence');
+
+  const noLegacyOfficePolicies = structuredClone(snapshot) as Record<string, any>;
+  noLegacyOfficePolicies.database.policies = noLegacyOfficePolicies.database.policies.filter(
+    (item: Record<string, unknown>) => ![
+      'public.circle_office_agents.circle members can view office agents',
+      'public.circle_office_agents.owners can manage their office agents',
+    ].includes(item.identity as string),
+  );
+  const noLegacyOfficePoliciesPath = writeSnapshot(fixture, noLegacyOfficePolicies, 'no-legacy-office-policies.json');
+  const noLegacyOfficePoliciesRun = runPreflight(['--repo-root', fixture, '--catalog-snapshot', noLegacyOfficePoliciesPath, '--json']);
+  check(noLegacyOfficePoliciesRun.status === 0, 'known-safe legacy Office policies are optional when the four canonical policies remain exact');
+
   const oldFunctionBody = structuredClone(snapshot) as Record<string, any>;
   oldFunctionBody.database.functions.find(
     (item: Record<string, unknown>) => item.identity === 'public.set_published_agent_spirit_v1(uuid,uuid,text,text,uuid)',
@@ -371,11 +448,13 @@ try {
   check(JSON.parse(incompleteTriggerRun.stdout).deployment.blockers.some((item: string) => item.includes('trigger contract differs')), 'trigger transition drift is named');
 
   const widenedDelete = structuredClone(snapshot) as Record<string, any>;
-  widenedDelete.database.tablePrivileges[0].delete = true;
+  widenedDelete.database.tablePrivileges.find(
+    (item: Record<string, unknown>) => item.identity === 'public.custom_agent_profiles' && item.role === 'authenticated',
+  ).delete = true;
   const widenedDeletePath = writeSnapshot(fixture, widenedDelete, 'widened-delete.json');
   const widenedDeleteRun = runPreflight(['--repo-root', fixture, '--catalog-snapshot', widenedDeletePath, '--json']);
   check(widenedDeleteRun.status === 2, 'authenticated direct custom-profile DELETE blocks deployment evidence');
-  check(JSON.parse(widenedDeleteRun.stdout).deployment.blockers.some((item: string) => item.includes('deny DELETE')), 'table privilege drift is named');
+  check(JSON.parse(widenedDeleteRun.stdout).deployment.blockers.some((item: string) => item.includes('table privileges')), 'table privilege drift is named');
 
   const stale = structuredClone(snapshot) as Record<string, any>;
   stale.capturedAt = new Date(Date.now() - 48 * 60 * 60 * 1_000).toISOString();

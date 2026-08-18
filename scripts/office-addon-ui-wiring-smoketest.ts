@@ -350,11 +350,16 @@ assert(
   'edit mode hides the runtime presentation without unmounting terminal state or subscriptions',
 );
 assert(
-  agentPanelShell.includes('minWidth: 44')
-    && agentPanelShell.includes('minHeight: 44')
-    && agentPanelShell.includes('accessibilityState={{ disabled: !prevTab }}')
-    && agentPanelShell.includes('accessibilityState={{ disabled: !nextTab }}'),
-  'compact agent-panel navigation exposes real minimum targets and disabled semantics',
+  agentPanelShell.includes('primaryTabNavItem: {')
+    && agentPanelShell.includes('contextualTabNavItem: {')
+    && (agentPanelShell.match(/minHeight: 44/g) || []).length >= 2
+    && (agentPanelShell.match(/minWidth: 44/g) || []).length >= 2
+    && agentPanelShell.includes('accessibilityRole="tablist"')
+    && agentPanelShell.includes('accessibilityRole="tab"')
+    && agentPanelShell.includes('accessibilityState={{ selected }}')
+    && agentPanelShell.includes("tabIndex: selected ? 0 : -1")
+    && agentPanelShell.includes('WAI-ARIA manual-activation model'),
+  'compact agent-panel navigation exposes 44px tab targets, selected state, and manual keyboard activation semantics',
 );
 assert(
   connectAllBridgesPanel.includes('accessibilityState={{ disabled: running, busy: running }}')

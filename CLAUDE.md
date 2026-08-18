@@ -710,7 +710,9 @@ subject or authority-generation change resets and remounts section resources.
 Overview, OpenSwan, and Terminal pass an exact agent id plus optional bounded
 draft through the typed Circle handle into hydrated Chat. Chat selects and
 focuses the target but never auto-sends; it remains the owner of durable
-messages, approvals, runs, proof, and recovery. OpenSwan loads only exact
+messages, approvals, runs, proof, and recovery. The handoff retires the Office
+modal before switching tabs because Office stays mounted in the background.
+OpenSwan loads only exact
 connection/session evidence by default, with private binding/history/search
 behind Advanced options. Schedules are explicitly connection-level, omit the
 ambiguous current target, preserve the last verified same-scope snapshot on
@@ -720,6 +722,12 @@ subagent, runtime-agent, Cron, and web-search evidence is accepted only from
 bounded structured provider payloads. Runtime, schedules, Pause/Resume,
 main-agent, and terminal-profile controls consume captured
 user/circle/bearer/generation authority; an unknown read cannot mutate state.
+Runtime routing and tab eligibility share one transport resolver. A blank token
+is accepted only for the canonical root-only localhost/loopback proxy on port
+18790, where the proxy injects its private gateway credential; remote, direct,
+credentialed-URL, path, query, and masked variants fail closed. Exact identity
+commands distinguish full success, durable-server/local-refresh-needed,
+outcome-unknown, and definitive failure so the UI never invites blind replay.
 The §47 primary-agent RPC is the only multi-row identity writer: it serializes
 one authenticated owner, clears and promotes transactionally, enforces a
 partial unique `(user_id,bound_ai_provider)` primary invariant, and requires a
@@ -755,7 +763,11 @@ rereads one count-complete owner snapshot with the captured bearer and abort
 signal before replacing the cache. An older completion therefore publishes
 current server truth rather than its stale receipt; lock absence/timeout keeps
 `serverSaved: true` and fails local publication closed. Native retains the
-bounded in-process queue, and client time is never ordering authority. Memory
+bounded in-process queue, and client time is never ordering authority. Mounted
+web Office tabs listen only to their exact user/circle cache key and adopt the
+validated published snapshot through the captured authority fence without
+writing storage again, so rename/appearance/profile truth converges without an
+event loop. Memory
 Soul projection requires an exact published-agent UUID,
 never a mutable display-name match.
 
@@ -769,9 +781,30 @@ a verified read, while raw subject/session metadata is disclosed only under
 Inspect. Centered and compact modes block the background and restore focus;
 docking is a web-desktop-only non-modal affordance, so wide native tablets
 remain inside the React Native modal boundary with live viewport geometry.
-Reduced motion is honored, and the dock resize handle supports keyboard/assistive input. The open panel reconciles from the
+The web modal layer covers the sticky header and persistent Floating Chat,
+suppresses the Circle Search shortcut while it owns focus, keeps a valid dialog
+name during Rename, and restores focus after Rename. Reduced motion is honored,
+and the dock resize handle supports keyboard/assistive input. The open panel reconciles from the
 live roster rather than retaining a click-time agent snapshot. Run
 `npm run check:openswan-control-panels` for this surface.
+The offline popup-canary contract now guards an opt-in disposable two-tab
+browser lane for centered focus cycling, tested header/floating-Chat backdrop
+blocking, web tablet rotation, reduced motion, and concurrent exact-user
+auth-refresh authority rehydration. It requires explicit live, disposable-
+fixture, exact-project, and (for non-local targets) remote acknowledgements.
+The lane is source-ready but has not been executed for this revision; native Modal,
+VoiceOver/TalkBack, provider mutation, account switch, and deployed-site proof
+remain separate rollout gates.
+
+The §§47-48 deployment preflight is intentionally no-apply and repository-only
+by default. A supplied value-free catalog JSON can prove only that its declared
+shape matches the reviewed function bodies/owners, triggers, index, complete
+authority-table policy inventories, authenticated privileges, and Edge source
+digests. Caller-supplied JSON has no capture provenance, so a match is reported
+as `catalog_contract_matches_unattested`; it never sets deployment or release
+readiness, and `--require-deployed` remains nonzero until a reviewed
+target-bound live capture plus authenticated contention/account-switch canaries
+exist.
 
 After the claim, the pure resolver still requires the exact Office-agent UUID,
 exactly one local connection whose `remoteId` is the bound `agents_bots` UUID,

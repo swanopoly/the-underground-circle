@@ -616,7 +616,9 @@ export default function AgentOverviewPanel({
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [isMainAgent, setIsMainAgent] = useState(false);
-  const [mainAgentStatus, setMainAgentStatus] = useState<'idle' | 'locked' | 'loading' | 'ready' | 'error'>('idle');
+  const [mainAgentStatus, setMainAgentStatus] = useState<
+    'idle' | 'locked' | 'loading' | 'ready' | 'refresh-needed' | 'outcome-unknown' | 'error'
+  >('idle');
   const [mainAgentBusy, setMainAgentBusy] = useState(false);
   const [mainAgentReloadGeneration, setMainAgentReloadGeneration] = useState(0);
 
@@ -747,7 +749,15 @@ export default function AgentOverviewPanel({
         || latestIdentityRequestKeyRef.current !== capturedRequestKey
         || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
       ) return;
-      if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
+      if (receipt.error === 'outcome_unknown' || receipt.serverSaved === null) {
+        setMainAgentStatus('outcome-unknown');
+        return;
+      }
+      if (receipt.serverSaved === true && !receipt.localSaved) {
+        setMainAgentStatus('refresh-needed');
+        return;
+      }
+      if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
         setMainAgentStatus('error');
         return;
       }
@@ -860,6 +870,30 @@ export default function AgentOverviewPanel({
                 <Text accessibilityRole="alert" style={overviewStyles.mainAgentStatusText}>
                   Main-agent status is locked until this Office session has exact identity authority.
                 </Text>
+              ) : mainAgentStatus === 'refresh-needed' ? (
+                <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={overviewStyles.mainAgentWarningRow}>
+                  <Text style={overviewStyles.mainAgentWarningText}>Main-agent selection was saved on the server, but this view could not refresh. Reload status; do not set it again.</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Reload main Office agent status after server save"
+                    onPress={() => setMainAgentReloadGeneration(value => value + 1)}
+                    style={overviewStyles.mainAgentWarningButton}
+                  >
+                    <Text style={overviewStyles.mainAgentWarningText}>Reload status</Text>
+                  </Pressable>
+                </View>
+              ) : mainAgentStatus === 'outcome-unknown' ? (
+                <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={overviewStyles.mainAgentWarningRow}>
+                  <Text style={overviewStyles.mainAgentWarningText}>Main-agent outcome could not be verified. Reload status before retrying the change.</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Reload main Office agent status after unknown outcome"
+                    onPress={() => setMainAgentReloadGeneration(value => value + 1)}
+                    style={overviewStyles.mainAgentWarningButton}
+                  >
+                    <Text style={overviewStyles.mainAgentWarningText}>Reload status</Text>
+                  </Pressable>
+                </View>
               ) : mainAgentStatus === 'error' ? (
                 <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={overviewStyles.mainAgentErrorRow}>
                   <Text style={overviewStyles.mainAgentErrorText}>Main-agent status could not be verified. No change is available until it reloads.</Text>
@@ -1297,6 +1331,29 @@ const overviewStyles = StyleSheet.create({
     color: '#8b949e',
     fontSize: 11,
     lineHeight: 17,
+  },
+  mainAgentWarningRow: {
+    gap: 8,
+    padding: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    backgroundColor: '#2a1a06',
+  },
+  mainAgentWarningText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    lineHeight: 17,
+  },
+  mainAgentWarningButton: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   mainAgentErrorRow: {
     gap: 8,

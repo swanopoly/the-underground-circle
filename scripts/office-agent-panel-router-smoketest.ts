@@ -7,6 +7,7 @@ import {
   resolveAgentPanelRuntimeConnectionId,
   type AgentPanelCapabilities,
 } from '../src/screens/circles/tabs/office/AgentPanelTabs';
+import { resolveOpenSwanConnectionTransport } from '../src/lib/officeAgentSessionBindingCore';
 import { resolveOfficeAgentExecutionTruth } from '../src/lib/officeAgents';
 
 type PanelAgent = Parameters<typeof getAgentPanelTabs>[0];
@@ -163,6 +164,11 @@ assert.equal(
   'local-proxy',
   'the canonical localhost proxy may rely on its own gateway-token injection',
 );
+assert.deepEqual(
+  resolveOpenSwanConnectionTransport({ ...openSwanConnection('local-proxy'), token: '' }),
+  { endpoint: 'http://localhost:18790', token: '' },
+  'the shared transport resolver preserves the exact tokenless browser proxy contract',
+);
 assert.equal(
   resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, [{ ...openSwanConnection('loopback-proxy'), endpoint: 'http://127.0.0.1:18790', token: '' }]),
   'loopback-proxy',
@@ -198,6 +204,12 @@ const xpFeed = read('src/components/rpg/XPEventFeed.tsx');
 const office = read('src/screens/circles/tabs/OfficeTab.tsx');
 const customize = read('src/screens/circles/tabs/office/AgentCustomizePanel.tsx');
 const gateway = read('src/screens/circles/tabs/office/AgentGatewayPanels.tsx');
+assert.equal(
+  (gateway.match(/resolveOpenSwanConnectionTransport\(match\)/g) || []).length,
+  2,
+  'Runtime and Schedules consume the same capability verdict used to expose their routes',
+);
+assert(!gateway.includes('|| !match.token'), 'panel executors do not re-reject the canonical tokenless proxy');
 
 for (const marker of [
   'requestGenerationRef',
@@ -295,7 +307,7 @@ assert(
 );
 assert(
   office.includes('The popup is a live projection of the canonical roster')
-    && office.includes('displayAgents.find(candidate => candidate.id === previous.id)'),
+    && office.includes('resolveUniqueOfficeAgentById(displayAgents, previous.id)'),
   'the open popup follows the live roster instead of retaining a click-time snapshot',
 );
 assert(
@@ -304,15 +316,17 @@ assert(
   'the panel authority fails closed during same-user access-token rotation before effects commit',
 );
 assert(
-  panel.includes('onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<boolean>')
+  panel.includes('onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>')
     && office.includes('const receipt = await updateAgentIdentityExact(')
-    && office.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved')
+    && office.includes('if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true)')
+    && office.includes('return receipt;')
     && office.includes('return isOfficeAuthorityCurrent(requestedAuthority)')
-    && customize.includes('onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<boolean>')
-    && customize.includes('if (saved !== true)')
+    && customize.includes('onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>')
+    && customize.includes("setSaveState('refresh-needed')")
+    && customize.includes("setSaveState('outcome-unknown')")
     && customize.includes("label: '✕ NOT SAVED — TRY AGAIN'")
     && !customize.includes('optimistically report'),
-  'Customize reports SAVED only after the exact durable identity receipt resolves',
+  'Customize distinguishes complete, server-only, unknown, and failed exact identity receipts',
 );
 assert(
   gateway.includes('const cleared = await clearOfficeAgentSessionBinding(')

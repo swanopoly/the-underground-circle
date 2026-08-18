@@ -100,7 +100,12 @@ interface Props {
   onCancelRename: () => void;
   canRenameAgent: boolean;
   renameBusy: boolean;
-  actionNotice: { kind: 'success' | 'error'; message: string } | null;
+  actionNotice: {
+    kind: 'success' | 'warning' | 'error';
+    message: string;
+    actionLabel?: string;
+    onAction?: () => void | Promise<void>;
+  } | null;
   onClose: () => void;
   onToggleMode: () => void;
   onStartSideResize: (pageX: number) => void;
@@ -122,6 +127,11 @@ interface Props {
 // transform/opacity inline every frame). 110ms is short enough to feel snappy
 // while still cueing "this is a modal opening" rather than snap-appearing.
 const OPEN_ANIM_STYLE_ID = 'uc-agent-panel-open-anim';
+// Circle-level overlays such as the persistent Floating Chat currently occupy
+// z-index 9000. A centered Agent panel is a true modal and must cover/intercept
+// every non-modal Circle surface, not only the App header.
+const WEB_AGENT_MODAL_BACKDROP_Z_INDEX = 12_000;
+const WEB_AGENT_MODAL_PANEL_Z_INDEX = WEB_AGENT_MODAL_BACKDROP_Z_INDEX + 1;
 function ensureOpenAnimStyle() {
   if (Platform.OS !== 'web' || typeof document === 'undefined') return;
   if (document.getElementById(OPEN_ANIM_STYLE_ID)) return;
@@ -193,6 +203,16 @@ export default function AgentPanelShell({
   React.useEffect(() => {
     ensureOpenAnimStyle();
   }, []);
+
+  const renameButtonRef = React.useRef<any>(null);
+  const wasEditingRef = React.useRef(editing);
+  React.useEffect(() => {
+    const wasEditing = wasEditingRef.current;
+    wasEditingRef.current = editing;
+    if (Platform.OS !== 'web' || !wasEditing || editing || typeof requestAnimationFrame === 'undefined') return;
+    const frame = requestAnimationFrame(() => renameButtonRef.current?.focus?.());
+    return () => cancelAnimationFrame(frame);
+  }, [editing]);
 
   const providerMeta = PROVIDER_META[agent.providerType];
   const activeGroup = getAgentPanelGroupForTab(tabGroups, panelTab) || tabGroups[0] || null;
@@ -393,6 +413,7 @@ export default function AgentPanelShell({
         <View style={styles.desktopHeaderIdentity}>
           {editing ? (
             <View style={styles.desktopHeaderEditingRow}>
+              <Text nativeID="uc-agent-panel-title" style={styles.visuallyHiddenTitle}>{agent.name}</Text>
               <TextInput
                 style={styles.desktopHeaderNameInput}
                 value={editName}
@@ -440,6 +461,7 @@ export default function AgentPanelShell({
               <Text nativeID="uc-agent-panel-title" style={styles.desktopHeaderName} numberOfLines={1}>{agent.name}</Text>
               {canRenameAgent ? (
                 <Pressable
+                  ref={renameButtonRef}
                   onPress={onStartRename}
                   style={[styles.desktopRenameChip, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
                   accessibilityRole="button"
@@ -507,6 +529,7 @@ export default function AgentPanelShell({
             { opacity: backdropOpacity },
             Platform.OS === 'web' && ({
               position: 'fixed',
+              zIndex: WEB_AGENT_MODAL_BACKDROP_Z_INDEX,
               transition: 'opacity 280ms cubic-bezier(0.4, 0, 0.2, 1)',
               cursor: 'pointer',
             } as any),
@@ -543,6 +566,9 @@ export default function AgentPanelShell({
             : { transform: [{ translateY: slideAnim }] },
           isDesktop && styles.panelDesktop,
           isDesktop && panelMode === 'side' && styles.panelSide,
+          Platform.OS === 'web' && panelMode === 'center'
+            ? ({ position: 'fixed', zIndex: WEB_AGENT_MODAL_PANEL_Z_INDEX } as any)
+            : null,
           isDesktop && Platform.OS === 'web' ? ({ transition: panelTransition } as any) : null,
         ]}>
         {isDesktop && Platform.OS === 'web' && panelMode === 'side' && (
@@ -585,19 +611,37 @@ export default function AgentPanelShell({
           <View
             style={[
               styles.commandNotice,
-              actionNotice.kind === 'error' ? styles.commandNoticeError : styles.commandNoticeSuccess,
+              actionNotice.kind === 'error'
+                ? styles.commandNoticeError
+                : actionNotice.kind === 'warning'
+                  ? styles.commandNoticeWarning
+                  : styles.commandNoticeSuccess,
             ]}
-            accessibilityRole={actionNotice.kind === 'error' ? 'alert' : undefined}
-            accessibilityLiveRegion={actionNotice.kind === 'error' ? 'assertive' : 'polite'}
+            accessibilityRole={actionNotice.kind === 'success' ? undefined : 'alert'}
+            accessibilityLiveRegion={actionNotice.kind === 'success' ? 'polite' : 'assertive'}
           >
             <Text
               style={[
                 styles.commandNoticeText,
-                actionNotice.kind === 'error' ? styles.commandNoticeErrorText : styles.commandNoticeSuccessText,
+                actionNotice.kind === 'error'
+                  ? styles.commandNoticeErrorText
+                  : actionNotice.kind === 'warning'
+                    ? styles.commandNoticeWarningText
+                    : styles.commandNoticeSuccessText,
               ]}
             >
               {actionNotice.message}
             </Text>
+            {actionNotice.actionLabel && actionNotice.onAction ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={actionNotice.actionLabel}
+                onPress={() => { void actionNotice.onAction?.(); }}
+                style={styles.commandNoticeAction}
+              >
+                <Text style={styles.commandNoticeActionText}>{actionNotice.actionLabel}</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
         {renderTabNavigation(isDesktop)}
@@ -650,6 +694,13 @@ export default function AgentPanelShell({
 }
 
 const styles = StyleSheet.create({
+  visuallyHiddenTitle: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    overflow: 'hidden',
+  },
   nativeModalRoot: {
     flex: 1,
   },
@@ -918,6 +969,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 9,
     borderBottomWidth: 1,
+    gap: 8,
   },
   commandNoticeError: {
     backgroundColor: '#f8514910',
@@ -926,6 +978,10 @@ const styles = StyleSheet.create({
   commandNoticeSuccess: {
     backgroundColor: '#22c55e10',
     borderBottomColor: '#22c55e38',
+  },
+  commandNoticeWarning: {
+    backgroundColor: '#f59e0b12',
+    borderBottomColor: '#f59e0b42',
   },
   commandNoticeText: {
     fontSize: 12,
@@ -936,6 +992,24 @@ const styles = StyleSheet.create({
   },
   commandNoticeSuccessText: {
     color: '#3fb950',
+  },
+  commandNoticeWarningText: {
+    color: '#fbbf24',
+  },
+  commandNoticeAction: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  commandNoticeActionText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '700',
   },
   desktopActionRow: {
     marginTop: 24,
@@ -1021,6 +1095,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     borderRadius: 6,
     minHeight: 44,
+    minWidth: 44,
     justifyContent: 'center',
   },
   primaryTabNavItemText: {
@@ -1041,7 +1116,8 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   contextualTabNavItem: {
-    minHeight: 36,
+    minHeight: 44,
+    minWidth: 44,
     paddingHorizontal: 11,
     paddingVertical: 7,
     borderRadius: 999,

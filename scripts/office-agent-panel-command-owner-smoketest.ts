@@ -50,7 +50,7 @@ check(
 
 const renameCommand = section(panel, 'onSubmitRename={async () => {', 'onCancelRename={() => {');
 check(
-  panel.includes('onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<boolean>')
+  panel.includes('onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<AgentIdentityExactSaveResult>')
     && renameCommand.includes('const capturedAuthority = exactIdentityAuthority')
     && renameCommand.includes('latestPanelScopeKeyRef.current !== capturedScopeKey')
     && renameCommand.includes('renameRequestGenerationRef.current !== requestGeneration')
@@ -58,17 +58,23 @@ check(
   'header rename captures and fences the exact authority and selected-agent scope',
 );
 check(
-  renameCommand.includes('if (saved !== true)')
-    && renameCommand.indexOf('if (saved !== true)') < renameCommand.indexOf('setRenameDraft(null)')
+  renameCommand.includes("receipt.error === 'outcome_unknown'")
+    && renameCommand.includes('receipt.serverSaved === true && !receipt.localSaved')
+    && renameCommand.includes('Reload this agent before retrying the rename.')
+    && renameCommand.includes('do not save the name again.')
+    && renameCommand.includes("actionLabel: 'Reload identity'")
+    && renameCommand.includes('onAction: reloadIdentityForNotice')
     && renameCommand.includes("message: 'Agent name was not saved. Try again.'"),
-  'header rename keeps the editor open and exposes generic failure until a true receipt arrives',
+  'header rename distinguishes unknown, durable-server/local-refresh, and definitive failure receipts',
 );
 check(
   shell.includes('renameBusy: boolean')
     && shell.includes("{renameBusy ? 'Saving…' : 'Save'}")
-    && shell.includes('accessibilityLiveRegion={actionNotice.kind === \'error\' ? \'assertive\' : \'polite\'}')
-    && shell.includes("accessibilityRole={actionNotice.kind === 'error' ? 'alert' : undefined}"),
-  'header commands expose disabled busy state and a live generic result region',
+    && shell.includes("actionNotice.kind === 'warning'")
+    && shell.includes("accessibilityLiveRegion={actionNotice.kind === 'success' ? 'polite' : 'assertive'}")
+    && shell.includes("accessibilityRole={actionNotice.kind === 'success' ? undefined : 'alert'}")
+    && shell.includes('actionNotice.actionLabel && actionNotice.onAction'),
+  'header commands expose disabled busy state plus assertive and actionable warning/error receipt regions',
 );
 
 const removeCommand = section(panel, 'onRemoveAgent={async () => {', 'tabs={tabs}');
@@ -102,29 +108,46 @@ check(
 );
 
 check(
-  customize.includes('onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<boolean>')
-    && customize.includes('const saved = await onAppearanceChange(')
-    && customize.includes('if (saved !== true)')
+  customize.includes('onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>')
+    && customize.includes('const receipt = await onAppearanceChange(')
+    && customize.includes("setSaveState('refresh-needed')")
+    && customize.includes("setSaveState('outcome-unknown')")
     && !customize.includes('Promise<void>')
     && !customize.includes('optimistically report'),
-  'customization accepts only an asynchronous boolean durable receipt and never treats void as saved',
+  'customization consumes the exact receipt and preserves partial or unknown save truth',
 );
 check(
   customize.includes('const saveInFlightRef = useRef(false)')
     && customize.includes('const saveGenerationRef = useRef(0)')
     && customize.includes('saveGenerationRef.current !== generation')
+    && customize.includes("label: 'SAVED ON SERVER — RELOAD REQUIRED'")
+    && customize.includes("label: 'OUTCOME UNKNOWN — REOPEN BEFORE RETRY'")
+    && customize.includes("saveState === 'refresh-needed'")
+    && customize.includes("saveState === 'outcome-unknown'")
+    && customize.includes('disabled={saveBlocked}')
+    && customize.includes('const refreshed = await onIdentityRefresh()')
+    && customize.includes('RELOAD APPEARANCE')
     && customize.includes("label: '✕ NOT SAVED — TRY AGAIN'")
     && !customize.includes('err.message')
-    && customize.includes("accessibilityLiveRegion={saveState === 'error' ? 'assertive' : 'polite'}"),
-  'customization serializes saves, rejects stale completion, redacts errors, and announces live status',
+    && customize.includes("accessibilityRole={saveState === 'error' || saveState === 'refresh-needed' || saveState === 'outcome-unknown' ? 'alert' : undefined}"),
+  'customization serializes saves, blocks stale-result replay, redacts errors, and announces receipt truth',
 );
 
-const appearanceOwner = section(office, 'onAppearanceChange={async (id, a) => {', 'environmentType={currentTheme.environmentType}');
+const appearanceOwner = section(office, 'onAppearanceChange={async (id, a): Promise<AgentIdentityExactSaveResult> => {', 'environmentType={currentTheme.environmentType}');
 check(
   appearanceOwner.includes('const receipt = await updateAgentIdentityExact(')
-    && appearanceOwner.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved')
-    && appearanceOwner.includes('return isOfficeAuthorityCurrent(requestedAuthority)'),
-  'Office customization returns true only after the existing exact writer reports full durable success',
+    && appearanceOwner.includes('!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true')
+    && appearanceOwner.includes('return receipt;')
+    && appearanceOwner.indexOf('!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true') < appearanceOwner.indexOf('setAppearances('),
+  'Office customization returns the exact receipt and adopts appearance only after full durable local success',
+);
+check(
+  office.includes('const selectedAgentPanelAppearances = useMemo(() => {')
+    && office.includes('getAgentIdentityByAgent(agentIdentities, selectedAgent)?.appearance')
+    && office.includes('[selectedAgent.id]: resolvedAppearance')
+    && office.includes('appearances={selectedAgentPanelAppearances}')
+    && panel.includes('onIdentityRefresh={onAgentIdentityChange}'),
+  'an explicit exact identity reload rehydrates the popup appearance from verified server truth',
 );
 
 console.log(`Office Agent panel command-owner smoke: ${assertions} passed`);

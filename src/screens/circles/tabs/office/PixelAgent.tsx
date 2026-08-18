@@ -41,7 +41,7 @@ interface Props {
   agent: OfficeAgent;
   appearance?: AgentAppearance;
   environmentType?: EnvironmentType;
-  onPress?: () => void;
+  onPress?: (agentId: string) => void;
   selected: boolean;
   scale?: number;
   showThoughts?: boolean; // Enable thought bubbles
@@ -954,7 +954,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   return (
     <Pressable
-      onPress={interactive ? onPress : undefined}
+      onPress={interactive ? () => onPress?.(agent.id) : undefined}
       onPressIn={interactive ? handlePressIn : undefined}
       onPressOut={interactive ? handlePressOut : undefined}
       disabled={!interactive}
@@ -2311,6 +2311,7 @@ const PixelAgent = memo(PixelAgentInner, (prev, next) => {
     prev.agent.costToday === next.agent.costToday &&
     prev.agent.activity === next.agent.activity &&
     prev.agent.color === next.agent.color &&
+    prev.agent.spirit === next.agent.spirit &&
     prev.plaque?.counts === next.plaque?.counts &&
     prev.plaque?.tone === next.plaque?.tone &&
     prev.plaque?.note === next.plaque?.note &&
@@ -2328,7 +2329,7 @@ const PixelAgent = memo(PixelAgentInner, (prev, next) => {
     prev.turns === next.turns &&
     prev.tokens === next.tokens &&
     prev.reduceMotion === next.reduceMotion &&
-    Boolean(prev.onPress) === Boolean(next.onPress)
+    prev.onPress === next.onPress
   );
 });
 export default PixelAgent;

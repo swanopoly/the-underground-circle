@@ -113,6 +113,7 @@ import {
 } from '../../../lib/sessionCache';
 import {
   applyIdentityToAgent,
+  agentIdentityExactStorageKey,
   getAgentIdentityByAgent,
   getAgentIdentityKey,
   loadAgentIdentitiesExact,
@@ -124,6 +125,7 @@ import {
   updateAgentIdentityExact,
   type AgentIdentity,
   type AgentIdentityExactAuthority,
+  type AgentIdentityExactSaveResult,
 } from '../../../lib/agentIdentity';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
@@ -276,7 +278,11 @@ import {
 } from '../../../lib/officeAgentSessionBindingCore';
 import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
 import { getActiveRuns } from '../../../lib/agentRunSystem';
-import { buildOfficeRoster, isOfficeAgentOwnedByCurrentUser } from '../../../lib/officeRoster';
+import {
+  buildOfficeRoster,
+  isOfficeAgentOwnedByCurrentUser,
+  resolveUniqueOfficeAgentById,
+} from '../../../lib/officeRoster';
 import { useUserApiKeysExact } from '../../../lib/llmProviders';
 import { useOfficeSurfaceState } from './office/useOfficeSurfaceState';
 import {
@@ -4003,28 +4009,66 @@ export default function OfficeTab({
 
   const refreshAgentIdentities = useCallback(async () => {
     const requestedAuthority = captureOfficeAuthority();
-    if (!requestedAuthority) return;
+    if (!requestedAuthority) return false;
     try {
       const localIdentities = await loadAgentIdentitiesExact(requestedAuthority);
-      if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return false;
       const serverResult = await syncAgentIdentitiesFromServerExact(requestedAuthority);
-      if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return false;
 
       const identities = new Map(localIdentities);
       if (serverResult.ok) {
         for (const [key, serverIdentity] of serverResult.identities) {
-          const localIdentity = identities.get(key);
-          if (!localIdentity || serverIdentity.lastSeen >= localIdentity.lastSeen) {
-            identities.set(key, serverIdentity);
-          }
+          // This is an explicit exact-server refresh. Existing durable rows
+          // win unconditionally; client clocks are never ordering authority.
+          identities.set(key, serverIdentity);
         }
         if (identities.size > 0 && isOfficeAuthorityCurrent(requestedAuthority)) {
           void saveAgentIdentitiesExact(identities, requestedAuthority, isOfficeAuthorityCurrent);
         }
       }
       setAgentIdentities(identities);
-    } catch {}
+      return serverResult.ok;
+    } catch {
+      return false;
+    }
   }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
+
+  useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
+    if (
+      Platform.OS !== 'web'
+      || typeof window === 'undefined'
+      || !requestedAuthority
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return;
+    const exactStorageKey = agentIdentityExactStorageKey(requestedAuthority);
+    if (!exactStorageKey) return;
+    let retired = false;
+    let loadGeneration = 0;
+    const onExactIdentityStorage = (event: StorageEvent) => {
+      if (event.key !== exactStorageKey || event.newValue === null) return;
+      const generation = loadGeneration + 1;
+      loadGeneration = generation;
+      void loadAgentIdentitiesExact(requestedAuthority, isOfficeAuthorityCurrent).then((identities) => {
+        if (
+          retired
+          || generation !== loadGeneration
+          || !isOfficeAuthorityCurrent(requestedAuthority)
+        ) return;
+        // Exact writers publish only a count-complete server snapshot under
+        // the cross-realm lock. Adopting that cache here is read-only and does
+        // not write storage again, so tabs converge without an event loop.
+        setAgentIdentities(identities);
+      });
+    };
+    window.addEventListener('storage', onExactIdentityStorage);
+    return () => {
+      retired = true;
+      loadGeneration += 1;
+      window.removeEventListener('storage', onExactIdentityStorage);
+    };
+  }, [committedAuthAuthority, isOfficeAuthorityCurrent]);
 
   const userAgentsStatusKey = useMemo(() => JSON.stringify(userAgents.map(agent => [
     agent.id,
@@ -4081,10 +4125,15 @@ export default function OfficeTab({
       return { ...agent, status: upgrade.status, activity: upgrade.activity ?? agent.activity };
     });
   }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id, opsRunNodesByAgent]);
+  // Sprite memoization may intentionally retain a prior visual object. Panel
+  // selection always resolves the id against this synchronously current roster
+  // so a connection/session refresh cannot reopen stale execution authority.
+  const displayAgentsRef = useRef<readonly OfficeAgent[]>(displayAgents);
+  displayAgentsRef.current = displayAgents;
   useEffect(() => {
     setSelectedAgent(previous => {
       if (!previous) return null;
-      const current = displayAgents.find(candidate => candidate.id === previous.id) || null;
+      const current = resolveUniqueOfficeAgentById(displayAgents, previous.id);
       // The popup is a live projection of the canonical roster, never a
       // snapshot captured at click time. If the subject retires, close it.
       return current;
@@ -4217,6 +4266,20 @@ export default function OfficeTab({
     }
     return result;
   }, [agentIdentities, appearances]);
+  const selectedAgentPanelAppearances = useMemo(() => {
+    if (!selectedAgent) return appearances;
+    // The popup's explicit reload is server-truth recovery, so the freshly
+    // hydrated exact identity must outrank the older preference appearance.
+    const resolvedAppearance = getAgentIdentityByAgent(agentIdentities, selectedAgent)?.appearance
+      || getAppearance(selectedAgent);
+    if (!resolvedAppearance) return appearances;
+    const identityKey = getAgentIdentityKey(selectedAgent);
+    return {
+      ...appearances,
+      [selectedAgent.id]: resolvedAppearance,
+      [identityKey]: resolvedAppearance,
+    };
+  }, [agentIdentities, appearances, getAppearance, selectedAgent]);
 
   // Auto-assign random outfits to new agents + backfill pets/auras for existing agents
   useEffect(() => {
@@ -4619,14 +4682,23 @@ export default function OfficeTab({
   const scaledH = OFFICE_FLOOR_HEIGHT * officeScale;
   const needsHScroll = rawScale < 0.55;
 
-  const handleAgentPress = useCallback((agent: OfficeAgent) => {
+  const handleAgentPress = useCallback((agentId: string) => {
     if (editMode) return;
+    const agent = resolveUniqueOfficeAgentById(displayAgentsRef.current, agentId);
+    if (!agent) {
+      setSelectedAgent(null);
+      return;
+    }
     setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
   }, [editMode]);
 
   const handleOpenAgentInChat = useCallback((agentId: string, draft?: string) => {
     const focus = encodeEntityHandle({ surface: 'chat', kind: 'agent', id: agentId });
     if (!focus) return;
+    // Office stays mounted after switching tabs. Retire its modal before the
+    // validated handoff so a hidden aria-modal/focus trap cannot reappear when
+    // the user returns from Chat.
+    setSelectedAgent(null);
     onOpenAgentInChat?.(focus, normalizeChatAgentFocusDraft(draft) || undefined);
   }, [onOpenAgentInChat]);
 
@@ -6704,11 +6776,18 @@ export default function OfficeTab({
     }
   };
 
-  const handleRenameAgent = useCallback(async (agent: OfficeAgent, newName: string) => {
+  const handleRenameAgent = useCallback(async (
+    agent: OfficeAgent,
+    newName: string,
+  ): Promise<AgentIdentityExactSaveResult> => {
     const normalizedName = newName.trim();
-    if (!normalizedName) return false;
+    if (!normalizedName) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+    }
     const requestedAuthority = captureOfficeAuthority();
-    if (!requestedAuthority) return false;
+    if (!requestedAuthority) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+    }
 
     const identityKey = getAgentIdentityKey(agent);
     const identitySave = await renameAgentExact(
@@ -6717,12 +6796,12 @@ export default function OfficeTab({
       requestedAuthority,
       isOfficeAuthorityCurrent,
     );
+    if (!isOfficeAuthorityCurrent(requestedAuthority)) return identitySave;
     if (
-      !isOfficeAuthorityCurrent(requestedAuthority)
-      || !identitySave.ok
+      !identitySave.ok
       || !identitySave.localSaved
-      || !identitySave.serverSaved
-    ) return false;
+      || identitySave.serverSaved !== true
+    ) return identitySave;
 
     const updated = {
       ...agentNames,
@@ -6745,7 +6824,7 @@ export default function OfficeTab({
 
     const identities = await loadAgentIdentitiesExact(requestedAuthority);
     if (isOfficeAuthorityCurrent(requestedAuthority)) setAgentIdentities(identities);
-    return isOfficeAuthorityCurrent(requestedAuthority);
+    return identitySave;
   }, [
     agentNames,
     captureOfficeAuthority,
@@ -7572,7 +7651,7 @@ export default function OfficeTab({
                 return (
                   <Pressable
                     key={agent.id}
-                    onPress={() => handleAgentPress(agent)}
+                    onPress={() => handleAgentPress(agent.id)}
                     style={[styles.mobileAgentCard, isSelected && { borderColor: agent.color + '60', backgroundColor: agent.color + '08' },
                       Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     accessibilityRole="button"
@@ -7694,7 +7773,7 @@ export default function OfficeTab({
                               agent={agent}
                               appearance={getAppearance(agent)}
                               environmentType={currentTheme.environmentType}
-                              onPress={() => handleAgentPress(agent)}
+                              onPress={handleAgentPress}
                               selected={selectedAgent?.id === agent.id}
                               showThoughts={!editMode}
                               totalAgents={agents.length}
@@ -7958,7 +8037,7 @@ export default function OfficeTab({
                   {displayAgents.map((agent) => (
                     <Pressable
                       key={agent.id}
-                      onPress={() => handleAgentPress(agent)}
+                      onPress={() => handleAgentPress(agent.id)}
                       accessibilityRole="button"
                       accessibilityLabel={`Open ${agent.name} agent panel`}
                       accessibilityHint="Shows current work, controls, activity, memory, runs, and agent settings."
@@ -8042,10 +8121,12 @@ export default function OfficeTab({
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
           circleId={circleId}
-          appearances={appearances}
-          onAppearanceChange={async (id, a) => {
+          appearances={selectedAgentPanelAppearances}
+          onAppearanceChange={async (id, a): Promise<AgentIdentityExactSaveResult> => {
             const requestedAuthority = captureOfficeAuthority();
-            if (!requestedAuthority) return false;
+            if (!requestedAuthority) {
+              return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+            }
             const identityKey = getAgentIdentityKey(selectedAgent) || id;
             const receipt = await updateAgentIdentityExact(
               identityKey,
@@ -8054,14 +8135,14 @@ export default function OfficeTab({
               isOfficeAuthorityCurrent,
             );
             if (!isOfficeAuthorityCurrent(requestedAuthority)) {
-              return false;
+              return receipt;
             }
-            if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
-              return false;
+            if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
+              return receipt;
             }
             setAppearances(prev => ({ ...prev, [id]: a, [identityKey]: a }));
             await refreshAgentIdentities();
-            return isOfficeAuthorityCurrent(requestedAuthority);
+            return receipt;
           }}
           environmentType={currentTheme.environmentType}
           onRunCommand={handleRunCommand}

@@ -643,7 +643,8 @@ agent's stale data cannot render beneath another agent.
 The popup owns no parallel task conversation. Overview, OpenSwan, and Terminal
 encode the exact agent target and optional bounded draft through the typed
 Circle handle. Chat waits for thread/draft hydration, selects and focuses that
-target, and never auto-sends; it remains the single owner of durable messages,
+target, and never auto-sends; Office retires its still-mounted modal before the
+tab switch. Chat remains the single owner of durable messages,
 approvals, canonical runs, proof, and recovery. OpenSwan initially loads only
 exact connection/session evidence; private binding, history/status, runtime
 agents, subagents, and search stay under Advanced options. Those provider
@@ -654,6 +655,10 @@ on failure, require exact action/target receipts plus fresh postconditions, and
 lock mutation after an unknown outcome until an exact refresh succeeds.
 Runtime and schedule reads/mutations use the captured Office
 user/circle/bearer/generation boundary.
+Tab eligibility and runtime execution share one connection-transport resolver.
+It admits a blank token only for the exact root-only localhost/loopback proxy
+on port 18790, where the proxy injects its private gateway credential; remote,
+direct, credentialed-URL, path, query, and masked variants remain closed.
 
 Overview Pause/Resume, main-agent, and Terminal profile mutations remain
 unavailable until their exact reads resolve. Main-agent selection is the
@@ -673,11 +678,34 @@ retry/error states and confirmation-gated, receipt-checked destructive actions;
 Spirit, WordPress, and integration absence is shown only after a verified read;
 raw identity/session details remain behind Inspect disclosures. Centered and
 compact modes block background interaction, own and restore focus, and honor
-reduced motion. Docking is web-desktop-only; wide native tablets remain in the
+reduced motion. The web modal layer sits above persistent Floating Chat,
+suppresses the Circle Search shortcut while active, preserves its accessible
+name throughout Rename, and returns focus after Rename. Docking is
+web-desktop-only; wide native tablets remain in the
 React Native modal boundary and use live viewport geometry. The non-modal web
 dock resize handle supports keyboard/assistive actions. The live roster, not the click-time object, feeds
-the open panel. Prior authenticated panel QA predates this router revision, so
-fresh responsive/native/provider validation remains pending.
+the open panel. `scripts/office-agent-popup-live-canary-contract-smoketest.ts`
+pins an offline safety contract for the opt-in disposable fixture in
+`scripts/office-authenticated-local-e2e.mjs`. That live lane opens the built-in
+OpenSwan popup in two same-origin tabs, checks centered focus cycling and backdrop blocking,
+web tablet portrait/landscape containment, reduced motion, and concurrent exact-user
+auth refresh followed by exact authority rereads. Its backdrop proof is scoped
+to tested header and visible floating-Chat points, and its fixture requires
+explicit live, disposable-fixture, exact-project, and remote-target (when
+applicable) acknowledgements. It is source-ready but has not
+been run for this revision, and it does not claim native Modal, VoiceOver,
+TalkBack, provider-mutation, account-switch, or deployed-site proof.
+
+The §§47-48 deployment preflight never applies SQL or Edge code and performs no
+network access. Its default is source-only. An explicitly supplied value-free
+catalog JSON is parsed as untrusted shape evidence and must exactly match the
+six function bodies and owners, trigger/index contracts, complete
+`agent_identities`/`circle_office_agents`/`custom_agent_profiles` policy
+inventories, authenticated privileges, and reviewed Edge digests. A match is
+`catalog_contract_matches_unattested`, never deployment or release proof;
+`--require-deployed` intentionally remains nonzero until a reviewed
+target-bound capture plus authenticated contention/account-switch canaries are
+available.
 
 Published Office Spirit assignment uses
 `supabase/migrations/20260817140000_agent_spirit_assignment_rpc.sql`, mirrored
@@ -705,7 +733,10 @@ captured bearer and an abort signal, and replaces the cache only from that
 server truth. An older completion therefore cannot republish its receipt after
 a newer tab; lock absence or timeout preserves `serverSaved: true` and fails
 local publication closed. Native retains the same bounded in-process queue,
-and client wall-clock time is never ordering authority.
+and client wall-clock time is never ordering authority. Other mounted web
+Office tabs subscribe only to that exact user/circle storage key, reverify the
+captured authority, and adopt the validated full snapshot without writing it
+again, avoiding both stale open panels and storage-event loops.
 Memory Soul projection requires an exact published-agent UUID and never falls
 back to mutable display-name matching.
 §48 is pending/not applied.

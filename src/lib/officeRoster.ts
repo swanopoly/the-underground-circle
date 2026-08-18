@@ -24,6 +24,26 @@ export type OfficeAgentOwnershipContext = Readonly<{
 }>;
 
 /**
+ * Resolve a panel target from the current canonical roster, never from the
+ * object captured by an older sprite render. Duplicate ids are ambiguous and
+ * therefore close/fail the interaction instead of choosing the first row.
+ */
+export function resolveUniqueOfficeAgentById<T extends Pick<OfficeAgent, 'id'>>(
+  agents: readonly T[],
+  agentIdInput: string,
+): T | null {
+  const agentId = typeof agentIdInput === 'string' ? agentIdInput.trim() : '';
+  if (!agentId || agentId !== agentIdInput) return null;
+  let match: T | null = null;
+  for (const agent of agents) {
+    if (agent.id !== agentId) continue;
+    if (match) return null;
+    match = agent;
+  }
+  return match;
+}
+
+/**
  * Classify the Office "Mine" lane from exact structural custody only.
  * Display names are intentionally absent: two members may publish the same
  * name, and customization can rename a live session without changing owner.

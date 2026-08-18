@@ -18,6 +18,7 @@ import {
 import {
   buildOpenSwanConnectionFingerprint,
   matchesOpenSwanConnectionFingerprint,
+  resolveOpenSwanConnectionTransport,
   type OpenSwanConnectionFingerprint,
 } from '../../../../lib/officeAgentSessionBindingCore';
 import {
@@ -180,21 +181,14 @@ export function OpenSwanFrontendPanel({
     if (!result.ok || !isIdentityAuthorityCurrent(identityAuthority)) return null;
     const matches = result.connections.filter((conn) => conn.id === runtimeConnectionId);
     const match = matches.length === 1 ? matches[0] : null;
-
-    if (
-      match?.provider !== 'openswan'
-      || match.status !== 'connected'
-      || !match.enabled
-      || !match.endpoint
-      || !match.token
-      || match.token === '***'
-    ) {
+    const transport = resolveOpenSwanConnectionTransport(match);
+    if (!match || !transport) {
       setConnection(match || null);
       return null;
     }
 
     setConnection(match);
-    return { endpoint: match.endpoint, token: match.token, connection: match };
+    return { ...transport, connection: match };
   }, [identityAuthority, isIdentityAuthorityCurrent, runtimeConnectionId]);
 
   const refresh = useCallback(async () => {
@@ -1163,16 +1157,10 @@ export function CronJobsPanel({
     if (!result.ok || !isIdentityAuthorityCurrent(identityAuthority)) return null;
     const matches = result.connections.filter((conn) => conn.id === runtimeConnectionId);
     const match = matches.length === 1 ? matches[0] : null;
-    if (
-      match?.provider !== 'openswan'
-      || match.status !== 'connected'
-      || !match.enabled
-      || !match.endpoint
-      || !match.token
-      || match.token === '***'
-    ) { setConnection(match || null); return null; }
+    const transport = resolveOpenSwanConnectionTransport(match);
+    if (!match || !transport) { setConnection(match || null); return null; }
     setConnection(match);
-    return { endpoint: match.endpoint, token: match.token, connection: match };
+    return { ...transport, connection: match };
   }, [identityAuthority, isIdentityAuthorityCurrent, runtimeConnectionId]);
 
   const refresh = useCallback(async () => {

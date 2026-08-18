@@ -13,6 +13,7 @@ import {
   SKIN_TONES,
 } from '../../../../lib/officeConfig';
 import { MONO } from './AgentPanelShared';
+import type { AgentIdentityExactSaveResult } from '../../../../lib/agentIdentity';
 
 const PANTS_COLORS = ['#2d2d3d', '#2a2a2a', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
 
@@ -20,13 +21,16 @@ interface Props {
   agent: OfficeAgent;
   appearances?: Record<string, AgentAppearance>;
   // Customization is a durable command, not an optimistic presentation hook.
-  // Only an explicit true receipt may be rendered as saved.
-  onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<boolean>;
+  // Only a complete exact receipt may be rendered as locally saved. A durable
+  // server commit whose cache publication failed remains a distinct,
+  // non-retryable-until-refresh result.
+  onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>;
+  onIdentityRefresh?: () => Promise<boolean>;
   environmentType?: EnvironmentType;
   reduceMotion: boolean;
 }
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+type SaveState = 'idle' | 'saving' | 'refreshing' | 'saved' | 'refresh-needed' | 'outcome-unknown' | 'error';
 type Category = 'colors' | 'looks' | 'accessories' | 'aura';
 
 const CATEGORIES: Array<{ key: Category; label: string; color: string }> = [
@@ -40,6 +44,7 @@ export default function AgentCustomizePanel({
   agent,
   appearances,
   onAppearanceChange,
+  onIdentityRefresh,
   environmentType,
   reduceMotion,
 }: Props) {
@@ -85,9 +90,17 @@ export default function AgentCustomizePanel({
 
     void (async () => {
       try {
-        const saved = await onAppearanceChange(agent.id, { ...appearance, ...patch });
+        const receipt = await onAppearanceChange(agent.id, { ...appearance, ...patch });
         if (!mountedRef.current || saveGenerationRef.current !== generation) return;
-        if (saved !== true) {
+        if (receipt.error === 'outcome_unknown' || receipt.serverSaved === null) {
+          setSaveState('outcome-unknown');
+          return;
+        }
+        if (receipt.serverSaved === true && !receipt.localSaved) {
+          setSaveState('refresh-needed');
+          return;
+        }
+        if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
           setSaveState('error');
           return;
         }
@@ -103,12 +116,41 @@ export default function AgentCustomizePanel({
     })();
   };
 
+  const refreshIdentity = () => {
+    if (!onIdentityRefresh || saveInFlightRef.current) return;
+    const priorState = saveState;
+    saveInFlightRef.current = true;
+    const generation = saveGenerationRef.current + 1;
+    saveGenerationRef.current = generation;
+    setSaveState('refreshing');
+    void (async () => {
+      try {
+        const refreshed = await onIdentityRefresh();
+        if (!mountedRef.current || saveGenerationRef.current !== generation) return;
+        setSaveState(refreshed ? 'idle' : priorState);
+      } catch {
+        if (mountedRef.current && saveGenerationRef.current === generation) {
+          setSaveState(priorState);
+        }
+      } finally {
+        if (saveGenerationRef.current === generation) saveInFlightRef.current = false;
+      }
+    })();
+  };
+
   const saveIndicator = (() => {
     if (saveState === 'saving') return { color: '#6366f1', dot: '#6366f1', label: 'SAVING…' };
+    if (saveState === 'refreshing') return { color: '#6366f1', dot: '#6366f1', label: 'REFRESHING SERVER TRUTH…' };
     if (saveState === 'saved') return { color: '#22c55e', dot: '#22c55e', label: '✓ SAVED' };
+    if (saveState === 'refresh-needed') return { color: '#fbbf24', dot: '#f59e0b', label: 'SAVED ON SERVER — RELOAD REQUIRED' };
+    if (saveState === 'outcome-unknown') return { color: '#fbbf24', dot: '#f59e0b', label: 'OUTCOME UNKNOWN — REOPEN BEFORE RETRY' };
     if (saveState === 'error') return { color: '#ef4444', dot: '#ef4444', label: '✕ NOT SAVED — TRY AGAIN' };
     return { color: '#606075', dot: '#2a2a3e', label: 'READY' };
   })();
+  const saveBlocked = saveState === 'saving'
+    || saveState === 'refreshing'
+    || saveState === 'refresh-needed'
+    || saveState === 'outcome-unknown';
 
   const neonSkinTones = ['#ff00ff', '#00ff88', '#00ffff', '#ff4444', '#ffff00', '#aa55ff'];
 
@@ -124,8 +166,8 @@ export default function AgentCustomizePanel({
               key={color}
               accessibilityRole="button"
               accessibilityLabel={`${label.toLowerCase()} color ${color}`}
-              accessibilityState={{ selected: active, disabled: saveState === 'saving' }}
-              disabled={saveState === 'saving'}
+              accessibilityState={{ selected: active, disabled: saveBlocked }}
+              disabled={saveBlocked}
               onPress={() => onSelect(color)}
               style={[
                 styles.swatch,
@@ -157,8 +199,8 @@ export default function AgentCustomizePanel({
             key={item.key}
             accessibilityRole="button"
             accessibilityLabel={`${label.toLowerCase()} ${item.name.toLowerCase()}`}
-            accessibilityState={{ selected: item.active, disabled: saveState === 'saving' }}
-            disabled={saveState === 'saving'}
+            accessibilityState={{ selected: item.active, disabled: saveBlocked }}
+            disabled={saveBlocked}
             onPress={() => {
               const field = label === 'HAT'
                 ? 'hat'
@@ -206,9 +248,9 @@ export default function AgentCustomizePanel({
             click actually persisted (or failed). Fades back to READY after 1.2s. */}
         <View
           style={styles.saveRow}
-          accessibilityRole={saveState === 'error' ? 'alert' : undefined}
-          accessibilityLiveRegion={saveState === 'error' ? 'assertive' : 'polite'}
-          accessibilityState={{ busy: saveState === 'saving' }}
+          accessibilityRole={saveState === 'error' || saveState === 'refresh-needed' || saveState === 'outcome-unknown' ? 'alert' : undefined}
+          accessibilityLiveRegion={saveState === 'error' || saveState === 'refresh-needed' || saveState === 'outcome-unknown' ? 'assertive' : 'polite'}
+          accessibilityState={{ busy: saveState === 'saving' || saveState === 'refreshing' }}
           accessibilityLabel={`Customization save status: ${saveIndicator.label}`}
         >
           <View style={[styles.saveDot, { backgroundColor: saveIndicator.dot }]} />
@@ -216,6 +258,16 @@ export default function AgentCustomizePanel({
             {saveIndicator.label}
           </Text>
         </View>
+        {(saveState === 'refresh-needed' || saveState === 'outcome-unknown') && onIdentityRefresh ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Reload appearance from the exact server identity"
+            onPress={refreshIdentity}
+            style={styles.reloadButton}
+          >
+            <Text style={styles.reloadButtonText}>RELOAD APPEARANCE</Text>
+          </Pressable>
+        ) : null}
         <View style={styles.preview}>
           {/* Larger preview with a subtle grid background — makes subtle
               color/accessory changes much easier to spot */}
@@ -347,6 +399,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1e1e3a',
     backgroundColor: '#0a0a0a',
+  },
+  reloadButton: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  reloadButtonText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: MONO,
   },
   saveDot: {
     width: 6,

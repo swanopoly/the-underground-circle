@@ -34,6 +34,29 @@ check(
     && shell.includes('return panelLayer;'),
   'web centered and docked presentation keeps its existing dialog/DOM path',
 );
+check(
+  shell.includes('<Text nativeID="uc-agent-panel-title" style={styles.visuallyHiddenTitle}>{agent.name}</Text>')
+    && shell.includes("'aria-labelledby': 'uc-agent-panel-title'"),
+  'Rename keeps a valid accessible dialog title while the visible heading is replaced by the editor',
+);
+check(
+  shell.includes('const wasEditingRef = React.useRef(editing);')
+    && shell.includes('renameButtonRef.current?.focus?.()')
+    && shell.includes('ref={renameButtonRef}'),
+  'leaving Rename restores focus to its stable Rename control',
+);
+check(
+  panel.includes("ev.key === 'Escape'")
+    && panel.includes('if (ev.isComposing) return;')
+    && panel.includes('if (editingRef.current)')
+    && panel.includes('window.addEventListener(\'keydown\', onKey, { capture: true });'),
+  'captured Escape cancels Rename first, closes otherwise, and preserves IME composition',
+);
+check(
+  panel.includes("ev.key.toLowerCase() === 'k'")
+    && panel.includes('ev.stopImmediatePropagation();'),
+  'a centered Agent modal suppresses the Circle Search shortcut instead of stacking focus traps',
+);
 
 const arrowHandler = shell.slice(
   shell.indexOf('const handleArrowNavigation = ('),

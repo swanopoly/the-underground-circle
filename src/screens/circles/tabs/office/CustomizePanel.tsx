@@ -1369,7 +1369,6 @@ export default function CustomizePanel({
                     <PixelAgent
                       agent={selectedAgent}
                       appearance={currentAppearance}
-                      onPress={() => {}}
                       selected={false}
                       scale={1.8}
                     />

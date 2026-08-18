@@ -80,18 +80,22 @@ export default function SessionTagInput({
 
   return (
     <View style={styles.container}>
-      <SessionTagsHelp visible={showHelp} onClose={() => setShowHelp(false)} />
-      
       {/* Header with Help Button */}
       <View style={styles.headerRow}>
         <Text style={styles.headerTitle}>🏷️ Session Tags</Text>
         <Pressable
-          onPress={() => setShowHelp(true)}
+          onPress={() => setShowHelp(visible => !visible)}
+          accessibilityRole="button"
+          accessibilityLabel={showHelp ? 'Hide Session Tags Guide' : 'Show Session Tags Guide'}
+          accessibilityState={{ expanded: showHelp }}
+          {...(Platform.OS === 'web' ? ({ 'aria-controls': 'uc-session-tags-help' } as any) : {})}
           style={[styles.helpBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
           <Text style={styles.helpBtnText}>?</Text>
         </Pressable>
       </View>
+
+      <SessionTagsHelp visible={showHelp} />
 
       {/* Current Tags */}
       {currentTags.length > 0 && (
@@ -101,6 +105,8 @@ export default function SessionTagInput({
               <Text style={[styles.tagText, { color: tag.color }]}>{tag.label}</Text>
               <Pressable
                 onPress={() => onRemoveTag(tag.key)}
+                accessibilityRole="button"
+                accessibilityLabel={`Remove ${tag.label} session tag`}
                 style={[styles.tagRemove, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
                 <Text style={[styles.tagRemoveText, { color: tag.color }]}>×</Text>
@@ -113,6 +119,7 @@ export default function SessionTagInput({
       {/* Input Row */}
       <View style={styles.inputRow}>
         <TextInput
+          accessibilityLabel="Session tag"
           style={styles.input}
           value={input}
           onChangeText={(text) => {
@@ -126,6 +133,9 @@ export default function SessionTagInput({
           autoCorrect={false}
         />
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Add session tag"
+          accessibilityState={{ disabled: !input.trim() }}
           onPress={handleSubmit}
           style={[styles.addBtn, !input.trim() && { opacity: 0.4 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           disabled={!input.trim()}
@@ -142,6 +152,8 @@ export default function SessionTagInput({
             return (
               <Pressable
                 key={category}
+                accessibilityRole="button"
+                accessibilityLabel={`Start ${meta.label} session tag`}
                 onPress={() => handleQuickTag(category)}
                 style={[styles.quickTag, { borderColor: meta.color + '40' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
@@ -159,6 +171,8 @@ export default function SessionTagInput({
           {filteredSuggestions.map(suggestion => (
             <Pressable
               key={suggestion.key}
+              accessibilityRole="button"
+              accessibilityLabel={`Add suggested session tag ${suggestion.label}`}
               onPress={() => handleSelectSuggestion(suggestion)}
               style={[styles.suggestion, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
@@ -206,9 +220,9 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   helpBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#6366f1',
     alignItems: 'center',
     justifyContent: 'center',
@@ -298,6 +312,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     paddingHorizontal: 8,
+    minHeight: 44,
     paddingVertical: 4,
     borderRadius: 6,
     borderWidth: 1,

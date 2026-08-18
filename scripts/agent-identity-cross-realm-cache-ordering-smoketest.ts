@@ -10,6 +10,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 
 const source = fs.readFileSync('src/lib/agentIdentity.ts', 'utf8');
+const officeSource = fs.readFileSync('src/screens/circles/tabs/OfficeTab.tsx', 'utf8');
 let assertions = 0;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -82,6 +83,11 @@ assert(primarySource.includes('publishCurrentAgentIdentityServerTruthExact('), '
 assert(spiritSource.includes('parsePublishedAgentSpiritRpcReceipt('), 'Spirit mutation still validates its atomic RPC receipt');
 assert(spiritSource.includes("serverSaved: null, error: 'outcome_unknown'"), 'unverifiable Spirit receipt remains outcome_unknown');
 assert(spiritSource.includes('publishCurrentAgentIdentityServerTruthExact('), 'verified Spirit mutation publishes only fresh full server truth');
+assert(officeSource.includes('agentIdentityExactStorageKey(requestedAuthority)'), 'Office subscribes only to its captured exact identity cache key');
+assert(officeSource.includes("window.addEventListener('storage', onExactIdentityStorage)"), 'web Office listens for cross-tab exact cache publication');
+assert(officeSource.includes('event.key !== exactStorageKey || event.newValue === null'), 'unrelated/removal storage events cannot alter the current identity view');
+assert(officeSource.includes('loadAgentIdentitiesExact(requestedAuthority, isOfficeAuthorityCurrent)'), 'cross-tab adoption re-verifies the captured bearer and lifecycle fence');
+assert(officeSource.includes('setAgentIdentities(identities);') && officeSource.includes('tabs converge without an event loop.'), 'cross-tab adoption is read-only and cannot create a storage-event loop');
 
 type LockOptions = Readonly<{ mode: 'exclusive'; signal: AbortSignal }>;
 
@@ -259,6 +265,62 @@ async function main() {
       && timedWebResult.serverSaved === true
       && timedWebResult.error === 'local_write_failed',
     'a queued Web Lock acquisition times out as a server-saved local failure',
+  );
+
+  console.log('Bounded held Web Lock operation');
+  serverVersion = 'A';
+  localVersion = 'unchanged';
+  fetchCalls = 0;
+  publicationCalls = 0;
+  const operationLocks = new SharedExclusiveLockManager();
+  const timedHeldRealm = makeRealm(operationLocks, 'web', 25);
+  let markTimedFetchStarted!: () => void;
+  let releaseTimedFetch!: () => void;
+  const timedFetchStarted = new Promise<void>(resolve => { markTimedFetchStarted = resolve; });
+  const timedFetchGate = new Promise<void>(resolve => { releaseTimedFetch = resolve; });
+  let timedFetchSignal: AbortSignal | undefined;
+  timedHeldRealm.sandbox.fetchAgentIdentitiesServerSnapshotExact = async (
+    _authority: unknown,
+    signal?: AbortSignal,
+  ) => {
+    fetchCalls += 1;
+    timedFetchSignal = signal;
+    const captured = serverVersion;
+    markTimedFetchStarted();
+    // Deliberately ignore abort until the adapter eventually settles. The
+    // publication fence must still prevent a late stale cache write.
+    await timedFetchGate;
+    return {
+      ok: true,
+      identities: new Map([['agent', { sessionKey: 'agent', version: captured }]]),
+    };
+  };
+  const timedHeldPublication = timedHeldRealm.publish(authority, () => true);
+  await timedFetchStarted;
+  const timedHeldResult = await Promise.race([
+    timedHeldPublication,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('held web operation did not time out')), 1_000)),
+  ]);
+  assert(
+    timedHeldResult.ok === false
+      && timedHeldResult.serverSaved === true
+      && timedHeldResult.error === 'local_write_failed',
+    'a granted Web Lock operation has its own bounded server-saved/local-failed result',
+  );
+  assert(timedFetchSignal?.aborted === true, 'held-operation timeout aborts the server reread signal');
+
+  serverVersion = 'B';
+  const recoveryRealm = makeRealm(operationLocks, 'web', 1_000);
+  const recoveredPublication = await recoveryRealm.publish(authority, () => true);
+  assert(
+    recoveredPublication.ok === true && localVersion === 'B',
+    'another tab can acquire the released lane and publish current server B',
+  );
+  releaseTimedFetch();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert(
+    publicationCalls === 1 && localVersion === 'B',
+    'the timed-out stale task cannot publish after the exclusive lock is released',
   );
 
   console.log('Native single-process fallback');

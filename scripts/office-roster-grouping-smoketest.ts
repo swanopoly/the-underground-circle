@@ -141,7 +141,38 @@ async function main(): Promise<void> {
   const older = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
   const recent = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
-  const { buildOfficeRoster, isOfficeAgentOwnedByCurrentUser } = await import('../src/lib/officeRoster');
+  const {
+    buildOfficeRoster,
+    isOfficeAgentOwnedByCurrentUser,
+    resolveUniqueOfficeAgentById,
+  } = await import('../src/lib/officeRoster');
+
+  const stalePanelTarget = agent({
+    id: 'same-runtime-id',
+    name: 'Runtime',
+    providerType: 'codex',
+    connectionId: 'connection-a',
+    sessionKey: 'session-a',
+  });
+  const currentPanelTarget = agent({
+    id: 'same-runtime-id',
+    name: 'Runtime',
+    providerType: 'codex',
+    connectionId: 'connection-b',
+    sessionKey: 'session-b',
+  });
+  assert(
+    resolveUniqueOfficeAgentById([currentPanelTarget], stalePanelTarget.id) === currentPanelTarget,
+    'a stale sprite id resolves to the current exact roster target',
+  );
+  assert(
+    resolveUniqueOfficeAgentById([stalePanelTarget, currentPanelTarget], stalePanelTarget.id) === null,
+    'duplicate runtime ids fail closed instead of selecting the first target',
+  );
+  assert(
+    resolveUniqueOfficeAgentById([currentPanelTarget], ` ${currentPanelTarget.id}`) === null,
+    'non-canonical target ids never widen through trimming',
+  );
   const { DEFAULT_AGENT, HUGGINGSWAN_AGENT } = await import('../src/lib/officeAgents');
 
   const codexMain = agent({

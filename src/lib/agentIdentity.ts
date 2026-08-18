@@ -944,10 +944,16 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
   }
 }
 
+declare const VERIFIED_AGENT_IDENTITY_EXACT_WRITE_AUTHORITY: unique symbol;
+
+type VerifiedAgentIdentityExactWriteAuthority = AgentIdentityExactWriteAuthority & Readonly<{
+  [VERIFIED_AGENT_IDENTITY_EXACT_WRITE_AUTHORITY]: true;
+}>;
+
 type AgentIdentityExactMutationLoadResult =
   | {
     ok: true;
-    authority: AgentIdentityExactWriteAuthority;
+    authority: VerifiedAgentIdentityExactWriteAuthority;
     identities: Map<string, AgentIdentity>;
     serverIdentities: Map<string, AgentIdentity>;
     /** Raw server version used for optimistic concurrency; absence means INSERT. */
@@ -1062,7 +1068,13 @@ async function loadAgentIdentityMutationBaseExact(
       serverVersions.set(rowSessionKey, updatedAt);
       seen.add(rowSessionKey);
     }
-    return { ok: true, authority, identities, serverIdentities, serverVersions };
+    return {
+      ok: true,
+      authority: authority as VerifiedAgentIdentityExactWriteAuthority,
+      identities,
+      serverIdentities,
+      serverVersions,
+    };
   } catch {
     return isAgentIdentityExactAuthorityCurrent(authority, fence)
       ? { ok: false, error: 'server_unavailable' }
@@ -1640,17 +1652,23 @@ async function publishCurrentAgentIdentityServerTruthExact(
 
 async function saveAgentIdentityMapExact(
   identities: Map<string, AgentIdentity>,
-  capturedAuthority: AgentIdentityExactWriteAuthority,
+  verifiedAuthority: VerifiedAgentIdentityExactWriteAuthority,
   fence: AgentIdentityExactAuthorityFence,
   persistedIdentities: Map<string, AgentIdentity>,
   expectedColumnsBySessionKey?: ReadonlyMap<string, ReadonlySet<keyof AgentIdentityRow>>,
   serverVersions?: ReadonlyMap<string, string>,
 ): Promise<AgentIdentityExactSaveResult> {
-  const syntacticAuthority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
-  if (!syntacticAuthority || typeof fence !== 'function') {
+  // This private helper is reachable only after
+  // loadAgentIdentityMutationBaseExact has verified the captured bearer and
+  // returned its normalized authority. Repeating the remote bearer check here
+  // added a network round trip but could not eliminate the write-time TOCTOU
+  // window; the bearer-bound database mutation and RLS remain the durable
+  // authority check. Keep every caller routed through that verified base.
+  const authority = normalizeAgentIdentityExactWriteAuthority(verifiedAuthority);
+  if (!authority || typeof fence !== 'function') {
     return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
   }
-  if (!isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)) {
+  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
     return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
   }
   if (
@@ -1670,17 +1688,6 @@ async function saveAgentIdentityMapExact(
     if (identities.get(sessionKey) !== identity || identity.sessionKey !== sessionKey) {
       return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
     }
-  }
-
-  const verified = await verifyAgentIdentityExactAuthority(syntacticAuthority, fence);
-  const authority = normalizeAgentIdentityExactWriteAuthority(verified as AgentIdentityExactWriteAuthority);
-  if (!authority) {
-    return isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)
-      ? { ok: false, localSaved: false, serverSaved: false, error: 'authority_mismatch' }
-      : { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
-  }
-  if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
-    return { ok: false, localSaved: false, serverSaved: false, error: 'authority_retired' };
   }
 
   // Durable mutation comes first. A retired generation can therefore never

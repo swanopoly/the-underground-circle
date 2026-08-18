@@ -14,7 +14,9 @@ const check = (condition: unknown, message: string): void => {
 };
 
 for (const marker of [
-  "type TerminalProfileLoadState = 'locked' | 'loading' | 'ready' | 'error'",
+  'type TerminalProfileLoadState =',
+  "| 'refresh-needed'",
+  "| 'outcome-unknown'",
   "setProfileLoadState('loading')",
   'syncAgentIdentitiesFromServerExact(exactIdentityAuthority)',
   "if (!serverResult.ok) {\n          setProfileLoadState('error')",
@@ -26,9 +28,13 @@ for (const marker of [
   check(terminal.includes(marker), `Terminal profile wires ${marker}`);
 }
 check(
-  terminal.indexOf("profileLoadState === 'error'") < terminal.indexOf('accessibilityLabel="Terminal profile model"')
+  terminal.indexOf("profileLoadState === 'refresh-needed'") < terminal.indexOf('accessibilityLabel="Terminal profile model"')
+    && terminal.indexOf("profileLoadState === 'outcome-unknown'") < terminal.indexOf('accessibilityLabel="Terminal profile model"')
+    && terminal.indexOf("profileLoadState === 'error'") < terminal.indexOf('accessibilityLabel="Terminal profile model"')
+    && terminal.includes('saved on the server, but this view could not refresh')
+    && terminal.includes('outcome could not be verified')
     && terminal.includes(") : (\n          <>"),
-  'Terminal renders editable profile fields only in the verified-ready branch',
+  'Terminal renders editable profile fields only in the verified-ready branch and makes partial or unknown receipts reload-only',
 );
 check(
   terminal.includes('latestIdentityRequestKeyRef.current !== capturedRequestKey')
@@ -53,10 +59,14 @@ for (const marker of [
   check(overview.includes(marker), `Overview wires ${marker}`);
 }
 check(
-  overview.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved')
+  overview.includes("receipt.error === 'outcome_unknown' || receipt.serverSaved === null")
+    && overview.includes('receipt.serverSaved === true && !receipt.localSaved')
+    && overview.includes('!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true')
+    && overview.includes("setMainAgentStatus('outcome-unknown')")
+    && overview.includes("setMainAgentStatus('refresh-needed')")
     && overview.includes('latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken')
     && overview.includes('!isIdentityAuthorityCurrent(capturedAuthority)'),
-  'Set-as-main requires a durable receipt and rejects stale authority results',
+  'Set-as-main requires a durable local receipt, distinguishes uncertain refresh states, and rejects stale authority results',
 );
 
 for (const marker of [

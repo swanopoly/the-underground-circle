@@ -746,7 +746,12 @@ export default function AgentSpiritPanel({
                 {editingSpirit ? (
                   <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 3, justifyContent: 'center' }}>
                     {options.map(opt => (
-                      <Pressable key={opt} onPress={() => setCustomKnobs(prev => ({ ...prev, [label === 'ACTION' ? 'actionPosture' : label === 'EVIDENCE' ? 'evidencePosture' : label === 'COMMUNICATION' ? 'communicationDensity' : label === 'SKEPTICISM' ? 'skepticism' : 'riskTier']: opt }))}
+                      <Pressable
+                        key={opt}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${label.toLowerCase()} ${opt.replace(/-/g, ' ')}`}
+                        accessibilityState={{ selected: value === opt }}
+                        onPress={() => setCustomKnobs(prev => ({ ...prev, [label === 'ACTION' ? 'actionPosture' : label === 'EVIDENCE' ? 'evidencePosture' : label === 'COMMUNICATION' ? 'communicationDensity' : label === 'SKEPTICISM' ? 'skepticism' : 'riskTier']: opt }))}
                         style={[{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: '700', color: value === opt ? (colors?.[opt] || '#6366f1') : '#555' }}>{opt.replace(/-/g, ' ').toUpperCase()}</Text>
                       </Pressable>
@@ -815,7 +820,7 @@ export default function AgentSpiritPanel({
                   <View style={styles.spiritKnob}>
                     <Text style={styles.spiritKnobLabel}>SKILL</Text>
                     {editingSpirit ? (
-                      <TextInput value={customKnobs.skillBundle} onChangeText={v => setCustomKnobs(prev => ({ ...prev, skillBundle: v }))}
+                      <TextInput accessibilityLabel="Spirit skill bundle" value={customKnobs.skillBundle} onChangeText={v => setCustomKnobs(prev => ({ ...prev, skillBundle: v }))}
                         style={{ fontSize: 12, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', textAlign: 'center', borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 6 }} placeholder="skill-name" placeholderTextColor="#333" />
                     ) : (
                       <Text style={[styles.spiritKnobValue, { color: '#6366f1' }]} numberOfLines={1}>{knobs.skillBundle}</Text>
@@ -826,7 +831,7 @@ export default function AgentSpiritPanel({
                 <View style={styles.spiritEscalation}>
                   <Text style={styles.spiritKnobLabel}>ESCALATES WHEN</Text>
                   {editingSpirit ? (
-                    <TextInput value={customKnobs.escalationTrigger} onChangeText={v => setCustomKnobs(prev => ({ ...prev, escalationTrigger: v }))}
+                    <TextInput accessibilityLabel="Spirit escalation trigger" value={customKnobs.escalationTrigger} onChangeText={v => setCustomKnobs(prev => ({ ...prev, escalationTrigger: v }))}
                       style={[styles.spiritEscalationText, { borderBottomWidth: 1, borderBottomColor: '#1e1e3a', paddingVertical: 6 }]}
                       placeholder="e.g. failing tests, unclear requirements" placeholderTextColor="#333" />
                   ) : (
@@ -848,7 +853,7 @@ export default function AgentSpiritPanel({
                 {showSoul && (
                   <View style={{ marginTop: 4 }}>
                     {editingSpirit ? (
-                      <TextInput value={customPrompt} onChangeText={setCustomPrompt} multiline
+                      <TextInput accessibilityLabel="Spirit system prompt" value={customPrompt} onChangeText={setCustomPrompt} multiline
                         style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 12, color: '#ccc', fontFamily: 'monospace', fontSize: 14, minHeight: 200, maxHeight: 400, textAlignVertical: 'top' }}
                         placeholder="System prompt instructions..." placeholderTextColor="#333" />
                     ) : (
@@ -1111,7 +1116,7 @@ export default function AgentSpiritPanel({
                   <View style={{ marginTop: 12 }}>
                     {showSaveForm ? (
                       <View style={{ gap: 8 }}>
-                        <TextInput value={saveProfileName} onChangeText={setSaveProfileName} placeholder="Profile name..." placeholderTextColor="#555"
+                        <TextInput accessibilityLabel="Custom Spirit profile name" value={saveProfileName} onChangeText={setSaveProfileName} placeholder="Profile name..." placeholderTextColor="#555"
                           style={{ backgroundColor: '#000', borderWidth: 1, borderColor: '#1e1e3a', borderRadius: 8, padding: 10, color: '#eee', fontFamily: 'monospace', fontSize: 13 }} />
                         <View style={{ flexDirection: 'row', gap: 8 }}>
                           <Pressable
@@ -1337,6 +1342,8 @@ export default function AgentSpiritPanel({
 
               <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 4 }}>
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Scroll personality choices left"
                   onPress={() => personalityScrollRef.current?.scrollTo({ x: Math.max(0, (personalityScrollX.current || 0) - 200), animated: true })}
                   style={[styles.scrollArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
@@ -1355,6 +1362,9 @@ export default function AgentSpiritPanel({
                     return (
                       <Pressable
                         key={tmpl.id}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Use ${tmpl.name} personality`}
+                        accessibilityState={{ selected: isActive }}
                         onPress={() => setSoulText(tmpl.soulText)}
                         style={[
                           styles.personalityChip,
@@ -1370,6 +1380,8 @@ export default function AgentSpiritPanel({
                   })}
                 </ScrollView>
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Scroll personality choices right"
                   onPress={() => personalityScrollRef.current?.scrollTo({ x: (personalityScrollX.current || 0) + 200, animated: true })}
                   style={[styles.scrollArrow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
@@ -1378,6 +1390,7 @@ export default function AgentSpiritPanel({
               </View>
 
               <TextInput
+                accessibilityLabel="Custom agent personality instructions"
                 style={styles.soulInput}
                 value={soulText}
                 onChangeText={setSoulText}
@@ -1389,6 +1402,9 @@ export default function AgentSpiritPanel({
 
               <View style={styles.soulActions}>
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Save agent personality instructions"
+                  accessibilityState={{ disabled: soulSaving, busy: soulSaving }}
                   onPress={handleSaveSoul}
                   disabled={soulSaving}
                   style={[styles.soulSaveBtn, soulSaving && { opacity: 0.4 }]}
@@ -1396,7 +1412,7 @@ export default function AgentSpiritPanel({
                   <Text style={styles.soulSaveBtnText}>{soulSaving ? 'SAVING...' : 'SAVE SOUL'}</Text>
                 </Pressable>
                 {soulText.trim() ? (
-                  <Pressable onPress={() => setSoulText('')} style={styles.soulClearBtn}>
+                  <Pressable accessibilityRole="button" accessibilityLabel="Clear agent personality instructions" onPress={() => setSoulText('')} style={styles.soulClearBtn}>
                     <Text style={styles.soulClearBtnText}>CLEAR</Text>
                   </Pressable>
                 ) : null}
@@ -1868,9 +1884,9 @@ const styles = StyleSheet.create({
     marginTop: 16, paddingTop: 14,
   },
   scrollArrow: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#ffffff08',
     borderWidth: 1,
     borderColor: '#ffffff15',
@@ -1900,14 +1916,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 4,
   },
   soulSaveBtn: {
-    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
+    minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
     backgroundColor: '#6366f120', borderWidth: 1, borderColor: '#6366f140',
   },
   soulSaveBtnText: {
     fontSize: 12, color: '#6366f1', fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.8,
   },
   soulClearBtn: {
-    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
+    minHeight: 44, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8,
     backgroundColor: '#ef444420', borderWidth: 1, borderColor: '#ef444440',
   },
   soulClearBtnText: {

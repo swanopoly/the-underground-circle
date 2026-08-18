@@ -8,6 +8,8 @@ const read = (path: string) => readFileSync(`${root}/${path}`, 'utf8');
 const memory = read('src/screens/circles/tabs/office/AgentMemoryPanel.tsx');
 const runs = read('src/screens/circles/tabs/office/AgentRunsPanel.tsx');
 const spirit = read('src/screens/circles/tabs/office/AgentSpiritPanel.tsx');
+const sessionTagInput = read('src/components/SessionTagInput.tsx');
+const sessionTagsHelp = read('src/components/SessionTagsHelp.tsx');
 
 let assertions = 0;
 const check = (condition: unknown, message: string) => {
@@ -150,6 +152,54 @@ check(
     && spirit.includes('opsActionBtn: {\n    minHeight: 44')
     && spirit.includes('opsSaveBtn: {\n    minHeight: 44'),
   'Spirit leaves vertical scrolling to the shell and preserves accessible 44px artifact actions',
+);
+
+check(
+  spirit.includes('accessibilityLabel="Spirit skill bundle"')
+    && spirit.includes('accessibilityLabel="Spirit escalation trigger"')
+    && spirit.includes('accessibilityLabel="Spirit system prompt"')
+    && spirit.includes('accessibilityLabel="Custom Spirit profile name"')
+    && spirit.includes('accessibilityLabel="Custom agent personality instructions"'),
+  'Spirit edit fields expose stable screen-reader names instead of relying on placeholder text',
+);
+check(
+  spirit.includes("accessibilityLabel={`${label.toLowerCase()} ${opt.replace(/-/g, ' ')}`}")
+    && spirit.includes('accessibilityState={{ selected: value === opt }}')
+    && spirit.includes('accessibilityLabel={`Use ${tmpl.name} personality`}')
+    && spirit.includes('accessibilityState={{ selected: isActive }}'),
+  'Spirit knob and personality choices expose their button and selected semantics',
+);
+check(
+  spirit.includes('accessibilityLabel="Scroll personality choices left"')
+    && spirit.includes('accessibilityLabel="Scroll personality choices right"')
+    && spirit.includes('accessibilityLabel="Save agent personality instructions"')
+    && spirit.includes('accessibilityLabel="Clear agent personality instructions"')
+    && spirit.includes("width: 44,\n    height: 44,")
+    && spirit.includes("minHeight: 44, justifyContent: 'center', paddingHorizontal: 16"),
+  'Spirit personality navigation and save controls have descriptive names and reliable targets',
+);
+
+const sessionTagToggle = sessionTagInput.indexOf("accessibilityLabel={showHelp ? 'Hide Session Tags Guide'");
+const sessionTagDisclosure = sessionTagInput.indexOf('<SessionTagsHelp visible={showHelp} />');
+check(
+  sessionTagToggle >= 0
+    && sessionTagDisclosure > sessionTagToggle
+    && sessionTagInput.includes("'aria-controls': 'uc-session-tags-help'")
+    && sessionTagInput.includes('accessibilityState={{ expanded: showHelp }}')
+    && sessionTagsHelp.includes('nativeID="uc-session-tags-help"')
+    && sessionTagsHelp.includes("role: 'region'")
+    && !sessionTagsHelp.includes('<ScrollView')
+    && !sessionTagsHelp.includes('styles.overlay'),
+  'Session Tags help is an in-flow disclosure after its persistent expanded-state toggle, not a nested faux modal',
+);
+check(
+  sessionTagInput.includes('accessibilityLabel={`Remove ${tag.label} session tag`}')
+    && sessionTagInput.includes('accessibilityLabel="Session tag"')
+    && sessionTagInput.includes('accessibilityLabel="Add session tag"')
+    && sessionTagInput.includes('accessibilityLabel={`Start ${meta.label} session tag`}')
+    && sessionTagInput.includes('accessibilityLabel={`Add suggested session tag ${suggestion.label}`}')
+    && sessionTagInput.includes('width: 44,\n    height: 44,'),
+  'Session tag editing, suggestions, removal, and help expose named controls with a 44px primary target',
 );
 
 console.log(`Office Agent panel safety smoke: ${assertions} passed`);

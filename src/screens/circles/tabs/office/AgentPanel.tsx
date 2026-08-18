@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Animated, Platform, ActivityIndicator, Pressable, Text, AccessibilityInfo } from 'react-native';
-import { getAgentIdentityKey, type AgentIdentityExactAuthority } from '../../../../lib/agentIdentity';
+import {
+  getAgentIdentityKey,
+  type AgentIdentityExactAuthority,
+  type AgentIdentityExactSaveResult,
+} from '../../../../lib/agentIdentity';
 import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../../../../lib/officeAgents';
 import { SessionTag, type OfficeSessionStorageScope } from '../../../../lib/sessionTags';
 import AgentPanelShell from './AgentPanelShell';
@@ -32,8 +36,8 @@ interface Props {
   agent: OfficeAgent | null;
   onClose: () => void;
   isDesktop?: boolean;
-  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<boolean>;
-  onAgentIdentityChange?: () => void;
+  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<AgentIdentityExactSaveResult>;
+  onAgentIdentityChange?: () => Promise<boolean>;
   onRemoveAgent?: (agent: OfficeAgent) => Promise<boolean>;
   sessionTags?: Map<string, SessionTag[]>;
   onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
@@ -45,15 +49,17 @@ interface Props {
   identityAuthority?: AgentPanelIdentityAuthority | null;
   runtimeConnectionId?: string | null;
   appearances?: Record<string, AgentAppearance>;
-  onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<boolean>;
+  onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>;
   environmentType?: EnvironmentType;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
   onOpenAgentInChat?: (agentId: string, draft?: string) => void;
 }
 
 export type AgentPanelActionNotice = {
-  kind: 'success' | 'error';
+  kind: 'success' | 'warning' | 'error';
   message: string;
+  actionLabel?: string;
+  onAction?: () => void | Promise<void>;
 } | null;
 
 type GatewayPanelsModule = typeof import('./AgentGatewayPanels');
@@ -348,16 +354,51 @@ export default function AgentPanel({
   const latestPanelScopeKeyRef = useRef(panelScopeKey);
   latestPanelScopeKeyRef.current = panelScopeKey;
   const renameInFlightRef = useRef(false);
+  const identityRefreshInFlightRef = useRef(false);
   const removeInFlightRef = useRef(false);
   const renameRequestGenerationRef = useRef(0);
   const removeRequestGenerationRef = useRef(0);
   const editing = renameDraft?.scopeKey === panelScopeKey;
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const editName = editing ? renameDraft.name : '';
   const renameBusy = renameBusyScopeKey === panelScopeKey;
   const removingAgent = removeBusyScopeKey === panelScopeKey;
   const actionNotice = scopedActionNotice?.scopeKey === panelScopeKey
     ? scopedActionNotice
     : null;
+  const reloadIdentityForNotice = useCallback(async () => {
+    const capturedScopeKey = panelScopeKey;
+    if (!onAgentIdentityChange || identityRefreshInFlightRef.current) return;
+    identityRefreshInFlightRef.current = true;
+    setScopedActionNotice({
+      scopeKey: capturedScopeKey,
+      kind: 'warning',
+      message: 'Reloading the exact agent identity…',
+    });
+    try {
+      const refreshed = await onAgentIdentityChange();
+      if (latestPanelScopeKeyRef.current !== capturedScopeKey) return;
+      setScopedActionNotice(refreshed ? {
+        scopeKey: capturedScopeKey,
+        kind: 'success',
+        message: 'Agent identity refreshed from the server.',
+      } : {
+        scopeKey: capturedScopeKey,
+        kind: 'warning',
+        message: 'Agent identity could not be refreshed yet. Close and reopen Office after connectivity returns; do not repeat the save.',
+      });
+    } catch {
+      if (latestPanelScopeKeyRef.current !== capturedScopeKey) return;
+      setScopedActionNotice({
+        scopeKey: capturedScopeKey,
+        kind: 'warning',
+        message: 'Agent identity could not be refreshed yet. Close and reopen Office after connectivity returns; do not repeat the save.',
+      });
+    } finally {
+      identityRefreshInFlightRef.current = false;
+    }
+  }, [onAgentIdentityChange, panelScopeKey]);
   const setEditName = useCallback((name: string) => {
     setRenameDraft(current => current?.scopeKey === panelScopeKey
       ? { ...current, name }
@@ -459,12 +500,12 @@ export default function AgentPanel({
   }, [agent?.id]);
 
   // ── Keyboard shortcuts + modal focus trap (web only) ─────────────────────
-  // ESC         → close panel
+  // ESC         → cancel Rename first; otherwise close panel
   // ⌘/Ctrl + \  → toggle center/side mode
   // Tab/Shift+Tab wraps only in centered pop-up mode. A docked inspector must
   // not make the Office behind it unreachable to keyboard users.
-  // Ignored when focus is inside an editable element for ESC/mode toggle so
-  // typing isn't disrupted (Tab trap still applies).
+  // Mode toggle is ignored inside editable fields; Escape remains the modal
+  // escape hatch unless an IME composition is active.
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined' || !agent) return;
     const isEditing = (t: EventTarget | null): boolean => {
@@ -480,9 +521,24 @@ export default function AgentPanel({
         .filter(el => !el.hasAttribute('aria-hidden') && el.offsetParent !== null);
     };
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape' && !isEditing(ev.target)) {
+      if (effectivePanelMode === 'center'
+        && ev.key.toLowerCase() === 'k'
+        && (ev.metaKey || ev.ctrlKey)) {
+        // The Circle-level Search shortcut is another modal owner. A centered
+        // Agent dialog wins until it closes; never stack two focus traps.
         ev.preventDefault();
-        onClose();
+        ev.stopImmediatePropagation();
+        return;
+      }
+      if (ev.key === 'Escape') {
+        if (ev.isComposing) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        if (editingRef.current) {
+          if (!renameInFlightRef.current) setRenameDraft(null);
+        } else {
+          onClose();
+        }
         return;
       }
       // ⌘\ on Mac, Ctrl+\ elsewhere
@@ -514,7 +570,7 @@ export default function AgentPanel({
         }
       }
     };
-    window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, { capture: true });
     // A docked inspector is supplemental UI, so opening it must not steal focus
     // from the floor. The centered pop-up receives focus after it is mounted.
     const rafId = effectivePanelMode === 'center' ? requestAnimationFrame(() => {
@@ -526,7 +582,7 @@ export default function AgentPanel({
       }
     }) : null;
     return () => {
-      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, { capture: true });
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, [agent, effectivePanelMode, onClose, toggleMode]);
@@ -658,13 +714,35 @@ export default function AgentPanel({
         setRenameBusyScopeKey(capturedScopeKey);
         setScopedActionNotice(null);
         try {
-          const saved = await onRenameAgent(agent, normalizedName);
+          const receipt = await onRenameAgent(agent, normalizedName);
           if (
             latestPanelScopeKeyRef.current !== capturedScopeKey
             || renameRequestGenerationRef.current !== requestGeneration
             || !isExactIdentityAuthorityCurrent(capturedAuthority)
           ) return;
-          if (saved !== true) {
+          if (receipt.error === 'outcome_unknown' || receipt.serverSaved === null) {
+            setRenameDraft(null);
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'warning',
+              message: 'Agent-name outcome could not be verified. Reload this agent before retrying the rename.',
+              actionLabel: 'Reload identity',
+              onAction: reloadIdentityForNotice,
+            });
+            return;
+          }
+          if (receipt.serverSaved === true && !receipt.localSaved) {
+            setRenameDraft(null);
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'warning',
+              message: 'Agent name was saved on the server, but this view could not refresh. Reload the identity; do not save the name again.',
+              actionLabel: 'Reload identity',
+              onAction: reloadIdentityForNotice,
+            });
+            return;
+          }
+          if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
             setScopedActionNotice({
               scopeKey: capturedScopeKey,
               kind: 'error',
@@ -994,6 +1072,7 @@ export default function AgentPanel({
             agent={agent}
             appearances={appearances}
             onAppearanceChange={onAppearanceChange}
+            onIdentityRefresh={onAgentIdentityChange}
             environmentType={environmentType}
             reduceMotion={reduceMotion}
           />

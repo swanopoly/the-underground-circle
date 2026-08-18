@@ -319,8 +319,10 @@ for (const marker of [header, source, footer]) {
   );
 }
 check(
-  /^\s*$/u.test(consolidated.slice(sectionEnd + footer.length)),
-  '§46 is the closed executable tail of consolidated SQL',
+  consolidated.slice(sectionEnd + footer.length).startsWith(
+    '\n\n-- BEGIN SECTION 47: Transactional primary-agent identity selection',
+  ),
+  '§46 closes before the canonical §47 and §48 authority sections',
 );
 check(
   consolidated.includes('--   §46 Circle-global idle-behavior claims'),

@@ -94,6 +94,7 @@ interface DatabaseSourceContractReport {
   functionBodyDigests: Record<string, string>;
   triggers: TriggerContract[];
   primaryIndex: IndexContract | null;
+  policies: PolicyContract[];
   customProfilePolicies: PolicyContract[];
   blockers: string[];
 }
@@ -117,6 +118,7 @@ interface LocalSourceReport {
 
 interface CatalogFunction {
   identity: string;
+  ownerRole: string;
   securityDefiner: boolean;
   searchPath: string;
   executeRoles: string[];
@@ -167,20 +169,22 @@ interface DeploymentCatalogSnapshot {
 
 interface DeploymentReport {
   mode: 'not_checked' | 'catalog_snapshot';
-  status: 'not_checked' | 'ready' | 'blocked';
+  status: 'not_checked' | 'catalog_matches_unattested' | 'blocked';
   checked: boolean;
   ready: boolean;
+  catalogMatches: boolean;
   networkAttempted: false;
   mutationsPerformed: false;
   exactSourceVerified: boolean;
   targetRef: string | null;
   capturedAt: string | null;
   blockers: string[];
+  releaseBlockers: string[];
 }
 
 interface PreflightReport {
   schemaVersion: 1;
-  status: 'source_ready_deployment_unverified' | 'deployment_verified_docs_pending' | 'release_ready' | 'blocked';
+  status: 'source_ready_deployment_unverified' | 'catalog_contract_matches_unattested' | 'blocked';
   source: LocalSourceReport;
   deployment: DeploymentReport;
   releaseReady: boolean;
@@ -252,6 +256,7 @@ const EXPECTED_FUNCTIONS = [
     migration: '20260817130000_agent_identity_primary_rpc.sql',
     sourceMarker: 'CREATE OR REPLACE FUNCTION public.set_main_agent_for_provider_v1(',
     securityDefiner: true,
+    ownerRole: 'postgres',
     executeRoles: ['authenticated'],
   },
   {
@@ -259,6 +264,7 @@ const EXPECTED_FUNCTIONS = [
     migration: '20260817130000_agent_identity_primary_rpc.sql',
     sourceMarker: 'CREATE OR REPLACE FUNCTION public.guard_agent_identity_primary_columns_v1()',
     securityDefiner: false,
+    ownerRole: 'postgres',
     executeRoles: [],
   },
   {
@@ -266,6 +272,7 @@ const EXPECTED_FUNCTIONS = [
     migration: '20260817140000_agent_spirit_assignment_rpc.sql',
     sourceMarker: 'CREATE OR REPLACE FUNCTION public.set_published_agent_spirit_v1(',
     securityDefiner: true,
+    ownerRole: 'postgres',
     executeRoles: ['authenticated'],
   },
   {
@@ -273,6 +280,7 @@ const EXPECTED_FUNCTIONS = [
     migration: '20260817140000_agent_spirit_assignment_rpc.sql',
     sourceMarker: 'CREATE OR REPLACE FUNCTION public.delete_unreferenced_custom_agent_profile_v1(',
     securityDefiner: true,
+    ownerRole: 'postgres',
     executeRoles: ['authenticated'],
   },
   {
@@ -280,6 +288,7 @@ const EXPECTED_FUNCTIONS = [
     migration: '20260817140000_agent_spirit_assignment_rpc.sql',
     sourceMarker: 'CREATE OR REPLACE FUNCTION public.guard_circle_office_agent_spirit_columns_v1()',
     securityDefiner: false,
+    ownerRole: 'postgres',
     executeRoles: [],
   },
   {
@@ -287,6 +296,7 @@ const EXPECTED_FUNCTIONS = [
     migration: '20260817140000_agent_spirit_assignment_rpc.sql',
     sourceMarker: 'CREATE OR REPLACE FUNCTION public.guard_published_agent_identity_spirit_columns_v1()',
     securityDefiner: false,
+    ownerRole: 'postgres',
     executeRoles: [],
   },
 ] as const;
@@ -326,6 +336,27 @@ const EXPECTED_RLS_RELATIONS = [
   'public.custom_agent_profiles',
 ] as const;
 
+const EXPECTED_POLICY_SPECS = [
+  { relation: 'public.agent_identities', table: 'agent_identities', name: 'Users read own agent identities', migration: '20260522_repair_agent_identity_and_office_usage.sql' },
+  { relation: 'public.agent_identities', table: 'agent_identities', name: 'Users insert own agent identities', migration: '20260522_repair_agent_identity_and_office_usage.sql' },
+  { relation: 'public.agent_identities', table: 'agent_identities', name: 'Users update own agent identities', migration: '20260522_repair_agent_identity_and_office_usage.sql' },
+  { relation: 'public.agent_identities', table: 'agent_identities', name: 'Users delete own agent identities', migration: '20260522_repair_agent_identity_and_office_usage.sql' },
+  { relation: 'public.circle_office_agents', table: 'circle_office_agents', name: 'circle members can view office agents', migration: '20260225_circle_office.sql', optionalSafeLegacy: true },
+  { relation: 'public.circle_office_agents', table: 'circle_office_agents', name: 'owners can manage their office agents', migration: '20260225_circle_office.sql', optionalSafeLegacy: true },
+  { relation: 'public.circle_office_agents', table: 'circle_office_agents', name: 'rls_oa_select', migration: '20260318_rls_hardening.sql' },
+  { relation: 'public.circle_office_agents', table: 'circle_office_agents', name: 'rls_oa_insert', migration: '20260318_rls_hardening.sql' },
+  { relation: 'public.circle_office_agents', table: 'circle_office_agents', name: 'rls_oa_update', migration: '20260318_rls_hardening.sql' },
+  { relation: 'public.circle_office_agents', table: 'circle_office_agents', name: 'rls_oa_delete', migration: '20260318_rls_hardening.sql' },
+  { relation: 'public.custom_agent_profiles', table: 'custom_agent_profiles', name: 'custom_profiles_own', migration: '20260327_custom_agent_profiles.sql' },
+  { relation: 'public.custom_agent_profiles', table: 'custom_agent_profiles', name: 'custom_profiles_shared_read', migration: '20260327_custom_agent_profiles.sql' },
+] as const;
+
+const EXPECTED_AUTHENTICATED_TABLE_PRIVILEGES = [
+  { identity: 'public.agent_identities', select: true, insert: true, update: true, delete: true },
+  { identity: 'public.circle_office_agents', select: true, insert: true, update: true, delete: true },
+  { identity: 'public.custom_agent_profiles', select: true, insert: true, update: true, delete: false },
+] as const;
+
 const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60 * 1_000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 const MAX_SNAPSHOT_BYTES = 256 * 1_024;
@@ -342,13 +373,14 @@ Options:
   --json                     Print machine-readable JSON.
   --repo-root <path>         Inspect another repository root (test fixtures).
   --catalog-snapshot <path>  Read an explicit value-free deployment snapshot.
-  --require-deployed         Fail unless the supplied snapshot proves exact deployment.
+  --require-deployed         Fail closed: unsigned snapshots cannot prove deployment.
   --help                     Show this help.
 
 Default behavior is local-source only. It performs no network requests, reads
 no environment credentials, and applies no SQL or Edge functions. A catalog
-snapshot is evidence gathered by a separate reviewed read-only workflow; it
-must contain no row data or secrets. Function bodySha256 values are SHA-256 of
+snapshot is untrusted catalog-shape evidence only; it must contain no row data
+or secrets and cannot prove deployment or release readiness. Function
+bodySha256 values are SHA-256 of
 the exact pg_proc.prosrc after CRLF-to-LF normalization and outer trim; trigger
 fields come from the target catalog definition, not migration-version claims.
 This command has no apply mode.`;
@@ -564,27 +596,94 @@ function normalizePolicyExpression(value: string | null): string | null {
   );
 }
 
-function deriveCustomProfilePolicy(source: string, name: string): PolicyContract | null {
-  const marker = `CREATE POLICY "${name}" ON custom_agent_profiles`;
-  const policyAt = source.indexOf(marker);
-  if (policyAt < 0) return null;
-  const statementEnd = source.indexOf(';', policyAt);
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function extractBalancedPolicyClause(statement: string, keyword: 'USING' | 'WITH CHECK'): string | null {
+  const keywordPattern = keyword === 'USING' ? /\bUSING\s*\(/iu : /\bWITH\s+CHECK\s*\(/iu;
+  const match = keywordPattern.exec(statement);
+  if (!match) return null;
+  const openAt = statement.indexOf('(', match.index);
+  if (openAt < 0) return null;
+  let depth = 0;
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  for (let index = openAt; index < statement.length; index += 1) {
+    const char = statement[index];
+    const next = statement[index + 1];
+    if (singleQuoted) {
+      if (char === "'" && next === "'") {
+        index += 1;
+      } else if (char === "'") {
+        singleQuoted = false;
+      }
+      continue;
+    }
+    if (doubleQuoted) {
+      if (char === '"' && next === '"') {
+        index += 1;
+      } else if (char === '"') {
+        doubleQuoted = false;
+      }
+      continue;
+    }
+    if (char === "'") {
+      singleQuoted = true;
+      continue;
+    }
+    if (char === '"') {
+      doubleQuoted = true;
+      continue;
+    }
+    if (char === '(') depth += 1;
+    if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return statement.slice(openAt + 1, index);
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
+
+function derivePolicyContract(
+  source: string,
+  spec: (typeof EXPECTED_POLICY_SPECS)[number],
+): PolicyContract | null {
+  const escapedName = escapeRegExp(spec.name);
+  const escapedTable = escapeRegExp(spec.table);
+  const marker = new RegExp(
+    `CREATE\\s+POLICY\\s+(?:"${escapedName}"|${escapedName})\\s+ON\\s+(?:public\\.)?${escapedTable}\\b`,
+    'iu',
+  );
+  const match = marker.exec(source);
+  if (!match) return null;
+  const statementEnd = source.indexOf(';', match.index);
   if (statementEnd < 0) return null;
-  const statement = source.slice(policyAt, statementEnd + 1).replace(/\r\n?/gu, '\n');
-  const command = statement.match(/\sFOR\s+(ALL|SELECT|INSERT|UPDATE|DELETE)\s+/u)?.[1];
-  const rolesText = statement.match(/\sTO\s+([a-z0-9_, ]+)\s+(?:USING|WITH CHECK)/iu)?.[1];
-  const usingExpression = statement.match(/\sUSING\s+\(([^\n]+)\)/u)?.[1] ?? null;
-  const withCheckExpression = statement.match(/\sWITH CHECK\s+\(([^\n]+)\)/u)?.[1] ?? null;
-  if (!command || !rolesText) return null;
-  const roles = rolesText.split(',').map((role) => role.trim()).filter(Boolean).sort();
+  const statement = source.slice(match.index, statementEnd + 1).replace(/\r\n?/gu, '\n');
+  const command = statement.match(/\bFOR\s+(ALL|SELECT|INSERT|UPDATE|DELETE)\b/iu)?.[1]?.toUpperCase() || 'ALL';
+  const rolesText = statement.match(/\bTO\s+([\s\S]*?)(?=\bUSING\b|\bWITH\s+CHECK\b|;)/iu)?.[1] || 'public';
+  const roles = rolesText
+    .split(',')
+    .map((role) => role.replace(/"/gu, '').trim().toLowerCase())
+    .filter(Boolean)
+    .sort();
   if (roles.length === 0) return null;
   return {
-    identity: `public.custom_agent_profiles.${name}`,
+    identity: `${spec.relation}.${spec.name}`,
     command,
     roles,
-    usingExpression: normalizePolicyExpression(usingExpression),
-    withCheckExpression: normalizePolicyExpression(withCheckExpression),
+    usingExpression: normalizePolicyExpression(extractBalancedPolicyClause(statement, 'USING')),
+    withCheckExpression: normalizePolicyExpression(extractBalancedPolicyClause(statement, 'WITH CHECK')),
   };
+}
+
+function policyContractsEqual(actual: PolicyContract, expected: PolicyContract): boolean {
+  return actual.identity === expected.identity
+    && actual.command === expected.command
+    && actual.roles.join(',') === expected.roles.join(',')
+    && actual.usingExpression === expected.usingExpression
+    && actual.withCheckExpression === expected.withCheckExpression;
 }
 
 function inspectDatabaseSourceContract(repoRoot: string): DatabaseSourceContractReport {
@@ -619,20 +718,25 @@ function inspectDatabaseSourceContract(repoRoot: string): DatabaseSourceContract
     migrationSource('20260817130000_agent_identity_primary_rpc.sql'),
   );
   if (!primaryIndex) blockers.push('cannot derive canonical partial unique primary-agent index contract');
-  const customProfilePolicySource = read(repoRoot, 'supabase/migrations/20260327_custom_agent_profiles.sql') || '';
-  const customProfilePolicies = ['custom_profiles_own', 'custom_profiles_shared_read']
-    .map((name) => deriveCustomProfilePolicy(customProfilePolicySource, name))
+  const policies = EXPECTED_POLICY_SPECS
+    .map((spec) => derivePolicyContract(migrationSource(spec.migration), spec))
     .filter((policy): policy is PolicyContract => policy !== null);
-  if (customProfilePolicies.length !== 2) blockers.push('cannot derive complete canonical custom-agent-profile policy contract');
+  if (policies.length !== EXPECTED_POLICY_SPECS.length) {
+    blockers.push('cannot derive complete canonical authority-table policy contracts');
+  }
+  const customProfilePolicies = policies.filter((policy) => (
+    policy.identity.startsWith('public.custom_agent_profiles.')
+  ));
   return {
     ready: blockers.length === 0
       && Object.keys(functionBodyDigests).length === EXPECTED_FUNCTIONS.length
       && triggers.length === EXPECTED_TRIGGERS.length
       && primaryIndex !== null
-      && customProfilePolicies.length === 2,
+      && policies.length === EXPECTED_POLICY_SPECS.length,
     functionBodyDigests,
     triggers,
     primaryIndex,
+    policies,
     customProfilePolicies,
     blockers,
   };
@@ -871,8 +975,10 @@ function parseCatalogSnapshot(raw: unknown): DeploymentCatalogSnapshot | null {
   const functions: CatalogFunction[] = [];
   for (const item of raw.database.functions) {
     if (!isRecord(item)
-      || !hasOnlyKeys(item, ['identity', 'securityDefiner', 'searchPath', 'executeRoles', 'bodySha256'])
+      || !hasOnlyKeys(item, ['identity', 'ownerRole', 'securityDefiner', 'searchPath', 'executeRoles', 'bodySha256'])
       || typeof item.identity !== 'string'
+      || typeof item.ownerRole !== 'string'
+      || !/^[a-z_][a-z0-9_]{0,62}$/u.test(item.ownerRole)
       || typeof item.securityDefiner !== 'boolean'
       || typeof item.searchPath !== 'string'
       || !stringArray(item.executeRoles)
@@ -881,6 +987,7 @@ function parseCatalogSnapshot(raw: unknown): DeploymentCatalogSnapshot | null {
       || !/^[0-9a-f]{64}$/u.test(item.bodySha256)) return null;
     functions.push({
       identity: item.identity,
+      ownerRole: item.ownerRole,
       securityDefiner: item.securityDefiner,
       searchPath: item.searchPath,
       executeRoles: [...(item.executeRoles as string[])].sort(),
@@ -1027,12 +1134,14 @@ function inspectDeploymentSnapshot(path: string, source: LocalSourceReport): Dep
       status: 'blocked',
       checked: true,
       ready: false,
+      catalogMatches: false,
       networkAttempted: false,
       mutationsPerformed: false,
       exactSourceVerified: false,
       targetRef: null,
       capturedAt: null,
       blockers: ['catalog snapshot is missing, unreadable, or not valid JSON'],
+      releaseBlockers: ['catalog evidence is unavailable'],
     };
   }
   const snapshot = parseCatalogSnapshot(raw);
@@ -1042,12 +1151,14 @@ function inspectDeploymentSnapshot(path: string, source: LocalSourceReport): Dep
       status: 'blocked',
       checked: true,
       ready: false,
+      catalogMatches: false,
       networkAttempted: false,
       mutationsPerformed: false,
       exactSourceVerified: false,
       targetRef: null,
       capturedAt: null,
       blockers: ['catalog snapshot does not match the value-free schema'],
+      releaseBlockers: ['catalog evidence is unavailable'],
     };
   }
 
@@ -1065,6 +1176,7 @@ function inspectDeploymentSnapshot(path: string, source: LocalSourceReport): Dep
       blockers.push(`target is missing function ${expected.identity}`);
       continue;
     }
+    if (actual.ownerRole !== expected.ownerRole) blockers.push(`${expected.identity} owner role is not exact`);
     if (actual.securityDefiner !== expected.securityDefiner) blockers.push(`${expected.identity} SECURITY DEFINER state differs`);
     if (actual.searchPath !== '') blockers.push(`${expected.identity} does not have an empty search_path`);
     if (actual.executeRoles.join(',') !== [...expected.executeRoles].sort().join(',')) {
@@ -1107,34 +1219,34 @@ function inspectDeploymentSnapshot(path: string, source: LocalSourceReport): Dep
   for (const relation of EXPECTED_RLS_RELATIONS) {
     if (!snapshot.database.rlsEnabledRelations.includes(relation)) blockers.push(`target RLS is not enabled on ${relation}`);
   }
-  const customProfileRelation = 'public.custom_agent_profiles';
-  const targetCustomProfilePolicies = snapshot.database.policies
-    .filter((item) => item.identity.startsWith(`${customProfileRelation}.`))
-    .sort((left, right) => left.identity.localeCompare(right.identity));
-  const expectedCustomProfilePolicies = [...source.databaseContract.customProfilePolicies]
-    .sort((left, right) => left.identity.localeCompare(right.identity));
-  if (!snapshot.database.policyCompleteRelations.includes(customProfileRelation)
-    || targetCustomProfilePolicies.length !== expectedCustomProfilePolicies.length
-    || targetCustomProfilePolicies.some((actual, index) => {
-      const expected = expectedCustomProfilePolicies[index];
-      return !expected
-        || actual.identity !== expected.identity
-        || actual.command !== expected.command
-        || actual.roles.join(',') !== expected.roles.join(',')
-        || actual.usingExpression !== expected.usingExpression
-        || actual.withCheckExpression !== expected.withCheckExpression;
-    })) {
-    blockers.push('target custom_agent_profiles policy inventory/roles/commands/qualifiers do not match the complete canonical contract');
+  const sourcePolicies = new Map(source.databaseContract.policies.map((policy) => [policy.identity, policy]));
+  for (const relation of ['public.agent_identities', 'public.circle_office_agents', 'public.custom_agent_profiles']) {
+    const relationSpecs = EXPECTED_POLICY_SPECS.filter((spec) => spec.relation === relation);
+    const requiredSpecs = relationSpecs.filter((spec) => !('optionalSafeLegacy' in spec && spec.optionalSafeLegacy));
+    const targetPolicies = snapshot.database.policies.filter((policy) => policy.identity.startsWith(`${relation}.`));
+    const complete = snapshot.database.policyCompleteRelations.includes(relation)
+      && requiredSpecs.every((spec) => targetPolicies.some((policy) => policy.identity === `${relation}.${spec.name}`))
+      && targetPolicies.every((actual) => {
+        const expected = sourcePolicies.get(actual.identity);
+        return !!expected
+          && relationSpecs.some((spec) => `${relation}.${spec.name}` === actual.identity)
+          && policyContractsEqual(actual, expected);
+      });
+    if (!complete) {
+      blockers.push(`target ${relation.slice('public.'.length)} policy inventory/roles/commands/qualifiers are not complete and canonical`);
+    }
   }
-  const customProfilePrivileges = snapshot.database.tablePrivileges.find(
-    (item) => item.identity === 'public.custom_agent_profiles' && item.role === 'authenticated',
-  );
-  if (!customProfilePrivileges
-    || !customProfilePrivileges.select
-    || !customProfilePrivileges.insert
-    || !customProfilePrivileges.update
-    || customProfilePrivileges.delete) {
-    blockers.push('target custom_agent_profiles privileges must preserve authenticated SELECT/INSERT/UPDATE and deny DELETE');
+  for (const expected of EXPECTED_AUTHENTICATED_TABLE_PRIVILEGES) {
+    const actual = snapshot.database.tablePrivileges.find(
+      (item) => item.identity === expected.identity && item.role === 'authenticated',
+    );
+    if (!actual
+      || actual.select !== expected.select
+      || actual.insert !== expected.insert
+      || actual.update !== expected.update
+      || actual.delete !== expected.delete) {
+      blockers.push(`target ${expected.identity.slice('public.'.length)} authenticated table privileges are not exact`);
+    }
   }
   for (const slug of ['swanbot-ai', 'swanbot-v2-ai']) {
     if (!snapshot.edge.functions.some((item) => item.slug === slug && item.active)) {
@@ -1149,15 +1261,22 @@ function inspectDeploymentSnapshot(path: string, source: LocalSourceReport): Dep
 
   return {
     mode: 'catalog_snapshot',
-    status: blockers.length === 0 ? 'ready' : 'blocked',
+    status: blockers.length === 0 ? 'catalog_matches_unattested' : 'blocked',
     checked: true,
-    ready: blockers.length === 0,
+    ready: false,
+    catalogMatches: blockers.length === 0,
     networkAttempted: false,
     mutationsPerformed: false,
     exactSourceVerified,
     targetRef: snapshot.targetRef,
     capturedAt: snapshot.capturedAt,
     blockers,
+    releaseBlockers: blockers.length === 0
+      ? [
+          'catalog snapshot is caller-supplied and unattested',
+          'authenticated account-switch and contention canaries are still required',
+        ]
+      : ['catalog contract does not match the reviewed source'],
   };
 }
 
@@ -1170,24 +1289,22 @@ function buildReport(options: CliOptions): PreflightReport {
         status: 'not_checked',
         checked: false,
         ready: false,
+        catalogMatches: false,
         networkAttempted: false,
         mutationsPerformed: false,
         exactSourceVerified: false,
         targetRef: null,
         capturedAt: null,
         blockers: ['deployment was not checked; source readiness is not deployment proof'],
+        releaseBlockers: ['live catalog capture and authenticated canaries are pending'],
       };
-  const releaseReady = source.sourceReady
-    && deployment.ready
-    && source.roadmapDeploymentState === 'applied';
+  const releaseReady = false;
   return {
     schemaVersion: 1,
-    status: !source.sourceReady || (deployment.checked && !deployment.ready)
+    status: !source.sourceReady || (deployment.checked && !deployment.catalogMatches)
       ? 'blocked'
-      : releaseReady
-        ? 'release_ready'
-        : deployment.ready
-          ? 'deployment_verified_docs_pending'
+      : deployment.catalogMatches
+          ? 'catalog_contract_matches_unattested'
         : 'source_ready_deployment_unverified',
     source,
     deployment,
@@ -1211,6 +1328,9 @@ function printHuman(report: PreflightReport): void {
   for (const blocker of [...report.source.blockers, ...report.deployment.blockers]) {
     console.log(`BLOCKER: ${blocker}`);
   }
+  for (const blocker of report.deployment.releaseBlockers) {
+    console.log(`RELEASE GATE: ${blocker}`);
+  }
 }
 
 export {
@@ -1229,7 +1349,9 @@ if (require.main === module) {
       const report = buildReport(options);
       if (options.json) console.log(JSON.stringify(report, null, 2));
       else printHuman(report);
-      if (!report.source.sourceReady || (options.requireDeployed && !report.deployment.ready) || (report.deployment.checked && !report.deployment.ready)) {
+      if (!report.source.sourceReady
+        || (options.requireDeployed && !report.deployment.ready)
+        || (report.deployment.checked && !report.deployment.catalogMatches)) {
         process.exitCode = 2;
       }
     }

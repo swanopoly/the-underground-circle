@@ -27,8 +27,8 @@ check(
   panel.includes('!onRenameAgent')
     && panel.includes('!capturedAuthority')
     && panel.includes('!isExactIdentityAuthorityCurrent(capturedAuthority)')
-    && panel.includes('if (saved !== true)'),
-  'panel-shell rename fails closed without live exact authority or an explicit durable receipt',
+    && panel.includes('if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true)'),
+  'panel-shell rename fails closed without live exact authority or a complete durable receipt',
 );
 
 check(overview.includes('loadAgentIdentitiesExact(exactIdentityAuthority)'), 'Overview reads the exact identity cache');
@@ -44,7 +44,20 @@ check(!/\brenameAgent\(/.test(overview), 'Overview has no ownerless rename fallb
 check(!/\bsetMainAgentForProvider\(/.test(overview), 'Overview has no ownerless primary-agent mutation');
 check(overview.includes('latestIdentityRequestKeyRef.current !== capturedRequestKey'), 'Overview rejects late identity reads and mutations');
 check(overview.includes(".setHeader('Authorization', `Bearer ${accessToken}`)"), 'Overview memory status binds the captured bearer');
-check(overview.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved'), 'Overview requires a complete durable identity receipt');
+check(
+  overview.includes("receipt.error === 'outcome_unknown'")
+    && overview.includes('receipt.serverSaved === true && !receipt.localSaved')
+    && overview.includes("setMainAgentStatus('outcome-unknown')")
+    && overview.includes("setMainAgentStatus('refresh-needed')")
+    && overview.includes('do not set it again.')
+    && overview.includes('Reload status before retrying the change.'),
+  'Overview preserves unknown and durable-server/local-refresh main-agent outcomes without false local adoption or replay copy',
+);
+check(
+  overview.includes('!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true')
+    && overview.indexOf('!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true') < overview.indexOf('setIsMainAgent(true)'),
+  'Overview adopts main-agent state only after a complete durable exact receipt',
+);
 check(overview.includes('isParentIdentityAuthorityCurrent(authority)'), 'Overview composes its local request fence with the parent authority lifecycle');
 
 check(terminal.includes('loadAgentIdentitiesExact(exactIdentityAuthority)'), 'Terminal profile reads exact-scoped identity data');
@@ -53,7 +66,20 @@ check(!/\bloadAgentIdentities\(/.test(terminal), 'Terminal profile has no ownerl
 check(!/\bupdateAgentIdentity\(/.test(terminal), 'Terminal profile has no ownerless identity write');
 check(terminal.includes('latestIdentityRequestKeyRef.current !== capturedRequestKey'), 'Terminal profile rejects late results');
 check(terminal.includes('Sign in to this circle before saving'), 'Terminal profile fails closed with actionable locked-state copy');
-check(terminal.includes('!receipt.ok || !receipt.localSaved || !receipt.serverSaved'), 'Terminal profile requires a truthful durable exact-save receipt');
+check(
+  terminal.includes("receipt.error === 'outcome_unknown'")
+    && terminal.includes('receipt.serverSaved === true && !receipt.localSaved')
+    && terminal.includes("setProfileLoadState('outcome-unknown')")
+    && terminal.includes("setProfileLoadState('refresh-needed')")
+    && terminal.includes('do not save it again.')
+    && terminal.includes('before retrying or continuing to Chat.'),
+  'Terminal preserves unknown and durable-server/local-refresh outcomes and blocks write or Chat continuation until an explicit reload',
+);
+check(
+  terminal.includes('!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true')
+    && terminal.indexOf('!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true') < terminal.indexOf('onIdentityChange?.()'),
+  'Terminal adopts a profile only after a complete durable exact-save receipt',
+);
 check(!terminal.includes('safeGetUser'), 'Terminal surfaces never recover mutable global auth');
 check(terminal.includes('onOpenInChat?: (draft?: string) => void'), 'Quick Terminal exposes only the canonical Chat handoff');
 check(terminal.includes('onOpenInChat(message)') && !/onOpenInChat\(message\);\s*setInput\(''\)/.test(terminal), 'Quick Terminal carries a draft to Chat without clearing it before admission');

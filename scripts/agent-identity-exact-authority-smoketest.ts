@@ -488,7 +488,19 @@ async function main(): Promise<void> {
   const serverWriteAt = exactMapSave.indexOf('await persistIdentitiesToServerExact(');
   const localWriteAt = exactMapSave.indexOf('publishCurrentAgentIdentityServerTruthExact(authority, fence)');
   assert(serverWriteAt >= 0 && localWriteAt > serverWriteAt, 'server receipt precedes cross-realm server-truth cache publication');
-  assert((exactMapSave.match(/isAgentIdentityExactAuthorityCurrent\(/g) || []).length >= 4, 'the live generation fence surrounds every durable mutation phase');
+  assert(
+    !exactMapSave.includes('verifyAgentIdentityExactAuthority('),
+    'the private map saver reuses the mutation base verification instead of repeating an auth round trip',
+  );
+  assert(
+    exactMapSave.includes('verifiedAuthority: VerifiedAgentIdentityExactWriteAuthority'),
+    'the private map saver accepts only the module-branded verified authority type',
+  );
+  assert(
+    exactMapSave.includes('loadAgentIdentityMutationBaseExact has verified the captured bearer'),
+    'the no-repeat-auth invariant stays explicit at the private helper boundary',
+  );
+  assert((exactMapSave.match(/isAgentIdentityExactAuthorityCurrent\(/g) || []).length >= 2, 'the live generation fence surrounds the durable mutation phase');
 
   const exactPrimary = section(
     'export async function setMainAgentForProviderExact',

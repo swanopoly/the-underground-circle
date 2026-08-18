@@ -42,7 +42,12 @@ function getInitialSideWidth(): number {
   if (Platform.OS !== 'web') return SIDE_DEFAULT_W;
   try {
     const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(SIDE_W_KEY) : null;
-    if (stored) return Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, parseInt(stored, 10)));
+    if (stored) {
+      const parsed = Number(stored);
+      if (Number.isFinite(parsed)) {
+        return Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, Math.round(parsed)));
+      }
+    }
   } catch {}
   return SIDE_DEFAULT_W;
 }
@@ -89,7 +94,10 @@ export function useAgentPanelLayout() {
     // also reaches this effect on rotation, but remains centered and simply
     // keeps a safe preference for a future web session.
     const availableWidth = Math.max(SIDE_MIN_W, viewport.w - 80);
-    setSideWidth(width => Math.min(width, Math.min(SIDE_MAX_W, availableWidth)));
+    setSideWidth(width => Math.min(
+      Number.isFinite(width) ? width : SIDE_DEFAULT_W,
+      Math.min(SIDE_MAX_W, availableWidth),
+    ));
   }, [viewport.w]);
 
   const toggleMode = useCallback(() => {
@@ -152,21 +160,22 @@ export function useAgentPanelLayout() {
   }, [panelMode]);
 
   const panelGeometry = useMemo(() => {
-    const maxCenteredWidth = Math.max(320, viewport.w - (POPUP_PADDING * 2));
+    const maxCenteredWidth = Math.max(1, viewport.w - (POPUP_PADDING * 2));
     const minCenteredWidth = Math.min(CENTER_MIN_W, maxCenteredWidth);
-    const maxCenteredHeight = Math.max(320, viewport.h - (POPUP_PADDING * 2));
+    const maxCenteredHeight = Math.max(1, viewport.h - (POPUP_PADDING * 2));
     const minCenteredHeight = Math.min(CENTER_MIN_H, maxCenteredHeight);
-    const clampedSideWidth = Math.max(
-      Math.min(sideWidth, Math.max(320, viewport.w - 24)),
-      Math.min(SIDE_MIN_W, Math.max(280, viewport.w - 24)),
-    );
+    const maxSideWidth = Math.max(1, viewport.w);
+    const minSideWidth = Math.min(SIDE_MIN_W, maxSideWidth);
+    const requestedSideWidth = Number.isFinite(sideWidth) ? sideWidth : SIDE_DEFAULT_W;
+    const clampedSideWidth = Math.min(maxSideWidth, Math.max(minSideWidth, requestedSideWidth));
 
     if (panelMode === 'side') {
+      const top = Math.min(APP_HEADER_OFFSET, Math.max(0, viewport.h - 1));
       return {
         width: clampedSideWidth,
-        height: Math.max(320, viewport.h - APP_HEADER_OFFSET),
+        height: Math.max(1, viewport.h - top),
         left: viewport.w - clampedSideWidth,
-        top: APP_HEADER_OFFSET,
+        top,
       };
     }
 
@@ -175,8 +184,8 @@ export function useAgentPanelLayout() {
     return {
       width,
       height,
-      left: Math.max(POPUP_PADDING, Math.round((viewport.w - width) / 2)),
-      top: Math.max(POPUP_PADDING, Math.round((viewport.h - height) / 2)),
+      left: Math.max(0, Math.round((viewport.w - width) / 2)),
+      top: Math.max(0, Math.round((viewport.h - height) / 2)),
     };
   }, [panelMode, sideWidth, viewport.h, viewport.w]);
 
@@ -192,7 +201,10 @@ export function useAgentPanelLayout() {
     panelMode,
     panelGeometry,
     panelTransition,
-    backdropOpacity: backdropOn && panelMode === 'center' ? 1 : 0,
+    // AgentPanel owns the responsive effective mode. A saved desktop `side`
+    // preference may be temporarily centered on compact web/native, so the raw
+    // preference must not make that modal's blocking backdrop transparent.
+    backdropOpacity: backdropOn ? 1 : 0,
     setBackdropOn,
     toggleMode,
     startSideResize,

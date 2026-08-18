@@ -48,6 +48,61 @@ export interface OpenSwanConnectionFingerprint {
   readonly normalizedEndpoint: string;
 }
 
+export type OpenSwanConnectionTransport = Readonly<{
+  endpoint: string;
+  token: string;
+}>;
+
+export interface OpenSwanConnectionTransportInput {
+  readonly provider: string;
+  readonly enabled: boolean;
+  readonly status: string;
+  readonly endpoint: string;
+  readonly token: string;
+}
+
+/**
+ * The browser loopback proxy owns gateway-token injection. This is the only
+ * OpenSwan endpoint that may be usable without a client-side token; direct and
+ * remote gateways still require one exact unmasked credential.
+ */
+export function isCanonicalTokenlessLocalOpenSwanProxy(endpointInput: unknown): boolean {
+  if (typeof endpointInput !== 'string' || !endpointInput.trim()) return false;
+  try {
+    const url = new URL(endpointInput.trim());
+    const hostname = url.hostname.toLowerCase();
+    const loopback = hostname === 'localhost'
+      || hostname === '127.0.0.1'
+      || hostname === '[::1]'
+      || hostname === '::1';
+    return url.protocol === 'http:'
+      && loopback
+      && url.port === '18790'
+      && (url.pathname === '' || url.pathname === '/')
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+/** One shared capability/transport verdict for every OpenSwan panel route. */
+export function resolveOpenSwanConnectionTransport(
+  connection: OpenSwanConnectionTransportInput | null | undefined,
+): OpenSwanConnectionTransport | null {
+  if (!connection
+    || connection.provider !== 'openswan'
+    || !connection.enabled
+    || connection.status !== 'connected') return null;
+  const endpoint = typeof connection.endpoint === 'string' ? connection.endpoint.trim() : '';
+  const token = typeof connection.token === 'string' ? connection.token.trim() : '';
+  if (!endpoint || token === '***') return null;
+  if (!token && !isCanonicalTokenlessLocalOpenSwanProxy(endpoint)) return null;
+  return { endpoint, token };
+}
+
 export type OfficeAgentSessionsByConnection = Readonly<
   Record<string, readonly OfficeAgentBindingSession[] | undefined>
 >;

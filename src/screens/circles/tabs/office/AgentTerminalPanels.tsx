@@ -41,7 +41,13 @@ function modeLabel(mode: TerminalLaunchMode): string {
   return 'Safe';
 }
 
-type TerminalProfileLoadState = 'locked' | 'loading' | 'ready' | 'error';
+type TerminalProfileLoadState =
+  | 'locked'
+  | 'loading'
+  | 'ready'
+  | 'refresh-needed'
+  | 'outcome-unknown'
+  | 'error';
 
 type ActiveOutputResize = {
   onMove: (event: MouseEvent) => void;
@@ -430,15 +436,24 @@ export function AgentTerminalProfilePanel({
         },
         isCustomized: true,
       }, capturedAuthority, isIdentityAuthorityCurrent);
-      if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
-        throw new Error(receipt.error || 'identity save failed');
-      }
       if (
         !isIdentityAuthorityCurrent(capturedAuthority)
         ||
         latestIdentityRequestKeyRef.current !== capturedRequestKey
         || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
       ) return false;
+      if (receipt.error === 'outcome_unknown' || receipt.serverSaved === null) {
+        setProfileLoadState('outcome-unknown');
+        return false;
+      }
+      if (receipt.serverSaved === true && !receipt.localSaved) {
+        setProfileLoadState('refresh-needed');
+        return false;
+      }
+      if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
+        setResult('Save failed. Reload the exact terminal profile, then retry.');
+        return false;
+      }
       onIdentityChange?.();
       setResult('Saved terminal profile. Chat assignments will use this profile.');
       return true;
@@ -555,6 +570,34 @@ export function AgentTerminalProfilePanel({
             <Text style={{ color: '#fbbf24', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
               Terminal profile settings are locked until this Office session has exact identity authority.
             </Text>
+          </View>
+        ) : profileLoadState === 'refresh-needed' ? (
+          <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1a06', borderRadius: 3 }}>
+            <Text style={{ color: '#fbbf24', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
+              The terminal profile was saved on the server, but this view could not refresh. Reload the profile; do not save it again.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Reload terminal profile after server save"
+              onPress={() => setProfileReloadGeneration(value => value + 1)}
+              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 3, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={{ color: '#fbbf24', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RELOAD PROFILE</Text>
+            </Pressable>
+          </View>
+        ) : profileLoadState === 'outcome-unknown' ? (
+          <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1a06', borderRadius: 3 }}>
+            <Text style={{ color: '#fbbf24', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
+              The terminal-profile outcome could not be verified. Reload the profile before retrying or continuing to Chat.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Reload terminal profile after unknown outcome"
+              onPress={() => setProfileReloadGeneration(value => value + 1)}
+              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 3, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+            >
+              <Text style={{ color: '#fbbf24', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RELOAD PROFILE</Text>
+            </Pressable>
           </View>
         ) : profileLoadState === 'error' ? (
           <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 3 }}>
