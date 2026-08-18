@@ -85,7 +85,8 @@ check(
   'the shell keeps one accessible identity header and hides destructive controls outside Overview',
 );
 check(
-  agentPanel.includes("const effectivePanelMode = isDesktop ? panelMode : 'center';")
+  agentPanel.includes("const supportsDockedPanel = !!isDesktop && Platform.OS === 'web';")
+    && agentPanel.includes("const effectivePanelMode = supportsDockedPanel ? panelMode : 'center';")
     && agentPanel.includes("ev.key === 'Tab' && effectivePanelMode === 'center'")
     && agentPanel.includes('returnFocusRef.current')
     && agentPanel.includes('findMatchingTriggers()')

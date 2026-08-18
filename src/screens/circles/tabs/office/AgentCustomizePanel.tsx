@@ -23,6 +23,7 @@ interface Props {
   // Only an explicit true receipt may be rendered as saved.
   onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<boolean>;
   environmentType?: EnvironmentType;
+  reduceMotion: boolean;
 }
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -35,7 +36,13 @@ const CATEGORIES: Array<{ key: Category; label: string; color: string }> = [
   { key: 'aura', label: 'AURA', color: '#a855f7' },
 ];
 
-export default function AgentCustomizePanel({ agent, appearances, onAppearanceChange, environmentType }: Props) {
+export default function AgentCustomizePanel({
+  agent,
+  appearances,
+  onAppearanceChange,
+  environmentType,
+  reduceMotion,
+}: Props) {
   const appearance = appearances?.[agent.id] || appearances?.[agent.name] || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [category, setCategory] = useState<Category>('colors');
@@ -212,14 +219,19 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
         <View style={styles.preview}>
           {/* Larger preview with a subtle grid background — makes subtle
               color/accessory changes much easier to spot */}
-          <View style={styles.previewInner}>
+          <View
+            style={styles.previewInner}
+            accessible
+            accessibilityRole="image"
+            accessibilityLabel={`Appearance preview for ${agent.name}`}
+          >
             <PixelAgent
               agent={agent}
               appearance={appearance}
               environmentType={environmentType}
-              onPress={() => {}}
               selected={false}
               scale={2.5}
+              reduceMotion={reduceMotion}
             />
           </View>
         </View>

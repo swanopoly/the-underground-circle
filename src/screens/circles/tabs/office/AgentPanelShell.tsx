@@ -463,7 +463,7 @@ export default function AgentPanelShell({
         </View>
       </View>
       <View style={styles.desktopHeaderRight}>
-        {isDesktop ? (
+        {isDesktop && Platform.OS === 'web' ? (
           <Pressable
             onPress={onToggleMode}
             style={({ hovered }: any) => [

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform } from 'react-native';
+import { Platform, useWindowDimensions } from 'react-native';
 
 type PanelMode = 'center' | 'side';
 
@@ -48,6 +48,7 @@ function getInitialSideWidth(): number {
 }
 
 export function useAgentPanelLayout() {
+  const measuredViewport = useWindowDimensions();
   const [panelMode, setPanelMode] = useState<PanelMode>(getInitialMode);
   const [sideWidth, setSideWidth] = useState<number>(getInitialSideWidth);
   const [isResizing, setIsResizing] = useState(false);
@@ -55,10 +56,19 @@ export function useAgentPanelLayout() {
   const dragStartX = useRef(0);
   const dragStartW = useRef(0);
   const activeSideResizeRef = useRef<ActiveSideResize | null>(null);
-  const [viewport, setViewport] = useState(() => ({
-    w: typeof window !== 'undefined' ? window.innerWidth : 1920,
-    h: typeof window !== 'undefined' ? window.innerHeight : 1080,
-  }));
+  // Browser viewport globals are not a React Native viewport contract.
+  // In particular, wide native tablets enter Office's desktop breakpoint and
+  // therefore consume this geometry. Keep one platform-aware source of truth
+  // so rotation and split-screen changes cannot leave a 1920x1080 panel sized
+  // outside the native Modal window.
+  const viewport = useMemo(() => ({
+    w: Number.isFinite(measuredViewport.width) && measuredViewport.width > 0
+      ? measuredViewport.width
+      : 320,
+    h: Number.isFinite(measuredViewport.height) && measuredViewport.height > 0
+      ? measuredViewport.height
+      : 480,
+  }), [measuredViewport.height, measuredViewport.width]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
@@ -75,14 +85,12 @@ export function useAgentPanelLayout() {
   }, [sideWidth]);
 
   useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
-    const onResize = () => {
-      setViewport({ w: window.innerWidth, h: window.innerHeight });
-      setSideWidth(width => Math.min(width, Math.min(SIDE_MAX_W, window.innerWidth - 80)));
-    };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+    // Clamp a saved dock width whenever RN reports a new browser width. Native
+    // also reaches this effect on rotation, but remains centered and simply
+    // keeps a safe preference for a future web session.
+    const availableWidth = Math.max(SIDE_MIN_W, viewport.w - 80);
+    setSideWidth(width => Math.min(width, Math.min(SIDE_MAX_W, availableWidth)));
+  }, [viewport.w]);
 
   const toggleMode = useCallback(() => {
     setPanelMode(mode => (mode === 'center' ? 'side' : 'center'));

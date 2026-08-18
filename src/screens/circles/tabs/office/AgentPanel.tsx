@@ -215,10 +215,15 @@ export default function AgentPanel({
     startSideResize,
     resizeSideBy,
   } = useAgentPanelLayout();
-  // A saved desktop dock preference must never turn the compact bottom sheet
-  // into a non-modal inspector. Keep the preference for the next desktop
-  // visit, but use centered dialog semantics at compact widths.
-  const effectivePanelMode = isDesktop ? panelMode : 'center';
+  // Docking is a web-only inspector affordance. A wide native tablet still
+  // needs the React Native Modal window, hardware-Back handling, and modal
+  // accessibility isolation; never let its desktop breakpoint expose the
+  // persisted web side-panel mode.
+  const supportsDockedPanel = !!isDesktop && Platform.OS === 'web';
+  // A saved desktop dock preference must never turn a compact or native sheet
+  // into a non-modal inspector. Keep the preference for the next web desktop
+  // visit, but use centered dialog semantics everywhere else.
+  const effectivePanelMode = supportsDockedPanel ? panelMode : 'center';
   // Office supplies one immutable user/circle/bearer snapshot. Never recover
   // a replacement identity authority from the mutable global auth client.
   const exactIdentityAuthority = useMemo<OfficeConnectionExactAuthority | null>(() => {
@@ -282,10 +287,10 @@ export default function AgentPanel({
     };
   }, []);
 
-  // Open: pure CSS keyframe (see openAnimClass below) — no JS-driven Animated.
-  // Close: Animated.Value 1 → 0 because the parent unmounts on `agent === null`
-  // and we want the fade-out to finish before the panel disappears.
-  // Initialize at 1/1 so the open frame paints fully visible immediately.
+  // Web open uses the Shell's CSS keyframe; native compact open uses the
+  // retained slide animation below. The parent owns visibility and removes the
+  // panel as soon as `agent` becomes null, so this component deliberately does
+  // not claim or start an invisible close animation.
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
   const panelAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
@@ -561,21 +566,12 @@ export default function AgentPanel({
       }
     } else {
       setBackdropOn(false);
-      // Close: brief Animated fade so the panel doesn't snap-disappear before
-      // the parent unmounts it. ~80ms is short enough not to feel laggy.
-      if (reduceMotion) {
-        scaleAnim.setValue(1);
-        opacityAnim.setValue(0);
-        if (!isDesktop) slideAnim.setValue(0);
-      } else {
-        startPanelAnimation(Animated.parallel([
-          Animated.timing(scaleAnim, { toValue: 0.97, duration: 80, useNativeDriver: Platform.OS !== 'web' }),
-          Animated.timing(opacityAnim, { toValue: 0, duration: 80, useNativeDriver: Platform.OS !== 'web' }),
-          ...(!isDesktop
-            ? [Animated.timing(slideAnim, { toValue: 400, duration: 120, useNativeDriver: Platform.OS !== 'web' })]
-            : []),
-        ]));
-      }
+      // There is no rendered close frame once the parent clears `agent`.
+      // Prepare stable values for the next open instead: web/desktop paints at
+      // full opacity, while a motion-enabled compact sheet begins off-screen.
+      scaleAnim.setValue(1);
+      opacityAnim.setValue(1);
+      slideAnim.setValue(reduceMotion ? 0 : 400);
     }
     return () => {
       if (rafId !== null && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(rafId);
@@ -999,6 +995,7 @@ export default function AgentPanel({
             appearances={appearances}
             onAppearanceChange={onAppearanceChange}
             environmentType={environmentType}
+            reduceMotion={reduceMotion}
           />
         ) : (
           <LazySectionState

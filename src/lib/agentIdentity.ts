@@ -8,6 +8,7 @@
 //
 // See migration 20260430_agent_identities.sql.
 
+import { Platform } from 'react-native';
 import { storage } from './storage';
 import { supabase } from './supabase';
 import type { OfficeAgent } from './officeAgents';
@@ -23,6 +24,7 @@ const MAX_AGENT_IDENTITY_SCOPE_PART_LENGTH = 200;
 const MAX_AGENT_IDENTITY_ACCESS_TOKEN_LENGTH = 16_384;
 const MAX_AGENT_IDENTITY_CACHE_BYTES = 4 * 1024 * 1024;
 const MAX_AGENT_IDENTITIES_PER_SCOPE = 5_000;
+const AGENT_IDENTITY_CACHE_LOCK_TIMEOUT_MS = 8_000;
 
 /**
  * A caller-captured identity authority. Exact APIs never obtain a replacement
@@ -163,6 +165,18 @@ type AgentIdentityExactCommandEpoch = Readonly<{ key: string; epoch: number }>;
 const _agentIdentityExactCommandEpochs = new Map<string, number>();
 const _agentIdentityExactCachePublicationTails = new Map<string, Promise<void>>();
 
+type AgentIdentityWebLockManager = Readonly<{
+  request<T>(
+    name: string,
+    options: Readonly<{ mode: 'exclusive'; signal: AbortSignal }>,
+    callback: () => Promise<T>,
+  ): Promise<T>;
+}>;
+
+type AgentIdentityExactCacheLockResult<T> =
+  | Readonly<{ acquired: true; value: T }>
+  | Readonly<{ acquired: false }>;
+
 function beginAgentIdentityExactCommand(
   kind: 'primary' | 'published_spirit' | 'profile_delete',
   authority: AgentIdentityExactWriteAuthority,
@@ -200,9 +214,24 @@ function agentIdentityExactCommandRetirementError(
     : 'authority_retired';
 }
 
-async function withAgentIdentityExactCachePublicationLock<T>(
+function isAgentIdentityExactWebCacheRealm(): boolean {
+  return Platform.OS === 'web';
+}
+
+function getAgentIdentityWebLockManager(): AgentIdentityWebLockManager | null {
+  try {
+    const locks = (globalThis as unknown as {
+      navigator?: { locks?: AgentIdentityWebLockManager };
+    }).navigator?.locks;
+    return locks && typeof locks.request === 'function' ? locks : null;
+  } catch {
+    return null;
+  }
+}
+
+async function runAgentIdentityExactCachePublicationInRealm<T>(
   cacheKey: string,
-  task: () => Promise<T>,
+  task: (signal?: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const prior = _agentIdentityExactCachePublicationTails.get(cacheKey) || Promise.resolve();
   let release!: () => void;
@@ -217,6 +246,81 @@ async function withAgentIdentityExactCachePublicationLock<T>(
     if (_agentIdentityExactCachePublicationTails.get(cacheKey) === tail) {
       _agentIdentityExactCachePublicationTails.delete(cacheKey);
     }
+  }
+}
+
+async function runBoundedAgentIdentityExactCachePublication<T>(
+  cacheKey: string,
+  task: (signal?: AbortSignal) => Promise<T>,
+): Promise<AgentIdentityExactCacheLockResult<T>> {
+  if (typeof AbortController === 'undefined') return { acquired: false };
+  const operationController = new AbortController();
+  const operationTimedOut = Symbol('agent_identity_cache_publication_timeout');
+  let operationTimer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<typeof operationTimedOut>(resolve => {
+    operationTimer = setTimeout(() => {
+      operationController.abort();
+      resolve(operationTimedOut);
+    }, AGENT_IDENTITY_CACHE_LOCK_TIMEOUT_MS);
+  });
+  try {
+    const operation = runAgentIdentityExactCachePublicationInRealm(
+      cacheKey,
+      () => task(operationController.signal),
+    ).then(
+      value => ({ ok: true as const, value }),
+      () => ({ ok: false as const }),
+    );
+    const result = await Promise.race([operation, timeout]);
+    if (result === operationTimedOut || !result.ok || operationController.signal.aborted) {
+      return { acquired: false };
+    }
+    return { acquired: true, value: result.value };
+  } finally {
+    if (operationTimer) clearTimeout(operationTimer);
+  }
+}
+
+/**
+ * Serialize one exact cache publication across same-origin tabs/windows in
+ * the same storage partition. Web storage is shared across those realms, so
+ * an in-module promise tail is insufficient. Web Locks has the same
+ * origin/storage-partition boundary as localStorage. Secure web contexts
+ * without Web Locks fail local publication closed; native keeps the
+ * in-process queue because it has no browser tabs.
+ *
+ * Both lock acquisition and the server reread performed by `task` are
+ * bounded. The same abort signal is passed into PostgREST, so a timed-out task
+ * cannot later resume and write after the exclusive lock has been released.
+ */
+async function withAgentIdentityExactCachePublicationLock<T>(
+  cacheKey: string,
+  task: (signal?: AbortSignal) => Promise<T>,
+): Promise<AgentIdentityExactCacheLockResult<T>> {
+  if (!isAgentIdentityExactWebCacheRealm()) {
+    return runBoundedAgentIdentityExactCachePublication(cacheKey, task);
+  }
+  const locks = getAgentIdentityWebLockManager();
+  if (!locks || typeof AbortController === 'undefined') return { acquired: false };
+
+  const acquisitionController = new AbortController();
+  const acquisitionTimer = setTimeout(
+    () => acquisitionController.abort(),
+    AGENT_IDENTITY_CACHE_LOCK_TIMEOUT_MS,
+  );
+  try {
+    return await locks.request(
+      `uc-agent-identity-cache:${cacheKey}`,
+      { mode: 'exclusive', signal: acquisitionController.signal },
+      async () => {
+        clearTimeout(acquisitionTimer);
+        return runBoundedAgentIdentityExactCachePublication(cacheKey, task);
+      },
+    );
+  } catch {
+    return { acquired: false };
+  } finally {
+    clearTimeout(acquisitionTimer);
   }
 }
 
@@ -396,6 +500,39 @@ export async function loadAgentIdentities(): Promise<Map<string, AgentIdentity>>
   }
 }
 
+function isAgentIdentityNonNegativeFiniteNumber(value: unknown): boolean {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= 0
+    && value <= Number.MAX_SAFE_INTEGER;
+}
+
+function isAgentIdentityNonNegativeSafeInteger(value: unknown): boolean {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 0;
+}
+
+function isAgentIdentityServerNonNegativeNumber(value: unknown): boolean {
+  if (typeof value === 'number') return isAgentIdentityNonNegativeFiniteNumber(value);
+  if (
+    typeof value !== 'string'
+    || value.trim() !== value
+    || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)
+  ) return false;
+  return isAgentIdentityNonNegativeFiniteNumber(Number(value));
+}
+
+function isAgentIdentityServerNonNegativeSafeInteger(value: unknown): boolean {
+  if (typeof value === 'number') return isAgentIdentityNonNegativeSafeInteger(value);
+  if (
+    typeof value !== 'string'
+    || value.trim() !== value
+    || !/^(?:0|[1-9]\d*)$/u.test(value)
+  ) return false;
+  return isAgentIdentityNonNegativeSafeInteger(Number(value));
+}
+
 function parseExactAgentIdentityCache(raw: string | null): Map<string, AgentIdentity> | null {
   // A missing cache is the normal first-device/new-scope state. Present but
   // empty or malformed bytes are corruption and must not become verified
@@ -420,16 +557,15 @@ function parseExactAgentIdentityCache(raw: string | null): Map<string, AgentIden
       ) return null;
       const identity = value as Partial<AgentIdentity>;
       if (identity.sessionKey !== key) return null;
-      const requiredNumbers = [
-        identity.totalCostAllTime,
-        identity.totalTokensAllTime,
-        identity.totalSessionsAllTime,
-        identity.firstSeen,
-        identity.lastSeen,
-        identity.totalMessages,
-        identity.totalTurns,
-      ];
-      if (requiredNumbers.some(number => typeof number !== 'number' || !Number.isFinite(number) || number < 0)) {
+      if (
+        !isAgentIdentityNonNegativeFiniteNumber(identity.totalCostAllTime)
+        || !isAgentIdentityNonNegativeSafeInteger(identity.totalTokensAllTime)
+        || !isAgentIdentityNonNegativeSafeInteger(identity.totalSessionsAllTime)
+        || !isAgentIdentityNonNegativeSafeInteger(identity.firstSeen)
+        || !isAgentIdentityNonNegativeSafeInteger(identity.lastSeen)
+        || !isAgentIdentityNonNegativeSafeInteger(identity.totalMessages)
+        || !isAgentIdentityNonNegativeSafeInteger(identity.totalTurns)
+      ) {
         return null;
       }
       identities.set(key, identity as AgentIdentity);
@@ -495,33 +631,59 @@ export async function loadAgentIdentitiesExact(
  * bearer. A response containing another owner or malformed identity fails as
  * a whole rather than being partially accepted.
  */
-export async function syncAgentIdentitiesFromServerExact(
-  capturedAuthority: AgentIdentityExactAuthority,
+async function fetchAgentIdentitiesServerSnapshotExact(
+  authority: NormalizedAgentIdentityExactAuthority,
+  signal?: AbortSignal,
 ): Promise<AgentIdentityExactSyncResult> {
-  const syntacticAuthority = normalizeAgentIdentityExactAuthority(capturedAuthority);
-  if (!syntacticAuthority) {
-    return { ok: false, identities: new Map(), error: 'invalid_authority' };
-  }
-  const authority = await verifyAgentIdentityExactAuthority(syntacticAuthority);
-  if (!authority) {
-    return { ok: false, identities: new Map(), error: 'authority_mismatch' };
+  if (signal?.aborted) {
+    return { ok: false, identities: new Map(), error: 'server_unavailable' };
   }
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from('agent_identities')
-      .select('*')
+      .select('*', { count: 'exact' })
       .eq('user_id', authority.userId)
+      .limit(MAX_AGENT_IDENTITIES_PER_SCOPE + 1)
       .setHeader('Authorization', `Bearer ${authority.accessToken}`);
-    if (error || !Array.isArray(data)) {
+    if (signal) query = query.abortSignal(signal);
+    const { data, error, count } = await query;
+    if (signal?.aborted || error || !Array.isArray(data)) {
       return { ok: false, identities: new Map(), error: 'server_unavailable' };
     }
-    if (data.length > MAX_AGENT_IDENTITIES_PER_SCOPE) {
+    // PostgREST deployments may enforce a response-row cap below our client
+    // bound. Exact count equality prevents a truncated page from replacing a
+    // complete device cache while still keeping this one bounded statement.
+    if (
+      typeof count !== 'number'
+      || !Number.isSafeInteger(count)
+      || count < 0
+      || count > MAX_AGENT_IDENTITIES_PER_SCOPE
+      || data.length !== count
+    ) {
       return { ok: false, identities: new Map(), error: 'invalid_response' };
     }
     const identities = new Map<string, AgentIdentity>();
     for (const row of data as Array<Record<string, unknown>>) {
+      if (signal?.aborted) {
+        return { ok: false, identities: new Map(), error: 'server_unavailable' };
+      }
       const sessionKey = normalizeAgentIdentityScopePart(row?.session_key);
-      if (row?.user_id !== authority.userId || !sessionKey || identities.has(sessionKey)) {
+      const updatedAt = typeof row?.updated_at === 'string' ? row.updated_at : '';
+      const firstSeen = new Date(String(row?.first_seen || '')).getTime();
+      const lastSeen = new Date(String(row?.last_seen || '')).getTime();
+      if (
+        row?.user_id !== authority.userId
+        || !sessionKey
+        || !Number.isFinite(new Date(updatedAt).getTime())
+        || !Number.isFinite(firstSeen)
+        || !Number.isFinite(lastSeen)
+        || !isAgentIdentityServerNonNegativeNumber(row?.total_cost_all_time)
+        || !isAgentIdentityServerNonNegativeSafeInteger(row?.total_tokens_all_time)
+        || !isAgentIdentityServerNonNegativeSafeInteger(row?.total_sessions_all_time)
+        || !isAgentIdentityServerNonNegativeSafeInteger(row?.total_messages)
+        || !isAgentIdentityServerNonNegativeSafeInteger(row?.total_turns)
+        || identities.has(sessionKey)
+      ) {
         return { ok: false, identities: new Map(), error: 'invalid_response' };
       }
       const identity = rowToIdentity(row);
@@ -537,6 +699,20 @@ export async function syncAgentIdentitiesFromServerExact(
   } catch {
     return { ok: false, identities: new Map(), error: 'server_unavailable' };
   }
+}
+
+export async function syncAgentIdentitiesFromServerExact(
+  capturedAuthority: AgentIdentityExactAuthority,
+): Promise<AgentIdentityExactSyncResult> {
+  const syntacticAuthority = normalizeAgentIdentityExactAuthority(capturedAuthority);
+  if (!syntacticAuthority) {
+    return { ok: false, identities: new Map(), error: 'invalid_authority' };
+  }
+  const authority = await verifyAgentIdentityExactAuthority(syntacticAuthority);
+  if (!authority) {
+    return { ok: false, identities: new Map(), error: 'authority_mismatch' };
+  }
+  return fetchAgentIdentitiesServerSnapshotExact(authority);
 }
 
 /**
@@ -1413,6 +1589,55 @@ async function publishVerifiedAgentIdentityCacheExact(
   }
 }
 
+/**
+ * Publish only a complete server snapshot captured while the cross-realm cache
+ * lane is exclusive. The mutation receipt proves that this caller's server
+ * write completed, but it is deliberately not used as ordering authority: a
+ * later server command in another tab may already have committed. Rereading
+ * under the shared lock makes either completion publish current server truth.
+ */
+async function publishCurrentAgentIdentityServerTruthExact(
+  authority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+): Promise<AgentIdentityExactSaveResult> {
+  const key = agentIdentityExactStorageKey(authority);
+  if (!key) {
+    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
+  }
+  const locked = await withAgentIdentityExactCachePublicationLock(
+    key,
+    async signal => {
+      const publicationFence: AgentIdentityExactAuthorityFence = candidate => (
+        !signal?.aborted && isAgentIdentityExactAuthorityCurrent(candidate, fence)
+      );
+      if (signal?.aborted) {
+        return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' } as const;
+      }
+      if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+        return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' } as const;
+      }
+      const snapshot = await fetchAgentIdentitiesServerSnapshotExact(authority, signal);
+      if (signal?.aborted) {
+        return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' } as const;
+      }
+      if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+        return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' } as const;
+      }
+      if (!snapshot.ok) {
+        return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' } as const;
+      }
+      return publishVerifiedAgentIdentityCacheExact(
+        snapshot.identities,
+        authority,
+        publicationFence,
+      );
+    },
+  );
+  return locked.acquired
+    ? locked.value
+    : { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
+}
+
 async function saveAgentIdentityMapExact(
   identities: Map<string, AgentIdentity>,
   capturedAuthority: AgentIdentityExactWriteAuthority,
@@ -1474,26 +1699,7 @@ async function saveAgentIdentityMapExact(
     return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
   }
 
-  const key = agentIdentityExactStorageKey(authority);
-  if (!key) {
-    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
-  }
-  try {
-    await storage.setItem(key, serialized);
-    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
-      return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
-    }
-    const readback = await storage.getItem(key);
-    if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
-      return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' };
-    }
-    if (readback !== serialized) {
-      return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
-    }
-  } catch {
-    return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
-  }
-  return { ok: true, localSaved: true, serverSaved: true };
+  return publishCurrentAgentIdentityServerTruthExact(authority, fence);
 }
 
 /**
@@ -1540,10 +1746,10 @@ export async function saveAgentIdentitiesExact(
   }
   if (newIdentities.size === 0) {
     // loadAgentIdentityMutationBaseExact already supplied the exact, validated
-    // server receipt. No durable mutation is necessary; publish only while
-    // the same generation still owns the cache lane.
-    return publishVerifiedAgentIdentityCacheExact(
-      reconciled,
+    // server receipt. No durable mutation is necessary; reread current server
+    // truth under the cross-realm publication lane so an older tab cannot
+    // replace a newer exact cache snapshot.
+    return publishCurrentAgentIdentityServerTruthExact(
       mutationBase.authority,
       fence,
     );
@@ -1788,68 +1994,17 @@ export async function updatePublishedAgentSpiritExact(
     };
   }
 
-  const key = agentIdentityExactStorageKey(verifiedAuthority);
-  if (!key) {
-    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
+  const publication = await publishCurrentAgentIdentityServerTruthExact(
+    verifiedAuthority,
+    commandFence,
+  );
+  if (publication.error === 'authority_retired') {
+    return {
+      ...publication,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
   }
-  return withAgentIdentityExactCachePublicationLock(key, async () => {
-    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
-      return {
-        ok: false,
-        localSaved: false,
-        serverSaved: true,
-        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
-      };
-    }
-    let identities: Map<string, AgentIdentity> | null;
-    try {
-      const raw = await storage.getItem(key);
-      if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
-        return {
-          ok: false,
-          localSaved: false,
-          serverSaved: true,
-          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
-        };
-      }
-      identities = parseExactAgentIdentityCache(raw);
-    } catch {
-      return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
-    }
-    if (!identities) {
-      // The server mutation is already durable. Rebuild a corrupted exact
-      // cache from the same captured owner/bearer instead of publishing a
-      // partial speculative map.
-      const recovery = await syncAgentIdentitiesFromServerExact(verifiedAuthority);
-      if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
-        return {
-          ok: false,
-          localSaved: false,
-          serverSaved: true,
-          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
-        };
-      }
-      if (!recovery.ok) {
-        return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
-      }
-      identities = recovery.identities;
-    }
-    identities.set(sessionKey, receipt.identity);
-    const publication = await publishVerifiedAgentIdentityCacheExact(
-      identities,
-      verifiedAuthority,
-      commandFence,
-    );
-    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
-      return {
-        ok: false,
-        localSaved: false,
-        serverSaved: true,
-        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
-      };
-    }
-    return publication;
-  });
+  return publication;
 }
 
 /** Delete one owner profile only after the server proves it is unreferenced. */
@@ -2251,61 +2406,17 @@ export async function setMainAgentForProviderExact(
     };
   }
 
-  const key = agentIdentityExactStorageKey(verifiedAuthority);
-  if (!key) {
-    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
+  const publication = await publishCurrentAgentIdentityServerTruthExact(
+    verifiedAuthority,
+    commandFence,
+  );
+  if (publication.error === 'authority_retired') {
+    return {
+      ...publication,
+      error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
+    };
   }
-  return withAgentIdentityExactCachePublicationLock(key, async () => {
-    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
-      return {
-        ok: false,
-        localSaved: false,
-        serverSaved: true,
-        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
-      };
-    }
-    let identities: Map<string, AgentIdentity> | null;
-    try {
-      const raw = await storage.getItem(key);
-      if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
-        return {
-          ok: false,
-          localSaved: false,
-          serverSaved: true,
-          error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
-        };
-      }
-      identities = parseExactAgentIdentityCache(raw);
-    } catch {
-      return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
-    }
-    if (!identities) {
-      return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_local_data' };
-    }
-    // The receipt is the complete durable snapshot for the requested provider.
-    // Drop that lane from the cache before replacing it so deleted or moved
-    // server rows cannot survive as a second local primary.
-    for (const [keyToCheck, identity] of identities) {
-      if (identity.boundAiProvider === normalizedProviderType) identities.delete(keyToCheck);
-    }
-    for (const [receiptSessionKey, identity] of receipt.providerIdentities) {
-      identities.set(receiptSessionKey, identity);
-    }
-    const publication = await publishVerifiedAgentIdentityCacheExact(
-      identities,
-      verifiedAuthority,
-      commandFence,
-    );
-    if (!isAgentIdentityExactAuthorityCurrent(verifiedAuthority, commandFence)) {
-      return {
-        ok: false,
-        localSaved: false,
-        serverSaved: true,
-        error: agentIdentityExactCommandRetirementError(verifiedAuthority, fence, command),
-      };
-    }
-    return publication;
-  });
+  return publication;
 }
 
 // ─── Customize Agent Appearance ────────────────────────────

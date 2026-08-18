@@ -37,9 +37,10 @@ check(
 );
 check(
   panel.includes('startPanelAnimation(Animated.spring(slideAnim, {')
-    && panel.includes('startPanelAnimation(Animated.parallel([')
+    && !panel.includes('startPanelAnimation(Animated.parallel([')
+    && panel.includes('not claim or start an invisible close animation')
     && !panel.includes('}).start();'),
-  'open and close animations both run through the retained animation owner',
+  'native entrance uses the retained animation owner while parent-owned close stays immediate and truthful',
 );
 check(
   panel.includes('stopPanelAnimation();\n    };')

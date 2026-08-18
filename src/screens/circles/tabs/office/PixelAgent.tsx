@@ -41,7 +41,7 @@ interface Props {
   agent: OfficeAgent;
   appearance?: AgentAppearance;
   environmentType?: EnvironmentType;
-  onPress: () => void;
+  onPress?: () => void;
   selected: boolean;
   scale?: number;
   showThoughts?: boolean; // Enable thought bubbles
@@ -63,13 +63,17 @@ interface Props {
   xpIntoLevel?: number;
   xpLevelSpan?: number;
   xpMaxed?: boolean;
+  /** Explicit accessibility preference. True parks all decorative motion. */
+  reduceMotion?: boolean;
 }
 
-function PixelAgentInner({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate, plaque, xpLevel, xpIntoLevel, xpLevelSpan, xpMaxed = false }: Props) {
+function PixelAgentInner({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate, plaque, xpLevel, xpIntoLevel, xpLevelSpan, xpMaxed = false, reduceMotion: reduceMotionPreference = false }: Props) {
   // Performance mode: disable expensive animations when many agents are on the floor
   // 1-3 agents: full animations | 4-6: reduced | 7+: minimal (static sprites with blinking only)
-  const reducedMotion = totalAgents >= 4;
-  const minimalMotion = totalAgents >= 7;
+  const motionDisabled = reduceMotionPreference === true;
+  const reducedMotion = motionDisabled || totalAgents >= 4;
+  const minimalMotion = motionDisabled || totalAgents >= 7;
+  const interactive = typeof onPress === 'function';
 
   // True when the caller drives the bar from this agent's OWN build XP
   // (buildOfficeAgentXp) rather than a shared/absolute total. Gates the
@@ -124,7 +128,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   const celebJump = useRef(new Animated.Value(0)).current;
 
   // Aura animations
-  const auraFlicker = useRef(new Animated.Value(0)).current;
+  const auraFlicker = useRef(new Animated.Value(motionDisabled ? 1 : 0)).current;
   const auraPulse = useRef(new Animated.Value(1)).current;
   const auraRotate = useRef(new Animated.Value(0)).current;
   const auraDrift = useRef(new Animated.Value(0)).current;
@@ -159,11 +163,29 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   const automateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const automateInputRef = useRef<TextInput>(null);
 
+  // A preference change can arrive after an animation has already started.
+  // Park transient effects immediately instead of merely declining to create
+  // the next loop; otherwise a press/celebration could continue after Reduce
+  // Motion became active.
+  useEffect(() => {
+    if (!motionDisabled) return;
+    pressScale.stopAnimation();
+    celebJump.stopAnimation();
+    pressScale.setValue(1);
+    celebJump.setValue(0);
+    setShowSparkle(false);
+    setShowLevelUp(false);
+    setCelebrating(false);
+    setFloatingText([]);
+  }, [celebJump, motionDisabled, pressScale]);
+
   const handlePressIn = () => {
+    if (motionDisabled || !interactive) return;
     Animated.spring(pressScale, { toValue: 0.9, useNativeDriver: false }).start();
     setShowSparkle(true);
   };
   const handlePressOut = () => {
+    if (motionDisabled || !interactive) return;
     Animated.spring(pressScale, { toValue: 1, friction: 3, tension: 40, useNativeDriver: false }).start();
   };
 
@@ -184,7 +206,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Dance animation — triggered by badge earn
   useEffect(() => {
-    if (!dancing) {
+    if (motionDisabled || !dancing) {
       danceX.setValue(0);
       danceY.setValue(0);
       danceRotate.setValue(0);
@@ -219,12 +241,16 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       ]));
     loop.start();
     return () => loop.stop();
-  }, [dancing]);
+  }, [dancing, motionDisabled]);
 
 
   // Glow animation — disabled in reduced motion
   useEffect(() => {
-    if (reducedMotion) return;
+    if (reducedMotion) {
+      glowAnim.stopAnimation();
+      glowAnim.setValue(0.3);
+      return;
+    }
     if (agent.status === 'active') {
       const glowLoop = animLoop(() => Animated.sequence([
           Animated.timing(glowAnim, { toValue: 0.9, duration: 1500, useNativeDriver: false }),
@@ -237,7 +263,11 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Eye blinking — periodic blink every 3-6s for alive agents
   useEffect(() => {
-    if (agent.status === 'offline') return;
+    if (motionDisabled || agent.status === 'offline') {
+      blinkAnim.stopAnimation();
+      blinkAnim.setValue(1);
+      return;
+    }
     const blink = () => {
       Animated.sequence([
         Animated.timing(blinkAnim, { toValue: 0, duration: 80, useNativeDriver: false }),
@@ -263,11 +293,15 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     };
     let timerId = scheduleNext();
     return () => clearTimeout(timerId);
-  }, [agent.status === 'offline']);
+  }, [agent.status === 'offline', motionDisabled]);
 
   // Typing animation — arm wiggle when building/active (disabled in minimal motion)
   useEffect(() => {
-    if (minimalMotion) { typingAnim.setValue(0); return; }
+    if (minimalMotion) {
+      typingAnim.stopAnimation();
+      typingAnim.setValue(0);
+      return;
+    }
     if (agent.status === 'active' || agent.status === 'building') {
       const typingLoop = animLoop(() => Animated.sequence([
           Animated.timing(typingAnim, { toValue: 1, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -309,8 +343,11 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     const parked: Array<[Animated.Value, number]> = [
       [bobAnim, 0], [breatheAnim, 1], [swayAnim, 0], [lookAnim, 0],
     ];
-    if (agent.status === 'offline') {
-      parked.forEach(([value, rest]) => value.setValue(rest));
+    if (motionDisabled || agent.status === 'offline') {
+      parked.forEach(([value, rest]) => {
+        value.stopAnimation();
+        value.setValue(rest);
+      });
       return;
     }
 
@@ -364,11 +401,17 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
       loops.forEach((loop) => loop.stop());
       parked.forEach(([value, rest]) => value.setValue(rest));
     };
-  }, [agent.status, minimalMotion, reducedMotion, crowd]);
+  }, [agent.status, minimalMotion, motionDisabled, reducedMotion, crowd]);
 
   // Limb fidget — disabled in reduced motion mode
   useEffect(() => {
-    if (reducedMotion) return;
+    if (reducedMotion) {
+      [leftArmWiggle, rightArmWiggle, leftLegWiggle, rightLegWiggle].forEach(value => {
+        value.stopAnimation();
+        value.setValue(0);
+      });
+      return;
+    }
     let stopped = false;
     const doFidget = () => {
       if (stopped) return;
@@ -440,7 +483,24 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Aura animations — visual identity, but only for agents that HAVE an aura.
   useEffect(() => {
-    if (!hasAura) return;
+    if (motionDisabled) {
+      auraFlicker.stopAnimation();
+      auraPulse.stopAnimation();
+      auraRotate.stopAnimation();
+      auraDrift.stopAnimation();
+      auraFlicker.setValue(1);
+      auraPulse.setValue(1);
+      auraRotate.setValue(0);
+      auraDrift.setValue(0);
+      return;
+    }
+    if (!hasAura) {
+      auraFlicker.setValue(0);
+      auraPulse.setValue(1);
+      auraRotate.setValue(0);
+      auraDrift.setValue(0);
+      return;
+    }
     const flickerLoop = animLoop(() => Animated.sequence([
         Animated.timing(auraFlicker, { toValue: 1, duration: 400, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(auraFlicker, { toValue: 0.4, duration: 300, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
@@ -464,12 +524,18 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     rotateLoop.start();
     driftLoop.start();
     return () => { flickerLoop.stop(); pulseLoop.stop(); rotateLoop.stop(); driftLoop.stop(); };
-  }, [hasAura]);
+  }, [hasAura, motionDisabled]);
 
   // Pet animations — disabled in reduced motion (heavy recursive timers), and
   // skipped entirely for agents with no pet (nothing consumes these values).
   useEffect(() => {
-    if (reducedMotion || !hasPet) return;
+    if (reducedMotion || !hasPet) {
+      [petBounce, petTail, petCrawl, petCrawlY, petWander, petWanderY, petLegAnim].forEach(value => {
+        value.stopAnimation();
+        value.setValue(0);
+      });
+      return;
+    }
     let stopped = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const pBounce = Math.round(2 * crowd * 10) / 10; // 2px at 1, ~0.9 at 5, ~0.5 at 10
@@ -554,6 +620,10 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   // Mood indicator — reacts to agent activity
   const moodTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
+    if (motionDisabled) {
+      setMood(null);
+      return;
+    }
     const statusChanged = agent.status !== lastStatus.current;
     const costSpike = agent.costToday > lastCost.current + 0.10;
     let newMood: string | null = null;
@@ -585,7 +655,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     }
 
     return () => { if (moodTimerRef.current) clearTimeout(moodTimerRef.current); };
-  }, [agent.status, agent.costToday]);
+  }, [agent.status, agent.costToday, motionDisabled]);
 
   // Thought bubble generation — disabled in minimal motion
   useEffect(() => {
@@ -862,7 +932,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   };
   const lastIdleFloatRef = useRef(0);
   useEffect(() => {
-    if (agent.status !== 'building') return;
+    if (motionDisabled || agent.status !== 'building') return;
     const activity = (agent.activity || '').toLowerCase();
     let behaviorText: string | null = null;
     for (const [prefix, text] of Object.entries(IDLE_BEHAVIOR_KEYWORDS)) {
@@ -875,7 +945,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     const id = floatId.current++;
     setFloatingText(prev => [...prev, { id, text: behaviorText!, color: '#6366f1', x: (Math.random() - 0.5) * 30 }]);
     setTimeout(() => setFloatingText(prev => prev.filter(f => f.id !== id)), 2500);
-  }, [agent.status, agent.activity]);
+  }, [agent.status, agent.activity, motionDisabled]);
 
   const statusColor = STATUS_COLORS[agent.status];
   const isOffline = agent.status === 'offline';
@@ -884,14 +954,18 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   return (
     <Pressable
-      onPress={onPress}
-      onPressIn={handlePressIn}
-      onPressOut={handlePressOut}
-      accessibilityRole="button"
-      accessibilityLabel={`Open ${agent.name} agent panel`}
-      accessibilityHint="Shows current work, controls, activity, memory, runs, and agent settings."
-      accessibilityState={{ selected }}
-      style={Platform.OS === 'web' ? { cursor: 'pointer' } as any : undefined}
+      onPress={interactive ? onPress : undefined}
+      onPressIn={interactive ? handlePressIn : undefined}
+      onPressOut={interactive ? handlePressOut : undefined}
+      disabled={!interactive}
+      accessible={interactive}
+      accessibilityElementsHidden={!interactive}
+      importantForAccessibility={interactive ? 'auto' : 'no-hide-descendants'}
+      accessibilityRole={interactive ? 'button' : undefined}
+      accessibilityLabel={interactive ? `Open ${agent.name} agent panel` : undefined}
+      accessibilityHint={interactive ? 'Shows current work, controls, activity, memory, runs, and agent settings.' : undefined}
+      accessibilityState={interactive ? { selected } : { disabled: true }}
+      style={Platform.OS === 'web' && interactive ? { cursor: 'pointer' } as any : undefined}
     >
       <Animated.View style={[styles.container, {
           transform: [
@@ -904,24 +978,24 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
         }]}>
         
         {/* Floating Gamified Text */}
-        {floatingText.map(ft => (
+        {!motionDisabled && floatingText.map(ft => (
           <FloatingText key={ft.id} text={ft.text} color={ft.color} xOffset={ft.x} />
         ))}
 
         {/* Celebration confetti */}
-        {celebrating && <ConfettiBurst />}
+        {!motionDisabled && celebrating && <ConfettiBurst />}
 
         {/* Tamagotchi: Sleep ZZZs when offline */}
-        {isOffline && <SleepZzz />}
+        {!motionDisabled && isOffline && <SleepZzz />}
 
         {/* Tamagotchi: Sweat drops during error */}
-        {agent.status === 'error' && <SweatDrop />}
+        {!motionDisabled && agent.status === 'error' && <SweatDrop />}
 
         {/* Tamagotchi: Sparkle on tap */}
-        {showSparkle && <SparkleEffect onComplete={() => setShowSparkle(false)} />}
+        {!motionDisabled && showSparkle && <SparkleEffect onComplete={() => setShowSparkle(false)} />}
 
         {/* Tamagotchi: Level-up flash */}
-        {showLevelUp && <LevelUpFlash onComplete={() => setShowLevelUp(false)} />}
+        {!motionDisabled && showLevelUp && <LevelUpFlash onComplete={() => setShowLevelUp(false)} />}
 
         {/* Thought bubble */}
         {showThoughts && currentThought && (
@@ -948,7 +1022,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
         )}
 
         {/* Mood indicator — floating emoji above agent */}
-        {mood && !isOffline && (
+        {!motionDisabled && mood && !isOffline && (
           <MoodBubble emoji={mood} />
         )}
 
@@ -2202,6 +2276,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
           level={xpLevel}
           maxed={xpMaxed}
           color={agent.color}
+          reduceMotion={motionDisabled}
         />
 
         {/* Automate Me button */}
@@ -2251,7 +2326,9 @@ const PixelAgent = memo(PixelAgentInner, (prev, next) => {
     prev.totalAgents === next.totalAgents &&
     prev.xp === next.xp &&
     prev.turns === next.turns &&
-    prev.tokens === next.tokens
+    prev.tokens === next.tokens &&
+    prev.reduceMotion === next.reduceMotion &&
+    Boolean(prev.onPress) === Boolean(next.onPress)
   );
 });
 export default PixelAgent;
@@ -2312,12 +2389,13 @@ function ConfettiBurst() {
 
 // ── XP BAR ───────────────────────────────────────────────────────────────
 
-function XPBar({ xp, xpNext, color, level, maxed = false }: {
+function XPBar({ xp, xpNext, color, level, maxed = false, reduceMotion = false }: {
   xp: number; xpNext: number; color: string;
   /** 1-based level. When supplied the bar reads as per-level progress. */
   level?: number;
   /** True only at the XP ceiling — the rainbow "MAX" state. */
   maxed?: boolean;
+  reduceMotion?: boolean;
 }) {
   const pct = Math.min(100, xpNext > 0 ? Math.round((xp / xpNext) * 100) : 0);
   const hasLevel = typeof level === 'number' && level > 0;
@@ -2333,24 +2411,32 @@ function XPBar({ xp, xpNext, color, level, maxed = false }: {
   const rainbowAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (pct <= 0) { pulseAnim.setValue(0); return; }
+    if (reduceMotion || pct <= 0) {
+      pulseAnim.stopAnimation();
+      pulseAnim.setValue(0);
+      return;
+    }
     const loop = animLoop(() => Animated.sequence([
         Animated.timing(pulseAnim, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
         Animated.timing(pulseAnim, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
       ]));
     loop.start();
     return () => loop.stop();
-  }, [pct > 0]);
+  }, [pct > 0, reduceMotion]);
 
   useEffect(() => {
-    if (!isFull) return;
+    if (reduceMotion || !isFull) {
+      rainbowAnim.stopAnimation();
+      rainbowAnim.setValue(0);
+      return;
+    }
     const loop = animLoop(() => {
       rainbowAnim.setValue(0);
       return Animated.timing(rainbowAnim, { toValue: 1, duration: 2000, easing: Easing.linear, useNativeDriver: false });
     });
     loop.start();
     return () => loop.stop();
-  }, [isFull]);
+  }, [isFull, reduceMotion]);
 
   // Glow opacity: stronger when full
   const glowOpacity = pulseAnim.interpolate({
@@ -2372,7 +2458,7 @@ function XPBar({ xp, xpNext, color, level, maxed = false }: {
   if (Platform.OS === 'web') {
     // Web: inject a CSS keyframe animation for true rainbow gradient
     const styleId = 'xp-rainbow-style';
-    if (isFull && !document.getElementById(styleId)) {
+    if (isFull && !reduceMotion && !document.getElementById(styleId)) {
       const style = document.createElement('style');
       style.id = styleId;
       style.textContent = `
@@ -2411,10 +2497,10 @@ function XPBar({ xp, xpNext, color, level, maxed = false }: {
             <View
               style={[
                 xpStyles.fill,
-                isFull ? { width: '100%' } : { width: `${pct}%` as any, backgroundColor: color },
+                isFull ? { width: '100%', backgroundColor: reduceMotion ? color : undefined } : { width: `${pct}%` as any, backgroundColor: color },
               ] as any}
               // @ts-ignore web-only className
-              className={isFull ? 'xp-fill-rainbow xp-fill-rainbow-glow' : undefined}
+              className={isFull && !reduceMotion ? 'xp-fill-rainbow xp-fill-rainbow-glow' : undefined}
             />
           )}
         </View>

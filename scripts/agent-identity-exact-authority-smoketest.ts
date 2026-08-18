@@ -39,11 +39,11 @@ const verifySource = section(
   '/**\n * Read only the cache owned by the exact verified user/circle authority.',
 );
 const cacheParserSource = section(
-  'function parseExactAgentIdentityCache',
+  'function isAgentIdentityNonNegativeFiniteNumber',
   'async function verifyAgentIdentityExactAuthority',
 );
 const compiled = ts.transpileModule(
-  `${authorityPrelude}\n${cacheParserSource}\n${verifySource}\n;(globalThis as any).__exact = { agentIdentityExactStorageKey, normalizeAgentIdentityExactAuthority, parseExactAgentIdentityCache, verifyAgentIdentityExactAuthority };`,
+  `${authorityPrelude}\n${cacheParserSource}\n${verifySource}\n;(globalThis as any).__exact = { agentIdentityExactStorageKey, normalizeAgentIdentityExactAuthority, parseExactAgentIdentityCache, isAgentIdentityServerNonNegativeSafeInteger, verifyAgentIdentityExactAuthority };`,
   {
     compilerOptions: {
       module: ts.ModuleKind.None,
@@ -88,6 +88,7 @@ const exact = sandbox.__exact as {
     accessToken: string;
   } | null>;
   parseExactAgentIdentityCache: (raw: string | null) => Map<string, unknown> | null;
+  isAgentIdentityServerNonNegativeSafeInteger: (value: unknown) => boolean;
 };
 
 const writeModeSource = section(
@@ -339,6 +340,34 @@ async function main(): Promise<void> {
   assert(exact.parseExactAgentIdentityCache(null)?.size === 0, 'a missing first-device cache is a verified empty Map');
   assert(exact.parseExactAgentIdentityCache('') === null, 'present empty cache bytes are malformed, not verified empty');
   assert(exact.parseExactAgentIdentityCache('{broken') === null, 'malformed cache bytes fail closed');
+  const validCachedIdentity = {
+    sessionKey: 'agent-a',
+    totalCostAllTime: 0.25,
+    totalTokensAllTime: 10,
+    totalSessionsAllTime: 1,
+    firstSeen: 1_700_000_000_000,
+    lastSeen: 1_700_000_001_000,
+    totalMessages: 2,
+    totalTurns: 3,
+  };
+  assert(
+    exact.parseExactAgentIdentityCache(JSON.stringify({ 'agent-a': validCachedIdentity }))?.size === 1,
+    'finite cost plus safe integer counters form one valid exact cache row',
+  );
+  assert(
+    exact.parseExactAgentIdentityCache(JSON.stringify({
+      'agent-a': { ...validCachedIdentity, totalMessages: 1.5 },
+    })) === null,
+    'fractional integer counters cannot enter the exact cache',
+  );
+  assert(
+    exact.parseExactAgentIdentityCache(JSON.stringify({
+      'agent-a': { ...validCachedIdentity, totalTokensAllTime: Number.MAX_SAFE_INTEGER + 1 },
+    })) === null,
+    'unsafe integer totals cannot lose precision in the exact cache',
+  );
+  assert(!exact.isAgentIdentityServerNonNegativeSafeInteger(' 10'), 'whitespace-padded server counters fail closed');
+  assert(!exact.isAgentIdentityServerNonNegativeSafeInteger('1.5'), 'fractional server integer counters fail closed');
   assert(
     exactWriteMode(new Map([['agent-a', '2026-08-17T12:00:00.000Z']]), 'agent-a') === 'update',
     'a first-device cache with an existing server row takes the narrow CAS update path',
@@ -377,8 +406,8 @@ async function main(): Promise<void> {
   assert(!exactLoad.includes('STORAGE_KEY_AGENT_IDENTITY)'), 'local read never reaches the ownerless legacy key');
 
   const exactSync = section(
+    'async function fetchAgentIdentitiesServerSnapshotExact',
     'export async function syncAgentIdentitiesFromServerExact',
-    '/**\n * Seed-up:',
   );
   assert(exactSync.includes(".eq('user_id', authority.userId)"), 'server read filters the captured owner');
   assert(
@@ -386,6 +415,8 @@ async function main(): Promise<void> {
     'server read binds the captured bearer',
   );
   assert(exactSync.includes('row?.user_id !== authority.userId'), 'foreign-owner response rows fail the whole read');
+  assert(exactSync.includes(".select('*', { count: 'exact' })"), 'server read proves full-snapshot completeness');
+  assert(exactSync.includes('.abortSignal(signal)'), 'publication server read accepts a bounded abort signal');
   assert(!exactSync.includes('auth.getSession'), 'server read never obtains replacement global auth');
 
   const rowWriters = section(
@@ -455,10 +486,9 @@ async function main(): Promise<void> {
     '/**\n * Persist an exact scope synchronously',
   );
   const serverWriteAt = exactMapSave.indexOf('await persistIdentitiesToServerExact(');
-  const localWriteAt = exactMapSave.indexOf('await storage.setItem(key, serialized)');
-  assert(serverWriteAt >= 0 && localWriteAt > serverWriteAt, 'server receipt precedes exact local cache publication');
-  assert(exactMapSave.includes('const readback = await storage.getItem(key)'), 'local mutation requires exact readback proof');
-  assert((exactMapSave.match(/isAgentIdentityExactAuthorityCurrent\(/g) || []).length >= 5, 'the live generation fence surrounds every awaited mutation phase');
+  const localWriteAt = exactMapSave.indexOf('publishCurrentAgentIdentityServerTruthExact(authority, fence)');
+  assert(serverWriteAt >= 0 && localWriteAt > serverWriteAt, 'server receipt precedes cross-realm server-truth cache publication');
+  assert((exactMapSave.match(/isAgentIdentityExactAuthorityCurrent\(/g) || []).length >= 4, 'the live generation fence surrounds every durable mutation phase');
 
   const exactPrimary = section(
     'export async function setMainAgentForProviderExact',
@@ -470,7 +500,7 @@ async function main(): Promise<void> {
     'primary-agent RPC binds exactly the captured bearer',
   );
   assert(exactPrimary.includes('parseAgentIdentityPrimaryRpcReceipt('), 'primary-agent success requires the versioned exact RPC receipt');
-  assert(exactPrimary.includes('publishVerifiedAgentIdentityCacheExact('), 'validated provider rows publish only through the fenced exact cache path');
+  assert(exactPrimary.includes('publishCurrentAgentIdentityServerTruthExact('), 'validated primary receipt publishes only a fresh cross-realm server snapshot');
   assert((exactPrimary.match(/isAgentIdentityExactAuthorityCurrent\(/g) || []).length >= 6, 'primary-agent generation is fenced before and after every awaited phase');
   assert(
     !exactPrimary.includes(".from('agent_identities')")
@@ -648,6 +678,12 @@ async function main(): Promise<void> {
       publishedCacheSize = identities.size;
       return spiritPublishResult;
     },
+    publishCurrentAgentIdentityServerTruthExact: async () => {
+      recoveryCalls += 1;
+      spiritPublicationCalls += 1;
+      publishedCacheSize = 2;
+      return spiritPublishResult;
+    },
     storage: { getItem: async () => malformedCache ? '{broken' : null },
     supabase: {
       rpc: () => ({
@@ -688,8 +724,8 @@ async function main(): Promise<void> {
     { userId: 'user-a', circleId: 'circle-a', accessToken: 'token-a', generation: 8 },
     () => true,
   );
-  assert(recoveredSpirit.ok === true && recoveryCalls === 1, 'a valid Spirit receipt rebuilds a malformed exact cache from captured server truth');
-  assert(publishedCacheSize === 2, 'Spirit cache recovery preserves the full verified server lane plus the exact receipt row');
+  assert(recoveredSpirit.ok === true && recoveryCalls === 1, 'a valid Spirit receipt refreshes the exact cache from captured server truth');
+  assert(publishedCacheSize === 2, 'Spirit cache publication uses the complete verified server snapshot');
   malformedCache = false;
   spiritPublishResult = { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
   const partialSpirit = await runExactSpirit(
@@ -878,6 +914,10 @@ async function main(): Promise<void> {
     agentIdentityExactStorageKey: () => 'exact-key',
     parseExactAgentIdentityCache: () => new Map(),
     publishVerifiedAgentIdentityCacheExact: async () => {
+      stalePublications += 1;
+      return { ok: true, localSaved: true, serverSaved: true };
+    },
+    publishCurrentAgentIdentityServerTruthExact: async () => {
       stalePublications += 1;
       return { ok: true, localSaved: true, serverSaved: true };
     },

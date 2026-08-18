@@ -183,17 +183,14 @@ for (const marker of [
   'p_provider_type: normalizedProviderType',
   ".setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`)",
   'parseAgentIdentityPrimaryRpcReceipt(',
-  'const raw = await storage.getItem(key)',
-  'parseExactAgentIdentityCache(raw)',
-  'withAgentIdentityExactCachePublicationLock(key, async () =>',
   "error: 'mutation_superseded'",
-  'publishVerifiedAgentIdentityCacheExact(',
+  'publishCurrentAgentIdentityServerTruthExact(',
 ]) {
   check(exactPrimary.includes(marker), `exact runtime pins ${marker}`);
 }
 check(
   (exactPrimary.match(/isAgentIdentityExactAuthorityCurrent\(/gu) || []).length >= 6,
-  'generation fence surrounds verification, RPC, local read, and publication',
+  'generation fence surrounds verification, RPC, receipt, and publication handoff',
 );
 check(
   !exactPrimary.includes(".from('agent_identities')")
@@ -205,8 +202,8 @@ check(
 );
 check(
   exactPrimary.indexOf('parseAgentIdentityPrimaryRpcReceipt(')
-    < exactPrimary.indexOf('publishVerifiedAgentIdentityCacheExact('),
-  'validated server receipt precedes exact local cache publication',
+    < exactPrimary.indexOf('publishCurrentAgentIdentityServerTruthExact('),
+  'validated server receipt precedes the cross-realm server-truth publication',
 );
 
 const parser = section(

@@ -258,17 +258,14 @@ for (const marker of [
   ".setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`)",
   'parsePublishedAgentSpiritRpcReceipt(',
   "serverSaved: null, error: 'outcome_unknown'",
-  'const raw = await storage.getItem(key)',
-  'withAgentIdentityExactCachePublicationLock(key, async () =>',
   "error: 'mutation_superseded'",
-  'syncAgentIdentitiesFromServerExact(verifiedAuthority)',
-  'publishVerifiedAgentIdentityCacheExact(',
+  'publishCurrentAgentIdentityServerTruthExact(',
 ]) {
   check(exactWriter.includes(marker), `exact writer pins ${marker}`);
 }
-check((exactWriter.match(/isAgentIdentityExactAuthorityCurrent\(/gu) || []).length >= 7, 'exact writer fences every remote/local await boundary');
+check((exactWriter.match(/isAgentIdentityExactAuthorityCurrent\(/gu) || []).length >= 6, 'exact writer fences every remote and publication-handoff await boundary');
 check(!exactWriter.includes(".from('circle_office_agents')") && !exactWriter.includes(".from('agent_identities')"), 'runtime has one RPC and no split table writer');
-check(exactWriter.indexOf('parsePublishedAgentSpiritRpcReceipt(') < exactWriter.indexOf('publishVerifiedAgentIdentityCacheExact('), 'validated receipt precedes local cache publication');
+check(exactWriter.indexOf('parsePublishedAgentSpiritRpcReceipt(') < exactWriter.indexOf('publishCurrentAgentIdentityServerTruthExact('), 'validated receipt precedes cross-realm server-truth publication');
 
 const exactDelete = sourceSection(
   identityRuntime,
