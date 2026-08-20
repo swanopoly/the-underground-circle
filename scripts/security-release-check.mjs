@@ -21,6 +21,7 @@ const npmScripts = [
   'smoke:circle-default-chat-thread-bootstrap',
   'smoke:start-dev-dependency-watch',
   'smoke:netlify-csp-security',
+  'smoke:web-module-recovery',
   'smoke:local-secrets',
   'smoke:oauth-popup-boundary',
   'smoke:browser-provider-key-boundary',

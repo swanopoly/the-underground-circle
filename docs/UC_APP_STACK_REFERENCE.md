@@ -37,6 +37,10 @@ ownership. This file maps the app.
 8. Netlify JavaScript must use `max-age=0, must-revalidate`. Expo/Metro entry
    chunk names are not a sufficient immutable-module-graph guarantee; a stale
    entry path table can load incompatible lazy chunks after a deployment.
+   Missing `/_expo/*` assets return a real 404 rather than the SPA HTML shell,
+   and `webModuleRecoveryCore` lets the shared error boundary perform one
+   cooldown-scoped online reload (or wait for reconnect) without treating an
+   ordinary API `Failed to fetch` as a module failure.
 
 ## Security Baseline (2026-08-06)
 

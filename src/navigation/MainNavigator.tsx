@@ -1,9 +1,9 @@
 import React, { Suspense } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { WEB_MODULE_GRAPH_REVISION } from '../lib/webModuleRecoveryCore';
 
 const Stack = createNativeStackNavigator();
-const WEB_MODULE_GRAPH_REVISION = '2026-08-06-chat-cache-v2';
 
 function ScreenFallback() {
   return (

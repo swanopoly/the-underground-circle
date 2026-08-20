@@ -42,7 +42,10 @@ Expo/Metro may retain an entry-chunk filename while changing its dynamic-import
 path table, so year-long JS caching can mix incompatible deployment graphs and
 crash a lazy screen. Long-lived immutable caching remains limited to assets
 whose URL identity is safe for it. The live Chat canary clears its isolated
-browser cache before proving a signed-in route.
+browser cache before proving a signed-in route. Missing `/_expo/*` paths must
+return a real 404 rather than the SPA HTML shell; the shared error boundary uses
+`webModuleRecoveryCore` for one cooldown-scoped reload, waits for reconnect when
+offline, and never classifies a generic API `Failed to fetch` as module skew.
 
 Core commands:
 

@@ -1,9 +1,9 @@
 import React, { Suspense } from 'react';
 import { View, StyleSheet } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { WEB_MODULE_GRAPH_REVISION } from '../lib/webModuleRecoveryCore';
 
 const Stack = createNativeStackNavigator();
-const WEB_MODULE_GRAPH_REVISION = '2026-08-06-chat-cache-v2';
 
 const LoginScreen = React.lazy(() => import('../screens/auth/LoginScreen'));
 const SignUpScreen = React.lazy(() => import('../screens/auth/SignUpScreen'));
