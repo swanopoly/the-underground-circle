@@ -927,20 +927,22 @@ also fenced to the initiating user/circle generation; mapped reads, apply, and
 delete re-check circle identity, while delete requires an exact returned `id`
 plus `circle_id` receipt. The original §37 objects are
 catalog-ready per the user's 2026-08-12 SQL Editor result. The follow-up
-`20260813140000_office_layout_exact_save_receipt.sql` migration is source-ready
-but not applied to the target. It additionally makes the RPC the sole
+`20260813140000_office_layout_exact_save_receipt.sql` migration was applied
+individually and catalog-verified on 2026-08-20. It makes the RPC the sole
 authenticated layout mutation surface, rejects unsafe/far-future versions, and
 repairs any legacy future-version poison before revoking raw writes. It removes
 invalid legacy dismissals, enforces a durable run/circle foreign key, and uses
 server-owned acknowledgement/expiry timestamps plus a server-clock active-read
-RPC. The client uses that RPC only when
-`EXPO_PUBLIC_OFFICE_ATTENTION_SERVER_CLOCK_V1=true`; otherwise it directly uses
-the exact owner/circle legacy-table fallback and makes no missing-RPC probe.
+RPC. Target verification proved its exact SECURITY DEFINER/search-path config,
+authenticated execute grant, anonymous denial, and raw authenticated layout-DML
+revocation. Hosted production and deploy-preview builds use
+`EXPO_PUBLIC_OFFICE_ATTENTION_SERVER_CLOCK_V1=true`; local/default builds keep
+the exact owner/circle legacy-table fallback and make no optional-RPC probe.
 Before that trigger lands, a bounded 30-day compatibility payload renews
 expired historical rows; the trigger overwrites those browser timestamps after
 migration. Authenticated localhost exact local/server
-convergence and save/reload passed on 2026-08-13; negative RLS, deployed, and
-cross-device behavior remain unproven.
+convergence and save/reload passed on 2026-08-13; cross-device/native and full
+deployed UI behavior remain unproven.
 
 Private Office preference state is a separate §45 authority, not part of the
 peer-readable profile blob or the §37 layout document. The owner-private
@@ -985,16 +987,17 @@ caches are exact user/circle envelopes with no scoped fallback to ownerless
 legacy records. Local queue deadlines retire only the exact scope lane until an
 unabortable operation settles, while unrelated users/circles remain
 independent. Migration `20260813220000_office_user_preferences.sql` is mirrored
-byte-for-byte as §45 and is not applied to the target. A value-free production
-rollback preflight proved 910 exact archive entries, the deterministic 122-entry
-active projection, zero invalid archive rows, and complete legacy-source scrub
-inside one rolled-back transaction, leaving the target unchanged. Source,
-disposable PostgreSQL, and that rollback proof do not substitute for live
-two-user negative-RLS, account-switch, cross-device, native secret-store, or
-deployed UI proof.
-Accordingly, `EXPO_PUBLIC_OFFICE_USER_PREFERENCES_STORAGE_V1` is default-off;
-disabled builds keep device-only preference state and do not call the §45 read
-or patch RPC.
+byte-for-byte as §45 and was applied individually after the value-free
+production rollback preflight on 2026-08-20. Target receipts prove 910 exact
+canonical archive entries, the deterministic 122-entry active projection, zero
+invalid archive/preference rows, and complete reviewed legacy-source scrub.
+Both tables force RLS with exact owner SELECT policies; authenticated raw DML
+and anonymous RPC execution are denied. A rolled-back authenticated owner
+read/patch produced exact receipts, while a simulated nonmember saw zero rows
+and was denied by the RPC. Hosted production and deploy-preview builds use
+`EXPO_PUBLIC_OFFICE_USER_PREFERENCES_STORAGE_V1=true`; local/default builds
+remain device-only. Two-account/two-tab, account-switch, cross-device, native
+secret-store, and full deployed UI proof remain pending.
 
 The 2026-08-13 exact-runtime continuation layer extends that private-state gate
 to the remaining Office action surfaces. Before private hydration, Office
@@ -1256,12 +1259,13 @@ Before those provider requests, the client now checks the public `llm-proxy`
 GET capability list once. A healthy older deployment without advertised
 `list_models` support stays on the curated fallback and does not emit one
 expected HTTP 400 per connected provider during Chat startup. Production
-metadata/router probes on 2026-08-20 confirmed hosted `llm-proxy` v22 is
+metadata/router probes on 2026-08-20 confirmed hosted `llm-proxy` v23 is
 `ACTIVE`, uses `verify_jwt = false`, returns 200 to browser-style `OPTIONS`, and
 returns 401 from function-owned authorization for an unauthenticated `POST`.
-That proves the hosted router/CORS/auth boundary only: no source fingerprint or
-authenticated `list_models`/provider request was attested, so provider canaries
-remain gated.
+Version 23 was deployed from commit `8cbf6de`; passive unreadable-ciphertext
+catalog reads are handled as non-ready without noisy 409s, interactive dispatch
+stays fail-closed, and an upstream billing rejection is a typed terminal
+provider cooldown. An authenticated provider-response canary remains gated.
 Background memory embedding separately preflights OpenAI key metadata. Once
 the proxy reports an unreadable credential, the client persists that exact key
 id/version as blocked for a bounded daily recheck; re-saving or rotating the
@@ -1355,10 +1359,10 @@ source parity.
   `user_required` policy, so they never inspect or spend a platform environment
   key. Missing rows remain `key_missing`; failed stored-key lookup/decryption
   is `credential_unreadable`. Other shared-helper callers retain their explicit
-  policy until migrated. Hosted v22 was `ACTIVE` with `verify_jwt = false` on
-  2026-08-20; `OPTIONS` 200 and unauthenticated `POST` 401 confirm routing into
-  function-owned authorization, not source-fingerprint parity or a successful
-  authenticated provider call.
+  policy until migrated. Hosted v23 was deployed from commit `8cbf6de` and was
+  `ACTIVE` with `verify_jwt = false` on 2026-08-20; `OPTIONS` 200 and
+  unauthenticated `POST` 401 confirm routing into function-owned authorization.
+  A successful authenticated provider response remains a separate canary.
 - `supabase/functions/swanbot-ai/index.ts` can relay marketplace-prefixed
   models with tools.
 - `src/lib/billingPriority.ts` controls provider preference modes:

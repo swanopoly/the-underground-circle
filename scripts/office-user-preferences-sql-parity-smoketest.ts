@@ -120,8 +120,10 @@ const roadmapSection45 = roadmap
   .split(/\r?\n/u)
   .find((line) => line.startsWith('| 45 | Owner-private, circle-scoped Office user preferences'));
 check(
-  roadmapSection45?.includes('**Pending / not applied.**'),
-  'roadmap keeps source verification separate from deployment proof',
+  roadmapSection45?.includes('**Applied / catalog-verified 2026-08-20.**')
+    && roadmapSection45.includes('910 canonical archive rows')
+    && roadmapSection45.includes('simulated nonmember'),
+  'roadmap records the exact reviewed target deployment receipts',
 );
 
 console.log(`Office user preferences SQL parity smoke passed (${assertions} assertions).`);

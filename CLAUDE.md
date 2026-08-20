@@ -260,10 +260,14 @@ A public GET capability preflight now gates that fan-out. Healthy older Edge
 deployments that do not advertise `list_models` use the short-cache curated
 fallback without producing one expected HTTP 400 per connected provider at
 Chat startup. Production metadata/router probes on 2026-08-20 confirmed hosted
-`llm-proxy` v22 is `ACTIVE`, uses `verify_jwt = false`, returns 200 to
+`llm-proxy` v23 is `ACTIVE`, uses `verify_jwt = false`, returns 200 to
 browser-style `OPTIONS`, and returns 401 from function-owned authorization for
-an unauthenticated `POST`. Those checks do not attest the deployed source
-fingerprint or prove an authenticated `list_models`/provider request.
+an unauthenticated `POST`. Version 23 was deployed from commit `8cbf6de`: a
+passive `list_models` lookup now represents unreadable stored ciphertext as a
+handled non-ready catalog result without noisy HTTP 409s, interactive dispatch
+remains fail-closed, and an upstream billing rejection is a typed terminal
+result that cools down only that provider before the next turn. An
+authenticated end-to-end provider response remains a separate canary.
 Memory embedding now metadata-preflights the active OpenAI key and remembers an
 unreadable exact key version across reloads, with a bounded daily recheck.
 Marketplace key rotation clears the block and re-arms orphan repair
@@ -1020,16 +1024,19 @@ a layout version or server write. Preset load/apply/delete continuations bind to
 user/circle generation; rows and mutations re-check circle identity, with
 delete requiring an exact returned `id` plus `circle_id` receipt. The original
 §37 objects are catalog-ready per the user's 2026-08-12 SQL Editor result. The
-follow-up `20260813140000_office_layout_exact_save_receipt.sql` migration is
-source-ready but not applied to the target. It also makes the RPC the sole
+follow-up `20260813140000_office_layout_exact_save_receipt.sql` migration was
+applied individually and catalog-verified on 2026-08-20. It makes the RPC the sole
 authenticated layout mutation surface, rejects unsafe/far-future versions, and
 repairs legacy future-version poison before raw writes are revoked. It removes
 invalid legacy dismissals, enforces a durable run/circle foreign key, and uses
 server-owned acknowledgement/expiry timestamps plus a server-clock active-read
 RPC. Before that trigger lands, the client includes a bounded 30-day compatibility
 window so an expired historical dismissal is actually renewed; the trigger
-overwrites both browser timestamps after migration. Authenticated localhost exact
-local/server convergence and layout save/reload passed on 2026-08-13.
+overwrites both browser timestamps after migration. Target verification proved
+the exact SECURITY DEFINER/search-path contract, authenticated execute grant,
+anonymous denial, and raw authenticated layout-DML revocation. Authenticated
+localhost exact local/server convergence and layout save/reload passed on
+2026-08-13; cross-device/native behavior remains pending.
 
 Private Telegram metadata, names, appearances, notes, budget, idle settings,
 and filters use the separate owner-private §45 preference authority, not the
@@ -1070,13 +1077,17 @@ read/patch receipt path instead of writing a profile blob. Migration
 `20260813220000_office_user_preferences.sql` is mirrored byte-for-byte as §45;
 it also scrubs the deprecated private profile keys and appearance column and
 prevents older clients from restoring them. Static/parity, exact-scope runtime,
-and disposable PostgreSQL behavior are current 2026-08-20, but §45 is not
-applied. A value-free production rollback preflight proved 910 exact archive
-entries, the deterministic 122-entry active projection, zero invalid archive
-rows, and complete legacy-source scrub inside one rolled-back transaction, so
-the target remained unchanged. Authenticated negative RLS, two-account/two-tab,
-deployed, native secret-store, cross-device layout, preset, preference, and
-acknowledgement behavior remain pending.
+and disposable PostgreSQL behavior are current 2026-08-20. Section §45 was
+applied individually after a value-free production rollback preflight; target
+receipts prove 910 exact canonical archive entries, the deterministic 122-entry
+active projection, zero invalid archive/preference rows, and complete private
+legacy-source scrub. Both tables force RLS with exact owner SELECT policies,
+authenticated raw DML is denied, owner read/patch receipts pass inside a
+rolled-back live transaction, and a simulated nonmember sees no rows and is
+denied by the RPC. The hosted production and deploy-preview build contexts now
+enable the §37/§45 clients; two-account/two-tab, native secret-store,
+cross-device layout, preset, preference, and acknowledgement behavior remain
+pending.
 
 The 2026-08-13 continuation hardening applies the same exact authority to
 Office connections, terminal dispatch, approvals, OAuth/Figma, and idle work.
